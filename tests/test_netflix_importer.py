@@ -66,3 +66,75 @@ def test_estimate_duration_episode_with_season_marker():
 
 def test_estimate_duration_two_part_default():
     assert estimate_duration("Some Show: Some Title") == timedelta(minutes=45)
+
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fulcra_media.importers.netflix import parse_slim
+from fulcra_media.importers.base import NormalizedEvent
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "netflix_slim_small.csv"
+
+
+def test_parse_slim_yields_one_event_per_row():
+    events = list(parse_slim(FIXTURE))
+    assert len(events) == 8
+
+
+def test_parse_slim_first_event_is_movie():
+    events = list(parse_slim(FIXTURE))
+    e = events[0]
+    assert isinstance(e, NormalizedEvent)
+    assert e.importer == "netflix-slim"
+    assert e.service == "netflix"
+    assert e.category == "watched"
+    assert e.note == "Movie One"
+    assert e.title == "Movie One"
+    assert e.start_time == datetime(2026, 5, 12, 21, 0, tzinfo=timezone.utc)
+    # Movie heuristic -> 100 min
+    assert (e.end_time - e.start_time).total_seconds() == 100 * 60
+    assert e.timestamp_confidence == "low"
+    assert e.external_ids["time_estimated"] is True
+    assert e.external_ids["duration_estimated"] is True
+
+
+def test_parse_slim_episode_yields_30min_duration():
+    events = list(parse_slim(FIXTURE))
+    e = events[1]
+    assert (e.end_time - e.start_time).total_seconds() == 30 * 60
+
+
+def test_parse_slim_same_day_rewatch_gets_distinct_ids():
+    """The 27 real-data same-day rewatches must each produce a unique annotation."""
+    events = list(parse_slim(FIXTURE))
+    # rows 4 and 5 (zero-indexed 3 and 4): same date, same raw title
+    a, b = events[3], events[4]
+    assert a.start_time == b.start_time
+    assert a.note == b.note
+    assert a.deterministic_id != b.deterministic_id
+    # And both deterministic_ids start with the expected prefix
+    assert a.deterministic_id.startswith("com.fulcra.media.netflix.")
+    assert b.deterministic_id.startswith("com.fulcra.media.netflix.")
+
+
+def test_parse_slim_clean_same_day_rewatch_also_distinct():
+    events = list(parse_slim(FIXTURE))
+    a, b = events[5], events[6]  # "Show B: ... Episode 1" twice on 5/1/26
+    assert a.note == b.note
+    assert a.deterministic_id != b.deterministic_id
+
+
+def test_parse_slim_deterministic_id_is_stable_across_runs():
+    """Same CSV in -> same IDs out."""
+    a = list(parse_slim(FIXTURE))
+    b = list(parse_slim(FIXTURE))
+    assert [e.deterministic_id for e in a] == [e.deterministic_id for e in b]
+
+
+def test_parse_slim_malformed_leading_colon_row_has_empty_title():
+    events = list(parse_slim(FIXTURE))
+    e = events[3]
+    assert e.title == ""
+    assert e.note  # non-empty
