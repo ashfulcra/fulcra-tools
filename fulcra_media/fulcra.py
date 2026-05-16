@@ -7,13 +7,18 @@ ingest, dedup readback, and verification.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import httpx
 
 from .state import State
+
+if TYPE_CHECKING:
+    from .importers.base import NormalizedEvent
 
 DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
 
@@ -115,6 +120,58 @@ class FulcraClient:
         )
         r.raise_for_status()
         return r.json()["id"]
+
+    def ingest_batch(
+        self, events: list["NormalizedEvent"], state: "State"
+    ) -> None:
+        if not events:
+            return
+        lines: list[bytes] = []
+        for ev in events:
+            def_id = (
+                state.watched_definition_id
+                if ev.category == "watched"
+                else state.listened_definition_id
+            )
+            if def_id is None:
+                raise RuntimeError(
+                    f"missing {ev.category} definition id in state; run bootstrap first"
+                )
+            data_inner = {
+                "note": ev.note,
+                "title": ev.title,
+                "service": ev.service,
+                "timestamp_confidence": ev.timestamp_confidence,
+                "external_ids": ev.external_ids,
+            }
+            service_tag = state.tag_ids.get(ev.service)
+            tags = [service_tag] if service_tag else []
+            metadata = {
+                "data_type": "DurationAnnotation",
+                "recorded_at": {
+                    "start_time": ev.start_time.isoformat().replace("+00:00", "Z"),
+                    "end_time":   ev.end_time.isoformat().replace("+00:00", "Z"),
+                },
+                "tags": tags,
+                "source": [ev.deterministic_id, f"com.fulcradynamics.annotation.{def_id}"],
+                "content_type": "application/json",
+            }
+            line = {
+                "specversion": 1,
+                "data": json.dumps(data_inner, sort_keys=True),
+                "metadata": metadata,
+            }
+            lines.append(json.dumps(line, sort_keys=True).encode())
+        body = b"\n".join(lines)
+        r = self._client().post(
+            "/ingest/v1/record/batch",
+            content=body,
+            headers={
+                **self._authed_headers(),
+                "content-type": "application/x-jsonl",
+            },
+        )
+        r.raise_for_status()
 
     def fetch_existing_source_ids(
         self, start: datetime, end: datetime
