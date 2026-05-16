@@ -139,13 +139,33 @@ Every importer follows the same pipeline: **fetch → normalize → dedupe → i
   annotations).
 - **Timestamp confidence handling.** Trakt history can contain clusters of
   synthetic timestamps from signup-import flows (e.g. all watches stamped at
-  account-creation time, or at the moment a CSV was imported). The importer:
+  account-creation time, or at the moment a CSV was imported, or at the moment
+  a new streaming-service integration was linked). User-observed pattern
+  (2026-05-16): **older Trakt history backfills accurately**; the
+  inaccurate-timestamp problem concentrates on the **signup day and the day
+  after each new service-link event**, where Trakt re-stamps that service's
+  retroactive plays to the link date. Same play often appears twice: once
+  with the correct old timestamp (e.g. from Hulu) and once with the synthetic
+  link-day timestamp (e.g. from Apple TV). The importer must handle both
+  cluster-flagging and same-Trakt-account near-duplicate detection.
+
+  The importer:
   1. Honors `--trakt-from DATE` to drop everything older than the user's
      "clean-data" cutover date.
   2. Auto-detects clusters: if ≥5 history items share `watched_at` to the
      second, all members are flagged `timestamp_confidence: "low"` and tagged
      with `external_ids.timestamp_cluster_size = N`.
-  3. Records `external_ids.trakt_action` from the API (`scrobble` / `checkin` /
+  3. **Cross-source-within-Trakt near-duplicate detection.** After cluster
+     flagging, walk the history and group rows by content identity — for
+     episodes that's `(show.ids.trakt, episode.season, episode.number)`; for
+     movies that's `movie.ids.trakt`. Within each group, if one row is in a
+     low-confidence cluster AND another row has higher-confidence
+     authoritative timestamp AND the higher-confidence row is older, mark
+     the cluster row `external_ids.dropped_low_confidence_duplicate = true`
+     and skip ingest for it. Surface the dropped count in the import summary
+     (`fulcra-media import trakt` should print `dropped=N` alongside the
+     usual `posted/skipped/verified` counts) so the user can audit.
+  4. Records `external_ids.trakt_action` from the API (`scrobble` / `checkin` /
      `watch`). `scrobble` and `checkin` get `timestamp_confidence: "high"` by
      default; `watch` gets `medium` (often used for retroactive backfills with
      guessed timestamps).
