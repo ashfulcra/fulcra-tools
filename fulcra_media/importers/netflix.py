@@ -12,7 +12,7 @@ import hashlib
 import re
 from collections import Counter
 from collections.abc import Iterator
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from .base import NormalizedEvent
@@ -97,5 +97,71 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
                     "point_in_time": True,
                     "occurrence_index": idx,
                     "raw_date": date_str,
+                },
+            )
+
+
+_RICH_EXPECTED_COLS = [
+    "Profile Name", "Start Time", "Duration", "Attributes", "Title",
+    "Supplemental Video Type", "Device Type", "Bookmark", "Latest Bookmark", "Country",
+]
+
+
+def _det_id_rich(profile: str, start_time_str: str, raw_title: str) -> str:
+    h = hashlib.sha256(f"{profile}|{start_time_str}|{raw_title}".encode()).hexdigest()
+    return f"com.fulcra.media.netflix-rich.{h[:16]}"
+
+
+def _parse_hmmss(value: str) -> timedelta:
+    """Parse H:MM:SS into a timedelta."""
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"not a H:MM:SS duration: {value!r}")
+    h, m, s = (int(p) for p in parts)
+    return timedelta(hours=h, minutes=m, seconds=s)
+
+
+def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
+    """Parse a Netflix rich (GDPR) CSV into NormalizedEvents.
+
+    The rich variant has 10 columns including UTC Start Time, Duration in
+    H:MM:SS, Profile Name, Device Type, and Country. Rows with non-empty
+    Supplemental Video Type (TRAILER, HOOK, PROMOTIONAL, etc.) are dropped.
+    """
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != _RICH_EXPECTED_COLS:
+            raise ValueError(
+                f"unexpected Netflix CSV header {reader.fieldnames!r}; "
+                f"parse_rich handles the 10-column GDPR variant only — use parse_slim "
+                f"for the in-app 2-column download"
+            )
+        for row in reader:
+            if (row.get("Supplemental Video Type") or "").strip():
+                continue
+            raw_title = row["Title"]
+            start_str = row["Start Time"]
+            start = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            duration = _parse_hmmss(row["Duration"])
+            end = start + duration
+
+            note, title = make_note_and_title(raw_title)
+            profile = (row.get("Profile Name") or "").strip()
+
+            yield NormalizedEvent(
+                importer="netflix-rich",
+                service="netflix",
+                category="watched",
+                note=note,
+                title=title,
+                start_time=start,
+                end_time=end,
+                deterministic_id=_det_id_rich(profile, start_str, raw_title),
+                timestamp_confidence="high",
+                external_ids={
+                    "profile": profile,
+                    "device_type": (row.get("Device Type") or "").strip(),
+                    "country": (row.get("Country") or "").strip(),
+                    "bookmark": (row.get("Bookmark") or "").strip(),
                 },
             )

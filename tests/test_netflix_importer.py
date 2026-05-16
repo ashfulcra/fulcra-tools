@@ -119,3 +119,62 @@ def test_parse_slim_malformed_leading_colon_row_has_empty_title():
     e = events[3]
     assert e.title == ""
     assert e.note  # non-empty
+
+
+from fulcra_media.importers.netflix import parse_rich
+
+RICH_FIXTURE = Path(__file__).parent / "fixtures" / "netflix_rich_small.csv"
+
+
+def test_parse_rich_filters_trailers():
+    events = list(parse_rich(RICH_FIXTURE))
+    assert len(events) == 5
+    assert all("Trailer" not in e.title for e in events)
+
+
+def test_parse_rich_movie_first_event():
+    events = list(parse_rich(RICH_FIXTURE))
+    e = next(e for e in events if e.note == "Dune: Part Two")
+    assert e.importer == "netflix-rich"
+    assert e.service == "netflix"
+    assert e.category == "watched"
+    assert e.note == "Dune: Part Two"
+    assert e.title == "Dune"
+    assert e.start_time == datetime(2026, 5, 12, 20, 32, 15, tzinfo=timezone.utc)
+    assert e.end_time == datetime(2026, 5, 12, 22, 14, 45, tzinfo=timezone.utc)
+    assert e.timestamp_confidence == "high"
+    assert e.external_ids["profile"] == "Ash"
+    assert "Apple TV" in e.external_ids["device_type"]
+    assert e.external_ids["country"].startswith("US")
+    assert "time_estimated" not in e.external_ids
+    assert "duration_estimated" not in e.external_ids
+    assert "point_in_time" not in e.external_ids
+
+
+def test_parse_rich_episode_note_format():
+    events = list(parse_rich(RICH_FIXTURE))
+    e = next(e for e in events if "Severance" in e.title and "We We Are" in e.note)
+    assert "Severance" in e.note
+    assert "Season 2" in e.note
+
+
+def test_parse_rich_idempotency_key_per_session():
+    events = list(parse_rich(RICH_FIXTURE))
+    ids = [e.deterministic_id for e in events]
+    assert len(ids) == len(set(ids))
+    assert all(i.startswith("com.fulcra.media.netflix-rich.") for i in ids)
+
+
+def test_parse_rich_duration_parsed_to_seconds():
+    events = list(parse_rich(RICH_FIXTURE))
+    e = next(e for e in events if e.title == "Killers of the Flower Moon")
+    # 2:38:45 = 9525 s
+    assert (e.end_time - e.start_time).total_seconds() == 9525
+
+
+def test_parse_rich_rejects_slim_header(tmp_path):
+    csv = tmp_path / "slim.csv"
+    csv.write_text('Title,Date\n"Movie","5/12/26"\n')
+    import pytest
+    with pytest.raises(ValueError, match="parse_rich handles the 10-column"):
+        list(parse_rich(csv))
