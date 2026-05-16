@@ -216,24 +216,34 @@ class FulcraClient:
         if total == 0:
             return ImportResult(0, 0, 0, 0)
 
-        win_start = min(e.start_time for e in events) - timedelta(minutes=window_pad_minutes)
-        win_end = max(e.end_time for e in events) + timedelta(minutes=window_pad_minutes)
-
-        existing = self.fetch_existing_source_ids(win_start, win_end)
-        new_events = [e for e in events if e.deterministic_id not in existing]
-        skipped = total - len(new_events)
-
+        # Dedup readback and verification both operate per-chunk on the chunk's
+        # own narrow time window. The Fulcra event endpoint has an undocumented
+        # pagination ceiling (~4,000 records) and no cursor/limit param, so a
+        # single readback over a multi-year window misses records. Per-chunk
+        # narrow windows stay well under the ceiling.
+        events_sorted = sorted(events, key=lambda e: e.start_time)
         posted = 0
-        for i in range(0, len(new_events), chunk_size):
-            chunk = new_events[i : i + chunk_size]
-            self.ingest_batch(chunk, state)
-            posted += len(chunk)
+        skipped = 0
+        verified = 0
 
-        after = self.fetch_existing_source_ids(win_start, win_end)
-        verified = sum(1 for e in new_events if e.deterministic_id in after)
+        for i in range(0, len(events_sorted), chunk_size):
+            chunk = events_sorted[i : i + chunk_size]
+            win_start = min(e.start_time for e in chunk) - timedelta(minutes=window_pad_minutes)
+            win_end = max(e.end_time for e in chunk) + timedelta(minutes=window_pad_minutes)
+
+            existing = self.fetch_existing_source_ids(win_start, win_end)
+            new_events = [e for e in chunk if e.deterministic_id not in existing]
+            skipped += len(chunk) - len(new_events)
+
+            if new_events:
+                self.ingest_batch(new_events, state)
+                posted += len(new_events)
+                after = self.fetch_existing_source_ids(win_start, win_end)
+                verified += sum(1 for e in new_events if e.deterministic_id in after)
+
         if verified < posted:
             raise RuntimeError(
                 f"verified {verified} < posted {posted} — readback did not see "
-                f"all newly-ingested events. Window: {win_start} → {win_end}"
+                f"all newly-ingested events across the chunked windows."
             )
         return ImportResult(total=total, skipped_existing=skipped, posted=posted, verified=verified)
