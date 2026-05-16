@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import httpx
@@ -21,6 +22,14 @@ if TYPE_CHECKING:
     from .importers.base import NormalizedEvent
 
 DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
+
+
+@dataclass
+class ImportResult:
+    total: int
+    skipped_existing: int
+    posted: int
+    verified: int
 
 
 class FulcraClient:
@@ -191,3 +200,37 @@ class FulcraClient:
             for s in (rec.get("metadata") or {}).get("source") or []:
                 out.add(s)
         return out
+
+    def run_import(
+        self,
+        events: "list[NormalizedEvent]",
+        state: State,
+        chunk_size: int = 500,
+        window_pad_minutes: int = 10,
+    ) -> ImportResult:
+        events = list(events)
+        total = len(events)
+        if total == 0:
+            return ImportResult(0, 0, 0, 0)
+
+        win_start = min(e.start_time for e in events) - timedelta(minutes=window_pad_minutes)
+        win_end = max(e.end_time for e in events) + timedelta(minutes=window_pad_minutes)
+
+        existing = self.fetch_existing_source_ids(win_start, win_end)
+        new_events = [e for e in events if e.deterministic_id not in existing]
+        skipped = total - len(new_events)
+
+        posted = 0
+        for i in range(0, len(new_events), chunk_size):
+            chunk = new_events[i : i + chunk_size]
+            self.ingest_batch(chunk, state)
+            posted += len(chunk)
+
+        after = self.fetch_existing_source_ids(win_start, win_end)
+        verified = sum(1 for e in new_events if e.deterministic_id in after)
+        if verified < posted:
+            raise RuntimeError(
+                f"verified {verified} < posted {posted} — readback did not see "
+                f"all newly-ingested events. Window: {win_start} → {win_end}"
+            )
+        return ImportResult(total=total, skipped_existing=skipped, posted=posted, verified=verified)
