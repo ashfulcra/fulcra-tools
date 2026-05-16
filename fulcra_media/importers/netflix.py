@@ -7,8 +7,15 @@ no profile.
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import re
-from datetime import date, timedelta
+from collections import Counter
+from collections.abc import Iterator
+from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
+
+from .base import NormalizedEvent
 
 
 _NETFLIX_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2})$")
@@ -53,3 +60,55 @@ def estimate_duration(raw_title: str) -> timedelta:
     if "season" in lowered or "episode" in lowered or "limited series" in lowered:
         return timedelta(minutes=30)
     return timedelta(minutes=45)
+
+
+def _det_id(date_str: str, raw_title: str, occurrence: int) -> str:
+    h = hashlib.sha256(f"{date_str}|{raw_title}|{occurrence}".encode()).hexdigest()
+    return f"com.fulcra.media.netflix.{h[:16]}"
+
+
+def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
+    """Parse a Netflix slim CSV (Title, Date) into NormalizedEvents.
+
+    Each row -> one event with synthetic 21:00 UTC start time and an estimated
+    duration. Idempotency key incorporates an occurrence index so same-day
+    rewatches produce distinct events.
+    """
+    occurrence_counter: Counter[tuple[str, str]] = Counter()
+
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != ["Title", "Date"]:
+            raise ValueError(
+                f"unexpected Netflix CSV header {reader.fieldnames!r}; "
+                "this importer handles the slim 2-column variant only"
+            )
+        for row in reader:
+            raw_title = row["Title"]
+            date_str = row["Date"]
+            d = parse_netflix_date(date_str)
+            key = (date_str, raw_title)
+            idx = occurrence_counter[key]
+            occurrence_counter[key] += 1
+
+            note, title = make_note_and_title(raw_title)
+            start = datetime.combine(d, time(21, 0, 0), tzinfo=timezone.utc)
+            end = start + estimate_duration(raw_title)
+
+            yield NormalizedEvent(
+                importer="netflix-slim",
+                service="netflix",
+                category="watched",
+                note=note,
+                title=title,
+                start_time=start,
+                end_time=end,
+                deterministic_id=_det_id(date_str, raw_title, idx),
+                timestamp_confidence="low",
+                external_ids={
+                    "time_estimated": True,
+                    "duration_estimated": True,
+                    "occurrence_index": idx,
+                    "raw_date": date_str,
+                },
+            )
