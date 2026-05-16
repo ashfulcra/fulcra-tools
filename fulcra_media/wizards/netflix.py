@@ -25,9 +25,9 @@ Netflix slim CSV (in-app per-profile download)
   6. Save the file (filename usually NetflixViewingHistory.csv).
 
   Note: The slim CSV is date-only (M/D/YY format) with no time, duration,
-  device, or profile fields. Each row becomes one Watched annotation with a
-  synthetic 21:00 UTC start time and a duration estimated by title shape
-  (movie ~ 100 min, episode ~ 30 min). timestamp_confidence: low.
+  device, or profile fields. Each row becomes one Watched annotation as a
+  point-in-time event at 12:00 UTC on the date. timestamp_confidence: low,
+  point_in_time: true. Real watch times require the GDPR export below.
 
   When the file is ready, run:
     fulcra-media import netflix /path/to/NetflixViewingHistory.csv
