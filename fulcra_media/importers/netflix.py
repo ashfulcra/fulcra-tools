@@ -49,7 +49,11 @@ def make_note_and_title(raw_title: str) -> tuple[str, str]:
 
 def _det_id(date_str: str, raw_title: str, occurrence: int) -> str:
     h = hashlib.sha256(f"{date_str}|{raw_title}|{occurrence}".encode()).hexdigest()
-    return f"com.fulcra.media.netflix.{h[:16]}"
+    # v2: point-in-time at noon UTC, zero duration (vs v1's fake 21:00 UTC + estimated durations).
+    # Versioning the prefix so Fulcra's implicit ingest-time dedup doesn't reject the v2
+    # events as duplicates of the v1 events — Fulcra silently drops POSTs whose source IDs
+    # match existing records, even when the originating annotation def is soft-deleted.
+    return f"com.fulcra.media.netflix.v2.{h[:16]}"
 
 
 def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
@@ -81,6 +85,10 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
 
             note, title = make_note_and_title(raw_title)
             instant = datetime.combine(d, time(12, 0, 0), tzinfo=timezone.utc)
+            # Fulcra silently drops DurationAnnotation events with
+            # start_time == end_time; use a 1-second duration so the event
+            # actually indexes. Still effectively a point at noon UTC.
+            end_instant = instant + timedelta(seconds=1)
 
             yield NormalizedEvent(
                 importer="netflix-slim",
@@ -89,7 +97,7 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
                 note=note,
                 title=title,
                 start_time=instant,
-                end_time=instant,
+                end_time=end_instant,
                 deterministic_id=_det_id(date_str, raw_title, idx),
                 timestamp_confidence="low",
                 external_ids={

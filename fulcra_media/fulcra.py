@@ -184,8 +184,17 @@ class FulcraClient:
         r.raise_for_status()
 
     def fetch_existing_source_ids(
-        self, start: datetime, end: datetime
+        self,
+        start: datetime,
+        end: datetime,
+        only_for_defs: set[str] | None = None,
     ) -> set[str]:
+        """Return source IDs of DurationAnnotation events in [start, end].
+
+        If `only_for_defs` is set, records whose top-level `source_id` doesn't
+        appear in that set are ignored — this prevents dedup against events
+        orphaned by a previously soft-deleted annotation definition.
+        """
         r = self._client().get(
             "/data/v1alpha1/event/DurationAnnotation",
             params={
@@ -198,6 +207,8 @@ class FulcraClient:
         records = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
         out: set[str] = set()
         for rec in records:
+            if only_for_defs is not None and rec.get("source_id") not in only_for_defs:
+                continue
             for s in rec.get("sources") or []:
                 out.add(s)
             for s in (rec.get("metadata") or {}).get("source") or []:
@@ -226,24 +237,39 @@ class FulcraClient:
         skipped = 0
         verified = 0
 
+        # Scope dedup readback to the current annotation defs only — events
+        # orphaned by a soft-deleted def still surface in queries but their
+        # source_id points at the deleted def, so we want to ignore them.
+        current_def_source_ids: set[str] = set()
+        if state.watched_definition_id:
+            current_def_source_ids.add(
+                f"com.fulcradynamics.annotation.{state.watched_definition_id}"
+            )
+        if state.listened_definition_id:
+            current_def_source_ids.add(
+                f"com.fulcradynamics.annotation.{state.listened_definition_id}"
+            )
+
         for i in range(0, len(events_sorted), chunk_size):
             chunk = events_sorted[i : i + chunk_size]
             win_start = min(e.start_time for e in chunk) - timedelta(minutes=window_pad_minutes)
             win_end = max(e.end_time for e in chunk) + timedelta(minutes=window_pad_minutes)
 
-            existing = self.fetch_existing_source_ids(win_start, win_end)
+            existing = self.fetch_existing_source_ids(
+                win_start, win_end, only_for_defs=current_def_source_ids or None
+            )
             new_events = [e for e in chunk if e.deterministic_id not in existing]
             skipped += len(chunk) - len(new_events)
 
             if new_events:
                 self.ingest_batch(new_events, state)
                 posted += len(new_events)
-                after = self.fetch_existing_source_ids(win_start, win_end)
+                after = self.fetch_existing_source_ids(
+                    win_start, win_end, only_for_defs=current_def_source_ids or None
+                )
                 verified += sum(1 for e in new_events if e.deterministic_id in after)
 
-        if verified < posted:
-            raise RuntimeError(
-                f"verified {verified} < posted {posted} — readback did not see "
-                f"all newly-ingested events across the chunked windows."
-            )
+        # Note: `verified < posted` is no longer fatal. Fulcra accepts the POST
+        # (204) but indexing can lag seconds-to-minutes behind for large batches.
+        # Callers display the gap so the user knows what's still settling.
         return ImportResult(total=total, skipped_existing=skipped, posted=posted, verified=verified)

@@ -44,13 +44,16 @@ def test_real_netflix_csv_full_pipeline(recording_transport):
     # Drive the network pipeline with a mock that captures every JSONL line
     posted_lines: list[bytes] = []
 
-    # Verification readback after ingest returns the same source IDs we posted
+    # Verification readback after ingest returns the same source IDs we posted,
+    # carrying the current def's source_id at top level (so the run_import
+    # def-scoped filter accepts them).
+    _DEF_SID = "com.fulcradynamics.annotation.def-watched"
     posted_so_far: set[str] = set()
     def handler2(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/data/v1alpha1/event/DurationAnnotation":
             return json_response(
                 200,
-                [{"metadata": {"source": [sid]}} for sid in posted_so_far],
+                [{"source_id": _DEF_SID, "sources": [sid, _DEF_SID]} for sid in posted_so_far],
             )
         if request.method == "POST" and request.url.path == "/ingest/v1/record/batch":
             for line in request.content.splitlines():
