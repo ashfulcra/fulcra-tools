@@ -103,3 +103,32 @@ def test_import_netflix_resolves_fulcra_uri(tmp_path: Path, mocker):
     )
     result = CliRunner().invoke(cli, ["import", "netflix", "fulcra:/takeouts/Netflix.csv"])
     assert result.exit_code == 0, result.output
+
+
+def test_import_netflix_rich_variant(tmp_path: Path, mocker):
+    """The CLI auto-detects the 10-column rich variant and routes correctly."""
+    csv = tmp_path / "rich.csv"
+    csv.write_text(
+        'Profile Name,Start Time,Duration,Attributes,Title,Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n'
+        '"Ash","2026-05-12 20:00:00","00:30:00","","Some: Season 1: Ep","","Apple TV","00:30:00","00:30:00","US"\n'
+    )
+    state_path = tmp_path / "state.json"
+    save(State(
+        watched_definition_id="w", listened_definition_id="l",
+        tag_ids={"netflix": "t"},
+    ), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    captured = {}
+    from fulcra_media.fulcra import ImportResult
+    def fake_run(self, events, state, chunk_size=500, window_pad_minutes=10):
+        events = list(events)
+        captured["count"] = len(events)
+        captured["importer"] = events[0].importer if events else None
+        return ImportResult(total=len(events), skipped_existing=0, posted=len(events), verified=len(events))
+    mocker.patch("fulcra_media.fulcra.FulcraClient.run_import", fake_run)
+
+    result = CliRunner().invoke(cli, ["import", "netflix", str(csv)])
+    assert result.exit_code == 0, result.output
+    assert captured["count"] == 1
+    assert captured["importer"] == "netflix-rich"

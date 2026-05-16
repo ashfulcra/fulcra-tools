@@ -134,12 +134,13 @@ def test_parse_rich_filters_trailers():
 
 def test_parse_rich_movie_first_event():
     events = list(parse_rich(RICH_FIXTURE))
-    e = next(e for e in events if e.note == "Dune: Part Two")
+    e = next(e for e in events if "Dune" in e.title)
     assert e.importer == "netflix-rich"
     assert e.service == "netflix"
     assert e.category == "watched"
     assert e.note == "Dune: Part Two"
-    assert e.title == "Dune"
+    # Movie subtitles are preserved — no episode markers in the title
+    assert e.title == "Dune: Part Two"
     assert e.start_time == datetime(2026, 5, 12, 20, 32, 15, tzinfo=timezone.utc)
     assert e.end_time == datetime(2026, 5, 12, 22, 14, 45, tzinfo=timezone.utc)
     assert e.timestamp_confidence == "high"
@@ -151,11 +152,19 @@ def test_parse_rich_movie_first_event():
     assert "point_in_time" not in e.external_ids
 
 
-def test_parse_rich_episode_note_format():
+def test_parse_rich_episode_title_is_show_name():
+    """For shows, title is the show name (first colon-separated segment)."""
     events = list(parse_rich(RICH_FIXTURE))
-    e = next(e for e in events if "Severance" in e.title and "We We Are" in e.note)
-    assert "Severance" in e.note
+    e = next(e for e in events if "Severance" in e.note and "We We Are" in e.note)
+    assert e.title == "Severance"
     assert "Season 2" in e.note
+
+
+def test_parse_rich_movie_no_colon_title_preserved():
+    events = list(parse_rich(RICH_FIXTURE))
+    e = next(e for e in events if "Killers" in e.title)
+    assert e.title == "Killers of the Flower Moon"
+    assert e.note == "Killers of the Flower Moon"
 
 
 def test_parse_rich_idempotency_key_per_session():
@@ -178,3 +187,26 @@ def test_parse_rich_rejects_slim_header(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="parse_rich handles the 10-column"):
         list(parse_rich(csv))
+
+
+from fulcra_media.importers.netflix import parse_auto
+
+
+def test_parse_auto_routes_slim():
+    events = list(parse_auto(FIXTURE))
+    assert all(e.importer == "netflix-slim" for e in events)
+    assert len(events) == 8
+
+
+def test_parse_auto_routes_rich():
+    events = list(parse_auto(RICH_FIXTURE))
+    assert all(e.importer == "netflix-rich" for e in events)
+    assert len(events) == 5
+
+
+def test_parse_auto_rejects_unknown_header(tmp_path):
+    csv = tmp_path / "weird.csv"
+    csv.write_text("Foo,Bar\n1,2\n")
+    import pytest
+    with pytest.raises(ValueError, match="unrecognized Netflix CSV"):
+        list(parse_auto(csv))
