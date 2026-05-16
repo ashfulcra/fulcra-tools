@@ -21,6 +21,9 @@ def test_walkthrough_gdpr_route():
     assert "netflix.com/account/getmyinfo" in result.output
     assert "up to 30 days" in result.output
     assert "10 columns" in result.output or "rich" in result.output.lower()
+    # New: confirm rich import is wired (no more "not yet wired up" disclaimer)
+    assert "not yet wired" not in result.output
+    assert "fulcra-media import netflix" in result.output
 
 
 def test_walkthrough_rejects_bad_choice():
