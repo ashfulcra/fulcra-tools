@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime
 
 import httpx
 
@@ -114,3 +115,22 @@ class FulcraClient:
         )
         r.raise_for_status()
         return r.json()["id"]
+
+    def fetch_existing_source_ids(
+        self, start: datetime, end: datetime
+    ) -> set[str]:
+        r = self._client().get(
+            "/data/v1alpha1/event/DurationAnnotation",
+            params={
+                "start_time": start.isoformat().replace("+00:00", "Z"),
+                "end_time": end.isoformat().replace("+00:00", "Z"),
+            },
+            headers=self._authed_headers(),
+        )
+        r.raise_for_status()
+        records = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
+        out: set[str] = set()
+        for rec in records:
+            for s in (rec.get("metadata") or {}).get("source") or []:
+                out.add(s)
+        return out
