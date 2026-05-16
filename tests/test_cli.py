@@ -49,3 +49,57 @@ def test_bootstrap_calls_ensure_definitions(tmp_path: Path, mocker):
     raw = _json.loads(state_path.read_text())
     assert raw["watched_definition_id"] == "w-id"
     assert raw["listened_definition_id"] == "l-id"
+
+
+def test_wizard_netflix_invokes_walkthrough():
+    result = CliRunner().invoke(cli, ["wizard", "netflix"], input="1\n")
+    assert result.exit_code == 0
+    assert "Download all" in result.output
+
+
+def test_import_netflix_runs_pipeline(tmp_path: Path, mocker):
+    # Prep a tiny CSV and state on disk
+    csv = tmp_path / "small.csv"
+    csv.write_text('Title,Date\n"Movie One","5/12/26"\n')
+    state_path = tmp_path / "state.json"
+    save(State(
+        watched_definition_id="w", listened_definition_id="l",
+        tag_ids={"netflix": "t"},
+    ), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    # Stub the network-touching pipeline
+    from fulcra_media.fulcra import ImportResult
+
+    captured = {}
+    def fake_run(self, events, state, chunk_size=500, window_pad_minutes=10):
+        events = list(events)
+        captured["count"] = len(events)
+        return ImportResult(total=len(events), skipped_existing=0, posted=len(events), verified=len(events))
+    mocker.patch("fulcra_media.fulcra.FulcraClient.run_import", fake_run)
+
+    result = CliRunner().invoke(cli, ["import", "netflix", str(csv)])
+    assert result.exit_code == 0, result.output
+    assert captured["count"] == 1
+    assert "posted=1" in result.output or "1 posted" in result.output
+
+
+def test_import_netflix_resolves_fulcra_uri(tmp_path: Path, mocker):
+    csv = tmp_path / "downloaded.csv"
+    csv.write_text('Title,Date\n"Movie","5/12/26"\n')
+    mocker.patch("fulcra_media.library.resolve", return_value=csv)
+
+    state_path = tmp_path / "state.json"
+    save(State(
+        watched_definition_id="w", listened_definition_id="l",
+        tag_ids={"netflix": "t"},
+    ), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    from fulcra_media.fulcra import ImportResult
+    mocker.patch(
+        "fulcra_media.fulcra.FulcraClient.run_import",
+        return_value=ImportResult(1, 0, 1, 1),
+    )
+    result = CliRunner().invoke(cli, ["import", "netflix", "fulcra:/takeouts/Netflix.csv"])
+    assert result.exit_code == 0, result.output
