@@ -107,6 +107,27 @@ _RICH_EXPECTED_COLS = [
 ]
 
 
+_EPISODE_MARKERS = ("Season ", "Episode ", "Limited Series", "Chapter ", "Volume ")
+
+
+def _extract_title_rich(raw_title: str) -> tuple[str, str]:
+    """For rich-variant titles, distinguish movies from episodes.
+
+    Returns (note, title). Movies (no episode-shape marker in the string)
+    keep their full title intact even if they have colon subtitles
+    (e.g. "Dune: Part Two"). Episodes (with Season/Episode/Limited Series
+    markers) get title set to the show name (first colon-separated segment).
+    """
+    if ":" not in raw_title:
+        return raw_title, raw_title
+    if not any(marker in raw_title for marker in _EPISODE_MARKERS):
+        # Movie with colon subtitle
+        return raw_title, raw_title
+    # Episode — first colon-separated part is the show
+    parts = [p.strip() for p in raw_title.split(":")]
+    return raw_title, parts[0]
+
+
 def _det_id_rich(profile: str, start_time_str: str, raw_title: str) -> str:
     h = hashlib.sha256(f"{profile}|{start_time_str}|{raw_title}".encode()).hexdigest()
     return f"com.fulcra.media.netflix-rich.{h[:16]}"
@@ -145,7 +166,7 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
             duration = _parse_hmmss(row["Duration"])
             end = start + duration
 
-            note, title = make_note_and_title(raw_title)
+            note, title = _extract_title_rich(raw_title)
             profile = (row.get("Profile Name") or "").strip()
 
             yield NormalizedEvent(
@@ -165,3 +186,19 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
                     "bookmark": (row.get("Bookmark") or "").strip(),
                 },
             )
+
+
+def parse_auto(csv_path: Path) -> Iterator[NormalizedEvent]:
+    """Inspect CSV header and dispatch to parse_slim or parse_rich."""
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        header = reader.fieldnames
+    if header == ["Title", "Date"]:
+        yield from parse_slim(csv_path)
+    elif header == _RICH_EXPECTED_COLS:
+        yield from parse_rich(csv_path)
+    else:
+        raise ValueError(
+            f"unrecognized Netflix CSV header {header!r}; "
+            "expected slim ['Title', 'Date'] or rich 10-column GDPR variant"
+        )
