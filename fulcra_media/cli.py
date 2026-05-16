@@ -70,12 +70,14 @@ def import_netflix(path: str) -> None:
     """Import a Netflix slim-variant CSV (local path or fulcra:/... URI)."""
     resolved = library.resolve(path)
     s = state_mod.load(STATE_PATH)
-    if not s.watched_definition_id or "netflix" not in s.tag_ids:
+    if not s.watched_definition_id:
         raise click.UsageError(
-            "Run `fulcra-media bootstrap` first; need Watched definition + netflix tag."
+            "Run `fulcra-media bootstrap` first; need Watched definition."
         )
     events = list(netflix_importer.parse_slim(Path(resolved)))
     client = FulcraClient()
+    client.ensure_tag("netflix", s)
+    state_mod.save(s, STATE_PATH)
     result = client.run_import(events, s)
     state_mod.save(s, STATE_PATH)
     click.echo(
