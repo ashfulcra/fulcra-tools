@@ -11,3 +11,4 @@ dist/
 .scratch/
 .DS_Store
 ~/.config/fulcra-media/   # not in repo but documented as user state location
+takeouts/
