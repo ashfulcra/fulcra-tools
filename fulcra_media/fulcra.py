@@ -198,6 +198,8 @@ class FulcraClient:
         records = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
         out: set[str] = set()
         for rec in records:
+            for s in rec.get("sources") or []:
+                out.add(s)
             for s in (rec.get("metadata") or {}).get("source") or []:
                 out.add(s)
         return out
