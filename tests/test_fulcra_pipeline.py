@@ -31,13 +31,17 @@ def _ev(i: int, det_id: str | None = None) -> NormalizedEvent:
 
 def test_run_import_dedupes_against_existing(recording_transport):
     """One existing, two new -> ingest 2, skip 1, verify 2."""
+    # Real Fulcra records carry source_id pointing at the current def, plus
+    # the per-event sources array. fetch_existing_source_ids filters records
+    # by source_id to ignore orphans from soft-deleted defs.
+    _DEF_SID = "com.fulcradynamics.annotation.def-watched"
     existing_response = [
-        {"metadata": {"source": ["com.fulcra.media.netflix.id0001"]}},
+        {"source_id": _DEF_SID, "sources": ["com.fulcra.media.netflix.id0001", _DEF_SID]},
     ]
     after_response = [
-        {"metadata": {"source": ["com.fulcra.media.netflix.id0001"]}},
-        {"metadata": {"source": ["com.fulcra.media.netflix.id0002"]}},
-        {"metadata": {"source": ["com.fulcra.media.netflix.id0003"]}},
+        {"source_id": _DEF_SID, "sources": ["com.fulcra.media.netflix.id0001", _DEF_SID]},
+        {"source_id": _DEF_SID, "sources": ["com.fulcra.media.netflix.id0002", _DEF_SID]},
+        {"source_id": _DEF_SID, "sources": ["com.fulcra.media.netflix.id0003", _DEF_SID]},
     ]
     call_counter = {"get": 0, "post": 0}
 
@@ -68,10 +72,11 @@ def test_run_import_dedupes_against_existing(recording_transport):
 
 
 def test_run_import_no_new_events_does_not_post(recording_transport):
+    _DEF_SID = "com.fulcradynamics.annotation.d"
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
             return json_response(200, [
-                {"metadata": {"source": ["com.fulcra.media.netflix.id0001"]}},
+                {"source_id": _DEF_SID, "sources": ["com.fulcra.media.netflix.id0001", _DEF_SID]},
             ])
         pytest.fail(f"unexpected POST {request.url}")
     transport = recording_transport(handler)
@@ -94,7 +99,10 @@ def test_run_import_chunks_large_input(recording_transport):
     client = FulcraClient(transport=transport)
     state = State(watched_definition_id="d", listened_definition_id="d2", tag_ids={"netflix": "t"})
     events = [_ev(i) for i in range(25)]
-    # GET response is empty so verification will fail-count, but we only care about chunking here
-    with pytest.raises(RuntimeError, match="verified .* < posted"):
-        client.run_import(events, state, chunk_size=10)
+    # GET response is empty so verification finds 0; the pipeline used to raise
+    # but now reports the gap non-fatally (Fulcra has read-after-write lag).
+    result = client.run_import(events, state, chunk_size=10)
+    assert result.total == 25
+    assert result.posted == 25
+    assert result.verified == 0
     assert post_count["n"] == 3

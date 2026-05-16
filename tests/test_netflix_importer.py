@@ -78,9 +78,10 @@ def test_parse_slim_first_event_is_movie():
     assert e.category == "watched"
     assert e.note == "Movie One"
     assert e.title == "Movie One"
-    # Honest point-in-time at noon UTC — no fake duration
-    assert e.start_time == datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
-    assert e.end_time == e.start_time
+    # Honest point-in-time at noon UTC + 1s sentinel so Fulcra indexes it
+    # (the API silently drops events with start_time == end_time).
+    assert e.start_time == datetime(2026, 5, 12, 12, 0, 0, tzinfo=timezone.utc)
+    assert e.end_time == datetime(2026, 5, 12, 12, 0, 1, tzinfo=timezone.utc)
     assert e.timestamp_confidence == "low"
     assert e.external_ids["time_estimated"] is True
     assert e.external_ids["point_in_time"] is True
