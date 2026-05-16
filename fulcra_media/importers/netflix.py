@@ -12,7 +12,7 @@ import hashlib
 import re
 from collections import Counter
 from collections.abc import Iterator
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from .base import NormalizedEvent
@@ -47,21 +47,6 @@ def make_note_and_title(raw_title: str) -> tuple[str, str]:
     return note, parts[0]
 
 
-def estimate_duration(raw_title: str) -> timedelta:
-    """Heuristic runtime estimate for slim-variant rows (no real duration).
-
-    - No colon -> assume movie -> 100 min
-    - Contains 'Season' or 'Episode' marker -> assume TV episode -> 30 min
-    - Otherwise -> default 45 min
-    """
-    if ":" not in raw_title:
-        return timedelta(minutes=100)
-    lowered = raw_title.lower()
-    if "season" in lowered or "episode" in lowered or "limited series" in lowered:
-        return timedelta(minutes=30)
-    return timedelta(minutes=45)
-
-
 def _det_id(date_str: str, raw_title: str, occurrence: int) -> str:
     h = hashlib.sha256(f"{date_str}|{raw_title}|{occurrence}".encode()).hexdigest()
     return f"com.fulcra.media.netflix.{h[:16]}"
@@ -70,9 +55,12 @@ def _det_id(date_str: str, raw_title: str, occurrence: int) -> str:
 def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
     """Parse a Netflix slim CSV (Title, Date) into NormalizedEvents.
 
-    Each row -> one event with synthetic 21:00 UTC start time and an estimated
-    duration. Idempotency key incorporates an occurrence index so same-day
-    rewatches produce distinct events.
+    The slim variant has no time or duration data. We emit one point-in-time
+    event per row at 12:00 UTC on the date — start_time == end_time. The
+    timestamp_confidence is 'low' and external_ids carries both
+    `time_estimated: true` and `point_in_time: true`. Idempotency key
+    incorporates an occurrence index so same-day rewatches produce distinct
+    events.
     """
     occurrence_counter: Counter[tuple[str, str]] = Counter()
 
@@ -81,7 +69,7 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
         if reader.fieldnames != ["Title", "Date"]:
             raise ValueError(
                 f"unexpected Netflix CSV header {reader.fieldnames!r}; "
-                "this importer handles the slim 2-column variant only"
+                "parse_slim handles the 2-column variant only — use parse_rich for the GDPR export"
             )
         for row in reader:
             raw_title = row["Title"]
@@ -92,8 +80,7 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
             occurrence_counter[key] += 1
 
             note, title = make_note_and_title(raw_title)
-            start = datetime.combine(d, time(21, 0, 0), tzinfo=timezone.utc)
-            end = start + estimate_duration(raw_title)
+            instant = datetime.combine(d, time(12, 0, 0), tzinfo=timezone.utc)
 
             yield NormalizedEvent(
                 importer="netflix-slim",
@@ -101,13 +88,13 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
                 category="watched",
                 note=note,
                 title=title,
-                start_time=start,
-                end_time=end,
+                start_time=instant,
+                end_time=instant,
                 deterministic_id=_det_id(date_str, raw_title, idx),
                 timestamp_confidence="low",
                 external_ids={
                     "time_estimated": True,
-                    "duration_estimated": True,
+                    "point_in_time": True,
                     "occurrence_index": idx,
                     "raw_date": date_str,
                 },

@@ -1,7 +1,6 @@
-from datetime import date, timedelta
+from datetime import date
 
 from fulcra_media.importers.netflix import (
-    estimate_duration,
     make_note_and_title,
     parse_netflix_date,
 )
@@ -55,19 +54,6 @@ def test_make_note_and_title_leading_colon_malformed():
     assert title == ""
 
 
-def test_estimate_duration_movie_no_colon():
-    assert estimate_duration("Tetris") == timedelta(minutes=100)
-
-
-def test_estimate_duration_episode_with_season_marker():
-    assert estimate_duration("Show: Season 1: Ep") == timedelta(minutes=30)
-    assert estimate_duration("Show: Limited Series: Episode 1") == timedelta(minutes=30)
-
-
-def test_estimate_duration_two_part_default():
-    assert estimate_duration("Some Show: Some Title") == timedelta(minutes=45)
-
-
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -92,18 +78,13 @@ def test_parse_slim_first_event_is_movie():
     assert e.category == "watched"
     assert e.note == "Movie One"
     assert e.title == "Movie One"
-    assert e.start_time == datetime(2026, 5, 12, 21, 0, tzinfo=timezone.utc)
-    # Movie heuristic -> 100 min
-    assert (e.end_time - e.start_time).total_seconds() == 100 * 60
+    # Honest point-in-time at noon UTC — no fake duration
+    assert e.start_time == datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+    assert e.end_time == e.start_time
     assert e.timestamp_confidence == "low"
     assert e.external_ids["time_estimated"] is True
-    assert e.external_ids["duration_estimated"] is True
-
-
-def test_parse_slim_episode_yields_30min_duration():
-    events = list(parse_slim(FIXTURE))
-    e = events[1]
-    assert (e.end_time - e.start_time).total_seconds() == 30 * 60
+    assert e.external_ids["point_in_time"] is True
+    assert "duration_estimated" not in e.external_ids
 
 
 def test_parse_slim_same_day_rewatch_gets_distinct_ids():
