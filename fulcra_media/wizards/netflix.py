@@ -50,9 +50,13 @@ Netflix GDPR / "Request your personal information" export (RECOMMENDED)
 
   Scope: covers ALL profiles in your account and your full account lifetime.
 
-  Importing the rich variant is not yet wired up (the slim importer is in
-  place). For now, upload the ZIP to your Fulcra Library and we'll wire the
-  rich importer in the next milestone.
+  When you have the zip, extract it and import:
+    fulcra-media import netflix CONTENT_INTERACTION/ViewingActivity.csv
+
+  The importer auto-detects the 10-column variant. Each row becomes one
+  Watched annotation with the real UTC start time and real duration —
+  timestamp_confidence: high, no estimates. Trailers and previews are
+  filtered out automatically.
 """
 
 
