@@ -66,6 +66,7 @@ class FulcraClient:
                 transport=self._transport,
                 timeout=30.0,
                 headers={"User-Agent": "fulcra-media-helpers/0.1"},
+                follow_redirects=True,
             )
         return self._http
 
