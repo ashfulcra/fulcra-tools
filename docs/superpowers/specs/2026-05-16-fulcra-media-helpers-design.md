@@ -490,24 +490,51 @@ fulcra-media status                                          # state.json + last
 to skip Trakt's well-known synthetic signup-import clusters. `--since` is a
 soft watermark used for incrementals.
 
-### The wizard commands
+### The top-level setup experience
 
-Each `wizard <source>` is an interactive walkthrough that does three things:
+The end product **must not require the user to already know which subcommand to
+run**. The default entry point is `fulcra-media setup` (also reached by running
+`fulcra-media` with no args after a future iteration), a menu-driven flow:
 
-1. **Explains the export options** for that service (e.g. Netflix's slim CSV
-   vs GDPR export, with tradeoffs).
-2. **Prints the canonical Netflix/Spotify/Apple URLs and click sequence**
-   verbatim, links to upstream help pages, and tells the user roughly how long
-   the export takes (up to 30 days for Netflix GDPR, ~5 days for Spotify
-   Extended, etc.).
-3. **Once the user has the file**, offers to `fulcra file upload` it to a
-   canonical Library path (e.g. `/takeouts/netflix/2026-05-16.zip`) and
-   immediately invoke the corresponding `fulcra-media import`.
+1. **Pre-flight** — checks Fulcra auth (prompts `fulcra auth login` if missing),
+   runs `bootstrap` if the Watched/Listened definitions don't exist yet.
+2. **Service status table** — lists every supported service with its current
+   state:
+   ```
+     Service           Auth/Source     Last import       Events ingested
+     ----------------  --------------  ----------------  ---------------
+     Netflix           CSV present     2026-05-16        6,456
+     Apple takeout     no zip found    -                 0
+     Trakt             not connected   -                 0
+     Spotify Extended  no zip found    -                 0
+     Apple Podcasts    DB found        -                 0
+     Last.fm           not connected   -                 0
+   ```
+3. **Choice prompt** — "Which service do you want to set up next?" Selecting
+   one routes into that service's wizard (existing `wizard <source>` commands
+   become internal callees, not the user-facing surface).
+4. **Per-service flow** (delegated to the existing wizards):
+   - Explains the export options and tradeoffs.
+   - Prints the canonical URLs / click sequences with upstream help links.
+   - Tells the user the rough turnaround for human-in-loop steps (30 days
+     for Netflix GDPR, ~5 days for Spotify Extended, instant for Apple
+     Podcasts on-device, OAuth-now for Trakt/Last.fm).
+   - **Once the data is in hand** (local file, Library URI, or live API),
+     offers to upload to a canonical Library path and immediately invoke the
+     matching `fulcra-media import`.
+5. **Returns to the menu** so the user can set up the next service in the same
+   sitting.
 
-This is the friendliest path for a one-shot user. Power users skip the wizard
-and call `import` directly.
+Power users skip `setup` entirely and call `import <source> <path>` directly.
+The per-service wizards remain accessible via `wizard <source>` for users who
+already know which one they want.
 
 `--dry-run` emits JSONL of would-be records to stdout instead of POSTing.
+
+**Status (2026-05-16):** the thin slice ships `fulcra-media wizard netflix`
+only. The top-level `setup` command is deferred until ≥2 wizards exist (so
+the menu has something to choose between). Tracking it as the next UX
+milestone after the second importer lands.
 
 ## 7. Project layout
 
