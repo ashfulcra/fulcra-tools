@@ -78,8 +78,10 @@ def reset(confirm: bool, keep_watched: bool, keep_listened: bool) -> None:
     # Watermarks are now meaningless; tag IDs survive (tags weren't deleted).
     s.watermarks = {}
     state_mod.save(s, STATE_PATH)
+    from . import twin_cache
+    twin_cache.clear()
     click.echo("soft-deleted: " + (", ".join(deleted) or "(nothing — defs were absent)"))
-    click.echo("state cleared. Run `bootstrap` to create fresh definitions.")
+    click.echo("state cleared (including twin cache). Run `bootstrap` to create fresh definitions.")
 
 
 cli.add_command(setup_command, name="setup")
@@ -153,10 +155,19 @@ def import_netflix(path: str, check_only: bool, json_mode: bool) -> None:
                    "Default 'ask' on TTY, errors otherwise.")
 @click.option("--check-only", is_flag=True)
 @click.option("--json", "json_mode", is_flag=True)
+@click.option("--twin-policy",
+              type=click.Choice(["ask", "auto-discard", "keep"]),
+              default=None,
+              help="When a Trakt low-conf event has a high-conf twin in the local "
+                   "cache (same content_fingerprint, previously imported): "
+                   "ask (TTY default), auto-discard, or keep. "
+                   "Errors non-interactively without an explicit choice.")
 def import_trakt(cluster_threshold: int, cluster_spec: str | None,
-                 check_only: bool, json_mode: bool) -> None:
+                 check_only: bool, json_mode: bool,
+                 twin_policy: str | None) -> None:
     """Import Trakt watch history via the Trakt API."""
-    from fulcra_csv import apply_cluster_policy
+    from fulcra_csv import apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
+    from . import twin_cache
     from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import trakt as trakt_importer
     s = state_mod.load(STATE_PATH)
@@ -191,8 +202,71 @@ def import_trakt(cluster_threshold: int, cluster_spec: str | None,
         if not json_mode:
             click.echo(f"cluster policy '{policy.action}': {affected} events affected", err=True)
 
+    # Cross-batch twin dedup: low-conf events whose content_fingerprint matches
+    # a previously-imported high-conf event in the local twin cache.
+    events = _maybe_apply_twin_dedup(
+        events, twin_policy=twin_policy, json_mode=json_mode,
+    )
+
     run_and_emit("trakt", events, s,
                  tag_name="trakt", check_only=check_only, json_mode=json_mode)
+
+
+def _maybe_apply_twin_dedup(events: list,
+                            *, twin_policy: str | None,
+                            json_mode: bool) -> list:
+    """Look for low-conf events whose content_fingerprint matches a high-conf
+    entry in the local twin cache, then apply the user's chosen policy."""
+    from fulcra_csv import apply_twin_decisions, find_low_conf_twins
+    from . import twin_cache
+
+    cached = twin_cache.load_for_twin_lookup()
+    pairs = find_low_conf_twins(events, extra_pool=cached)
+    if not pairs:
+        return events
+
+    # Resolve the policy
+    spec = twin_policy
+    if spec is None:
+        if json_mode or not click.get_text_stream("stdin").isatty():
+            click.echo(
+                f"warning: {len(pairs)} low-conf events have high-conf twins in the "
+                "twin cache; pass --twin-policy ask|auto-discard|keep to handle them.",
+                err=True,
+            )
+            return events
+        spec = "ask"
+
+    if spec == "keep":
+        return events
+
+    if spec == "auto-discard":
+        to_drop = {twin_cache._source_id_of(low) for low, _high in pairs}
+        return apply_twin_decisions(events, to_drop)
+
+    # ask
+    click.echo(
+        f"\nDetected {len(pairs)} low-confidence events with high-confidence "
+        f"twins from previous imports.", err=True,
+    )
+    for i, (low, high) in enumerate(pairs[:5], start=1):
+        fp = low.external_ids.get("content_fingerprint", "?")
+        click.echo(
+            f"  {i}. {fp}  (low-conf {low.start_time.isoformat()} ↔ "
+            f"high-conf source {high.external_ids.get('importer', '?')})",
+            err=True,
+        )
+    if len(pairs) > 5:
+        click.echo(f"  ... and {len(pairs) - 5} more", err=True)
+
+    choice = click.prompt(
+        "Discard the low-confidence twins?",
+        type=click.Choice(["yes", "no"]), default="yes",
+    )
+    if choice == "yes":
+        to_drop = {twin_cache._source_id_of(low) for low, _high in pairs}
+        return apply_twin_decisions(events, to_drop)
+    return events
 
 
 def _resolve_cluster_policy(
