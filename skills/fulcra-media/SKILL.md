@@ -1,13 +1,15 @@
 ---
 name: fulcra-media
-description: Import media history (Watched / Listened / Activity / Read) into a Fulcra account via the `fulcra-media` CLI. Use when the user wants to track Netflix, Trakt, Spotify, Last.fm, Apple Podcasts, Strava, Letterboxd, Goodreads, Plex/Jellyfin, or any other media source listed in `fulcra-media import --help`.
+description: Import media history (Watched / Listened / Read) into a Fulcra account via the `fulcra-media` CLI. Use when the user wants to track Netflix, Trakt, Spotify, Last.fm, Apple Podcasts, Letterboxd, Goodreads, YouTube, Plex/Jellyfin, or any other media source listed in `fulcra-media import --help`.
 ---
 
 # fulcra-media — Import a user's media history into Fulcra
 
-`fulcra-media` is a Python CLI that imports media events (watches, listens, workouts, books read) into Fulcra as DurationAnnotations. Each import is idempotent (re-runs are safe), and every command supports a `--json` flag for machine-readable output and a `--check-only` dry-run.
+`fulcra-media` is a Python CLI that imports media events (watches, listens, books read) into Fulcra as DurationAnnotations. Each import is idempotent (re-runs are safe), and every command supports a `--json` flag for machine-readable output and a `--check-only` dry-run.
 
 This skill helps you (the AI agent) run imports on the user's behalf, schedule periodic syncs, and interpret the results.
+
+**Runtime-agnostic.** Everything below is shell I/O. This skill works the same in Claude Code, OpenCode, Codex, Gemini CLI, Copilot CLI, or any agent runtime that can execute a subprocess. No Claude-Code-specific tools are required — the only contract is `fulcra-media` on PATH and the JSON envelope schema.
 
 ---
 
@@ -20,8 +22,8 @@ fulcra-media status
 ```
 
 The output (JSON) tells you:
-- Which annotation definitions exist (`watched_definition_id`, `listened_definition_id`, `activity_definition_id`, `read_definition_id`) — if `null`, run `fulcra-media bootstrap` to create them
-- Per-importer watermarks (`watermarks["lastfm"]`, `watermarks["strava"]`, ...) — empty means cold-start, ISO timestamp means incremental
+- Which annotation definitions exist (`watched_definition_id`, `listened_definition_id`, `read_definition_id`) — if `null`, run `fulcra-media bootstrap` to create them
+- Per-importer watermarks (`watermarks["lastfm"]`, `watermarks["trakt"]`, ...) — empty means cold-start, ISO timestamp means incremental
 - Service-tag UUIDs the user has already created
 
 If the user is brand new, walk them through `fulcra-media setup` (interactive picker) — but **don't run setup non-interactively**, it expects stdin input from a TTY.
@@ -78,7 +80,7 @@ Run `fulcra-media import --help` for the live list. As of this skill version:
 | `apple-takeout` | watched | privacy.apple.com CSV | Apple TV Playback Activity. |
 | `letterboxd` | watched | Username | Public RSS. |
 | `goodreads` | read | User ID | Public RSS of the 'read' shelf. |
-| `strava` | activity | OAuth | Workouts (runs, rides, swims). |
+| `youtube` | watched | Google Takeout zip | watch-history.json. Recurring exports every 2 months. |
 | `generic-csv` | watched/listened | n/a | Any column-mapped CSV. |
 | `generic-rss` | watched/listened | n/a | Any RSS/Atom feed. |
 | (server) `webhook` | watched | bearer token | Long-running HTTP receiver for Plex/Jellyfin push. Not an `import` subcommand. |
@@ -121,7 +123,7 @@ Useful for high-frequency polling (every minute) without ingest churn — only r
 ### Bootstrap a fresh user
 
 ```bash
-fulcra-media bootstrap  # creates Watched, Listened, Activity, Read defs
+fulcra-media bootstrap  # creates Watched, Listened, Read defs
 ```
 
 Idempotent — subsequent calls are no-ops once defs exist.
@@ -129,7 +131,7 @@ Idempotent — subsequent calls are no-ops once defs exist.
 ### Reset everything (rare)
 
 ```bash
-fulcra-media reset --confirm  # soft-deletes all four defs, clears watermarks + twin cache
+fulcra-media reset --confirm  # soft-deletes all three defs, clears watermarks + twin cache
 ```
 
 ⚠️ Fulcra has **no per-event delete**. Events under reset-soft-deleted defs stay visible in queries forever (Fulcra limitation). The next `bootstrap` creates fresh defs with new UUIDs, so future imports namespace cleanly. Use this only after a meaningful pipeline change you want to re-run against (e.g. a cluster-policy change).
@@ -147,11 +149,11 @@ User says they want to track X →
 | Netflix | `netflix` (slim CSV from privacy settings, or full GDPR export) |
 | Hulu / Disney+ / Max / Prime Video / Peacock | No direct path — use `trakt` for ongoing, GDPR-export-and-`generic-csv` for backfill |
 | Apple TV+ | `trakt` (with Universal Trakt Scrobbler browser ext) for ongoing; `apple-takeout` for backfill |
-| YouTube (videos) | Google Takeout zip → `generic-csv` (a dedicated `youtube` importer is on the roadmap) |
+| YouTube (videos) | `youtube` against the Takeout watch-history.json (recurring 2-month exports) |
 | Apple Podcasts | `apple-podcasts` (macOS only); add `apple-podcasts-timemachine` for replay recovery |
 | Letterboxd | `letterboxd --username <user>` |
 | Goodreads | `goodreads --user-id <id>` |
-| Strava | `strava` (OAuth setup via `wizard strava`) |
+| Workouts (Strava etc.) | Not currently wired — workouts will land in Fulcra's native workout data type in a future revision. The `strava` importer module is still in the repo (frozen for rewrite); don't suggest it yet. |
 | Plex | `webhook` (run the receiver, point Plex webhooks at it) |
 | Jellyfin | `webhook` (run the receiver, point jellyfin-plugin-webhook at it) |
 | **Anything else with a CSV they got somewhere** | `generic-csv` with column flags |
@@ -164,7 +166,7 @@ User says they want to track X →
 
 `fulcra-media wizard <name>` prints onboarding instructions for the given service. **The output is plain text for the user, not for you.** Don't try to parse it. If the user asks "how do I set up X," just call `fulcra-media wizard X` and show them the output.
 
-Available wizards: `netflix trakt apple-podcasts spotify spotify-ifttt apple-takeout ifttt pipedream lastfm deezer letterboxd strava goodreads plex jellyfin`.
+Available wizards: `netflix trakt apple-podcasts spotify spotify-ifttt apple-takeout ifttt pipedream lastfm deezer letterboxd goodreads youtube plex jellyfin`.
 
 The interactive `fulcra-media setup` walks the user through category-picking and then drops them into the right wizard. **Only invoke setup from a TTY** — it expects keyboard input.
 
@@ -176,10 +178,9 @@ All creds live under `~/.config/fulcra-media/` with mode 0600:
 
 | File | For | Shape |
 |---|---|---|
-| `state.json` | All importers | `{watched_definition_id, listened_definition_id, activity_definition_id, read_definition_id, tag_ids, watermarks}` |
+| `state.json` | All importers | `{watched_definition_id, listened_definition_id, read_definition_id, tag_ids, watermarks}` |
 | `lastfm.json` | Last.fm | `{username, api_key}` |
 | `deezer.json` | Deezer | `{access_token}` |
-| `strava.json` | Strava | `{client_id, client_secret, access_token, refresh_token, expires_at}` |
 | `trakt.json` | Trakt | OAuth blob managed by the importer |
 | `twin_cache.json` | All | `{<content_fingerprint>: {source_id, importer, start_time, confidence}}` for cross-batch dedup |
 
@@ -193,17 +194,17 @@ Recommended cadence:
 
 | Importer | Cadence |
 |---|---|
-| `lastfm`, `deezer`, `strava` | hourly (API + watermark) |
+| `lastfm`, `deezer`, `trakt` | hourly (API + watermark) |
 | `letterboxd`, `goodreads`, `generic-rss` | daily (RSS feeds change slowly) |
 | `apple-podcasts` | hourly (cheap — local SQLite snapshot) |
-| `netflix`, `spotify-extended`, `apple-takeout`, `spotify-ifttt` | on-demand (user-uploaded zips) |
+| `netflix`, `spotify-extended`, `apple-takeout`, `spotify-ifttt`, `youtube` | on-demand (user-uploaded zips / recurring Takeouts) |
 | `webhook` (Plex/Jellyfin) | persistent service (`launchd` / `systemd`) |
 
 A simple agent driver:
 
 ```python
 import json, subprocess
-for importer in ("lastfm", "deezer", "strava"):
+for importer in ("lastfm", "deezer", "trakt"):
     res = subprocess.run(
         ["fulcra-media", "import", importer, "--json"],
         capture_output=True, text=True,
@@ -223,7 +224,7 @@ The `webhook` receiver is a long-running process — don't poll it; start it onc
 
 ### `ok: false`, `errors[0].stage = "auth"`
 
-Creds file missing or expired. Tell the user to run `fulcra-media wizard <importer>`. For OAuth-based importers (Strava, Trakt, Deezer), the wizard explains the manual token mint flow.
+Creds file missing or expired. Tell the user to run `fulcra-media wizard <importer>`. For OAuth-based importers (Trakt, Deezer), the wizard explains the manual token mint flow.
 
 ### `ok: true`, `verified: 0`, `posted > 0`
 

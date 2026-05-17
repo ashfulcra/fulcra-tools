@@ -106,12 +106,11 @@ class FulcraClient:
 
     def ensure_definitions(self, state: State) -> None:
         if (state.watched_definition_id and state.listened_definition_id
-                and state.activity_definition_id and state.read_definition_id):
+                and state.read_definition_id):
             return
         media = self.ensure_tag("media", state)
         watched = self.ensure_tag("watched", state)
         listened = self.ensure_tag("listened", state)
-        activity = self.ensure_tag("activity", state)
         read = self.ensure_tag("read", state)
 
         if not state.watched_definition_id:
@@ -125,12 +124,6 @@ class FulcraClient:
                 name="Listened",
                 description="Media content listened to (music, podcasts).",
                 tags=[media, listened],
-            )
-        if not state.activity_definition_id:
-            state.activity_definition_id = self._create_duration_definition(
-                name="Activity",
-                description="Physical activity / workouts (Strava, etc.).",
-                tags=[activity],
             )
         if not state.read_definition_id:
             state.read_definition_id = self._create_duration_definition(
@@ -168,7 +161,6 @@ class FulcraClient:
         category_to_def = {
             "watched":  state.watched_definition_id,
             "listened": state.listened_definition_id,
-            "activity": state.activity_definition_id,
             "read":     state.read_definition_id,
         }
         for ev in events:
@@ -281,7 +273,6 @@ class FulcraClient:
         for def_id in (
             state.watched_definition_id,
             state.listened_definition_id,
-            state.activity_definition_id,
             state.read_definition_id,
         ):
             if def_id:

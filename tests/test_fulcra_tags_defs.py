@@ -86,9 +86,9 @@ def test_ensure_definitions_skips_when_already_cached(recording_transport):
     client = FulcraClient(transport=transport)
     state = State(
         watched_definition_id="x", listened_definition_id="y",
-        activity_definition_id="a", read_definition_id="r",
+        read_definition_id="r",
         tag_ids={"media": "m", "watched": "w", "listened": "l",
-                 "activity": "ac", "read": "re"},
+                 "read": "re"},
     )
     client.ensure_definitions(state)
     assert state.watched_definition_id == "x"

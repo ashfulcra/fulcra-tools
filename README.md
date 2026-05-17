@@ -1,6 +1,6 @@
 # FulcraMediaHelpers
 
-Import your media history — what you've **Watched**, **Listened to**, **read**, and the workouts you've **done** — into your [Fulcra](https://fulcradynamics.com) personal data account, from ~14 sources, with per-row idempotency and agent-friendly JSON output.
+Import your media history — what you've **Watched**, **Listened to**, and **Read** — into your [Fulcra](https://fulcradynamics.com) personal data account, from ~13 sources, with per-row idempotency and agent-friendly JSON output.
 
 ```
 $ fulcra-media import lastfm --json
@@ -18,7 +18,7 @@ This tool funnels all of them into Fulcra as `DurationAnnotation` events, so a s
 ```bash
 pip install -e ".[dev]"
 fulcra auth login          # via the fulcra-api CLI
-fulcra-media bootstrap     # create the four annotation definitions
+fulcra-media bootstrap     # create the three annotation definitions
 fulcra-media setup         # interactive picker — walks you through service onboarding
 ```
 
@@ -36,7 +36,7 @@ fulcra-media setup         # interactive picker — walks you through service on
 | **Apple TV / TV+ takeout** | `import apple-takeout` | privacy.apple.com → Apple Media Services → Playback Activity CSV. |
 | **Letterboxd** | `import letterboxd` | Public RSS diary feed. |
 | **Goodreads** | `import goodreads` | Public RSS of the 'read' shelf. |
-| **Strava** | `import strava` | Direct OAuth API. Runs, rides, swims as **Activity** events. |
+| **YouTube** | `import youtube` | Google Takeout `watch-history.json` (recurring 2-month exports supported). |
 | **Plex / Jellyfin** | `webhook` (long-running) | HTTP server that accepts `media.scrobble` / `PlaybackStop` events and ingests them in real time. |
 | **Anything with a CSV** | `import generic-csv` | Column-mapped import. IFTTT, Pipedream, hand-rolled — any timestamp + title source. |
 | **Anything with an RSS feed** | `import generic-rss` | Same for RSS/Atom feeds. |
@@ -45,12 +45,13 @@ Run `fulcra-media import --help` for the live list and `fulcra-media wizard <ser
 
 ## Categories
 
-Events are split across four annotation definitions that `bootstrap` creates:
+Events are split across three annotation definitions that `bootstrap` creates:
 
-- **Watched** — TV, movies, video (Netflix, Trakt, Apple TV, Letterboxd, Plex)
+- **Watched** — TV, movies, video (Netflix, Trakt, Apple TV, Letterboxd, YouTube, Plex)
 - **Listened** — music, podcasts (Last.fm, Spotify, Deezer, Apple Podcasts)
-- **Activity** — workouts (Strava)
 - **Read** — books (Goodreads)
+
+Workouts are coming in a future revision against Fulcra's native workout data type; the `strava` importer module is in the repo but unwired from the CLI for now.
 
 Each event carries a `content_fingerprint` for cross-source dedup (e.g. the same Dune episode imported from Netflix and Trakt collapses on a single fingerprint downstream).
 
@@ -67,7 +68,7 @@ Periodic-invocation cookbook:
 
 ```python
 import json, subprocess
-for importer in ("lastfm", "deezer", "strava", "letterboxd", "goodreads"):
+for importer in ("lastfm", "deezer", "trakt", "letterboxd", "goodreads"):
     res = subprocess.run(
         ["fulcra-media", "import", importer, "--json"],
         capture_output=True, text=True,
@@ -102,7 +103,7 @@ The sibling project [fulcra-csv-importer](../fulcra-csv-importer) handles the ge
 
 ```bash
 uv sync --extra dev
-uv run pytest                  # 414 tests as of this writing
+uv run pytest                  # 415 tests as of this writing
 uv run fulcra-media --help
 ```
 
@@ -113,9 +114,9 @@ Architecture docs:
 
 ## Status
 
-- 414 unit tests passing
+- 415 unit tests passing
 - All importers exercised against real or fixture-shaped data
-- Schema covers four categories; adding a fifth is a small schema bump
+- Schema covers three categories (workouts pending native-type rework)
 - Webhook receiver tested against simulated Plex/Jellyfin payloads; needs a Plex Pass user for real-data validation
 - Goodreads / Letterboxd: RSS endpoint quirks documented in their wizards
 

@@ -142,14 +142,6 @@ SERVICES: list[ServiceEntry] = [
         available=True,
     ),
 
-    # ---- Physical activity / workouts ----
-    ServiceEntry(
-        key="strava", label="Strava", category="activity", rank=1, pathway="api",
-        import_cmd="strava", wizard="strava",
-        blurb="Direct OAuth API. Workouts (runs, rides, swims, ...) imported as "
-              "Activity events. Webhook subscription available for real-time push.",
-    ),
-
     # ---- Books / reading (future) ----
     ServiceEntry(
         key="letterboxd", label="Letterboxd (RSS)", category="video", rank=4,
