@@ -24,6 +24,7 @@ from .wizards.pipedream import walkthrough as pipedream_walkthrough
 from .wizards.lastfm import walkthrough as lastfm_walkthrough
 from .wizards.deezer import walkthrough as deezer_walkthrough
 from .wizards.letterboxd import walkthrough as letterboxd_walkthrough
+from .wizards.goodreads import walkthrough as goodreads_walkthrough
 from .wizards.strava import walkthrough as strava_walkthrough
 from .setup_wizard import setup as setup_command
 
@@ -139,6 +140,7 @@ wizard.add_command(pipedream_walkthrough, name="pipedream")
 wizard.add_command(lastfm_walkthrough, name="lastfm")
 wizard.add_command(deezer_walkthrough, name="deezer")
 wizard.add_command(letterboxd_walkthrough, name="letterboxd")
+wizard.add_command(goodreads_walkthrough, name="goodreads")
 wizard.add_command(strava_walkthrough, name="strava")
 
 
@@ -1057,6 +1059,87 @@ def import_letterboxd(
 
     envelope = import_result_to_dict(
         "letterboxd", result,
+        since_watermark=since_str,
+        new_watermark=new_watermark_iso,
+        would_post=result.posted if check_only else None,
+    )
+    emit_result(envelope, json_mode=json_mode)
+
+
+@import_group.command("goodreads")
+@click.option("--user-id", required=True,
+              help="Your Goodreads numeric user id (the number in profile URL).")
+@click.option("--since", "since_iso", default=None,
+              help="ISO 8601 datetime; defaults to stored watermark.")
+@click.option("--max-entries", default=None, type=int,
+              help="Cap how many entries to process from this fetch.")
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_goodreads(
+    user_id: str, since_iso: str | None, max_entries: int | None,
+    check_only: bool, json_mode: bool,
+) -> None:
+    """Import Goodreads 'read' shelf entries via the public RSS feed."""
+    from . import watermarks
+    from .cli_common import (
+        emit_result, import_result_to_dict, ImportEnvelope,
+    )
+    from .importers import goodreads as gr
+
+    watermark_key = f"goodreads:{user_id}"
+
+    s = state_mod.load(STATE_PATH)
+    if not s.read_definition_id:
+        emit_result(
+            ImportEnvelope(
+                importer="goodreads", ok=False,
+                errors=[{"stage": "setup",
+                         "message": "Run `fulcra-media bootstrap` first; "
+                                    "need read definition."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    since, since_str, err = _resolve_since(
+        since_iso, importer_name="goodreads",
+        watermark_key=watermark_key, state=s, json_mode=json_mode,
+    )
+    if err:
+        return
+
+    try:
+        all_events = list(gr.fetch_diary(user_id))
+    except (RuntimeError, httpx.HTTPError) as exc:
+        emit_result(
+            ImportEnvelope(
+                importer="goodreads", ok=False, since_watermark=since_str,
+                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    if since is not None:
+        all_events = [e for e in all_events if e.start_time >= since]
+    if max_entries is not None:
+        all_events = all_events[:max_entries]
+
+    client = FulcraClient()
+    if not check_only:
+        client.ensure_tag("goodreads", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(all_events, s, check_only=check_only)
+
+    new_watermark_iso: str | None = None
+    if all_events and not check_only and result.posted > 0:
+        max_ts = max(e.start_time for e in all_events)
+        watermarks.set_iso(s, watermark_key, max_ts)
+        new_watermark_iso = max_ts.isoformat()
+    state_mod.save(s, STATE_PATH)
+
+    envelope = import_result_to_dict(
+        "goodreads", result,
         since_watermark=since_str,
         new_watermark=new_watermark_iso,
         would_post=result.posted if check_only else None,
