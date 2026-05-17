@@ -59,6 +59,28 @@ def import_result_to_dict(
     )
 
 
+def resolve_or_emit(
+    importer_name: str, path: str, *, json_mode: bool,
+) -> "Path | None":
+    """Wrap library.resolve so missing files become a structured envelope.
+
+    Returns the resolved Path on success; emits + returns None on failure.
+    """
+    from pathlib import Path
+    from . import library
+    try:
+        return Path(library.resolve(path))
+    except (FileNotFoundError, RuntimeError) as exc:
+        emit_result(
+            ImportEnvelope(
+                importer=importer_name, ok=False,
+                errors=[{"stage": "args", "message": f"resolve {path!r}: {exc}"}],
+            ),
+            json_mode=json_mode,
+        )
+        return None
+
+
 def run_and_emit(
     importer_name: str,
     events: list,
