@@ -12,6 +12,10 @@ from . import state as state_mod
 from .fulcra import FulcraClient
 from .importers import netflix as netflix_importer
 from .wizards.netflix import walkthrough as netflix_walkthrough
+from .wizards.trakt import walkthrough as trakt_walkthrough
+from .wizards.apple_podcasts import walkthrough as apple_podcasts_walkthrough
+from .wizards.spotify import walkthrough as spotify_walkthrough
+from .wizards.apple_takeout import walkthrough as apple_takeout_walkthrough
 
 STATE_PATH = state_mod.DEFAULT_PATH
 
@@ -62,6 +66,10 @@ def import_group() -> None:
 
 
 wizard.add_command(netflix_walkthrough, name="netflix")
+wizard.add_command(trakt_walkthrough, name="trakt")
+wizard.add_command(apple_podcasts_walkthrough, name="apple-podcasts")
+wizard.add_command(spotify_walkthrough, name="spotify")
+wizard.add_command(apple_takeout_walkthrough, name="apple-takeout")
 
 
 @import_group.command("netflix")
