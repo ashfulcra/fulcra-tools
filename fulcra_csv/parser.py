@@ -15,14 +15,19 @@ from typing import Any
 
 import dateparser
 
-from .events import ColumnMap, GenericEvent, derive_source_id
+from .events import (
+    DURATION,
+    INSTANT,
+    VALID_TYPES,
+    ColumnMap,
+    GenericEvent,
+    coerce_value,
+    derive_source_id,
+)
 
 
 def parse_value(v: Any) -> str:
-    """Coerce a CSV value (which is always str via csv.DictReader) to clean str.
-
-    Strips whitespace. Preserves emptiness so callers can decide what to skip.
-    """
+    """Coerce a CSV value to clean str. Strips whitespace; preserves empty."""
     if v is None:
         return ""
     return str(v).strip()
@@ -67,24 +72,25 @@ def parse_csv(
     source_id_prefix: str = "fulcra-csv.v1",
     default_tag: str | None = None,
     sentinel_duration_seconds: int = 1,
+    annotation_type: str = DURATION,
 ) -> Iterator[GenericEvent]:
     """Yield GenericEvent per CSV row.
 
     column_map: how CSV columns map to logical fields. Defaults to literal
-    column names ('timestamp', 'title', ...) — caller usually overrides.
-
-    tz: timezone for naive timestamps (dateparser hint). Has no effect on
-    timestamps that already carry tzinfo.
-
-    source_id_prefix: deterministic id prefix. e.g. "com.fulcra.csv.v1".
-
+        column names ('timestamp', 'title', ...) — caller usually overrides.
+    tz: timezone for naive timestamps (dateparser hint).
+    source_id_prefix: deterministic id prefix.
     default_tag: fallback tag when colmap.tag is None or the row's tag cell
-    is empty.
-
+        is empty.
     sentinel_duration_seconds: end_time = start_time + this many seconds
-    when neither end_time nor duration columns are present. Fulcra silently
-    drops zero-duration events, so the default is 1.
+        when neither end_time nor duration columns are present. Fulcra
+        silently drops zero-duration events, so the default is 1. Ignored
+        when annotation_type='instant'.
+    annotation_type: 'duration' (default) or 'instant'. Instant events
+        carry no end_time and only emit start_time in recorded_at.
     """
+    if annotation_type not in VALID_TYPES:
+        raise ValueError(f"annotation_type must be one of {VALID_TYPES}")
     colmap = column_map or ColumnMap()
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -99,7 +105,10 @@ def parse_csv(
                 continue
             start = _parse_ts(ts_raw, tz=tz)
 
-            if colmap.end_time and parse_value(row.get(colmap.end_time)):
+            end: datetime | None
+            if annotation_type == INSTANT:
+                end = None
+            elif colmap.end_time and parse_value(row.get(colmap.end_time)):
                 end = _parse_ts(parse_value(row[colmap.end_time]), tz=tz)
             elif colmap.duration_seconds and parse_value(row.get(colmap.duration_seconds)):
                 end = start + timedelta(seconds=int(float(row[colmap.duration_seconds])))
@@ -107,22 +116,32 @@ def parse_csv(
                 end = start + timedelta(seconds=sentinel_duration_seconds)
 
             note, title = _build_note(row, colmap)
-            if not note:
+            value: Any = None
+            if colmap.value:
+                value = coerce_value(parse_value(row.get(colmap.value)), colmap.value_type)
+
+            # An event needs at least SOMETHING — note, title, or value.
+            if not note and value is None:
                 continue
+            if not note and value is not None:
+                # Synthesize a note from the value when no text is given.
+                note = str(value)
 
             tag = parse_value(row.get(colmap.tag)) if colmap.tag else ""
             tag = tag or default_tag
 
-            # Always hash with the timestamp — `source_id` columns typically
-            # hold per-content ids (e.g. a Spotify track id), not per-row ids,
-            # so two plays of the same content at different times must still
-            # produce distinct source_ids.
             explicit_id = (
                 parse_value(row.get(colmap.source_id)) if colmap.source_id else ""
             )
             source_id = derive_source_id(
                 source_id_prefix, ts_raw, note, tag, explicit_id,
             )
+
+            data_fields: dict[str, Any] = {}
+            for col, key in colmap.data_fields:
+                val = parse_value(row.get(col))
+                if val:
+                    data_fields[key] = val
 
             extras: dict[str, Any] = {}
             for col, key in colmap.extras:
@@ -137,5 +156,8 @@ def parse_csv(
                 title=title,
                 source_id=source_id,
                 tag=tag,
+                value=value,
+                annotation_type=annotation_type,
+                data_fields=data_fields,
                 external_ids=extras,
             )
