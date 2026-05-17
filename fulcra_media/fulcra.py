@@ -105,11 +105,14 @@ class FulcraClient:
         return tag_id
 
     def ensure_definitions(self, state: State) -> None:
-        if state.watched_definition_id and state.listened_definition_id:
+        if (state.watched_definition_id and state.listened_definition_id
+                and state.activity_definition_id and state.read_definition_id):
             return
         media = self.ensure_tag("media", state)
         watched = self.ensure_tag("watched", state)
         listened = self.ensure_tag("listened", state)
+        activity = self.ensure_tag("activity", state)
+        read = self.ensure_tag("read", state)
 
         if not state.watched_definition_id:
             state.watched_definition_id = self._create_duration_definition(
@@ -122,6 +125,18 @@ class FulcraClient:
                 name="Listened",
                 description="Media content listened to (music, podcasts).",
                 tags=[media, listened],
+            )
+        if not state.activity_definition_id:
+            state.activity_definition_id = self._create_duration_definition(
+                name="Activity",
+                description="Physical activity / workouts (Strava, etc.).",
+                tags=[activity],
+            )
+        if not state.read_definition_id:
+            state.read_definition_id = self._create_duration_definition(
+                name="Read",
+                description="Books read (Goodreads, etc.).",
+                tags=[read],
             )
 
     def _create_duration_definition(self, name: str, description: str, tags: list[str]) -> str:
@@ -150,12 +165,14 @@ class FulcraClient:
         if not events:
             return
         lines: list[bytes] = []
+        category_to_def = {
+            "watched":  state.watched_definition_id,
+            "listened": state.listened_definition_id,
+            "activity": state.activity_definition_id,
+            "read":     state.read_definition_id,
+        }
         for ev in events:
-            def_id = (
-                state.watched_definition_id
-                if ev.category == "watched"
-                else state.listened_definition_id
-            )
+            def_id = category_to_def.get(ev.category)
             if def_id is None:
                 raise RuntimeError(
                     f"missing {ev.category} definition id in state; run bootstrap first"
@@ -261,14 +278,16 @@ class FulcraClient:
         # orphaned by a soft-deleted def still surface in queries but their
         # source_id points at the deleted def, so we want to ignore them.
         current_def_source_ids: set[str] = set()
-        if state.watched_definition_id:
-            current_def_source_ids.add(
-                f"com.fulcradynamics.annotation.{state.watched_definition_id}"
-            )
-        if state.listened_definition_id:
-            current_def_source_ids.add(
-                f"com.fulcradynamics.annotation.{state.listened_definition_id}"
-            )
+        for def_id in (
+            state.watched_definition_id,
+            state.listened_definition_id,
+            state.activity_definition_id,
+            state.read_definition_id,
+        ):
+            if def_id:
+                current_def_source_ids.add(
+                    f"com.fulcradynamics.annotation.{def_id}"
+                )
 
         for i in range(0, len(events_sorted), chunk_size):
             chunk = events_sorted[i : i + chunk_size]

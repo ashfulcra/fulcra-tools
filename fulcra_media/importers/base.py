@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
-VALID_CATEGORIES = {"watched", "listened"}
+VALID_CATEGORIES = {"watched", "listened", "activity", "read"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 
 
@@ -14,7 +14,7 @@ VALID_CONFIDENCE = {"high", "medium", "low"}
 class NormalizedEvent:
     importer: str
     service: str
-    category: str            # "watched" or "listened"
+    category: str            # "watched" | "listened" | "activity" | "read"
     note: str
     title: str
     start_time: datetime
@@ -46,10 +46,12 @@ def _slugify(value: str) -> str:
 def content_fingerprint(kind: str, **fields) -> str:
     """Build a stable cross-source content identifier.
 
-    kind="tv":      requires show, season:int, episode:int
-    kind="movie":   requires title; optional year
-    kind="music":   requires artist, track
-    kind="podcast": requires show; one of (guid, title)
+    kind="tv":       requires show, season:int, episode:int
+    kind="movie":    requires title; optional year
+    kind="music":    requires artist, track
+    kind="podcast":  requires show; one of (guid, title)
+    kind="workout":  requires sport, athlete; optional id
+    kind="book":     requires title; optional author, year
     """
     if kind == "tv":
         return f"tv:{_slugify(fields['show'])}:s{fields['season']:02d}e{fields['episode']:02d}"
@@ -64,4 +66,18 @@ def content_fingerprint(kind: str, **fields) -> str:
         if ep is None:
             raise ValueError("podcast fingerprint needs guid or title")
         return f"podcast:{_slugify(fields['show'])}:{_slugify(str(ep))}"
+    if kind == "workout":
+        # Workouts dedup at the (athlete, sport, exact start_time) level when
+        # available; the importer is expected to surface a stable id too.
+        # Caller passes id (the service's per-activity uuid/sha) when present.
+        base = f"workout:{_slugify(fields['athlete'])}:{_slugify(fields['sport'])}"
+        wid = fields.get("id")
+        return f"{base}:{wid}" if wid else base
+    if kind == "book":
+        base = f"book:{_slugify(fields['title'])}"
+        author = fields.get("author")
+        if author:
+            base += f":{_slugify(author)}"
+        year = fields.get("year")
+        return f"{base}:y{year}" if year else base
     raise ValueError(f"unknown fingerprint kind: {kind!r}")
