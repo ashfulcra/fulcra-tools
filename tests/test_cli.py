@@ -219,3 +219,63 @@ def test_import_spotify_extended_runs_pipeline(tmp_path: Path, mocker):
     result = CliRunner().invoke(cli, ["import", "spotify-extended", str(fake_zip)])
     assert result.exit_code == 0, result.output
     assert "spotify-extended:" in result.output
+
+
+def test_import_apple_takeout_runs_pipeline(tmp_path: Path, mocker):
+    state_path = tmp_path / "state.json"
+    save(State(watched_definition_id="w", listened_definition_id="l", tag_ids={"apple-tv": "t"}), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    fake_csv = tmp_path / "Playback Activity.csv"
+    fake_csv.write_text("")
+    mocker.patch("fulcra_media.library.resolve", return_value=fake_csv)
+
+    from fulcra_media.importers.base import NormalizedEvent
+    from datetime import datetime, timezone
+    fake = [NormalizedEvent(
+        importer="apple-takeout", service="apple-tv", category="watched",
+        note="x", title="x",
+        start_time=datetime(2026,1,1,tzinfo=timezone.utc),
+        end_time=datetime(2026,1,1,1,tzinfo=timezone.utc),
+        deterministic_id="com.fulcra.media.apple-takeout.v1.abc",
+        timestamp_confidence="high",
+    )]
+    mocker.patch("fulcra_media.importers.apple_takeout.parse_playback_csv", return_value=iter(fake))
+    from fulcra_media.fulcra import ImportResult
+    mocker.patch("fulcra_media.fulcra.FulcraClient.run_import",
+                 return_value=ImportResult(1, 0, 1, 1))
+    mocker.patch("fulcra_media.fulcra.FulcraClient.ensure_tag", return_value="t")
+
+    result = CliRunner().invoke(cli, ["import", "apple-takeout", str(fake_csv)])
+    assert result.exit_code == 0, result.output
+    assert "apple-takeout:" in result.output
+
+
+def test_import_apple_takeout_finds_csv_in_directory(tmp_path: Path, mocker):
+    """When given a directory, the CLI finds Playback Activity.csv inside."""
+    state_path = tmp_path / "state.json"
+    save(State(watched_definition_id="w", listened_definition_id="l", tag_ids={"apple-tv": "t"}), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    # Build an export-like dir tree
+    export_dir = tmp_path / "apple_data_export"
+    nested = export_dir / "Apple Media Services information" / "Apple TV"
+    nested.mkdir(parents=True)
+    csv_inside = nested / "Playback Activity.csv"
+    csv_inside.write_text("")
+    mocker.patch("fulcra_media.library.resolve", return_value=export_dir)
+
+    captured = {}
+    def fake_parse(path):
+        captured["path"] = path
+        return iter([])
+    mocker.patch("fulcra_media.importers.apple_takeout.parse_playback_csv", side_effect=fake_parse)
+
+    from fulcra_media.fulcra import ImportResult
+    mocker.patch("fulcra_media.fulcra.FulcraClient.run_import",
+                 return_value=ImportResult(0, 0, 0, 0))
+    mocker.patch("fulcra_media.fulcra.FulcraClient.ensure_tag", return_value="t")
+
+    result = CliRunner().invoke(cli, ["import", "apple-takeout", str(export_dir)])
+    assert result.exit_code == 0, result.output
+    assert captured["path"] == csv_inside
