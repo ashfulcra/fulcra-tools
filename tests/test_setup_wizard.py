@@ -43,16 +43,25 @@ def test_setup_skip_in_category_shows_completion_message():
     assert "Done." in res.output
 
 
-def test_setup_picks_planned_service_explains_pathway():
-    """Pick a category whose top option is planned-not-shipped (self-hosted Plex)."""
-    # Resolve the self-hosted index dynamically so it doesn't drift when
-    # new categories are added between music/video and self-hosted.
-    from fulcra_media.service_catalog import categories
-    cats = categories()
-    sh_idx = cats.index("self-hosted") + 1  # 1-based for the prompt
-    res = CliRunner().invoke(cli, ["setup"], input=f"{sh_idx}\n1\n")
-    assert res.exit_code == 0
-    assert "isn't implemented yet" in res.output
+def test_setup_explain_choice_marks_planned_service_as_unimplemented(capsys):
+    """The wizard's _explain_choice flags any available=False entry.
+
+    No live entry is planned today (all flipped to available), so exercise
+    the branch directly with a synthetic ServiceEntry. This keeps the test
+    decoupled from whatever happens to be the next-not-shipped service.
+    """
+    from fulcra_media.service_catalog import ServiceEntry
+    from fulcra_media.setup_wizard import _explain_choice
+
+    fake = ServiceEntry(
+        key="fake", label="Fake Service", category="self-hosted", rank=99,
+        pathway="webhook", import_cmd=None, wizard=None,
+        blurb="placeholder", available=False,
+    )
+    lines: list[str] = []
+    _explain_choice(fake, lines.append)
+    joined = "\n".join(lines)
+    assert "isn't implemented yet" in joined
 
 
 def test_setup_invalid_category_number_ignored():

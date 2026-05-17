@@ -128,3 +128,26 @@ def test_goodreads_is_top_books_pick():
     assert len(books) >= 1
     assert books[0].key == "goodreads"
     assert books[0].available is True
+
+
+def test_plex_and_jellyfin_are_available_with_webhook_importer():
+    """Both flipped to available now that the webhook receiver ships."""
+    plex = get("plex")
+    jelly = get("jellyfin")
+    assert plex is not None and jelly is not None
+    for entry in (plex, jelly):
+        assert entry.available is True
+        assert entry.import_cmd == "webhook"
+        assert entry.pathway == "webhook"
+        assert entry.category == "self-hosted"
+    assert plex.wizard == "plex"
+    assert jelly.wizard == "jellyfin"
+
+
+def test_self_hosted_ranks_are_unique():
+    """Plex rank=1, Jellyfin rank=2 — both can't be 1 (unique-rank invariant)."""
+    sh = services_for_category("self-hosted")
+    ranks = [s.rank for s in sh]
+    assert ranks == sorted(ranks)
+    assert len(ranks) == len(set(ranks))
+    assert sh[0].key == "plex"
