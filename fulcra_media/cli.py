@@ -26,6 +26,8 @@ from .wizards.deezer import walkthrough as deezer_walkthrough
 from .wizards.letterboxd import walkthrough as letterboxd_walkthrough
 from .wizards.goodreads import walkthrough as goodreads_walkthrough
 from .wizards.strava import walkthrough as strava_walkthrough
+from .wizards.plex import walkthrough as plex_walkthrough
+from .wizards.jellyfin import walkthrough as jellyfin_walkthrough
 from .setup_wizard import setup as setup_command
 
 STATE_PATH = state_mod.DEFAULT_PATH
@@ -142,6 +144,8 @@ wizard.add_command(deezer_walkthrough, name="deezer")
 wizard.add_command(letterboxd_walkthrough, name="letterboxd")
 wizard.add_command(goodreads_walkthrough, name="goodreads")
 wizard.add_command(strava_walkthrough, name="strava")
+wizard.add_command(plex_walkthrough, name="plex")
+wizard.add_command(jellyfin_walkthrough, name="jellyfin")
 
 
 @import_group.command("netflix")
@@ -1257,6 +1261,153 @@ def import_strava(
         would_post=result.posted if check_only else None,
     )
     emit_result(envelope, json_mode=json_mode)
+
+
+@cli.command("webhook", help="Long-running HTTP server for Plex/Jellyfin webhooks.")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Bind address. Default loopback only.")
+@click.option("--port", default=8765, show_default=True, type=int,
+              help="Bind port.")
+@click.option("--bearer-token", default=None,
+              help="If set, require Authorization: Bearer <token> from clients "
+                   "(or ?token=<token> for Plex's no-custom-headers webhook config). "
+                   "Required when --host is non-loopback.")
+@click.option("--json", "json_mode", is_flag=True,
+              help="One JSON line per significant lifecycle event on stdout; "
+                   "clean stderr for logs.")
+def webhook_serve(host: str, port: int, bearer_token: str | None,
+                  json_mode: bool) -> None:
+    """Block and serve webhook requests until SIGINT/SIGTERM.
+
+    Validates that the watched annotation definition is set (run bootstrap
+    first), and that --host being non-loopback is paired with --bearer-token.
+    Emits a ready-line to stdout once the socket is bound, which is the
+    signal that a parent agent can stop waiting and start firing webhooks.
+    """
+    import json as _json
+    import signal
+    import sys
+
+    from .cli_common import emit_result, ImportEnvelope
+    from .webhook_receiver import make_server
+
+    s = state_mod.load(STATE_PATH)
+    if not s.watched_definition_id:
+        emit_result(
+            ImportEnvelope(
+                importer="webhook", ok=False,
+                errors=[{"stage": "setup",
+                         "message": "Run `fulcra-media bootstrap` first; "
+                                    "the webhook receiver needs the watched "
+                                    "annotation definition to ingest events."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    if host != "127.0.0.1" and host != "localhost" and not bearer_token:
+        emit_result(
+            ImportEnvelope(
+                importer="webhook", ok=False,
+                errors=[{"stage": "args",
+                         "message": f"--host {host!r} is non-loopback; refusing "
+                                    "to start without --bearer-token. Either set "
+                                    "a token (openssl rand -hex 32) or bind on "
+                                    "127.0.0.1."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    client = FulcraClient()
+    try:
+        server = make_server(
+            host=host, port=port, state=s, client=client,
+            bearer_token=bearer_token,
+            log_stream=sys.stderr if not json_mode else None,
+        )
+    except OSError as exc:
+        emit_result(
+            ImportEnvelope(
+                importer="webhook", ok=False,
+                errors=[{"stage": "bind",
+                         "message": f"failed to bind {host}:{port}: "
+                                    f"{safe_exc_message(exc)}"}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    bound_host, bound_port = server.server_address[:2]
+
+    # Emit the "ready" line so callers (especially tests + parent agents)
+    # can stop waiting on stdout and start sending webhooks. JSON mode
+    # writes one line; human mode prints a friendly banner.
+    ready_payload = {
+        "ok": True,
+        "stage": "ready",
+        "host": bound_host,
+        "port": bound_port,
+        "bearer_token_required": bool(bearer_token),
+    }
+    if json_mode:
+        click.echo(_json.dumps(ready_payload))
+    else:
+        click.echo(
+            f"fulcra-media webhook listening on http://{bound_host}:{bound_port}",
+            err=True,
+        )
+        click.echo(
+            f"  POST /webhook   accept Plex multipart or Jellyfin JSON",
+            err=True,
+        )
+        click.echo(f"  GET  /health    liveness probe", err=True)
+        if bearer_token:
+            click.echo("  bearer-token: required (Authorization: Bearer ... "
+                       "or ?token=...)", err=True)
+        else:
+            click.echo("  bearer-token: not set (loopback only)", err=True)
+
+    # Flush so the ready-line lands immediately even when stdout is a pipe.
+    sys.stdout.flush()
+
+    # Graceful shutdown on SIGTERM/SIGINT. server.shutdown() must run on
+    # a different thread than serve_forever — signal handlers run on the
+    # main thread, but they only set a flag; we then call shutdown after
+    # serve_forever returns from the handler-induced exception. Simpler:
+    # run serve_forever on a background thread and block on a stop event.
+    import threading
+    stop_event = threading.Event()
+
+    def _handle(signum, _frame):
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+
+    server_thread = threading.Thread(
+        target=lambda: server.serve_forever(poll_interval=0.1),
+        name="fulcra-webhook", daemon=True,
+    )
+    server_thread.start()
+    try:
+        stop_event.wait()
+    finally:
+        server.shutdown()
+        server_thread.join(timeout=5)
+        server.server_close()
+
+    # Emit a final summary so the parent gets a clean exit confirmation.
+    if json_mode:
+        summary = server.context.health()  # type: ignore[attr-defined]
+        summary["stage"] = "shutdown"
+        click.echo(_json.dumps(summary))
+    else:
+        h = server.context.health()  # type: ignore[attr-defined]
+        click.echo(
+            f"shutdown: received={h['received']} posted={h['posted']}",
+            err=True,
+        )
 
 
 if __name__ == "__main__":
