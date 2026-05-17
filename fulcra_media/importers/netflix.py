@@ -15,10 +15,70 @@ from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from .base import NormalizedEvent, content_fingerprint
+from .base import NormalizedEvent, _slugify, content_fingerprint
 
 
 _NETFLIX_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2})$")
+_SEASON_NUM_RE = re.compile(r"Season\s+(\d+)")
+_EPISODE_NUM_RE = re.compile(r"Episode\s+(\d+)")
+_YEAR_ONLY_RE = re.compile(r"^\d{4}$")
+
+
+def _fingerprint_from_joined_title(raw_title: str, *, is_episode: bool | None = None) -> str:
+    """Cross-source fingerprint from a Netflix-style joined title.
+
+    Patterns recognized:
+      "Movie Name"                      -> movie:movie-name
+      "Show: Season 1: Episode 5"       -> tv:show:s01e05
+      "BEEF: Season 2: Episode Title"   -> tv:beef:s02:episode-title
+      "Anthology: 2026: Episode Title"  -> tv:anthology:s2026:episode-title
+      "Show: Limited Series: Episode 1" -> tv:show:limited-series:e01
+      "Show: Some Season: Ep Title"     -> tv:show:some-season:ep-title
+      "Show: Episode Title"             -> tv:show:episode-title (2-part TV)
+      "Dune: Part Two"                  -> movie:dune-part-two   (2-part movie, when is_episode=False)
+
+    `is_episode`: caller's signal about whether this is a TV episode. When
+    None (e.g. the slim importer, which has no extra context), we infer:
+    3+ colon segments → TV; 2 segments without Season/Episode markers
+    defaults to TV (most Netflix joined titles are episodic).
+    """
+    parts = [p.strip() for p in raw_title.split(":")]
+    show = parts[0]
+    season_match = _SEASON_NUM_RE.search(raw_title)
+    episode_match = _EPISODE_NUM_RE.search(raw_title)
+
+    # Most-specific signal first.
+    if season_match and episode_match:
+        return content_fingerprint(
+            "tv",
+            show=show,
+            season=int(season_match.group(1)),
+            episode=int(episode_match.group(1)),
+        )
+
+    if is_episode is False or len(parts) == 1:
+        return content_fingerprint("movie", title=raw_title)
+
+    rest = parts[1:]
+    if len(parts) >= 3:
+        season_part = rest[0]
+        if season_match and season_match.group(0) in season_part:
+            season_seg = f"s{int(season_match.group(1)):02d}"
+        elif _YEAR_ONLY_RE.match(season_part):
+            season_seg = f"s{season_part}"
+        else:
+            season_seg = _slugify(season_part)
+
+        episode_remainder = ": ".join(rest[1:])
+        if episode_match and episode_match.group(0) in episode_remainder:
+            episode_seg = f"e{int(episode_match.group(1)):02d}"
+        else:
+            episode_seg = _slugify(episode_remainder)
+
+        return f"tv:{_slugify(show)}:{season_seg}:{episode_seg}"
+
+    # 2 parts: default TV unless is_episode explicitly False (handled above).
+    return f"tv:{_slugify(show)}:{_slugify(rest[0])}"
 
 
 def parse_netflix_date(value: str) -> date:
@@ -90,23 +150,7 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
             # actually indexes. Still effectively a point at noon UTC.
             end_instant = instant + timedelta(seconds=1)
 
-            # Best-effort fingerprint from slim's limited info: only Season+Episode
-            # pairs yield a tv: fingerprint; everything else falls back to movie:.
-            if ":" in raw_title:
-                show = note.split(":", 1)[0].strip()
-                m_season = re.search(r"Season\s+(\d+)", raw_title)
-                m_episode = re.search(r"Episode\s+(\d+)", raw_title)
-                if m_season and m_episode:
-                    fp = content_fingerprint(
-                        "tv",
-                        show=show,
-                        season=int(m_season.group(1)),
-                        episode=int(m_episode.group(1)),
-                    )
-                else:
-                    fp = content_fingerprint("movie", title=note)
-            else:
-                fp = content_fingerprint("movie", title=raw_title)
+            fp = _fingerprint_from_joined_title(raw_title)
 
             yield NormalizedEvent(
                 importer="netflix-slim",
@@ -176,11 +220,6 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
     H:MM:SS, Profile Name, Device Type, and Country. Rows with non-empty
     Supplemental Video Type (TRAILER, HOOK, PROMOTIONAL, etc.) are dropped.
     """
-    # Per-(show, season) occurrence counter: when a row has Season N but no
-    # explicit "Episode N" (e.g. Severance lists named episodes only), fall
-    # back to file-order position within the season.
-    season_occurrence: Counter[tuple[str, int]] = Counter()
-
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames != _RICH_EXPECTED_COLS:
@@ -200,26 +239,11 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
 
             note, title = _extract_title_rich(raw_title)
             profile = (row.get("Profile Name") or "").strip()
-
-            m_season = re.search(r"Season\s+(\d+)", raw_title)
-            m_episode = re.search(r"Episode\s+(\d+)", raw_title)
-            has_episode_marker = any(marker in raw_title for marker in _EPISODE_MARKERS)
-            if has_episode_marker and m_season:
-                season_num = int(m_season.group(1))
-                if m_episode:
-                    episode_num = int(m_episode.group(1))
-                else:
-                    # No explicit episode number — assign file-order position within season.
-                    season_occurrence[(title, season_num)] += 1
-                    episode_num = season_occurrence[(title, season_num)]
-                fp = content_fingerprint(
-                    "tv",
-                    show=title,
-                    season=season_num,
-                    episode=episode_num,
-                )
-            else:
-                fp = content_fingerprint("movie", title=title)
+            # _extract_title_rich already distinguishes episodes (it splits
+            # on colons when episode markers are present) from movies (which
+            # keep their full title). Pass that signal through.
+            is_episode = note != title or any(marker in raw_title for marker in _EPISODE_MARKERS)
+            fp = _fingerprint_from_joined_title(raw_title, is_episode=is_episode)
 
             yield NormalizedEvent(
                 importer="netflix-rich",
