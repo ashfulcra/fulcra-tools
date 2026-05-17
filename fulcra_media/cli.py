@@ -15,6 +15,7 @@ from .wizards.netflix import walkthrough as netflix_walkthrough
 from .wizards.trakt import walkthrough as trakt_walkthrough
 from .wizards.apple_podcasts import walkthrough as apple_podcasts_walkthrough
 from .wizards.spotify import walkthrough as spotify_walkthrough
+from .wizards.spotify_ifttt import walkthrough as spotify_ifttt_walkthrough
 from .wizards.apple_takeout import walkthrough as apple_takeout_walkthrough
 
 STATE_PATH = state_mod.DEFAULT_PATH
@@ -69,6 +70,7 @@ wizard.add_command(netflix_walkthrough, name="netflix")
 wizard.add_command(trakt_walkthrough, name="trakt")
 wizard.add_command(apple_podcasts_walkthrough, name="apple-podcasts")
 wizard.add_command(spotify_walkthrough, name="spotify")
+wizard.add_command(spotify_ifttt_walkthrough, name="spotify-ifttt")
 wizard.add_command(apple_takeout_walkthrough, name="apple-takeout")
 
 
@@ -194,6 +196,38 @@ def import_spotify_extended(path: str) -> None:
     state_mod.save(s, STATE_PATH)
     click.echo(
         f"spotify-extended: total={result.total} skipped_existing={result.skipped_existing} "
+        f"posted={result.posted} verified={result.verified}"
+    )
+
+
+@import_group.command("spotify-ifttt")
+@click.argument("path", type=str)
+@click.option("--tz", "tz_name", default="UTC",
+              help="IANA timezone IFTTT rendered the timestamps in (e.g. America/New_York)")
+def import_spotify_ifttt(path: str, tz_name: str) -> None:
+    """Import the legacy IFTTT->GDrive Spotify zip (multiple overlapping xlsx files).
+
+    Use this only for backfilling pre-Extended-history plays — for ongoing
+    capture, prefer `import spotify-extended` (full ms_played data).
+    """
+    from zoneinfo import ZoneInfo
+    from .importers import spotify_ifttt as si
+    resolved = library.resolve(path)
+    s = state_mod.load(STATE_PATH)
+    if not s.listened_definition_id:
+        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception as exc:
+        raise click.UsageError(f"unknown timezone {tz_name!r}: {exc}") from exc
+    events = list(si.parse_ifttt_zip(Path(resolved), tz=tz))
+    client = FulcraClient()
+    client.ensure_tag("spotify", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s)
+    state_mod.save(s, STATE_PATH)
+    click.echo(
+        f"spotify-ifttt: total={result.total} skipped_existing={result.skipped_existing} "
         f"posted={result.posted} verified={result.verified}"
     )
 
