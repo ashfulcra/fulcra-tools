@@ -17,6 +17,8 @@ from .wizards.apple_podcasts import walkthrough as apple_podcasts_walkthrough
 from .wizards.spotify import walkthrough as spotify_walkthrough
 from .wizards.spotify_ifttt import walkthrough as spotify_ifttt_walkthrough
 from .wizards.apple_takeout import walkthrough as apple_takeout_walkthrough
+from .wizards.ifttt import walkthrough as ifttt_walkthrough
+from .wizards.pipedream import walkthrough as pipedream_walkthrough
 
 STATE_PATH = state_mod.DEFAULT_PATH
 
@@ -72,6 +74,8 @@ wizard.add_command(apple_podcasts_walkthrough, name="apple-podcasts")
 wizard.add_command(spotify_walkthrough, name="spotify")
 wizard.add_command(spotify_ifttt_walkthrough, name="spotify-ifttt")
 wizard.add_command(apple_takeout_walkthrough, name="apple-takeout")
+wizard.add_command(ifttt_walkthrough, name="ifttt")
+wizard.add_command(pipedream_walkthrough, name="pipedream")
 
 
 @import_group.command("netflix")
@@ -196,6 +200,83 @@ def import_spotify_extended(path: str) -> None:
     state_mod.save(s, STATE_PATH)
     click.echo(
         f"spotify-extended: total={result.total} skipped_existing={result.skipped_existing} "
+        f"posted={result.posted} verified={result.verified}"
+    )
+
+
+@import_group.command("generic-csv")
+@click.argument("path", type=str)
+@click.option("--service", required=True, help="Service tag (e.g. spotify, netflix, youtube)")
+@click.option("--category", type=click.Choice(["watched", "listened"]), required=True)
+@click.option("--ts-col", default="timestamp", show_default=True)
+@click.option("--title-col", default="title", show_default=True)
+@click.option("--subtitle-col", default="artist", show_default=True,
+              help="Subtitle column (artist for music, show for podcasts/tv)")
+@click.option("--id-col", "id_col", default="id", show_default=True,
+              help="Optional per-content id column — included in the hash, not used verbatim")
+@click.option("--duration-col", default=None,
+              help="Optional duration (seconds) column; else 1s sentinel")
+@click.option("--end-col", default=None, help="Optional explicit end_time column")
+@click.option("--confidence", type=click.Choice(["high", "medium", "low"]), default="medium")
+@click.option("--tz", "tz_name", default="UTC")
+@click.option("--fingerprint",
+              type=click.Choice(["auto", "music", "movie", "tv", "podcast", "none"]),
+              default="auto",
+              help="content_fingerprint kind (auto picks music/movie from --category)")
+def import_generic_csv(
+    path: str, service: str, category: str,
+    ts_col: str, title_col: str, subtitle_col: str, id_col: str,
+    duration_col: str | None, end_col: str | None,
+    confidence: str, tz_name: str, fingerprint: str,
+) -> None:
+    """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened."""
+    from fulcra_csv import ColumnMap
+    from .importers.generic_csv import parse_media_csv
+
+    resolved = library.resolve(path)
+    s = state_mod.load(STATE_PATH)
+    target_def = (
+        s.watched_definition_id if category == "watched" else s.listened_definition_id
+    )
+    if not target_def:
+        raise click.UsageError(f"Run `fulcra-media bootstrap` first; need {category} definition.")
+
+    cm = ColumnMap(
+        timestamp=ts_col,
+        title=title_col,
+        subtitle=subtitle_col or None,
+        source_id=id_col or None,
+        duration_seconds=duration_col,
+        end_time=end_col,
+    )
+    if tz_name == "UTC":
+        from datetime import timezone as _tz
+        tz = _tz.utc
+    else:
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception as exc:
+            raise click.UsageError(f"unknown timezone {tz_name!r}: {exc}") from exc
+
+    fp_kind = None if fingerprint == "none" else (None if fingerprint == "auto" else fingerprint)
+    from .importers.generic_csv import _FP_AUTO
+    fp_arg = _FP_AUTO if fingerprint == "auto" else fp_kind
+
+    events = list(parse_media_csv(
+        Path(resolved),
+        service=service, category=category,
+        column_map=cm, tz=tz, confidence=confidence,
+        fingerprint_kind=fp_arg,
+    ))
+    client = FulcraClient()
+    client.ensure_tag(service, s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s)
+    state_mod.save(s, STATE_PATH)
+    click.echo(
+        f"generic-csv ({service}/{category}): total={result.total} "
+        f"skipped_existing={result.skipped_existing} "
         f"posted={result.posted} verified={result.verified}"
     )
 
