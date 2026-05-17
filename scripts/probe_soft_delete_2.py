@@ -119,5 +119,15 @@ def main() -> int:
     return 0
 
 
+import sys as _sys
+if "--i-know-this-hits-prod" not in _sys.argv:
+    print("Refusing to run: this script creates real annotation defs against",
+          file=_sys.stderr)
+    print(f"  {os.environ.get('FULCRA_API_BASE', 'https://api.fulcradynamics.com')}",
+          file=_sys.stderr)
+    print("Pass --i-know-this-hits-prod to proceed.", file=_sys.stderr)
+    _sys.exit(2)
+_sys.argv.remove("--i-know-this-hits-prod")
+
 if __name__ == "__main__":
     raise SystemExit(main())
