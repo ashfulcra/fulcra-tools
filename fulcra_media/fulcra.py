@@ -73,6 +73,19 @@ class FulcraClient:
     def _authed_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.get_token()}"}
 
+    def soft_delete_definition(self, definition_id: str) -> bool:
+        """Soft-delete an annotation definition. See sibling docs for caveats."""
+        r = self._client().delete(
+            f"/user/v1alpha1/annotation/{definition_id}",
+            headers=self._authed_headers(),
+        )
+        if r.status_code == 204:
+            return True
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return False
+
     def ensure_tag(self, name: str, state: State) -> str:
         if name in state.tag_ids:
             return state.tag_ids[name]
