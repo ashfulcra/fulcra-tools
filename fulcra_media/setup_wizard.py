@@ -25,7 +25,6 @@ CATEGORY_LABELS = {
     "music": "Music (Spotify, Apple Music, Last.fm, ...)",
     "video": "TV / Movies (Netflix, Hulu, Disney+, Trakt, ...)",
     "podcasts": "Podcasts (Apple Podcasts, Spotify, ...)",
-    "activity": "Physical activity (Strava, workouts)",
     "books": "Books / Reading",
     "self-hosted": "Self-hosted (Plex, Jellyfin)",
 }

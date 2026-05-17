@@ -93,20 +93,12 @@ def test_video_ranks_are_unique_after_letterboxd_promotion():
     assert len(ranks) == len(set(ranks))
 
 
-def test_strava_is_top_activity_pick():
-    """Strava is the canonical workouts source — rank=1 in the new 'activity' category."""
-    activity = services_for_category("activity")
-    assert len(activity) >= 1
-    assert activity[0].key == "strava"
-    assert activity[0].pathway == "api"
-    assert activity[0].import_cmd == "strava"
-    assert activity[0].wizard == "strava"
-    assert activity[0].available is True
-
-
-def test_activity_category_appears_in_categories_list():
-    """The new 'activity' category must show up in the ordered category list."""
-    assert "activity" in categories()
+def test_activity_category_not_in_catalog():
+    """Strava is unlinked from the CLI for now — the importer module stays
+    in the repo, but the catalog doesn't list it (the activity category is
+    being rebuilt against Fulcra's native workout data type)."""
+    assert "activity" not in categories()
+    assert get("strava") is None
 
 
 def test_goodreads_is_available_with_importer_and_wizard():

@@ -26,7 +26,6 @@ DEFAULT_PATH = Path(
 class State:
     watched_definition_id: str | None = None
     listened_definition_id: str | None = None
-    activity_definition_id: str | None = None  # workouts (Strava, etc.)
     read_definition_id: str | None = None  # books (Goodreads, etc.)
     tag_ids: dict[str, str] = field(default_factory=dict)
     watermarks: dict[str, str] = field(default_factory=dict)
@@ -39,7 +38,6 @@ def load(path: Path = DEFAULT_PATH) -> State:
     return State(
         watched_definition_id=raw.get("watched_definition_id"),
         listened_definition_id=raw.get("listened_definition_id"),
-        activity_definition_id=raw.get("activity_definition_id"),
         read_definition_id=raw.get("read_definition_id"),
         tag_ids=raw.get("tag_ids", {}),
         watermarks=raw.get("watermarks", {}),
