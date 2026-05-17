@@ -140,6 +140,43 @@ def import_apple_podcasts(db_path: str | None) -> None:
     )
 
 
+@import_group.command("apple-podcasts-timemachine")
+def import_apple_podcasts_timemachine() -> None:
+    """Recover Apple Podcasts replay history by walking Time Machine snapshots.
+
+    Each snapshot has its own ZLASTDATEPLAYED for each episode, so events
+    that the live DB has overwritten resurface from older backups. Idempotency
+    on (ZUUID, ZLASTDATEPLAYED) means duplicates across snapshots are skipped.
+    """
+    from .importers import apple_podcasts as ap
+    s = state_mod.load(STATE_PATH)
+    if not s.listened_definition_id:
+        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+    snapshots = ap.find_timemachine_snapshots()
+    if not snapshots:
+        click.echo(
+            "No Time Machine backups with Apple Podcasts data found. "
+            "Run `tmutil listbackups` to verify backups are visible, "
+            "and make sure your Time Machine destination is mounted.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
+    click.echo(f"Walking {len(snapshots)} Time Machine snapshots...")
+    all_events = []
+    for snap in snapshots:
+        click.echo(f"  {snap}")
+        all_events.extend(ap.parse_db(snap))
+    client = FulcraClient()
+    client.ensure_tag("apple-podcasts", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(all_events, s)
+    state_mod.save(s, STATE_PATH)
+    click.echo(
+        f"apple-podcasts-timemachine: total={result.total} skipped_existing={result.skipped_existing} "
+        f"posted={result.posted} verified={result.verified}"
+    )
+
+
 @import_group.command("spotify-extended")
 @click.argument("path", type=str)
 def import_spotify_extended(path: str) -> None:

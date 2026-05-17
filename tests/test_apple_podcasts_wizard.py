@@ -18,3 +18,13 @@ def test_walkthrough_mentions_completed_filter():
 def test_walkthrough_mentions_fragility():
     result = CliRunner().invoke(walkthrough, [])
     assert "fragility" in result.output.lower() or "auto-delete" in result.output.lower()
+
+
+def test_walkthrough_mentions_launchd():
+    result = CliRunner().invoke(walkthrough, [])
+    assert "launchd" in result.output.lower() or "LaunchAgents" in result.output
+
+
+def test_walkthrough_mentions_timemachine():
+    result = CliRunner().invoke(walkthrough, [])
+    assert "Time Machine" in result.output or "apple-podcasts-timemachine" in result.output
