@@ -153,5 +153,39 @@ def import_spotify_extended(path: str) -> None:
     )
 
 
+@import_group.command("apple-takeout")
+@click.argument("path", type=str)
+def import_apple_takeout(path: str) -> None:
+    """Import Apple Data & Privacy takeout — Apple TV Playback Activity CSV.
+
+    Accepts the Playback Activity.csv file directly, or a path to the unzipped
+    apple_data_export tree (we'll find the CSV inside).
+    """
+    from .importers import apple_takeout as at
+    resolved = library.resolve(path)
+    resolved_path = Path(resolved)
+    if resolved_path.is_dir():
+        # Find Playback Activity.csv inside the tree
+        candidates = list(resolved_path.rglob("Playback Activity.csv"))
+        if not candidates:
+            raise click.UsageError(
+                f"No 'Playback Activity.csv' found under {resolved_path}"
+            )
+        resolved_path = candidates[0]
+    s = state_mod.load(STATE_PATH)
+    if not s.watched_definition_id:
+        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+    events = list(at.parse_playback_csv(resolved_path))
+    client = FulcraClient()
+    client.ensure_tag("apple-tv", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s)
+    state_mod.save(s, STATE_PATH)
+    click.echo(
+        f"apple-takeout: total={result.total} skipped_existing={result.skipped_existing} "
+        f"posted={result.posted} verified={result.verified}"
+    )
+
+
 if __name__ == "__main__":
     cli()
