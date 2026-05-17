@@ -188,3 +188,34 @@ def test_import_apple_podcasts_runs_pipeline(tmp_path: Path, mocker):
     result = CliRunner().invoke(cli, ["import", "apple-podcasts", "--db", str(tmp_path / "fake.sqlite")])
     assert result.exit_code == 0, result.output
     assert "apple-podcasts:" in result.output
+
+
+def test_import_spotify_extended_runs_pipeline(tmp_path: Path, mocker):
+    state_path = tmp_path / "state.json"
+    save(State(watched_definition_id="w", listened_definition_id="l", tag_ids={"spotify": "t"}), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    # Provide a fake zip path; the parser is mocked so the file just needs to exist
+    fake_zip = tmp_path / "spotify.zip"
+    fake_zip.write_bytes(b"")
+    mocker.patch("fulcra_media.library.resolve", return_value=fake_zip)
+
+    from fulcra_media.importers.base import NormalizedEvent
+    from datetime import datetime, timezone
+    fake = [NormalizedEvent(
+        importer="spotify-extended", service="spotify", category="listened",
+        note="x", title="x",
+        start_time=datetime(2026,1,1,tzinfo=timezone.utc),
+        end_time=datetime(2026,1,1,1,tzinfo=timezone.utc),
+        deterministic_id="com.fulcra.media.spotify-extended.v1.abc",
+        timestamp_confidence="high",
+    )]
+    mocker.patch("fulcra_media.importers.spotify.parse_extended_zip", return_value=iter(fake))
+    from fulcra_media.fulcra import ImportResult
+    mocker.patch("fulcra_media.fulcra.FulcraClient.run_import",
+                 return_value=ImportResult(1, 0, 1, 1))
+    mocker.patch("fulcra_media.fulcra.FulcraClient.ensure_tag", return_value="t")
+
+    result = CliRunner().invoke(cli, ["import", "spotify-extended", str(fake_zip)])
+    assert result.exit_code == 0, result.output
+    assert "spotify-extended:" in result.output
