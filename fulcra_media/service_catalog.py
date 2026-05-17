@@ -45,22 +45,29 @@ SERVICES: list[ServiceEntry] = [
               "Web Scrobbler. Username + API key, no OAuth.",
     ),
     ServiceEntry(
+        key="deezer", label="Deezer", category="music", rank=2, pathway="api",
+        import_cmd="deezer", wizard="deezer",
+        blurb="Direct OAuth API with real user.history endpoint. Cleaner than "
+              "Spotify (no per-call 50-track cap). Manual token mint via "
+              "developers.deezer.com.",
+    ),
+    ServiceEntry(
         key="spotify-extended", label="Spotify Extended (GDPR)",
-        category="music", rank=2, pathway="gdpr",
+        category="music", rank=3, pathway="gdpr",
         import_cmd="spotify-extended", wizard="spotify",
         blurb="Spotify's official 'Extended streaming history' — request via "
               "privacy settings. Full history; one-shot, ~3-5 days to deliver.",
     ),
     ServiceEntry(
         key="spotify-ifttt", label="Spotify → IFTTT → Google Drive (legacy)",
-        category="music", rank=3, pathway="ifttt",
+        category="music", rank=4, pathway="ifttt",
         import_cmd="spotify-ifttt", wizard="spotify-ifttt",
         blurb="If you wired the legacy IFTTT applet years ago, your back history "
               "is in Drive as xlsx. This importer handles the multi-file overlap.",
     ),
     ServiceEntry(
         key="generic-csv-music", label="Generic CSV (music)",
-        category="music", rank=4, pathway="via-generic-csv",
+        category="music", rank=5, pathway="via-generic-csv",
         import_cmd="generic-csv", wizard="ifttt",
         blurb="Bring any CSV (IFTTT/Pipedream/hand-rolled) with timestamp + "
               "track + artist columns. See `wizard ifttt` or `wizard pipedream`.",

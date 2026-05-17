@@ -54,3 +54,21 @@ def test_get_by_key():
 def test_available_flag_present_on_every_entry():
     for s in SERVICES:
         assert isinstance(s.available, bool)
+
+
+def test_deezer_is_second_music_pick():
+    """Last.fm rank=1, Deezer rank=2 (also a direct API, single-account)."""
+    music = services_for_category("music")
+    assert music[0].key == "lastfm"
+    assert music[1].key == "deezer"
+    assert music[1].pathway == "api"
+    assert music[1].import_cmd == "deezer"
+    assert music[1].wizard == "deezer"
+
+
+def test_music_ranks_are_unique_after_deezer_bump():
+    """When inserting deezer at rank=2, all later music entries should bump."""
+    music = services_for_category("music")
+    ranks = [s.rank for s in music]
+    assert ranks == sorted(ranks)
+    assert len(ranks) == len(set(ranks))  # no duplicates
