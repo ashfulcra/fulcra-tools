@@ -24,6 +24,7 @@ from .wizards.pipedream import walkthrough as pipedream_walkthrough
 from .wizards.lastfm import walkthrough as lastfm_walkthrough
 from .wizards.deezer import walkthrough as deezer_walkthrough
 from .wizards.letterboxd import walkthrough as letterboxd_walkthrough
+from .wizards.strava import walkthrough as strava_walkthrough
 from .setup_wizard import setup as setup_command
 
 STATE_PATH = state_mod.DEFAULT_PATH
@@ -138,6 +139,7 @@ wizard.add_command(pipedream_walkthrough, name="pipedream")
 wizard.add_command(lastfm_walkthrough, name="lastfm")
 wizard.add_command(deezer_walkthrough, name="deezer")
 wizard.add_command(letterboxd_walkthrough, name="letterboxd")
+wizard.add_command(strava_walkthrough, name="strava")
 
 
 @import_group.command("netflix")
@@ -1055,6 +1057,118 @@ def import_letterboxd(
 
     envelope = import_result_to_dict(
         "letterboxd", result,
+        since_watermark=since_str,
+        new_watermark=new_watermark_iso,
+        would_post=result.posted if check_only else None,
+    )
+    emit_result(envelope, json_mode=json_mode)
+
+
+@import_group.command("strava")
+@click.option("--since", "since_iso", default=None,
+              help="ISO 8601 datetime; defaults to stored watermark.")
+@click.option("--max-pages", default=None, type=int,
+              help="Cap pagination — useful for large first-run backfills.")
+@click.option("--check-only", is_flag=True,
+              help="Don't post; just count new items and report.")
+@click.option("--json", "json_mode", is_flag=True,
+              help="Machine-readable single-line JSON output.")
+def import_strava(
+    since_iso: str | None,
+    max_pages: int | None,
+    check_only: bool,
+    json_mode: bool,
+) -> None:
+    """Import Strava activities via /athlete/activities (OAuth, 6h refresh)."""
+    from datetime import datetime, timezone
+    from . import watermarks
+    from .cli_common import emit_result, import_result_to_dict, ImportEnvelope
+    from .importers import strava as strava_importer
+
+    s = state_mod.load(STATE_PATH)
+    if not s.activity_definition_id:
+        emit_result(
+            ImportEnvelope(
+                importer="strava", ok=False,
+                errors=[{"stage": "setup",
+                         "message": "Run `fulcra-media bootstrap` first; "
+                                    "need activity definition."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    # Auth: load creds + refresh if the 6h token has rolled over.
+    try:
+        auth = strava_importer.StravaAuth()
+    except FileNotFoundError:
+        emit_result(
+            ImportEnvelope(
+                importer="strava", ok=False,
+                errors=[{"stage": "auth",
+                         "message": f"Missing {strava_importer.CREDS_PATH}. "
+                                    "Run `fulcra-media wizard strava` for setup."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    # Resolve since: explicit flag > watermark (no overlap subtraction —
+    # Strava's `after` is a strict GT, source-id dedup handles boundary).
+    since: datetime | None = None
+    if since_iso:
+        try:
+            since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            emit_result(
+                ImportEnvelope(
+                    importer="strava", ok=False,
+                    errors=[{"stage": "args",
+                             "message": f"Invalid --since: {exc}"}],
+                ),
+                json_mode=json_mode,
+            )
+            return
+    else:
+        wm = watermarks.get_iso(s, "strava")
+        if wm is not None:
+            since = wm
+
+    since_str = since.isoformat() if since else None
+
+    try:
+        auth.refresh_if_needed()
+        raw_activities = list(strava_importer.fetch_activities(
+            auth.creds, since=since, max_pages=max_pages,
+        ))
+    except (RuntimeError, httpx.HTTPError) as exc:
+        emit_result(
+            ImportEnvelope(
+                importer="strava", ok=False, since_watermark=since_str,
+                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+    events = list(strava_importer.normalize_activities(raw_activities))
+
+    client = FulcraClient()
+    if not check_only:
+        client.ensure_tag("strava", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s, check_only=check_only)
+
+    new_watermark_iso: str | None = None
+    if events and not check_only and result.posted > 0:
+        max_ts = max(e.start_time for e in events)
+        watermarks.set_iso(s, "strava", max_ts)
+        new_watermark_iso = max_ts.isoformat()
+    state_mod.save(s, STATE_PATH)
+
+    envelope = import_result_to_dict(
+        "strava", result,
         since_watermark=since_str,
         new_watermark=new_watermark_iso,
         would_post=result.posted if check_only else None,
