@@ -140,14 +140,31 @@ def import_netflix(path: str) -> None:
 @import_group.command("trakt")
 @click.option("--cluster-threshold", default=5, type=int,
               help="Mark >=N items sharing watched_at as timestamp_confidence: low")
-def import_trakt(cluster_threshold: int) -> None:
+@click.option("--clusters", "cluster_spec", default=None, metavar="POLICY",
+              help="Cluster handling: 'drop', 'sentinel:YYYY', 'keep', or 'ask'. "
+                   "Default 'ask' on TTY, errors otherwise.")
+def import_trakt(cluster_threshold: int, cluster_spec: str | None) -> None:
     """Import Trakt watch history via the Trakt API."""
+    from fulcra_csv import apply_cluster_policy
     from .importers import trakt as trakt_importer
     s = state_mod.load(STATE_PATH)
     if not s.watched_definition_id:
         raise click.UsageError("Run `fulcra-media bootstrap` first.")
     items = list(trakt_importer.fetch_history())
     events = list(trakt_importer.normalize_history(items, cluster_threshold=cluster_threshold))
+
+    policy = _resolve_cluster_policy(
+        events, cluster_spec=cluster_spec,
+        cluster_size_threshold=cluster_threshold,
+    )
+    if policy:
+        before = len(events)
+        events = apply_cluster_policy(events, policy)
+        affected = before - len(events) if policy.action == "drop" else sum(
+            1 for e in events if e.external_ids.get("sentinel_applied")
+        )
+        click.echo(f"cluster policy '{policy.action}': {affected} events affected")
+
     client = FulcraClient()
     client.ensure_tag("trakt", s)
     state_mod.save(s, STATE_PATH)
@@ -156,6 +173,88 @@ def import_trakt(cluster_threshold: int) -> None:
     click.echo(
         f"trakt: total={result.total} skipped_existing={result.skipped_existing} "
         f"posted={result.posted} verified={result.verified}"
+    )
+
+
+def _resolve_cluster_policy(
+    events: list,
+    *,
+    cluster_spec: str | None,
+    cluster_size_threshold: int,
+):
+    """Resolve --clusters into a ClusterPolicy. None means no cluster preprocessing.
+
+    Modes:
+      'drop'             — drop all cluster members
+      'sentinel:YYYY'    — shift cluster members to Jan 1, YYYY
+      'keep'             — leave at original timestamps
+      'ask' (or None on TTY) — interactive prompt
+    """
+    from fulcra_csv import ClusterPolicy, cluster_size_of
+
+    cluster_count = sum(
+        1 for e in events if cluster_size_of(e) >= cluster_size_threshold
+    )
+    if cluster_count == 0:
+        return None  # nothing to do
+
+    # Compact summary of detected clusters for the user
+    from collections import Counter
+    cluster_dates = Counter(
+        e.start_time.date().isoformat() for e in events
+        if cluster_size_of(e) >= cluster_size_threshold
+    )
+    summary = ", ".join(f"{d} ({n})" for d, n in cluster_dates.most_common(4))
+    if len(cluster_dates) > 4:
+        summary += f", and {len(cluster_dates) - 4} more dates"
+
+    spec = cluster_spec
+    if spec is None:
+        if not click.get_text_stream("stdin").isatty():
+            raise click.UsageError(
+                f"Detected {cluster_count} cluster events on {len(cluster_dates)} dates "
+                f"(largest: {summary}). Pass --clusters drop|sentinel:YYYY|keep "
+                "to handle them non-interactively."
+            )
+        spec = "ask"
+
+    if spec == "ask":
+        click.echo(
+            f"\nDetected {cluster_count} events flagged as cluster members "
+            f"(timestamp_confidence: low, ≥{cluster_size_threshold} sharing one watched_at)."
+        )
+        click.echo(f"Dates: {summary}\n")
+        click.echo("These are typically signup-day backfill artifacts with synthetic")
+        click.echo("timestamps. Three handling options:")
+        click.echo("  drop      — discard them entirely")
+        click.echo("  sentinel  — keep them but shift to a date far in the past (e.g. 2015)")
+        click.echo("  keep      — leave at original (low-confidence) timestamps")
+        choice = click.prompt(
+            "Choice", type=click.Choice(["drop", "sentinel", "keep"]),
+            default="sentinel",
+        )
+        if choice == "sentinel":
+            year = click.prompt("Sentinel year", type=int, default=2015)
+            return ClusterPolicy(
+                action="sentinel", sentinel_year=year,
+                cluster_size_threshold=cluster_size_threshold,
+            )
+        return ClusterPolicy(action=choice, cluster_size_threshold=cluster_size_threshold)
+
+    # Non-interactive parse
+    if spec.startswith("sentinel:"):
+        try:
+            year = int(spec.split(":", 1)[1])
+        except ValueError as exc:
+            raise click.UsageError(f"--clusters sentinel:YYYY needs a year: {spec!r}") from exc
+        return ClusterPolicy(
+            action="sentinel", sentinel_year=year,
+            cluster_size_threshold=cluster_size_threshold,
+        )
+    if spec in ("drop", "keep"):
+        return ClusterPolicy(action=spec, cluster_size_threshold=cluster_size_threshold)
+    raise click.UsageError(
+        f"--clusters must be 'drop', 'sentinel:YYYY', 'keep', or 'ask', got {spec!r}"
     )
 
 
