@@ -30,6 +30,40 @@ Apple Podcasts setup (macOS only)
     only ZLASTDATEPLAYED, not a per-play log) - run frequently (hourly
     launchd) to minimize collapse
   - Episodes from unfollowed shows get pruned over time
+
+  Going beyond the current snapshot:
+
+  1. Hourly capture via launchd (recommended). Save this to
+     ~/Library/LaunchAgents/com.fulcradynamics.media-podcasts.plist
+     then `launchctl load <plist>`:
+
+       <?xml version="1.0" encoding="UTF-8"?>
+       <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+       <plist version="1.0">
+       <dict>
+         <key>Label</key><string>com.fulcradynamics.media-podcasts</string>
+         <key>ProgramArguments</key>
+         <array>
+           <string>/path/to/.venv/bin/fulcra-media</string>
+           <string>import</string>
+           <string>apple-podcasts</string>
+         </array>
+         <key>StartInterval</key><integer>3600</integer>
+         <key>RunAtLoad</key><true/>
+       </dict>
+       </plist>
+
+  2. Recover history from Time Machine backups (one-shot):
+
+       fulcra-media import apple-podcasts-timemachine
+
+     This walks every Time Machine backup with a MTLibrary.sqlite and
+     posts annotations for every historical ZLASTDATEPLAYED found.
+     Idempotency means re-runs are safe.
+
+  ZPLAYCOUNT is also captured as external_ids.play_count so consumers
+  can see how many total plays an episode has had (the snapshot only
+  knows the most recent play's timestamp).
 """
 
 

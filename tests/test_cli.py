@@ -190,6 +190,51 @@ def test_import_apple_podcasts_runs_pipeline(tmp_path: Path, mocker):
     assert "apple-podcasts:" in result.output
 
 
+def test_import_apple_podcasts_timemachine_runs_pipeline(tmp_path: Path, mocker):
+    state_path = tmp_path / "state.json"
+    save(State(watched_definition_id="w", listened_definition_id="l", tag_ids={"apple-podcasts": "t"}), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    fake_snap = tmp_path / "snap.sqlite"
+    fake_snap.write_text("")
+    mocker.patch(
+        "fulcra_media.importers.apple_podcasts.find_timemachine_snapshots",
+        return_value=[fake_snap],
+    )
+
+    from fulcra_media.importers.base import NormalizedEvent
+    from datetime import datetime, timezone
+    fake = [NormalizedEvent(
+        importer="apple-podcasts", service="apple-podcasts", category="listened",
+        note="x", title="x",
+        start_time=datetime(2026,1,1,tzinfo=timezone.utc),
+        end_time=datetime(2026,1,1,1,tzinfo=timezone.utc),
+        deterministic_id="com.fulcra.media.apple-podcasts.v1.abc",
+        timestamp_confidence="medium",
+    )]
+    mocker.patch("fulcra_media.importers.apple_podcasts.parse_db", return_value=iter(fake))
+    from fulcra_media.fulcra import ImportResult
+    mocker.patch("fulcra_media.fulcra.FulcraClient.run_import",
+                 return_value=ImportResult(1, 0, 1, 1))
+    mocker.patch("fulcra_media.fulcra.FulcraClient.ensure_tag", return_value="t")
+
+    result = CliRunner().invoke(cli, ["import", "apple-podcasts-timemachine"])
+    assert result.exit_code == 0, result.output
+    assert "apple-podcasts-timemachine:" in result.output
+
+
+def test_import_apple_podcasts_timemachine_no_snapshots(tmp_path: Path, mocker):
+    state_path = tmp_path / "state.json"
+    save(State(watched_definition_id="w", listened_definition_id="l", tag_ids={"apple-podcasts": "t"}), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+    mocker.patch(
+        "fulcra_media.importers.apple_podcasts.find_timemachine_snapshots",
+        return_value=[],
+    )
+    result = CliRunner().invoke(cli, ["import", "apple-podcasts-timemachine"])
+    assert result.exit_code == 1
+
+
 def test_import_spotify_extended_runs_pipeline(tmp_path: Path, mocker):
     state_path = tmp_path / "state.json"
     save(State(watched_definition_id="w", listened_definition_id="l", tag_ids={"spotify": "t"}), state_path)
