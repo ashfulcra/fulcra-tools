@@ -150,10 +150,12 @@ SERVICES: list[ServiceEntry] = [
         available=True,
     ),
     ServiceEntry(
-        key="goodreads", label="Goodreads (RSS)", category="books", rank=1,
-        pathway="rss", import_cmd=None, wizard=None,
-        blurb="RSS feed of the 'read' shelf. API is closed; RSS still works.",
-        available=False,
+        key="goodreads", label="Goodreads", category="books", rank=1,
+        pathway="rss", import_cmd="goodreads", wizard="goodreads",
+        blurb="RSS feed of the 'read' shelf. API was killed in Dec 2020, "
+              "but every public shelf still has a stable RSS feed. "
+              "Polls /review/list_rss/<user_id>?shelf=read.",
+        available=True,
     ),
 ]
 
