@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom Feed</title>
+  <link href="https://example.org/"/>
+  <link rel="self" href="https://example.org/atom.xml"/>
+  <id>tag:example.org,2026:/atom</id>
+  <updated>2026-05-17T12:00:00Z</updated>
+
+  <entry>
+    <title>An Atom Post</title>
+    <link href="https://example.org/post/1"/>
+    <id>https://example.org/post/1</id>
+    <published>2026-05-17T11:00:00Z</published>
+    <updated>2026-05-17T11:30:00Z</updated>
+    <summary>summary text for entry one</summary>
+  </entry>
+
+  <entry>
+    <title>Updated-only Atom Post</title>
+    <link href="https://example.org/post/2"/>
+    <id>https://example.org/post/2</id>
+    <updated>2026-05-15T08:00:00Z</updated>
+    <summary>no published, only updated</summary>
+  </entry>
+
+  <entry>
+    <title>Sigur Rós Live (Unicode)</title>
+    <link href="https://example.org/post/3"/>
+    <id>https://example.org/post/3</id>
+    <published>2026-05-14T09:00:00Z</published>
+    <summary>unicode round-trip check</summary>
+  </entry>
+
+  <entry>
+    <title>Entry missing date</title>
+    <link href="https://example.org/post/4"/>
+    <id>https://example.org/post/4</id>
+    <summary>this one should be filtered out — no date at all</summary>
+  </entry>
+</feed>
