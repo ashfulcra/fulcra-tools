@@ -86,5 +86,27 @@ def import_netflix(path: str) -> None:
     )
 
 
+@import_group.command("trakt")
+@click.option("--cluster-threshold", default=5, type=int,
+              help="Mark >=N items sharing watched_at as timestamp_confidence: low")
+def import_trakt(cluster_threshold: int) -> None:
+    """Import Trakt watch history via the Trakt API."""
+    from .importers import trakt as trakt_importer
+    s = state_mod.load(STATE_PATH)
+    if not s.watched_definition_id:
+        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+    items = list(trakt_importer.fetch_history())
+    events = list(trakt_importer.normalize_history(items, cluster_threshold=cluster_threshold))
+    client = FulcraClient()
+    client.ensure_tag("trakt", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s)
+    state_mod.save(s, STATE_PATH)
+    click.echo(
+        f"trakt: total={result.total} skipped_existing={result.skipped_existing} "
+        f"posted={result.posted} verified={result.verified}"
+    )
+
+
 if __name__ == "__main__":
     cli()

@@ -161,3 +161,26 @@ def normalize_history(items: list[dict], cluster_threshold: int = 5) -> Iterator
             timestamp_confidence=confidence,
             external_ids=ext,
         )
+
+
+def fetch_history(per_page: int = 1000) -> Iterator[dict]:
+    """Iterate all history items, paginating most-recent-first."""
+    auth = TraktAuth()
+    page = 1
+    with httpx.Client(timeout=60) as client:
+        while True:
+            r = client.get(
+                f"{TRAKT_BASE}/sync/history",
+                params={"extended": "full", "limit": per_page, "page": page},
+                headers=auth.headers(),
+            )
+            r.raise_for_status()
+            items = r.json()
+            if not items:
+                return
+            for it in items:
+                yield it
+            page_count = int(r.headers.get("X-Pagination-Page-Count", "1"))
+            if page >= page_count:
+                return
+            page += 1
