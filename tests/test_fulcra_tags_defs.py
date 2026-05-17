@@ -84,6 +84,11 @@ def test_ensure_definitions_creates_watched_and_listened(recording_transport):
 def test_ensure_definitions_skips_when_already_cached(recording_transport):
     transport = recording_transport(lambda r: pytest.fail(f"unexpected {r.url}"))
     client = FulcraClient(transport=transport)
-    state = State(watched_definition_id="x", listened_definition_id="y", tag_ids={"media": "m", "watched": "w", "listened": "l"})
+    state = State(
+        watched_definition_id="x", listened_definition_id="y",
+        activity_definition_id="a", read_definition_id="r",
+        tag_ids={"media": "m", "watched": "w", "listened": "l",
+                 "activity": "ac", "read": "re"},
+    )
     client.ensure_definitions(state)
     assert state.watched_definition_id == "x"

@@ -56,9 +56,12 @@ def bootstrap() -> None:
 ))
 @click.option("--confirm", is_flag=True, required=False,
               help="Required. Confirms you understand orphaned events stay visible.")
-@click.option("--keep-watched", is_flag=True, help="Only soft-delete the Listened def.")
-@click.option("--keep-listened", is_flag=True, help="Only soft-delete the Watched def.")
-def reset(confirm: bool, keep_watched: bool, keep_listened: bool) -> None:
+@click.option("--keep-watched", is_flag=True, help="Don't soft-delete the Watched def.")
+@click.option("--keep-listened", is_flag=True, help="Don't soft-delete the Listened def.")
+@click.option("--keep-activity", is_flag=True, help="Don't soft-delete the Activity def.")
+@click.option("--keep-read", is_flag=True, help="Don't soft-delete the Read def.")
+def reset(confirm: bool, keep_watched: bool, keep_listened: bool,
+          keep_activity: bool, keep_read: bool) -> None:
     if not confirm:
         raise click.UsageError(
             "Pass --confirm. This soft-deletes the annotation definitions; "
@@ -78,6 +81,14 @@ def reset(confirm: bool, keep_watched: bool, keep_listened: bool) -> None:
         if client.soft_delete_definition(s.listened_definition_id):
             deleted.append(f"listened={s.listened_definition_id}")
         s.listened_definition_id = None
+    if s.activity_definition_id and not keep_activity:
+        if client.soft_delete_definition(s.activity_definition_id):
+            deleted.append(f"activity={s.activity_definition_id}")
+        s.activity_definition_id = None
+    if s.read_definition_id and not keep_read:
+        if client.soft_delete_definition(s.read_definition_id):
+            deleted.append(f"read={s.read_definition_id}")
+        s.read_definition_id = None
     # Watermarks are now meaningless; tag IDs survive (tags weren't deleted).
     s.watermarks = {}
     state_mod.save(s, STATE_PATH)
