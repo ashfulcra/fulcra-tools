@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import click
+import httpx
 
 from . import library
 from . import state as state_mod
@@ -19,6 +20,7 @@ from .wizards.spotify_ifttt import walkthrough as spotify_ifttt_walkthrough
 from .wizards.apple_takeout import walkthrough as apple_takeout_walkthrough
 from .wizards.ifttt import walkthrough as ifttt_walkthrough
 from .wizards.pipedream import walkthrough as pipedream_walkthrough
+from .wizards.lastfm import walkthrough as lastfm_walkthrough
 
 STATE_PATH = state_mod.DEFAULT_PATH
 
@@ -113,6 +115,7 @@ wizard.add_command(spotify_ifttt_walkthrough, name="spotify-ifttt")
 wizard.add_command(apple_takeout_walkthrough, name="apple-takeout")
 wizard.add_command(ifttt_walkthrough, name="ifttt")
 wizard.add_command(pipedream_walkthrough, name="pipedream")
+wizard.add_command(lastfm_walkthrough, name="lastfm")
 
 
 @import_group.command("netflix")
@@ -481,6 +484,121 @@ def import_apple_takeout(path: str) -> None:
         f"apple-takeout: total={result.total} skipped_existing={result.skipped_existing} "
         f"posted={result.posted} verified={result.verified}"
     )
+
+
+@import_group.command("lastfm")
+@click.option("--since", "since_iso", default=None,
+              help="ISO 8601 datetime override; defaults to stored watermark.")
+@click.option("--max-pages", default=None, type=int,
+              help="Cap pagination — useful for large first-run backfills.")
+@click.option("--check-only", is_flag=True,
+              help="Don't post; just count new items and report.")
+@click.option("--json", "json_mode", is_flag=True,
+              help="Machine-readable single-line JSON output.")
+@click.option("--watermark-overlap-hours", default=1, type=int,
+              help="When using the watermark, fetch this many hours BEFORE it "
+                   "to catch late server-side reordering. Default 1.")
+def import_lastfm(
+    since_iso: str | None,
+    max_pages: int | None,
+    check_only: bool,
+    json_mode: bool,
+    watermark_overlap_hours: int,
+) -> None:
+    """Import Last.fm scrobbles via user.getRecentTracks (public, API-key auth)."""
+    from datetime import datetime, timedelta, timezone
+    from . import watermarks
+    from .cli_common import emit_result, import_result_to_dict, ImportEnvelope
+    from .importers import lastfm as lastfm_importer
+
+    s = state_mod.load(STATE_PATH)
+    if not s.listened_definition_id:
+        emit_result(
+            ImportEnvelope(
+                importer="lastfm", ok=False,
+                errors=[{"stage": "setup", "message": "Run `fulcra-media bootstrap` first."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    try:
+        creds = lastfm_importer.load_creds()
+    except FileNotFoundError:
+        emit_result(
+            ImportEnvelope(
+                importer="lastfm", ok=False,
+                errors=[{"stage": "auth",
+                         "message": f"Missing {lastfm_importer.CREDS_PATH}. "
+                                    "Run `fulcra-media wizard lastfm` for setup."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    # Resolve since: explicit flag > watermark > None (full backfill)
+    since: datetime | None = None
+    if since_iso:
+        try:
+            since = datetime.fromisoformat(
+                since_iso.replace("Z", "+00:00")
+            )
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            emit_result(
+                ImportEnvelope(
+                    importer="lastfm", ok=False,
+                    errors=[{"stage": "args",
+                             "message": f"Invalid --since: {exc}"}],
+                ),
+                json_mode=json_mode,
+            )
+            return
+    else:
+        wm = watermarks.get_iso(s, "lastfm")
+        if wm is not None:
+            since = wm - timedelta(hours=watermark_overlap_hours)
+
+    since_str = since.isoformat() if since else None
+
+    # Fetch + normalize
+    try:
+        raw_tracks = list(lastfm_importer.fetch_recent_tracks(
+            creds, since=since, max_pages=max_pages,
+        ))
+    except (RuntimeError, httpx.HTTPError) as exc:
+        emit_result(
+            ImportEnvelope(
+                importer="lastfm", ok=False, since_watermark=since_str,
+                errors=[{"stage": "fetch", "message": str(exc)}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+    events = list(lastfm_importer.normalize_history(raw_tracks))
+
+    # Ingest (or check-only)
+    client = FulcraClient()
+    if not check_only:
+        client.ensure_tag("lastfm", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s, check_only=check_only)
+
+    new_watermark_iso: str | None = None
+    if events and not check_only and result.posted > 0:
+        max_ts = max(e.start_time for e in events)
+        watermarks.set_iso(s, "lastfm", max_ts)
+        new_watermark_iso = max_ts.isoformat()
+    state_mod.save(s, STATE_PATH)
+
+    envelope = import_result_to_dict(
+        "lastfm", result,
+        since_watermark=since_str,
+        new_watermark=new_watermark_iso,
+        would_post=result.posted if check_only else None,
+    )
+    emit_result(envelope, json_mode=json_mode)
 
 
 if __name__ == "__main__":
