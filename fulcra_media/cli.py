@@ -22,6 +22,7 @@ from .wizards.ifttt import walkthrough as ifttt_walkthrough
 from .wizards.pipedream import walkthrough as pipedream_walkthrough
 from .wizards.lastfm import walkthrough as lastfm_walkthrough
 from .wizards.deezer import walkthrough as deezer_walkthrough
+from .wizards.letterboxd import walkthrough as letterboxd_walkthrough
 from .setup_wizard import setup as setup_command
 
 STATE_PATH = state_mod.DEFAULT_PATH
@@ -124,6 +125,7 @@ wizard.add_command(ifttt_walkthrough, name="ifttt")
 wizard.add_command(pipedream_walkthrough, name="pipedream")
 wizard.add_command(lastfm_walkthrough, name="lastfm")
 wizard.add_command(deezer_walkthrough, name="deezer")
+wizard.add_command(letterboxd_walkthrough, name="letterboxd")
 
 
 @import_group.command("netflix")
@@ -826,6 +828,221 @@ def import_deezer(
 
     envelope = import_result_to_dict(
         "deezer", result,
+        since_watermark=since_str,
+        new_watermark=new_watermark_iso,
+        would_post=result.posted if check_only else None,
+    )
+    emit_result(envelope, json_mode=json_mode)
+
+
+def _resolve_since(
+    since_iso: str | None,
+    *,
+    importer_name: str,
+    watermark_key: str,
+    state,
+    json_mode: bool,
+    watermark_overlap_hours: int = 1,
+):
+    """Resolve --since: explicit flag > watermark - overlap > None (full backfill).
+
+    Returns (since_dt, since_iso_str, did_emit_error). If did_emit_error is
+    True, the caller must return immediately — an envelope has already been
+    written.
+    """
+    from datetime import datetime, timedelta, timezone
+    from . import watermarks
+    from .cli_common import emit_result, ImportEnvelope
+
+    if since_iso:
+        try:
+            since = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            emit_result(
+                ImportEnvelope(
+                    importer=importer_name, ok=False,
+                    errors=[{"stage": "args",
+                             "message": f"Invalid --since: {exc}"}],
+                ),
+                json_mode=json_mode,
+            )
+            return None, None, True
+        return since, since.isoformat(), False
+
+    wm = watermarks.get_iso(state, watermark_key)
+    if wm is not None:
+        since = wm - timedelta(hours=watermark_overlap_hours)
+        return since, since.isoformat(), False
+    return None, None, False
+
+
+@import_group.command("generic-rss")
+@click.argument("feed_url")
+@click.option("--service", required=True,
+              help="Service tag to record on each event (e.g. blog, letterboxd, goodreads)")
+@click.option("--category", type=click.Choice(["watched", "listened"]),
+              required=True)
+@click.option("--since", "since_iso", default=None,
+              help="ISO 8601 datetime; defaults to per-feed watermark.")
+@click.option("--max-entries", default=None, type=int,
+              help="Cap how many entries to process from this fetch.")
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_generic_rss(
+    feed_url: str, service: str, category: str,
+    since_iso: str | None, max_entries: int | None,
+    check_only: bool, json_mode: bool,
+) -> None:
+    """Import any RSS/Atom feed as Watched/Listened events.
+
+    Per-feed watermarks (keyed off the feed URL) live in state.watermarks
+    so distinct feeds don't clobber each other.
+    """
+    from . import watermarks
+    from .cli_common import (
+        emit_result, import_result_to_dict, ImportEnvelope,
+    )
+    from .importers import generic_rss as rss_importer
+
+    importer_label = f"generic-rss:{service}"
+    watermark_key = f"generic-rss:{feed_url}"
+
+    s = state_mod.load(STATE_PATH)
+    target_def = (
+        s.watched_definition_id if category == "watched"
+        else s.listened_definition_id
+    )
+    if not target_def:
+        emit_result(
+            ImportEnvelope(
+                importer=importer_label, ok=False,
+                errors=[{"stage": "setup",
+                         "message": f"Run `fulcra-media bootstrap` first; need {category} definition."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    since, since_str, err = _resolve_since(
+        since_iso, importer_name=importer_label,
+        watermark_key=watermark_key, state=s, json_mode=json_mode,
+    )
+    if err:
+        return
+
+    try:
+        all_events = list(rss_importer.normalize_feed(
+            feed_url, service=service, category=category,
+        ))
+    except (RuntimeError, httpx.HTTPError) as exc:
+        emit_result(
+            ImportEnvelope(
+                importer=importer_label, ok=False, since_watermark=since_str,
+                errors=[{"stage": "fetch", "message": str(exc)}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    # Client-side timestamp filter (most RSS feeds have no native since param).
+    if since is not None:
+        all_events = [e for e in all_events if e.start_time >= since]
+    if max_entries is not None:
+        all_events = all_events[:max_entries]
+
+    client = FulcraClient()
+    if not check_only:
+        client.ensure_tag(service, s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(all_events, s, check_only=check_only)
+
+    new_watermark_iso: str | None = None
+    if all_events and not check_only and result.posted > 0:
+        max_ts = max(e.start_time for e in all_events)
+        watermarks.set_iso(s, watermark_key, max_ts)
+        new_watermark_iso = max_ts.isoformat()
+    state_mod.save(s, STATE_PATH)
+
+    envelope = import_result_to_dict(
+        importer_label, result,
+        since_watermark=since_str,
+        new_watermark=new_watermark_iso,
+        would_post=result.posted if check_only else None,
+    )
+    emit_result(envelope, json_mode=json_mode)
+
+
+@import_group.command("letterboxd")
+@click.option("--username", required=True, help="Letterboxd username")
+@click.option("--since", "since_iso", default=None,
+              help="ISO 8601 datetime; defaults to stored watermark.")
+@click.option("--max-entries", default=None, type=int)
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_letterboxd(
+    username: str, since_iso: str | None, max_entries: int | None,
+    check_only: bool, json_mode: bool,
+) -> None:
+    """Import Letterboxd diary entries via the public RSS feed."""
+    from . import watermarks
+    from .cli_common import (
+        emit_result, import_result_to_dict, ImportEnvelope,
+    )
+    from .importers import letterboxd as lb
+
+    s = state_mod.load(STATE_PATH)
+    if not s.watched_definition_id:
+        emit_result(
+            ImportEnvelope(
+                importer="letterboxd", ok=False,
+                errors=[{"stage": "setup",
+                         "message": "Run `fulcra-media bootstrap` first."}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    since, since_str, err = _resolve_since(
+        since_iso, importer_name="letterboxd",
+        watermark_key="letterboxd", state=s, json_mode=json_mode,
+    )
+    if err:
+        return
+
+    try:
+        all_events = list(lb.fetch_diary(username))
+    except (RuntimeError, httpx.HTTPError) as exc:
+        emit_result(
+            ImportEnvelope(
+                importer="letterboxd", ok=False, since_watermark=since_str,
+                errors=[{"stage": "fetch", "message": str(exc)}],
+            ),
+            json_mode=json_mode,
+        )
+        return
+
+    if since is not None:
+        all_events = [e for e in all_events if e.start_time >= since]
+    if max_entries is not None:
+        all_events = all_events[:max_entries]
+
+    client = FulcraClient()
+    if not check_only:
+        client.ensure_tag("letterboxd", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(all_events, s, check_only=check_only)
+
+    new_watermark_iso: str | None = None
+    if all_events and not check_only and result.posted > 0:
+        max_ts = max(e.start_time for e in all_events)
+        watermarks.set_iso(s, "letterboxd", max_ts)
+        new_watermark_iso = max_ts.isoformat()
+    state_mod.save(s, STATE_PATH)
+
+    envelope = import_result_to_dict(
+        "letterboxd", result,
         since_watermark=since_str,
         new_watermark=new_watermark_iso,
         would_post=result.posted if check_only else None,
