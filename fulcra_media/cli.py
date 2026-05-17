@@ -108,5 +108,29 @@ def import_trakt(cluster_threshold: int) -> None:
     )
 
 
+@import_group.command("apple-podcasts")
+@click.option("--db", "db_path",
+              default=None,
+              help="Path to MTLibrary.sqlite (default: macOS standard location)")
+def import_apple_podcasts(db_path: str | None) -> None:
+    """Import Apple Podcasts listening history from the on-device SQLite DB."""
+    from .importers import apple_podcasts as ap
+    if db_path is None:
+        db_path = str(ap.DEFAULT_DB_PATH)
+    s = state_mod.load(STATE_PATH)
+    if not s.listened_definition_id:
+        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+    events = list(ap.parse_db(Path(db_path)))
+    client = FulcraClient()
+    client.ensure_tag("apple-podcasts", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s)
+    state_mod.save(s, STATE_PATH)
+    click.echo(
+        f"apple-podcasts: total={result.total} skipped_existing={result.skipped_existing} "
+        f"posted={result.posted} verified={result.verified}"
+    )
+
+
 if __name__ == "__main__":
     cli()
