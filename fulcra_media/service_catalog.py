@@ -96,7 +96,7 @@ SERVICES: list[ServiceEntry] = [
     ),
     ServiceEntry(
         key="generic-csv-video", label="Generic CSV (video)",
-        category="video", rank=4, pathway="via-generic-csv",
+        category="video", rank=5, pathway="via-generic-csv",
         import_cmd="generic-csv", wizard="ifttt",
         blurb="For everything else (Hulu/Disney+/Max/Prime Video/Peacock/YouTube) "
               "— privacy request, then convert to CSV and import.",
@@ -136,9 +136,10 @@ SERVICES: list[ServiceEntry] = [
     # ---- Books / reading (future) ----
     ServiceEntry(
         key="letterboxd", label="Letterboxd (RSS)", category="video", rank=4,
-        pathway="rss", import_cmd=None, wizard=None,
-        blurb="Public diary RSS feed; polls hourly. Future: generic-rss importer.",
-        available=False,
+        pathway="rss", import_cmd="letterboxd", wizard="letterboxd",
+        blurb="Public diary RSS feed; polls hourly. API is closed beta so we "
+              "scrape /<user>/rss/ — fingerprints films for cross-source dedup.",
+        available=True,
     ),
     ServiceEntry(
         key="goodreads", label="Goodreads (RSS)", category="books", rank=1,
