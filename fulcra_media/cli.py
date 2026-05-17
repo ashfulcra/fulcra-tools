@@ -21,6 +21,7 @@ from .wizards.apple_takeout import walkthrough as apple_takeout_walkthrough
 from .wizards.ifttt import walkthrough as ifttt_walkthrough
 from .wizards.pipedream import walkthrough as pipedream_walkthrough
 from .wizards.lastfm import walkthrough as lastfm_walkthrough
+from .setup_wizard import setup as setup_command
 
 STATE_PATH = state_mod.DEFAULT_PATH
 
@@ -79,6 +80,9 @@ def reset(confirm: bool, keep_watched: bool, keep_listened: bool) -> None:
     state_mod.save(s, STATE_PATH)
     click.echo("soft-deleted: " + (", ".join(deleted) or "(nothing — defs were absent)"))
     click.echo("state cleared. Run `bootstrap` to create fresh definitions.")
+
+
+cli.add_command(setup_command, name="setup")
 
 
 @cli.command(help="Print the cached state.json contents.")
