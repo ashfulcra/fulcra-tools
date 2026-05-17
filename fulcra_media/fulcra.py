@@ -234,7 +234,14 @@ class FulcraClient:
         state: State,
         chunk_size: int = 500,
         window_pad_minutes: int = 10,
+        check_only: bool = False,
     ) -> ImportResult:
+        """Run the dedup-readback + ingest pipeline.
+
+        `check_only`: when True, do all the readbacks and dedup math but
+        don't POST. Result.posted reports how many *would* post; verified
+        stays 0.
+        """
         events = list(events)
         total = len(events)
         if total == 0:
@@ -275,12 +282,15 @@ class FulcraClient:
             skipped += len(chunk) - len(new_events)
 
             if new_events:
-                self.ingest_batch(new_events, state)
-                posted += len(new_events)
-                after = self.fetch_existing_source_ids(
-                    win_start, win_end, only_for_defs=current_def_source_ids or None
-                )
-                verified += sum(1 for e in new_events if e.deterministic_id in after)
+                if check_only:
+                    posted += len(new_events)
+                else:
+                    self.ingest_batch(new_events, state)
+                    posted += len(new_events)
+                    after = self.fetch_existing_source_ids(
+                        win_start, win_end, only_for_defs=current_def_source_ids or None
+                    )
+                    verified += sum(1 for e in new_events if e.deterministic_id in after)
 
         # Note: `verified < posted` is no longer fatal. Fulcra accepts the POST
         # (204) but indexing can lag seconds-to-minutes behind for large batches.
