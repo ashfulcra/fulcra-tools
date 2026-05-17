@@ -130,8 +130,10 @@ wizard.add_command(lastfm_walkthrough, name="lastfm")
 @click.option("--json", "json_mode", is_flag=True, help="Single-line JSON output.")
 def import_netflix(path: str, check_only: bool, json_mode: bool) -> None:
     """Import a Netflix slim-variant CSV (local path or fulcra:/... URI)."""
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
-    resolved = library.resolve(path)
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
+    resolved = resolve_or_emit("netflix", path, json_mode=json_mode)
+    if resolved is None:
+        return
     s = state_mod.load(STATE_PATH)
     if not s.watched_definition_id:
         emit_result(
@@ -142,7 +144,7 @@ def import_netflix(path: str, check_only: bool, json_mode: bool) -> None:
             json_mode=json_mode,
         )
         return
-    events = list(netflix_importer.parse_auto(Path(resolved)))
+    events = list(netflix_importer.parse_auto(resolved))
     run_and_emit("netflix", events, s,
                  tag_name="netflix", check_only=check_only, json_mode=json_mode)
 
@@ -420,9 +422,11 @@ def import_apple_podcasts_timemachine(check_only: bool, json_mode: bool) -> None
 @click.option("--json", "json_mode", is_flag=True)
 def import_spotify_extended(path: str, check_only: bool, json_mode: bool) -> None:
     """Import Spotify Extended Streaming History from a GDPR-export zip."""
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
     from .importers import spotify as sp
-    resolved = library.resolve(path)
+    resolved = resolve_or_emit("spotify-extended", path, json_mode=json_mode)
+    if resolved is None:
+        return
     s = state_mod.load(STATE_PATH)
     if not s.listened_definition_id:
         emit_result(
@@ -431,7 +435,7 @@ def import_spotify_extended(path: str, check_only: bool, json_mode: bool) -> Non
             json_mode=json_mode,
         )
         return
-    events = list(sp.parse_extended_zip(Path(resolved)))
+    events = list(sp.parse_extended_zip(resolved))
     run_and_emit("spotify-extended", events, s,
                  tag_name="spotify", check_only=check_only, json_mode=json_mode)
 
@@ -466,10 +470,12 @@ def import_generic_csv(
 ) -> None:
     """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened."""
     from fulcra_csv import ColumnMap
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
     from .importers.generic_csv import parse_media_csv
 
-    resolved = library.resolve(path)
+    resolved = resolve_or_emit(f"generic-csv:{service}", path, json_mode=json_mode)
+    if resolved is None:
+        return
     s = state_mod.load(STATE_PATH)
     target_def = (
         s.watched_definition_id if category == "watched" else s.listened_definition_id
@@ -512,7 +518,7 @@ def import_generic_csv(
     fp_arg = _FP_AUTO if fingerprint == "auto" else fp_kind
 
     events = list(parse_media_csv(
-        Path(resolved),
+        resolved,
         service=service, category=category,
         column_map=cm, tz=tz, confidence=confidence,
         fingerprint_kind=fp_arg,
@@ -534,9 +540,11 @@ def import_spotify_ifttt(path: str, tz_name: str, check_only: bool, json_mode: b
     capture, prefer `import spotify-extended` (full ms_played data).
     """
     from zoneinfo import ZoneInfo
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
     from .importers import spotify_ifttt as si
-    resolved = library.resolve(path)
+    resolved = resolve_or_emit("spotify-ifttt", path, json_mode=json_mode)
+    if resolved is None:
+        return
     s = state_mod.load(STATE_PATH)
     if not s.listened_definition_id:
         emit_result(
@@ -554,7 +562,7 @@ def import_spotify_ifttt(path: str, tz_name: str, check_only: bool, json_mode: b
             json_mode=json_mode,
         )
         return
-    events = list(si.parse_ifttt_zip(Path(resolved), tz=tz))
+    events = list(si.parse_ifttt_zip(resolved, tz=tz))
     run_and_emit("spotify-ifttt", events, s,
                  tag_name="spotify", check_only=check_only, json_mode=json_mode)
 
@@ -569,10 +577,11 @@ def import_apple_takeout(path: str, check_only: bool, json_mode: bool) -> None:
     Accepts the Playback Activity.csv file directly, or a path to the unzipped
     apple_data_export tree (we'll find the CSV inside).
     """
-    from .cli_common import emit_result, ImportEnvelope, run_and_emit
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
     from .importers import apple_takeout as at
-    resolved = library.resolve(path)
-    resolved_path = Path(resolved)
+    resolved_path = resolve_or_emit("apple-takeout", path, json_mode=json_mode)
+    if resolved_path is None:
+        return
     if resolved_path.is_dir():
         candidates = list(resolved_path.rglob("Playback Activity.csv"))
         if not candidates:
