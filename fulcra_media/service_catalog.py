@@ -120,17 +120,18 @@ SERVICES: list[ServiceEntry] = [
 
     # ---- Self-hosted ----
     ServiceEntry(
-        key="plex", label="Plex (webhook)", category="self-hosted", rank=1,
-        pathway="webhook", import_cmd=None, wizard=None,
-        blurb="Plex Pass webhook (or Tautulli for non-Pass) → posts play "
-              "events directly. Best AI-agent integration shape.",
-        available=False,
+        key="plex", label="Plex", category="self-hosted", rank=1,
+        pathway="webhook", import_cmd="webhook", wizard="plex",
+        blurb="Long-running webhook receiver. Plex (Pass) or Tautulli POSTs "
+              "media.scrobble events here; we translate and ingest.",
+        available=True,
     ),
     ServiceEntry(
-        key="jellyfin", label="Jellyfin (webhook)", category="self-hosted",
-        rank=1, pathway="webhook", import_cmd=None, wizard=None,
-        blurb="Webhook plugin emits PlaybackStop events to any HTTP endpoint.",
-        available=False,
+        key="jellyfin", label="Jellyfin", category="self-hosted",
+        rank=2, pathway="webhook", import_cmd="webhook", wizard="jellyfin",
+        blurb="Long-running webhook receiver. jellyfin-plugin-webhook POSTs "
+              "PlaybackStop events here; we translate and ingest.",
+        available=True,
     ),
 
     # ---- Physical activity / workouts ----
