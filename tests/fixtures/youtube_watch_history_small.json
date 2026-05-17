@@ -1,0 +1,43 @@
+[
+  {
+    "header": "YouTube",
+    "title": "Watched OK Go - Here It Goes Again",
+    "titleUrl": "https://www.youtube.com/watch?v=dTAAsCNK7RA",
+    "subtitles": [
+      {"name": "OK Go", "url": "https://www.youtube.com/channel/UCN6sm8iH9Imm9Ww0wG8AyOA"}
+    ],
+    "time": "2024-05-16T22:40:00.000Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Watched 3Blue1Brown - But what is a neural network?",
+    "titleUrl": "https://www.youtube.com/watch?v=aircAruvnKk",
+    "subtitles": [
+      {"name": "3Blue1Brown", "url": "https://www.youtube.com/c/3blue1brown"}
+    ],
+    "time": "2024-05-16T18:00:00.000Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Watched a video that has been removed",
+    "time": "2024-05-15T10:00:00.000Z",
+    "products": ["YouTube"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Watched https://www.youtube.com/watch?v=raw_url_only",
+    "titleUrl": "https://www.youtube.com/watch?v=raw_url_only",
+    "time": "2024-05-15T09:00:00.000Z",
+    "products": ["YouTube"]
+  },
+  {
+    "header": "Google Ads",
+    "title": "Search: random ad",
+    "time": "2024-05-15T08:00:00.000Z",
+    "products": ["Ads"]
+  }
+]

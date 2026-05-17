@@ -26,6 +26,7 @@ from .wizards.deezer import walkthrough as deezer_walkthrough
 from .wizards.letterboxd import walkthrough as letterboxd_walkthrough
 from .wizards.goodreads import walkthrough as goodreads_walkthrough
 from .wizards.strava import walkthrough as strava_walkthrough
+from .wizards.youtube import walkthrough as youtube_walkthrough
 from .wizards.plex import walkthrough as plex_walkthrough
 from .wizards.jellyfin import walkthrough as jellyfin_walkthrough
 from .setup_wizard import setup as setup_command
@@ -151,6 +152,7 @@ wizard.add_command(deezer_walkthrough, name="deezer")
 wizard.add_command(letterboxd_walkthrough, name="letterboxd")
 wizard.add_command(goodreads_walkthrough, name="goodreads")
 wizard.add_command(strava_walkthrough, name="strava")
+wizard.add_command(youtube_walkthrough, name="youtube")
 wizard.add_command(plex_walkthrough, name="plex")
 wizard.add_command(jellyfin_walkthrough, name="jellyfin")
 
@@ -469,6 +471,30 @@ def import_spotify_extended(path: str, check_only: bool, json_mode: bool) -> Non
     events = list(sp.parse_extended_zip(resolved))
     run_and_emit("spotify-extended", events, s,
                  tag_name="spotify", check_only=check_only, json_mode=json_mode)
+
+
+@import_group.command("youtube")
+@click.argument("path", type=str)
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_youtube(path: str, check_only: bool, json_mode: bool) -> None:
+    """Import a Google Takeout YouTube watch-history.json file."""
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit, resolve_or_emit
+    from .importers import youtube as yt
+    resolved = resolve_or_emit("youtube", path, json_mode=json_mode)
+    if resolved is None:
+        return
+    s = state_mod.load(STATE_PATH)
+    if not s.watched_definition_id:
+        emit_result(
+            ImportEnvelope(importer="youtube", ok=False,
+                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
+            json_mode=json_mode,
+        )
+        return
+    events = list(yt.parse_takeout_json(resolved))
+    run_and_emit("youtube", events, s,
+                 tag_name="youtube", check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("generic-csv")
