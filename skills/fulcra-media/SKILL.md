@@ -220,6 +220,63 @@ The `webhook` receiver is a long-running process — don't poll it; start it onc
 
 ---
 
+## Running on a heartbeat (Hermes, openclaw, OpenHands, and friends)
+
+Several agent runtimes natively support recurring/scheduled wake-ups:
+
+| Runtime | Mechanism | Notes |
+|---|---|---|
+| **Hermes Agent** (NousResearch) | First-class `heartbeat` primitive — recurring wake-ups that fire a bounded micro-action and report back. Also has built-in cron. | The phrase "heartbeat" in NousResearch's sense means **scheduled wake-up** with fresh agent context. |
+| **openclaw** | First-class **Cron jobs** tool (alongside bash/process/read/write/edit). Skills live at `~/.openclaw/workspace/skills/<skill>/SKILL.md`. | Drop this SKILL.md into that path verbatim. |
+| **OpenHands** (formerly OpenDevin) | Sandboxed automations — scheduled tasks. Loader auto-picks up `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`. | Bash sandboxing is built-in. |
+| **Claude Code / Aider / Cursor / Continue.dev** | No native heartbeat — use host `cron` / `launchd` / `systemd-timer`. | These read `AGENTS.md` / `CLAUDE.md` from the repo root. A copy of this skill lives at `AGENTS.md` for that reason. |
+| **Letta / MemGPT** | **Different meaning** — `request_heartbeat: bool` is an intra-turn flag that keeps the tool loop going within a single user turn, not a scheduler. Still needs an external scheduler to run `fulcra-media` periodically. | Don't conflate. |
+| **SmolAgents / AutoGen / CrewAI / LangGraph** | Function-calling orchestration; no native scheduler. | Run from host cron, or wrap calls in a single `execute_code` tool. |
+
+### The recurring-task contract
+
+When running this skill on a heartbeat (any runtime), the action you fire each tick should be **bounded, idempotent, and stateful** in this exact shape:
+
+1. **Inspect first.** `fulcra-media status` (cheap, local, no API) tells you which importers have watermarks and how stale each one is. Skip importers whose `watermarks[<name>]` is fresher than their recommended cadence.
+2. **Probe before paying.** For each candidate importer, fire `fulcra-media import <name> --check-only --json` and read `would_post`. If 0, skip. This costs an API readback but no ingest.
+3. **Import when warranted.** `fulcra-media import <name> --json`. Parse the envelope. On `ok: false`, surface `errors[0].stage` to the user via whatever channel the runtime provides — don't retry mechanically from inside the heartbeat tick.
+4. **Cap per-tick wallclock.** A single heartbeat should not import every source on every tick. Round-robin or pick whichever importer is most stale; ingestion of a large historical zip (`spotify-extended`, `netflix` full GDPR) is a one-shot, not a heartbeat job — surface those as "user-uploaded" and run them ad-hoc.
+5. **Lock if your runtime can re-enter.** If the runtime can fire two heartbeats concurrently (it generally shouldn't), put a flock around the import:
+
+   ```bash
+   flock -n /tmp/fulcra-media.lock fulcra-media import lastfm --json
+   ```
+
+6. **Report status to wherever your runtime expects it.** Hermes has a default "consolidate memory / write status file" maintenance heartbeat — write the last-tick envelope summary there. openclaw cron jobs can pipe to its sessions log. For host cron, route stdout/stderr to a logfile the next tick can read.
+
+### A heartbeat-tick template
+
+```bash
+#!/usr/bin/env bash
+# Single heartbeat tick. Idempotent; safe to fire every 30 minutes.
+set -euo pipefail
+
+CADENCE_HOURS=1
+LOG=/var/log/fulcra-media-heartbeat.log
+
+now=$(date -u +%s)
+for importer in lastfm deezer trakt apple-podcasts; do
+  last=$(fulcra-media status | jq -r ".watermarks.\"$importer\" // \"1970-01-01T00:00:00Z\"")
+  last_s=$(date -u -d "$last" +%s 2>/dev/null || echo 0)
+  age=$(( (now - last_s) / 3600 ))
+  if [ "$age" -lt "$CADENCE_HOURS" ]; then continue; fi
+
+  if [ "$(fulcra-media import "$importer" --check-only --json | jq '.would_post')" = "0" ]; then
+    continue
+  fi
+  fulcra-media import "$importer" --json >> "$LOG" 2>&1
+done
+```
+
+Drop that in a `cron job` (openclaw), `heartbeat` (Hermes), `automation` (OpenHands), or host `cron`/`launchd` — same script, same result.
+
+---
+
 ## Common failure patterns
 
 ### `ok: false`, `errors[0].stage = "auth"`
