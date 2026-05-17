@@ -211,3 +211,19 @@ def test_parse_auto_rejects_unknown_header(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="unrecognized Netflix CSV"):
         list(parse_auto(csv))
+
+
+def test_parse_slim_includes_content_fingerprint():
+    events = list(parse_slim(FIXTURE))
+    movie = next(e for e in events if e.title == "Movie One")
+    assert movie.external_ids["content_fingerprint"] == "movie:movie-one"
+    ep = next(e for e in events if e.note == "Show A: Season 1: Episode 1")
+    assert ep.external_ids["content_fingerprint"].startswith("tv:show-a:")
+
+
+def test_parse_rich_includes_content_fingerprint():
+    events = list(parse_rich(RICH_FIXTURE))
+    movie = next(e for e in events if e.title == "Dune: Part Two")
+    assert movie.external_ids["content_fingerprint"] == "movie:dune-part-two"
+    ep = next(e for e in events if "We We Are" in e.note)
+    assert ep.external_ids["content_fingerprint"] == "tv:severance:s02e01"

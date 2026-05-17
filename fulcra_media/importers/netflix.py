@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from .base import NormalizedEvent
+from .base import NormalizedEvent, content_fingerprint
 
 
 _NETFLIX_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2})$")
@@ -90,6 +90,24 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
             # actually indexes. Still effectively a point at noon UTC.
             end_instant = instant + timedelta(seconds=1)
 
+            # Best-effort fingerprint from slim's limited info: only Season+Episode
+            # pairs yield a tv: fingerprint; everything else falls back to movie:.
+            if ":" in raw_title:
+                show = note.split(":", 1)[0].strip()
+                m_season = re.search(r"Season\s+(\d+)", raw_title)
+                m_episode = re.search(r"Episode\s+(\d+)", raw_title)
+                if m_season and m_episode:
+                    fp = content_fingerprint(
+                        "tv",
+                        show=show,
+                        season=int(m_season.group(1)),
+                        episode=int(m_episode.group(1)),
+                    )
+                else:
+                    fp = content_fingerprint("movie", title=note)
+            else:
+                fp = content_fingerprint("movie", title=raw_title)
+
             yield NormalizedEvent(
                 importer="netflix-slim",
                 service="netflix",
@@ -105,6 +123,7 @@ def parse_slim(csv_path: Path) -> Iterator[NormalizedEvent]:
                     "point_in_time": True,
                     "occurrence_index": idx,
                     "raw_date": date_str,
+                    "content_fingerprint": fp,
                 },
             )
 
@@ -157,6 +176,11 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
     H:MM:SS, Profile Name, Device Type, and Country. Rows with non-empty
     Supplemental Video Type (TRAILER, HOOK, PROMOTIONAL, etc.) are dropped.
     """
+    # Per-(show, season) occurrence counter: when a row has Season N but no
+    # explicit "Episode N" (e.g. Severance lists named episodes only), fall
+    # back to file-order position within the season.
+    season_occurrence: Counter[tuple[str, int]] = Counter()
+
     with csv_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames != _RICH_EXPECTED_COLS:
@@ -177,6 +201,26 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
             note, title = _extract_title_rich(raw_title)
             profile = (row.get("Profile Name") or "").strip()
 
+            m_season = re.search(r"Season\s+(\d+)", raw_title)
+            m_episode = re.search(r"Episode\s+(\d+)", raw_title)
+            has_episode_marker = any(marker in raw_title for marker in _EPISODE_MARKERS)
+            if has_episode_marker and m_season:
+                season_num = int(m_season.group(1))
+                if m_episode:
+                    episode_num = int(m_episode.group(1))
+                else:
+                    # No explicit episode number — assign file-order position within season.
+                    season_occurrence[(title, season_num)] += 1
+                    episode_num = season_occurrence[(title, season_num)]
+                fp = content_fingerprint(
+                    "tv",
+                    show=title,
+                    season=season_num,
+                    episode=episode_num,
+                )
+            else:
+                fp = content_fingerprint("movie", title=title)
+
             yield NormalizedEvent(
                 importer="netflix-rich",
                 service="netflix",
@@ -192,6 +236,7 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
                     "device_type": (row.get("Device Type") or "").strip(),
                     "country": (row.get("Country") or "").strip(),
                     "bookmark": (row.get("Bookmark") or "").strip(),
+                    "content_fingerprint": fp,
                 },
             )
 
