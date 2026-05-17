@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>ash's bookshelf: read</title>
+    <copyright><![CDATA[Copyright (C) 2026 Goodreads Inc. All rights reserved.]]></copyright>
+    <link><![CDATA[https://www.goodreads.com/review/list_rss/12345?shelf=read]]></link>
+    <atom:link href="https://www.goodreads.com/review/list_rss/12345?shelf=read" rel="self" type="application/rss+xml"/>
+    <description><![CDATA[ash's bookshelf: read]]></description>
+    <language>en-US</language>
+    <lastBuildDate>Tue, 12 May 2026 12:34:56 +0000</lastBuildDate>
+    <ttl>60</ttl>
+    <image>
+      <title>ash's bookshelf: read</title>
+      <link>https://www.goodreads.com/review/list_rss/12345?shelf=read</link>
+      <width>144</width>
+      <height>41</height>
+      <url>https://s.gr-assets.com/images/widget/widget_logo.gif</url>
+    </image>
+
+    <item>
+      <guid><![CDATA[https://www.goodreads.com/review/show/8000000001?utm_medium=api&amp;utm_source=rss]]></guid>
+      <pubDate><![CDATA[Mon, 11 May 2026 09:00:00 -0700]]></pubDate>
+      <title><![CDATA[The Hobbit]]></title>
+      <link><![CDATA[https://www.goodreads.com/review/show/8000000001]]></link>
+      <book_id>5907</book_id>
+      <book_image_url><![CDATA[https://images-na.ssl-images-amazon.com/images/I/91b0C2YNSrL._SY475_.jpg]]></book_image_url>
+      <book_small_image_url><![CDATA[https://images-na.ssl-images-amazon.com/images/I/91b0C2YNSrL._SY75_.jpg]]></book_small_image_url>
+      <book_medium_image_url><![CDATA[https://images-na.ssl-images-amazon.com/images/I/91b0C2YNSrL._SY200_.jpg]]></book_medium_image_url>
+      <book_large_image_url><![CDATA[https://images-na.ssl-images-amazon.com/images/I/91b0C2YNSrL._SY475_.jpg]]></book_large_image_url>
+      <book_description><![CDATA[In a hole in the ground there lived a hobbit...]]></book_description>
+      <book id="5907">
+        <num_pages>366</num_pages>
+        <id>5907</id>
+        <title>The Hobbit</title>
+      </book>
+      <author_name><![CDATA[J.R.R. Tolkien]]></author_name>
+      <isbn>0547928222</isbn>
+      <user_name>ash</user_name>
+      <user_rating>5</user_rating>
+      <user_read_at><![CDATA[Sat, 10 May 2026 00:00:00 +0000]]></user_read_at>
+      <user_date_added><![CDATA[Mon, 11 May 2026 09:00:00 -0700]]></user_date_added>
+      <user_date_created><![CDATA[Mon, 11 May 2026 09:00:00 -0700]]></user_date_created>
+      <user_shelves><![CDATA[fantasy, classics]]></user_shelves>
+      <user_review><![CDATA[Loved it. Reread for the Nth time.]]></user_review>
+      <average_rating>4.28</average_rating>
+      <book_published>1937</book_published>
+      <description><![CDATA[<a href="https://www.goodreads.com/book/show/5907"><img alt="The Hobbit" src="https://images-na.ssl-images-amazon.com/images/I/91b0C2YNSrL._SY75_.jpg" /></a><br/>
+                                      author: J.R.R. Tolkien<br/>
+                                      name: ash<br/>
+                                      average rating: 4.28<br/>
+                                      book published: 1937<br/>
+                                      rating: 5<br/>
+                                      read at: 2026/05/10<br/>
+                                      date added: 2026/05/11<br/>
+                                      shelves: fantasy, classics<br/>
+                                      review: Loved it.]]></description>
+    </item>
+
+    <item>
+      <guid><![CDATA[https://www.goodreads.com/review/show/8000000002?utm_medium=api&amp;utm_source=rss]]></guid>
+      <pubDate><![CDATA[Sun, 10 May 2026 12:30:00 -0700]]></pubDate>
+      <title><![CDATA[Project Hail Mary]]></title>
+      <link><![CDATA[https://www.goodreads.com/review/show/8000000002]]></link>
+      <book_id>54493401</book_id>
+      <book_image_url><![CDATA[https://images-na.ssl-images-amazon.com/images/I/91Bd7P8UwxL._SY475_.jpg]]></book_image_url>
+      <book_description><![CDATA[Ryland Grace is the sole survivor on a desperate, last-chance mission...]]></book_description>
+      <book id="54493401">
+        <num_pages>476</num_pages>
+        <id>54493401</id>
+        <title>Project Hail Mary</title>
+      </book>
+      <author_name><![CDATA[Andy Weir]]></author_name>
+      <isbn>0593135202</isbn>
+      <user_name>ash</user_name>
+      <user_rating>4</user_rating>
+      <user_read_at></user_read_at>
+      <user_date_added><![CDATA[Sun, 10 May 2026 12:30:00 -0700]]></user_date_added>
+      <user_date_created><![CDATA[Sun, 10 May 2026 12:30:00 -0700]]></user_date_created>
+      <user_shelves><![CDATA[sci-fi]]></user_shelves>
+      <user_review><![CDATA[]]></user_review>
+      <average_rating>4.51</average_rating>
+      <book_published>2021</book_published>
+      <description><![CDATA[<a href="https://www.goodreads.com/book/show/54493401"><img alt="Project Hail Mary" /></a><br/>author: Andy Weir]]></description>
+    </item>
+
+    <item>
+      <guid><![CDATA[https://www.goodreads.com/review/show/8000000003?utm_medium=api&amp;utm_source=rss]]></guid>
+      <pubDate><![CDATA[Fri, 08 May 2026 23:15:00 -0700]]></pubDate>
+      <title><![CDATA[Unknown Pleasures]]></title>
+      <link><![CDATA[https://www.goodreads.com/review/show/8000000003]]></link>
+      <book_id>99999999</book_id>
+      <book_description><![CDATA[A book whose rating was never set.]]></book_description>
+      <book id="99999999">
+        <num_pages></num_pages>
+        <id>99999999</id>
+        <title>Unknown Pleasures</title>
+      </book>
+      <author_name><![CDATA[Anonymous]]></author_name>
+      <isbn></isbn>
+      <user_name>ash</user_name>
+      <user_rating>0</user_rating>
+      <user_read_at><![CDATA[Wed, 07 May 2026 00:00:00 +0000]]></user_read_at>
+      <user_date_added><![CDATA[Fri, 08 May 2026 23:15:00 -0700]]></user_date_added>
+      <user_date_created><![CDATA[Fri, 08 May 2026 23:15:00 -0700]]></user_date_created>
+      <user_shelves><![CDATA[currently-reading, to-read]]></user_shelves>
+      <user_review><![CDATA[]]></user_review>
+      <average_rating>3.50</average_rating>
+      <book_published></book_published>
+      <description><![CDATA[<a>...</a>]]></description>
+    </item>
+  </channel>
+</rss>
