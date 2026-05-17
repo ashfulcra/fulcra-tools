@@ -16,6 +16,8 @@ dependencies = [
     # (add-cli branch) and `fulcra file download` (file-commands branch).
     # Pin to a branch/tag that includes both, or vendor a merged fork.
     "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+    # Sibling project providing the shared CSV → annotation parser.
+    "fulcra-csv-importer @ file:///Users/Scanning/Developer/fulcra-csv-importer",
 ]
 
 [project.scripts]
