@@ -95,10 +95,18 @@ SERVICES: list[ServiceEntry] = [
               "CSV. EU/UK/JP users can schedule recurring exports.",
     ),
     ServiceEntry(
+        key="youtube", label="YouTube (Google Takeout)",
+        category="video", rank=5, pathway="gdpr",
+        import_cmd="youtube", wizard="youtube",
+        blurb="Google Takeout watch-history.json. Supports scheduled exports "
+              "every 2 months, so works for ongoing capture too. No duration "
+              "data — 1-second sentinel.",
+    ),
+    ServiceEntry(
         key="generic-csv-video", label="Generic CSV (video)",
-        category="video", rank=5, pathway="via-generic-csv",
+        category="video", rank=6, pathway="via-generic-csv",
         import_cmd="generic-csv", wizard="ifttt",
-        blurb="For everything else (Hulu/Disney+/Max/Prime Video/Peacock/YouTube) "
+        blurb="For everything else (Hulu/Disney+/Max/Prime Video/Peacock) "
               "— privacy request, then convert to CSV and import.",
     ),
 
