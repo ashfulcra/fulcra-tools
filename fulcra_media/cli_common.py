@@ -86,6 +86,17 @@ def run_and_emit(
     result = client.run_import(events, state, check_only=check_only)
     save_state(state, STATE_PATH)
 
+    # Populate the cross-batch twin cache with this run's high-confidence
+    # events. Skip on check-only since nothing was actually posted.
+    if not check_only and result.posted > 0:
+        try:
+            from . import twin_cache
+            twin_cache.record_imported_events(events)
+        except Exception:
+            # Cache failures must not break the import — log to stderr.
+            import click as _click
+            _click.echo("warning: twin cache write failed", err=True)
+
     envelope = import_result_to_dict(
         importer_name, result,
         since_watermark=since_watermark,
