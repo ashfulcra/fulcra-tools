@@ -72,3 +72,22 @@ def test_music_ranks_are_unique_after_deezer_bump():
     ranks = [s.rank for s in music]
     assert ranks == sorted(ranks)
     assert len(ranks) == len(set(ranks))  # no duplicates
+
+
+def test_letterboxd_is_available_with_importer_and_wizard():
+    """Letterboxd flipped to available now that the RSS importer is wired up."""
+    lb = get("letterboxd")
+    assert lb is not None
+    assert lb.available is True
+    assert lb.import_cmd == "letterboxd"
+    assert lb.wizard == "letterboxd"
+    assert lb.pathway == "rss"
+    assert lb.category == "video"
+
+
+def test_video_ranks_are_unique_after_letterboxd_promotion():
+    """Letterboxd takes rank=4; generic-csv-video bumped to 5."""
+    video = services_for_category("video")
+    ranks = [s.rank for s in video]
+    assert ranks == sorted(ranks)
+    assert len(ranks) == len(set(ranks))
