@@ -42,6 +42,43 @@ def bootstrap() -> None:
     click.echo(f"watched={s.watched_definition_id} listened={s.listened_definition_id}")
 
 
+@cli.command(help=(
+    "Soft-delete Watched and Listened defs and clear local state. "
+    "Events under the deleted defs stay visible in queries (Fulcra has no "
+    "per-event delete); the next bootstrap creates new defs whose UUIDs "
+    "naturally namespace fresh imports."
+))
+@click.option("--confirm", is_flag=True, required=False,
+              help="Required. Confirms you understand orphaned events stay visible.")
+@click.option("--keep-watched", is_flag=True, help="Only soft-delete the Listened def.")
+@click.option("--keep-listened", is_flag=True, help="Only soft-delete the Watched def.")
+def reset(confirm: bool, keep_watched: bool, keep_listened: bool) -> None:
+    if not confirm:
+        raise click.UsageError(
+            "Pass --confirm. This soft-deletes the annotation definitions; "
+            "previously-ingested events stay visible in queries (Fulcra has no "
+            "per-event delete). To do a clean re-import, run `reset` then "
+            "`bootstrap` — the new defs get fresh UUIDs that namespace future "
+            "events apart from the orphaned ones."
+        )
+    s = state_mod.load(STATE_PATH)
+    client = FulcraClient()
+    deleted: list[str] = []
+    if s.watched_definition_id and not keep_watched:
+        if client.soft_delete_definition(s.watched_definition_id):
+            deleted.append(f"watched={s.watched_definition_id}")
+        s.watched_definition_id = None
+    if s.listened_definition_id and not keep_listened:
+        if client.soft_delete_definition(s.listened_definition_id):
+            deleted.append(f"listened={s.listened_definition_id}")
+        s.listened_definition_id = None
+    # Watermarks are now meaningless; tag IDs survive (tags weren't deleted).
+    s.watermarks = {}
+    state_mod.save(s, STATE_PATH)
+    click.echo("soft-deleted: " + (", ".join(deleted) or "(nothing — defs were absent)"))
+    click.echo("state cleared. Run `bootstrap` to create fresh definitions.")
+
+
 @cli.command(help="Print the cached state.json contents.")
 def status() -> None:
     s = state_mod.load(STATE_PATH)
