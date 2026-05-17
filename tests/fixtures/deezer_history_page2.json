@@ -1,0 +1,32 @@
+{
+  "data": [
+    {
+      "id": 778899,
+      "title": "Lost Cause",
+      "timestamp": 1715897000,
+      "duration": 234,
+      "type": "track",
+      "artist": {"id": 144, "name": "Beck", "type": "artist"},
+      "album": {"id": 555, "title": "Sea Change", "type": "album"}
+    },
+    {
+      "id": 991122,
+      "title": "1901",
+      "timestamp": 1715896800,
+      "duration": 196,
+      "type": "track",
+      "artist": {"id": 4711, "name": "Phoenix", "type": "artist"},
+      "album": {"id": 88812, "title": "Wolfgang Amadeus Phoenix", "type": "album"}
+    },
+    {
+      "id": 555111,
+      "title": "Wave Of Mutilation",
+      "timestamp": 1715896600,
+      "duration": 124,
+      "type": "track",
+      "artist": {"id": 791, "name": "Pixies", "type": "artist"},
+      "album": {"id": 4811, "title": "Doolittle", "type": "album"}
+    }
+  ],
+  "total": 7
+}
