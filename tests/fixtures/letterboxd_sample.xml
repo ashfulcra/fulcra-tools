@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:letterboxd="https://letterboxd.com" xmlns:tmdb="https://themoviedb.org">
+  <channel>
+    <title>ash's Letterboxd diary</title>
+    <link>https://letterboxd.com/ash/</link>
+    <description>Diary entries from ash on Letterboxd</description>
+    <language>en</language>
+    <atom:link xmlns:atom="http://www.w3.org/2005/Atom" rel="self" href="https://letterboxd.com/ash/rss/" type="application/rss+xml"/>
+
+    <item>
+      <title>Sigur Rós Live, 2026 - ★★★★½</title>
+      <link>https://letterboxd.com/ash/film/sigur-ros-live-2026/</link>
+      <guid isPermaLink="false">letterboxd-watch-99001</guid>
+      <pubDate>Mon, 12 May 2026 23:30:00 +0000</pubDate>
+      <description>&lt;p&gt;Watched on Monday May 12, 2026.&lt;/p&gt;</description>
+      <letterboxd:watchedDate>2026-05-12</letterboxd:watchedDate>
+      <letterboxd:rewatch>No</letterboxd:rewatch>
+      <letterboxd:filmTitle>Sigur Rós Live</letterboxd:filmTitle>
+      <letterboxd:filmYear>2026</letterboxd:filmYear>
+      <letterboxd:memberRating>4.5</letterboxd:memberRating>
+      <tmdb:movieId>123456</tmdb:movieId>
+    </item>
+
+    <item>
+      <title>The Fifth Element, 1997 - ★★★★★</title>
+      <link>https://letterboxd.com/ash/film/the-fifth-element/</link>
+      <guid isPermaLink="false">letterboxd-watch-99002</guid>
+      <pubDate>Sun, 11 May 2026 21:00:00 +0000</pubDate>
+      <description>&lt;p&gt;Watched on Sunday May 11, 2026.&lt;/p&gt;</description>
+      <letterboxd:watchedDate>2026-05-11</letterboxd:watchedDate>
+      <letterboxd:rewatch>Yes</letterboxd:rewatch>
+      <letterboxd:filmTitle>The Fifth Element</letterboxd:filmTitle>
+      <letterboxd:filmYear>1997</letterboxd:filmYear>
+      <letterboxd:memberRating>5.0</letterboxd:memberRating>
+      <tmdb:movieId>18</tmdb:movieId>
+    </item>
+
+    <item>
+      <title>Unknown Film - ★★★</title>
+      <link>https://letterboxd.com/ash/film/unknown-film/</link>
+      <guid isPermaLink="false">letterboxd-watch-99003</guid>
+      <pubDate>Sat, 10 May 2026 17:00:00 +0000</pubDate>
+      <description>&lt;p&gt;Watched on Saturday May 10, 2026.&lt;/p&gt;</description>
+      <letterboxd:watchedDate>2026-05-10</letterboxd:watchedDate>
+      <letterboxd:rewatch>No</letterboxd:rewatch>
+      <letterboxd:filmTitle>Unknown Film</letterboxd:filmTitle>
+      <letterboxd:memberRating>3.0</letterboxd:memberRating>
+    </item>
+
+    <item>
+      <title>Past Lives, 2023</title>
+      <link>https://letterboxd.com/ash/film/past-lives/</link>
+      <guid isPermaLink="false">letterboxd-watch-99004</guid>
+      <pubDate>Fri, 09 May 2026 02:15:00 +0000</pubDate>
+      <description>&lt;p&gt;Watched on Friday May 9, 2026.&lt;/p&gt;</description>
+      <letterboxd:watchedDate>2026-05-09</letterboxd:watchedDate>
+      <letterboxd:rewatch>No</letterboxd:rewatch>
+      <letterboxd:filmTitle>Past Lives</letterboxd:filmTitle>
+      <letterboxd:filmYear>2023</letterboxd:filmYear>
+    </item>
+  </channel>
+</rss>
