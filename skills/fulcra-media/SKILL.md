@@ -251,29 +251,24 @@ When running this skill on a heartbeat (any runtime), the action you fire each t
 
 ### A heartbeat-tick template
 
+The CLI already manages its own per-importer watermarks, so a heartbeat tick can be small:
+
 ```bash
 #!/usr/bin/env bash
-# Single heartbeat tick. Idempotent; safe to fire every 30 minutes.
+# Single heartbeat tick. Idempotent; safe to fire as often as your runtime allows.
+# The CLI's watermark layer guarantees no double-imports — re-runs are cheap.
 set -euo pipefail
-
-CADENCE_HOURS=1
 LOG=/var/log/fulcra-media-heartbeat.log
 
-now=$(date -u +%s)
-for importer in lastfm deezer trakt apple-podcasts; do
-  last=$(fulcra-media status | jq -r ".watermarks.\"$importer\" // \"1970-01-01T00:00:00Z\"")
-  last_s=$(date -u -d "$last" +%s 2>/dev/null || echo 0)
-  age=$(( (now - last_s) / 3600 ))
-  if [ "$age" -lt "$CADENCE_HOURS" ]; then continue; fi
-
-  if [ "$(fulcra-media import "$importer" --check-only --json | jq '.would_post')" = "0" ]; then
-    continue
-  fi
+for importer in lastfm deezer trakt apple-podcasts letterboxd goodreads; do
+  # Cheap probe — no ingest cost, just an API readback.
+  pending=$(fulcra-media import "$importer" --check-only --json | jq '.would_post')
+  [ "$pending" = "0" ] && continue
   fulcra-media import "$importer" --json >> "$LOG" 2>&1
 done
 ```
 
-Drop that in a `cron job` (openclaw), `heartbeat` (Hermes), `automation` (OpenHands), or host `cron`/`launchd` — same script, same result.
+Drop that in a `cron job` (openclaw), `heartbeat` (Hermes), `automation` (OpenHands), or host `cron`/`launchd` — same script, same result. Portable across BSD (macOS) and GNU (Linux) because it leans on the CLI for all timestamp arithmetic.
 
 ---
 

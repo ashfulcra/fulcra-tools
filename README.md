@@ -57,7 +57,15 @@ Each event carries a `content_fingerprint` for cross-source dedup (e.g. the same
 
 ## For agents
 
-There's a skill at `skills/fulcra-media/SKILL.md` — load it when an AI agent needs to run imports on a user's behalf. Key contracts:
+There's a skill at `skills/fulcra-media/SKILL.md` (with an `AGENTS.md` pointer at the repo root for auto-loaders). It's deliberately runtime-agnostic — the only contract is `fulcra-media` on PATH and the `--json` envelope. Tested mental model for:
+
+- **Claude Code / Aider / Cursor / Continue.dev / Copilot CLI / Codex / Gemini CLI** — load via `AGENTS.md` or equivalent, use host `cron` / `launchd` / `systemd-timer` for periodic runs
+- **Hermes Agent** (NousResearch) — drop SKILL.md into the `agentskills.io` registry; uses Hermes's first-class **heartbeat** primitive for recurring imports
+- **openclaw** — drop SKILL.md at `~/.openclaw/workspace/skills/fulcra-media/SKILL.md`; uses openclaw's built-in **cron jobs** tool
+- **OpenHands** (formerly OpenDevin) — auto-picked up via `SKILL.md` / `AGENTS.md`; uses OpenHands sandboxed **automations** for scheduling
+- **Letta / MemGPT** — `request_heartbeat: bool` in Letta is intra-turn loop control, **not** a scheduler; pair Letta with an external cron
+
+Key contracts:
 
 - Every `import` command supports `--json` (one-line envelope) and `--check-only` (dry-run)
 - The envelope schema is stable & append-only: `{importer, ok, total, skipped_existing, posted, verified, since_watermark, new_watermark, would_post, errors[]}`
