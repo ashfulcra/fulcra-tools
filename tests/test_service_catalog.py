@@ -91,3 +91,19 @@ def test_video_ranks_are_unique_after_letterboxd_promotion():
     ranks = [s.rank for s in video]
     assert ranks == sorted(ranks)
     assert len(ranks) == len(set(ranks))
+
+
+def test_strava_is_top_activity_pick():
+    """Strava is the canonical workouts source — rank=1 in the new 'activity' category."""
+    activity = services_for_category("activity")
+    assert len(activity) >= 1
+    assert activity[0].key == "strava"
+    assert activity[0].pathway == "api"
+    assert activity[0].import_cmd == "strava"
+    assert activity[0].wizard == "strava"
+    assert activity[0].available is True
+
+
+def test_activity_category_appears_in_categories_list():
+    """The new 'activity' category must show up in the ordered category list."""
+    assert "activity" in categories()
