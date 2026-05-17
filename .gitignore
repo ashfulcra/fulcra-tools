@@ -9,6 +9,7 @@ __pycache__/
 build/
 dist/
 .scratch/
+.claude/
 .DS_Store
 ~/.config/fulcra-media/   # not in repo but documented as user state location
 takeouts/
