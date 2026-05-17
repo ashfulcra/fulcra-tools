@@ -20,9 +20,10 @@ Apple Podcasts setup (macOS only)
   2. Run:
        fulcra-media import apple-podcasts
 
-  The importer captures only *completed* episodes - ZPLAYSTATE=3 (played)
-  with playhead/duration > 0.9 and ZPLAYSTATEMANUALLYSET=0. Manual
-  marked-as-played is filtered out.
+  The importer captures any episode with ZPLAYCOUNT > 0 (i.e. it
+  completed at least once) where ZLASTDATEPLAYED is set and the play
+  state wasn't manually toggled. Real Apple Podcasts resets ZPLAYSTATE
+  to 0 and ZPLAYHEAD to 0 after completion, so we can't rely on those.
 
   Known fragility:
   - Auto-delete-after-played removes the row entirely -> history is lost
@@ -60,6 +61,12 @@ Apple Podcasts setup (macOS only)
      This walks every Time Machine backup with a MTLibrary.sqlite and
      posts annotations for every historical ZLASTDATEPLAYED found.
      Idempotency means re-runs are safe.
+
+     IMPORTANT: `tmutil listbackups` requires Full Disk Access. Open
+     System Settings -> Privacy & Security -> Full Disk Access, click
+     +, and add Terminal (or whatever app you run fulcra-media from).
+     Without FDA, the walker reports "No Time Machine backups found"
+     even when backups exist.
 
   ZPLAYCOUNT is also captured as external_ids.play_count so consumers
   can see how many total plays an episode has had (the snapshot only

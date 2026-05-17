@@ -43,6 +43,13 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
                 shutil.copy2(candidate, snap_dir / candidate.name)
         conn = sqlite3.connect(snap_db)
         cur = conn.cursor()
+        # Filter rationale (refined against real Apple Podcasts data):
+        # After an episode completes, ZPLAYSTATE resets to 0, ZHASBEENPLAYED
+        # becomes NULL, and ZPLAYHEAD resets to 0. The only durable signals
+        # of completion are ZPLAYCOUNT (incremented per completion) and
+        # ZLASTDATEPLAYED (the timestamp of the last play). The spec's
+        # original ZPLAYSTATE=3 + playhead/duration check missed everything
+        # — every episode in a real library matched 0 rows.
         cur.execute("""
             SELECT
               e.ZUUID,
@@ -53,10 +60,8 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
               COALESCE(e.ZPLAYCOUNT, 0)
             FROM ZMTEPISODE e
             JOIN ZMTPODCAST p ON p.Z_PK = e.ZPODCAST
-            WHERE e.ZPLAYSTATE = 3
-              AND e.ZHASBEENPLAYED = 1
+            WHERE COALESCE(e.ZPLAYCOUNT, 0) > 0
               AND COALESCE(e.ZPLAYSTATEMANUALLYSET, 0) = 0
-              AND (e.ZPLAYHEAD * 1.0 / NULLIF(e.ZDURATION, 0)) > 0.9
               AND e.ZLASTDATEPLAYED IS NOT NULL
         """)
         for zuuid, mac_last, show_title, ep_title, duration_s, play_count in cur.fetchall():
