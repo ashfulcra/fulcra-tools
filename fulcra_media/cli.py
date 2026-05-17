@@ -132,5 +132,26 @@ def import_apple_podcasts(db_path: str | None) -> None:
     )
 
 
+@import_group.command("spotify-extended")
+@click.argument("path", type=str)
+def import_spotify_extended(path: str) -> None:
+    """Import Spotify Extended Streaming History from a GDPR-export zip."""
+    from .importers import spotify as sp
+    resolved = library.resolve(path)
+    s = state_mod.load(STATE_PATH)
+    if not s.listened_definition_id:
+        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+    events = list(sp.parse_extended_zip(Path(resolved)))
+    client = FulcraClient()
+    client.ensure_tag("spotify", s)
+    state_mod.save(s, STATE_PATH)
+    result = client.run_import(events, s)
+    state_mod.save(s, STATE_PATH)
+    click.echo(
+        f"spotify-extended: total={result.total} skipped_existing={result.skipped_existing} "
+        f"posted={result.posted} verified={result.verified}"
+    )
+
+
 if __name__ == "__main__":
     cli()
