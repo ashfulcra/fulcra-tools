@@ -107,3 +107,24 @@ def test_strava_is_top_activity_pick():
 def test_activity_category_appears_in_categories_list():
     """The new 'activity' category must show up in the ordered category list."""
     assert "activity" in categories()
+
+
+def test_goodreads_is_available_with_importer_and_wizard():
+    """Goodreads flipped to available now that the RSS importer is wired up."""
+    gr = get("goodreads")
+    assert gr is not None
+    assert gr.available is True
+    assert gr.import_cmd == "goodreads"
+    assert gr.wizard == "goodreads"
+    assert gr.pathway == "rss"
+    assert gr.category == "books"
+    # Label cleanup — strip the "(RSS)" suffix now that it ships.
+    assert gr.label == "Goodreads"
+
+
+def test_goodreads_is_top_books_pick():
+    """Goodreads is the canonical books source today — rank=1 in 'books'."""
+    books = services_for_category("books")
+    assert len(books) >= 1
+    assert books[0].key == "goodreads"
+    assert books[0].available is True
