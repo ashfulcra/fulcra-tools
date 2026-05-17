@@ -1,0 +1,31 @@
+[
+  {
+    "id": 13371004,
+    "name": "Hike — Bear Peak",
+    "type": "Hike",
+    "sport_type": "Hike",
+    "start_date": "2026-05-10T15:00:00Z",
+    "start_date_local": "2026-05-10T09:00:00Z",
+    "elapsed_time": 14400,
+    "moving_time": 12000,
+    "distance": 12450.0,
+    "total_elevation_gain": 920.0,
+    "average_heartrate": 128.0,
+    "kudos_count": 11,
+    "athlete": {"id": 99001}
+  },
+  {
+    "id": 13371005,
+    "name": "Trail Run",
+    "type": "Run",
+    "sport_type": "TrailRun",
+    "start_date": "2026-05-09T13:00:00Z",
+    "start_date_local": "2026-05-09T07:00:00Z",
+    "elapsed_time": 3600,
+    "moving_time": 3500,
+    "distance": 9500.0,
+    "total_elevation_gain": 250.0,
+    "kudos_count": 3,
+    "athlete": {"id": 99001}
+  }
+]
