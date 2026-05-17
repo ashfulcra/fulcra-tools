@@ -43,13 +43,18 @@ def cli(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-@cli.command(help="Create the Watched/Listened annotation definitions and service tags.")
+@cli.command(help="Create the Watched / Listened / Activity / Read annotation defs.")
 def bootstrap() -> None:
     s = state_mod.load(STATE_PATH)
     client = FulcraClient()
     client.ensure_definitions(s)
     state_mod.save(s, STATE_PATH)
-    click.echo(f"watched={s.watched_definition_id} listened={s.listened_definition_id}")
+    click.echo(
+        f"watched={s.watched_definition_id} "
+        f"listened={s.listened_definition_id} "
+        f"activity={s.activity_definition_id} "
+        f"read={s.read_definition_id}"
+    )
 
 
 @cli.command(help=(
@@ -112,6 +117,8 @@ def status() -> None:
         {
             "watched_definition_id": s.watched_definition_id,
             "listened_definition_id": s.listened_definition_id,
+            "activity_definition_id": s.activity_definition_id,
+            "read_definition_id": s.read_definition_id,
             "tag_ids": s.tag_ids,
             "watermarks": s.watermarks,
             "state_path": str(STATE_PATH),
