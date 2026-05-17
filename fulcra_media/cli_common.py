@@ -8,11 +8,36 @@ human mode, errors go to stderr.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import click
+
+
+# Auth-bearing query params that must be scrubbed before exception strings
+# (e.g. httpx.HTTPStatusError) land in --json error envelopes. Adding new
+# importers? If your service puts a secret in a URL param, add the name here.
+_SECRET_QUERY_PARAMS = (
+    "access_token", "api_key", "client_secret", "refresh_token",
+    "token", "api_secret", "auth_token", "session_key",
+)
+_SECRET_RE = re.compile(
+    r"(?<=[?&])(" + "|".join(_SECRET_QUERY_PARAMS) + r")=[^&\s'\"]+",
+    re.IGNORECASE,
+)
+
+
+def safe_exc_message(exc: BaseException) -> str:
+    """str(exc) with credential-shaped URL params scrubbed.
+
+    Use this everywhere an exception string flows into an ImportEnvelope's
+    errors[].message. httpx.HTTPStatusError in particular embeds the full
+    request URL which often carries our auth params for services that
+    don't support header-based auth (Last.fm, Deezer).
+    """
+    return _SECRET_RE.sub(lambda m: f"{m.group(1)}=REDACTED", str(exc))
 
 from .fulcra import ImportResult
 

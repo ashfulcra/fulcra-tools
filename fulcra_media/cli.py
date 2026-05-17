@@ -10,6 +10,7 @@ import httpx
 
 from . import library
 from . import state as state_mod
+from .cli_common import safe_exc_message
 from .fulcra import FulcraClient
 from .importers import netflix as netflix_importer
 from .wizards.netflix import walkthrough as netflix_walkthrough
@@ -189,7 +190,7 @@ def import_trakt(cluster_threshold: int, cluster_spec: str | None,
     except (RuntimeError, httpx.HTTPError) as exc:
         emit_result(
             ImportEnvelope(importer="trakt", ok=False,
-                           errors=[{"stage": "fetch", "message": str(exc)}]),
+                           errors=[{"stage": "fetch", "message": safe_exc_message(exc)}]),
             json_mode=json_mode,
         )
         return
@@ -695,7 +696,7 @@ def import_lastfm(
         emit_result(
             ImportEnvelope(
                 importer="lastfm", ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": str(exc)}],
+                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
             ),
             json_mode=json_mode,
         )
@@ -806,7 +807,7 @@ def import_deezer(
         emit_result(
             ImportEnvelope(
                 importer="deezer", ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": str(exc)}],
+                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
             ),
             json_mode=json_mode,
         )
@@ -940,7 +941,7 @@ def import_generic_rss(
         emit_result(
             ImportEnvelope(
                 importer=importer_label, ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": str(exc)}],
+                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
             ),
             json_mode=json_mode,
         )
@@ -1017,7 +1018,7 @@ def import_letterboxd(
         emit_result(
             ImportEnvelope(
                 importer="letterboxd", ok=False, since_watermark=since_str,
-                errors=[{"stage": "fetch", "message": str(exc)}],
+                errors=[{"stage": "fetch", "message": safe_exc_message(exc)}],
             ),
             json_mode=json_mode,
         )

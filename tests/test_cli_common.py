@@ -5,7 +5,12 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from fulcra_media.cli_common import emit_result, import_result_to_dict, ImportEnvelope
+from fulcra_media.cli_common import (
+    ImportEnvelope,
+    emit_result,
+    import_result_to_dict,
+    safe_exc_message,
+)
 
 
 def test_emit_result_json_writes_one_line_to_stdout():
@@ -119,3 +124,58 @@ def test_import_envelope_optional_fields_default_sensibly():
     assert env.posted == 0
     assert env.errors == []
     assert env.would_post is None  # set on --check-only
+
+
+# ---------- safe_exc_message ----------
+
+def test_safe_exc_message_scrubs_access_token():
+    exc = RuntimeError(
+        "Client error '403 Forbidden' for url "
+        "'https://api.deezer.com/user/me/history?access_token=secret123abc&limit=200'"
+    )
+    msg = safe_exc_message(exc)
+    assert "secret123abc" not in msg
+    assert "access_token=REDACTED" in msg
+    # Non-secret params survive
+    assert "limit=200" in msg
+
+
+def test_safe_exc_message_scrubs_api_key():
+    exc = RuntimeError(
+        "GET https://ws.audioscrobbler.com/2.0/?api_key=k1234567890abcdef&user=ash failed"
+    )
+    msg = safe_exc_message(exc)
+    assert "k1234567890abcdef" not in msg
+    assert "api_key=REDACTED" in msg
+    assert "user=ash" in msg
+
+
+def test_safe_exc_message_scrubs_multiple_secrets():
+    exc = RuntimeError(
+        "POST /token?client_secret=abc&refresh_token=def returned 401"
+    )
+    msg = safe_exc_message(exc)
+    assert "abc" not in msg
+    assert "def" not in msg
+    assert msg.count("REDACTED") == 2
+
+
+def test_safe_exc_message_is_case_insensitive():
+    """Some services capitalize URL params; the scrubber catches both."""
+    exc = RuntimeError("url=https://x.com/?Access_Token=secret&foo=bar")
+    msg = safe_exc_message(exc)
+    assert "secret" not in msg
+
+
+def test_safe_exc_message_passes_through_clean_strings():
+    exc = RuntimeError("not a network error: file not found")
+    assert safe_exc_message(exc) == "not a network error: file not found"
+
+
+def test_safe_exc_message_doesnt_overscrub():
+    """Don't redact legitimate similar-looking text outside URL query strings."""
+    # access_token at start of string (no preceding ? or &) shouldn't match
+    exc = RuntimeError("access_token=foo (this is informational text, not a URL)")
+    msg = safe_exc_message(exc)
+    # The literal hasn't been preceded by ? or &, so it stays
+    assert msg == "access_token=foo (this is informational text, not a URL)"
