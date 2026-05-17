@@ -72,6 +72,40 @@ class FulcraClient:
     def _authed_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.get_token()}"}
 
+    def soft_delete_definition(self, definition_id: str) -> bool:
+        """Soft-delete an annotation definition.
+
+        Returns True on a successful 204. The events under the def are NOT
+        removed from query results — they stay visible but their source_id
+        points at a deleted def. To effectively "reset" a stream of imports,
+        soft-delete the def AND bump the source-id prefix on the importer
+        so the next run doesn't get silently deduped against the orphans.
+
+        This is the only delete primitive Fulcra currently exposes; there's
+        no per-event delete (probed and confirmed 2026-05-17).
+        """
+        r = self._client().delete(
+            f"/user/v1alpha1/annotation/{definition_id}",
+            headers=self._authed_headers(),
+        )
+        if r.status_code == 204:
+            return True
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return False
+
+    def cancel_definition_deletion(self, definition_id: str) -> bool:
+        """Restore a soft-deleted annotation definition."""
+        r = self._client().post(
+            f"/user/v1alpha1/annotation/{definition_id}/cancel_deletion",
+            headers=self._authed_headers(),
+        )
+        if r.status_code in (200, 204):
+            return True
+        r.raise_for_status()
+        return False
+
     def ensure_tag(self, name: str) -> str:
         c = self._client()
         r = c.get(f"/user/v1alpha1/tag/name/{name}", headers=self._authed_headers())

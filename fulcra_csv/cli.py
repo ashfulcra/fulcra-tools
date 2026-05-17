@@ -183,6 +183,26 @@ def import_csv(
     )
 
 
+@cli.command("soft-delete", help="Soft-delete an annotation definition.")
+@click.argument("definition_id")
+@click.option("--confirm", is_flag=True,
+              help="Required. Soft-delete is the closest thing to a reset Fulcra "
+                   "offers, and events under the def stay visible in queries.")
+def soft_delete(definition_id: str, confirm: bool) -> None:
+    if not confirm:
+        raise click.UsageError(
+            "Pass --confirm. Soft-delete does NOT hide events from queries; "
+            "you also need to bump the source-id prefix on importers."
+        )
+    client = FulcraClient()
+    ok = client.soft_delete_definition(definition_id)
+    if ok:
+        click.echo(f"soft-deleted {definition_id}")
+    else:
+        click.echo(f"definition {definition_id} not found", err=True)
+        raise click.exceptions.Exit(1)
+
+
 @cli.command(help="Create a generic annotation definition.")
 @click.option("--name", required=True)
 @click.option("--description", default="")
