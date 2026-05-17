@@ -59,6 +59,42 @@ def import_result_to_dict(
     )
 
 
+def run_and_emit(
+    importer_name: str,
+    events: list,
+    state: Any,
+    *,
+    tag_name: str | None,
+    check_only: bool,
+    json_mode: bool,
+    since_watermark: str | None = None,
+    new_watermark: str | None = None,
+) -> None:
+    """Standard ingest pipeline + envelope emission. Used by every importer.
+
+    tag_name: which tag to ensure for the events. None to skip (e.g. when the
+        events are tagged per-row via fulcra-csv).
+    """
+    from .state import save as save_state
+    from .fulcra import FulcraClient
+    from .cli import STATE_PATH  # local import to avoid cycle at module top
+
+    client = FulcraClient()
+    if tag_name and not check_only:
+        client.ensure_tag(tag_name, state)
+    save_state(state, STATE_PATH)
+    result = client.run_import(events, state, check_only=check_only)
+    save_state(state, STATE_PATH)
+
+    envelope = import_result_to_dict(
+        importer_name, result,
+        since_watermark=since_watermark,
+        new_watermark=new_watermark,
+        would_post=result.posted if check_only else None,
+    )
+    emit_result(envelope, json_mode=json_mode)
+
+
 def emit_result(envelope: ImportEnvelope, *, json_mode: bool) -> None:
     """Print the envelope (JSON or human) and exit non-zero on failure.
 

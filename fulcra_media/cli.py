@@ -120,24 +120,25 @@ wizard.add_command(lastfm_walkthrough, name="lastfm")
 
 @import_group.command("netflix")
 @click.argument("path", type=str)
-def import_netflix(path: str) -> None:
+@click.option("--check-only", is_flag=True, help="Don't post; report what would be posted.")
+@click.option("--json", "json_mode", is_flag=True, help="Single-line JSON output.")
+def import_netflix(path: str, check_only: bool, json_mode: bool) -> None:
     """Import a Netflix slim-variant CSV (local path or fulcra:/... URI)."""
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     resolved = library.resolve(path)
     s = state_mod.load(STATE_PATH)
     if not s.watched_definition_id:
-        raise click.UsageError(
-            "Run `fulcra-media bootstrap` first; need Watched definition."
+        emit_result(
+            ImportEnvelope(
+                importer="netflix", ok=False,
+                errors=[{"stage": "setup", "message": "Run `fulcra-media bootstrap` first."}],
+            ),
+            json_mode=json_mode,
         )
+        return
     events = list(netflix_importer.parse_auto(Path(resolved)))
-    client = FulcraClient()
-    client.ensure_tag("netflix", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"netflix: total={result.total} skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit("netflix", events, s,
+                 tag_name="netflix", check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("trakt")
@@ -146,14 +147,31 @@ def import_netflix(path: str) -> None:
 @click.option("--clusters", "cluster_spec", default=None, metavar="POLICY",
               help="Cluster handling: 'drop', 'sentinel:YYYY', 'keep', or 'ask'. "
                    "Default 'ask' on TTY, errors otherwise.")
-def import_trakt(cluster_threshold: int, cluster_spec: str | None) -> None:
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_trakt(cluster_threshold: int, cluster_spec: str | None,
+                 check_only: bool, json_mode: bool) -> None:
     """Import Trakt watch history via the Trakt API."""
     from fulcra_csv import apply_cluster_policy
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import trakt as trakt_importer
     s = state_mod.load(STATE_PATH)
     if not s.watched_definition_id:
-        raise click.UsageError("Run `fulcra-media bootstrap` first.")
-    items = list(trakt_importer.fetch_history())
+        emit_result(
+            ImportEnvelope(importer="trakt", ok=False,
+                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
+            json_mode=json_mode,
+        )
+        return
+    try:
+        items = list(trakt_importer.fetch_history())
+    except (RuntimeError, httpx.HTTPError) as exc:
+        emit_result(
+            ImportEnvelope(importer="trakt", ok=False,
+                           errors=[{"stage": "fetch", "message": str(exc)}]),
+            json_mode=json_mode,
+        )
+        return
     events = list(trakt_importer.normalize_history(items, cluster_threshold=cluster_threshold))
 
     policy = _resolve_cluster_policy(
@@ -166,17 +184,11 @@ def import_trakt(cluster_threshold: int, cluster_spec: str | None) -> None:
         affected = before - len(events) if policy.action == "drop" else sum(
             1 for e in events if e.external_ids.get("sentinel_applied")
         )
-        click.echo(f"cluster policy '{policy.action}': {affected} events affected")
+        if not json_mode:
+            click.echo(f"cluster policy '{policy.action}': {affected} events affected", err=True)
 
-    client = FulcraClient()
-    client.ensure_tag("trakt", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"trakt: total={result.total} skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit("trakt", events, s,
+                 tag_name="trakt", check_only=check_only, json_mode=json_mode)
 
 
 def _resolve_cluster_policy(
@@ -265,82 +277,85 @@ def _resolve_cluster_policy(
 @click.option("--db", "db_path",
               default=None,
               help="Path to MTLibrary.sqlite (default: macOS standard location)")
-def import_apple_podcasts(db_path: str | None) -> None:
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_apple_podcasts(db_path: str | None, check_only: bool, json_mode: bool) -> None:
     """Import Apple Podcasts listening history from the on-device SQLite DB."""
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import apple_podcasts as ap
     if db_path is None:
         db_path = str(ap.DEFAULT_DB_PATH)
     s = state_mod.load(STATE_PATH)
     if not s.listened_definition_id:
-        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+        emit_result(
+            ImportEnvelope(importer="apple-podcasts", ok=False,
+                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
+            json_mode=json_mode,
+        )
+        return
     events = list(ap.parse_db(Path(db_path)))
-    client = FulcraClient()
-    client.ensure_tag("apple-podcasts", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"apple-podcasts: total={result.total} skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit("apple-podcasts", events, s,
+                 tag_name="apple-podcasts", check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("apple-podcasts-timemachine")
-def import_apple_podcasts_timemachine() -> None:
-    """Recover Apple Podcasts replay history by walking Time Machine snapshots.
-
-    Each snapshot has its own ZLASTDATEPLAYED for each episode, so events
-    that the live DB has overwritten resurface from older backups. Idempotency
-    on (ZUUID, ZLASTDATEPLAYED) means duplicates across snapshots are skipped.
-    """
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_apple_podcasts_timemachine(check_only: bool, json_mode: bool) -> None:
+    """Recover Apple Podcasts replay history by walking Time Machine snapshots."""
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import apple_podcasts as ap
     s = state_mod.load(STATE_PATH)
     if not s.listened_definition_id:
-        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+        emit_result(
+            ImportEnvelope(importer="apple-podcasts-timemachine", ok=False,
+                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
+            json_mode=json_mode,
+        )
+        return
     snapshots = ap.find_timemachine_snapshots()
     if not snapshots:
-        click.echo(
-            "No Time Machine backups with Apple Podcasts data found. "
-            "Run `tmutil listbackups` to verify backups are visible, "
-            "and make sure your Time Machine destination is mounted.",
-            err=True,
+        emit_result(
+            ImportEnvelope(
+                importer="apple-podcasts-timemachine", ok=False,
+                errors=[{"stage": "fetch",
+                         "message": "No Time Machine backups with Apple Podcasts data found. "
+                                    "Verify tmutil listbackups + Time Machine mount + FDA."}],
+            ),
+            json_mode=json_mode,
         )
-        raise click.exceptions.Exit(1)
-    click.echo(f"Walking {len(snapshots)} Time Machine snapshots...")
+        return
+    if not json_mode:
+        click.echo(f"Walking {len(snapshots)} Time Machine snapshots...", err=True)
     all_events = []
     for snap in snapshots:
-        click.echo(f"  {snap}")
+        if not json_mode:
+            click.echo(f"  {snap}", err=True)
         all_events.extend(ap.parse_db(snap))
-    client = FulcraClient()
-    client.ensure_tag("apple-podcasts", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(all_events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"apple-podcasts-timemachine: total={result.total} skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit("apple-podcasts-timemachine", all_events, s,
+                 tag_name="apple-podcasts", check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("spotify-extended")
 @click.argument("path", type=str)
-def import_spotify_extended(path: str) -> None:
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_spotify_extended(path: str, check_only: bool, json_mode: bool) -> None:
     """Import Spotify Extended Streaming History from a GDPR-export zip."""
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import spotify as sp
     resolved = library.resolve(path)
     s = state_mod.load(STATE_PATH)
     if not s.listened_definition_id:
-        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+        emit_result(
+            ImportEnvelope(importer="spotify-extended", ok=False,
+                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
+            json_mode=json_mode,
+        )
+        return
     events = list(sp.parse_extended_zip(Path(resolved)))
-    client = FulcraClient()
-    client.ensure_tag("spotify", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"spotify-extended: total={result.total} skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit("spotify-extended", events, s,
+                 tag_name="spotify", check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("generic-csv")
@@ -362,14 +377,18 @@ def import_spotify_extended(path: str) -> None:
               type=click.Choice(["auto", "music", "movie", "tv", "podcast", "none"]),
               default="auto",
               help="content_fingerprint kind (auto picks music/movie from --category)")
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
 def import_generic_csv(
     path: str, service: str, category: str,
     ts_col: str, title_col: str, subtitle_col: str, id_col: str,
     duration_col: str | None, end_col: str | None,
     confidence: str, tz_name: str, fingerprint: str,
+    check_only: bool, json_mode: bool,
 ) -> None:
     """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened."""
     from fulcra_csv import ColumnMap
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers.generic_csv import parse_media_csv
 
     resolved = library.resolve(path)
@@ -378,7 +397,13 @@ def import_generic_csv(
         s.watched_definition_id if category == "watched" else s.listened_definition_id
     )
     if not target_def:
-        raise click.UsageError(f"Run `fulcra-media bootstrap` first; need {category} definition.")
+        emit_result(
+            ImportEnvelope(importer=f"generic-csv:{service}", ok=False,
+                           errors=[{"stage": "setup",
+                                    "message": f"Run bootstrap first; need {category} definition."}]),
+            json_mode=json_mode,
+        )
+        return
 
     cm = ColumnMap(
         timestamp=ts_col,
@@ -396,7 +421,13 @@ def import_generic_csv(
         try:
             tz = ZoneInfo(tz_name)
         except Exception as exc:
-            raise click.UsageError(f"unknown timezone {tz_name!r}: {exc}") from exc
+            emit_result(
+                ImportEnvelope(importer=f"generic-csv:{service}", ok=False,
+                               errors=[{"stage": "args",
+                                        "message": f"unknown timezone {tz_name!r}: {exc}"}]),
+                json_mode=json_mode,
+            )
+            return
 
     fp_kind = None if fingerprint == "none" else (None if fingerprint == "auto" else fingerprint)
     from .importers.generic_csv import _FP_AUTO
@@ -408,82 +439,84 @@ def import_generic_csv(
         column_map=cm, tz=tz, confidence=confidence,
         fingerprint_kind=fp_arg,
     ))
-    client = FulcraClient()
-    client.ensure_tag(service, s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"generic-csv ({service}/{category}): total={result.total} "
-        f"skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit(f"generic-csv:{service}", events, s,
+                 tag_name=service, check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("spotify-ifttt")
 @click.argument("path", type=str)
 @click.option("--tz", "tz_name", default="UTC",
               help="IANA timezone IFTTT rendered the timestamps in (e.g. America/New_York)")
-def import_spotify_ifttt(path: str, tz_name: str) -> None:
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_spotify_ifttt(path: str, tz_name: str, check_only: bool, json_mode: bool) -> None:
     """Import the legacy IFTTT->GDrive Spotify zip (multiple overlapping xlsx files).
 
     Use this only for backfilling pre-Extended-history plays — for ongoing
     capture, prefer `import spotify-extended` (full ms_played data).
     """
     from zoneinfo import ZoneInfo
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import spotify_ifttt as si
     resolved = library.resolve(path)
     s = state_mod.load(STATE_PATH)
     if not s.listened_definition_id:
-        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+        emit_result(
+            ImportEnvelope(importer="spotify-ifttt", ok=False,
+                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
+            json_mode=json_mode,
+        )
+        return
     try:
         tz = ZoneInfo(tz_name)
     except Exception as exc:
-        raise click.UsageError(f"unknown timezone {tz_name!r}: {exc}") from exc
+        emit_result(
+            ImportEnvelope(importer="spotify-ifttt", ok=False,
+                           errors=[{"stage": "args", "message": f"unknown timezone {tz_name!r}: {exc}"}]),
+            json_mode=json_mode,
+        )
+        return
     events = list(si.parse_ifttt_zip(Path(resolved), tz=tz))
-    client = FulcraClient()
-    client.ensure_tag("spotify", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"spotify-ifttt: total={result.total} skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit("spotify-ifttt", events, s,
+                 tag_name="spotify", check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("apple-takeout")
 @click.argument("path", type=str)
-def import_apple_takeout(path: str) -> None:
+@click.option("--check-only", is_flag=True)
+@click.option("--json", "json_mode", is_flag=True)
+def import_apple_takeout(path: str, check_only: bool, json_mode: bool) -> None:
     """Import Apple Data & Privacy takeout — Apple TV Playback Activity CSV.
 
     Accepts the Playback Activity.csv file directly, or a path to the unzipped
     apple_data_export tree (we'll find the CSV inside).
     """
+    from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import apple_takeout as at
     resolved = library.resolve(path)
     resolved_path = Path(resolved)
     if resolved_path.is_dir():
-        # Find Playback Activity.csv inside the tree
         candidates = list(resolved_path.rglob("Playback Activity.csv"))
         if not candidates:
-            raise click.UsageError(
-                f"No 'Playback Activity.csv' found under {resolved_path}"
+            emit_result(
+                ImportEnvelope(importer="apple-takeout", ok=False,
+                               errors=[{"stage": "args",
+                                        "message": f"No 'Playback Activity.csv' under {resolved_path}"}]),
+                json_mode=json_mode,
             )
+            return
         resolved_path = candidates[0]
     s = state_mod.load(STATE_PATH)
     if not s.watched_definition_id:
-        raise click.UsageError("Run `fulcra-media bootstrap` first.")
+        emit_result(
+            ImportEnvelope(importer="apple-takeout", ok=False,
+                           errors=[{"stage": "setup", "message": "Run bootstrap first."}]),
+            json_mode=json_mode,
+        )
+        return
     events = list(at.parse_playback_csv(resolved_path))
-    client = FulcraClient()
-    client.ensure_tag("apple-tv", s)
-    state_mod.save(s, STATE_PATH)
-    result = client.run_import(events, s)
-    state_mod.save(s, STATE_PATH)
-    click.echo(
-        f"apple-takeout: total={result.total} skipped_existing={result.skipped_existing} "
-        f"posted={result.posted} verified={result.verified}"
-    )
+    run_and_emit("apple-takeout", events, s,
+                 tag_name="apple-tv", check_only=check_only, json_mode=json_mode)
 
 
 @import_group.command("lastfm")
