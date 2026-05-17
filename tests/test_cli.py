@@ -72,7 +72,7 @@ def test_import_netflix_runs_pipeline(tmp_path: Path, mocker):
     from fulcra_media.fulcra import ImportResult
 
     captured = {}
-    def fake_run(self, events, state, chunk_size=500, window_pad_minutes=10):
+    def fake_run(self, events, state, chunk_size=500, window_pad_minutes=10, **kw):
         events = list(events)
         captured["count"] = len(events)
         return ImportResult(total=len(events), skipped_existing=0, posted=len(events), verified=len(events))
@@ -121,7 +121,7 @@ def test_import_netflix_rich_variant(tmp_path: Path, mocker):
 
     captured = {}
     from fulcra_media.fulcra import ImportResult
-    def fake_run(self, events, state, chunk_size=500, window_pad_minutes=10):
+    def fake_run(self, events, state, chunk_size=500, window_pad_minutes=10, **kw):
         events = list(events)
         captured["count"] = len(events)
         captured["importer"] = events[0].importer if events else None
@@ -161,7 +161,7 @@ def test_import_trakt_runs_pipeline(tmp_path: Path, mocker):
 
     result = CliRunner().invoke(cli, ["import", "trakt"])
     assert result.exit_code == 0, result.output
-    assert "trakt:" in result.output
+    assert "importer=trakt" in result.output
 
 
 def test_import_apple_podcasts_runs_pipeline(tmp_path: Path, mocker):
@@ -187,7 +187,7 @@ def test_import_apple_podcasts_runs_pipeline(tmp_path: Path, mocker):
 
     result = CliRunner().invoke(cli, ["import", "apple-podcasts", "--db", str(tmp_path / "fake.sqlite")])
     assert result.exit_code == 0, result.output
-    assert "apple-podcasts:" in result.output
+    assert "importer=apple-podcasts" in result.output
 
 
 def test_import_apple_podcasts_timemachine_runs_pipeline(tmp_path: Path, mocker):
@@ -220,7 +220,7 @@ def test_import_apple_podcasts_timemachine_runs_pipeline(tmp_path: Path, mocker)
 
     result = CliRunner().invoke(cli, ["import", "apple-podcasts-timemachine"])
     assert result.exit_code == 0, result.output
-    assert "apple-podcasts-timemachine:" in result.output
+    assert "importer=apple-podcasts-timemachine" in result.output
 
 
 def test_import_apple_podcasts_timemachine_no_snapshots(tmp_path: Path, mocker):
@@ -232,7 +232,11 @@ def test_import_apple_podcasts_timemachine_no_snapshots(tmp_path: Path, mocker):
         return_value=[],
     )
     result = CliRunner().invoke(cli, ["import", "apple-podcasts-timemachine"])
-    assert result.exit_code == 1
+    # Envelope-style failure → exit 2 (distinct from click's usage-error 1)
+    assert result.exit_code == 2
+    # Failure envelope is emitted; in human mode the error goes to stderr
+    # (captured into result.output for CliRunner by default).
+    assert "ok=False" in result.output
 
 
 def test_import_spotify_extended_runs_pipeline(tmp_path: Path, mocker):
@@ -263,7 +267,7 @@ def test_import_spotify_extended_runs_pipeline(tmp_path: Path, mocker):
 
     result = CliRunner().invoke(cli, ["import", "spotify-extended", str(fake_zip)])
     assert result.exit_code == 0, result.output
-    assert "spotify-extended:" in result.output
+    assert "importer=spotify-extended" in result.output
 
 
 def test_import_apple_takeout_runs_pipeline(tmp_path: Path, mocker):
@@ -293,7 +297,7 @@ def test_import_apple_takeout_runs_pipeline(tmp_path: Path, mocker):
 
     result = CliRunner().invoke(cli, ["import", "apple-takeout", str(fake_csv)])
     assert result.exit_code == 0, result.output
-    assert "apple-takeout:" in result.output
+    assert "importer=apple-takeout" in result.output
 
 
 def test_import_apple_takeout_finds_csv_in_directory(tmp_path: Path, mocker):
