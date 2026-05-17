@@ -226,4 +226,6 @@ def test_parse_rich_includes_content_fingerprint():
     movie = next(e for e in events if e.title == "Dune: Part Two")
     assert movie.external_ids["content_fingerprint"] == "movie:dune-part-two"
     ep = next(e for e in events if "We We Are" in e.note)
-    assert ep.external_ids["content_fingerprint"] == "tv:severance:s02e01"
+    # Netflix titles don't always include "Episode N" — fall back to slugified
+    # episode title under the season segment.
+    assert ep.external_ids["content_fingerprint"] == "tv:severance:s02:the-we-we-are"
