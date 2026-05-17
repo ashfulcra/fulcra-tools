@@ -132,3 +132,33 @@ def test_import_netflix_rich_variant(tmp_path: Path, mocker):
     assert result.exit_code == 0, result.output
     assert captured["count"] == 1
     assert captured["importer"] == "netflix-rich"
+
+
+def test_import_trakt_runs_pipeline(tmp_path: Path, mocker):
+    state_path = tmp_path / "state.json"
+    save(State(watched_definition_id="w", listened_definition_id="l", tag_ids={"trakt": "t"}), state_path)
+    mocker.patch("fulcra_media.cli.STATE_PATH", state_path)
+
+    from fulcra_media.importers.base import NormalizedEvent
+    from datetime import datetime, timezone
+    fake_events = [
+        NormalizedEvent(
+            importer="trakt", service="trakt", category="watched",
+            note="X", title="X",
+            start_time=datetime(2026,1,1,tzinfo=timezone.utc),
+            end_time=datetime(2026,1,1,1,tzinfo=timezone.utc),
+            deterministic_id="com.fulcra.media.trakt.v1.history.123",
+            timestamp_confidence="high",
+        ),
+    ]
+    mocker.patch("fulcra_media.importers.trakt.fetch_history", return_value=iter([]))
+    mocker.patch("fulcra_media.importers.trakt.normalize_history", return_value=iter(fake_events))
+
+    from fulcra_media.fulcra import ImportResult
+    mocker.patch("fulcra_media.fulcra.FulcraClient.run_import",
+                 return_value=ImportResult(1, 0, 1, 1))
+    mocker.patch("fulcra_media.fulcra.FulcraClient.ensure_tag", return_value="t")
+
+    result = CliRunner().invoke(cli, ["import", "trakt"])
+    assert result.exit_code == 0, result.output
+    assert "trakt:" in result.output

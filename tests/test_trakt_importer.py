@@ -74,3 +74,41 @@ def test_normalize_history_deterministic_id_uses_history_id():
     assert e.deterministic_id.startswith("com.fulcra.media.trakt.v1.history.")
     history_id_str = e.deterministic_id.rsplit(".", 1)[-1]
     assert history_id_str.isdigit()
+
+
+import time
+import httpx
+
+
+def test_fetch_history_paginates(mocker, tmp_path):
+    p = tmp_path / "trakt.json"
+    import json as _j, time as _t
+    p.write_text(_j.dumps({
+        "client_id": "cid", "client_secret": "csec",
+        "access_token": "tok", "refresh_token": "rt",
+        "expires_in": 86400, "created_at": int(_t.time()) + 100000,
+    }))
+    mocker.patch("fulcra_media.importers.trakt.CREDS_PATH", p)
+
+    page1 = [{"id": 1}, {"id": 2}]
+    page2 = [{"id": 3}]
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page") or "1"
+        if page == "1":
+            return httpx.Response(200, json=page1, headers={"X-Pagination-Page-Count": "2"})
+        else:
+            return httpx.Response(200, json=page2, headers={"X-Pagination-Page-Count": "2"})
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client_init = httpx.Client
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_init(*args, **kwargs)
+    mocker.patch("fulcra_media.importers.trakt.httpx.Client", side_effect=fake_client)
+
+    from fulcra_media.importers.trakt import fetch_history
+    items = list(fetch_history(per_page=2))
+    assert len(items) == 3
+    assert items[0]["id"] == 1
+    assert items[-1]["id"] == 3
