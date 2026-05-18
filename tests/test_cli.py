@@ -68,3 +68,36 @@ def test_bootstrap_idempotent(_isolate_state, mocker):
     res = CliRunner().invoke(cli, ["bootstrap"])
     assert res.exit_code == 0
     assert "def-existing" in res.output
+
+
+def test_setup_generates_bearer_token_and_relay_json(_isolate_state, tmp_path, mocker, monkeypatch):
+    relay_dir = tmp_path / "fulcra-attention-config"
+    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_dir / "relay.json"))
+    # Skip service install on the test box.
+    fake_install = mocker.patch(
+        "fulcra_attention.cli.service_manager.install",
+        return_value=tmp_path / "fake-service-file",
+    )
+    res = CliRunner().invoke(cli, ["setup"])
+    assert res.exit_code == 0, res.output
+    relay_json = relay_dir / "relay.json"
+    assert relay_json.exists()
+    body = json.loads(relay_json.read_text())
+    assert "bearer_token" in body and len(body["bearer_token"]) >= 40
+    assert body["port"] == 8771
+    # Token printed for paste-into-extension
+    assert body["bearer_token"] in res.output
+    fake_install.assert_called_once()
+
+
+def test_setup_is_idempotent_preserves_existing_token(_isolate_state, tmp_path, mocker, monkeypatch):
+    relay_json = tmp_path / "relay.json"
+    relay_json.write_text(json.dumps({"bearer_token": "PRE-EXISTING", "port": 8771}))
+    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
+    mocker.patch("fulcra_attention.cli.service_manager.install",
+                 return_value=tmp_path / "fake")
+    res = CliRunner().invoke(cli, ["setup"])
+    assert res.exit_code == 0
+    body = json.loads(relay_json.read_text())
+    assert body["bearer_token"] == "PRE-EXISTING"
+    assert "PRE-EXISTING" in res.output
