@@ -56,19 +56,36 @@ def _to_iso_second_z(dt: datetime) -> str:
 
 @pytest.fixture
 def state() -> State:
+    # Pre-cache the identity tag so the relay's lazy ensure_tag is a cache
+    # hit (no HTTP request). The lazy-create behavior itself is tested
+    # separately in test_relay.py.
     return State(
         attention_definition_id="def-att",
-        tag_ids={"attention": "tag-a", "web": "tag-w"},
+        tag_ids={
+            "attention": "tag-a",
+            "web": "tag-w",
+            "identity:redacted@users.noreply.github.com": "tag-id-ash",
+        },
     )
 
 
 @pytest.fixture
 def capturing_client(recording_transport):
-    """FulcraClient that always returns 200 and records every request body."""
-    transport = recording_transport(
-        lambda r: httpx.Response(200, json={"ok": True})
-    )
+    """FulcraClient that always returns 200 and records every request body.
+    Tag lookups return a structured 200 so any reached ensure_tag()
+    deserialises cleanly."""
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        if "/tag/name/" in r.url.path:
+            return httpx.Response(200, json={"id": "tag-from-lookup"})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = recording_transport(responder)
     return FulcraClient(transport=transport)
+
+
+def _ingest_requests(transport) -> list:
+    return [r for r in transport.requests if r.url.path.endswith("/record/batch")]
 
 
 @pytest.fixture
@@ -140,13 +157,15 @@ def test_chrome_extension_payload_accepted_end_to_end(live_relay):
     assert status == 200, f"Relay returned {status}: {resp_body}"
     assert resp_body == {"posted": 1, "dropped": 0}
 
-    # 2. Exactly one /ingest/v1/record/batch POST was fired.
-    assert len(transport.requests) == 1, (
-        f"Expected 1 ingest request, got {len(transport.requests)}"
+    # 2. Exactly one /ingest/v1/record/batch POST was fired. (Tag lookups
+    # don't count — the identity tag is pre-cached in the state fixture.)
+    ingests = _ingest_requests(transport)
+    assert len(ingests) == 1, (
+        f"Expected 1 ingest request, got {len(ingests)}: {[r.url.path for r in transport.requests]}"
     )
 
     # 3. Decode the ingest body.
-    ingest_body_bytes = transport.requests[0].content
+    ingest_body_bytes = ingests[0].content
     event = json.loads(ingest_body_bytes)
     assert event["metadata"]["data_type"] == "DurationAnnotation"
     data = json.loads(event["data"])
@@ -233,7 +252,7 @@ def test_chrome_extension_categorized_payload_accepted(live_relay):
 
     assert status == 200, f"Relay returned {status}: {resp_body}"
 
-    ingest_body_bytes = transport.requests[0].content
+    ingest_body_bytes = _ingest_requests(transport)[0].content
     event = json.loads(ingest_body_bytes)
     data = json.loads(event["data"])
 

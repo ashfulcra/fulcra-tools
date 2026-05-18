@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from fulcra_attention.fulcra import FulcraClient
+from fulcra_attention.fulcra import CATEGORY_VOCAB, FulcraClient
 from fulcra_attention.state import State
 
 
@@ -55,7 +55,7 @@ def test_ensure_tag_uses_existing_server_side(recording_transport):
     assert state.tag_ids["web"] == "tag-existing"
 
 
-def test_ensure_definitions_creates_attention_def(recording_transport):
+def test_ensure_definitions_creates_attention_def_and_vocab(recording_transport):
     posted_defs: list[dict] = []
     posted_tags: list[dict] = []
 
@@ -76,20 +76,35 @@ def test_ensure_definitions_creates_attention_def(recording_transport):
     state = State()
     client.ensure_definitions(state)
     assert state.attention_definition_id == "def-attention"
-    assert {t["name"] for t in posted_tags} == {"attention", "web"}
+    posted_names = {t["name"] for t in posted_tags}
+    assert "attention" in posted_names
+    assert "web" in posted_names
+    # All Tier-2 vocab tags are pre-created so filters/timelines work
+    # before any domain has been categorized.
+    for slug in CATEGORY_VOCAB:
+        assert f"category:{slug}" in posted_names, f"missing vocab tag for {slug}"
     assert len(posted_defs) == 1
     d = posted_defs[0]
     assert d["name"] == "Attention"
     assert d["annotation_type"] == "duration"
+    # The Attention def only references attention + web — category tags
+    # apply per-event, not at the def level.
     assert "tag-attention" in d["tags"] and "tag-web" in d["tags"]
+    assert len(d["tags"]) == 2
 
 
-def test_ensure_definitions_skips_when_already_cached(recording_transport):
-    transport = recording_transport(lambda r: pytest.fail(f"unexpected {r.url}"))
+def test_ensure_definitions_skips_def_post_when_already_cached(recording_transport):
+    """Def re-creation is skipped, but vocab tags are still re-ensured (cache hit only)."""
+    pre_cached = {"attention": "a", "web": "w"}
+    for slug in CATEGORY_VOCAB:
+        pre_cached[f"category:{slug}"] = f"t-{slug}"
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        # Should never be called because everything is cached.
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+
+    transport = recording_transport(responder)
     client = FulcraClient(transport=transport)
-    state = State(
-        attention_definition_id="def-x",
-        tag_ids={"attention": "a", "web": "w"},
-    )
+    state = State(attention_definition_id="def-x", tag_ids=pre_cached)
     client.ensure_definitions(state)
     assert state.attention_definition_id == "def-x"

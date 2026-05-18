@@ -5,6 +5,7 @@ import json as _json
 import os as _os
 import secrets as _secrets
 import shutil as _shutil
+import socket as _socket
 import stat as _stat
 from pathlib import Path as _Path
 
@@ -48,15 +49,28 @@ def _load_or_create_relay_json(port: int = 8771) -> dict:
 
 
 @cli.command(help="Generate bearer token and install the relay as a system service.")
-def setup() -> None:
+@click.option(
+    "--hostname",
+    default=None,
+    help="Override autodetected hostname for the `machine:<host>` tag.",
+)
+def setup(hostname: str | None) -> None:
     s = state_mod.load(state_mod.DEFAULT_PATH)
     if not s.attention_definition_id:
         raise click.ClickException(
             "Run `fulcra-attention bootstrap` first — no Attention definition exists."
         )
+    detected = (hostname or _socket.gethostname()).strip().lower()
+    # Strip ".local" / ".lan" / etc. so the tag stays portable across networks.
+    short = detected.split(".", 1)[0] or detected
+    client = FulcraClient()
+    client.ensure_machine_tag(short, s)
+    s.hostname = short
+    state_mod.save(s, state_mod.DEFAULT_PATH)
     relay = _load_or_create_relay_json()
     exe = _shutil.which("fulcra-attention") or "fulcra-attention"
     path = service_manager.install(executable=exe)
+    click.echo(f"Hostname:     {short} (tag: machine:{short})")
     click.echo(f"Bearer token: {relay['bearer_token']}")
     click.echo(f"Port:         {relay['port']}")
     click.echo(f"Service file: {path}")
@@ -70,6 +84,7 @@ def status() -> None:
     click.echo(_json.dumps(
         {
             "attention_definition_id": s.attention_definition_id,
+            "hostname": s.hostname,
             "tag_ids": s.tag_ids,
             "watermarks": s.watermarks,
         },

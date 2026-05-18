@@ -19,6 +19,29 @@ from .state import State
 
 DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
 
+# Tier 2 vocabulary, mirrored in chrome/src/categorize.ts. Pre-created at
+# bootstrap so users can build filters/timelines against a known set even
+# before they've categorized any domains. Add new slugs to both sides.
+CATEGORY_VOCAB: tuple[str, ...] = (
+    "search",
+    "webmail",
+    "ai-chat",
+    "dm",
+    "doc-editor",
+    "reddit-thread",
+    "calendar",
+    "banking",
+    "brokerage",
+    "crypto",
+    "tax",
+    "healthcare",
+    "password-manager",
+    "mental-health",
+    "dating",
+    "adult",
+    "job-hunting",
+)
+
 
 class FulcraClient:
     def __init__(
@@ -86,10 +109,16 @@ class FulcraClient:
         return tag_id
 
     def ensure_definitions(self, state: State) -> None:
-        if state.attention_definition_id:
-            return
+        # ensure_tag is cache-first so safe to call on every bootstrap.
+        # Always re-ensures vocab tags even if the def already exists, so a
+        # bootstrap on an old account back-fills the new tag schema.
         attention = self.ensure_tag("attention", state)
         web = self.ensure_tag("web", state)
+        # Pre-create category tags (Tier 2 vocabulary).
+        for slug in CATEGORY_VOCAB:
+            self.ensure_tag(f"category:{slug}", state)
+        if state.attention_definition_id:
+            return
         body = {
             "annotation_type": "duration",
             "name": "Attention",
@@ -108,6 +137,10 @@ class FulcraClient:
         )
         r.raise_for_status()
         state.attention_definition_id = r.json()["id"]
+
+    def ensure_machine_tag(self, hostname: str, state: State) -> str:
+        """Create / look up the `machine:<hostname>` tag. Called by `setup`."""
+        return self.ensure_tag(f"machine:{hostname}", state)
 
     def soft_delete_definition(self, definition_id: str) -> bool:
         r = self._client().delete(

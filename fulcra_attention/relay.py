@@ -144,6 +144,22 @@ class AttentionHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "bad payload", "message": str(exc)})
             return
 
+        # Lazy-create identity:<chrome_identity> tag. Done in the relay
+        # (not in build_attention_event) because tag creation is a network
+        # call — keep ingest.py pure / side-effect-free.
+        identity = payload.get("chrome_identity")
+        if identity:
+            tag_key = f"identity:{identity}"
+            if tag_key not in ctx.state.tag_ids:
+                try:
+                    ctx.client.ensure_tag(tag_key, ctx.state)
+                    from . import state as state_mod
+                    state_mod.save(ctx.state, state_mod.DEFAULT_PATH)
+                except Exception:
+                    # Don't block ingest on identity-tag failure; the event
+                    # will just lack the identity tag this round.
+                    pass
+
         try:
             event = build_attention_event(payload, state=ctx.state)
         except (KeyError, ValueError) as exc:
