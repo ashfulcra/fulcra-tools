@@ -19,6 +19,7 @@ dev = [
     # stay compatible with that constraint until upstream loosens it.
     "pytest>=7.4,<8",
     "pytest-mock>=3.12",
+    "ruff>=0.5",
 ]
 
 [project.scripts]
@@ -30,3 +31,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["fulcra_attention*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
