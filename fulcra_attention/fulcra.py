@@ -99,3 +99,26 @@ class FulcraClient:
         )
         r.raise_for_status()
         state.attention_definition_id = r.json()["id"]
+
+    def ingest_batch(self, events: list[dict]) -> None:
+        """POST a JSONL batch of already-built events to /ingest/v1/record/batch.
+
+        Each event must be a dict with `specversion`, `data`, `metadata` keys
+        (the wire format documented in the spec). Source-id idempotency is the
+        caller's responsibility — building the deterministic source-id lives
+        in ingest.py.
+        """
+        import json as _json  # local to avoid shadowing
+        if not events:
+            return
+        lines = [_json.dumps(e, sort_keys=True).encode() for e in events]
+        body = b"\n".join(lines)
+        r = self._client().post(
+            "/ingest/v1/record/batch",
+            content=body,
+            headers={
+                **self._authed_headers(),
+                "content-type": "application/x-jsonl",
+            },
+        )
+        r.raise_for_status()
