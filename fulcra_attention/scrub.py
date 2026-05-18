@@ -1,0 +1,43 @@
+"""Tier 1 URL scrubbing — pure function.
+
+Strip auth-bearing query params, tracking params, one-click action tokens.
+Whole fragment dropped by default (covers OAuth Implicit Flow + Slack/Notion
+magic-share links).
+
+Cross-language contract: a sibling TypeScript implementation in the Chrome
+extension (Plan B) must produce identical output for identical input.
+Shared fixture file lives in `tests/fixtures/scrub_cases.json` (Plan B).
+"""
+from __future__ import annotations
+
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+# Lowercase for case-insensitive matching.
+DENYLIST: frozenset[str] = frozenset({
+    # auth-bearing
+    "access_token", "id_token", "refresh_token", "code", "state", "nonce",
+    "client_secret", "assertion", "session", "sid", "sessionid", "auth",
+    "authorization", "token", "apikey", "api_key", "key", "signature",
+    "sig", "hmac", "x-amz-signature", "x-amz-credential",
+    "x-amz-security-token", "expires", "password", "pwd", "pw", "otp",
+    "magic", "share_token", "invite", "confirmation_token",
+    "_csrf", "csrf_token", "xsrf", "ticket", "ott",
+    # tracking
+    "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+    "gclid", "fbclid", "msclkid", "mc_eid", "mc_cid", "_hsenc", "_hsmi",
+    "igshid", "yclid", "ref", "ref_src", "ref_url",
+    # one-click action tokens
+    "unsubscribe", "unsub", "verify", "reset", "confirm", "activate",
+})
+
+
+def scrub_url(url: str) -> str:
+    """Return `url` with denylisted query params and the entire fragment dropped.
+
+    Pure function. Preserves param order of surviving entries.
+    """
+    parts = urlsplit(url)
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    kept = [(k, v) for (k, v) in pairs if k.lower() not in DENYLIST]
+    new_query = urlencode(kept)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, ""))
