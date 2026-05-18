@@ -149,11 +149,33 @@ Content-Type: application/json
   "og_description": "A 2026 reflection on...", // null when missing or categorized
   "favicon_url": "https://example.com/fav.ico",// null when missing or categorized
   "category": null,                             // string slug when categorized
+
+  // Context enrichment (all optional; null when unknown)
+  "chrome_identity": "ash@fulcradynamics.com",  // Google account in this Chrome profile,
+                                                 // OR a user-set label ("Work"/"Personal"/...)
+                                                 // OR null when neither is available
+  "og_type": "article",                         // <meta property="og:type">
+  "lang": "en",                                  // <html lang="...">
+
   "start_time": "2026-05-18T14:23:08.412Z",
   "end_time":   "2026-05-18T14:35:42.108Z",
   "client": "fulcra-attention-chrome/0.1.0"
 }
 ```
+
+### Chrome identity capture
+
+The extension fills `chrome_identity` from one of two sources, in order:
+1. `chrome.identity.getProfileUserInfo({accountStatus: 'ANY'})` — returns the email of the Google account signed into this Chrome profile. Stable, distinguishes work/personal Google accounts.
+2. If empty (profile not signed into Google), the user-configured label in the popup ("Work", "Personal", "Side Project", etc.). Persisted in `chrome.storage.local`. Null until set.
+
+The relay treats `chrome_identity` as an opaque string. No server-side validation.
+
+### Contextual tags policy
+
+Static server-side tags (created at bootstrap, applied to every event): `attention`, `web`. No more — Fulcra tags require pre-created UUIDs, so dynamic-value tags (like one per host or one per language) would explode the namespace.
+
+Dynamic context lives in `external_ids` (free-form key/value), where it's queryable but doesn't require server-side schema. The four enrichment fields above (`chrome_identity`, `og_type`, `lang`, `host`) all land there.
 
 **Validation at relay:**
 - Bearer token matches `~/.config/fulcra-attention/relay.json`
@@ -179,7 +201,10 @@ The relay converts the ping to a `DurationAnnotation` payload under the `Attenti
     "parent_source_id": null,                            // reserved for v2 highlights
     "external_ids": {
       "client": "fulcra-attention-chrome/0.1.0",
-      "host": "example.com"                              // null if categorized
+      "host": "example.com",                             // null if categorized
+      "chrome_identity": "ash@fulcradynamics.com",       // null if unavailable
+      "og_type": "article",                              // null if missing
+      "lang": "en"                                       // null if missing
     }
   },
   "metadata": {
