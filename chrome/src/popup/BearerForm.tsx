@@ -39,9 +39,9 @@ export function BearerForm() {
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
-        <button onClick={save}>Save</button>
+        <button className="primary" onClick={save}>Save</button>
       </div>
-      {saved && <div className="muted">Saved.</div>}
+      {saved && <span className="saved-flash">✓ Saved</span>}
     </div>
   );
 }

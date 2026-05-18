@@ -33,7 +33,10 @@ export function IgnoreList() {
 
   return (
     <div className="section">
-      <div className="muted">Ignore list (Tier 3 — dropped entirely; syncs across Chrome profiles)</div>
+      <h2>Ignore list</h2>
+      <div className="muted" style={{ marginBottom: 6 }}>
+        Dropped entirely. Syncs across your Chrome profiles.
+      </div>
       <div className="row">
         <input
           type="text"
@@ -48,8 +51,8 @@ export function IgnoreList() {
         {list.length === 0 && <div className="muted">(empty)</div>}
         {list.map((e) => (
           <div key={e.pattern} className="ignore-row">
-            <span>{e.pattern}</span>
-            <button onClick={() => void remove(e.pattern)}>×</button>
+            <span style={{ flex: 1 }}>{e.pattern}</span>
+            <button onClick={() => void remove(e.pattern)} aria-label={`Remove ${e.pattern}`}>×</button>
           </div>
         ))}
       </div>

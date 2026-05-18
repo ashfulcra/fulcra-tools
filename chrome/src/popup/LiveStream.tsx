@@ -43,13 +43,14 @@ export function LiveStream() {
   if (recent.length === 0) {
     return (
       <div className="section">
-        <div className="muted">No events captured yet. Visit a page in another tab.</div>
+        <h2>Recent</h2>
+        <div className="muted">No events yet — visit a page in another tab.</div>
       </div>
     );
   }
   return (
     <div className="section">
-      <div className="muted">Last 5 captured (auto-refreshes)</div>
+      <h2>Recent</h2>
       {recent.map((ev, i) => <Row key={`${ev.end_time}-${i}`} ev={ev} />)}
     </div>
   );

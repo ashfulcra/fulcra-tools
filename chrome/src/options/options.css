@@ -1,0 +1,89 @@
+/* Options page — shares the same brand palette as popup.css but for
+ * a wider, single-column document. Imports Rubik from Google Fonts. */
+
+@import url("https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
+
+:root {
+  color-scheme: light;
+  --fa-bg: #ffffff;
+  --fa-ink: #0c1023;
+  --fa-ink-2: #16161d;
+  --fa-muted: #475068;
+  --fa-mute-2: #758696;
+  --fa-mint: #56d6b7;
+  --fa-purple: #7b61ff;
+  --fa-edge: #e4ebf3;
+  --fa-surface: #fafafa;
+}
+
+body {
+  margin: 0;
+  background: var(--fa-bg);
+  color: var(--fa-ink-2);
+  font-family: "Rubik", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.options {
+  max-width: 680px;
+  margin: 40px auto;
+  padding: 0 24px 80px;
+}
+
+.options-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--fa-edge);
+  margin-bottom: 28px;
+}
+.options-header .logo {
+  width: 28px;
+  height: 28px;
+  color: var(--fa-ink);
+}
+.options-header h1 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+  color: var(--fa-ink);
+}
+.options-header .sub {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fa-mute-2);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.options h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 28px 0 10px;
+  color: var(--fa-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.options p { color: var(--fa-ink-2); margin: 0 0 12px; }
+.options p.muted { color: var(--fa-muted); }
+.options code {
+  font-family: "Noto Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: var(--fa-surface);
+  border: 1px solid var(--fa-edge);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.options a {
+  color: var(--fa-purple);
+  text-decoration: none;
+  font-weight: 500;
+}
+.options a:hover { text-decoration: underline; }
