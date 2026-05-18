@@ -4,31 +4,31 @@
 
 import { vi } from "vitest";
 
-const memStore: Record<string, unknown> = {};
-
 function makeArea() {
+  // Each area gets its own independent backing store.
+  const store: Record<string, unknown> = {};
   return {
     get: vi.fn(async (keys?: string | string[] | Record<string, unknown> | null) => {
-      if (keys == null) return { ...memStore };
-      if (typeof keys === "string") return { [keys]: memStore[keys] };
+      if (keys == null) return { ...store };
+      if (typeof keys === "string") return { [keys]: store[keys] };
       if (Array.isArray(keys)) {
         const out: Record<string, unknown> = {};
-        for (const k of keys) out[k] = memStore[k];
+        for (const k of keys) out[k] = store[k];
         return out;
       }
       const out: Record<string, unknown> = {};
-      for (const k of Object.keys(keys)) out[k] = memStore[k] ?? (keys as Record<string, unknown>)[k];
+      for (const k of Object.keys(keys)) out[k] = store[k] ?? (keys as Record<string, unknown>)[k];
       return out;
     }),
     set: vi.fn(async (items: Record<string, unknown>) => {
-      Object.assign(memStore, items);
+      Object.assign(store, items);
     }),
     remove: vi.fn(async (keys: string | string[]) => {
       const arr = Array.isArray(keys) ? keys : [keys];
-      for (const k of arr) delete memStore[k];
+      for (const k of arr) delete store[k];
     }),
     clear: vi.fn(async () => {
-      for (const k of Object.keys(memStore)) delete memStore[k];
+      for (const k of Object.keys(store)) delete store[k];
     }),
   };
 }
