@@ -35,9 +35,23 @@ export async function flushOutbox(): Promise<void> {
   if (entries.length === 0) return;
 
   const remaining: OutboxEntry[] = [];
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 5;
+  const REQUEST_TIMEOUT_MS = 10_000;
+  let aborted = false;
+
   for (const entry of entries) {
+    // Bail out early if the relay is clearly unreachable. Keep remaining
+    // entries in the outbox — the next alarm tick retries.
+    if (aborted) {
+      remaining.push(entry);
+      continue;
+    }
+
     let ok = false;
     let permanentFail = false;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
     try {
       const resp = await fetch(RELAY_URL, {
         method: "POST",
@@ -46,15 +60,30 @@ export async function flushOutbox(): Promise<void> {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(entry.payload),
+        signal: ac.signal,
       });
       if (resp.status === 200) ok = true;
       else if (resp.status >= 400 && resp.status < 500) permanentFail = true;
     } catch {
-      // Network error — keep for retry.
+      // Network error / abort — keep for retry.
+    } finally {
+      clearTimeout(timer);
     }
-    if (ok) continue;
-    if (permanentFail) continue;
+
+    if (ok) {
+      consecutiveFailures = 0;
+      continue;
+    }
+    if (permanentFail) {
+      consecutiveFailures = 0;
+      continue;  // drop entry
+    }
+    // Transient failure — keep and bump attempts.
     remaining.push({ ...entry, attempts: entry.attempts + 1 });
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      aborted = true;
+    }
   }
   await saveOutbox(remaining);
 }

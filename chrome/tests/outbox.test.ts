@@ -104,4 +104,36 @@ describe("flushOutbox", () => {
     await flushOutbox();
     expect(await loadOutbox()).toHaveLength(0);
   });
+
+  test("bails out after 5 consecutive network failures and keeps remaining entries", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    // Queue 10 entries.
+    for (let i = 0; i < 10; i++) {
+      await addToOutbox(makeEvent(`https://x${i}.com/`));
+    }
+    // Every request fails with a network error.
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Network error"));
+    await flushOutbox();
+    // First 5 attempted (counted as failures), bail aborts the rest.
+    // All 10 should still be in the outbox (5 with attempts=1, 5 with attempts=0).
+    const ob = await loadOutbox();
+    expect(ob).toHaveLength(10);
+    const withAttempts = ob.filter((e) => e.attempts === 1);
+    const fresh = ob.filter((e) => e.attempts === 0);
+    expect(withAttempts).toHaveLength(5);
+    expect(fresh).toHaveLength(5);
+  });
+
+  test("uses AbortController with 10s timeout per fetch", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await addToOutbox(makeEvent());
+    let observedSignal: AbortSignal | undefined;
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      observedSignal = (init as RequestInit).signal as AbortSignal;
+      return new Response('{"posted":1}', { status: 200 });
+    });
+    await flushOutbox();
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal).toBeInstanceOf(AbortSignal);
+  });
 });
