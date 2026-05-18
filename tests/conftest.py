@@ -1,33 +1,35 @@
-"""Shared pytest fixtures."""
+"""Shared test fixtures."""
+
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
-from typing import Any
 
 import httpx
 import pytest
 
 
+class RecordingTransport(httpx.MockTransport):
+    """MockTransport that records every request it sees."""
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.requests: list[httpx.Request] = []
+        self.bodies: list[bytes] = []
+
+        def wrapper(request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            self.bodies.append(request.content)
+            return handler(request)
+
+        super().__init__(wrapper)
+
+
 @pytest.fixture
-def recording_transport() -> Callable[..., httpx.MockTransport]:
-    """Factory for a MockTransport that records every outgoing request.
+def recording_transport():
+    def make(handler: Callable[[httpx.Request], httpx.Response]) -> RecordingTransport:
+        return RecordingTransport(handler)
+    return make
 
-    Usage:
-        def test_x(recording_transport):
-            transport = recording_transport(lambda r: httpx.Response(200, json={"id": "x"}))
-            # transport.requests is the list of httpx.Request objects observed
-    """
-    def _factory(
-        responder: Callable[[httpx.Request], httpx.Response]
-    ) -> httpx.MockTransport:
-        requests: list[httpx.Request] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(request)
-            return responder(request)
-
-        t = httpx.MockTransport(handler)
-        t.requests = requests  # type: ignore[attr-defined]
-        return t
-
-    return _factory
+def json_response(status: int, body: dict | list) -> httpx.Response:
+    return httpx.Response(status, content=json.dumps(body).encode(), headers={"content-type": "application/json"})
