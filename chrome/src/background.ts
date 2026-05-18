@@ -487,6 +487,15 @@ chrome.runtime.onStartup.addListener(() => {
   void flushOutbox();
 });
 
+// Auto-open the onboarding wizard on first install. Skipped on
+// update/upgrade so existing users don't get spammed with a tab on
+// every refresh.
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === "install") {
+    void chrome.tabs.create({ url: chrome.runtime.getURL("wizard.html") });
+  }
+});
+
 chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: FLUSH_INTERVAL_MIN });
 chrome.alarms.create(SWEEP_ALARM, { periodInMinutes: SWEEP_INTERVAL_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {

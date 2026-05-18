@@ -1,0 +1,213 @@
+/* Wizard — full-tab page with the same fulcra.ai-on-white palette as
+ * the popup and options. Sized for a comfortable desktop reading column. */
+
+@import url("https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
+
+:root {
+  color-scheme: light;
+  --fa-bg: #ffffff;
+  --fa-ink: #0c1023;
+  --fa-ink-2: #16161d;
+  --fa-muted: #475068;
+  --fa-mute-2: #758696;
+  --fa-mint: #56d6b7;
+  --fa-mint-2: #2bd4c4;
+  --fa-purple: #7b61ff;
+  --fa-purple-2: #9b7cff;
+  --fa-edge: #e4ebf3;
+  --fa-surface: #fafafa;
+  --fa-danger: #d92638;
+}
+
+body {
+  margin: 0;
+  background: var(--fa-bg);
+  color: var(--fa-ink-2);
+  font-family: "Rubik", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wizard {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 40px 28px 100px;
+}
+
+.wizard-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--fa-edge);
+  margin-bottom: 24px;
+}
+.wizard-header .logo {
+  width: 28px; height: 28px; color: var(--fa-ink);
+}
+.wizard-header h1 {
+  font-size: 22px; font-weight: 600; margin: 0;
+  letter-spacing: -0.01em; color: var(--fa-ink);
+}
+.wizard-header .step-tag {
+  margin-left: auto;
+  font-size: 12px; font-weight: 500;
+  color: var(--fa-purple); background: rgba(123, 97, 255, 0.10);
+  padding: 4px 10px; border-radius: 999px;
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+
+.wizard h2 {
+  font-size: 18px; font-weight: 600;
+  margin: 0 0 8px; color: var(--fa-ink);
+  letter-spacing: -0.01em;
+}
+.wizard h3 {
+  font-size: 13px; font-weight: 600;
+  margin: 24px 0 8px; color: var(--fa-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.wizard p { color: var(--fa-ink-2); margin: 0 0 14px; max-width: 60ch; }
+.wizard p.muted { color: var(--fa-muted); font-size: 13px; }
+
+.wizard code {
+  font-family: "Noto Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: var(--fa-surface);
+  border: 1px solid var(--fa-edge);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+/* ---- form controls ---- */
+input[type="text"], input[type="password"], input[type="number"], select {
+  padding: 9px 11px;
+  border: 1px solid var(--fa-edge);
+  border-radius: 6px;
+  font: inherit;
+  color: var(--fa-ink-2);
+  background: var(--fa-bg);
+}
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--fa-purple);
+  box-shadow: 0 0 0 3px rgba(123, 97, 255, 0.18);
+}
+
+input[type="checkbox"] { accent-color: var(--fa-mint); cursor: pointer; }
+
+button {
+  padding: 9px 16px;
+  border: 1px solid var(--fa-edge);
+  background: var(--fa-bg);
+  color: var(--fa-ink);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit; font-weight: 500;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+button:hover { background: var(--fa-surface); border-color: var(--fa-mute-2); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.primary {
+  background: var(--fa-ink); border-color: var(--fa-ink); color: var(--fa-bg);
+}
+button.primary:hover {
+  background: var(--fa-purple); border-color: var(--fa-purple);
+}
+button.danger {
+  border-color: var(--fa-danger); color: var(--fa-danger);
+}
+button.danger:hover { background: rgba(217, 38, 56, 0.05); }
+
+.action-row {
+  display: flex; gap: 10px; align-items: center;
+  margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--fa-edge);
+}
+.action-row .spacer { flex: 1; }
+
+/* ---- step: filter list ---- */
+.toolbar {
+  display: flex; gap: 12px; align-items: center;
+  margin-bottom: 14px; flex-wrap: wrap;
+}
+.toolbar .search { flex: 1; min-width: 200px; }
+
+.presets {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 10px; margin-bottom: 18px;
+}
+.preset-card {
+  border: 1px solid var(--fa-edge); border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--fa-bg);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.preset-card:hover { border-color: var(--fa-mute-2); }
+.preset-card.on {
+  border-color: var(--fa-mint);
+  background: rgba(86, 214, 183, 0.06);
+}
+.preset-card .pname { font-weight: 600; color: var(--fa-ink); display: block; margin-bottom: 4px; }
+.preset-card .pdesc { font-size: 12px; color: var(--fa-muted); }
+
+.domain-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--fa-edge); border-radius: 6px;
+  overflow: hidden;
+}
+.domain-table th, .domain-table td {
+  text-align: left; padding: 8px 12px;
+  border-bottom: 1px solid var(--fa-edge);
+}
+.domain-table th {
+  background: var(--fa-surface);
+  font-size: 12px; font-weight: 600;
+  color: var(--fa-muted); text-transform: uppercase; letter-spacing: 0.04em;
+}
+.domain-table tr:last-child td { border-bottom: none; }
+.domain-table tr.excluded td { color: var(--fa-mute-2); text-decoration: line-through; }
+.domain-table tr.excluded td .badge { text-decoration: none; }
+.domain-table tr.excluded-by-preset td { color: var(--fa-mute-2); }
+.domain-table tr.excluded-by-preset td .badge {
+  background: rgba(86, 214, 183, 0.18); color: #0e6a55;
+}
+.domain-table td.count {
+  font-family: "Noto Sans Mono", monospace; text-align: right; width: 80px;
+}
+.badge {
+  display: inline-block; padding: 1px 6px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 500;
+  background: rgba(123, 97, 255, 0.13); color: #4a31bd;
+}
+.scrollbox {
+  max-height: 480px; overflow-y: auto;
+  border: 1px solid var(--fa-edge); border-radius: 6px;
+}
+
+/* ---- step: progress ---- */
+.progress-track {
+  width: 100%; height: 8px;
+  background: var(--fa-edge); border-radius: 999px;
+  overflow: hidden;
+  margin: 12px 0 6px;
+}
+.progress-fill {
+  height: 100%; background: var(--fa-mint);
+  transition: width 200ms ease;
+}
+.progress-label {
+  font-family: "Noto Sans Mono", monospace; font-size: 12px;
+  color: var(--fa-muted);
+}
+
+/* ---- step: done ---- */
+.done-card {
+  border: 1px solid var(--fa-mint);
+  background: rgba(86, 214, 183, 0.05);
+  border-radius: 8px;
+  padding: 18px 20px;
+  margin: 16px 0;
+}

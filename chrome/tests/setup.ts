@@ -65,9 +65,14 @@ function makeArea() {
   },
   runtime: {
     onStartup: { addListener: vi.fn() },
+    onInstalled: { addListener: vi.fn() },
     onSuspend: { addListener: vi.fn() },
     onMessage: { addListener: vi.fn() },
     sendMessage: vi.fn(),
+    getURL: vi.fn((path: string) => `chrome-extension://stub/${path}`),
+  },
+  history: {
+    search: vi.fn(async () => []),
   },
   scripting: {
     executeScript: vi.fn(),

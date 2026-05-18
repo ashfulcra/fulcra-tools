@@ -20,9 +20,13 @@ describe("settings", () => {
     expect(await loadSettings()).toEqual(DEFAULT_SETTINGS);
   });
   test("saveSettings then loadSettings round-trips", async () => {
-    await saveSettings({ bearerToken: "x", relayPort: 8771, enabled: false, identityLabel: "Work" });
+    await saveSettings({
+      bearerToken: "x", relayPort: 8771, enabled: false,
+      identityLabel: "Work", onboarded: true,
+    });
     expect(await loadSettings()).toEqual({
-      bearerToken: "x", relayPort: 8771, enabled: false, identityLabel: "Work",
+      bearerToken: "x", relayPort: 8771, enabled: false,
+      identityLabel: "Work", onboarded: true,
     });
   });
 });

@@ -16,5 +16,12 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      // wizard.html is opened in a tab via chrome.tabs.create — it isn't
+      // referenced by manifest.json, so we tell rollup explicitly.
+      input: {
+        wizard: "wizard.html",
+      },
+    },
   },
 });

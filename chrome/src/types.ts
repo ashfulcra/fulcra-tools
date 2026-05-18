@@ -28,6 +28,7 @@ export interface Settings {
   relayPort: number;       // default 8771
   enabled: boolean;        // master kill switch
   identityLabel: string | null;  // user override; null means use chrome.identity.getProfileUserInfo
+  onboarded: boolean;            // true once the wizard finished (any step beyond Welcome)
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -35,6 +36,7 @@ export const DEFAULT_SETTINGS: Settings = {
   relayPort: 8771,
   enabled: true,
   identityLabel: null,
+  onboarded: false,
 };
 
 /** One entry in the Tier 3 ignore list (chrome.storage.sync). */
