@@ -29,6 +29,15 @@ def test_save_creates_nested_parent_dirs(tmp_path: Path):
     assert p.exists()
 
 
+def test_save_writes_mode_0600(tmp_path: Path):
+    """state.json contains def UUIDs and tag UUIDs — same posture as relay.json."""
+    import stat
+    p = tmp_path / "state.json"
+    save(State(attention_definition_id="x"), p)
+    mode = stat.S_IMODE(p.stat().st_mode)
+    assert mode == 0o600
+
+
 def test_load_tolerates_missing_optional_fields(tmp_path: Path):
     p = tmp_path / "state.json"
     p.write_text(json.dumps({"attention_definition_id": "def-x"}))

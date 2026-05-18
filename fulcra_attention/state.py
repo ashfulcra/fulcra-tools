@@ -40,3 +40,4 @@ def load(path: Path = DEFAULT_PATH) -> State:
 def save(state: State, path: Path = DEFAULT_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(state), indent=2, sort_keys=True))
+    os.chmod(path, 0o600)

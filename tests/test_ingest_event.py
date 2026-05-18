@@ -143,6 +143,24 @@ def test_build_event_source_id_category_keyed_when_categorized(state: State):
     assert ev["metadata"]["source"][0].startswith("com.fulcra.attention.v1.")
 
 
+def test_build_event_url_is_scrubbed_defense_in_depth(state: State):
+    """If a client POSTs a URL with an auth-bearing param, it MUST be stripped
+    before landing in Fulcra. Defense in depth — the extension also scrubs
+    client-side, but the relay enforces."""
+    payload = {
+        "url": "https://example.com/page?access_token=DEADBEEF&id=42",
+        "title": "T",
+        "category": None,
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(payload, state=state)
+    data = json.loads(ev["data"])
+    assert data["url"] == "https://example.com/page?id=42"
+    assert "access_token" not in data["url"]
+
+
 def test_build_event_strips_fractional_seconds_from_recorded_at(state: State):
     p = {
         "url": "https://x.com/",
