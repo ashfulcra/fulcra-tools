@@ -49,6 +49,11 @@ def _load_or_create_relay_json(port: int = 8771) -> dict:
 
 @cli.command(help="Generate bearer token and install the relay as a system service.")
 def setup() -> None:
+    s = state_mod.load(state_mod.DEFAULT_PATH)
+    if not s.attention_definition_id:
+        raise click.ClickException(
+            "Run `fulcra-attention bootstrap` first — no Attention definition exists."
+        )
     relay = _load_or_create_relay_json()
     exe = _shutil.which("fulcra-attention") or "fulcra-attention"
     path = service_manager.install(executable=exe)
