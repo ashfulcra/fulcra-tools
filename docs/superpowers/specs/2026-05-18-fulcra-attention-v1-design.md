@@ -165,11 +165,21 @@ Content-Type: application/json
 
 ### Chrome identity capture
 
-The extension fills `chrome_identity` from one of two sources, in order:
-1. `chrome.identity.getProfileUserInfo({accountStatus: 'ANY'})` — returns the email of the Google account signed into this Chrome profile. Stable, distinguishes work/personal Google accounts.
-2. If empty (profile not signed into Google), the user-configured label in the popup ("Work", "Personal", "Side Project", etc.). Persisted in `chrome.storage.local`. Null until set.
+Users typically have multiple Chrome profiles for distinct contexts — e.g. one per client/company they work with, plus a personal profile. Concrete example:
 
-The relay treats `chrome_identity` as an opaque string. No server-side validation.
+| Chrome profile | Google account signed in | `chrome_identity` value |
+|---|---|---|
+| Fulcra (employer) | `ash@fulcradynamics.com` | `ash@fulcradynamics.com` |
+| Acme Corp (consulting) | `ash@acmecorp.com` | `ash@acmecorp.com` |
+| BetaCo (consulting) | `ash@betaco.com` | `ash@betaco.com` |
+| Personal | `ash.personal@gmail.com` | `ash.personal@gmail.com` |
+| Side project (no Google sign-in) | — | (user-set popup label, e.g. `"OSS"`) |
+
+The extension fills `chrome_identity` from one of two sources, in order:
+1. `chrome.identity.getProfileUserInfo({accountStatus: 'ANY'})` — returns the email of the Google account signed into this Chrome profile. Most users with multiple work contexts use distinct Google accounts per company; the email naturally encodes the company via its domain, so no extra config is needed for that case.
+2. If empty (profile not signed into Google), a **free-text user-configurable label** in the popup. Persisted in `chrome.storage.local`. Defaults to null; user types whatever string makes sense for them (`"OSS"`, `"Open-source side-project"`, `"Volunteer board"`, etc.). Not constrained to an enum.
+
+The relay treats `chrome_identity` as an opaque string. No server-side validation. Querying by company at retrieval time is straightforward: group by `external_ids.chrome_identity` exact match, or by email-domain substring for "show me everything under @acmecorp.com last week" use cases.
 
 ### Contextual tags policy
 
