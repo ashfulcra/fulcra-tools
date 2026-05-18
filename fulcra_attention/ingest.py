@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
+from .scrub import scrub_url
 from .state import State
 
 SOURCE_PREFIX = "com.fulcra.attention.v1."
@@ -46,6 +47,8 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
     bearer token, time bounds. We trust the payload here.
     """
     url = payload.get("url")
+    if url is not None:
+        url = scrub_url(url)
     category = payload.get("category")
     title = payload.get("title")
     og_description = payload.get("og_description")
