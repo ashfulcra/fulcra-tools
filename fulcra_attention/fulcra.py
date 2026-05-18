@@ -101,6 +101,18 @@ class FulcraClient:
         r.raise_for_status()
         state.attention_definition_id = r.json()["id"]
 
+    def soft_delete_definition(self, definition_id: str) -> bool:
+        r = self._client().delete(
+            f"/user/v1alpha1/annotation/{definition_id}",
+            headers=self._authed_headers(),
+        )
+        if r.status_code == 204:
+            return True
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        return False
+
     def ingest_batch(self, events: list[dict]) -> None:
         """POST a JSONL batch of already-built events to /ingest/v1/record/batch.
 
