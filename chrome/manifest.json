@@ -11,7 +11,8 @@
     "activeTab",
     "contextMenus",
     "identity",
-    "scripting"
+    "scripting",
+    "idle"
   ],
   "host_permissions": [
     "http://127.0.0.1:8771/*"

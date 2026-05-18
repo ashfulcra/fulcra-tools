@@ -1,6 +1,6 @@
 // chrome/src/storage.ts
 import type {
-  Settings, IgnoreEntry, CategoryMapping, OutboxEntry, ActiveVisit,
+  Settings, IgnoreEntry, CategoryMapping, OutboxEntry, Visit,
 } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 
@@ -38,11 +38,17 @@ export async function saveIgnoreList(entries: IgnoreEntry[]): Promise<void> {
   await chrome.storage.sync.set({ ignoreList: entries });
 }
 
-// chrome.storage.session — in-memory, cleared on browser restart
-export async function loadActiveVisits(): Promise<Record<number, ActiveVisit>> {
-  const r = await chrome.storage.session.get("activeVisits");
-  return (r.activeVisits as Record<number, ActiveVisit> | undefined) ?? {};
+// chrome.storage.session — in-memory, cleared on browser restart.
+// A single map keyed by tabId. At most one entry has state="focused".
+export async function loadVisits(): Promise<Record<number, Visit>> {
+  const r = await chrome.storage.session.get("visits");
+  return (r.visits as Record<number, Visit> | undefined) ?? {};
 }
-export async function saveActiveVisits(v: Record<number, ActiveVisit>): Promise<void> {
-  await chrome.storage.session.set({ activeVisits: v });
+export async function saveVisits(v: Record<number, Visit>): Promise<void> {
+  await chrome.storage.session.set({ visits: v });
 }
+
+// Back-compat alias for tests + popup. Used to be `loadActiveVisits` —
+// the renamed key signals the new state machine semantics.
+export const loadActiveVisits = loadVisits;
+export const saveActiveVisits = saveVisits;

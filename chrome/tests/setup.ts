@@ -50,11 +50,18 @@ function makeArea() {
   },
   tabs: {
     get: vi.fn(),
+    query: vi.fn(async () => []),
+    onActivated: { addListener: vi.fn() },
     onRemoved: { addListener: vi.fn() },
   },
   windows: {
+    get: vi.fn(),
     onFocusChanged: { addListener: vi.fn() },
     WINDOW_ID_NONE: -1,
+  },
+  idle: {
+    setDetectionInterval: vi.fn(),
+    onStateChanged: { addListener: vi.fn() },
   },
   runtime: {
     onStartup: { addListener: vi.fn() },

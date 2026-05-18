@@ -57,12 +57,44 @@ export interface OutboxEntry {
   attempts: number;
 }
 
-/** Active visit being timed in chrome.storage.session. Keyed by tabId. */
-export interface ActiveVisit {
+/**
+ * A visit attached to a specific tab. At most one visit at a time is in
+ * `focused` state (the active tab of the focused window with the user
+ * not-idle). Background tabs that were never focused never get a visit.
+ *
+ * `state="focused"`  — the user is actively looking at this tab. While
+ *                      focused, accumulatedFocusMs is NOT updated; the
+ *                      current focus period contributes
+ *                      (now - focusEpoch) at emit time.
+ * `state="blurred"`  — the user has tab-hopped, blurred the window, or
+ *                      gone idle. accumulatedFocusMs has been updated to
+ *                      include the just-ended focus period. blurredAt
+ *                      records when the blur happened; if the user
+ *                      returns within BLUR_GRACE_MS, the visit resumes
+ *                      (not a new visit). Past the grace window, the
+ *                      visit is emitted and disappears.
+ *
+ * Both states live in `chrome.storage.session.visits`, a single map
+ * keyed by tabId. A non-existent entry means "no visit on this tab".
+ */
+export interface Visit {
   tabId: number;
+  windowId: number;
+  url: string;             // pre-scrub (used for ignore re-check on resume)
   scrubbedUrl: string;
-  startTime: number;   // Date.now()
+  category: string | null; // resolved at visit-start so re-categorisation mid-visit doesn't flip
+  startTime: number;       // ms epoch — visit start (first focus). Used as `start_time` in payload.
+  state: "focused" | "blurred";
+  focusEpoch: number;      // ms epoch — when the CURRENT focus period started (only meaningful while focused)
+  accumulatedFocusMs: number; // total focused time from PRIOR focus periods (excludes current)
+  blurredAt: number | null;   // ms epoch — only set when state="blurred"
 }
+
+/** @deprecated kept as alias for tests / external code; use Visit. */
+export type ActiveVisit = Visit;
+
+/** How long after blur a visit can be resumed instead of starting a new one. */
+export const BLUR_GRACE_MS = 30_000;
 
 /** Daily counters in chrome.storage.local for popup display. */
 export interface Counts {
