@@ -18,17 +18,20 @@ export function IdentityLabel() {
 
   return (
     <div className="section">
-      <div className="muted">Identity label (overrides Google account email)</div>
+      <h2>Identity label</h2>
+      <div className="muted" style={{ marginBottom: 6 }}>
+        Overrides your Google account email. Blank = use Google email.
+      </div>
       <div className="row">
         <input
           type="text"
-          placeholder='e.g. "Acme Corp", "Personal" — blank uses Google email'
+          placeholder='e.g. "Acme Corp", "Personal"'
           value={label}
           onChange={(e) => setLabel(e.target.value)}
         />
         <button onClick={save}>Save</button>
       </div>
-      {saved && <div className="muted">Saved.</div>}
+      {saved && <span className="saved-flash">✓ Saved</span>}
     </div>
   );
 }

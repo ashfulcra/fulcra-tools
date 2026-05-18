@@ -21,7 +21,21 @@ export function Counts() {
 
   return (
     <div className="section">
-      <div className="muted">Today: {c.logged} logged · {c.categorized} categorized · {c.ignored} ignored</div>
+      <h2>Today</h2>
+      <div className="counts">
+        <div className="count-pill">
+          <span className="n">{c.logged}</span>
+          <span className="label">Logged</span>
+        </div>
+        <div className="count-pill">
+          <span className="n">{c.categorized}</span>
+          <span className="label">Categorized</span>
+        </div>
+        <div className="count-pill">
+          <span className="n">{c.ignored}</span>
+          <span className="label">Ignored</span>
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,24 +1,259 @@
-:root { color-scheme: light dark; }
-body { margin: 0; font-family: -apple-system, system-ui, sans-serif; width: 380px; }
-.app { padding: 12px; }
-.app h1 { font-size: 14px; margin: 0 0 12px 0; font-weight: 600; }
-.row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+/* Fulcra Attention popup — branded after fulcra.ai (white-background variant).
+ *
+ * Palette pulled from the live fulcra-dynamics.webflow.shared CSS:
+ *   --fa-bg          #ffffff   (white background, per user request)
+ *   --fa-ink         #0c1023   (brand-dark text)
+ *   --fa-ink-2       #16161d   (default body)
+ *   --fa-muted       #475068   (slate secondary)
+ *   --fa-mute-2      #758696   (lighter slate)
+ *   --fa-mint        #56d6b7   (primary accent)
+ *   --fa-mint-2      #2bd4c4   (hover/accent-pressed)
+ *   --fa-purple      #7b61ff   (secondary accent)
+ *   --fa-purple-2    #9b7cff   (purple hover/link)
+ *   --fa-edge        #e4ebf3   (hairline borders)
+ *
+ * Fonts: Rubik for UI; Noto Sans Mono for code/url tags (matching the
+ * live site's heading + code stack).
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
+
+:root {
+  color-scheme: light;
+  --fa-bg: #ffffff;
+  --fa-ink: #0c1023;
+  --fa-ink-2: #16161d;
+  --fa-muted: #475068;
+  --fa-mute-2: #758696;
+  --fa-mint: #56d6b7;
+  --fa-mint-2: #2bd4c4;
+  --fa-purple: #7b61ff;
+  --fa-purple-2: #9b7cff;
+  --fa-edge: #e4ebf3;
+  --fa-surface: #fafafa;
+}
+
+body {
+  margin: 0;
+  width: 380px;
+  background: var(--fa-bg);
+  color: var(--fa-ink-2);
+  font-family: "Rubik", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.app {
+  padding: 14px 14px 12px;
+}
+
+/* ---- header ---- */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.app-header .logo {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  /* The "fulcrum" mark — a stylised pivot. Inline SVG so the popup
+   * doesn't need to ship an image asset; tinted via fill on the path. */
+}
+.app-header h1 {
+  font-size: 14px;
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fa-ink);
+}
+.app-header .sub {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fa-mute-2);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* ---- rows ---- */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 input[type="text"], input[type="password"] {
-  flex: 1; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px;
-  font: inherit; min-width: 0;
+  flex: 1;
+  padding: 7px 9px;
+  border: 1px solid var(--fa-edge);
+  border-radius: 6px;
+  font: inherit;
+  color: var(--fa-ink-2);
+  background: var(--fa-bg);
+  min-width: 0;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
+input[type="text"]:focus, input[type="password"]:focus {
+  outline: none;
+  border-color: var(--fa-purple);
+  box-shadow: 0 0 0 3px rgba(123, 97, 255, 0.18);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--fa-mint);
+  cursor: pointer;
+}
+
+label {
+  font-weight: 500;
+  color: var(--fa-ink-2);
+}
+
 button {
-  padding: 6px 10px; border: 1px solid #888; background: #f5f5f5;
-  border-radius: 4px; cursor: pointer; font: inherit;
+  padding: 7px 12px;
+  border: 1px solid var(--fa-edge);
+  background: var(--fa-bg);
+  color: var(--fa-ink);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
-button:hover { background: #eaeaea; }
-.muted { color: #777; font-size: 12px; }
-.section { margin-top: 14px; padding-top: 10px; border-top: 1px solid #eee; }
-.stream-row { font-size: 12px; padding: 3px 0; border-bottom: 1px dotted #eee; }
-.stream-row .ts { color: #888; margin-right: 8px; }
-.tag { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 11px; margin-right: 4px; }
-.tag.cat { background: #fcebd5; color: #7a4a00; }
-.tag.url { background: #d9eef9; color: #0a4a6e; }
-.ignore-list { max-height: 120px; overflow-y: auto; }
-.ignore-row { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 0; }
-.ignore-row button { padding: 1px 5px; font-size: 11px; }
+button:hover {
+  background: var(--fa-surface);
+  border-color: var(--fa-mute-2);
+}
+button:focus-visible {
+  outline: none;
+  border-color: var(--fa-purple);
+  box-shadow: 0 0 0 3px rgba(123, 97, 255, 0.18);
+}
+/* Primary action — used by Save buttons. Apply with className="primary". */
+button.primary {
+  background: var(--fa-ink);
+  border-color: var(--fa-ink);
+  color: var(--fa-bg);
+}
+button.primary:hover {
+  background: var(--fa-purple);
+  border-color: var(--fa-purple);
+}
+
+.muted {
+  color: var(--fa-muted);
+  font-size: 12px;
+}
+
+.section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--fa-edge);
+}
+.section h2 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--fa-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- live stream ---- */
+.stream-row {
+  font-size: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--fa-edge);
+  font-family: "Noto Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.stream-row:last-child { border-bottom: none; }
+.stream-row .ts {
+  color: var(--fa-mute-2);
+  margin-right: 8px;
+}
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  margin-right: 4px;
+  font-weight: 500;
+  font-family: "Rubik", sans-serif;
+  letter-spacing: 0.01em;
+}
+.tag.cat {
+  background: rgba(86, 214, 183, 0.18);
+  color: #0e6a55;
+}
+.tag.url {
+  background: rgba(123, 97, 255, 0.13);
+  color: #4a31bd;
+}
+
+/* ---- ignore list ---- */
+.ignore-list {
+  max-height: 140px;
+  overflow-y: auto;
+  border: 1px solid var(--fa-edge);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.ignore-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 0;
+}
+.ignore-row + .ignore-row {
+  border-top: 1px dotted var(--fa-edge);
+}
+.ignore-row button {
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  color: var(--fa-mute-2);
+}
+.ignore-row button:hover {
+  color: var(--fa-ink);
+}
+
+/* ---- counts pill row ---- */
+.counts {
+  display: flex;
+  gap: 6px;
+}
+.count-pill {
+  flex: 1;
+  text-align: center;
+  background: var(--fa-surface);
+  border: 1px solid var(--fa-edge);
+  border-radius: 6px;
+  padding: 6px 4px;
+}
+.count-pill .n {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fa-ink);
+  display: block;
+  line-height: 1.1;
+}
+.count-pill .label {
+  font-size: 10.5px;
+  color: var(--fa-mute-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- saved indicator ---- */
+.saved-flash {
+  font-size: 11px;
+  color: var(--fa-mint-2);
+  font-weight: 500;
+  margin-left: 6px;
+}
