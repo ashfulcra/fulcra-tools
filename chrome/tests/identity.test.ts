@@ -11,14 +11,16 @@ beforeEach(async () => {
 
 describe("getChromeIdentity", () => {
   test("returns Google account email when signed in", async () => {
-    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts, cb) => {
+    // @ts-expect-error chrome.identity overload signatures not compatible with vi.mocked
+    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => {
       cb({ email: "redacted@users.noreply.github.com", id: "google-id-123" });
     });
     expect(await getChromeIdentity()).toBe("redacted@users.noreply.github.com");
   });
 
   test("returns popup-set label when not signed in to Google", async () => {
-    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts, cb) => {
+    // @ts-expect-error chrome.identity overload signatures not compatible with vi.mocked
+    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => {
       cb({ email: "", id: "" });
     });
     await saveSettings({ ...DEFAULT_SETTINGS, identityLabel: "Side Project" });
@@ -26,14 +28,16 @@ describe("getChromeIdentity", () => {
   });
 
   test("returns null when neither source available", async () => {
-    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts, cb) => {
+    // @ts-expect-error chrome.identity overload signatures not compatible with vi.mocked
+    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => {
       cb({ email: "", id: "" });
     });
     expect(await getChromeIdentity()).toBeNull();
   });
 
   test("popup label overrides Google email when both set", async () => {
-    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts, cb) => {
+    // @ts-expect-error chrome.identity overload signatures not compatible with vi.mocked
+    vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_opts: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => {
       cb({ email: "redacted@users.noreply.github.com", id: "google-id" });
     });
     await saveSettings({ ...DEFAULT_SETTINGS, identityLabel: "Custom Label" });

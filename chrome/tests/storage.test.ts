@@ -4,7 +4,7 @@ import {
   loadSettings, saveSettings,
   loadOutbox, saveOutbox,
   loadIgnoreList, saveIgnoreList,
-  loadCategoryMap, saveCategoryMap,
+  loadCategoryMap,
   loadActiveVisits, saveActiveVisits,
 } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";

@@ -13,7 +13,7 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["chrome", "vitest/globals"]
+    "types": ["chrome", "node", "vitest/globals"]
   },
   "include": ["src", "tests"]
 }
