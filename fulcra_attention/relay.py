@@ -6,6 +6,7 @@ payload schema. Bearer-token authentication required.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import threading
 from datetime import datetime, timedelta, timezone
@@ -64,6 +65,15 @@ class ReceiverContext:
             self.posted += posted
             self.dropped += dropped
 
+    def update_watermark(self, client: str, end_time_iso: str) -> None:
+        """Thread-safely update the high-water mark for a client and persist state."""
+        with self._lock:
+            cur = self.state.watermarks.get(client)
+            if cur is None or end_time_iso > cur:
+                self.state.watermarks[client] = end_time_iso
+                from . import state as state_mod
+                state_mod.save(self.state, state_mod.DEFAULT_PATH)
+
     def health(self) -> dict:
         with self._lock:
             return {
@@ -94,7 +104,7 @@ class AttentionHandler(BaseHTTPRequestHandler):
         ctx = self._context()
         header = self.headers.get("Authorization", "")
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-        if token != ctx.bearer_token:
+        if not hmac.compare_digest(token, ctx.bearer_token):
             self._send_json(401, {"ok": False, "error": "unauthorized"})
             return False
         return True
@@ -146,6 +156,9 @@ class AttentionHandler(BaseHTTPRequestHandler):
             self._send_json(502, {"ok": False, "error": "ingest_failed", "message": str(exc)})
             return
 
+        # Persist watermark for the payload's client (max end_time seen)
+        from .ingest import _to_second_iso
+        ctx.update_watermark(payload["client"], _to_second_iso(payload["end_time"]))
         ctx.bump(posted=1)
         self._send_json(200, {"posted": 1, "dropped": 0})
 
