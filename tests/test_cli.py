@@ -71,6 +71,11 @@ def test_bootstrap_idempotent(_isolate_state, mocker):
 
 
 def test_setup_generates_bearer_token_and_relay_json(_isolate_state, tmp_path, mocker, monkeypatch):
+    # Bootstrap must have run first — pre-populate state
+    state_mod.save(
+        state_mod.State(attention_definition_id="def-setup-test", tag_ids={"attention": "a", "web": "w"}),
+        _isolate_state,
+    )
     relay_dir = tmp_path / "fulcra-attention-config"
     monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_dir / "relay.json"))
     # Skip service install on the test box.
@@ -91,6 +96,11 @@ def test_setup_generates_bearer_token_and_relay_json(_isolate_state, tmp_path, m
 
 
 def test_setup_is_idempotent_preserves_existing_token(_isolate_state, tmp_path, mocker, monkeypatch):
+    # Bootstrap must have run first — pre-populate state
+    state_mod.save(
+        state_mod.State(attention_definition_id="def-idempotent", tag_ids={"attention": "a", "web": "w"}),
+        _isolate_state,
+    )
     relay_json = tmp_path / "relay.json"
     relay_json.write_text(json.dumps({"bearer_token": "PRE-EXISTING", "port": 8771}))
     monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
@@ -101,6 +111,20 @@ def test_setup_is_idempotent_preserves_existing_token(_isolate_state, tmp_path, 
     body = json.loads(relay_json.read_text())
     assert body["bearer_token"] == "PRE-EXISTING"
     assert "PRE-EXISTING" in res.output
+
+
+def test_setup_requires_bootstrap_first(_isolate_state, tmp_path, mocker, monkeypatch):
+    relay_json = tmp_path / "relay.json"
+    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
+    # service_manager.install would be called only on the happy path — patch it
+    # to fail loud if reached.
+    mocker.patch("fulcra_attention.cli.service_manager.install",
+                 side_effect=AssertionError("should not be called"))
+    # No bootstrap has run — state is empty
+    res = CliRunner().invoke(cli, ["setup"])
+    assert res.exit_code != 0
+    assert "bootstrap" in res.output.lower()
+    assert not relay_json.exists()  # nothing written
 
 
 def test_status_prints_state_json(_isolate_state):
