@@ -7,6 +7,7 @@ Attention) so we keep it standalone rather than importing from fulcra-media.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -108,10 +109,9 @@ class FulcraClient:
         caller's responsibility — building the deterministic source-id lives
         in ingest.py.
         """
-        import json as _json  # local to avoid shadowing
         if not events:
             return
-        lines = [_json.dumps(e, sort_keys=True).encode() for e in events]
+        lines = [json.dumps(e, sort_keys=True).encode() for e in events]
         body = b"\n".join(lines)
         r = self._client().post(
             "/ingest/v1/record/batch",
