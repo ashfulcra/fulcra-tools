@@ -17,6 +17,29 @@ from .ingest import build_attention_event
 from .state import State
 
 
+def _validate(payload: dict) -> None:
+    """Raise ValueError with a human-readable message on schema violation."""
+    required = ("start_time", "end_time", "client")
+    missing = [k for k in required if k not in payload]
+    if missing:
+        raise ValueError(f"missing fields: {missing}")
+    url = payload.get("url")
+    cat = payload.get("category")
+    if (url is None) == (cat is None):
+        raise ValueError("exactly one of {url, category} must be non-null")
+    try:
+        from .ingest import _parse_iso
+        st = _parse_iso(payload["start_time"])
+        en = _parse_iso(payload["end_time"])
+    except ValueError as exc:
+        raise ValueError(f"unparseable timestamp: {exc}") from exc
+    if st > en:
+        raise ValueError("start_time > end_time")
+    now = datetime.now(timezone.utc)
+    if en > now + timedelta(minutes=5):
+        raise ValueError("end_time more than 5 minutes in the future")
+
+
 class ReceiverContext:
     """Thread-safe shared state for the relay."""
 
@@ -103,6 +126,12 @@ class AttentionHandler(BaseHTTPRequestHandler):
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
             self._send_json(400, {"ok": False, "error": "bad json", "message": str(exc)})
+            return
+
+        try:
+            _validate(payload)
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": "bad payload", "message": str(exc)})
             return
 
         try:

@@ -170,3 +170,54 @@ def test_get_health_does_not_require_auth(running_server):
     body = json.loads(resp.read())
     assert body["ok"] is True
     conn.close()
+
+
+def test_post_both_url_and_category_rejected(running_server):
+    _server, port, _ctx = running_server
+    status, payload = _post(port, {
+        "url": "https://x.com/", "title": "T", "category": "banking",
+        "start_time": _now(), "end_time": _now(), "client": "c",
+    })
+    assert status == 400
+    assert payload["error"] == "bad payload"
+    assert "url" in payload["message"] and "category" in payload["message"]
+
+
+def test_post_neither_url_nor_category_rejected(running_server):
+    _server, port, _ctx = running_server
+    status, payload = _post(port, {
+        "url": None, "title": None, "category": None,
+        "start_time": _now(), "end_time": _now(), "client": "c",
+    })
+    assert status == 400
+    assert payload["error"] == "bad payload"
+
+
+def test_post_end_before_start_rejected(running_server):
+    _server, port, _ctx = running_server
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    status, payload = _post(port, {
+        "url": "https://x.com/", "title": "T", "category": None,
+        "start_time": now.isoformat().replace("+00:00", "Z"),
+        "end_time":   (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+        "client": "c",
+    })
+    assert status == 400
+
+
+def test_post_future_end_time_rejected(running_server):
+    _server, port, _ctx = running_server
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    status, payload = _post(port, {
+        "url": "https://x.com/", "title": "T", "category": None,
+        "start_time": now.isoformat().replace("+00:00", "Z"),
+        "end_time":   (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        "client": "c",
+    })
+    assert status == 400
+
+
+def test_post_missing_required_fields_rejected(running_server):
+    _server, port, _ctx = running_server
+    status, payload = _post(port, {"url": "https://x.com/"})
+    assert status == 400
