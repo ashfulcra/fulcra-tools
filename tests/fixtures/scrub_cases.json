@@ -53,5 +53,10 @@
   {"input": "https://x.com/p#section1",              "expected": "https://x.com/p"},
   {"input": "https://x.com/p?id=1#access_token=t",   "expected": "https://x.com/p?id=1"},
   {"input": "https://x.com/?utm_source=x",           "expected": "https://x.com/"},
-  {"input": "https://x.com/p",                       "expected": "https://x.com/p"}
+  {"input": "https://x.com/p",                       "expected": "https://x.com/p"},
+  {"input": "https://x.com",                         "expected": "https://x.com/"},
+  {"input": "https://x.com:443/",                    "expected": "https://x.com/"},
+  {"input": "https://x.com:8080/p",                  "expected": "https://x.com:8080/p"},
+  {"input": "https://user@example.com/",             "expected": "https://example.com/"},
+  {"input": "http://x.com:80/p",                     "expected": "http://x.com/p"}
 ]

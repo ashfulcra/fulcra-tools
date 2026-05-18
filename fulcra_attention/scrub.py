@@ -34,10 +34,29 @@ DENYLIST: frozenset[str] = frozenset({
 def scrub_url(url: str) -> str:
     """Return `url` with denylisted query params and the entire fragment dropped.
 
+    Also normalizes to canonical browser-URL form (matches `new URL()` in JS):
+      - Empty path → "/"
+      - Strip default ports (:443 for https, :80 for http)
+      - Strip userinfo from authority
+
     Pure function. Preserves param order of surviving entries.
     """
     parts = urlsplit(url)
     pairs = parse_qsl(parts.query, keep_blank_values=True)
     kept = [(k, v) for (k, v) in pairs if k.lower() not in DENYLIST]
     new_query = urlencode(kept)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, ""))
+
+    # Canonicalize the authority to match browser URL behavior.
+    netloc = parts.hostname or ""
+    port = parts.port
+    if port is not None:
+        is_default = (
+            (parts.scheme == "https" and port == 443)
+            or (parts.scheme == "http" and port == 80)
+        )
+        if not is_default:
+            netloc = f"{netloc}:{port}"
+    # Userinfo (parts.username / parts.password) is intentionally dropped.
+
+    path = parts.path or "/"
+    return urlunsplit((parts.scheme, netloc, path, new_query, ""))
