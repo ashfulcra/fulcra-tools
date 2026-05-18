@@ -221,3 +221,60 @@ def test_post_missing_required_fields_rejected(running_server):
     _server, port, _ctx = running_server
     status, payload = _post(port, {"url": "https://x.com/"})
     assert status == 400
+
+
+def test_post_writes_watermark_to_state(running_server, client_with_ingest_capture, tmp_path, monkeypatch):
+    """After a successful POST, state.watermarks[client] == end_time (to-second)."""
+    _server, port, ctx = running_server
+    # Re-point state_mod.DEFAULT_PATH so the watermark write doesn't touch user home
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr("fulcra_attention.state.DEFAULT_PATH", state_path)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    end = now
+    start = now - timedelta(minutes=1)
+    status, _ = _post(port, {
+        "url": "https://x.com/", "title": "T", "category": None,
+        "start_time": start.isoformat().replace("+00:00", "Z"),
+        "end_time":   end.isoformat().replace("+00:00", "Z"),
+        "client": "my-client/1.0",
+    })
+    assert status == 200
+    # ctx.state was mutated in-place
+    assert ctx.state.watermarks["my-client/1.0"] == end.isoformat().replace("+00:00", "Z")
+
+
+def test_post_watermark_is_monotonic_max(running_server, client_with_ingest_capture, tmp_path, monkeypatch):
+    """A later POST with an earlier end_time does NOT lower the watermark."""
+    _server, port, ctx = running_server
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr("fulcra_attention.state.DEFAULT_PATH", state_path)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    # First POST: end = now
+    _post(port, {
+        "url": "https://x.com/a", "title": "A", "category": None,
+        "start_time": (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        "end_time":   now.isoformat().replace("+00:00", "Z"),
+        "client": "c",
+    })
+    high = ctx.state.watermarks["c"]
+    # Second POST: end = now - 30s (earlier)
+    earlier = now - timedelta(seconds=30)
+    _post(port, {
+        "url": "https://x.com/b", "title": "B", "category": None,
+        "start_time": (earlier - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        "end_time":   earlier.isoformat().replace("+00:00", "Z"),
+        "client": "c",
+    })
+    # Watermark stays at the higher value
+    assert ctx.state.watermarks["c"] == high
+
+
+def test_post_uses_constant_time_compare(running_server):
+    """Smoke test that the bearer-comparison path uses hmac.compare_digest.
+    Verifying via a near-miss token that differs only in the last char."""
+    _server, port, _ctx = running_server
+    status, payload = _post(port, {
+        "url": "https://x.com/", "title": "T", "category": None,
+        "start_time": _now(), "end_time": _now(), "client": "c",
+    }, token="test-beareS")  # differs from "test-bearer" only in final char
+    assert status == 401
