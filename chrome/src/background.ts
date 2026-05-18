@@ -114,6 +114,12 @@ async function closeVisit(tabId: number, endTime: number): Promise<void> {
 
   const payload = await buildPayload({ visit, category, endTime, meta });
   await addToOutbox(payload);
+  // Maintain a small recent-emitted ring for the popup live stream.
+  const r = await chrome.storage.local.get("recentEmitted");
+  const recent: AttentionEvent[] = (r.recentEmitted as AttentionEvent[] | undefined) ?? [];
+  recent.unshift(payload);
+  while (recent.length > 10) recent.pop();
+  await chrome.storage.local.set({ recentEmitted: recent });
   await flushOutbox();
 }
 
