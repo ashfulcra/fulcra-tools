@@ -27,6 +27,8 @@ function isHttpScheme(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
+// `toISOString` always produces `.000Z` after second-flooring;
+// the replace is defensive in case the floor is ever skipped.
 function toIsoSecondZ(ms: number): string {
   return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000", "");
 }
@@ -169,6 +171,9 @@ export async function handleNavigation(n: NavInput): Promise<void> {
   }
 
   const scrubbed = scrubUrl(n.url);
+  // Per-tab activeVisits is read-mutate-write; concurrent nav events on
+  // DIFFERENT tabs can lose updates (last write wins). Benign for v1 — the
+  // next nav on the affected tab will create a fresh visit.
   const cur = await loadActiveVisits();
   cur[n.tabId] = {
     tabId: n.tabId,
