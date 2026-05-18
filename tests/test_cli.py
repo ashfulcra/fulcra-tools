@@ -101,3 +101,58 @@ def test_setup_is_idempotent_preserves_existing_token(_isolate_state, tmp_path, 
     body = json.loads(relay_json.read_text())
     assert body["bearer_token"] == "PRE-EXISTING"
     assert "PRE-EXISTING" in res.output
+
+
+def test_status_prints_state_json(_isolate_state):
+    state_mod.save(
+        state_mod.State(
+            attention_definition_id="def-x",
+            tag_ids={"attention": "a", "web": "w"},
+            watermarks={"curl/0.1": "2026-05-18T14:00:00Z"},
+        ),
+        _isolate_state,
+    )
+    res = CliRunner().invoke(cli, ["status"])
+    assert res.exit_code == 0
+    parsed = json.loads(res.output)
+    assert parsed["attention_definition_id"] == "def-x"
+    assert parsed["tag_ids"]["attention"] == "a"
+    assert parsed["watermarks"]["curl/0.1"] == "2026-05-18T14:00:00Z"
+
+
+def test_reset_requires_confirm(_isolate_state):
+    state_mod.save(
+        state_mod.State(attention_definition_id="def-x"),
+        _isolate_state,
+    )
+    res = CliRunner().invoke(cli, ["reset"])
+    assert res.exit_code != 0  # UsageError without --confirm
+    assert "--confirm" in res.output
+
+
+def test_reset_with_confirm_soft_deletes_and_clears(_isolate_state, mocker):
+    state_mod.save(
+        state_mod.State(
+            attention_definition_id="def-to-delete",
+            tag_ids={"attention": "a", "web": "w"},
+            watermarks={"curl": "2026-05-18T14:00:00Z"},
+        ),
+        _isolate_state,
+    )
+    calls = []
+    def responder(r: httpx.Request) -> httpx.Response:
+        calls.append((r.method, r.url.path))
+        if r.method == "DELETE":
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+    transport = httpx.MockTransport(responder)
+    mocker.patch(
+        "fulcra_attention.cli.FulcraClient",
+        lambda **kw: __import__("fulcra_attention.fulcra", fromlist=["FulcraClient"]).FulcraClient(transport=transport, **kw),
+    )
+    res = CliRunner().invoke(cli, ["reset", "--confirm"])
+    assert res.exit_code == 0
+    assert ("DELETE", "/user/v1alpha1/annotation/def-to-delete") in calls
+    s = state_mod.load(_isolate_state)
+    assert s.attention_definition_id is None
+    assert s.watermarks == {}
