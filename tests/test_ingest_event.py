@@ -173,3 +173,128 @@ def test_build_event_strips_fractional_seconds_from_recorded_at(state: State):
     ev = build_attention_event(p, state=state)
     assert ev["metadata"]["recorded_at"]["start_time"] == "2026-05-18T14:00:00Z"
     assert ev["metadata"]["recorded_at"]["end_time"] == "2026-05-18T14:05:00Z"
+
+
+# ---------- three-axis tag tests (machine / category / identity) ----------
+
+def test_tags_include_machine_when_hostname_set():
+    state = State(
+        attention_definition_id="def-att",
+        hostname="deskbookpro",
+        tag_ids={
+            "attention": "tag-a",
+            "web": "tag-w",
+            "machine:deskbookpro": "tag-m-dbp",
+        },
+    )
+    p = {
+        "url": "https://x.com/",
+        "title": "X",
+        "category": None,
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(p, state=state)
+    assert ev["metadata"]["tags"] == ["tag-a", "tag-w", "tag-m-dbp"]
+
+
+def test_tags_omit_machine_when_hostname_unset(state: State):
+    p = {
+        "url": "https://x.com/",
+        "title": "X",
+        "category": None,
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(p, state=state)
+    assert ev["metadata"]["tags"] == ["tag-a", "tag-w"]
+
+
+def test_tags_include_category_when_categorized():
+    state = State(
+        attention_definition_id="def-att",
+        tag_ids={
+            "attention": "tag-a",
+            "web": "tag-w",
+            "category:banking": "tag-c-bank",
+        },
+    )
+    p = {
+        "url": None,
+        "title": None,
+        "category": "banking",
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(p, state=state)
+    assert ev["metadata"]["tags"] == ["tag-a", "tag-w", "tag-c-bank"]
+
+
+def test_tags_omit_category_when_uncategorized_tag_cache_missing(state: State):
+    """Defensive: if category tag isn't pre-created, gracefully drop the tag
+    rather than crashing. The Tier 2 vocab is supposed to be ensured at
+    bootstrap, so this only happens for ad-hoc categories or old state."""
+    p = {
+        "url": None,
+        "title": None,
+        "category": "made-up-category-not-in-vocab",
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(p, state=state)
+    # Only the always-on tags (no machine, no category mapping in state)
+    assert ev["metadata"]["tags"] == ["tag-a", "tag-w"]
+
+
+def test_tags_include_identity_when_cached():
+    state = State(
+        attention_definition_id="def-att",
+        tag_ids={
+            "attention": "tag-a",
+            "web": "tag-w",
+            "identity:ash@fulcradynamics.com": "tag-i-ash",
+        },
+    )
+    p = {
+        "url": "https://x.com/",
+        "title": "X",
+        "category": None,
+        "chrome_identity": "ash@fulcradynamics.com",
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(p, state=state)
+    assert ev["metadata"]["tags"] == ["tag-a", "tag-w", "tag-i-ash"]
+
+
+def test_tags_all_three_axes_at_once():
+    state = State(
+        attention_definition_id="def-att",
+        hostname="deskbookpro",
+        tag_ids={
+            "attention": "tag-a",
+            "web": "tag-w",
+            "machine:deskbookpro": "tag-m-dbp",
+            "category:banking": "tag-c-bank",
+            "identity:ash@fulcradynamics.com": "tag-i-ash",
+        },
+    )
+    p = {
+        "url": None,
+        "title": None,
+        "category": "banking",
+        "chrome_identity": "ash@fulcradynamics.com",
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(p, state=state)
+    # Order: always-on first, then machine, category, identity (insertion order).
+    assert ev["metadata"]["tags"] == [
+        "tag-a", "tag-w", "tag-m-dbp", "tag-c-bank", "tag-i-ash",
+    ]

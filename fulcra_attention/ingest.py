@@ -92,16 +92,30 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
         },
     }
     assert state.attention_definition_id, "ensure_definitions() must run first"
+    tags = [state.tag_ids["attention"], state.tag_ids["web"]]
+    # Three optional axes; each only emitted if the relevant tag UUID is
+    # cached in state. machine: set at `setup` time. category: pre-created
+    # at bootstrap from CATEGORY_VOCAB. identity: lazy-created by the relay
+    # the first time an identity is seen.
+    if state.hostname:
+        machine_tag = state.tag_ids.get(f"machine:{state.hostname}")
+        if machine_tag:
+            tags.append(machine_tag)
+    if category:
+        cat_tag = state.tag_ids.get(f"category:{category}")
+        if cat_tag:
+            tags.append(cat_tag)
+    if chrome_identity:
+        id_tag = state.tag_ids.get(f"identity:{chrome_identity}")
+        if id_tag:
+            tags.append(id_tag)
     metadata = {
         "data_type": "DurationAnnotation",
         "recorded_at": {
             "start_time": start_time,
             "end_time": end_time,
         },
-        "tags": [
-            state.tag_ids["attention"],
-            state.tag_ids["web"],
-        ],
+        "tags": tags,
         "source": [
             sid,
             f"com.fulcradynamics.annotation.{state.attention_definition_id}",

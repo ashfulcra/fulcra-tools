@@ -24,6 +24,7 @@ class State:
     attention_definition_id: str | None = None
     tag_ids: dict[str, str] = field(default_factory=dict)
     watermarks: dict[str, str] = field(default_factory=dict)
+    hostname: str | None = None  # local machine name, set by `setup`
 
 
 def load(path: Path = DEFAULT_PATH) -> State:
@@ -34,6 +35,7 @@ def load(path: Path = DEFAULT_PATH) -> State:
         attention_definition_id=raw.get("attention_definition_id"),
         tag_ids=raw.get("tag_ids", {}),
         watermarks=raw.get("watermarks", {}),
+        hostname=raw.get("hostname"),
     )
 
 

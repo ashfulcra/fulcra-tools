@@ -10,6 +10,15 @@ from click.testing import CliRunner
 
 from fulcra_attention import state as state_mod
 from fulcra_attention.cli import cli
+from fulcra_attention.fulcra import CATEGORY_VOCAB
+
+
+def _pre_cached_tags() -> dict[str, str]:
+    """Cache attention/web + all vocab tags so ensure_definitions makes no calls."""
+    out = {"attention": "a", "web": "w"}
+    for slug in CATEGORY_VOCAB:
+        out[f"category:{slug}"] = f"t-{slug}"
+    return out
 
 
 @pytest.fixture(autouse=True)
@@ -49,11 +58,13 @@ def test_bootstrap_creates_def_and_tags(_isolate_state, mocker):
 
 
 def test_bootstrap_idempotent(_isolate_state, mocker):
-    # Pre-populate state with definition; transport should never be hit.
+    # Pre-populate state with definition AND every vocab tag; transport should
+    # never be hit since ensure_definitions always re-ensures vocab tags
+    # (cache-first) on every bootstrap.
     state_mod.save(
         state_mod.State(
             attention_definition_id="def-existing",
-            tag_ids={"attention": "a", "web": "w"},
+            tag_ids=_pre_cached_tags(),
         ),
         _isolate_state,
     )
@@ -70,12 +81,34 @@ def test_bootstrap_idempotent(_isolate_state, mocker):
     assert "def-existing" in res.output
 
 
+def _patch_setup_client(mocker, posted_tags: list[dict] | None = None):
+    """Patch FulcraClient in cli with a transport that handles ensure_tag for
+    the machine:<hostname> lookup setup does. Returns the recorded list."""
+    posted_tags = posted_tags if posted_tags is not None else []
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and "/tag/name/" in r.url.path:
+            return httpx.Response(404)
+        if r.method == "POST" and r.url.path == "/user/v1alpha1/tag":
+            body = json.loads(r.content)
+            posted_tags.append(body)
+            return httpx.Response(200, json={"id": f"tag-{body['name']}"})
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+    transport = httpx.MockTransport(responder)
+    mocker.patch(
+        "fulcra_attention.cli.FulcraClient",
+        lambda **kw: __import__("fulcra_attention.fulcra", fromlist=["FulcraClient"]).FulcraClient(transport=transport, **kw),
+    )
+    return posted_tags
+
+
 def test_setup_generates_bearer_token_and_relay_json(_isolate_state, tmp_path, mocker, monkeypatch):
     # Bootstrap must have run first — pre-populate state
     state_mod.save(
-        state_mod.State(attention_definition_id="def-setup-test", tag_ids={"attention": "a", "web": "w"}),
+        state_mod.State(attention_definition_id="def-setup-test", tag_ids=_pre_cached_tags()),
         _isolate_state,
     )
+    posted_tags = _patch_setup_client(mocker)
     relay_dir = tmp_path / "fulcra-attention-config"
     monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_dir / "relay.json"))
     # Skip service install on the test box.
@@ -83,7 +116,7 @@ def test_setup_generates_bearer_token_and_relay_json(_isolate_state, tmp_path, m
         "fulcra_attention.cli.service_manager.install",
         return_value=tmp_path / "fake-service-file",
     )
-    res = CliRunner().invoke(cli, ["setup"])
+    res = CliRunner().invoke(cli, ["setup", "--hostname", "testbox"])
     assert res.exit_code == 0, res.output
     relay_json = relay_dir / "relay.json"
     assert relay_json.exists()
@@ -93,24 +126,53 @@ def test_setup_generates_bearer_token_and_relay_json(_isolate_state, tmp_path, m
     # Token printed for paste-into-extension
     assert body["bearer_token"] in res.output
     fake_install.assert_called_once()
+    # machine:<hostname> tag was created and persisted
+    assert {"name": "machine:testbox"} in posted_tags
+    s = state_mod.load(_isolate_state)
+    assert s.hostname == "testbox"
+    assert s.tag_ids["machine:testbox"] == "tag-machine:testbox"
 
 
 def test_setup_is_idempotent_preserves_existing_token(_isolate_state, tmp_path, mocker, monkeypatch):
     # Bootstrap must have run first — pre-populate state
+    pre = _pre_cached_tags()
+    pre["machine:testbox"] = "tag-existing-machine"
     state_mod.save(
-        state_mod.State(attention_definition_id="def-idempotent", tag_ids={"attention": "a", "web": "w"}),
+        state_mod.State(
+            attention_definition_id="def-idempotent",
+            tag_ids=pre,
+            hostname="testbox",
+        ),
         _isolate_state,
     )
+    _patch_setup_client(mocker)  # cache-hit means transport is never called
     relay_json = tmp_path / "relay.json"
     relay_json.write_text(json.dumps({"bearer_token": "PRE-EXISTING", "port": 8771}))
     monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
     mocker.patch("fulcra_attention.cli.service_manager.install",
                  return_value=tmp_path / "fake")
-    res = CliRunner().invoke(cli, ["setup"])
+    res = CliRunner().invoke(cli, ["setup", "--hostname", "testbox"])
     assert res.exit_code == 0
     body = json.loads(relay_json.read_text())
     assert body["bearer_token"] == "PRE-EXISTING"
     assert "PRE-EXISTING" in res.output
+
+
+def test_setup_strips_local_suffix_from_hostname(_isolate_state, tmp_path, mocker, monkeypatch):
+    """`.local` mDNS suffix is stripped so the tag stays portable across networks."""
+    state_mod.save(
+        state_mod.State(attention_definition_id="def-x", tag_ids=_pre_cached_tags()),
+        _isolate_state,
+    )
+    _patch_setup_client(mocker)
+    relay_json = tmp_path / "relay.json"
+    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
+    mocker.patch("fulcra_attention.cli.service_manager.install",
+                 return_value=tmp_path / "fake")
+    res = CliRunner().invoke(cli, ["setup", "--hostname", "DeskBookPro.local"])
+    assert res.exit_code == 0, res.output
+    s = state_mod.load(_isolate_state)
+    assert s.hostname == "deskbookpro"
 
 
 def test_setup_requires_bootstrap_first(_isolate_state, tmp_path, mocker, monkeypatch):

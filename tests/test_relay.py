@@ -16,19 +16,35 @@ from fulcra_attention.state import State
 
 @pytest.fixture
 def state() -> State:
+    # Pre-cache identity tag for ash@ so the relay's lazy ensure_tag
+    # short-circuits. Tests targeting the lazy-create path itself
+    # construct their own state.
     return State(
         attention_definition_id="def-att",
-        tag_ids={"attention": "tag-a", "web": "tag-w"},
+        tag_ids={
+            "attention": "tag-a",
+            "web": "tag-w",
+            "identity:ash@fulcradynamics.com": "tag-id-ash",
+        },
     )
 
 
 @pytest.fixture
 def client_with_ingest_capture(recording_transport):
-    """FulcraClient whose /ingest/v1/record/batch always 200s."""
-    transport = recording_transport(
-        lambda r: httpx.Response(200, json={"ok": True})
-    )
+    """FulcraClient whose /ingest/v1/record/batch always 200s. Tag lookups
+    return a structured 200 so ensure_tag() doesn't blow up if reached."""
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        if "/tag/name/" in r.url.path:
+            return httpx.Response(200, json={"id": "tag-from-lookup"})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = recording_transport(responder)
     return FulcraClient(transport=transport)
+
+
+def _ingest_requests(transport) -> list:
+    return [r for r in transport.requests if r.url.path.endswith("/record/batch")]
 
 
 @pytest.fixture
@@ -94,10 +110,11 @@ def test_post_attention_happy_path_url(running_server, client_with_ingest_captur
     })
     assert status == 200, payload
     assert payload["posted"] == 1
-    # FulcraClient saw exactly one ingest POST
+    # FulcraClient saw exactly one ingest POST (tag lookups don't count)
     transport = client_with_ingest_capture._transport
-    assert len(transport.requests) == 1
-    sent_body = transport.requests[0].content
+    ingests = _ingest_requests(transport)
+    assert len(ingests) == 1
+    sent_body = ingests[0].content
     line = json.loads(sent_body)
     assert line["metadata"]["data_type"] == "DurationAnnotation"
     inner = json.loads(line["data"])
@@ -123,7 +140,8 @@ def test_post_attention_happy_path_category(running_server, client_with_ingest_c
         "client": "curl/0.1",
     })
     assert status == 200
-    inner = json.loads(json.loads(client_with_ingest_capture._transport.requests[0].content)["data"])
+    ingests = _ingest_requests(client_with_ingest_capture._transport)
+    inner = json.loads(json.loads(ingests[0].content)["data"])
     assert inner["category"] == "banking"
     assert inner["url"] is None
 
@@ -272,6 +290,76 @@ def test_post_watermark_is_monotonic_max(running_server, client_with_ingest_capt
     })
     # Watermark stays at the higher value
     assert ctx.state.watermarks["c"] == high
+
+
+def test_post_lazy_creates_identity_tag(recording_transport, monkeypatch, tmp_path):
+    """First POST carrying a never-seen chrome_identity should:
+       a) trigger ensure_tag('identity:<email>')
+       b) cache the resulting tag UUID in state.tag_ids
+       c) include that tag in metadata.tags on the ingested event"""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    monkeypatch.setattr("fulcra_attention.state.DEFAULT_PATH", tmp_path / "state.json")
+
+    posted_tag_names: list[str] = []
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and "/tag/name/" in r.url.path:
+            return httpx.Response(404)
+        if r.method == "POST" and r.url.path == "/user/v1alpha1/tag":
+            body = json.loads(r.content)
+            posted_tag_names.append(body["name"])
+            return httpx.Response(200, json={"id": f"tag-{body['name']}"})
+        if r.method == "POST" and r.url.path.endswith("/record/batch"):
+            return httpx.Response(200, json={"ok": True})
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+
+    transport = recording_transport(responder)
+    client = FulcraClient(transport=transport)
+    state = State(
+        attention_definition_id="def-att",
+        tag_ids={"attention": "tag-a", "web": "tag-w"},  # NO identity tag cached
+    )
+    ctx = ReceiverContext(client=client, state=state, bearer_token="test-bearer")
+    server = make_server(host="127.0.0.1", port=0, context=ctx)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        status, _payload = _post(port, {
+            "url": "https://x.com/",
+            "title": "X",
+            "category": None,
+            "chrome_identity": "newuser@example.com",
+            "start_time": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "end_time":   now.isoformat().replace("+00:00", "Z"),
+            "client": "c",
+        })
+        assert status == 200
+        # The identity tag was created server-side.
+        assert "identity:newuser@example.com" in posted_tag_names
+        # It was cached for next time.
+        assert state.tag_ids["identity:newuser@example.com"] == "tag-identity:newuser@example.com"
+        # It appears in the ingested event's tags.
+        ingests = _ingest_requests(transport)
+        line = json.loads(ingests[0].content)
+        assert "tag-identity:newuser@example.com" in line["metadata"]["tags"]
+
+        # Second POST: cache hit, no extra tag POST.
+        before = list(posted_tag_names)
+        _post(port, {
+            "url": "https://x.com/2",
+            "title": "X2",
+            "category": None,
+            "chrome_identity": "newuser@example.com",
+            "start_time": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "end_time":   now.isoformat().replace("+00:00", "Z"),
+            "client": "c",
+        })
+        assert posted_tag_names == before, "second post must not re-create the identity tag"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_post_uses_constant_time_compare(running_server):
