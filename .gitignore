@@ -11,3 +11,5 @@ dist/
 .scratch/
 .claude/
 .DS_Store
+chrome/node_modules/
+chrome/dist/
