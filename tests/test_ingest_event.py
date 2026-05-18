@@ -75,7 +75,7 @@ def test_build_event_url_variant(state: State):
     assert data["external_ids"]["chrome_identity"] == "redacted@users.noreply.github.com"
     assert data["external_ids"]["og_type"] == "article"
     assert data["external_ids"]["lang"] == "en"
-    assert data["note"] == "Attention: Why I Quit Twitter"
+    assert data["note"] == "Why I Quit Twitter — https://example.com/article"
 
 
 def test_build_event_omits_unknown_enrichment_fields(state: State):
