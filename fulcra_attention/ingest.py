@@ -62,7 +62,9 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
 
     if url is not None:
         host: str | None = urlsplit(url).hostname
-        note = f"Attention: {title or url}"
+        # Embed URL in note so it's visible in default `fulcra get-records`
+        # output (which surfaces `note` but not `data.url`).
+        note = f"{title} — {url}" if title else url
         sid_key = url
     else:
         host = None
