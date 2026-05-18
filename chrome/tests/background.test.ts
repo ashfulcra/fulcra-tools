@@ -11,13 +11,14 @@ beforeEach(async () => {
   await chrome.storage.local.clear();
   await chrome.storage.sync.clear();
   await chrome.storage.session.clear();
-  vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_o, cb) => cb({ email: "", id: "" }));
+  // @ts-expect-error chrome.identity overload signatures not compatible with vi.mocked
+  vi.mocked(chrome.identity.getProfileUserInfo).mockImplementation((_o: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => cb({ email: "", id: "" }));
   vi.mocked(chrome.tabs.get).mockResolvedValue({
     id: 1, url: "https://example.com/p", title: "Example", incognito: false,
   } as chrome.tabs.Tab);
-  vi.mocked(chrome.scripting.executeScript).mockResolvedValue([
-    { result: { title: "Example", og_description: null, og_type: null, favicon_url: null, lang: null }, frameId: 0 },
-  ] as chrome.scripting.InjectionResult[]);
+  vi.mocked(chrome.scripting.executeScript).mockResolvedValue(
+    [{ result: { title: "Example", og_description: null, og_type: null, favicon_url: null, lang: null }, frameId: 0 }] as unknown as never,
+  );
 });
 
 describe("handleNavigation", () => {

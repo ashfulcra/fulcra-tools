@@ -10,7 +10,7 @@ import { loadSettings } from "./storage";
 
 function profileUserInfo(): Promise<chrome.identity.UserInfo> {
   return new Promise((resolve) => {
-    chrome.identity.getProfileUserInfo({ accountStatus: "ANY" }, (info) => resolve(info));
+    chrome.identity.getProfileUserInfo({ accountStatus: "ANY" as chrome.identity.AccountStatus }, (info) => resolve(info));
   });
 }
 
