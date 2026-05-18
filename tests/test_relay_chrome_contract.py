@@ -34,9 +34,12 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from fulcra_attention.fulcra import FulcraClient
+from fulcra_attention.fulcra import FulcraClient, build_tag_name
 from fulcra_attention.relay import ReceiverContext, make_server
 from fulcra_attention.state import State
+
+
+_ASH_IDENTITY_KEY = build_tag_name("identity", "redacted@users.noreply.github.com")
 
 
 # ---------- helpers replicated from background.ts ----------
@@ -64,7 +67,7 @@ def state() -> State:
         tag_ids={
             "attention": "tag-a",
             "web": "tag-w",
-            "identity:redacted@users.noreply.github.com": "tag-id-ash",
+            _ASH_IDENTITY_KEY: "tag-id-ash",
         },
     )
 

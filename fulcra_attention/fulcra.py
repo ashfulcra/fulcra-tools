@@ -22,6 +22,55 @@ DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics
 # Tier 2 vocabulary, mirrored in chrome/src/categorize.ts. Pre-created at
 # bootstrap so users can build filters/timelines against a known set even
 # before they've categorized any domains. Add new slugs to both sides.
+def sanitize_tag_value(value: str) -> str:
+    """Reduce a free-text axis value to chars Fulcra's tag API accepts.
+
+    Empirically Fulcra accepts `[a-z0-9._:-]` in tag names and rejects
+    `@` and most other punctuation. Lowercase, collapse any disallowed
+    run to a single `-`, trim leading/trailing `-`. The colon between
+    axis and value is added by the caller, not here. Empty input
+    returns an empty string (caller must guard).
+    """
+    import re
+    out = re.sub(r"[^a-z0-9._\-]+", "-", value.strip().lower())
+    out = re.sub(r"-{2,}", "-", out)  # collapse runs of `-`
+    return out.strip("-")
+
+
+TAG_NAME_MAX = 30  # Fulcra's tag.name validation cap (HTTP 422 above this).
+
+
+def build_tag_name(axis: str, value: str) -> str:
+    """Compose `<axis>:<sanitized-value>` so the result fits TAG_NAME_MAX.
+
+    If the sanitized value alone would push the name past the limit, we
+    truncate and append a deterministic 6-char sha256 suffix so distinct
+    long values don't collide. axis must already be a safe slug
+    (caller's responsibility — these are hard-coded in this package).
+    """
+    safe_value = sanitize_tag_value(value)
+    if not safe_value:
+        raise ValueError(f"axis={axis!r} value sanitises to empty: {value!r}")
+    prefix = f"{axis}:"
+    budget = TAG_NAME_MAX - len(prefix)
+    if budget <= 0:
+        raise ValueError(f"axis prefix {prefix!r} already exceeds {TAG_NAME_MAX}")
+    if len(safe_value) <= budget:
+        return f"{prefix}{safe_value}"
+    # Truncate + 6-char hash suffix derived from the full sanitized value
+    # (not the raw input — so case/whitespace differences collapse the
+    # same way for lookup and creation).
+    import hashlib
+    suffix = hashlib.sha256(safe_value.encode()).hexdigest()[:6]
+    head_budget = budget - 1 - len(suffix)  # 1 for the `-` separator
+    if head_budget < 1:
+        # Pathological: axis name so long there's no room for any value
+        # bytes. Fall back to just the hash so the tag is still unique.
+        return f"{prefix}{suffix[:budget]}"
+    head = safe_value[:head_budget].rstrip("-")
+    return f"{prefix}{head}-{suffix}"
+
+
 CATEGORY_VOCAB: tuple[str, ...] = (
     "search",
     "webmail",
@@ -116,7 +165,10 @@ class FulcraClient:
         web = self.ensure_tag("web", state)
         # Pre-create category tags (Tier 2 vocabulary).
         for slug in CATEGORY_VOCAB:
-            self.ensure_tag(f"category:{slug}", state)
+            # Vocab slugs are hand-picked to be short + ascii so they
+            # never need hashing — but route through build_tag_name for
+            # consistency and to enforce the length cap.
+            self.ensure_tag(build_tag_name("category", slug), state)
         if state.attention_definition_id:
             return
         body = {
@@ -140,7 +192,7 @@ class FulcraClient:
 
     def ensure_machine_tag(self, hostname: str, state: State) -> str:
         """Create / look up the `machine:<hostname>` tag. Called by `setup`."""
-        return self.ensure_tag(f"machine:{hostname}", state)
+        return self.ensure_tag(build_tag_name("machine", hostname), state)
 
     def soft_delete_definition(self, definition_id: str) -> bool:
         r = self._client().delete(

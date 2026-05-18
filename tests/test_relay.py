@@ -9,9 +9,13 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from fulcra_attention.fulcra import FulcraClient
+from fulcra_attention.fulcra import FulcraClient, build_tag_name
 from fulcra_attention.relay import ReceiverContext, make_server
 from fulcra_attention.state import State
+
+
+_ASH_IDENTITY_KEY = build_tag_name("identity", "redacted@users.noreply.github.com")
+_NEWUSER_IDENTITY_KEY = build_tag_name("identity", "newuser@example.com")
 
 
 @pytest.fixture
@@ -24,7 +28,7 @@ def state() -> State:
         tag_ids={
             "attention": "tag-a",
             "web": "tag-w",
-            "identity:redacted@users.noreply.github.com": "tag-id-ash",
+            _ASH_IDENTITY_KEY: "tag-id-ash",
         },
     )
 
@@ -336,14 +340,14 @@ def test_post_lazy_creates_identity_tag(recording_transport, monkeypatch, tmp_pa
             "client": "c",
         })
         assert status == 200
-        # The identity tag was created server-side.
-        assert "identity:newuser@example.com" in posted_tag_names
-        # It was cached for next time.
-        assert state.tag_ids["identity:newuser@example.com"] == "tag-identity:newuser@example.com"
+        # The identity tag was created server-side under the name
+        # build_tag_name produces (sanitized + length-capped).
+        assert _NEWUSER_IDENTITY_KEY in posted_tag_names
+        assert state.tag_ids[_NEWUSER_IDENTITY_KEY] == f"tag-{_NEWUSER_IDENTITY_KEY}"
         # It appears in the ingested event's tags.
         ingests = _ingest_requests(transport)
         line = json.loads(ingests[0].content)
-        assert "tag-identity:newuser@example.com" in line["metadata"]["tags"]
+        assert f"tag-{_NEWUSER_IDENTITY_KEY}" in line["metadata"]["tags"]
 
         # Second POST: cache hit, no extra tag POST.
         before = list(posted_tag_names)

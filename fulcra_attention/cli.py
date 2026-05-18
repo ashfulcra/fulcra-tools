@@ -13,7 +13,7 @@ import click
 
 from . import service_manager
 from . import state as state_mod
-from .fulcra import FulcraClient
+from .fulcra import FulcraClient, build_tag_name, sanitize_tag_value
 
 
 @click.group(help="Capture browsing attention into Fulcra.")
@@ -61,8 +61,14 @@ def setup(hostname: str | None) -> None:
             "Run `fulcra-attention bootstrap` first — no Attention definition exists."
         )
     detected = (hostname or _socket.gethostname()).strip().lower()
-    # Strip ".local" / ".lan" / etc. so the tag stays portable across networks.
-    short = detected.split(".", 1)[0] or detected
+    # Strip ".local" / ".lan" / etc. so the tag stays portable across
+    # networks, then sanitize so unusual hostnames don't trip Fulcra's
+    # tag-name validation (e.g. underscores, accented chars).
+    short = sanitize_tag_value(detected.split(".", 1)[0] or detected)
+    if not short:
+        raise click.ClickException(
+            f"hostname {detected!r} sanitises to empty — pass --hostname"
+        )
     client = FulcraClient()
     client.ensure_machine_tag(short, s)
     s.hostname = short

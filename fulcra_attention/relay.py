@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from .fulcra import FulcraClient
+from .fulcra import FulcraClient, build_tag_name
 from .ingest import build_attention_event
 from .state import State
 
@@ -149,16 +149,24 @@ class AttentionHandler(BaseHTTPRequestHandler):
         # call — keep ingest.py pure / side-effect-free.
         identity = payload.get("chrome_identity")
         if identity:
-            tag_key = f"identity:{identity}"
-            if tag_key not in ctx.state.tag_ids:
+            try:
+                tag_key = build_tag_name("identity", identity)
+            except ValueError:
+                tag_key = None
+            if tag_key and tag_key not in ctx.state.tag_ids:
                 try:
                     ctx.client.ensure_tag(tag_key, ctx.state)
                     from . import state as state_mod
                     state_mod.save(ctx.state, state_mod.DEFAULT_PATH)
-                except Exception:
+                except Exception as exc:
                     # Don't block ingest on identity-tag failure; the event
-                    # will just lack the identity tag this round.
-                    pass
+                    # will just lack the identity tag this round. Log to
+                    # stderr so the launchd err log captures it.
+                    import sys as _sys
+                    print(
+                        f"warning: lazy identity-tag create failed: {exc!r}",
+                        file=_sys.stderr, flush=True,
+                    )
 
         try:
             event = build_attention_event(payload, state=ctx.state)
