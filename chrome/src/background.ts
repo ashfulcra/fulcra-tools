@@ -120,6 +120,18 @@ async function closeVisit(tabId: number, endTime: number): Promise<void> {
   recent.unshift(payload);
   while (recent.length > 10) recent.pop();
   await chrome.storage.local.set({ recentEmitted: recent });
+  // Daily counts for the popup.
+  const today = new Date().toISOString().slice(0, 10);
+  const cRaw = await chrome.storage.local.get("counts");
+  const c = (cRaw.counts as { date: string; logged: number; categorized: number; ignored: number } | undefined)
+    ?? { date: today, logged: 0, categorized: 0, ignored: 0 };
+  const isNewDay = c.date !== today;
+  const counts = isNewDay
+    ? { date: today, logged: 0, categorized: 0, ignored: 0 }
+    : c;
+  if (payload.category !== null) counts.categorized += 1;
+  else counts.logged += 1;
+  await chrome.storage.local.set({ counts });
   await flushOutbox();
 }
 
@@ -144,7 +156,17 @@ export async function handleNavigation(n: NavInput): Promise<void> {
     await closeVisit(n.tabId, n.timeStamp);
   }
 
-  if (await isIgnored(n.url)) return;
+  if (await isIgnored(n.url)) {
+    const today = new Date().toISOString().slice(0, 10);
+    const cRaw = await chrome.storage.local.get("counts");
+    const c = (cRaw.counts as { date: string; logged: number; categorized: number; ignored: number } | undefined)
+      ?? { date: today, logged: 0, categorized: 0, ignored: 0 };
+    const counts = c.date !== today
+      ? { date: today, logged: 0, categorized: 0, ignored: 1 }
+      : { ...c, ignored: c.ignored + 1 };
+    await chrome.storage.local.set({ counts });
+    return;
+  }
 
   const scrubbed = scrubUrl(n.url);
   const cur = await loadActiveVisits();
