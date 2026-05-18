@@ -67,6 +67,15 @@ class AttentionHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _authorize(self) -> bool:
+        ctx = self._context()
+        header = self.headers.get("Authorization", "")
+        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if token != ctx.bearer_token:
+            self._send_json(401, {"ok": False, "error": "unauthorized"})
+            return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         if path == "/health":
@@ -78,6 +87,8 @@ class AttentionHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path != "/attention":
             self._send_json(404, {"ok": False, "error": "not found"})
+            return
+        if not self._authorize():
             return
         ctx = self._context()
 
