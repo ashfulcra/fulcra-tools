@@ -23,7 +23,7 @@ def test_save_then_load_roundtrips(tmp_path: Path):
     assert load(p) == s
 
 
-def test_save_writes_mode_aware_parent_dir(tmp_path: Path):
+def test_save_creates_nested_parent_dirs(tmp_path: Path):
     p = tmp_path / "nested" / "deep" / "state.json"
     save(State(attention_definition_id="x"), p)
     assert p.exists()
