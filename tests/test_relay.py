@@ -132,3 +132,41 @@ def test_post_unknown_path_404s(running_server):
     resp = conn.getresponse()
     assert resp.status == 404
     conn.close()
+
+
+def test_post_missing_auth_returns_401(running_server):
+    _server, port, _ctx = running_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/attention",
+                 body=json.dumps({
+                     "url": "https://x.com/", "title": "T",
+                     "category": None,
+                     "start_time": _now(), "end_time": _now(),
+                     "client": "c"}),
+                 headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    assert resp.status == 401
+    body = json.loads(resp.read())
+    assert body["error"] == "unauthorized"
+    conn.close()
+
+
+def test_post_wrong_bearer_returns_401(running_server):
+    _server, port, _ctx = running_server
+    status, payload = _post(port, {
+        "url": "https://x.com/", "title": "T", "category": None,
+        "start_time": _now(), "end_time": _now(), "client": "c",
+    }, token="not-the-token")
+    assert status == 401
+    assert payload["error"] == "unauthorized"
+
+
+def test_get_health_does_not_require_auth(running_server):
+    _server, port, _ctx = running_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/health")
+    resp = conn.getresponse()
+    assert resp.status == 200
+    body = json.loads(resp.read())
+    assert body["ok"] is True
+    conn.close()
