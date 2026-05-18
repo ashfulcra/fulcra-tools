@@ -32,8 +32,13 @@ def client_with_ingest_capture(recording_transport):
 
 
 @pytest.fixture
-def running_server(state, client_with_ingest_capture, monkeypatch):
+def running_server(state, client_with_ingest_capture, monkeypatch, tmp_path):
     monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    # Redirect watermark/state writes to tmp so happy-path POSTs in these
+    # tests don't pollute ~/.config/fulcra-attention/state.json on the dev
+    # box. The individual watermark tests below ALSO set this (redundant
+    # but safe — last setattr wins, both point at tmp).
+    monkeypatch.setattr("fulcra_attention.state.DEFAULT_PATH", tmp_path / "state.json")
     ctx = ReceiverContext(
         client=client_with_ingest_capture,
         state=state,
