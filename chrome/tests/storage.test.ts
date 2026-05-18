@@ -69,9 +69,15 @@ describe("active visits (session)", () => {
   test("loadActiveVisits returns {} when empty", async () => {
     expect(await loadActiveVisits()).toEqual({});
   });
-  test("uses chrome.storage.session", async () => {
-    await saveActiveVisits({ 7: { tabId: 7, scrubbedUrl: "https://x.com/", startTime: 1700000000000 } });
+  test("uses chrome.storage.session under the `visits` key", async () => {
+    await saveActiveVisits({
+      7: {
+        tabId: 7, windowId: 1, url: "https://x.com/", scrubbedUrl: "https://x.com/",
+        category: null, startTime: 1700000000000, state: "focused",
+        focusEpoch: 1700000000000, accumulatedFocusMs: 0, blurredAt: null,
+      },
+    });
     const session = await chrome.storage.session.get(null);
-    expect(session).toHaveProperty("activeVisits");
+    expect(session).toHaveProperty("visits");
   });
 });
