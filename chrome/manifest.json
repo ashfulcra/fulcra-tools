@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Fulcra Attention",
+  "version": "0.1.0",
+  "description": "Capture browsing attention into your Fulcra account.",
+  "permissions": [
+    "webNavigation",
+    "tabs",
+    "storage",
+    "alarms",
+    "activeTab",
+    "contextMenus",
+    "identity",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8771/*"
+  ],
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "Fulcra Attention"
+  },
+  "options_page": "options.html"
+}
