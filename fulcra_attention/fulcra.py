@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+from pathlib import Path
 
 import httpx
 
@@ -32,16 +34,22 @@ class FulcraClient:
         env = os.environ.get("FULCRA_ACCESS_TOKEN")
         if env:
             return env
+        # Find `fulcra` next to our own python (same venv). Necessary because
+        # the launchd-managed relay inherits a minimal PATH that doesn't
+        # include the venv bin directory.
+        sibling = Path(sys.executable).parent / "fulcra"
+        fulcra_cmd = str(sibling) if sibling.exists() else "fulcra"
         try:
             result = subprocess.run(
-                ["fulcra", "auth", "print-access-token"],
+                [fulcra_cmd, "auth", "print-access-token"],
                 check=True,
                 capture_output=True,
             )
-        except subprocess.CalledProcessError as exc:
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            stderr = getattr(exc, "stderr", b"") or b""
             raise RuntimeError(
                 "fulcra auth print-access-token failed; run `fulcra auth login` first. "
-                f"stderr={exc.stderr!r}"
+                f"stderr={stderr!r}"
             ) from exc
         return result.stdout.decode().strip()
 
