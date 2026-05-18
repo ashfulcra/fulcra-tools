@@ -6,8 +6,55 @@ import json
 import httpx
 import pytest
 
-from fulcra_attention.fulcra import CATEGORY_VOCAB, FulcraClient
+from fulcra_attention.fulcra import CATEGORY_VOCAB, FulcraClient, sanitize_tag_value
 from fulcra_attention.state import State
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # Fulcra accepts `[a-z0-9._-]` in tag names (probed empirically:
+        # `_` returns 303, `@` returns 422). `@` is replaced with `-`.
+        ("ash@fulcradynamics.com", "ash-fulcradynamics.com"),
+        ("ASH@FulcraDynamics.com", "ash-fulcradynamics.com"),
+        ("  spaces  ", "spaces"),
+        ("Desk Book Pro", "desk-book-pro"),
+        # Underscores are allowed verbatim — only dashes collapse.
+        ("multi___under_score", "multi___under_score"),
+        ("--leading-and-trailing--", "leading-and-trailing"),
+        ("já-acentos-ño!", "j-acentos-o"),
+        ("", ""),
+    ],
+)
+def test_sanitize_tag_value_collapses_disallowed_chars(raw: str, expected: str):
+    assert sanitize_tag_value(raw) == expected
+
+
+from fulcra_attention.fulcra import TAG_NAME_MAX, build_tag_name
+
+
+def test_build_tag_name_short_value_no_hash():
+    assert build_tag_name("category", "banking") == "category:banking"
+    assert build_tag_name("machine", "deskbookpro") == "machine:deskbookpro"
+
+
+def test_build_tag_name_truncates_with_deterministic_suffix():
+    """A too-long value gets truncated + 6-char sha256 suffix so distinct
+    long values don't collide on the same truncated head."""
+    long = "ash@fulcradynamics.com"  # 22 chars raw; over budget with `identity:` prefix
+    name = build_tag_name("identity", long)
+    assert len(name) <= TAG_NAME_MAX
+    assert name.startswith("identity:")
+    # Deterministic: same input → same output.
+    assert build_tag_name("identity", long) == name
+    # Different input → different suffix (even if heads happen to match).
+    other = build_tag_name("identity", "ash@example-organization.com")
+    assert other != name
+
+
+def test_build_tag_name_empty_value_raises():
+    with pytest.raises(ValueError):
+        build_tag_name("identity", "!!!")  # sanitises to empty
 
 
 @pytest.fixture(autouse=True)

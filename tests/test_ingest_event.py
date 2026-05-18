@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from fulcra_attention.fulcra import build_tag_name
 from fulcra_attention.ingest import build_attention_event, source_id
 from fulcra_attention.state import State
 
@@ -251,19 +252,24 @@ def test_tags_omit_category_when_uncategorized_tag_cache_missing(state: State):
 
 
 def test_tags_include_identity_when_cached():
+    # Identity must be looked up under the key build_tag_name produces
+    # (sanitized + length-capped + optionally hash-suffixed). Derive the
+    # key dynamically so we don't pin the hash digest in tests.
+    identity = "ash@fulcradynamics.com"
+    identity_key = build_tag_name("identity", identity)
     state = State(
         attention_definition_id="def-att",
         tag_ids={
             "attention": "tag-a",
             "web": "tag-w",
-            "identity:ash@fulcradynamics.com": "tag-i-ash",
+            identity_key: "tag-i-ash",
         },
     )
     p = {
         "url": "https://x.com/",
         "title": "X",
         "category": None,
-        "chrome_identity": "ash@fulcradynamics.com",
+        "chrome_identity": identity,
         "start_time": "2026-05-18T14:00:00Z",
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
@@ -272,7 +278,32 @@ def test_tags_include_identity_when_cached():
     assert ev["metadata"]["tags"] == ["tag-a", "tag-w", "tag-i-ash"]
 
 
+def test_identity_lookup_is_case_insensitive_via_sanitizer():
+    """Mixed-case identity must produce the same lookup key as lowercase."""
+    identity_key = build_tag_name("identity", "ash@fulcradynamics.com")
+    state = State(
+        attention_definition_id="def-att",
+        tag_ids={
+            "attention": "tag-a",
+            "web": "tag-w",
+            identity_key: "tag-i-ash",
+        },
+    )
+    p = {
+        "url": "https://x.com/",
+        "title": "X",
+        "category": None,
+        "chrome_identity": "ASH@FulcraDynamics.com",
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(p, state=state)
+    assert "tag-i-ash" in ev["metadata"]["tags"]
+
+
 def test_tags_all_three_axes_at_once():
+    identity_key = build_tag_name("identity", "ash@fulcradynamics.com")
     state = State(
         attention_definition_id="def-att",
         hostname="deskbookpro",
@@ -281,7 +312,7 @@ def test_tags_all_three_axes_at_once():
             "web": "tag-w",
             "machine:deskbookpro": "tag-m-dbp",
             "category:banking": "tag-c-bank",
-            "identity:ash@fulcradynamics.com": "tag-i-ash",
+            identity_key: "tag-i-ash",
         },
     )
     p = {

@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
+from .fulcra import build_tag_name
 from .scrub import scrub_url
 from .state import State
 
@@ -98,17 +99,29 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
     # at bootstrap from CATEGORY_VOCAB. identity: lazy-created by the relay
     # the first time an identity is seen.
     if state.hostname:
-        machine_tag = state.tag_ids.get(f"machine:{state.hostname}")
-        if machine_tag:
-            tags.append(machine_tag)
+        try:
+            machine_key = build_tag_name("machine", state.hostname)
+            machine_tag = state.tag_ids.get(machine_key)
+            if machine_tag:
+                tags.append(machine_tag)
+        except ValueError:
+            pass
     if category:
-        cat_tag = state.tag_ids.get(f"category:{category}")
-        if cat_tag:
-            tags.append(cat_tag)
+        try:
+            cat_key = build_tag_name("category", category)
+            cat_tag = state.tag_ids.get(cat_key)
+            if cat_tag:
+                tags.append(cat_tag)
+        except ValueError:
+            pass
     if chrome_identity:
-        id_tag = state.tag_ids.get(f"identity:{chrome_identity}")
-        if id_tag:
-            tags.append(id_tag)
+        try:
+            id_key = build_tag_name("identity", chrome_identity)
+            id_tag = state.tag_ids.get(id_key)
+            if id_tag:
+                tags.append(id_tag)
+        except ValueError:
+            pass
     metadata = {
         "data_type": "DurationAnnotation",
         "recorded_at": {
