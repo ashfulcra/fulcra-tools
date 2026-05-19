@@ -41,9 +41,9 @@ body {
   margin-bottom: 28px;
 }
 .options-header .logo {
-  width: 28px;
-  height: 28px;
-  color: var(--fa-ink);
+  width: 32px;
+  height: 32px;
+  display: block;
 }
 .options-header h1 {
   font-size: 22px;

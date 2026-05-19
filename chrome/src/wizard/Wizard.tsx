@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import "./wizard.css";
+import markUrl from "../assets/fulcra-mark.png";
 import { loadSettings, saveSettings, loadIgnoreList, saveIgnoreList } from "../storage";
 import type { IgnoreEntry } from "../types";
 import {
@@ -11,12 +12,7 @@ import { backfillHistory } from "./backfill";
 type Step = "welcome" | "token" | "scan" | "filter" | "ingest" | "done";
 
 function FulcrumMark() {
-  return (
-    <svg className="logo" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <path d="M3 17h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path d="M12 4 L18 16 L6 16 Z" fill="#56d6b7" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
-  );
+  return <img className="logo" src={markUrl} alt="Fulcra" />;
 }
 
 export function Wizard() {
@@ -610,9 +606,25 @@ function DoneStep({ ingestComplete }: { ingestComplete: boolean }) {
           </p>
         )}
       </div>
-      <p className="muted">
-        Close this tab — the extension popup (toolbar icon) is the day-to-day
-        control surface from here on.
+      <p>
+        Next stop: your context dashboard.
+      </p>
+      <div className="action-row">
+        <div className="spacer" />
+        <a
+          href="https://context.fulcradynamics.com/"
+          target="_blank"
+          rel="noreferrer"
+          style={{ textDecoration: "none" }}
+        >
+          <button className="primary">
+            Open Fulcra Context →
+          </button>
+        </a>
+      </div>
+      <p className="muted" style={{ marginTop: 14 }}>
+        The popup (toolbar icon) stays your day-to-day control surface — pause
+        capture, edit your ignore list, swap your identity label.
       </p>
     </>
   );

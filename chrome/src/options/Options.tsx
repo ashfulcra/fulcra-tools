@@ -1,24 +1,8 @@
 import "./options.css";
+import markUrl from "../assets/fulcra-mark.png";
 
 function FulcrumMark() {
-  return (
-    <svg
-      className="logo"
-      viewBox="0 0 24 24"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-    >
-      <path d="M3 17h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      <path
-        d="M12 4 L18 16 L6 16 Z"
-        fill="#56d6b7"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <img className="logo" src={markUrl} alt="Fulcra" />;
 }
 
 export function Options() {
