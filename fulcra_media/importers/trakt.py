@@ -58,7 +58,7 @@ class TraktAuth:
         if r.status_code >= 400:
             raise httpx.HTTPStatusError(
                 f"Trakt token refresh failed: {r.status_code}",
-                request=r.request if r._request is not None else None,  # type: ignore[arg-type]
+                request=r.request,
                 response=r,
             )
         tok = r.json()

@@ -31,6 +31,7 @@ from __future__ import annotations
 import email
 import email.policy
 import hashlib
+import hmac
 import json
 import re
 import threading
@@ -466,7 +467,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 q = parse_qs(urlsplit(self.path).query)
                 qs_token = q.get("token", [""])[0]
                 token = qs_token
-            if token != ctx.bearer_token:
+            # Constant-time compare. Receiver may be reachable from a
+            # non-loopback interface (--host 0.0.0.0 is supported, with
+            # the bearer-token requirement enforced), so a naive `!=`
+            # would expose a per-byte timing oracle.
+            if not hmac.compare_digest(token, ctx.bearer_token):
                 self._send_json(401, {"ok": False, "error": "unauthorized"})
                 return False
             return True
