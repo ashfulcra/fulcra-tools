@@ -9,6 +9,7 @@ from __future__ import annotations
 import hmac
 import json
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -75,6 +76,19 @@ class ReceiverContext:
         self.received = 0
         self.posted = 0
         self.dropped = 0
+        # Defense-in-depth dedup. Fulcra's ingest accepts duplicate
+        # source_ids — the dedup is hint-for-queries, not enforced on
+        # write. A broken client (or a re-run wizard) can therefore
+        # flood the same source_id thousands of times. We keep a
+        # short-lived in-process cache of recently-posted source_ids
+        # and drop repeats. Lives only for the relay process lifetime
+        # (intentionally — a fresh relay = fresh dedup window).
+        # 24h is long enough that re-running the backfill wizard
+        # within a day doesn't re-flood; short enough that a real
+        # repeat-visit a day later gets through.
+        self._dedup: dict[str, float] = {}  # source_id → last-seen mono epoch
+        self._dedup_ttl_s: float = 24 * 3600.0
+        self._dedup_max: int = 10_000
 
     def bump(self, *, posted: int = 0, dropped: int = 0) -> None:
         with self._lock:
@@ -100,6 +114,23 @@ class ReceiverContext:
                 "posted": self.posted,
                 "dropped": self.dropped,
             }
+
+    def is_duplicate(self, source_id: str) -> bool:
+        """True if `source_id` was already seen within the TTL window.
+        Thread-safe. Side-effect: prunes expired entries when the cache
+        grows past _dedup_max."""
+        now = time.monotonic()
+        with self._lock:
+            seen = self._dedup.get(source_id)
+            if seen is not None and (now - seen) < self._dedup_ttl_s:
+                return True
+            self._dedup[source_id] = now
+            if len(self._dedup) > self._dedup_max:
+                cutoff = now - self._dedup_ttl_s
+                self._dedup = {
+                    k: v for k, v in self._dedup.items() if v >= cutoff
+                }
+            return False
 
 
 class AttentionHandler(BaseHTTPRequestHandler):
@@ -204,6 +235,20 @@ class AttentionHandler(BaseHTTPRequestHandler):
             event = build_attention_event(payload, state=ctx.state)
         except (KeyError, ValueError) as exc:
             self._send_json(400, {"ok": False, "error": "bad payload", "message": str(exc)})
+            return
+
+        # In-process dedup. Drop events whose source_id was already
+        # forwarded to Fulcra recently. Fulcra accepts duplicate
+        # source_ids on write — without this guard, a re-run wizard
+        # or a buggy client can flood the same source_id thousands of
+        # times. The wire event's source[0] is the per-event source_id.
+        source_id = event["metadata"]["source"][0]
+        if ctx.is_duplicate(source_id):
+            ctx.bump(posted=0, dropped=1)
+            # 200 + posted=0/dropped=1 so the caller knows we accepted
+            # but didn't forward. Same response shape as a successful
+            # post, just different counts.
+            self._send_json(200, {"posted": 0, "dropped": 1, "reason": "duplicate"})
             return
 
         try:

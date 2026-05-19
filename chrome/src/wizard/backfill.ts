@@ -31,9 +31,25 @@ export async function backfillHistory(
   // Pre-flatten so we can report total + progress accurately.
   const rows: ScannedUrl[] = [];
   for (const g of groups) for (const u of g.urls) rows.push(u);
+  // Dedup by (scrubbed URL + lastVisitTime-truncated-to-second) — the
+  // exact key that drives the relay's source_id. chrome.history returns
+  // one row per URL but the rows that came in via the same browser
+  // session frequently share `lastVisitTime`, and the wizard can be
+  // re-run, so without this dedup we get hundreds of identical-on-the-
+  // wire events. Fulcra's ingest doesn't dedupe by source_id (it's a
+  // dedup hint for QUERY-time, not write-time), so the client has to.
+  const seen = new Set<string>();
+  const unique: ScannedUrl[] = [];
+  for (const row of rows) {
+    const sec = Math.floor(row.lastVisitTime / 1000) * 1000;
+    const key = `${row.url}|${sec}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(row);
+  }
   const identity = await getChromeIdentity();
   let queued = 0;
-  for (const row of rows) {
+  for (const row of unique) {
     // Re-check the current ignore list — the wizard updated it before
     // calling us, so any newly-excluded host should be dropped here.
     if (await isIgnored(row.url)) continue;
@@ -55,7 +71,7 @@ export async function backfillHistory(
     };
     await addToOutbox(payload);
     queued += 1;
-    if (opts.onProgress) opts.onProgress(queued, rows.length);
+    if (opts.onProgress) opts.onProgress(queued, unique.length);
   }
   // addToOutbox only writes to storage; the actual POST happens here.
   // For a backfill of a few thousand URLs this is one big flush at

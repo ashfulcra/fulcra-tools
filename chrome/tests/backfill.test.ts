@@ -65,6 +65,23 @@ describe("backfillHistory", () => {
     expect(ob[0].payload.title).toBeNull();
   });
 
+  test("dedups by (url + lastVisitTime-to-second) so re-runs don't flood Fulcra", async () => {
+    // Same URL at the same second → one event. The relay derives source_id
+    // from url+second, so emitting both would produce identical source_ids
+    // and (before relay-side dedup) duplicate events. Even with relay dedup,
+    // we shouldn't waste outbox slots / POST round-trips.
+    const groups = [fakeGroup("example.com", [
+      { url: "https://example.com/a", lastVisitTime: 1_700_000_000_000 },
+      { url: "https://example.com/a", lastVisitTime: 1_700_000_000_412 }, // same second, different ms
+      { url: "https://example.com/a", lastVisitTime: 1_700_000_001_000 }, // next second → kept
+      { url: "https://example.com/b", lastVisitTime: 1_700_000_000_000 }, // different URL → kept
+    ])];
+    const count = await backfillHistory(groups);
+    expect(count).toBe(3);
+    const ob = await loadOutbox();
+    expect(ob).toHaveLength(3);
+  });
+
   test("reports progress via onProgress callback", async () => {
     const groups = [fakeGroup("example.com", [
       { url: "https://example.com/a", lastVisitTime: 1 },

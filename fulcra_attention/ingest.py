@@ -16,7 +16,12 @@ from .fulcra import build_tag_name
 from .scrub import scrub_url
 from .state import State
 
-SOURCE_PREFIX = "com.fulcra.attention.v1."
+# Bumped 2026-05-19 from v1 → v2 so that source_ids generated post-reset
+# can never collide with v1 source_ids that are still in Fulcra (under
+# the soft-deleted v1 attention definition). v1 events stay visible if
+# a query doesn't filter by definition, but v2 events get fresh,
+# non-overlapping source_ids and clean dedup behaviour.
+SOURCE_PREFIX = "com.fulcra.attention.v2."
 
 
 def _parse_iso(s: str) -> datetime:
