@@ -31,6 +31,9 @@ from .base import NormalizedEvent, content_fingerprint
 
 CREDS_PATH = Path(os.path.expanduser("~/.config/fulcra-media/lastfm.json"))
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
+# Last.fm can return ancient placeholder UTS values for imported/library rows.
+# Treat Unix-epoch-adjacent timestamps as malformed, not real scrobbles.
+MIN_VALID_UTS = 946684800  # 2000-01-01T00:00:00Z
 
 
 def load_creds() -> dict:
@@ -82,6 +85,8 @@ def normalize_track(track: dict) -> NormalizedEvent | None:
         return None
 
     uts = int(date["uts"])
+    if uts < MIN_VALID_UTS:
+        return None
     start = datetime.fromtimestamp(uts, tz=timezone.utc)
     end = start + timedelta(seconds=1)
 
