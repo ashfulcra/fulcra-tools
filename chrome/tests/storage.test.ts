@@ -5,7 +5,7 @@ import {
   loadOutbox, saveOutbox,
   loadIgnoreList, saveIgnoreList,
   loadCategoryMap,
-  loadActiveVisits, saveActiveVisits,
+  loadVisits, saveVisits,
 } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";
 
@@ -70,11 +70,11 @@ describe("category map (local)", () => {
 });
 
 describe("active visits (session)", () => {
-  test("loadActiveVisits returns {} when empty", async () => {
-    expect(await loadActiveVisits()).toEqual({});
+  test("loadVisits returns {} when empty", async () => {
+    expect(await loadVisits()).toEqual({});
   });
   test("uses chrome.storage.session under the `visits` key", async () => {
-    await saveActiveVisits({
+    await saveVisits({
       7: {
         tabId: 7, windowId: 1, url: "https://x.com/", scrubbedUrl: "https://x.com/",
         category: null, startTime: 1700000000000, state: "focused",

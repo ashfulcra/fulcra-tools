@@ -409,17 +409,17 @@ export async function handleIdleStateChanged(
   now: number,
 ): Promise<void> {
   if (state === "active") {
-    // User came back. Don't auto-resume — the focused tab will tick
-    // back to focused via the next onActivated/onFocusChanged. But we
-    // DO need to thaw the currently-focused visit (the one that was
-    // never really blurred from a tab POV, only from a "user is here"
-    // POV). Update its focusEpoch to now so we don't claim AFK time
-    // as attention.
+    // User came back. Thaw any blurred visit that's still within
+    // grace. We can't tell idle-driven freezes from blur-driven
+    // freezes in storage without an extra flag, and the grace
+    // window already handles both consistently — anything older
+    // gets emitted by the sweep, anything fresher resumes here.
     const visits = await loadVisits();
     let changed = false;
     for (const [k, v] of Object.entries(visits)) {
-      if (v.state === "blurred" && v.blurredAt !== null && v.blurredAt === idleSentinelTimestamp(v)) {
-        // Visit was frozen by an idle transition; thaw it.
+      if (v.state === "blurred"
+          && v.blurredAt !== null
+          && now - v.blurredAt <= BLUR_GRACE_MS) {
         visits[Number(k)] = thaw(v, now);
         changed = true;
       }
@@ -427,20 +427,10 @@ export async function handleIdleStateChanged(
     if (changed) await saveVisits(visits);
     return;
   }
-  // idle | locked → treat the same: freeze all focused visits as of NOW.
-  // The blur grace timer starts now; if the user returns within grace,
+  // idle | locked → freeze all focused visits as of NOW. The blur
+  // grace timer starts now; if the user returns within grace,
   // we resume via the 'active' transition above.
   await blurAll(now);
-}
-
-// We can't distinguish "idle freeze" from "blur freeze" in storage
-// without a flag. For now use a sentinel: idle-driven freezes mark
-// blurredAt with the current moment, and so do blur-driven freezes;
-// we can't truly differentiate. So idle-resume is best-effort: it
-// resumes any blurred visit that's within grace. This matches the
-// existing thaw-on-activated path, so behaviour is consistent.
-function idleSentinelTimestamp(v: Visit): number | null {
-  return v.blurredAt;
 }
 
 // ---------- wire to chrome APIs at SW boot ----------

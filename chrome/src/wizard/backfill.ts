@@ -57,8 +57,10 @@ export async function backfillHistory(
     queued += 1;
     if (opts.onProgress) opts.onProgress(queued, rows.length);
   }
-  // One final flush — outbox.addToOutbox already triggers flushes,
-  // but call once more so the wizard can show "all sent".
+  // addToOutbox only writes to storage; the actual POST happens here.
+  // For a backfill of a few thousand URLs this is one big flush at
+  // the end — the per-request timeout + 5-failure circuit breaker
+  // in outbox.ts caps the worst case.
   await flushOutbox();
   return queued;
 }

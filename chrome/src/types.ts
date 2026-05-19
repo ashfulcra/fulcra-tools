@@ -92,9 +92,6 @@ export interface Visit {
   blurredAt: number | null;   // ms epoch — only set when state="blurred"
 }
 
-/** @deprecated kept as alias for tests / external code; use Visit. */
-export type ActiveVisit = Visit;
-
 /** How long after blur a visit can be resumed instead of starting a new one. */
 export const BLUR_GRACE_MS = 30_000;
 

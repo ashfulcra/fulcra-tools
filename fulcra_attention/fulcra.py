@@ -118,7 +118,12 @@ class FulcraClient:
                 capture_output=True,
             )
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            stderr = getattr(exc, "stderr", b"") or b""
+            stderr_raw = getattr(exc, "stderr", b"") or b""
+            # Truncate so we don't accidentally surface a long stderr that
+            # could contain a token or other credential from a future
+            # fulcra-cli change. 200 chars is enough for the usual
+            # "not logged in" / "missing config" messages.
+            stderr = stderr_raw[:200]
             raise RuntimeError(
                 "fulcra auth print-access-token failed; run `fulcra auth login` first. "
                 f"stderr={stderr!r}"

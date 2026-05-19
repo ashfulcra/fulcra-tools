@@ -128,7 +128,6 @@ export const EXCLUSION_PRESETS: ExclusionPreset[] = [
       "*.auth0.com",
       "*.okta.com",
       "appleid.apple.com",
-      "github.com/login",
     ],
   },
 ];

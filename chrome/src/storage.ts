@@ -47,8 +47,3 @@ export async function loadVisits(): Promise<Record<number, Visit>> {
 export async function saveVisits(v: Record<number, Visit>): Promise<void> {
   await chrome.storage.session.set({ visits: v });
 }
-
-// Back-compat alias for tests + popup. Used to be `loadActiveVisits` —
-// the renamed key signals the new state machine semantics.
-export const loadActiveVisits = loadVisits;
-export const saveActiveVisits = saveVisits;
