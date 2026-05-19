@@ -27,6 +27,7 @@ import { loadVisits, saveVisits, loadSettings, saveSettings } from "./storage";
 import type { AttentionEvent, Visit, Counts } from "./types";
 import { BLUR_GRACE_MS, CLIENT, HEARTBEAT_STALE_MS } from "./types";
 import { reconcileHeartbeatOnBoot } from "./heartbeat-control";
+import { scrubTitle } from "./title-scrub";
 
 const FLUSH_ALARM = "fulcra-attention-flush";
 const SWEEP_ALARM = "fulcra-attention-sweep";
@@ -115,9 +116,15 @@ export async function buildPayload(inp: {
 }): Promise<AttentionEvent> {
   const identity = await getChromeIdentity();
   const isCategorized = inp.visit.category !== null;
+  // Apply per-host title scrubbing. Gmail subjects, Calendar event
+  // names, Slack channels etc. don't belong in the Fulcra attention
+  // log — the URL+host is enough.
+  let host: string | null = null;
+  try { host = new URL(inp.visit.scrubbedUrl).hostname; } catch { /* keep null */ }
+  const cleanTitle = scrubTitle(host, inp.meta.title);
   return {
     url: isCategorized ? null : inp.visit.scrubbedUrl,
-    title: isCategorized ? null : inp.meta.title,
+    title: isCategorized ? null : cleanTitle,
     og_description: isCategorized ? null : inp.meta.og_description,
     favicon_url: isCategorized ? null : inp.meta.favicon_url,
     category: inp.visit.category,
