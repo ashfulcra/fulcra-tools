@@ -14,12 +14,17 @@ npm run build       # Production build to dist/
 
 ## Load into Chrome
 
-1. Build: `npm run build`
+1. Build: `npm run build` — this is **required first** and produces `chrome/dist/`.
 2. Open `chrome://extensions/`
 3. Enable "Developer mode" (top right)
 4. Click "Load unpacked"
-5. Choose `chrome/dist/`
+5. Choose **`chrome/dist/`** — the build output, *not* the `chrome/` source folder.
 6. Open the extension popup and paste the bearer token from `~/.config/fulcra-attention/relay.json`
+
+> **Load `chrome/dist/`, not `chrome/`.** The source folder has no `manifest.json`,
+> so Chrome will reject it with "Manifest file is missing or unreadable" — that
+> error means you picked the wrong folder; run `npm run build` and choose
+> `chrome/dist/`. (`dist/` is gitignored, so it won't exist until you build.)
 
 ## Architecture
 
