@@ -229,7 +229,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
         This setup takes a couple of minutes:
       </p>
       <ol>
-        <li>Paste your relay's bearer token (you generated this when you ran <code>fulcra-attention setup</code>)</li>
+        <li>Paste your relay's bearer token (from <code>~/.config/fulcra-attention/relay.json</code>)</li>
         <li>Scan your recent browser history</li>
         <li>Pick sites and categories to exclude (banking, healthcare, etc.)</li>
         <li>Optionally back-fill the kept history into Fulcra</li>
@@ -267,8 +267,15 @@ function TokenStep(props: {
         style={{ width: "100%", boxSizing: "border-box" }}
       />
       <p className="muted">
-        Don't have one yet? In a terminal: <code>fulcra-attention setup</code>{" "}
-        and copy the printed token.
+        Don't have one yet? Print it with:
+        <br />
+        <code>cat ~/.config/fulcra-attention/relay.json</code>
+        <br />
+        — the <code>bearer_token</code> field is what you want. If that file
+        doesn't exist, run setup first (from inside the fulcra-attention
+        venv):
+        <br />
+        <code>.venv/bin/fulcra-attention setup</code>
       </p>
       <div className="action-row">
         <div className="spacer" />
