@@ -71,7 +71,7 @@ describe("category map (local)", () => {
   });
 });
 
-describe("active visits (session)", () => {
+describe("visits (session)", () => {
   test("loadVisits returns {} when empty", async () => {
     expect(await loadVisits()).toEqual({});
   });

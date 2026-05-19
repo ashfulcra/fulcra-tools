@@ -270,6 +270,30 @@ describe("foreground-only model", () => {
     expect(after[1].accumulatedFocusMs).toBe(35 * SEC);
   });
 
+  test("heartbeat AFK: thaw resets lastHeartbeat so a resumed visit isn't immediately re-frozen", async () => {
+    // Bug fixed in this commit: when a blurred visit resumed via the
+    // grace window, lastHeartbeat stayed at its pre-blur value. The
+    // next sweep would see it as stale and instantly re-freeze the
+    // visit, truncating the duration. Thaw now bumps lastHeartbeat
+    // to `now` for parity with focusEpoch.
+    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok", heartbeatEnabled: true });
+    stubTab(1, "https://reader.example/");
+    await handleTabActivated(1, T0);
+    // Tab-hop to another tab (freezes visit 1), then return within grace.
+    stubTab(2, "https://other.example/");
+    await handleTabActivated(2, T0 + 10 * SEC);
+    stubTab(1, "https://reader.example/");
+    await handleTabActivated(1, T0 + 20 * SEC);
+    // visit 1 should be focused again with a FRESH lastHeartbeat.
+    const visits = await loadVisits();
+    expect(visits[1].state).toBe("focused");
+    expect(visits[1].lastHeartbeat).toBe(T0 + 20 * SEC);
+    // Sweep ~5s later — visit 1 should NOT be re-frozen even though
+    // its previous lastHeartbeat was 25s in the past.
+    await sweepStaleBlurred(T0 + 25 * SEC);
+    expect((await loadVisits())[1].state).toBe("focused");
+  });
+
   test("heartbeat AFK: disabled by default — stale lastHeartbeat does nothing", async () => {
     // settings.heartbeatEnabled is false by default. Even with a
     // stale lastHeartbeat, sweep must not freeze the visit.

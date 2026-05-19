@@ -2,7 +2,12 @@
 
 Capture what takes your attention while browsing — every page you read, with title and time-on-page — into your own [Fulcra](https://fulcradynamics.com) account, so you can later recall *"what was that article I read on Tuesday?"*
 
-This repo is the **Python relay + CLI** that the Chrome extension talks to. The Chrome extension itself is a separate project (Plan B). The relay holds your Fulcra credentials so the extension never sees them.
+This repo holds both halves of the system:
+
+- **Python relay + CLI** at the repo root (`fulcra_attention/`). Runs locally, holds your Fulcra credentials, accepts loopback POSTs from the extension.
+- **Chrome MV3 extension** under `chrome/`. Foreground-only capture, optional sharper-AFK content script, onboarding wizard, right-click context menu, branded UI. See [chrome/README.md](chrome/README.md) for build + load instructions.
+
+The extension never sees your Fulcra credentials — it talks to the relay over `127.0.0.1:8771` with a per-machine bearer token.
 
 ## Per-machine install
 
@@ -94,7 +99,7 @@ Architecture references (in the sibling repo):
 ## Status
 
 - **Plan A (this repo):** Python backend complete. 102 tests passing.
-- **Plan B:** Chrome extension (separate work item — separate repo eventually, or `chrome/` subdir here).
+- Chrome extension: shipped, lives under [chrome/](chrome/). Foreground-only attention, AFK detection, pause control, onboarding wizard, right-click context menu, branded UI.
 - **v2:** Direct-to-cloud via Auth0 OAuth (extension drops the relay dependency); needs the dedicated Auth0 app provisioned per the spec above.
 
 ## License
