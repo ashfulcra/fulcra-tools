@@ -248,6 +248,24 @@ describe("foreground-only model", () => {
     await handleTabClose(1, T0 + 500);  // 0.5s
     expect(await loadOutbox()).toEqual([]);
   });
+
+  test("sleep-orphan: focused visit older than 30 min caps at the limit", async () => {
+    // Simulate the case where the system went to sleep mid-visit:
+    // SW evicted, chrome.idle never fired, focused visit sits in storage
+    // for 12 hours. When the user wakes the laptop and closes the tab,
+    // emission MUST NOT report 12 hours of focused time.
+    stubTab(1, "https://accounts.google.com/");
+    await handleTabActivated(1, T0);
+    // 12 hours later, the tab gets closed.
+    const TWELVE_HOURS = 12 * 60 * MIN;
+    await handleTabClose(1, T0 + TWELVE_HOURS);
+    const ob = await loadOutbox();
+    expect(ob).toHaveLength(1);
+    const startMs = new Date(ob[0].payload.start_time).getTime();
+    const endMs = new Date(ob[0].payload.end_time).getTime();
+    // Duration is exactly MAX_FOCUS_PERIOD_MS (30 min), not 12 hours.
+    expect(endMs - startMs).toBe(30 * MIN);
+  });
 });
 
 // ---------- idle (chrome.idle.onStateChanged) ----------

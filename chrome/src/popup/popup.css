@@ -57,11 +57,12 @@ body {
   margin: 0 0 14px;
 }
 .app-header .logo {
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   flex: 0 0 auto;
-  /* The "fulcrum" mark — a stylised pivot. Inline SVG so the popup
-   * doesn't need to ship an image asset; tinted via fill on the path. */
+  display: block;
+  /* The official Fulcra mark — bundled PNG at build time. The spiral
+   * detail is legible at 22px on a 380px popup. */
 }
 .app-header h1 {
   font-size: 14px;

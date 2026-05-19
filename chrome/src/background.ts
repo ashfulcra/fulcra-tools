@@ -33,6 +33,19 @@ const FLUSH_INTERVAL_MIN = 1;
 // Sweep periodically to emit visits whose blur grace window expired.
 const SWEEP_INTERVAL_MIN = 1;
 
+// Maximum single continuous "focused" period (ms). Belt-and-braces for
+// the case where the SW gets evicted while a visit is open (system
+// sleep, browser hibernation, etc.): chrome.idle can't fire while the
+// SW is suspended, so a tab that was focused at sleep stays "focused"
+// in storage. When the SW wakes up and something eventually freezes
+// the visit, the raw delta would be huge. The cap means a 12-hour
+// orphan emits as 30 min max, which is still wrong but bounded.
+//
+// 30 min covers genuine long-form reading without artificially closing
+// real sessions; sleep-orphans land at the cap and then get re-opened
+// fresh on the next focus signal.
+const MAX_FOCUS_PERIOD_MS = 30 * 60 * 1000;
+
 // ---------- single-writer mutex for chrome.storage.session.visits ----------
 //
 // Every handler that does a load-mutate-save against `visits` (or counts /
@@ -67,9 +80,14 @@ function toIsoSecondZ(ms: number): string {
 
 function focusedDurationMs(v: Visit, now: number): number {
   // Total focused ms = accumulated (prior periods) + current period if still
-  // focused. While blurred, accumulatedFocusMs already includes the last
-  // period (we update it on every focused → blurred transition).
-  return v.accumulatedFocusMs + (v.state === "focused" ? Math.max(0, now - v.focusEpoch) : 0);
+  // focused. The current period is capped at MAX_FOCUS_PERIOD_MS to handle
+  // sleep-orphans (see comment at the constant). While blurred,
+  // accumulatedFocusMs already includes the last period (we update it on
+  // every focused → blurred transition, also capped there).
+  const currentPeriod = v.state === "focused"
+    ? Math.min(MAX_FOCUS_PERIOD_MS, Math.max(0, now - v.focusEpoch))
+    : 0;
+  return v.accumulatedFocusMs + currentPeriod;
 }
 
 // ---------- payload + emit ----------
@@ -192,10 +210,14 @@ async function emit(visit: Visit, endTime: number): Promise<void> {
  */
 function freeze(v: Visit, now: number): Visit {
   if (v.state === "blurred") return v;
+  // Apply the same MAX_FOCUS_PERIOD_MS cap as focusedDurationMs so a
+  // sleep-orphan visit doesn't bake 12 hours into accumulatedFocusMs
+  // when the user finally activates a different tab.
+  const period = Math.min(MAX_FOCUS_PERIOD_MS, Math.max(0, now - v.focusEpoch));
   return {
     ...v,
     state: "blurred",
-    accumulatedFocusMs: v.accumulatedFocusMs + Math.max(0, now - v.focusEpoch),
+    accumulatedFocusMs: v.accumulatedFocusMs + period,
     blurredAt: now,
   };
 }
