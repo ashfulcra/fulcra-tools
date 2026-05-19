@@ -41,6 +41,8 @@ export function Wizard() {
   const [ingestProgress, setIngestProgress] = useState<{ done: number; total: number } | null>(null);
   const [ingestEnabled, setIngestEnabled] = useState(true);
   const [ingestComplete, setIngestComplete] = useState(false);
+  const [ingestRunning, setIngestRunning] = useState(false);
+  const [ingestError, setIngestError] = useState<string | null>(null);
 
   // Pre-populate manuallyExcluded with anything already on the Tier 3 list
   // so the wizard starts from "here's what you already excluded".
@@ -107,27 +109,40 @@ export function Wizard() {
   }
 
   async function runIngest() {
+    if (ingestRunning) return;  // double-click guard
     if (!groups) return;
+    setIngestRunning(true);
+    setIngestError(null);
     setIngestProgress({ done: 0, total: 0 });
-    if (!ingestEnabled) {
-      // Skip the actual backfill — go straight to done.
+    try {
+      if (!ingestEnabled) {
+        // Skip the actual backfill — go straight to done.
+        await markOnboarded();
+        setIngestComplete(true);
+        setStep("done");
+        return;
+      }
+      // Filter out groups whose host is covered by ANY current exclusion
+      // (preset, manual, or pre-existing). The wizard already wrote
+      // those into storage in applyExclusionsAndAdvance, but recompute
+      // here so this function stays correct in isolation.
+      const keep = groups.filter((g) => !matchesAnyPattern(g.host, livePatterns));
+      const count = await backfillHistory(keep, {
+        onProgress: (done, total) => setIngestProgress({ done, total }),
+      });
       await markOnboarded();
       setIngestComplete(true);
+      setIngestProgress({ done: count, total: count });
       setStep("done");
-      return;
+    } catch (e) {
+      // Surface the error so the user knows why nothing advanced —
+      // most likely the relay is unreachable or the bearer token
+      // is missing/wrong. Events stay in the outbox and will retry
+      // on the next chrome.alarms tick, so this isn't data loss.
+      setIngestError((e as Error).message ?? String(e));
+    } finally {
+      setIngestRunning(false);
     }
-    // Filter out groups whose host is covered by ANY current exclusion
-    // (preset, manual, or pre-existing). The wizard already wrote
-    // those into storage in applyExclusionsAndAdvance, but recompute
-    // here so this function stays correct in isolation.
-    const keep = groups.filter((g) => !matchesAnyPattern(g.host, livePatterns));
-    const count = await backfillHistory(keep, {
-      onProgress: (done, total) => setIngestProgress({ done, total }),
-    });
-    await markOnboarded();
-    setIngestComplete(true);
-    setIngestProgress({ done: count, total: count });
-    setStep("done");
   }
 
   async function markOnboarded() {
@@ -206,8 +221,11 @@ export function Wizard() {
           ingestEnabled={ingestEnabled}
           setIngestEnabled={setIngestEnabled}
           progress={ingestProgress}
+          running={ingestRunning}
+          error={ingestError}
           onStart={() => void runIngest()}
           onBack={() => setStep("filter")}
+          onSkip={async () => { await markOnboarded(); setStep("done"); }}
         />
       )}
 
@@ -483,15 +501,21 @@ function IngestStep(props: {
   ingestEnabled: boolean;
   setIngestEnabled: (b: boolean) => void;
   progress: { done: number; total: number } | null;
+  running: boolean;
+  error: string | null;
   onStart: () => void;
   onBack: () => void;
+  onSkip: () => void;
 }) {
   const kept = props.groups
     .filter((g) => !matchesAnyPattern(g.host, props.livePatterns))
     .reduce((sum, g) => sum + g.urls.length, 0);
 
-  const inProgress = props.progress !== null && props.progress.total > 0
-    && props.progress.done < props.progress.total;
+  // Use the running flag from the parent for the disable check — it's
+  // true the entire time runIngest is in flight, even before any
+  // progress callback has fired. Without this, the button stayed clickable
+  // on empty-keep / instant-done flows.
+  const inProgress = props.running;
   const pct = props.progress && props.progress.total > 0
     ? Math.round((props.progress.done / props.progress.total) * 100)
     : 0;
@@ -530,11 +554,39 @@ function IngestStep(props: {
         </>
       )}
 
+      {props.error && (
+        <div style={{
+          marginTop: 12, padding: "10px 12px",
+          border: "1px solid var(--fa-danger)",
+          background: "rgba(217, 38, 56, 0.05)",
+          borderRadius: 6,
+          color: "var(--fa-danger)",
+          fontSize: 13,
+        }}>
+          <strong>Backfill failed.</strong> {props.error}
+          <br />
+          <span style={{ color: "var(--fa-muted)" }}>
+            Most likely cause: relay isn't reachable on{" "}
+            <code>127.0.0.1:8771</code>, or the bearer token in settings
+            doesn't match the one in <code>relay.json</code>. Queued events
+            stay in the outbox and will retry automatically — you can finish
+            the wizard and check the popup's Recent stream later.
+          </span>
+        </div>
+      )}
+
       <div className="action-row">
         <button onClick={props.onBack} disabled={inProgress}>← Back</button>
         <div className="spacer" />
+        {props.error && (
+          <button onClick={props.onSkip}>
+            Finish anyway →
+          </button>
+        )}
         <button className="primary" onClick={props.onStart} disabled={inProgress}>
-          {props.ingestEnabled ? "Send to Fulcra →" : "Finish setup →"}
+          {inProgress
+            ? "Sending…"
+            : props.ingestEnabled ? "Send to Fulcra →" : "Finish setup →"}
         </button>
       </div>
     </>
