@@ -16,6 +16,10 @@ export function BearerForm() {
   async function save() {
     const cur = await loadSettings();
     await saveSettings({ ...cur, bearerToken: token || null, enabled });
+    // Clear any stale ingest error — the user just fixed their token,
+    // so we shouldn't keep showing a Reconnect banner. The next outbox
+    // flush either succeeds (stays clear) or re-raises a fresh error.
+    await chrome.storage.local.remove("lastIngestError");
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   }

@@ -54,7 +54,19 @@ export async function flushOutbox(): Promise<void> {
   const settings = await loadSettings();
   if (!settings.bearerToken) return;
   const entries = await loadOutbox();
-  if (entries.length === 0) return;
+  if (entries.length === 0) {
+    // Nothing to flush. If the user just fixed a token (popup save
+    // clears `lastIngestError` directly) we're already clean; if the
+    // outbox naturally drained, clear any stale `unreachable` so the
+    // banner doesn't keep warning about a state that no longer
+    // exists. We leave `unauthorized` alone — that one only clears on
+    // explicit token save or a successful POST.
+    const r = await chrome.storage.local.get("lastIngestError");
+    if (r.lastIngestError && (r.lastIngestError as IngestError).kind === "unreachable") {
+      await chrome.storage.local.remove("lastIngestError");
+    }
+    return;
+  }
 
   const remaining: OutboxEntry[] = [];
   let consecutiveFailures = 0;

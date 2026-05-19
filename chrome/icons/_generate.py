@@ -58,13 +58,6 @@ def main() -> None:
             out_path = HERE / f"icon-{name}-{size}.png"
             small.save(out_path)
             print(f"  → {out_path.name}")
-    # Also keep the legacy `icon-{16,32,48,128}.png` aliases (= active)
-    # so a stale dist/ or pre-update manifest doesn't 404.
-    for size in SIZES:
-        active = HERE / f"icon-active-{size}.png"
-        alias  = HERE / f"icon-{size}.png"
-        alias.write_bytes(active.read_bytes())
-        print(f"  → {alias.name} (alias)")
 
 
 if __name__ == "__main__":
