@@ -1,10 +1,6 @@
 """Service manager: launchd (macOS) + systemd user (Linux) generation."""
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from fulcra_attention.service_manager import (
     LAUNCHD_LABEL,
     launchd_plist_path,

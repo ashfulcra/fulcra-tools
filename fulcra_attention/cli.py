@@ -13,7 +13,7 @@ import click
 
 from . import service_manager
 from . import state as state_mod
-from .fulcra import FulcraClient, build_tag_name, sanitize_tag_value
+from .fulcra import FulcraClient, sanitize_tag_value
 
 
 @click.group(help="Capture browsing attention into Fulcra.")

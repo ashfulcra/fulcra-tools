@@ -18,12 +18,29 @@ from .ingest import build_attention_event
 from .state import State
 
 
+_STRING_FIELDS = (
+    "url", "category", "title", "og_description", "favicon_url",
+    "chrome_identity", "og_type", "lang", "client",
+    "start_time", "end_time",
+)
+
+
 def _validate(payload: dict) -> None:
     """Raise ValueError with a human-readable message on schema violation."""
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
     required = ("start_time", "end_time", "client")
     missing = [k for k in required if k not in payload]
     if missing:
         raise ValueError(f"missing fields: {missing}")
+    # Type-check every string field — relay refuses ints, lists, dicts in
+    # places we expect strings. Closes off a class of accidental
+    # crash-via-malformed-payload paths and prevents weird types from
+    # flowing into sanitize_tag_value / build_tag_name downstream.
+    for k in _STRING_FIELDS:
+        v = payload.get(k)
+        if v is not None and not isinstance(v, str):
+            raise ValueError(f"field {k!r} must be string or null, got {type(v).__name__}")
     url = payload.get("url")
     cat = payload.get("category")
     if (url is None) == (cat is None):
@@ -109,6 +126,19 @@ class AttentionHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _check_host_header(self) -> bool:
+        """Reject DNS-rebinding attempts. A browser fetch from an
+        attacker page that resolves their hostname to 127.0.0.1 will
+        send Host: attacker.example. Loopback binding alone doesn't
+        protect against this — only the bearer-token check does, but
+        rejecting non-loopback Host values is cheap defense in depth.
+        """
+        host = self.headers.get("Host", "").split(":", 1)[0].lower()
+        if host in ("127.0.0.1", "localhost", "::1", ""):
+            return True
+        self._send_json(400, {"ok": False, "error": "bad host"})
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         if path == "/health":
@@ -117,6 +147,8 @@ class AttentionHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._check_host_header():
+            return
         path = urlsplit(self.path).path
         if path != "/attention":
             self._send_json(404, {"ok": False, "error": "not found"})
