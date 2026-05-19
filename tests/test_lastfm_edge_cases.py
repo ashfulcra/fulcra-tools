@@ -60,17 +60,24 @@ def test_normalize_track_with_whitespace_only_artist_skipped():
     assert normalize_track(track) is None
 
 
-def test_normalize_track_negative_uts_is_handled():
-    """Some old scrobbles may carry pre-epoch timestamps (data quality artifact)."""
+def test_normalize_track_negative_uts_is_skipped():
+    """Pre-epoch timestamps are data quality artifacts, not real scrobbles."""
     track = {
         "artist": {"#text": "X"},
         "name": "Y",
         "date": {"uts": "-100"},
     }
-    ev = normalize_track(track)
-    assert ev is not None
-    # Pre-epoch datetimes are still valid in Python
-    assert ev.start_time.timestamp() == -100
+    assert normalize_track(track) is None
+
+
+def test_normalize_track_epoch_sentinel_uts_is_skipped():
+    """Last.fm can return UTS 1/2/3-style placeholders; skip them."""
+    track = {
+        "artist": {"#text": "Frank Black"},
+        "name": "(I Want to Live on an) Abstract Plain",
+        "date": {"uts": "1"},
+    }
+    assert normalize_track(track) is None
 
 
 def test_normalize_track_uts_as_int_not_string():
