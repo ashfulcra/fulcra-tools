@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import timezone, tzinfo
+import sys
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 
 import click
 
 from .events import DURATION, INSTANT, ColumnMap
+from .export import DEFAULT_COLUMNS, ExportOptions, write_csv
 from .fulcra import FulcraClient
 from .parser import parse_csv
 
@@ -243,6 +245,121 @@ def bootstrap(
     )
     r.raise_for_status()
     click.echo(r.json()["id"])
+
+
+def _parse_time_arg(value: str, tz: tzinfo) -> datetime:
+    """Parse a time argument. Accepts ISO-8601 or `dateparser`-style
+    relative strings ('1 week ago', 'yesterday')."""
+    try:
+        s = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        return dt
+    except ValueError:
+        pass
+    import dateparser  # hard dep — see pyproject.toml
+    settings = {"RETURN_AS_TIMEZONE_AWARE": True, "TIMEZONE": str(tz)}
+    parsed = dateparser.parse(value, settings=settings)
+    if parsed is None:
+        raise click.UsageError(f"can't parse time argument {value!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=tz)
+    return parsed
+
+
+@cli.command(
+    "export",
+    help=(
+        "Export Fulcra annotations as CSV.\n\n"
+        "Pass --definition-id to scope to a user-defined annotation, or "
+        "--data-type to pull a built-in time series (BodyMass, HeartRate, "
+        "DurationAnnotation, etc.). At least one must be given.\n\n"
+        "Columns are configurable via --columns: well-known fields like "
+        "start_time, end_time, note, tag, value, source_id, definition_id, "
+        "plus dotted paths data.<key> and external_ids.<key>."
+    ),
+)
+@click.option("--definition-id", default=None,
+              help="Scope export to a user-defined annotation UUID.")
+@click.option("--data-type", default=None,
+              help="Wire data_type to query. Defaults to DurationAnnotation "
+                   "when --definition-id is given, otherwise required.")
+@click.option("--start", "start", required=True,
+              help="ISO-8601 or relative ('1 week ago', 'yesterday').")
+@click.option("--end", "end", default="now", show_default=True,
+              help="ISO-8601 or relative.")
+@click.option("--columns", default=",".join(DEFAULT_COLUMNS), show_default=True,
+              help=("Comma-separated column list. Supports well-known fields, "
+                    "`data.<key>`, and `external_ids.<key>`."))
+@click.option("--date-format",
+              type=click.Choice(["iso", "epoch", "local"]),
+              default="iso", show_default=True)
+@click.option("--tz", "tz_name", default="UTC", show_default=True,
+              help="IANA tz. Used for parsing relative times and for "
+                   "--date-format local.")
+@click.option("--out", "out_path",
+              type=click.Path(dir_okay=False, writable=True, path_type=Path),
+              default=None,
+              help="Output path. Default: stdout.")
+def export_cmd(
+    definition_id: str | None,
+    data_type: str | None,
+    start: str,
+    end: str,
+    columns: str,
+    date_format: str,
+    tz_name: str,
+    out_path: Path | None,
+) -> None:
+    if not definition_id and not data_type:
+        raise click.UsageError(
+            "Pass --definition-id <uuid> or --data-type <Name>."
+        )
+    tz = _resolve_tz(tz_name)
+    start_dt = _parse_time_arg(start, tz)
+    end_dt = _parse_time_arg(end, tz)
+    if start_dt >= end_dt:
+        raise click.UsageError(f"--start must be before --end ({start_dt!s} >= {end_dt!s})")
+
+    cols = tuple(c.strip() for c in columns.split(",") if c.strip())
+    if not cols:
+        raise click.UsageError("--columns produced an empty list")
+
+    opts = ExportOptions(
+        columns=cols,
+        date_format=date_format,
+        local_tz=tz if date_format == "local" else None,
+    )
+
+    # When the user picked a user-defined annotation, query its underlying
+    # data_type (default DurationAnnotation) and filter rows whose source
+    # array references the target def. This mirrors run_import's
+    # only_for_defs filter so the export sees the same records the
+    # importer would dedup against.
+    read_data_type = data_type or "DurationAnnotation"
+    client = FulcraClient()
+    records = client.fetch_records(start_dt, end_dt, data_type=read_data_type)
+
+    if definition_id:
+        target_def_marker = f"com.fulcradynamics.annotation.{definition_id}"
+        records = [
+            r for r in records
+            if _record_references_def(r, target_def_marker)
+        ]
+
+    if out_path:
+        with out_path.open("w", newline="", encoding="utf-8") as f:
+            n = write_csv(records, f, opts)
+        click.echo(f"wrote {n} rows → {out_path}", err=True)
+    else:
+        n = write_csv(records, sys.stdout, opts)
+        click.echo(f"wrote {n} rows", err=True)
+
+
+def _record_references_def(rec: dict, target: str) -> bool:
+    sources = rec.get("sources") or (rec.get("metadata") or {}).get("source") or []
+    return any(str(s) == target for s in sources)
 
 
 if __name__ == "__main__":
