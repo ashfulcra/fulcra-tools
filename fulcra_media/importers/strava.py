@@ -1,5 +1,17 @@
 """Strava workout importer.
 
+FROZEN MODULE — unlinked from the CLI + service catalog at commit
+af1fb35 ("refactor: unlink Strava + drop Activity category, revisiting
+via native workout type"). Tests at tests/test_service_catalog.py
+positively assert the unwired state. Do NOT re-add to service_catalog
+or the CLI dispatch without first redesigning against Fulcra's native
+workout data type — the current implementation writes to a
+DurationAnnotation, which we no longer want to duplicate the native
+type.
+
+Kept in tree so the OAuth + paging + normalize logic doesn't have to
+be reconstructed from scratch when the rewrite lands.
+
 Reads the authenticated athlete's activities via Strava's REST API
 endpoint `GET https://www.strava.com/api/v3/athlete/activities`.
 Auth is OAuth 2.0 with a 6-hour access-token lifetime; refresh tokens

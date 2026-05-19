@@ -34,7 +34,13 @@ class State:
 def load(path: Path = DEFAULT_PATH) -> State:
     if not path.exists():
         return State()
-    raw = json.loads(path.read_text())
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        # A truncated / zero-byte / mid-write state.json would brick every
+        # importer. Fail open to an empty State so a partial-write
+        # incident is recoverable on the next save without manual repair.
+        return State()
     return State(
         watched_definition_id=raw.get("watched_definition_id"),
         listened_definition_id=raw.get("listened_definition_id"),
@@ -47,3 +53,8 @@ def load(path: Path = DEFAULT_PATH) -> State:
 def save(state: State, path: Path = DEFAULT_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(state), indent=2, sort_keys=True))
+    # 0600: state holds annotation-def IDs + tag UUIDs + per-importer
+    # watermarks. Not credentials per se, but the watermarks reveal
+    # import cadence/recency and the def IDs let any local process
+    # write into the user's Fulcra annotations via the importers.
+    os.chmod(path, 0o600)
