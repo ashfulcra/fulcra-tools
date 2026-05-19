@@ -18,7 +18,7 @@ import {
   buildPayload, withSwLock,
 } from "../src/background";
 import {
-  saveSettings, loadOutbox, loadVisits,
+  saveSettings, loadSettings, loadOutbox, loadVisits, saveVisits,
   saveIgnoreList, saveCategoryMap,
 } from "../src/storage";
 import { DEFAULT_SETTINGS, BLUR_GRACE_MS } from "../src/types";
@@ -249,6 +249,67 @@ describe("foreground-only model", () => {
     expect(await loadOutbox()).toEqual([]);
   });
 
+  test("heartbeat AFK: focused visit with stale lastHeartbeat freezes on sweep", async () => {
+    // The opt-in heartbeat path: SW watches lastHeartbeat per visit.
+    // When the content script falls silent (no input for >30s) the
+    // sweep freezes the visit at lastHeartbeat + HEARTBEAT_STALE_MS,
+    // not at `now`, so the duration reflects when the user actually
+    // walked away — not when the sweep noticed.
+    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok", heartbeatEnabled: true });
+    stubTab(1, "https://reader.example/");
+    await handleTabActivated(1, T0);
+    // Pretend the content script's last heartbeat was 45s ago.
+    const visits = await loadVisits();
+    visits[1] = { ...visits[1], lastHeartbeat: T0 + 5 * SEC };
+    await saveVisits(visits);
+    // Sweep at T0 + 50s — heartbeat is 45s stale (> 30s threshold).
+    await sweepStaleBlurred(T0 + 50 * SEC);
+    const after = await loadVisits();
+    expect(after[1].state).toBe("blurred");
+    // Frozen at lastHeartbeat (5s) + HEARTBEAT_STALE_MS (30s) = 35s of focus
+    expect(after[1].accumulatedFocusMs).toBe(35 * SEC);
+  });
+
+  test("heartbeat AFK: disabled by default — stale lastHeartbeat does nothing", async () => {
+    // settings.heartbeatEnabled is false by default. Even with a
+    // stale lastHeartbeat, sweep must not freeze the visit.
+    stubTab(1, "https://reader.example/");
+    await handleTabActivated(1, T0);
+    const visits = await loadVisits();
+    visits[1] = { ...visits[1], lastHeartbeat: T0 - 60 * SEC };
+    await saveVisits(visits);
+    await sweepStaleBlurred(T0 + 50 * SEC);
+    expect((await loadVisits())[1].state).toBe("focused");
+  });
+
+  test("pause: setForegroundTab + handleNavigation short-circuit when paused", async () => {
+    await saveSettings({
+      ...DEFAULT_SETTINGS, bearerToken: "tok",
+      pausedUntil: T0 + 15 * MIN,
+    });
+    stubTab(1, "https://reddit.com/r/anything");
+    await handleTabActivated(1, T0);
+    // No visit opened.
+    expect(await loadVisits()).toEqual({});
+    // Nav into a different URL also a no-op.
+    await handleNavigation({
+      tabId: 1, url: "https://reddit.com/r/anything", frameId: 0,
+      timeStamp: T0 + 1 * SEC,
+    });
+    expect(await loadVisits()).toEqual({});
+  });
+
+  test("pause: sweep clears pausedUntil once the deadline passes", async () => {
+    await saveSettings({
+      ...DEFAULT_SETTINGS, bearerToken: "tok",
+      pausedUntil: T0 + 15 * MIN,
+    });
+    // Sweep after the deadline.
+    await sweepStaleBlurred(T0 + 16 * MIN);
+    const s = await loadSettings();
+    expect(s.pausedUntil).toBeNull();
+  });
+
   test("sleep-orphan: focused visit older than 30 min caps at the limit", async () => {
     // Simulate the case where the system went to sleep mid-visit:
     // SW evicted, chrome.idle never fired, focused visit sits in storage
@@ -323,6 +384,7 @@ describe("buildPayload", () => {
         tabId: 1, windowId: 1, url: "https://x.com/", scrubbedUrl: "https://x.com/",
         category: null, startTime: T0, state: "focused",
         focusEpoch: T0, accumulatedFocusMs: 0, blurredAt: null,
+        lastHeartbeat: null,
       },
       endTime: T0 + 5 * MIN,
       meta: { title: "T", og_description: "d", og_type: "article", favicon_url: "https://x.com/f.ico", lang: "en" },

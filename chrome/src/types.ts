@@ -29,6 +29,8 @@ export interface Settings {
   enabled: boolean;        // master kill switch
   identityLabel: string | null;  // user override; null means use chrome.identity.getProfileUserInfo
   onboarded: boolean;            // true once the wizard finished (any step beyond Welcome)
+  pausedUntil: number | null;    // ms epoch — when null, not paused. Past = auto-resumed (lazy)
+  heartbeatEnabled: boolean;     // opt-in content-script AFK watchdog (requires <all_urls>)
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -37,7 +39,13 @@ export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
   identityLabel: null,
   onboarded: false,
+  pausedUntil: null,
+  heartbeatEnabled: false,
 };
+
+/** How stale a focused visit's lastHeartbeat can be before the heartbeat
+ * sweep counts it as AFK. Only applies when settings.heartbeatEnabled. */
+export const HEARTBEAT_STALE_MS = 30_000;
 
 /** One entry in the Tier 3 ignore list (chrome.storage.sync). */
 export interface IgnoreEntry {
@@ -90,6 +98,10 @@ export interface Visit {
   focusEpoch: number;      // ms epoch — when the CURRENT focus period started (only meaningful while focused)
   accumulatedFocusMs: number; // total focused time from PRIOR focus periods (excludes current)
   blurredAt: number | null;   // ms epoch — only set when state="blurred"
+  /** Last content-script heartbeat received for this tab (ms epoch). Null
+   * means: heartbeat is disabled, or no heartbeat has been received yet
+   * since this visit opened. Only used when Settings.heartbeatEnabled. */
+  lastHeartbeat: number | null;
 }
 
 /** How long after blur a visit can be resumed instead of starting a new one. */

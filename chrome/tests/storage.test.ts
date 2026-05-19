@@ -23,10 +23,12 @@ describe("settings", () => {
     await saveSettings({
       bearerToken: "x", relayPort: 8771, enabled: false,
       identityLabel: "Work", onboarded: true,
+      pausedUntil: null, heartbeatEnabled: false,
     });
     expect(await loadSettings()).toEqual({
       bearerToken: "x", relayPort: 8771, enabled: false,
       identityLabel: "Work", onboarded: true,
+      pausedUntil: null, heartbeatEnabled: false,
     });
   });
 });
@@ -79,6 +81,7 @@ describe("active visits (session)", () => {
         tabId: 7, windowId: 1, url: "https://x.com/", scrubbedUrl: "https://x.com/",
         category: null, startTime: 1700000000000, state: "focused",
         focusEpoch: 1700000000000, accumulatedFocusMs: 0, blurredAt: null,
+        lastHeartbeat: null,
       },
     });
     const session = await chrome.storage.session.get(null);

@@ -23,9 +23,10 @@ import { categorize } from "./categorize";
 import { getChromeIdentity } from "./identity";
 import type { PageMeta } from "./content";
 import { addToOutbox, flushOutbox } from "./outbox";
-import { loadVisits, saveVisits, loadSettings } from "./storage";
+import { loadVisits, saveVisits, loadSettings, saveSettings } from "./storage";
 import type { AttentionEvent, Visit, Counts } from "./types";
-import { BLUR_GRACE_MS, CLIENT } from "./types";
+import { BLUR_GRACE_MS, CLIENT, HEARTBEAT_STALE_MS } from "./types";
+import { reconcileHeartbeatOnBoot } from "./heartbeat-control";
 
 const FLUSH_ALARM = "fulcra-attention-flush";
 const SWEEP_ALARM = "fulcra-attention-sweep";
@@ -72,6 +73,21 @@ export function withSwLock<T>(fn: () => Promise<T>): Promise<T> {
 
 function isHttpScheme(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
+}
+
+/**
+ * Check whether capture is currently paused. `pausedUntil` semantics:
+ *   null   → not paused
+ *   Number → paused until that ms epoch; values in the past mean the
+ *            pause already expired and the SW just hasn't cleared the
+ *            field yet (it gets cleared lazily on next sweep). Sentinel
+ *            value Number.POSITIVE_INFINITY = pause indefinitely.
+ */
+function isPaused(
+  settings: { pausedUntil: number | null },
+  now: number,
+): boolean {
+  return settings.pausedUntil !== null && now < settings.pausedUntil;
 }
 
 function toIsoSecondZ(ms: number): string {
@@ -241,6 +257,7 @@ function thaw(v: Visit, now: number): Visit {
 export async function setForegroundTab(tabId: number | null, now: number): Promise<void> {
   const settings = await loadSettings();
   if (!settings.enabled) return;
+  if (isPaused(settings, now)) return;
   const visits = await loadVisits();
 
   // Freeze any currently-focused visit, regardless of tabId. Necessary
@@ -311,6 +328,13 @@ export async function setForegroundTab(tabId: number | null, now: number): Promi
     focusEpoch: now,
     accumulatedFocusMs: 0,
     blurredAt: null,
+    // Seeded to `now` so the first sweep cycle doesn't immediately mark
+    // a brand-new visit AFK before the content script (if enabled) has
+    // had a chance to send its first heartbeat. After this seed, the
+    // heartbeat path either keeps it fresh (script enabled) or leaves
+    // it at this seed (script disabled — sweep ignores it because
+    // settings.heartbeatEnabled is false).
+    lastHeartbeat: now,
   };
   await saveVisits(visits);
 }
@@ -336,12 +360,31 @@ export async function blurAll(now: number): Promise<void> {
  * state change so stale visits don't sit forever.
  */
 export async function sweepStaleBlurred(now: number): Promise<void> {
+  const settings = await loadSettings();
+  // Clear an expired pause so the next handler invocation actually
+  // captures. Pause expiry happens lazily on the next sweep tick.
+  if (settings.pausedUntil !== null && now >= settings.pausedUntil) {
+    await saveSettings({ ...settings, pausedUntil: null });
+  }
+
   const visits = await loadVisits();
   let changed = false;
   for (const [k, v] of Object.entries(visits)) {
     if (v.state === "blurred" && v.blurredAt !== null && now - v.blurredAt > BLUR_GRACE_MS) {
       await emit(v, v.blurredAt);
       delete visits[Number(k)];
+      changed = true;
+      continue;
+    }
+    // Heartbeat-driven AFK detection (only when the user opted in). A
+    // focused tab without a recent heartbeat means the page is up but
+    // nothing's happening on it. Freeze the visit; the existing blur
+    // grace window then handles emit.
+    if (settings.heartbeatEnabled
+        && v.state === "focused"
+        && v.lastHeartbeat !== null
+        && now - v.lastHeartbeat > HEARTBEAT_STALE_MS) {
+      visits[Number(k)] = freeze(v, v.lastHeartbeat + HEARTBEAT_STALE_MS);
       changed = true;
     }
   }
@@ -367,6 +410,7 @@ export async function handleNavigation(n: NavInput): Promise<void> {
 
   const settings = await loadSettings();
   if (!settings.enabled) return;
+  if (isPaused(settings, n.timeStamp)) return;
 
   // If the nav target is ignored, count it (so the popup shows the
   // user that ignore-list rules are firing) — but don't open a visit.
@@ -508,7 +552,10 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 if (chrome.idle?.onStateChanged) {
   // Default idle threshold is 60 s; bump explicitly to be sure.
   try {
-    chrome.idle.setDetectionInterval?.(60);
+    // 30 s instead of Chrome's 60 s default. Catches the "walked away
+     // for a coffee" case sooner. Combined with the existing 30 s
+     // blur-grace window, an AFK visit emits at ~1 minute total, not 2.
+    chrome.idle.setDetectionInterval?.(30);
   } catch {
     // Stub in tests / older builds.
   }
@@ -519,12 +566,168 @@ if (chrome.idle?.onStateChanged) {
 
 chrome.runtime.onStartup.addListener(() => {
   void flushOutbox();
+  void reconcileHeartbeatOnBoot();
+  void refreshToolbarIcon();
+});
+
+// Reconcile on every SW boot (not just chrome.runtime.onStartup, which
+// only fires when Chrome starts — not when the SW is woken from being
+// idle). Doing this at module load means a freshly-reactivated SW
+// re-registers the heartbeat script if it was previously enabled.
+void reconcileHeartbeatOnBoot();
+void refreshToolbarIcon();
+
+// ---------- right-click context menu ----------
+//
+// Two quick actions that previously required a popup round-trip:
+//   "Ignore this domain"     → adds the host to the Tier 3 list
+//   "Categorize this as…"    → submenu of CATEGORY_VOCAB slugs
+// The contextMenus permission is back in the manifest specifically for
+// this. We register the menu at SW boot and on install.
+
+const MENU_ROOT = "fulcra-attention-root";
+const MENU_IGNORE = "fulcra-attention-ignore";
+const MENU_CATEGORY_PREFIX = "fulcra-attention-cat:";
+
+const CATEGORY_VOCAB = [
+  "search", "webmail", "ai-chat", "dm", "doc-editor", "reddit-thread",
+  "calendar", "banking", "brokerage", "crypto", "tax", "healthcare",
+  "password-manager", "mental-health", "dating", "adult", "job-hunting",
+];
+
+function ensureContextMenus(): void {
+  if (!chrome.contextMenus) return;
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MENU_ROOT,
+      title: "Fulcra Attention",
+      contexts: ["page"],
+    });
+    chrome.contextMenus.create({
+      id: MENU_IGNORE,
+      parentId: MENU_ROOT,
+      title: "Ignore this domain",
+      contexts: ["page"],
+    });
+    for (const slug of CATEGORY_VOCAB) {
+      chrome.contextMenus.create({
+        id: MENU_CATEGORY_PREFIX + slug,
+        parentId: MENU_ROOT,
+        title: `Categorize as: ${slug}`,
+        contexts: ["page"],
+      });
+    }
+  });
+}
+
+if (chrome.contextMenus) {
+  chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    if (!info.menuItemId || !tab?.url) return;
+    let host: string;
+    try { host = new URL(tab.url).hostname; } catch { return; }
+    if (info.menuItemId === MENU_IGNORE) {
+      const { loadIgnoreList, saveIgnoreList } = await import("./storage");
+      const list = await loadIgnoreList();
+      if (!list.some((e) => e.pattern === host)) {
+        await saveIgnoreList([
+          ...list,
+          { pattern: host, addedAt: new Date().toISOString() },
+        ]);
+      }
+      return;
+    }
+    const id = String(info.menuItemId);
+    if (id.startsWith(MENU_CATEGORY_PREFIX)) {
+      const slug = id.slice(MENU_CATEGORY_PREFIX.length);
+      const { loadCategoryMap, saveCategoryMap } = await import("./storage");
+      const map = await loadCategoryMap();
+      const existing = map.findIndex((m) => m.pattern === host);
+      if (existing >= 0) map[existing] = { pattern: host, category: slug };
+      else map.push({ pattern: host, category: slug });
+      await saveCategoryMap(map);
+    }
+  });
+}
+
+// ---------- toolbar icon state machine ----------
+//
+// Three visual states surface different operational realities:
+//   active    → default mark, full color (icons/icon-*.png)
+//   paused    → desaturated; clear "I'm not capturing"
+//   error     → red overlay; relay unreachable / 401 / etc.
+//
+// We re-evaluate on every storage change + on each handler tick.
+
+type IconState = "active" | "paused" | "error";
+
+async function currentIconState(): Promise<IconState> {
+  const settings = await loadSettings();
+  if (!settings.enabled) return "paused";
+  if (isPaused(settings, Date.now())) return "paused";
+  const r = await chrome.storage.local.get("lastIngestError");
+  if (r.lastIngestError) return "error";
+  return "active";
+}
+
+export async function refreshToolbarIcon(): Promise<void> {
+  const state = await currentIconState();
+  const path = {
+    16:  `icons/icon-${state}-16.png`,
+    32:  `icons/icon-${state}-32.png`,
+    48:  `icons/icon-${state}-48.png`,
+    128: `icons/icon-${state}-128.png`,
+  };
+  try {
+    await chrome.action.setIcon({ path });
+    await chrome.action.setTitle({
+      title: state === "active" ? "Fulcra Attention"
+           : state === "paused" ? "Fulcra Attention — paused"
+           : "Fulcra Attention — error (relay unreachable?)",
+    });
+  } catch {
+    // setIcon throws if a variant file is missing. Fall back to the
+    // default manifest icon by clearing the override.
+    try { await chrome.action.setIcon({ path: "icons/icon-active-32.png" }); } catch { /* ignore */ }
+  }
+}
+
+chrome.storage.onChanged.addListener(() => {
+  void refreshToolbarIcon();
+});
+
+// ---------- heartbeat ingest ----------
+//
+// The optional heartbeat content script (registered dynamically when the
+// user opts in) posts {kind:"heartbeat", t} for every input event on its
+// page, debounced to ~5 s. The sender.tab.id tells us which tab. We just
+// update visits[tabId].lastHeartbeat — the sweep does the AFK decision.
+//
+// The message is intentionally tiny: NO url, NO selection, NO page text.
+// The framing is "did something happen on this tab" — that's it.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.kind !== "heartbeat") return false;
+  const tabId = sender.tab?.id;
+  if (tabId === undefined) {
+    sendResponse({ ok: false });
+    return false;
+  }
+  void withSwLock(async () => {
+    const visits = await loadVisits();
+    const v = visits[tabId];
+    if (v) {
+      visits[tabId] = { ...v, lastHeartbeat: Date.now() };
+      await saveVisits(visits);
+    }
+    sendResponse({ ok: true });
+  });
+  return true;  // tells Chrome we'll call sendResponse asynchronously
 });
 
 // Auto-open the onboarding wizard on first install. Skipped on
 // update/upgrade so existing users don't get spammed with a tab on
 // every refresh.
 chrome.runtime.onInstalled.addListener((details) => {
+  ensureContextMenus();
   if (details.reason === "install") {
     void chrome.tabs.create({ url: chrome.runtime.getURL("wizard.html") });
   }
