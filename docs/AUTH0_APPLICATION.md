@@ -99,11 +99,11 @@ For Auth0 to accept the redirect URL during local development, the extension ID 
    ```bash
    openssl rsa -in fulcra-attention-key.pem -pubout -outform DER | openssl base64 -A
    ```
-3. Paste that base64 string into `manifest.json` under a top-level `"key"` field.
+3. Paste that base64 string into `chrome/manifest.config.json` (the @crxjs manifest source) under a top-level `"key"` field; the build propagates it to `dist/manifest.json`.
 4. Load the unpacked extension once in `chrome://extensions/`. Note the displayed **ID** (32 lowercase letters).
 5. Add `https://<that-id>.chromiumapp.org/` to the Auth0 app's Allowed Callback URLs.
 
-The `manifest.json` `key` field is only included in **development builds** — strip it before publishing to CWS (CWS assigns the production ID and rejects pinned keys).
+The `"key"` field is only included in **development builds** — strip it before publishing to CWS (CWS assigns the production ID and rejects pinned keys).
 
 ### Step 4 — After first CWS submission
 
