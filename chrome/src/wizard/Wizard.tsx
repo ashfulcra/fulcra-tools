@@ -8,8 +8,9 @@ import {
 } from "./history";
 import type { DomainGroup } from "./history";
 import { backfillHistory } from "./backfill";
+import { setHeartbeatEnabled, hasHeartbeatPermission } from "../heartbeat-control";
 
-type Step = "welcome" | "token" | "scan" | "filter" | "ingest" | "done";
+type Step = "welcome" | "token" | "scan" | "filter" | "heartbeat" | "ingest" | "done";
 
 function FulcrumMark() {
   return <img className="logo" src={markUrl} alt="Fulcra" />;
@@ -101,7 +102,7 @@ export function Wizard() {
       existingMap.get(pattern) ?? { pattern, addedAt: now }
     ));
     await saveIgnoreList(out);
-    setStep("ingest");
+    setStep("heartbeat");
   }
 
   async function runIngest() {
@@ -154,11 +155,12 @@ export function Wizard() {
   // ---- render ----
 
   const tagForStep: Record<Step, string> = {
-    welcome: "Step 1 of 6",
-    token: "Step 2 of 6",
-    scan: "Step 3 of 6",
-    filter: "Step 4 of 6",
-    ingest: "Step 5 of 6",
+    welcome: "Step 1 of 7",
+    token: "Step 2 of 7",
+    scan: "Step 3 of 7",
+    filter: "Step 4 of 7",
+    heartbeat: "Step 5 of 7",
+    ingest: "Step 6 of 7",
     done: "All set",
   };
 
@@ -207,6 +209,13 @@ export function Wizard() {
           livePatterns={livePatterns}
           onNext={() => void applyExclusionsAndAdvance()}
           onBack={() => setStep("scan")}
+        />
+      )}
+
+      {step === "heartbeat" && (
+        <HeartbeatStep
+          onBack={() => setStep("filter")}
+          onNext={() => setStep("ingest")}
         />
       )}
 
@@ -489,6 +498,97 @@ function presetPatternsFor(ids: string[]): string[] {
     if (p) out.push(...p.patterns);
   }
   return out;
+}
+
+function HeartbeatStep(props: { onBack: () => void; onNext: () => void }) {
+  const [enabling, setEnabling] = useState(false);
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [denied, setDenied] = useState(false);
+
+  // Reflect the current real state on mount so a user re-running the
+  // wizard sees the right toggle.
+  useEffect(() => {
+    void (async () => {
+      const s = await loadSettings();
+      const hasPerm = await hasHeartbeatPermission();
+      setEnabled(s.heartbeatEnabled && hasPerm);
+    })();
+  }, []);
+
+  async function enable(): Promise<void> {
+    setEnabling(true);
+    setDenied(false);
+    try {
+      const ok = await setHeartbeatEnabled(true);
+      setEnabled(ok);
+      if (!ok) setDenied(true);
+    } finally {
+      setEnabling(false);
+    }
+  }
+
+  return (
+    <>
+      <h2>Sharper AFK detection (optional)</h2>
+      <p>
+        By default we use Chrome's system-level idle signal — keyboard,
+        mouse, screen lock. That misses cases where you've walked away
+        from your desk but Chrome thinks you're still active (no clicks
+        for a few minutes).
+      </p>
+      <p>
+        Turn this on and we'll also watch for <em>any</em> mouse movement,
+        scroll, or keypress inside the tab you're reading.
+      </p>
+      <div style={{
+        border: "1px solid var(--fa-edge)",
+        background: "var(--fa-surface)",
+        borderRadius: 8, padding: "12px 14px", margin: "14px 0",
+      }}>
+        <strong style={{ display: "block", marginBottom: 6 }}>
+          What this script reads
+        </strong>
+        <ul style={{ margin: "0 0 6px 22px", padding: 0 }}>
+          <li><strong>No</strong> page content, DOM, text, or forms</li>
+          <li><strong>No</strong> URLs, titles, or selected text</li>
+          <li><em>Only</em> whether you're interacting with the page (event types, not values)</li>
+        </ul>
+        <span className="muted">
+          Chrome will ask you to grant "read and change all your data on websites you visit."
+          That permission is needed for the watchdog to load on every page,
+          but the script itself reads no page data.
+        </span>
+      </div>
+
+      {enabled && (
+        <p className="muted" style={{ color: "var(--fa-mint-2)" }}>
+          ✓ Enabled. You can flip this off anytime from the popup.
+        </p>
+      )}
+      {denied && (
+        <p className="muted" style={{ color: "var(--fa-danger)" }}>
+          Permission declined. The default chrome.idle signal still works —
+          you can flip this on later from the popup.
+        </p>
+      )}
+
+      <div className="action-row">
+        <button onClick={props.onBack}>← Back</button>
+        <div className="spacer" />
+        <button onClick={props.onNext}>Skip this</button>
+        {!enabled && (
+          <button className="primary" onClick={() => void enable()} disabled={enabling}>
+            {enabling ? "Asking Chrome…" : "Enable sharper AFK"}
+          </button>
+        )}
+        {enabled && (
+          <button className="primary" onClick={props.onNext}>
+            Continue →
+          </button>
+        )}
+      </div>
+    </>
+  );
 }
 
 function IngestStep(props: {

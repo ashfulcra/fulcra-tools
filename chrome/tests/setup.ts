@@ -38,6 +38,21 @@ function makeArea() {
     local: makeArea(),
     sync: makeArea(),
     session: makeArea(),
+    onChanged: { addListener: vi.fn() },
+  },
+  action: {
+    setIcon: vi.fn(async () => undefined),
+    setTitle: vi.fn(async () => undefined),
+  },
+  contextMenus: {
+    create: vi.fn(),
+    removeAll: vi.fn((cb?: () => void) => { if (cb) cb(); }),
+    onClicked: { addListener: vi.fn() },
+  },
+  permissions: {
+    contains: vi.fn(async () => false),
+    request: vi.fn(async () => true),
+    remove: vi.fn(async () => true),
   },
   alarms: {
     create: vi.fn(),
@@ -76,6 +91,9 @@ function makeArea() {
   },
   scripting: {
     executeScript: vi.fn(),
+    registerContentScripts: vi.fn(async () => undefined),
+    unregisterContentScripts: vi.fn(async () => undefined),
+    getRegisteredContentScripts: vi.fn(async () => []),
   },
   identity: {
     getProfileUserInfo: vi.fn(),

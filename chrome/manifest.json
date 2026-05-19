@@ -9,6 +9,7 @@
     "storage",
     "alarms",
     "activeTab",
+    "contextMenus",
     "identity",
     "scripting",
     "idle",
@@ -16,6 +17,10 @@
   ],
   "host_permissions": [
     "http://127.0.0.1:8771/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "src/background.ts",
@@ -37,5 +42,18 @@
       "128": "icons/icon-128.png"
     }
   },
-  "options_page": "options.html"
+  "options_page": "options.html",
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/icon-active-16.png", "icons/icon-active-32.png",
+        "icons/icon-active-48.png", "icons/icon-active-128.png",
+        "icons/icon-paused-16.png", "icons/icon-paused-32.png",
+        "icons/icon-paused-48.png", "icons/icon-paused-128.png",
+        "icons/icon-error-16.png",  "icons/icon-error-32.png",
+        "icons/icon-error-48.png",  "icons/icon-error-128.png"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

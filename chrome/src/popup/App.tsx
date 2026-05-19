@@ -4,6 +4,10 @@ import { LiveStream } from "./LiveStream";
 import { IgnoreList } from "./IgnoreList";
 import { Counts } from "./Counts";
 import { IdentityLabel } from "./IdentityLabel";
+import { PauseControl } from "./PauseControl";
+import { HeartbeatToggle } from "./HeartbeatToggle";
+import { Banner } from "./Banner";
+import { CategoryEditor } from "./CategoryEditor";
 import { loadSettings } from "../storage";
 
 import markUrl from "../assets/fulcra-mark.png";
@@ -60,10 +64,14 @@ export function App() {
         <h1>Fulcra Attention</h1>
         <span className="sub">v0.1</span>
       </header>
+      <Banner />
       <BearerForm />
+      <PauseControl />
       <Counts />
       <LiveStream />
+      <CategoryEditor />
       <IgnoreList />
+      <HeartbeatToggle />
       <IdentityLabel />
       <div className="section">
         <button onClick={openWizard} style={{ width: "100%" }}>
