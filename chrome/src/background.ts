@@ -82,7 +82,9 @@ function isHttpScheme(url: string): boolean {
  *   Number → paused until that ms epoch; values in the past mean the
  *            pause already expired and the SW just hasn't cleared the
  *            field yet (it gets cleared lazily on next sweep). Sentinel
- *            value Number.POSITIVE_INFINITY = pause indefinitely.
+ *            value Number.MAX_SAFE_INTEGER = pause indefinitely.
+ *            (POSITIVE_INFINITY would JSON-roundtrip to null via
+ *            chrome.storage and break the gate.)
  */
 function isPaused(
   settings: { pausedUntil: number | null },
@@ -247,10 +249,18 @@ function freeze(v: Visit, now: number): Visit {
 
 /**
  * Move a blurred visit back to focused. Resets focusEpoch to `now`.
+ *
+ * Also bumps `lastHeartbeat` to `now`. Otherwise: a visit that was
+ * blurred at 25s of staleness, then resumed via tab return within
+ * grace, would have a stale lastHeartbeat (still 25s+ old). The very
+ * next sweep tick (≤60s) would see `now - lastHeartbeat > HEARTBEAT_STALE_MS`
+ * for a "focused" visit and immediately re-freeze it with a
+ * truncated duration. Resetting on thaw makes the heartbeat sweep
+ * behave consistently with the underlying user-presence signal.
  */
 function thaw(v: Visit, now: number): Visit {
   if (v.state === "focused") return v;
-  return { ...v, state: "focused", focusEpoch: now, blurredAt: null };
+  return { ...v, state: "focused", focusEpoch: now, blurredAt: null, lastHeartbeat: now };
 }
 
 /**
@@ -573,7 +583,7 @@ if (chrome.idle?.onStateChanged) {
 
 chrome.runtime.onStartup.addListener(() => {
   void flushOutbox();
-  void reconcileHeartbeatOnBoot();
+  void withSwLock(() => reconcileHeartbeatOnBoot());
   void refreshToolbarIcon();
 });
 
@@ -581,7 +591,9 @@ chrome.runtime.onStartup.addListener(() => {
 // only fires when Chrome starts — not when the SW is woken from being
 // idle). Doing this at module load means a freshly-reactivated SW
 // re-registers the heartbeat script if it was previously enabled.
-void reconcileHeartbeatOnBoot();
+// Both paths go through the SW lock so a user-driven popup toggle
+// firing concurrently can't race the boot-time registration.
+void withSwLock(() => reconcileHeartbeatOnBoot());
 void refreshToolbarIcon();
 
 // ---------- right-click context menu ----------
@@ -719,6 +731,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   void withSwLock(async () => {
+    // Re-check the gate INSIDE the mutex. If the user revoked the host
+    // permission while a heartbeat was in flight, the content script
+    // is unregistered but already-fired messages can still arrive.
+    // Drop those without mutating storage so the disabled state stays
+    // clean.
+    const settings = await loadSettings();
+    if (!settings.heartbeatEnabled) {
+      sendResponse({ ok: false });
+      return;
+    }
     const visits = await loadVisits();
     const v = visits[tabId];
     if (v) {

@@ -27,10 +27,16 @@
     const now = Date.now();
     if (now - lastSent < HEARTBEAT_DEBOUNCE_MS) return;
     lastSent = now;
+    // chrome.runtime.sendMessage returns a promise in MV3. try/catch
+    // only catches sync throws; the returned promise rejects when the
+    // SW is being torn down (or when the message goes to nobody after
+    // unregister) and we DO have to silence those — otherwise Chrome
+    // logs an unhandled-rejection on every navigation.
     try {
-      chrome.runtime.sendMessage({ kind: "heartbeat", t: now });
+      const p = chrome.runtime.sendMessage({ kind: "heartbeat", t: now });
+      if (p && typeof p.catch === "function") p.catch(() => undefined);
     } catch {
-      // SW tearing down — ignore.
+      // Sync throw path (very old Chromes / unusual states) — ignore.
     }
   }
 
