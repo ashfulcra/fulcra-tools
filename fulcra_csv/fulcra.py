@@ -11,10 +11,11 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 import httpx
 
-from .events import DURATION, INSTANT, GenericEvent
+from .events import DURATION, GenericEvent
 
 DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
 
@@ -65,7 +66,14 @@ class FulcraClient:
                 transport=self._transport,
                 timeout=30.0,
                 headers={"User-Agent": "fulcra-csv-importer/0.1"},
-                follow_redirects=True,
+                # follow_redirects=False so the Authorization header
+                # we attach per-request never rides along on a 3xx to a
+                # host the user didn't intend. (httpx's auto auth-strip
+                # only applies to client-level auth, not per-request
+                # Authorization headers, which is how we send the
+                # bearer token.) If a redirect is legitimately required,
+                # callers should handle it explicitly with re-auth.
+                follow_redirects=False,
             )
         return self._http
 
@@ -95,20 +103,12 @@ class FulcraClient:
         r.raise_for_status()
         return False
 
-    def cancel_definition_deletion(self, definition_id: str) -> bool:
-        """Restore a soft-deleted annotation definition."""
-        r = self._client().post(
-            f"/user/v1alpha1/annotation/{definition_id}/cancel_deletion",
-            headers=self._authed_headers(),
-        )
-        if r.status_code in (200, 204):
-            return True
-        r.raise_for_status()
-        return False
-
     def ensure_tag(self, name: str) -> str:
         c = self._client()
-        r = c.get(f"/user/v1alpha1/tag/name/{name}", headers=self._authed_headers())
+        # urlencode the name so tags with `/`, `?`, `#`, or spaces don't
+        # break the GET path. Fulcra validates the value server-side, but
+        # the URL itself must stay well-formed.
+        r = c.get(f"/user/v1alpha1/tag/name/{quote(name, safe='')}", headers=self._authed_headers())
         if r.status_code == 200:
             return r.json()["id"]
         r = c.post(
@@ -203,6 +203,33 @@ class FulcraClient:
         )
         r.raise_for_status()
 
+    def fetch_records(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        data_type: str = "DurationAnnotation",
+    ) -> list[dict]:
+        """Return raw records of `data_type` over [start, end].
+
+        Shared by dedup (fetch_existing_source_ids) and export. The Fulcra
+        endpoint returns either a plain list or `{"data": [...]}` depending
+        on the response shape; both are normalised here.
+        """
+        r = self._client().get(
+            f"/data/v1alpha1/event/{data_type}",
+            params={
+                "start_time": start.isoformat().replace("+00:00", "Z"),
+                "end_time": end.isoformat().replace("+00:00", "Z"),
+            },
+            headers=self._authed_headers(),
+        )
+        r.raise_for_status()
+        body = r.json()
+        if isinstance(body, list):
+            return body
+        return body.get("data", []) or []
+
     def fetch_existing_source_ids(
         self,
         start: datetime,
@@ -219,16 +246,7 @@ class FulcraClient:
         their source_id points at the deleted def. For built-in types
         (BodyMass etc.) pass None — there's no definition to filter on.
         """
-        r = self._client().get(
-            f"/data/v1alpha1/event/{data_type}",
-            params={
-                "start_time": start.isoformat().replace("+00:00", "Z"),
-                "end_time": end.isoformat().replace("+00:00", "Z"),
-            },
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        records = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
+        records = self.fetch_records(start, end, data_type=data_type)
         out: set[str] = set()
         for rec in records:
             if only_for_defs is not None and rec.get("source_id") not in only_for_defs:
