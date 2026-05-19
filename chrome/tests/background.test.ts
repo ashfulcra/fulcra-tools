@@ -15,7 +15,7 @@ import {
   handleNavigation, handleTabActivated, handleTabClose,
   handleWindowFocusChange, handleIdleStateChanged,
   setForegroundTab, sweepStaleBlurred,
-  buildPayload,
+  buildPayload, withSwLock,
 } from "../src/background";
 import {
   saveSettings, loadOutbox, loadVisits,
@@ -320,3 +320,51 @@ describe("buildPayload", () => {
 // Reference: keep setForegroundTab import alive so the test file is also a
 // usage-doc for the public surface area.
 void setForegroundTab;
+
+
+// ---------- mutex regression test ----------
+
+describe("withSwLock serialises concurrent storage transitions", () => {
+  function stubTabsByIdMap(tabs: Record<number, string>) {
+    vi.mocked(chrome.tabs.get).mockImplementation(async (id: number) => {
+      const url = tabs[id];
+      if (!url) throw new Error(`stubTabsByIdMap: no tab ${id}`);
+      return {
+        id, url, title: "T",
+        active: true, windowId: 1, incognito: false,
+      } as chrome.tabs.Tab;
+    });
+  }
+
+  test("two handlers fired together execute one-at-a-time", async () => {
+    // Without the mutex, the second handler would load the same `visits`
+    // map as the first, miss the first's freeze, and overwrite it on
+    // save. With the mutex they run in order and the second call sees
+    // the first call's freeze.
+    stubTabsByIdMap({ 1: "https://a.com/", 2: "https://b.com/", 3: "https://c.com/" });
+    await withSwLock(() => handleTabActivated(1, T0));
+
+    // Fire two activations concurrently. Note: we don't await between
+    // them — we want both to be queued at the same time.
+    const first = withSwLock(() => handleTabActivated(2, T0 + 1 * SEC));
+    const second = withSwLock(() => handleTabActivated(3, T0 + 2 * SEC));
+    await Promise.all([first, second]);
+
+    const visits = await loadVisits();
+    expect(visits[1].state).toBe("blurred");
+    expect(visits[2].state).toBe("blurred");
+    expect(visits[3].state).toBe("focused");
+  });
+
+  test("a failing handler doesn't poison the chain", async () => {
+    // The catch on the mutex chain must swallow rejections so the
+    // NEXT handler still gets to run. Use a deliberate throw, then
+    // queue a real handler behind it and assert the real one ran.
+    const bad = withSwLock(async () => { throw new Error("boom"); });
+    await expect(bad).rejects.toThrow("boom");
+    stubTabsByIdMap({ 1: "https://recover.example/" });
+    await withSwLock(() => handleTabActivated(1, T0));
+    const visits = await loadVisits();
+    expect(visits[1].state).toBe("focused");
+  });
+});

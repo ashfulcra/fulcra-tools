@@ -33,6 +33,28 @@ const FLUSH_INTERVAL_MIN = 1;
 // Sweep periodically to emit visits whose blur grace window expired.
 const SWEEP_INTERVAL_MIN = 1;
 
+// ---------- single-writer mutex for chrome.storage.session.visits ----------
+//
+// Every handler that does a load-mutate-save against `visits` (or counts /
+// recentEmitted) must run inside this mutex. Chrome service workers are
+// single-threaded but the listeners are async — without serialization,
+// onCommitted + onActivated + the sweep alarm can interleave their
+// load/mutate/save and lose updates. We pay one extra microtask per
+// handler and get linearizability across all visit-storage transitions.
+//
+// Exported handlers themselves stay mutex-free so unit tests can call them
+// in any order without artificial sequencing; the chrome.* listener glue
+// at the bottom of this file is what acquires the mutex.
+
+let swStorageMutex: Promise<unknown> = Promise.resolve();
+export function withSwLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = swStorageMutex.then(fn, fn);
+  // Swallow rejections so a failing handler doesn't poison the chain;
+  // each task already has its own try/await semantics.
+  swStorageMutex = next.catch(() => undefined);
+  return next;
+}
+
 // ---------- helpers ----------
 
 function isHttpScheme(url: string): boolean {
@@ -436,29 +458,29 @@ export async function handleIdleStateChanged(
 // ---------- wire to chrome APIs at SW boot ----------
 
 chrome.webNavigation.onCommitted.addListener((details) => {
-  void handleNavigation({
+  void withSwLock(() => handleNavigation({
     tabId: details.tabId, url: details.url,
     frameId: details.frameId, timeStamp: details.timeStamp,
-  });
+  }));
 });
 
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-  void handleNavigation({
+  void withSwLock(() => handleNavigation({
     tabId: details.tabId, url: details.url,
     frameId: details.frameId, timeStamp: details.timeStamp,
-  });
+  }));
 });
 
 chrome.tabs.onActivated.addListener((info) => {
-  void handleTabActivated(info.tabId, Date.now());
+  void withSwLock(() => handleTabActivated(info.tabId, Date.now()));
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  void handleTabClose(tabId, Date.now());
+  void withSwLock(() => handleTabClose(tabId, Date.now()));
 });
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
-  void handleWindowFocusChange(windowId, Date.now());
+  void withSwLock(() => handleWindowFocusChange(windowId, Date.now()));
 });
 
 if (chrome.idle?.onStateChanged) {
@@ -469,7 +491,7 @@ if (chrome.idle?.onStateChanged) {
     // Stub in tests / older builds.
   }
   chrome.idle.onStateChanged.addListener((state) => {
-    void handleIdleStateChanged(state, Date.now());
+    void withSwLock(() => handleIdleStateChanged(state, Date.now()));
   });
 }
 
@@ -489,6 +511,8 @@ chrome.runtime.onInstalled.addListener((details) => {
 chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: FLUSH_INTERVAL_MIN });
 chrome.alarms.create(SWEEP_ALARM, { periodInMinutes: SWEEP_INTERVAL_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
+  // flushOutbox doesn't touch visits, only its own outbox key; safe
+  // outside the mutex. sweepStaleBlurred mutates visits → must be locked.
   if (alarm.name === FLUSH_ALARM) void flushOutbox();
-  if (alarm.name === SWEEP_ALARM) void sweepStaleBlurred(Date.now());
+  if (alarm.name === SWEEP_ALARM) void withSwLock(() => sweepStaleBlurred(Date.now()));
 });
