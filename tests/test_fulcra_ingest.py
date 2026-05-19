@@ -38,7 +38,7 @@ def test_ingest_batch_posts_jsonl_to_record_batch(recording_transport):
             },
             "tags": ["tag-a", "tag-w"],
             "source": [
-                "com.fulcra.attention.v1.0123456789abcdef",
+                "com.fulcra.attention.v2.0123456789abcdef",
                 "com.fulcradynamics.annotation.def-att",
             ],
             "content_type": "application/json",

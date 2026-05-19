@@ -366,6 +366,37 @@ def test_post_lazy_creates_identity_tag(recording_transport, monkeypatch, tmp_pa
         server.server_close()
 
 
+def test_post_dedup_drops_repeat_source_id(running_server, client_with_ingest_capture):
+    """The dup-storm fix: the relay must drop a repeat of a source_id
+    it already forwarded, even within the same process. Fulcra doesn't
+    dedup on write — without this guard the relay floods Fulcra with
+    duplicates whenever a misbehaving client (re-run wizard, replayed
+    payload, etc.) posts the same content twice."""
+    _server, port, _ctx = running_server
+    payload = {
+        "url": "https://example.com/dedup-test",
+        "title": "Dedup target",
+        "category": None,
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:01:00Z",
+        "client": "curl/0.1",
+    }
+    # First POST — accepted and forwarded.
+    s1, p1 = _post(port, payload)
+    assert s1 == 200
+    assert p1 == {"posted": 1, "dropped": 0}
+    # Second POST with the same payload (same url + same start-second
+    # → same source_id) — accepted but dropped.
+    s2, p2 = _post(port, payload)
+    assert s2 == 200
+    assert p2["posted"] == 0
+    assert p2["dropped"] == 1
+    assert p2.get("reason") == "duplicate"
+    # FulcraClient should have seen exactly one ingest POST.
+    ingests = _ingest_requests(client_with_ingest_capture._transport)
+    assert len(ingests) == 1
+
+
 def test_post_uses_constant_time_compare(running_server):
     """Smoke test that the bearer-comparison path uses hmac.compare_digest.
     Verifying via a near-miss token that differs only in the last char."""

@@ -26,7 +26,7 @@ def test_source_id_deterministic_for_same_url_and_second():
     a = source_id(key="https://x.com/p", start_time=t1)
     b = source_id(key="https://x.com/p", start_time=t2)
     assert a == b
-    assert a.startswith("com.fulcra.attention.v1.")
+    assert a.startswith("com.fulcra.attention.v2.")
 
 
 def test_source_id_changes_when_url_changes():
@@ -61,7 +61,7 @@ def test_build_event_url_variant(state: State):
     assert md["recorded_at"]["start_time"] == "2026-05-18T14:00:00Z"
     assert md["recorded_at"]["end_time"] == "2026-05-18T14:05:00Z"
     assert md["tags"] == ["tag-a", "tag-w"]
-    assert md["source"][0].startswith("com.fulcra.attention.v1.")
+    assert md["source"][0].startswith("com.fulcra.attention.v2.")
     assert md["source"][1] == "com.fulcradynamics.annotation.def-att"
     data = json.loads(ev["data"])
     assert data["title"] == "Why I Quit Twitter"
@@ -141,7 +141,7 @@ def test_build_event_source_id_category_keyed_when_categorized(state: State):
         "client": "c",
     }
     ev = build_attention_event(p, state=state)
-    assert ev["metadata"]["source"][0].startswith("com.fulcra.attention.v1.")
+    assert ev["metadata"]["source"][0].startswith("com.fulcra.attention.v2.")
 
 
 def test_build_event_url_is_scrubbed_defense_in_depth(state: State):

@@ -28,6 +28,7 @@ import type { AttentionEvent, Visit, Counts } from "./types";
 import { BLUR_GRACE_MS, CLIENT, HEARTBEAT_STALE_MS } from "./types";
 import { reconcileHeartbeatOnBoot } from "./heartbeat-control";
 import { scrubTitle } from "./title-scrub";
+import { mergeDefaults } from "./default-categories";
 
 const FLUSH_ALARM = "fulcra-attention-flush";
 const SWEEP_ALARM = "fulcra-attention-sweep";
@@ -755,9 +756,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Auto-open the onboarding wizard on first install. Skipped on
 // update/upgrade so existing users don't get spammed with a tab on
 // every refresh.
-chrome.runtime.onInstalled.addListener((details) => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   ensureContextMenus();
   if (details.reason === "install") {
+    // Seed the default category map on fresh installs so high-traffic
+    // sites (Gmail, Calendar, Docs, AI chats, DM apps) collapse to a
+    // single category event from the start instead of leaking
+    // per-email / per-conversation titles + URLs.
+    const { loadCategoryMap, saveCategoryMap } = await import("./storage");
+    const existing = await loadCategoryMap();
+    await saveCategoryMap(mergeDefaults(existing));
     void chrome.tabs.create({ url: chrome.runtime.getURL("wizard.html") });
   }
 });
