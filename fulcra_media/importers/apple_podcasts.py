@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,16 @@ DEFAULT_DB_PATH = Path(os.path.expanduser(
     "~/Library/Group Containers/243LU875E5.groups.com.apple.podcasts/Documents/MTLibrary.sqlite"
 ))
 MAC_EPOCH_OFFSET = 978307200  # seconds between Unix epoch and Core Data epoch (2001-01-01 UTC)
+
+# Hard cap on snapshotting the on-device DB. MTLibrary.sqlite can be several
+# hundred MB; when iCloud is mid-sync or the file is otherwise I/O-stalled, an
+# unbounded copy blocks indefinitely. Snapshotting via a killable subprocess
+# with this timeout makes a stalled DB fail fast with a clear error.
+SNAPSHOT_TIMEOUT_SECONDS = 120
+
+
+class SnapshotError(RuntimeError):
+    """Raised when the on-device DB cannot be snapshotted (stalled/inaccessible)."""
 
 
 def _det_id(zuuid: str, zlastdateplayed: float) -> str:
@@ -39,8 +50,37 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
     try:
         for ext in ("", "-wal", "-shm"):
             candidate = Path(str(src) + ext)
-            if candidate.exists():
-                shutil.copy2(candidate, snap_dir / candidate.name)
+            if not candidate.exists():
+                continue
+            dest = snap_dir / candidate.name
+            # Bounded copy via `cp` as a killable subprocess. An unbounded
+            # shutil.copy2 here blocks forever when the source SQLite file is
+            # I/O-stalled (iCloud sync, slow volume); a hung importer then
+            # cascades into the caller's own timeout with no clear cause.
+            try:
+                subprocess.run(
+                    ["cp", str(candidate), str(dest)],
+                    check=True,
+                    capture_output=True,
+                    timeout=SNAPSHOT_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    size_mb = candidate.stat().st_size / 1_000_000
+                except OSError:
+                    size_mb = -1
+                raise SnapshotError(
+                    f"Apple Podcasts DB snapshot timed out after "
+                    f"{SNAPSHOT_TIMEOUT_SECONDS}s copying {candidate.name} "
+                    f"({size_mb:.0f}MB). The on-device SQLite file is likely "
+                    f"I/O-stalled (iCloud sync) or inaccessible."
+                ) from exc
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or b"").decode(errors="replace").strip()
+                raise SnapshotError(
+                    f"Apple Podcasts DB snapshot failed copying "
+                    f"{candidate.name}: {stderr[:200]}"
+                ) from exc
         conn = sqlite3.connect(snap_db)
         cur = conn.cursor()
         # Filter rationale (refined against real Apple Podcasts data):
