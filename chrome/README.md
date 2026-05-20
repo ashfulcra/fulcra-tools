@@ -2,29 +2,45 @@
 
 The browser-side half of [fulcra-attention](../README.md). Captures every page you visit (URL + title + OG description + favicon + time-on-page) and POSTs it to the loopback relay at `127.0.0.1:8771`, which forwards it into your Fulcra account.
 
-## Develop
+## Install — prebuilt (no Node toolchain)
+
+The easy path. You need **neither Node nor this repo** — just the zip.
+
+1. Open the [**Releases** page](https://github.com/ashfulcra/fulcra-attention/releases) and download `fulcra-attention-chrome.zip` from the latest `chrome-v*` release.
+2. Unzip it — you get a `fulcra-attention-chrome/` folder.
+3. Open `chrome://extensions/` and turn on **Developer mode** (top-right toggle).
+4. Click **Load unpacked** and select the unzipped **`fulcra-attention-chrome/`** folder.
+5. Make sure the local relay is running and you have a bearer token — see [relay setup](../README.md#per-machine-install). Open the extension popup and paste the token from `~/.config/fulcra-attention/relay.json`.
+
+Chrome keeps sideloaded extensions across restarts but shows a "Developer mode extensions" notice each launch — expected. One-click install + auto-update comes with the Chrome Web Store listing (v2, gated on the Auth0 work).
+
+## Build from source (developers)
 
 ```bash
 cd chrome
 npm install         # or: pnpm install
 npm run dev         # Vite dev mode with hot reload
 npm test            # Vitest run (cross-language scrub gate included)
-npm run build       # Production build to dist/
+npm run build       # Production build to chrome/dist/
 ```
 
-## Load into Chrome
-
-1. Build: `npm run build` — this is **required first** and produces `chrome/dist/`.
-2. Open `chrome://extensions/`
-3. Enable "Developer mode" (top right)
-4. Click "Load unpacked"
-5. Choose **`chrome/dist/`** — the build output, *not* the `chrome/` source folder.
-6. Open the extension popup and paste the bearer token from `~/.config/fulcra-attention/relay.json`
+To load a from-source build: **Load unpacked** → select **`chrome/dist/`** (the build output), *not* the `chrome/` source folder.
 
 > **Load `chrome/dist/`, not `chrome/`.** The source folder has no `manifest.json`,
-> so Chrome will reject it with "Manifest file is missing or unreadable" — that
-> error means you picked the wrong folder; run `npm run build` and choose
-> `chrome/dist/`. (`dist/` is gitignored, so it won't exist until you build.)
+> so Chrome rejects it with "Manifest file is missing or unreadable" — that error
+> means you picked the wrong folder. Run `npm run build` and choose `chrome/dist/`.
+> (`dist/` is gitignored, so it won't exist until you build.)
+
+## Cutting a release
+
+Bump `version` in `chrome/package.json`, commit, then push a matching tag:
+
+```bash
+git tag chrome-v0.1.0
+git push origin chrome-v0.1.0
+```
+
+The `chrome-release` GitHub Actions workflow builds the extension, runs the tests, and attaches `fulcra-attention-chrome.zip` to the auto-created GitHub Release. Run the workflow manually (`workflow_dispatch`) to produce the zip as a downloadable artifact without cutting a release.
 
 ## Architecture
 
@@ -64,7 +80,7 @@ After install + paste bearer token:
 
 ## v2 roadmap
 
-- OAuth (Auth0) direct from extension — drops the relay dependency. See `docs/superpowers/specs/2026-05-18-fulcra-browse-extension-auth0-app.md` in the sibling FulcraMediaHelpers repo.
+- OAuth (Auth0) direct from extension — drops the relay dependency. See [`../docs/AUTH0_APPLICATION.md`](../docs/AUTH0_APPLICATION.md).
 - Highlights (text selection → annotation linked to parent visit)
 - Retrieval surface (popup search bar)
 - Tier 2 editor in options page (v1.5)
