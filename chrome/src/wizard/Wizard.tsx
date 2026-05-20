@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import "./wizard.css";
 import markUrl from "../assets/fulcra-mark.png";
-import { loadSettings, saveSettings, loadIgnoreList, saveIgnoreList } from "../storage";
-import type { IgnoreEntry } from "../types";
+import {
+  loadSettings, saveSettings, loadIgnoreList, saveIgnoreList,
+  loadBackfillRuns, recordBackfillRun, getMachineId,
+} from "../storage";
+import type { IgnoreEntry, BackfillRun } from "../types";
 import {
   EXCLUSION_PRESETS, fetchAndGroupHistory, matchesAnyPattern, buildIgnoreList,
 } from "./history";
@@ -40,6 +43,10 @@ export function Wizard() {
   const [ingestComplete, setIngestComplete] = useState(false);
   const [ingestRunning, setIngestRunning] = useState(false);
   const [ingestError, setIngestError] = useState<string | null>(null);
+  // A backfill already run on a *different* machine. When set, the
+  // backfill defaults OFF — re-backfilling synced history duplicates
+  // events. Null when no other machine has backfilled.
+  const [priorBackfill, setPriorBackfill] = useState<BackfillRun | null>(null);
 
   // Pre-populate manuallyExcluded with anything already on the Tier 3 list
   // so the wizard starts from "here's what you already excluded".
@@ -49,6 +56,18 @@ export function Wizard() {
       setExistingPatterns(existing.map((e) => e.pattern));
     })();
     void loadSettings().then((s) => setToken(s.bearerToken ?? ""));
+    // If another machine on this Chrome profile already backfilled,
+    // default the backfill OFF and surface a warning — re-backfilling
+    // synced history would duplicate every event.
+    void (async () => {
+      const [runs, myId] = await Promise.all([loadBackfillRuns(), getMachineId()]);
+      const fromOthers = runs.filter((r) => r.machineId !== myId);
+      if (fromOthers.length > 0) {
+        const latest = fromOthers.reduce((a, b) => (a.at > b.at ? a : b));
+        setPriorBackfill(latest);
+        setIngestEnabled(false);
+      }
+    })();
   }, []);
 
   // ---- handlers ----
@@ -127,6 +146,9 @@ export function Wizard() {
       const count = await backfillHistory(keep, {
         onProgress: (done, total) => setIngestProgress({ done, total }),
       });
+      // Record the run so other machines on this Chrome profile warn
+      // before backfilling the same synced history again.
+      await recordBackfillRun(await getMachineId());
       await markOnboarded();
       setIngestComplete(true);
       setIngestProgress({ done: count, total: count });
@@ -228,6 +250,7 @@ export function Wizard() {
           progress={ingestProgress}
           running={ingestRunning}
           error={ingestError}
+          priorBackfill={priorBackfill}
           onStart={() => void runIngest()}
           onBack={() => setStep("filter")}
           onSkip={async () => { await markOnboarded(); setStep("done"); }}
@@ -599,6 +622,7 @@ function IngestStep(props: {
   progress: { done: number; total: number } | null;
   running: boolean;
   error: string | null;
+  priorBackfill: BackfillRun | null;
   onStart: () => void;
   onBack: () => void;
   onSkip: () => void;
@@ -629,6 +653,27 @@ function IngestStep(props: {
         Skip this if you only want real-time tracking from here on. You can
         always re-run the wizard from the popup later.
       </p>
+
+      {props.priorBackfill && (
+        <div style={{
+          border: "1px solid var(--fa-edge)",
+          background: "var(--fa-surface)",
+          borderRadius: 8, padding: "12px 14px", margin: "12px 0",
+        }}>
+          <strong style={{ display: "block", marginBottom: 4 }}>
+            Another machine already backfilled
+          </strong>
+          <span className="muted">
+            History was backfilled from a different machine on{" "}
+            {new Date(props.priorBackfill.at).toLocaleDateString()}. If your
+            Chrome history syncs across machines, this machine sees the same
+            pages — backfilling again would create duplicate events, so it's
+            left unchecked. If this machine keeps its <em>own</em> separate
+            history, check the box to back-fill it.
+          </span>
+        </div>
+      )}
+
       <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <input
           type="checkbox"

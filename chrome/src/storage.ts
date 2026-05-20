@@ -1,6 +1,6 @@
 // chrome/src/storage.ts
 import type {
-  Settings, IgnoreEntry, CategoryMapping, OutboxEntry, Visit,
+  Settings, IgnoreEntry, CategoryMapping, OutboxEntry, Visit, BackfillRun,
 } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 
@@ -36,6 +36,33 @@ export async function loadIgnoreList(): Promise<IgnoreEntry[]> {
 }
 export async function saveIgnoreList(entries: IgnoreEntry[]): Promise<void> {
   await chrome.storage.sync.set({ ignoreList: entries });
+}
+
+// chrome.storage.local — a random id minted once per machine/profile.
+// Lets the wizard tell "a backfill run from another machine" apart from
+// its own.
+export async function getMachineId(): Promise<string> {
+  const r = await chrome.storage.local.get("machineId");
+  let id = r.machineId as string | undefined;
+  if (!id) {
+    id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    await chrome.storage.local.set({ machineId: id });
+  }
+  return id;
+}
+
+// chrome.storage.sync — backfill runs propagate across synced machines so
+// a second machine's wizard can warn before re-backfilling shared history.
+const BACKFILL_RUNS_CAP = 10;
+export async function loadBackfillRuns(): Promise<BackfillRun[]> {
+  const r = await chrome.storage.sync.get("backfillRuns");
+  return (r.backfillRuns as BackfillRun[] | undefined) ?? [];
+}
+export async function recordBackfillRun(machineId: string): Promise<void> {
+  const runs = await loadBackfillRuns();
+  runs.push({ machineId, at: new Date().toISOString() });
+  while (runs.length > BACKFILL_RUNS_CAP) runs.shift();
+  await chrome.storage.sync.set({ backfillRuns: runs });
 }
 
 // chrome.storage.session — in-memory, cleared on browser restart.
