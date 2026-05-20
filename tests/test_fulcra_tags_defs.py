@@ -107,6 +107,8 @@ def test_ensure_definitions_creates_attention_def_and_vocab(recording_transport)
     posted_tags: list[dict] = []
 
     def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and r.url.path == "/user/v1alpha1/annotation":
+            return httpx.Response(200, json=[])  # no existing defs
         if r.method == "GET" and "/tag/name/" in r.url.path:
             return httpx.Response(404)
         if r.method == "POST" and r.url.path == "/user/v1alpha1/tag":
@@ -138,6 +140,87 @@ def test_ensure_definitions_creates_attention_def_and_vocab(recording_transport)
     # apply per-event, not at the def level.
     assert "tag-attention" in d["tags"] and "tag-web" in d["tags"]
     assert len(d["tags"]) == 2
+
+
+def test_ensure_definitions_adopts_existing_attention_def(recording_transport):
+    """Second-machine bootstrap: when an "Attention" def already exists on
+    the account, adopt its id instead of POSTing a parallel duplicate."""
+    posted_defs: list[dict] = []
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and r.url.path == "/user/v1alpha1/annotation":
+            return httpx.Response(200, json=[
+                {"name": "Attention", "annotation_type": "duration",
+                 "id": "def-machine-1", "created_at": "2026-05-19T00:00:00Z",
+                 "deleted_at": None},
+            ])
+        if r.method == "GET" and "/tag/name/" in r.url.path:
+            return httpx.Response(200, json={"id": "tag-x"})
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+
+    transport = recording_transport(responder)
+    client = FulcraClient(transport=transport)
+    state = State()
+    client.ensure_definitions(state)
+    assert state.attention_definition_id == "def-machine-1"
+    assert posted_defs == []  # no parallel definition created
+
+
+def test_ensure_definitions_picks_oldest_when_duplicates_exist(recording_transport):
+    """If earlier create-only bootstraps already spawned duplicates, every
+    machine must converge on the same one — the oldest by created_at."""
+    def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and r.url.path == "/user/v1alpha1/annotation":
+            return httpx.Response(200, json=[
+                {"name": "Attention", "annotation_type": "duration",
+                 "id": "def-newer", "created_at": "2026-05-20T00:00:00Z",
+                 "deleted_at": None},
+                {"name": "Attention", "annotation_type": "duration",
+                 "id": "def-older", "created_at": "2026-05-18T00:00:00Z",
+                 "deleted_at": None},
+                # Soft-deleted "Attention" def — must be ignored.
+                {"name": "Attention", "annotation_type": "duration",
+                 "id": "def-deleted", "created_at": "2026-05-01T00:00:00Z",
+                 "deleted_at": "2026-05-02T00:00:00Z"},
+            ])
+        if r.method == "GET" and "/tag/name/" in r.url.path:
+            return httpx.Response(200, json={"id": "tag-x"})
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+
+    transport = recording_transport(responder)
+    client = FulcraClient(transport=transport)
+    state = State()
+    client.ensure_definitions(state)
+    assert state.attention_definition_id == "def-older"
+
+
+def test_ensure_definitions_creates_when_only_soft_deleted_exists(recording_transport):
+    """A soft-deleted "Attention" def must not be adopted — create a fresh one."""
+    posted_defs: list[dict] = []
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and r.url.path == "/user/v1alpha1/annotation":
+            return httpx.Response(200, json=[
+                {"name": "Attention", "annotation_type": "duration",
+                 "id": "def-old-deleted", "created_at": "2026-05-01T00:00:00Z",
+                 "deleted_at": "2026-05-02T00:00:00Z"},
+            ])
+        if r.method == "GET" and "/tag/name/" in r.url.path:
+            return httpx.Response(404)
+        if r.method == "POST" and r.url.path == "/user/v1alpha1/tag":
+            body = json.loads(r.content)
+            return httpx.Response(200, json={"id": f"tag-{body['name']}"})
+        if r.method == "POST" and r.url.path == "/user/v1alpha1/annotation":
+            posted_defs.append(json.loads(r.content))
+            return httpx.Response(200, json={"id": "def-fresh"})
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+
+    transport = recording_transport(responder)
+    client = FulcraClient(transport=transport)
+    state = State()
+    client.ensure_definitions(state)
+    assert state.attention_definition_id == "def-fresh"
+    assert len(posted_defs) == 1
 
 
 def test_ensure_definitions_skips_def_post_when_already_cached(recording_transport):

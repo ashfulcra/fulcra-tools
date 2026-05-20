@@ -73,11 +73,15 @@ export async function backfillHistory(
     queued += 1;
     if (opts.onProgress) opts.onProgress(queued, unique.length);
   }
-  // addToOutbox only writes to storage; the actual POST happens here.
-  // For a backfill of a few thousand URLs this is one big flush at
-  // the end — the per-request timeout + 5-failure circuit breaker
-  // in outbox.ts caps the worst case.
-  await flushOutbox();
+  // Queueing is done — the progress bar has hit 100%. Kick off a flush
+  // but DO NOT await it: flushOutbox POSTs every queued event one-by-one
+  // through the relay, which for a few-thousand-URL backfill takes
+  // minutes. Awaiting it here froze the wizard at 100% with the advance
+  // button disabled the whole time. The outbox is a write-ahead queue —
+  // the background alarm drains whatever this flush doesn't, and the
+  // relay dedups repeats — so a fire-and-forget flush is safe and lets
+  // the wizard advance the moment queueing finishes.
+  void flushOutbox();
   return queued;
 }
 
