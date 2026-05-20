@@ -1,8 +1,10 @@
 // chrome/tests/backfill.test.ts
-import { describe, test, expect, beforeEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { backfillHistory, BACKFILL_CLIENT } from "../src/wizard/backfill";
-import { loadOutbox, saveIgnoreList, saveCategoryMap } from "../src/storage";
+import { loadOutbox, saveIgnoreList, saveCategoryMap, loadSettings, saveSettings } from "../src/storage";
 import type { DomainGroup } from "../src/wizard/history";
+
+const origFetch = globalThis.fetch;
 
 beforeEach(async () => {
   await chrome.storage.local.clear();
@@ -10,6 +12,10 @@ beforeEach(async () => {
   (chrome.identity.getProfileUserInfo as unknown as ReturnType<typeof vi.fn>).mockImplementation(
     (_o: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => cb({ email: "", id: "" }),
   );
+});
+
+afterEach(() => {
+  globalThis.fetch = origFetch;
 });
 
 function fakeGroup(host: string, urls: { url: string; lastVisitTime: number; title?: string }[]): DomainGroup {
@@ -80,6 +86,26 @@ describe("backfillHistory", () => {
     expect(count).toBe(3);
     const ob = await loadOutbox();
     expect(ob).toHaveLength(3);
+  });
+
+  test("returns after queueing — does not block on the outbox flush", async () => {
+    // Regression: the wizard's backfill step froze at 100% because
+    // backfillHistory awaited flushOutbox(), which POSTs every queued
+    // event one-by-one through the relay. A bearer token is set so
+    // flushOutbox does NOT early-return, and fetch is stubbed to never
+    // resolve. If backfillHistory awaited the flush, the line below
+    // would hang forever and the test would time out.
+    const s = await loadSettings();
+    await saveSettings({ ...s, bearerToken: "test-token" });
+    globalThis.fetch = vi.fn(() => new Promise<Response>(() => {})) as typeof fetch;
+    const groups = [fakeGroup("example.com", [
+      { url: "https://example.com/a", lastVisitTime: 1 },
+      { url: "https://example.com/b", lastVisitTime: 2 },
+    ])];
+    const count = await backfillHistory(groups);
+    expect(count).toBe(2);
+    // Events are queued; the flush is still in flight (fetch never resolves).
+    expect(await loadOutbox()).toHaveLength(2);
   });
 
   test("reports progress via onProgress callback", async () => {

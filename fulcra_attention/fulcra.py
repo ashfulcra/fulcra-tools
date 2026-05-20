@@ -176,6 +176,14 @@ class FulcraClient:
             self.ensure_tag(build_tag_name("category", slug), state)
         if state.attention_definition_id:
             return
+        # A second machine's bootstrap must ADOPT the account's existing
+        # "Attention" definition, not POST a parallel one. This used to be
+        # create-only, so every new machine spawned a duplicate definition
+        # (a duplicate "Attention" row in Fulcra). Look it up by name first.
+        existing = self._find_attention_definition()
+        if existing is not None:
+            state.attention_definition_id = existing
+            return
         body = {
             "annotation_type": "duration",
             "name": "Attention",
@@ -194,6 +202,30 @@ class FulcraClient:
         )
         r.raise_for_status()
         state.attention_definition_id = r.json()["id"]
+
+    def _find_attention_definition(self) -> str | None:
+        """Return the id of the live "Attention" duration definition.
+
+        None if none exists. If duplicates exist — an older create-only
+        bootstrap made parallel ones — returns the oldest by created_at,
+        so every machine deterministically converges on the same one.
+        Soft-deleted definitions (non-null deleted_at) are ignored.
+        """
+        r = self._client().get(
+            "/user/v1alpha1/annotation",
+            headers=self._authed_headers(),
+        )
+        r.raise_for_status()
+        matches = [
+            d for d in r.json()
+            if d.get("name") == "Attention"
+            and d.get("annotation_type") == "duration"
+            and not d.get("deleted_at")
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda d: d.get("created_at") or "")
+        return matches[0]["id"]
 
     def ensure_machine_tag(self, hostname: str, state: State) -> str:
         """Create / look up the `machine:<hostname>` tag. Called by `setup`."""

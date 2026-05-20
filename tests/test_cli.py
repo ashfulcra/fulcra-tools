@@ -33,6 +33,8 @@ def _isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_bootstrap_creates_def_and_tags(_isolate_state, mocker):
     posted: list[dict] = []
     def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and r.url.path == "/user/v1alpha1/annotation":
+            return httpx.Response(200, json=[])  # no existing defs
         if r.method == "GET" and "/tag/name/" in r.url.path:
             return httpx.Response(404)
         if r.method == "POST" and r.url.path == "/user/v1alpha1/tag":
