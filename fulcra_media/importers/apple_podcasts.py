@@ -53,13 +53,21 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
             if not candidate.exists():
                 continue
             dest = snap_dir / candidate.name
-            # Bounded copy via `cp` as a killable subprocess. An unbounded
-            # shutil.copy2 here blocks forever when the source SQLite file is
-            # I/O-stalled (iCloud sync, slow volume); a hung importer then
-            # cascades into the caller's own timeout with no clear cause.
+            # Snapshot via `cp -c` — an APFS copy-on-write clone. This is the
+            # key fix: a plain data copy (shutil.copy2 / `cp`) of the live
+            # MTLibrary.sqlite performs a bulk sequential read, which blocks
+            # indefinitely while Apple Podcasts holds the file and macOS's
+            # file provider arbitrates access — the importer then appears to
+            # hang forever. `clonefile(2)` duplicates block references with no
+            # data read, completing instantly, and the resulting clone (a
+            # separate inode outside the protected container) reads cleanly.
+            # `cp -c` falls back to a normal copy when cloning is unsupported
+            # (cross-volume / non-APFS); the timeout below still bounds that
+            # case. Run as a killable subprocess so any fallback copy that
+            # does stall fails fast with a clear error instead of hanging.
             try:
                 subprocess.run(
-                    ["cp", str(candidate), str(dest)],
+                    ["cp", "-c", str(candidate), str(dest)],
                     check=True,
                     capture_output=True,
                     timeout=SNAPSHOT_TIMEOUT_SECONDS,
