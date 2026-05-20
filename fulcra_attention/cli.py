@@ -98,6 +98,41 @@ def status() -> None:
     ))
 
 
+@cli.command(help="List every Attention definition on the account (for multi-machine cleanup).")
+def defs() -> None:
+    s = state_mod.load(state_mod.DEFAULT_PATH)
+    client = FulcraClient()
+    rows = client.list_attention_definitions()
+    if not rows:
+        click.echo("No Attention definitions on this account.")
+        return
+    # Oldest first so duplicates created by successive bootstraps read
+    # in chronological order.
+    rows.sort(key=lambda d: d.get("created_at") or "")
+    for d in rows:
+        flags = []
+        if d.get("deleted_at"):
+            flags.append("soft-deleted")
+        if d.get("id") == s.attention_definition_id:
+            flags.append("THIS MACHINE")
+        suffix = f"  [{', '.join(flags)}]" if flags else ""
+        click.echo(f"{d.get('id')}  created={d.get('created_at', '?')}{suffix}")
+
+
+@cli.command(help="Point this machine's relay at a specific Attention definition id.")
+@click.argument("definition_id")
+def adopt(definition_id: str) -> None:
+    # Local-only: rewrites state.json so this machine's relay forwards
+    # events to an existing definition instead of its own. Used to merge
+    # a machine onto another machine's definition. Copy the id from the
+    # `defs` output. Does not touch Fulcra — restart the relay to apply.
+    s = state_mod.load(state_mod.DEFAULT_PATH)
+    s.attention_definition_id = definition_id
+    state_mod.save(s, state_mod.DEFAULT_PATH)
+    click.echo(f"adopted: {definition_id}")
+    click.echo("Restart the relay for this to take effect.")
+
+
 @cli.command(help="Soft-delete the Attention def + clear local state.")
 @click.option("--confirm", is_flag=True,
               help="Required. Confirms you understand orphaned events stay visible.")

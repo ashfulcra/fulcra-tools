@@ -244,3 +244,53 @@ def test_reset_with_confirm_soft_deletes_and_clears(_isolate_state, mocker):
     s = state_mod.load(_isolate_state)
     assert s.attention_definition_id is None
     assert s.watermarks == {}
+
+
+def test_defs_lists_all_attention_definitions(_isolate_state, mocker):
+    """`defs` lists every Attention definition so the user can spot the
+    duplicates an older create-only bootstrap left behind, and see which
+    one this machine currently points at."""
+    state_mod.save(
+        state_mod.State(attention_definition_id="def-mine"),
+        _isolate_state,
+    )
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET" and r.url.path == "/user/v1alpha1/annotation":
+            return httpx.Response(200, json=[
+                {"name": "Attention", "annotation_type": "duration",
+                 "id": "def-old", "created_at": "2026-05-18T00:00:00Z",
+                 "deleted_at": None},
+                {"name": "Attention", "annotation_type": "duration",
+                 "id": "def-mine", "created_at": "2026-05-19T00:00:00Z",
+                 "deleted_at": None},
+                {"name": "Energy", "annotation_type": "scale",
+                 "id": "def-unrelated", "created_at": "2026-01-01T00:00:00Z"},
+            ])
+        raise AssertionError(f"unexpected {r.method} {r.url}")
+
+    transport = httpx.MockTransport(responder)
+    mocker.patch(
+        "fulcra_attention.cli.FulcraClient",
+        lambda **kw: __import__("fulcra_attention.fulcra", fromlist=["FulcraClient"]).FulcraClient(transport=transport, **kw),
+    )
+    res = CliRunner().invoke(cli, ["defs"])
+    assert res.exit_code == 0, res.output
+    assert "def-old" in res.output
+    assert "def-mine" in res.output
+    assert "THIS MACHINE" in res.output  # marks the def this machine uses
+    assert "def-unrelated" not in res.output  # only "Attention" defs listed
+
+
+def test_adopt_points_local_state_at_given_definition(_isolate_state):
+    """`adopt` rewrites state.json so this machine merges onto another
+    machine's definition. Local-only — no Fulcra call."""
+    state_mod.save(
+        state_mod.State(attention_definition_id="def-old-local"),
+        _isolate_state,
+    )
+    res = CliRunner().invoke(cli, ["adopt", "def-from-other-machine"])
+    assert res.exit_code == 0, res.output
+    assert "adopted: def-from-other-machine" in res.output
+    s = state_mod.load(_isolate_state)
+    assert s.attention_definition_id == "def-from-other-machine"

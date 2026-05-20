@@ -203,6 +203,16 @@ class FulcraClient:
         r.raise_for_status()
         state.attention_definition_id = r.json()["id"]
 
+    def list_attention_definitions(self) -> list[dict]:
+        """Every annotation definition named "Attention" on the account,
+        live and soft-deleted. Powers the `defs` CLI and duplicate cleanup."""
+        r = self._client().get(
+            "/user/v1alpha1/annotation",
+            headers=self._authed_headers(),
+        )
+        r.raise_for_status()
+        return [d for d in r.json() if d.get("name") == "Attention"]
+
     def _find_attention_definition(self) -> str | None:
         """Return the id of the live "Attention" duration definition.
 
@@ -211,15 +221,9 @@ class FulcraClient:
         so every machine deterministically converges on the same one.
         Soft-deleted definitions (non-null deleted_at) are ignored.
         """
-        r = self._client().get(
-            "/user/v1alpha1/annotation",
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
         matches = [
-            d for d in r.json()
-            if d.get("name") == "Attention"
-            and d.get("annotation_type") == "duration"
+            d for d in self.list_attention_definitions()
+            if d.get("annotation_type") == "duration"
             and not d.get("deleted_at")
         ]
         if not matches:
