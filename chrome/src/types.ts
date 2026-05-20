@@ -47,6 +47,17 @@ export const DEFAULT_SETTINGS: Settings = {
  * sweep counts it as AFK. Only applies when settings.heartbeatEnabled. */
 export const HEARTBEAT_STALE_MS = 30_000;
 
+/**
+ * A completed history-backfill run. Stored in chrome.storage.sync so it
+ * propagates to other machines on the same Chrome profile — a second
+ * machine's wizard reads this to warn before backfilling the same
+ * (synced) history again and creating duplicate events.
+ */
+export interface BackfillRun {
+  machineId: string;  // random per-machine id (see getMachineId)
+  at: string;         // ISO timestamp the backfill completed
+}
+
 /** One entry in the Tier 3 ignore list (chrome.storage.sync). */
 export interface IgnoreEntry {
   pattern: string;  // exact host like "example.com" or wildcard like "*.example.com"

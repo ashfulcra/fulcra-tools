@@ -6,6 +6,7 @@ import {
   loadIgnoreList, saveIgnoreList,
   loadCategoryMap,
   loadVisits, saveVisits,
+  getMachineId, loadBackfillRuns, recordBackfillRun,
 } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";
 
@@ -68,6 +69,42 @@ describe("ignore list (sync)", () => {
 describe("category map (local)", () => {
   test("loadCategoryMap returns [] when empty", async () => {
     expect(await loadCategoryMap()).toEqual([]);
+  });
+});
+
+describe("machine id", () => {
+  test("getMachineId mints an id and is stable across calls", async () => {
+    const first = await getMachineId();
+    expect(first).toBeTruthy();
+    expect(await getMachineId()).toBe(first);
+  });
+});
+
+describe("backfill runs (sync)", () => {
+  test("loadBackfillRuns returns [] when empty", async () => {
+    expect(await loadBackfillRuns()).toEqual([]);
+  });
+  test("recordBackfillRun appends a run and stores it in chrome.storage.sync", async () => {
+    await recordBackfillRun("machine-a");
+    const runs = await loadBackfillRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0].machineId).toBe("machine-a");
+    expect(typeof runs[0].at).toBe("string");
+    const sync = await chrome.storage.sync.get(null);
+    expect(sync).toHaveProperty("backfillRuns");
+  });
+  test("keeps runs from multiple machines so a second machine sees the other's", async () => {
+    await recordBackfillRun("machine-a");
+    await recordBackfillRun("machine-b");
+    const ids = (await loadBackfillRuns()).map((r) => r.machineId);
+    expect(ids).toContain("machine-a");
+    expect(ids).toContain("machine-b");
+  });
+  test("caps the list at 10 runs, dropping the oldest", async () => {
+    for (let i = 0; i < 13; i++) await recordBackfillRun(`m-${i}`);
+    const runs = await loadBackfillRuns();
+    expect(runs).toHaveLength(10);
+    expect(runs[0].machineId).toBe("m-3");  // m-0..m-2 dropped
   });
 });
 
