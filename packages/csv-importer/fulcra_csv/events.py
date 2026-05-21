@@ -75,6 +75,7 @@ class GenericEvent:
     source_id: str
     end_time: datetime | None = None
     tag: str | None = None
+    extra_tags: tuple[str, ...] = ()
     value: Any = None
     annotation_type: str = DURATION  # "duration" | "instant"
     data_fields: dict[str, Any] = field(default_factory=dict)
