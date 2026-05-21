@@ -397,7 +397,17 @@ def import_apple_podcasts(db_path: str | None, check_only: bool, json_mode: bool
             json_mode=json_mode,
         )
         return
-    events = list(ap.parse_db(Path(db_path)))
+    try:
+        events = list(ap.parse_db(Path(db_path)))
+    except ap.SnapshotError as exc:
+        # On-device DB stalled/inaccessible — emit a clean error envelope
+        # instead of crashing with a traceback, so callers get structured JSON.
+        emit_result(
+            ImportEnvelope(importer="apple-podcasts", ok=False,
+                           errors=[{"stage": "snapshot", "message": str(exc)}]),
+            json_mode=json_mode,
+        )
+        return
     run_and_emit("apple-podcasts", events, s,
                  tag_name="apple-podcasts", check_only=check_only, json_mode=json_mode)
 
