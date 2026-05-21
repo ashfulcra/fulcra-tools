@@ -1,118 +1,38 @@
-"""Fulcra API client + run-import pipeline.
+"""Fulcra API client + run-import pipeline for fulcra-media-helpers.
 
-Single point of contact with the Fulcra REST API. Importers produce
-NormalizedEvent instances; this module handles auth, definitions, tags,
-ingest, dedup readback, and verification.
+Builds on `fulcra_common.BaseFulcraClient` — adds the Watched/Listened/Read
+DurationAnnotation definitions, the NormalizedEvent ingest, and the
+dedup-readback import pipeline. Auth, the httpx client, tag lookup,
+soft-delete, and event readback come from the base.
+
+`ImportResult` is re-exported here so existing
+`from fulcra_media.fulcra import ImportResult` imports keep working.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
-import httpx
+from fulcra_common import BaseFulcraClient, ImportResult
 
 from .state import State
 
 if TYPE_CHECKING:
     from .importers.base import NormalizedEvent
 
-DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
+__all__ = ["FulcraClient", "ImportResult"]
 
 
-@dataclass
-class ImportResult:
-    total: int
-    skipped_existing: int
-    posted: int
-    verified: int
-
-
-class FulcraClient:
-    def __init__(
-        self,
-        base_url: str = DEFAULT_BASE_URL,
-        transport: httpx.BaseTransport | None = None,
-    ) -> None:
-        self.base_url = base_url
-        self._transport = transport
-        self._http: httpx.Client | None = None
-
-    def get_token(self) -> str:
-        env = os.environ.get("FULCRA_ACCESS_TOKEN")
-        if env:
-            return env
-        try:
-            result = subprocess.run(
-                ["fulcra", "auth", "print-access-token"],
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                "fulcra auth print-access-token timed out after 30s; the Fulcra "
-                "CLI may be stuck on an interactive re-auth flow. Run "
-                "`fulcra auth login`, or set FULCRA_ACCESS_TOKEN."
-            ) from exc
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "fulcra CLI not found on PATH; install it or set "
-                "FULCRA_ACCESS_TOKEN."
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                "fulcra auth print-access-token failed; run `fulcra auth login` first. "
-                f"stderr={exc.stderr!r}"
-            ) from exc
-        return result.stdout.decode().strip()
-
-    def _client(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client(
-                base_url=self.base_url,
-                transport=self._transport,
-                timeout=30.0,
-                headers={"User-Agent": "fulcra-media-helpers/0.1"},
-                follow_redirects=True,
-            )
-        return self._http
-
-    def _authed_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.get_token()}"}
-
-    def soft_delete_definition(self, definition_id: str) -> bool:
-        """Soft-delete an annotation definition. See sibling docs for caveats."""
-        r = self._client().delete(
-            f"/user/v1alpha1/annotation/{definition_id}",
-            headers=self._authed_headers(),
-        )
-        if r.status_code == 204:
-            return True
-        if r.status_code == 404:
-            return False
-        r.raise_for_status()
-        return False
+class FulcraClient(BaseFulcraClient):
+    USER_AGENT = "fulcra-media-helpers/0.1"
 
     def ensure_tag(self, name: str, state: State) -> str:
+        """Look up / create a tag, caching the id in `state.tag_ids`."""
         if name in state.tag_ids:
             return state.tag_ids[name]
-        c = self._client()
-        r = c.get(f"/user/v1alpha1/tag/name/{name}", headers=self._authed_headers())
-        if r.status_code == 200:
-            tag_id = r.json()["id"]
-        else:
-            r = c.post(
-                "/user/v1alpha1/tag",
-                json={"name": name},
-                headers=self._authed_headers(),
-            )
-            r.raise_for_status()
-            tag_id = r.json()["id"]
+        tag_id = self._resolve_tag(name)
         state.tag_ids[name] = tag_id
         return tag_id
 
@@ -216,38 +136,6 @@ class FulcraClient:
             },
         )
         r.raise_for_status()
-
-    def fetch_existing_source_ids(
-        self,
-        start: datetime,
-        end: datetime,
-        only_for_defs: set[str] | None = None,
-    ) -> set[str]:
-        """Return source IDs of DurationAnnotation events in [start, end].
-
-        If `only_for_defs` is set, records whose top-level `source_id` doesn't
-        appear in that set are ignored — this prevents dedup against events
-        orphaned by a previously soft-deleted annotation definition.
-        """
-        r = self._client().get(
-            "/data/v1alpha1/event/DurationAnnotation",
-            params={
-                "start_time": start.isoformat().replace("+00:00", "Z"),
-                "end_time": end.isoformat().replace("+00:00", "Z"),
-            },
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        records = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
-        out: set[str] = set()
-        for rec in records:
-            if only_for_defs is not None and rec.get("source_id") not in only_for_defs:
-                continue
-            for s in rec.get("sources") or []:
-                out.add(s)
-            for s in (rec.get("metadata") or {}).get("source") or []:
-                out.add(s)
-        return out
 
     def run_import(
         self,
