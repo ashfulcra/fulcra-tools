@@ -1,0 +1,34 @@
+[
+  {"id": 100001, "watched_at": "2026-05-12T20:30:00.000Z", "action": "scrobble", "type": "episode",
+    "episode": {"season": 2, "number": 1, "title": "The We We Are",
+      "ids": {"trakt": 73482, "imdb": "tt5790298", "tmdb": 1130149, "tvdb": null}, "runtime": 51},
+    "show": {"title": "Severance", "year": 2022,
+      "ids": {"trakt": 2243, "slug": "severance", "imdb": "tt11280740", "tmdb": 95396}}
+  },
+  {"id": 100002, "watched_at": "2026-05-10T21:00:00.000Z", "action": "watch", "type": "movie",
+    "movie": {"title": "Dune: Part Two", "year": 2024, "runtime": 165,
+      "ids": {"trakt": 71938, "slug": "dune-part-two-2024", "imdb": "tt15239678", "tmdb": 693134}}
+  },
+  {"id": 100003, "watched_at": "2026-05-15T19:41:00.000Z", "action": "watch", "type": "episode",
+    "episode": {"season": 1, "number": 2, "title": "Episode Two",
+      "ids": {"trakt": 999001, "imdb": "tt0000001", "tmdb": 1}, "runtime": 45},
+    "show": {"title": "Star Wars Resistance", "year": 2018,
+      "ids": {"trakt": 100, "slug": "star-wars-resistance", "imdb": null, "tmdb": null}}
+  },
+  {"id": 100004, "watched_at": "2026-05-15T19:41:00.000Z", "action": "watch", "type": "episode",
+    "episode": {"season": 1, "number": 3, "title": "Episode Three",
+      "ids": {"trakt": 999002, "imdb": "tt0000002", "tmdb": 2}, "runtime": 45},
+    "show": {"title": "Star Wars Resistance", "year": 2018,
+      "ids": {"trakt": 100, "slug": "star-wars-resistance", "imdb": null, "tmdb": null}}
+  },
+  {"id": 100005, "watched_at": "2026-05-15T19:41:00.000Z", "action": "watch", "type": "episode",
+    "episode": {"season": 1, "number": 4, "title": "Episode Four",
+      "ids": {"trakt": 999003, "imdb": "tt0000003", "tmdb": 3}, "runtime": 45},
+    "show": {"title": "Star Wars Resistance", "year": 2018,
+      "ids": {"trakt": 100, "slug": "star-wars-resistance", "imdb": null, "tmdb": null}}
+  },
+  {"id": 100006, "watched_at": "2026-04-01T20:00:00.000Z", "action": "checkin", "type": "movie",
+    "movie": {"title": "Dune: Part Two", "year": 2024, "runtime": 165,
+      "ids": {"trakt": 71938, "slug": "dune-part-two-2024", "imdb": "tt15239678", "tmdb": 693134}}
+  }
+]
