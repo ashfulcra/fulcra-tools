@@ -51,7 +51,19 @@ class FulcraClient:
                 ["fulcra", "auth", "print-access-token"],
                 check=True,
                 capture_output=True,
+                timeout=30,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "fulcra auth print-access-token timed out after 30s; the Fulcra "
+                "CLI may be stuck on an interactive re-auth flow. Run "
+                "`fulcra auth login`, or set FULCRA_ACCESS_TOKEN."
+            ) from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "fulcra CLI not found on PATH; install it or set "
+                "FULCRA_ACCESS_TOKEN."
+            ) from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 "fulcra auth print-access-token failed; run `fulcra auth login` first. "
