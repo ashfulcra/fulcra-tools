@@ -8,10 +8,15 @@ authors = [{name = "ash", email = "ash@fulcradynamics.com"}]
 dependencies = [
     "click>=8.1",
     "httpx>=0.27",
+    # Shared Fulcra API client (sibling package in this monorepo).
+    "fulcra-common",
     # The fulcra-api CLI must provide `fulcra auth print-access-token`.
     # Same pin as the sibling FulcraMediaHelpers project.
     "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
 ]
+
+[tool.uv.sources]
+fulcra-common = { workspace = true }
 
 [project.optional-dependencies]
 dev = [

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 
 import httpx
@@ -19,6 +20,53 @@ def test_get_token_prefers_env_var(monkeypatch):
 def test_authed_headers_carry_the_bearer_token(monkeypatch):
     monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "abc123")
     assert BaseFulcraClient()._authed_headers() == {"Authorization": "Bearer abc123"}
+
+
+def test_get_token_shells_out_when_env_unset(monkeypatch):
+    """With FULCRA_ACCESS_TOKEN unset, get_token runs
+    `fulcra auth print-access-token` with a 30s timeout."""
+    monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
+    calls: list[tuple] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=b"shell-tok\n")
+
+    monkeypatch.setattr("fulcra_common.client.subprocess.run", fake_run)
+    assert BaseFulcraClient().get_token() == "shell-tok"
+    cmd, kwargs = calls[0]
+    assert cmd[0].endswith("fulcra")
+    assert cmd[1:] == ["auth", "print-access-token"]
+    assert kwargs == {"check": True, "capture_output": True, "timeout": 30}
+
+
+def test_get_token_falls_back_to_path_when_sibling_missing(monkeypatch, tmp_path):
+    """When no `fulcra` sits next to sys.executable, fall back to a bare
+    PATH lookup so the CLI is still found."""
+    monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
+    fake_python = tmp_path / "python"
+    fake_python.write_text("")
+    monkeypatch.setattr("fulcra_common.client.sys.executable", str(fake_python))
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=b"path-tok\n")
+
+    monkeypatch.setattr("fulcra_common.client.subprocess.run", fake_run)
+    assert BaseFulcraClient().get_token() == "path-tok"
+    assert captured["cmd"][0] == "fulcra"  # bare PATH lookup
+
+
+def test_get_token_raises_runtimeerror_on_cli_failure(monkeypatch):
+    monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd, stderr=b"not logged in")
+
+    monkeypatch.setattr("fulcra_common.client.subprocess.run", fake_run)
+    with pytest.raises(RuntimeError, match="fulcra auth print-access-token failed"):
+        BaseFulcraClient().get_token()
 
 
 def test_resolve_tag_returns_existing_tag(recording_transport):
