@@ -1,0 +1,37 @@
+[project]
+name = "fulcra-attention"
+version = "0.1.0"
+description = "Capture what takes your attention while browsing, into your own Fulcra account."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "ash", email = "ash@fulcradynamics.com"}]
+dependencies = [
+    "click>=8.1",
+    "httpx>=0.27",
+    # The fulcra-api CLI must provide `fulcra auth print-access-token`.
+    # Same pin as the sibling FulcraMediaHelpers project.
+    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+]
+
+[project.optional-dependencies]
+dev = [
+    # fulcra-api currently pins pytest<8 in its runtime deps, so we must
+    # stay compatible with that constraint until upstream loosens it.
+    "pytest>=7.4,<8",
+    "pytest-mock>=3.12",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+fulcra-attention = "fulcra_attention.cli:cli"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["fulcra_attention*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"

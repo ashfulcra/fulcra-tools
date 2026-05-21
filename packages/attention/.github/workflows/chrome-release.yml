@@ -1,0 +1,64 @@
+name: Chrome extension release
+
+# Builds the MV3 extension and publishes a ready-to-load zip so
+# teammates never need the Node toolchain.
+#
+#   - Push a tag like `chrome-v0.1.0`  -> builds + attaches the zip to
+#     the matching GitHub Release.
+#   - Run manually (workflow_dispatch) -> builds + uploads the zip as a
+#     downloadable workflow artifact (useful for testing the pipeline
+#     without cutting a release).
+
+on:
+  push:
+    tags:
+      - "chrome-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chrome
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: chrome/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package dist/ as a loadable folder
+        # The zip extracts to a `fulcra-attention-chrome/` folder with
+        # manifest.json at its root — point "Load unpacked" straight at it.
+        run: |
+          cp -r dist fulcra-attention-chrome
+          zip -r fulcra-attention-chrome.zip fulcra-attention-chrome
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fulcra-attention-chrome
+          path: chrome/fulcra-attention-chrome.zip
+          if-no-files-found: error
+
+      - name: Attach zip to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: chrome/fulcra-attention-chrome.zip
+          fail_on_unmatched_files: true
