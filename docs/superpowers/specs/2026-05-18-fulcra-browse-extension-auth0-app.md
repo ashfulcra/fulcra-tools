@@ -1,8 +1,8 @@
-# Auth0 Application Spec — Fulcra Browse Extension
+# Auth0 Application Spec — Fulcra Attention Extension
 
-**Status:** Spec only. Not yet provisioned. Architecture for v1 of the extension uses a localhost relay (no Auth0); this app is what unlocks public Chrome Web Store distribution in v2.
+**Status:** Spec only. Not yet provisioned. Architecture for v1 of the extension uses a localhost relay (no Auth0); this app is what eliminates the relay and unlocks public Chrome Web Store distribution in v2.
 
-**Owner:** Fulcra Dynamics platform team. Ash (redacted@users.noreply.github.com) is the requester and will own the extension repo.
+**Owner:** Fulcra Dynamics platform team. Ash (redacted@users.noreply.github.com) is the requester and owns the [extension repo](https://github.com/ashfulcra/fulcra-attention).
 
 **Tenant:** `fulcra.us.auth0.com` (the same Auth0 tenant the `fulcra-api` Python CLI uses).
 
@@ -18,7 +18,7 @@ We are **not** creating a per-user Auth0 application. Per-user clients would be 
 
 | Field | Value |
 |---|---|
-| **Name** | `Fulcra Browse Extension` |
+| **Name** | `Fulcra Attention Extension` |
 | **Application type** | Native (treated as a Public Client — no client secret, PKCE required) |
 | **Tenant** | `fulcra.us.auth0.com` |
 | **Token endpoint auth method** | None (public client) |
@@ -54,7 +54,7 @@ Both go into the Allowed Callback URLs list. Auth0 matches on exact string equal
 The extension's access token will be used to:
 - `POST /ingest/v1/record/batch` (write browsing events)
 - `GET /data/v1alpha1/event/DurationAnnotation` and `InstantAnnotation` (verify, dedup readback)
-- `GET /user/v1alpha1/tag/...` and `POST /user/v1alpha1/tag` (ensure the `browsed` tag exists)
+- `GET /user/v1alpha1/tag/...` and `POST /user/v1alpha1/tag` (ensure the `attention`, `web`, `machine:<host>`, `category:<slug>`, and `identity:<email>` tags exist)
 - `POST /user/v1alpha1/annotation` (create the `Browsed` annotation definition on first run)
 - `GET /user/v1alpha1/me` (display "signed in as redacted@users.noreply.github.com" in the popup)
 
@@ -68,7 +68,7 @@ Nothing else. If Fulcra has API-level scope enforcement beyond the resource serv
 
 1. Sign in to https://manage.auth0.com (Fulcra tenant: `fulcra.us.auth0.com`).
 2. **Applications → Applications → Create Application**.
-3. Name: `Fulcra Browse Extension`. Type: **Native**. Click Create.
+3. Name: `Fulcra Attention Extension`. Type: **Native**. Click Create.
 4. Under **Settings**:
    - Confirm **Token Endpoint Authentication Method** = `None` (public client).
    - Set **Allowed Callback URLs** to the development extension ID's redirect URI (we'll add the prod ID after the first CWS submission). Format: `https://<EXTENSION-ID>.chromiumapp.org/`
@@ -93,17 +93,17 @@ For Auth0 to accept the redirect URL during local development, the extension ID 
 
 1. Generate an RSA keypair:
    ```bash
-   openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out fulcra-browse-key.pem
+   openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out fulcra-attention-key.pem
    ```
 2. Extract the public key as base64:
    ```bash
-   openssl rsa -in fulcra-browse-key.pem -pubout -outform DER | openssl base64 -A
+   openssl rsa -in fulcra-attention-key.pem -pubout -outform DER | openssl base64 -A
    ```
-3. Paste that base64 string into `manifest.json` under a top-level `"key"` field.
+3. Paste that base64 string into `chrome/manifest.config.json` (the @crxjs manifest source) under a top-level `"key"` field; the build propagates it to `dist/manifest.json`.
 4. Load the unpacked extension once in `chrome://extensions/`. Note the displayed **ID** (32 lowercase letters).
 5. Add `https://<that-id>.chromiumapp.org/` to the Auth0 app's Allowed Callback URLs.
 
-The `manifest.json` `key` field is only included in **development builds** — strip it before publishing to CWS (CWS assigns the production ID and rejects pinned keys).
+The `"key"` field is only included in **development builds** — strip it before publishing to CWS (CWS assigns the production ID and rejects pinned keys).
 
 ### Step 4 — After first CWS submission
 
@@ -161,7 +161,7 @@ The access token is used as `Authorization: Bearer <token>` on every call to `ht
 
 ## Future considerations (not blocking provisioning)
 
-- **Mobile Safari port:** When we ship a Safari Web Extension wrapper, the OAuth flow needs a separate redirect URI scheme (`fulcra-browse-extension://`) because `chromiumapp.org` is Chrome-only. That'll need a **second Allowed Callback URL** added to this same Auth0 app — the app itself doesn't change, just one more URL in the list.
+- **Mobile Safari port:** When we ship a Safari Web Extension wrapper, the OAuth flow needs a separate redirect URI scheme (`fulcra-attention://`) because `chromiumapp.org` is Chrome-only. That'll need a **second Allowed Callback URL** added to this same Auth0 app — the app itself doesn't change, just one more URL in the list.
 - **Firefox port:** Firefox WebExtensions use the same `browser.identity.launchWebAuthFlow` API, but the redirect host is `<ext-id>.extensions.allizom.org` for AMO-distributed extensions. Adding a Firefox build later means adding a third callback URL to this same Auth0 app.
 - **Role/scope hardening:** Today the extension can in principle read anything its access token grants. If Fulcra adds scope-based authorization, request `media:write` (or whatever the equivalent is) explicitly via the `scope` param so the access token is least-privilege.
 - **MFA / step-up:** No special handling needed — Auth0's hosted login already presents whatever MFA the user has on their Fulcra account.
