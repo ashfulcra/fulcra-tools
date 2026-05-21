@@ -1,0 +1,6 @@
+Event Type,Content Type,Title,Episode Title,Season Number,Episode Number,Start Time,End Time,Play Duration (Seconds),Device Type,Device Model,Country
+PLAY,Movie,Dune: Part Two,,,,2025-01-15 20:30:00,2025-01-15 23:16:00,9960,Apple TV,Apple TV 4K (3rd generation),US
+PLAY,TV Episode,Severance,The We We Are,2,1,2025-01-14 21:00:00,2025-01-14 21:58:00,3480,Apple TV,Apple TV 4K (3rd generation),US
+PAUSE,Movie,The Holdovers,,,,2025-01-12 20:15:00,2025-01-12 20:15:00,0,iPhone,iPhone 15 Pro,US
+PLAY,TV Episode,Ted Lasso,Pilot,1,1,2025-01-10 20:00:00,2025-01-10 20:32:00,1920,iPad,iPad Pro 12.9-inch (6th generation),US
+PLAY,Movie,Killers of the Flower Moon,,,,2025-01-05 18:00:00,2025-01-05 21:26:00,12360,Apple TV,Apple TV 4K (3rd generation),US

@@ -1,0 +1,46 @@
+[
+  {
+    "id": 13371001,
+    "name": "Morning Run",
+    "type": "Run",
+    "sport_type": "Run",
+    "start_date": "2026-05-17T13:00:00Z",
+    "start_date_local": "2026-05-17T06:00:00Z",
+    "elapsed_time": 1830,
+    "moving_time": 1750,
+    "distance": 5012.4,
+    "total_elevation_gain": 42.0,
+    "average_heartrate": 152.3,
+    "kudos_count": 5,
+    "athlete": {"id": 99001}
+  },
+  {
+    "id": 13371002,
+    "name": "Evening Ride to Telluride",
+    "type": "Ride",
+    "sport_type": "Ride",
+    "start_date": "2026-05-16T22:00:00Z",
+    "start_date_local": "2026-05-16T15:00:00Z",
+    "elapsed_time": 7200,
+    "moving_time": 6900,
+    "distance": 40320.0,
+    "total_elevation_gain": 410.0,
+    "average_heartrate": 138.0,
+    "kudos_count": 9,
+    "athlete": {"id": 99001}
+  },
+  {
+    "id": 13371003,
+    "name": "Pool Laps",
+    "type": "Swim",
+    "sport_type": "Swim",
+    "start_date": "2026-05-15T16:30:00Z",
+    "start_date_local": "2026-05-15T09:30:00Z",
+    "elapsed_time": 2400,
+    "moving_time": 2100,
+    "distance": 1200.0,
+    "total_elevation_gain": 0.0,
+    "kudos_count": 2,
+    "athlete": {"id": 99001}
+  }
+]

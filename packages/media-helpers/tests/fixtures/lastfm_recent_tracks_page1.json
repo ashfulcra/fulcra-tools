@@ -1,0 +1,63 @@
+{
+  "recenttracks": {
+    "@attr": {
+      "user": "testuser",
+      "totalPages": "2",
+      "page": "1",
+      "perPage": "5",
+      "total": "8"
+    },
+    "track": [
+      {
+        "artist": {"mbid": "", "#text": "Phoenix"},
+        "album": {"mbid": "", "#text": "Wolfgang Amadeus Phoenix"},
+        "image": [{"size": "small", "#text": ""}],
+        "streamable": "0",
+        "url": "https://www.last.fm/music/Phoenix/_/1901",
+        "name": "1901",
+        "@attr": {"nowplaying": "true"},
+        "mbid": ""
+      },
+      {
+        "artist": {"mbid": "9ca0f70b-3a9e-4d80-9ffa-c7c5ad0c11c1", "#text": "Steely Dan"},
+        "album": {"mbid": "", "#text": "Can't Buy a Thrill"},
+        "image": [{"size": "small", "#text": "https://lastfm.freetls.fastly.net/..."}],
+        "streamable": "0",
+        "date": {"uts": "1715900000", "#text": "16 May 2024, 23:13"},
+        "url": "https://www.last.fm/music/Steely+Dan/_/Reelin%27+In+The+Years",
+        "name": "Reelin' In The Years",
+        "mbid": "be9e92d1-acd2-3a37-95c1-bef27faf16ee"
+      },
+      {
+        "artist": {"mbid": "", "#text": "The Futureheads"},
+        "album": {"mbid": "", "#text": "The Futureheads"},
+        "image": [{"size": "small", "#text": ""}],
+        "streamable": "0",
+        "date": {"uts": "1715898200", "#text": "16 May 2024, 22:43"},
+        "url": "https://www.last.fm/music/The+Futureheads/_/Hounds+of+Love",
+        "name": "Hounds of Love",
+        "mbid": ""
+      },
+      {
+        "artist": {"mbid": "", "#text": "OK Go"},
+        "album": {"mbid": "", "#text": "Oh No"},
+        "image": [{"size": "small", "#text": ""}],
+        "streamable": "0",
+        "date": {"uts": "1715898000", "#text": "16 May 2024, 22:40"},
+        "url": "https://www.last.fm/music/OK+Go/_/Here+It+Goes+Again",
+        "name": "Here It Goes Again",
+        "mbid": ""
+      },
+      {
+        "artist": {"mbid": "", "#text": "Pixies"},
+        "album": {"mbid": "", "#text": "Doolittle"},
+        "image": [{"size": "small", "#text": ""}],
+        "streamable": "0",
+        "date": {"uts": "1715897600", "#text": "16 May 2024, 22:33"},
+        "url": "https://www.last.fm/music/Pixies/_/Wave+Of+Mutilation",
+        "name": "Wave Of Mutilation",
+        "mbid": ""
+      }
+    ]
+  }
+}

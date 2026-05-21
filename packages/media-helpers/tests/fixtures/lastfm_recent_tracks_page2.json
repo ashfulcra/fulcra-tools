@@ -1,0 +1,43 @@
+{
+  "recenttracks": {
+    "@attr": {
+      "user": "testuser",
+      "totalPages": "2",
+      "page": "2",
+      "perPage": "5",
+      "total": "8"
+    },
+    "track": [
+      {
+        "artist": {"mbid": "", "#text": "Beck"},
+        "album": {"mbid": "", "#text": "Sea Change"},
+        "image": [{"size": "small", "#text": ""}],
+        "streamable": "0",
+        "date": {"uts": "1715897000", "#text": "16 May 2024, 22:23"},
+        "url": "https://www.last.fm/music/Beck/_/Lost+Cause",
+        "name": "Lost Cause",
+        "mbid": ""
+      },
+      {
+        "artist": {"mbid": "", "#text": "Phoenix"},
+        "album": {"mbid": "", "#text": "Wolfgang Amadeus Phoenix"},
+        "image": [{"size": "small", "#text": ""}],
+        "streamable": "0",
+        "date": {"uts": "1715896800", "#text": "16 May 2024, 22:20"},
+        "url": "https://www.last.fm/music/Phoenix/_/1901",
+        "name": "1901",
+        "mbid": ""
+      },
+      {
+        "artist": {"mbid": "", "#text": "Pixies"},
+        "album": {"mbid": "", "#text": "Doolittle"},
+        "image": [{"size": "small", "#text": ""}],
+        "streamable": "0",
+        "date": {"uts": "1715896600", "#text": "16 May 2024, 22:16"},
+        "url": "https://www.last.fm/music/Pixies/_/Wave+Of+Mutilation",
+        "name": "Wave Of Mutilation",
+        "mbid": ""
+      }
+    ]
+  }
+}

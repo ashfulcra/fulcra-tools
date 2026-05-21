@@ -1,0 +1,78 @@
+{
+  "data": [
+    {
+      "id": 1109731,
+      "title": "Reelin' In The Years",
+      "title_short": "Reelin' In The Years",
+      "timestamp": 1715900000,
+      "duration": 263,
+      "type": "track",
+      "artist": {
+        "id": 481,
+        "name": "Steely Dan",
+        "type": "artist"
+      },
+      "album": {
+        "id": 116356,
+        "title": "Can't Buy a Thrill",
+        "type": "album"
+      }
+    },
+    {
+      "id": 78901234,
+      "title": "Hounds of Love",
+      "title_short": "Hounds of Love",
+      "timestamp": 1715898200,
+      "duration": 178,
+      "type": "track",
+      "artist": {
+        "id": 32178,
+        "name": "The Futureheads",
+        "type": "artist"
+      },
+      "album": {
+        "id": 9923,
+        "title": "The Futureheads",
+        "type": "album"
+      }
+    },
+    {
+      "id": 4422111,
+      "title": "Here It Goes Again",
+      "title_short": "Here It Goes Again",
+      "timestamp": 1715898000,
+      "duration": 177,
+      "type": "track",
+      "artist": {
+        "id": 2008,
+        "name": "OK Go",
+        "type": "artist"
+      },
+      "album": {
+        "id": 14721,
+        "title": "Oh No",
+        "type": "album"
+      }
+    },
+    {
+      "id": 555111,
+      "title": "Wave Of Mutilation",
+      "title_short": "Wave Of Mutilation",
+      "timestamp": 1715897600,
+      "duration": 124,
+      "type": "track",
+      "artist": {
+        "id": 791,
+        "name": "Pixies",
+        "type": "artist"
+      },
+      "album": {
+        "id": 4811,
+        "title": "Doolittle",
+        "type": "album"
+      }
+    }
+  ],
+  "total": 7,
+  "next": "https://api.deezer.com/user/me/history?index=4&limit=4"
+}
