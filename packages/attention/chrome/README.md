@@ -6,7 +6,7 @@ The browser-side half of [fulcra-attention](../README.md). Captures every page y
 
 The easy path. You need **neither Node nor this repo** — just the zip.
 
-1. Open the [**Releases** page](https://github.com/ashfulcra/fulcra-attention/releases) and download `fulcra-attention-chrome.zip` from the latest `chrome-v*` release.
+1. Open the [**Releases** page](https://github.com/ashfulcra/fulcra-tools/releases) and download `fulcra-attention-chrome.zip` from the latest `attention-v*` release.
 2. Unzip it — you get a `fulcra-attention-chrome/` folder.
 3. Open `chrome://extensions/` and turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the unzipped **`fulcra-attention-chrome/`** folder.
@@ -33,14 +33,14 @@ To load a from-source build: **Load unpacked** → select **`chrome/dist/`** (th
 
 ## Cutting a release
 
-Bump `version` in `chrome/package.json`, commit, then push a matching tag:
+Bump `version` in `packages/attention/chrome/package.json`, commit, then push a matching tag:
 
 ```bash
-git tag chrome-v0.1.0
-git push origin chrome-v0.1.0
+git tag attention-v0.1.0
+git push origin attention-v0.1.0
 ```
 
-The `chrome-release` GitHub Actions workflow builds the extension, runs the tests, and attaches `fulcra-attention-chrome.zip` to the auto-created GitHub Release. Run the workflow manually (`workflow_dispatch`) to produce the zip as a downloadable artifact without cutting a release.
+The `chrome-release` GitHub Actions workflow (at the monorepo root, `.github/workflows/`) builds the extension, runs the tests, and attaches `fulcra-attention-chrome.zip` to the auto-created GitHub Release. Run the workflow manually (`workflow_dispatch`) to produce the zip as a downloadable artifact without cutting a release.
 
 ## Architecture
 
