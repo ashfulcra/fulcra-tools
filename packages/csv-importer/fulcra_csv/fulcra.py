@@ -1,123 +1,41 @@
 """Lightweight Fulcra ingest client for general CSV → annotation.
 
-Service-agnostic: caller supplies the target annotation definition id and
-optional tag ids. Supports both DurationAnnotation and InstantAnnotation
-shapes; data_type can be overridden for custom annotation kinds.
+Builds on `fulcra_common.BaseFulcraClient`. Service-agnostic: the caller
+supplies the target annotation definition id and optional tag ids.
+Supports both DurationAnnotation and InstantAnnotation shapes; data_type
+can be overridden for custom annotation kinds.
+
+`ImportResult` is re-exported here so existing
+`from fulcra_csv.fulcra import ImportResult` imports keep working.
 """
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from urllib.parse import quote
+from datetime import timedelta
 
-import httpx
+from fulcra_common import BaseFulcraClient, ImportResult
 
 from .events import DURATION, GenericEvent
 
-DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
-
-
-@dataclass
-class ImportResult:
-    total: int
-    skipped_existing: int
-    posted: int
-    verified: int
+__all__ = ["FulcraClient", "ImportResult"]
 
 
 def _default_data_type(annotation_type: str) -> str:
     return "DurationAnnotation" if annotation_type == DURATION else "InstantAnnotation"
 
 
-class FulcraClient:
-    def __init__(
-        self,
-        base_url: str = DEFAULT_BASE_URL,
-        transport: httpx.BaseTransport | None = None,
-    ) -> None:
-        self.base_url = base_url
-        self._transport = transport
-        self._http: httpx.Client | None = None
-
-    def get_token(self) -> str:
-        env = os.environ.get("FULCRA_ACCESS_TOKEN")
-        if env:
-            return env
-        try:
-            result = subprocess.run(
-                ["fulcra", "auth", "print-access-token"],
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                "fulcra auth print-access-token failed; run `fulcra auth login` first. "
-                f"stderr={exc.stderr!r}"
-            ) from exc
-        return result.stdout.decode().strip()
-
-    def _client(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client(
-                base_url=self.base_url,
-                transport=self._transport,
-                timeout=30.0,
-                headers={"User-Agent": "fulcra-csv-importer/0.1"},
-                # follow_redirects=False so the Authorization header
-                # we attach per-request never rides along on a 3xx to a
-                # host the user didn't intend. (httpx's auto auth-strip
-                # only applies to client-level auth, not per-request
-                # Authorization headers, which is how we send the
-                # bearer token.) If a redirect is legitimately required,
-                # callers should handle it explicitly with re-auth.
-                follow_redirects=False,
-            )
-        return self._http
-
-    def _authed_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.get_token()}"}
-
-    def soft_delete_definition(self, definition_id: str) -> bool:
-        """Soft-delete an annotation definition.
-
-        Returns True on a successful 204. The events under the def are NOT
-        removed from query results — they stay visible but their source_id
-        points at a deleted def. To effectively "reset" a stream of imports,
-        soft-delete the def AND bump the source-id prefix on the importer
-        so the next run doesn't get silently deduped against the orphans.
-
-        This is the only delete primitive Fulcra currently exposes; there's
-        no per-event delete (probed and confirmed 2026-05-17).
-        """
-        r = self._client().delete(
-            f"/user/v1alpha1/annotation/{definition_id}",
-            headers=self._authed_headers(),
-        )
-        if r.status_code == 204:
-            return True
-        if r.status_code == 404:
-            return False
-        r.raise_for_status()
-        return False
+class FulcraClient(BaseFulcraClient):
+    USER_AGENT = "fulcra-csv-importer/0.1"
+    # follow_redirects=False so the per-request Authorization header never
+    # rides along on a 3xx to a host the user didn't intend. This client
+    # percent-encodes tag names (quote_name below), so it doesn't depend on
+    # following the 303 the tag-name lookup answers for some names.
+    FOLLOW_REDIRECTS = False
 
     def ensure_tag(self, name: str) -> str:
-        c = self._client()
-        # urlencode the name so tags with `/`, `?`, `#`, or spaces don't
-        # break the GET path. Fulcra validates the value server-side, but
-        # the URL itself must stay well-formed.
-        r = c.get(f"/user/v1alpha1/tag/name/{quote(name, safe='')}", headers=self._authed_headers())
-        if r.status_code == 200:
-            return r.json()["id"]
-        r = c.post(
-            "/user/v1alpha1/tag",
-            json={"name": name},
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        return r.json()["id"]
+        # quote_name=True percent-encodes the name in the lookup path so
+        # tags with `/`, `?`, `#`, or spaces don't break the GET.
+        return self._resolve_tag(name, quote_name=True)
 
     def _build_record(
         self,
@@ -202,60 +120,6 @@ class FulcraClient:
             },
         )
         r.raise_for_status()
-
-    def fetch_records(
-        self,
-        start: datetime,
-        end: datetime,
-        *,
-        data_type: str = "DurationAnnotation",
-    ) -> list[dict]:
-        """Return raw records of `data_type` over [start, end].
-
-        Shared by dedup (fetch_existing_source_ids) and export. The Fulcra
-        endpoint returns either a plain list or `{"data": [...]}` depending
-        on the response shape; both are normalised here.
-        """
-        r = self._client().get(
-            f"/data/v1alpha1/event/{data_type}",
-            params={
-                "start_time": start.isoformat().replace("+00:00", "Z"),
-                "end_time": end.isoformat().replace("+00:00", "Z"),
-            },
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        body = r.json()
-        if isinstance(body, list):
-            return body
-        return body.get("data", []) or []
-
-    def fetch_existing_source_ids(
-        self,
-        start: datetime,
-        end: datetime,
-        *,
-        data_type: str = "DurationAnnotation",
-        only_for_defs: set[str] | None = None,
-    ) -> set[str]:
-        """Return the set of source-id strings present in [start, end].
-
-        only_for_defs: when set, restrict to records whose top-level source_id
-        is in this set. This is the dedup-vs-orphan story for user-defined
-        annotations: prior soft-deleted defs still surface records, but
-        their source_id points at the deleted def. For built-in types
-        (BodyMass etc.) pass None — there's no definition to filter on.
-        """
-        records = self.fetch_records(start, end, data_type=data_type)
-        out: set[str] = set()
-        for rec in records:
-            if only_for_defs is not None and rec.get("source_id") not in only_for_defs:
-                continue
-            for s in rec.get("sources") or []:
-                out.add(s)
-            for s in (rec.get("metadata") or {}).get("source") or []:
-                out.add(s)
-        return out
 
     def run_import(
         self,
