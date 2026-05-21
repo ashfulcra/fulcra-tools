@@ -1,0 +1,5 @@
+# Virtual workspace root for the fulcra-tools monorepo. Not a package
+# itself — it just ties the packages/ together so `uv sync` resolves the
+# intra-repo `fulcra-common` dependency from source.
+[tool.uv.workspace]
+members = ["packages/*"]
