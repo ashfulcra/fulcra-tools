@@ -89,30 +89,55 @@ already-unzipped folder. It parses every `*.json` file found:
 
 ### local_db reader
 
-Reads Day One's local database directly — no manual export.
+Reads Day One's local database directly — no manual export. The schema
+below was verified against the Day One install on the development machine
+on 2026-05-21 (a Core Data store, 1,771 entries, 5 journals, 3 tags).
 
-- **Location:** glob `~/Library/Group Containers/*dayone*/Data/Documents/*.sqlite`;
-  a `--db-path` CLI option overrides. If no DB is found, fail with a clear
-  message naming the searched path.
-- **Snapshot before read:** the DB belongs to a possibly-running app.
-  The reader copies it to a temp file with an APFS clone (`cp -c`,
-  falling back to a plain copy on non-APFS volumes) and reads the copy —
-  the same approach as the media-helpers Apple Podcasts importer. It never
-  opens the live database.
-- **Schema:** Day One uses Core Data — tables prefixed `Z`, dates stored
-  as seconds since the Core Data epoch (2001-01-01 00:00:00 UTC). The
-  reader carries hard-coded knowledge of the entry table, the journal
-  relation, and the entry↔tag many-to-many join. The exact `Z…` table and
-  column names are version-dependent; they are pinned during
-  implementation against a real Day One database and recorded in this
-  module's comments.
-- **Schema drift:** if an expected table or column is absent, the reader
-  raises with "Day One database schema not recognized — use the JSON
-  export instead." It never silently imports partial/garbage data.
-- **Encrypted journals:** entries belonging to an end-to-end-encrypted
-  journal have no readable text in the local DB. The reader skips them and
-  reports a count ("12 entries skipped — encrypted journal, not readable
-  from the local DB; use the JSON export for those").
+- **Location:** the database is at
+  `~/Library/Group Containers/<TEAMID>.dayoneapp2/Data/Documents/DayOne.sqlite`
+  — `<TEAMID>` is Day One's Apple team id (`5U8NS4GX82` on the dev
+  machine). The reader globs
+  `~/Library/Group Containers/*.dayoneapp2/Data/Documents/DayOne.sqlite`;
+  `--db-path` overrides. If nothing is found it fails with a message
+  naming the searched glob.
+- **Snapshot before read:** the DB belongs to a possibly-running app, so
+  the reader copies it to a temp file with an APFS clone (`cp -c`,
+  falling back to a plain copy off-APFS) and reads the copy — the same
+  approach as the media-helpers Apple Podcasts importer. It never opens
+  the live database.
+- **Schema** (Core Data — `Z`-prefixed tables; dates are float seconds
+  since the 2001-01-01 UTC epoch):
+  - `ZENTRY` — one row per entry: `Z_PK`, `ZUUID` (32-char uppercase
+    hex — the same id the JSON export uses, so `source_id` is stable
+    across both readers), `ZCREATIONDATE`, `ZMARKDOWNTEXT` (entry body),
+    `ZSTARRED` (0/1), `ZJOURNAL` (FK → `ZJOURNAL.Z_PK`), `ZLOCATION`
+    (nullable FK → `ZLOCATION.Z_PK`).
+  - `ZJOURNAL` — `Z_PK`, `ZNAME`.
+  - `ZTAG` — `Z_PK`, `ZNAME`.
+  - `ZLOCATION` — `Z_PK`, `ZPLACENAME`, `ZLOCALITYNAME`,
+    `ZADMINISTRATIVEAREA`, `ZCOUNTRY`.
+  - `ZATTACHMENT` — `ZENTRY` (FK), `ZTYPE`; an entry's photo count is the
+    number of its `ZATTACHMENT` rows.
+  - entry↔tag is a Core Data many-to-many join table named
+    `Z_<EntryEnt>TAGS` (`Z_17TAGS` on the dev machine), with columns
+    `Z_<EntryEnt>ENTRIES` and `Z_<TagEnt>TAGS1`.
+  - `Z_PRIMARYKEY` maps entity *names* to entity *numbers* (`Entry` → 17,
+    `Tag` → 66, … on the dev machine). The names are stable across Day
+    One versions; the numbers are not, and the join-table name is frozen
+    at whatever the numbers were when the relationship was created. So
+    the reader resolves the numbers by name from `Z_PRIMARYKEY` and finds
+    the join table by looking for the `Z_%TAGS` table carrying a
+    `Z_<EntryEnt>ENTRIES` column — it never hard-codes `Z_17TAGS`.
+- **Schema drift:** if `Z_PRIMARYKEY`, an expected `Z`-table, a required
+  column, or the tag join table can't be resolved, the reader raises
+  "Day One database schema not recognized — use the JSON export instead."
+  It never silently imports partial data.
+- **Unreadable entries:** in practice `ZMARKDOWNTEXT` is plaintext even
+  for journals that have encryption enabled — only 8 of 1,771 entries on
+  the dev machine have empty text (photo-only entries, or genuinely
+  undecryptable ones). The reader skips any entry with null/empty
+  `ZMARKDOWNTEXT` and reports the count, rather than assuming whole
+  journals are unreadable.
 
 ## Selection filters
 
@@ -232,9 +257,11 @@ All tests use a mock httpx transport — no live Fulcra API calls.
 
 - `json_export`: parse a checked-in sample export (zip + folder forms),
   including entries with/without tags, location, photos.
-- `local_db`: parse a checked-in small SQLite fixture built to the pinned
-  Core Data schema; cover the schema-drift failure and the
-  encrypted-entry skip.
+- `local_db`: parse a checked-in small SQLite fixture built to the
+  verified Core Data schema; cover entity-number resolution via
+  `Z_PRIMARYKEY`, the schema-drift failure, and the empty-text skip. The
+  reader is also smoke-checked against the real Day One database on the
+  dev machine during implementation.
 - `filter`: each of the four filters individually and AND-combined; the
   `--all`-required-when-no-filters guard.
 - `convert`: title extraction, media-placeholder cleanup, `source_id`
