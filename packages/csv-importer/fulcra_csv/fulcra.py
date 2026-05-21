@@ -45,8 +45,13 @@ class FulcraClient(BaseFulcraClient):
         tag_id_for: dict[str, str],
         data_type: str | None,
     ) -> dict:
-        tag_id = tag_id_for.get(ev.tag or "") if ev.tag else None
-        tags = [tag_id] if tag_id else []
+        # Resolve the single `tag` plus any `extra_tags` to tag ids, in
+        # order, de-duplicated.
+        tag_ids: list[str] = []
+        for name in ([ev.tag] if ev.tag else []) + list(ev.extra_tags):
+            tid = tag_id_for.get(name)
+            if tid and tid not in tag_ids:
+                tag_ids.append(tid)
         # Only include fields that are actually populated. When targeting a
         # built-in Fulcra type (e.g. BodyMass), the schema may not have a
         # `note` field — emitting empties pollutes downstream consumers.
@@ -84,7 +89,7 @@ class FulcraClient(BaseFulcraClient):
             "metadata": {
                 "data_type": data_type or _default_data_type(ev.annotation_type),
                 "recorded_at": recorded_at,
-                "tags": tags,
+                "tags": tag_ids,
                 "source": source,
                 "content_type": "application/json",
             },
