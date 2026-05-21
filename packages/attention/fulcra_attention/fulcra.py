@@ -1,27 +1,19 @@
 """Fulcra API client for fulcra-attention.
 
-Single point of contact with the Fulcra REST API. Mirrors
-fulcra-media/fulcra.py's shape: subprocess-shell-out auth, ensure_tag,
-ensure_definitions, ingest_batch. Different annotation type (just
-Attention) so we keep it standalone rather than importing from fulcra-media.
+A thin layer over `fulcra_common.BaseFulcraClient`: it adds the Attention
+DurationAnnotation definition handling, the three-axis tag vocabulary
+(machine / category / identity), and the attention-specific ingest_batch.
+Auth, the httpx client, tag lookup, and soft-delete come from the base.
 """
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-from pathlib import Path
 
-import httpx
+from fulcra_common import BaseFulcraClient
 
 from .state import State
 
-DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
 
-# Tier 2 vocabulary, mirrored in chrome/src/categorize.ts. Pre-created at
-# bootstrap so users can build filters/timelines against a known set even
-# before they've categorized any domains. Add new slugs to both sides.
 def sanitize_tag_value(value: str) -> str:
     """Reduce a free-text axis value to chars Fulcra's tag API accepts.
 
@@ -71,6 +63,9 @@ def build_tag_name(axis: str, value: str) -> str:
     return f"{prefix}{head}-{suffix}"
 
 
+# Tier 2 vocabulary, mirrored in chrome/src/categorize.ts. Pre-created at
+# bootstrap so users can build filters/timelines against a known set even
+# before they've categorized any domains. Add new slugs to both sides.
 CATEGORY_VOCAB: tuple[str, ...] = (
     "search",
     "webmail",
@@ -92,73 +87,14 @@ CATEGORY_VOCAB: tuple[str, ...] = (
 )
 
 
-class FulcraClient:
-    def __init__(
-        self,
-        base_url: str = DEFAULT_BASE_URL,
-        transport: httpx.BaseTransport | None = None,
-    ) -> None:
-        self.base_url = base_url
-        self._transport = transport
-        self._http: httpx.Client | None = None
-
-    def get_token(self) -> str:
-        env = os.environ.get("FULCRA_ACCESS_TOKEN")
-        if env:
-            return env
-        # Find `fulcra` next to our own python (same venv). Necessary because
-        # the launchd-managed relay inherits a minimal PATH that doesn't
-        # include the venv bin directory.
-        sibling = Path(sys.executable).parent / "fulcra"
-        fulcra_cmd = str(sibling) if sibling.exists() else "fulcra"
-        try:
-            result = subprocess.run(
-                [fulcra_cmd, "auth", "print-access-token"],
-                check=True,
-                capture_output=True,
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            stderr_raw = getattr(exc, "stderr", b"") or b""
-            # Truncate so we don't accidentally surface a long stderr that
-            # could contain a token or other credential from a future
-            # fulcra-cli change. 200 chars is enough for the usual
-            # "not logged in" / "missing config" messages.
-            stderr = stderr_raw[:200]
-            raise RuntimeError(
-                "fulcra auth print-access-token failed; run `fulcra auth login` first. "
-                f"stderr={stderr!r}"
-            ) from exc
-        return result.stdout.decode().strip()
-
-    def _client(self) -> httpx.Client:
-        if self._http is None:
-            self._http = httpx.Client(
-                base_url=self.base_url,
-                transport=self._transport,
-                timeout=30.0,
-                headers={"User-Agent": "fulcra-attention/0.1"},
-                follow_redirects=True,
-            )
-        return self._http
-
-    def _authed_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.get_token()}"}
+class FulcraClient(BaseFulcraClient):
+    USER_AGENT = "fulcra-attention/0.1"
 
     def ensure_tag(self, name: str, state: State) -> str:
+        """Look up / create a tag, caching the id in `state.tag_ids`."""
         if name in state.tag_ids:
             return state.tag_ids[name]
-        c = self._client()
-        r = c.get(f"/user/v1alpha1/tag/name/{name}", headers=self._authed_headers())
-        if r.status_code == 200:
-            tag_id = r.json()["id"]
-        else:
-            r = c.post(
-                "/user/v1alpha1/tag",
-                json={"name": name},
-                headers=self._authed_headers(),
-            )
-            r.raise_for_status()
-            tag_id = r.json()["id"]
+        tag_id = self._resolve_tag(name)
         state.tag_ids[name] = tag_id
         return tag_id
 
@@ -234,18 +170,6 @@ class FulcraClient:
     def ensure_machine_tag(self, hostname: str, state: State) -> str:
         """Create / look up the `machine:<hostname>` tag. Called by `setup`."""
         return self.ensure_tag(build_tag_name("machine", hostname), state)
-
-    def soft_delete_definition(self, definition_id: str) -> bool:
-        r = self._client().delete(
-            f"/user/v1alpha1/annotation/{definition_id}",
-            headers=self._authed_headers(),
-        )
-        if r.status_code == 204:
-            return True
-        if r.status_code == 404:
-            return False
-        r.raise_for_status()
-        return False
 
     def ingest_batch(self, events: list[dict]) -> None:
         """POST a JSONL batch of already-built events to /ingest/v1/record/batch.
