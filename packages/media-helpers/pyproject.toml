@@ -17,15 +17,17 @@ dependencies = [
     # (add-cli branch) and `fulcra file download` (file-commands branch).
     # Pin to a branch/tag that includes both, or vendor a merged fork.
     "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
-    # Sibling package in this monorepo — the shared CSV → annotation parser.
-    "fulcra-csv-importer",
+    # Sibling packages in this monorepo.
+    "fulcra-common",
+    "fulcra-csv-importer",  # the shared CSV → annotation parser
 ]
 
 [project.scripts]
 fulcra-media = "fulcra_media.cli:cli"
 
 [tool.uv.sources]
-# Resolve the sibling package from the workspace, not PyPI.
+# Resolve the sibling packages from the workspace, not PyPI.
+fulcra-common = { workspace = true }
 fulcra-csv-importer = { workspace = true }
 
 [project.optional-dependencies]
