@@ -1,0 +1,266 @@
+[
+  {
+    "input": "https://x.com/p?access_token=abc",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?code=ABC&state=xyz",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?apikey=k",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?api_key=k",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?key=k",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?token=t",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?authorization=a",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?id_token=jwt",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?refresh_token=r",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?nonce=n",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?client_secret=cs",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?assertion=a",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?session=s",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?sid=s",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?sessionid=s",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?auth=a",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?signature=s",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?sig=s",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?hmac=h",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?password=p",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?pwd=p",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?otp=123",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?magic=m",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?share_token=s",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?invite=i",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?confirmation_token=c",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?_csrf=c",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?csrf_token=c",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?xsrf=x",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?ticket=t",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?ott=o",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://s3.aws.com/bucket/k?X-Amz-Signature=abc&X-Amz-Credential=c&X-Amz-Security-Token=t&Expires=123",
+    "expected": "https://s3.aws.com/bucket/k"
+  },
+  {
+    "input": "https://x.com/p?utm_source=newsletter",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?utm_medium=email&utm_campaign=launch",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?gclid=g",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?fbclid=f",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?msclkid=m",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?mc_eid=e&mc_cid=c",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?_hsenc=h&_hsmi=h",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?igshid=i",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?yclid=y",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?unsubscribe=u",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?verify=v",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?reset=r",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?confirm=c",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?activate=a",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?ACCESS_TOKEN=a",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?Code=c",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?q=foo&page=2",
+    "expected": "https://x.com/p?q=foo&page=2"
+  },
+  {
+    "input": "https://x.com/p?id=123",
+    "expected": "https://x.com/p?id=123"
+  },
+  {
+    "input": "https://x.com/p?id=1&access_token=t&page=2",
+    "expected": "https://x.com/p?id=1&page=2"
+  },
+  {
+    "input": "https://x.com/p#section1",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com/p?id=1#access_token=t",
+    "expected": "https://x.com/p?id=1"
+  },
+  {
+    "input": "https://x.com/?utm_source=x",
+    "expected": "https://x.com/"
+  },
+  {
+    "input": "https://x.com/p",
+    "expected": "https://x.com/p"
+  },
+  {
+    "input": "https://x.com",
+    "expected": "https://x.com/"
+  },
+  {
+    "input": "https://x.com:443/",
+    "expected": "https://x.com/"
+  },
+  {
+    "input": "https://x.com:8080/p",
+    "expected": "https://x.com:8080/p"
+  },
+  {
+    "input": "https://user@example.com/",
+    "expected": "https://example.com/"
+  },
+  {
+    "input": "http://x.com:80/p",
+    "expected": "http://x.com/p"
+  },
+  {
+    "input": "https://api.twitter.com/oauth/authorize?oauth_token=ABC123&oauth_verifier=XYZ",
+    "expected": "https://api.twitter.com/oauth/authorize"
+  },
+  {
+    "input": "https://trello.com/1/OAuthAuthorizeToken?oauth_token=def&name=app",
+    "expected": "https://trello.com/1/OAuthAuthorizeToken?name=app"
+  },
+  {
+    "input": "https://example.com/cb?oauth_signature=sig&oauth_consumer_key=k&oauth_nonce=n&oauth_timestamp=12345",
+    "expected": "https://example.com/cb"
+  },
+  {
+    "input": "https://example.com/login?email=ash@example.com&token=ABC",
+    "expected": "https://example.com/login"
+  },
+  {
+    "input": "https://example.com/welcome?username=ash&theme=dark",
+    "expected": "https://example.com/welcome?theme=dark"
+  },
+  {
+    "input": "https://example.com/m?magic_link=ABC123",
+    "expected": "https://example.com/m"
+  }
+]
