@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-common"
+version = "0.1.0"
+description = "Shared Fulcra API client for the fulcra-tools packages."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Pinned <8 to match the other workspace packages, which inherit a
+    # pytest<8 constraint from fulcra-api. One pytest resolves for the
+    # whole workspace, so all members must agree.
+    "pytest>=7.4,<8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_common"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
