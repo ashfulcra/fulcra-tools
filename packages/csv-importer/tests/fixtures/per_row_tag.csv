@@ -1,0 +1,4 @@
+timestamp,title,subtitle,service,id,duration_s
+2024-05-10T14:33:00Z,Song A,Artist X,spotify,track-1,180
+2024-05-10T14:40:00Z,Episode B,Show Y,apple-podcasts,ep-1,2400
+2024-05-10T15:30:00Z,Movie C,,netflix,,7200

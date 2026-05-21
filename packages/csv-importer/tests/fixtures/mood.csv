@@ -1,0 +1,4 @@
+timestamp,mood_score,note,tags
+2026-01-01T08:00:00Z,7,morning coffee good,morning
+2026-01-01T20:00:00Z,5,long day,evening
+2026-01-02T09:00:00Z,8,sunny walk,morning
