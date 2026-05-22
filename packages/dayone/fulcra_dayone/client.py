@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from fulcra_common import ImportResult
+from fulcra_common import wire
 from fulcra_csv.events import GenericEvent
 from fulcra_csv.fulcra import FulcraClient
 
@@ -55,12 +56,11 @@ class DayOneFulcraClient(FulcraClient):
         if matches:
             matches.sort(key=lambda d: d.get("created_at") or "")
             return matches[0]["id"]
-        body = {
-            "annotation_type": JOURNAL_ANNOTATION_TYPE,
-            "name": JOURNAL_DEFINITION_NAME,
-            "description": "Day One journal entries.",
-            "tags": [],
-        }
+        body = wire.moment_definition_payload(
+            name=JOURNAL_DEFINITION_NAME,
+            description="Day One journal entries.",
+            tags=[],
+        )
         r = self._client().post(
             "/user/v1alpha1/annotation", json=body,
             headers=self._authed_headers(),
