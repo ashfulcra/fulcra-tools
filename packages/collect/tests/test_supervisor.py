@@ -96,18 +96,28 @@ def test_supervisor_restarts_an_exited_service_after_backoff():
     assert len(procs) == 2
 
 
+class DeadProc:
+    """A service process that is dead the instant it is polled — i.e. it
+    crashes immediately on every spawn."""
+    def poll(self):
+        return 1
+
+    def terminate(self):
+        pass
+
+
 def test_supervisor_marks_a_crash_looping_service_degraded():
+    # A service that crashes on every spawn. Ticking once per simulated
+    # second, the supervisor spawns, observes the death, backs off,
+    # respawns, observes again... Exits accumulate within the 60s crash
+    # window until decide_restart's threshold trips and the service is
+    # marked degraded and left stopped.
     sup = ServiceSupervisor()
-
-    def spawn(pid):
-        return FakeProc()  # every spawn immediately "dead" on next poll
-
-    # Drive 7 ticks 1s apart; each spawned proc is dead by the next tick.
     t = T0
-    for _ in range(8):
-        for p in list(sup._procs.values()):
-            p.alive = False
-        sup.tick(now=t, enabled_ids={"relay"}, spawn=spawn)
+    for _ in range(60):
+        sup.tick(now=t, enabled_ids={"relay"}, spawn=lambda pid: DeadProc())
+        if "relay" in sup.degraded:
+            break
         t += timedelta(seconds=1)
     assert "relay" in sup.degraded
 
