@@ -1066,6 +1066,123 @@ from fulcra_media.collect_plugins import GENERIC_CSV_PLUGIN  # noqa: E402
 from fulcra_media.importers.generic_csv import _FP_AUTO  # noqa: E402
 
 
+# ---------------------------------------------------------------------------
+# media-webhook service plugin
+# ---------------------------------------------------------------------------
+
+from fulcra_media.collect_plugins import MEDIA_WEBHOOK_PLUGIN  # noqa: E402
+
+
+def test_media_webhook_plugin_metadata():
+    assert MEDIA_WEBHOOK_PLUGIN.id == "media-webhook"
+    assert MEDIA_WEBHOOK_PLUGIN.name == "Plex/Jellyfin webhook receiver"
+    assert MEDIA_WEBHOOK_PLUGIN.kind == "service"
+    perm_ids = {p.id for p in MEDIA_WEBHOOK_PLUGIN.required_permissions}
+    assert "network-loopback-server" in perm_ids
+    cred_keys = {c.key for c in MEDIA_WEBHOOK_PLUGIN.required_credentials}
+    assert "bearer-token" in cred_keys
+
+
+def test_media_webhook_plugin_run_starts_and_serves(monkeypatch):
+    """run() builds the server via make_server and calls serve_forever."""
+    served = []
+
+    class _FakeServer:
+        def serve_forever(self):
+            served.append(True)
+
+    make_server_calls = {}
+
+    class _FakeState:
+        watched_definition_id = "def-uuid-123"
+
+    def fake_make_server(*, host, port, state, client, bearer_token, log_stream):
+        make_server_calls["host"] = host
+        make_server_calls["port"] = port
+        make_server_calls["bearer_token"] = bearer_token
+        make_server_calls["log_stream"] = log_stream
+        return _FakeServer()
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _FakeState(),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        fake_make_server,
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+
+    ctx, _ = _make_ctx("media-webhook", {"host": "127.0.0.1", "port": "8765"})
+    MEDIA_WEBHOOK_PLUGIN.run(ctx)
+
+    assert served == [True]
+    assert make_server_calls["host"] == "127.0.0.1"
+    assert make_server_calls["port"] == 8765
+    assert make_server_calls["bearer_token"] is None
+
+
+def test_media_webhook_plugin_run_uses_defaults(monkeypatch):
+    """When host/port are absent from config, defaults 127.0.0.1:8765 are used."""
+    make_server_calls = {}
+
+    class _FakeState:
+        watched_definition_id = "def-uuid-123"
+
+    def fake_make_server(*, host, port, state, client, bearer_token, log_stream):
+        make_server_calls["host"] = host
+        make_server_calls["port"] = port
+        return type("S", (), {"serve_forever": lambda self: None})()
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _FakeState(),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        fake_make_server,
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+
+    ctx, _ = _make_ctx("media-webhook", {})
+    MEDIA_WEBHOOK_PLUGIN.run(ctx)
+
+    assert make_server_calls["host"] == "127.0.0.1"
+    assert make_server_calls["port"] == 8765
+
+
+def test_media_webhook_plugin_non_loopback_without_token_raises(monkeypatch):
+    """A non-loopback host with no bearer token must raise RuntimeError."""
+    class _FakeState:
+        watched_definition_id = "def-uuid-123"
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _FakeState(),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+
+    ctx, _ = _make_ctx("media-webhook", {"host": "0.0.0.0"})
+    with pytest.raises(RuntimeError, match="non-loopback"):
+        MEDIA_WEBHOOK_PLUGIN.run(ctx)
+
+
+def test_media_webhook_plugin_raises_when_not_bootstrapped(monkeypatch):
+    """If watched_definition_id is not set, raise RuntimeError about bootstrap."""
+    class _UnbootstrappedState:
+        watched_definition_id = None
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _UnbootstrappedState(),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+
+    ctx, _ = _make_ctx("media-webhook", {})
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        MEDIA_WEBHOOK_PLUGIN.run(ctx)
+
+
 def test_generic_csv_plugin_metadata():
     assert GENERIC_CSV_PLUGIN.id == "generic-csv"
     assert GENERIC_CSV_PLUGIN.name == "Generic media CSV"

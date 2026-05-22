@@ -15,6 +15,7 @@ from fulcra_csv import ClusterPolicy, ColumnMap, apply_cluster_policy, apply_twi
 
 from . import library
 from . import twin_cache
+from . import webhook_receiver
 from .fulcra import FulcraClient
 from .importers import apple_podcasts as ap
 from .importers import apple_takeout as apple_takeout_importer
@@ -811,4 +812,81 @@ GENERIC_CSV_PLUGIN = Plugin(
     run=_run_generic_csv,
     default_interval=None,
     required_credentials=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Plex/Jellyfin webhook receiver service plugin
+# ---------------------------------------------------------------------------
+
+# Loopback addresses that are safe to bind without a bearer token.
+# Matches the CLI's check (cli.py: `host != "127.0.0.1" and host != "localhost"`).
+# Note: the CLI does not currently include "::1" in the guard; we match it exactly.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _run_media_webhook(ctx: RunContext) -> None:
+    """Long-running Plex/Jellyfin webhook receiver.
+
+    Binds an HTTP server on host:port (default 127.0.0.1:8765) and serves
+    forever.  Refuses to start on a non-loopback host without a bearer token,
+    mirroring the `fulcra-media webhook` CLI's safety check.
+    """
+    host: str = ctx.config.get("host", "127.0.0.1")
+    port: int = int(ctx.config.get("port", 8765))
+    bearer_token: str | None = ctx.credentials.get("bearer-token") or None
+
+    # Non-loopback guard — mirrors cli.py's `webhook_serve` exactly:
+    # refuse to bind a non-loopback address unless a bearer token is set.
+    if host not in _LOOPBACK_HOSTS and not bearer_token:
+        raise RuntimeError(
+            f"media-webhook: host {host!r} is non-loopback; refusing to start "
+            "without a bearer token. Set the 'bearer-token' credential "
+            "(`fulcra-collect set-credential media-webhook bearer-token`) "
+            "or bind on 127.0.0.1."
+        )
+
+    media_state = _state_load(STATE_PATH)
+    if not media_state.watched_definition_id:
+        raise RuntimeError(
+            "media annotations not bootstrapped — run `fulcra-media bootstrap` first"
+        )
+
+    client = FulcraClient()
+    server = webhook_receiver.make_server(
+        host=host,
+        port=port,
+        state=media_state,
+        client=client,
+        bearer_token=bearer_token,
+        log_stream=None,
+    )
+    ctx.log.info("media webhook receiver listening on %s:%s", host, port)
+    server.serve_forever()
+
+
+MEDIA_WEBHOOK_PLUGIN = Plugin(
+    id="media-webhook",
+    name="Plex/Jellyfin webhook receiver",
+    kind="service",
+    run=_run_media_webhook,
+    required_permissions=(
+        Permission(
+            id="network-loopback-server",
+            explanation=(
+                "Runs a local HTTP server (default 127.0.0.1:8765) that "
+                "Plex/Jellyfin POST playback webhooks to."
+            ),
+        ),
+    ),
+    required_credentials=(
+        Credential(
+            key="bearer-token",
+            label="Webhook bearer token",
+            help=(
+                "Shared secret Plex/Jellyfin must send; required when the "
+                "receiver binds a non-loopback host."
+            ),
+        ),
+    ),
 )
