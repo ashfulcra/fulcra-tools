@@ -28,6 +28,8 @@ fulcra-media = "fulcra_media.cli:cli"
 
 [project.entry-points."fulcra_collect.plugins"]
 lastfm = "fulcra_media.collect_plugins:LASTFM_PLUGIN"
+deezer = "fulcra_media.collect_plugins:DEEZER_PLUGIN"
+trakt = "fulcra_media.collect_plugins:TRAKT_PLUGIN"
 netflix = "fulcra_media.collect_plugins:NETFLIX_PLUGIN"
 spotify-extended = "fulcra_media.collect_plugins:SPOTIFY_EXTENDED_PLUGIN"
 youtube = "fulcra_media.collect_plugins:YOUTUBE_PLUGIN"
