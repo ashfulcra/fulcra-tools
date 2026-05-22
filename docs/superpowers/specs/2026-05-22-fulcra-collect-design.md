@@ -69,6 +69,7 @@ Plugin
   name                 # human label
   kind                 # PluginKind
   default_interval     # timedelta | None — required for "scheduled", else None
+  requires_network     # bool (default True) — gates scheduled dispatch when offline
   required_permissions # list[Permission]
   required_credentials # list[Credential]
   run(ctx: RunContext) # the work (see below)
@@ -89,6 +90,17 @@ RunContext             # built by the hub, passed into run()
   (manual).
 - **service** — the long-running entrypoint; it blocks (e.g. the relay's
   `serve_forever`). The hub keeps it alive in a supervised subprocess.
+
+**The watermark / backfill contract.** A scheduled plugin MUST import
+incrementally from `ctx.state.watermark` — the timestamp (or cursor) of
+the newest item it last imported — and advance the watermark at the end
+of a successful run. It must never import "the last interval's worth" of
+data. This is the contract that makes one run after a sleep or an
+offline stretch back-fill the entire gap: a machine asleep for a week
+wakes, the plugin runs once, and it imports everything since the
+watermark. The watermark is persisted by the hub (see "Sleep, offline,
+and backfill" below), survives restarts, and is the plugin's only source
+of "where did I get to."
 
 A plugin only *declares* what it needs (`required_permissions`,
 `required_credentials`); the hub resolves and supplies them through
@@ -144,6 +156,47 @@ The core is one long-lived process. Files under `fulcra_collect/`:
    receive a state snapshot or an acknowledgement.
 5. **Manual plugins** are never auto-run; they fire only on an explicit
    `fulcra-collect run <id>` (or the UI's "Run now").
+
+## Sleep, offline, and backfill
+
+The hub runs on laptops that sleep, close, and lose network for hours or
+days. It must miss nothing and storm nothing when they wake. Four
+properties, by design:
+
+1. **No missed-run storm.** The scheduler decides a plugin is due from
+   *time since its last run*, not a wall-clock cron. A machine asleep
+   for eight hours wakes with each scheduled plugin overdue, and the
+   scheduler returns each **once** — not once per missed interval. The
+   daemon's tick loop uses a short relative sleep; system sleep suspends
+   it and it resumes on wake, so catch-up happens within one tick of
+   waking.
+
+2. **One run back-fills the whole gap.** Because every scheduled plugin
+   imports incrementally from its watermark (the contract above), the
+   single catch-up run after a long sleep imports everything accumulated
+   since — there is no separate "backfill mode." The watermark advances
+   only on a successful run, so an interrupted or failed catch-up is
+   retried, not skipped.
+
+3. **Watermark persistence across the worker boundary.** A run executes
+   in a worker subprocess; the plugin advances `ctx.state.watermark`
+   there. The worker reports the final watermark in its result event;
+   the runner — the single writer of plugin state in the core process —
+   persists it alongside the run outcome. The watermark is therefore
+   never lost to a worker exiting, and a fresh run always resumes from
+   the last *successfully imported* point.
+
+4. **Offline is deferral, not failure.** Each plugin declares
+   `requires_network`. Before dispatching scheduled runs the daemon
+   checks connectivity (a short-timeout probe); while the machine is
+   offline it **skips** network-requiring scheduled plugins rather than
+   running them into a guaranteed failure. A skipped run is not recorded
+   as a failure and does not count toward the degraded threshold — so a
+   day offline never marks a plugin degraded. When connectivity returns,
+   the next tick dispatches the plugin and property 2 back-fills the
+   offline gap. Service plugins and manual runs are unaffected by the
+   connectivity gate (services are always supervised; manual runs are
+   user-initiated and may fail fast if offline).
 
 ## Plugins adapted in this sub-project
 
@@ -237,11 +290,14 @@ All tests use fakes/mocks — no live APIs, no real keychain prompts.
   entry-point; assert discovery, metadata validation, and that a
   bad/invalid plugin is excluded with a recorded load error.
 - **Scheduler** — with an injected fake clock: next-run computation,
-  interval override, and that manual plugins never auto-fire.
+  interval override, that manual plugins never auto-fire, that a plugin
+  overdue by many intervals (a long sleep) is returned exactly once, and
+  that network-requiring plugins are excluded while offline.
 - **Supervisor** — a fake service worker that exits: assert restart,
   exponential backoff, and crash-loop → degraded.
 - **Runner + worker** — round-trip one run: structured progress parsing,
-  error capture, and the per-run timeout killing a hung worker.
+  watermark carried from the worker's result event into persisted
+  state, error capture, and the per-run timeout killing a hung worker.
 - **Config** — TOML round-trip; enable/disable and interval overrides.
 - **Credentials** — `keyring`'s in-memory backend: get/set/delete.
 - **Control socket** — the request/response protocol for each command.
