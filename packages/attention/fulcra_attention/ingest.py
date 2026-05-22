@@ -7,10 +7,11 @@ FulcraClient.ingest_batch. Source-id is sha256-derived for idempotency.
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
+
+from fulcra_common import wire
 
 from .fulcra import build_tag_name
 from .scrub import scrub_url
@@ -63,8 +64,8 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
     chrome_identity = payload.get("chrome_identity")
     og_type = payload.get("og_type")
     lang = payload.get("lang")
-    start_time = _to_second_iso(payload["start_time"])
-    end_time = _to_second_iso(payload["end_time"])
+    start_dt_sec = _parse_iso(payload["start_time"]).replace(microsecond=0)
+    end_dt_sec = _parse_iso(payload["end_time"]).replace(microsecond=0)
 
     if url is not None:
         host: str | None = urlsplit(url).hostname
@@ -127,21 +128,12 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
                 tags.append(id_tag)
         except ValueError:
             pass
-    metadata = {
-        "data_type": "DurationAnnotation",
-        "recorded_at": {
-            "start_time": start_time,
-            "end_time": end_time,
-        },
-        "tags": tags,
-        "source": [
-            sid,
-            f"com.fulcradynamics.annotation.{state.attention_definition_id}",
-        ],
-        "content_type": "application/json",
-    }
-    return {
-        "specversion": 1,
-        "data": json.dumps(data_inner, sort_keys=True),
-        "metadata": metadata,
-    }
+    return wire.build_record(
+        data_type=wire.DURATION_ANNOTATION,
+        start_time=start_dt_sec,
+        end_time=end_dt_sec,
+        data=data_inner,
+        source_id=sid,
+        tags=tags,
+        definition_id=state.attention_definition_id,
+    )
