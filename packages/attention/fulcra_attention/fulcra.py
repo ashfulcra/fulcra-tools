@@ -7,9 +7,8 @@ Auth, the httpx client, tag lookup, and soft-delete come from the base.
 """
 from __future__ import annotations
 
-import json
-
 from fulcra_common import BaseFulcraClient
+from fulcra_common import wire
 
 from .state import State
 
@@ -120,17 +119,11 @@ class FulcraClient(BaseFulcraClient):
         if existing is not None:
             state.attention_definition_id = existing
             return
-        body = {
-            "annotation_type": "duration",
-            "name": "Attention",
-            "description": "What the user paid attention to (browsing).",
-            "tags": [attention, web],
-            "measurement_spec": {
-                "measurement_type": "duration",
-                "value_type": "duration",
-                "unit": None,
-            },
-        }
+        body = wire.duration_definition_payload(
+            name="Attention",
+            description="What the user paid attention to (browsing).",
+            tags=[attention, web],
+        )
         r = self._client().post(
             "/user/v1alpha1/annotation",
             json=body,
@@ -181,8 +174,7 @@ class FulcraClient(BaseFulcraClient):
         """
         if not events:
             return
-        lines = [json.dumps(e, sort_keys=True).encode() for e in events]
-        body = b"\n".join(lines)
+        body = wire.encode_batch(events)
         r = self._client().post(
             "/ingest/v1/record/batch",
             content=body,
