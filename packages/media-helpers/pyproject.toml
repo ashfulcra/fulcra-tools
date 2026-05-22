@@ -40,6 +40,7 @@ letterboxd = "fulcra_media.collect_plugins:LETTERBOXD_PLUGIN"
 goodreads = "fulcra_media.collect_plugins:GOODREADS_PLUGIN"
 apple-podcasts = "fulcra_media.collect_plugins:APPLE_PODCASTS_PLUGIN"
 apple-podcasts-timemachine = "fulcra_media.collect_plugins:APPLE_PODCASTS_TIMEMACHINE_PLUGIN"
+generic-csv = "fulcra_media.collect_plugins:GENERIC_CSV_PLUGIN"
 
 [tool.uv.sources]
 # Resolve the sibling packages from the workspace, not PyPI.

@@ -11,7 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext
-from fulcra_csv import ClusterPolicy, apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
+from fulcra_csv import ClusterPolicy, ColumnMap, apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
 
 from . import library
 from . import twin_cache
@@ -27,6 +27,7 @@ from .importers import spotify as spotify_importer
 from .importers import spotify_ifttt as spotify_ifttt_importer
 from .importers import trakt as trakt_importer
 from .importers import youtube as youtube_importer
+from .importers.generic_csv import _FP_AUTO, parse_media_csv
 from .importers.lastfm import fetch_recent_tracks, normalize_history
 from .state import DEFAULT_PATH as STATE_PATH
 from .state import load as _state_load
@@ -702,5 +703,112 @@ APPLE_PODCASTS_TIMEMACHINE_PLUGIN = Plugin(
     default_interval=None,
     requires_network=False,
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
+    required_credentials=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Generic media CSV manual plugin
+# ---------------------------------------------------------------------------
+
+def _run_generic_csv(ctx: RunContext) -> None:
+    """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened.
+
+    All parameters are read from ctx.config.  Required keys: path, service,
+    category.  Optional keys mirror the CLI flags for import generic-csv with
+    the same defaults.
+
+    Column-map keys (all optional, CLI defaults):
+      ts_col        — timestamp column name (default: "timestamp")
+      title_col     — title column name (default: "title")
+      subtitle_col  — subtitle/artist column name (default: "artist")
+      id_col        — per-content id column name (default: "id")
+      duration_col  — duration-in-seconds column name (default: None)
+      end_col       — explicit end_time column name (default: None)
+
+    Other optional keys:
+      tz            — IANA timezone name for naive timestamps (default: "UTC")
+      confidence    — timestamp_confidence value (default: "medium")
+      fingerprint   — content fingerprint kind: "auto", "none", or an explicit
+                      kind string such as "music", "movie" (default: "auto")
+    """
+    from datetime import timezone as _timezone
+
+    # --- Required parameters ------------------------------------------------
+    path_raw = ctx.config.get("path")
+    if not path_raw:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'path' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+    service = ctx.config.get("service")
+    if not service:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'service' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+    category = ctx.config.get("category")
+    if not category:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'category' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+
+    # --- Optional column-map parameters (CLI defaults) ----------------------
+    ts_col: str = ctx.config.get("ts_col", "timestamp")
+    title_col: str = ctx.config.get("title_col", "title")
+    subtitle_col: str = ctx.config.get("subtitle_col", "artist")
+    id_col: str = ctx.config.get("id_col", "id")
+    duration_col: str | None = ctx.config.get("duration_col", None)
+    end_col: str | None = ctx.config.get("end_col", None)
+
+    # --- Other optional parameters ------------------------------------------
+    tz_name: str = ctx.config.get("tz", "UTC")
+    confidence: str = ctx.config.get("confidence", "medium")
+    fingerprint: str = ctx.config.get("fingerprint", "auto")
+
+    # --- Build ColumnMap (mirror CLI's subtitle_col or None / id_col or None) -
+    cm = ColumnMap(
+        timestamp=ts_col,
+        title=title_col,
+        subtitle=subtitle_col or None,
+        source_id=id_col or None,
+        duration_seconds=duration_col,
+        end_time=end_col,
+    )
+
+    # --- Resolve timezone (CLI shortcut: "UTC" → timezone.utc, else ZoneInfo) -
+    if tz_name == "UTC":
+        tz = _timezone.utc
+    else:
+        tz = ZoneInfo(tz_name)
+
+    # --- Map fingerprint string → fingerprint_kind argument -----------------
+    # Mirrors the CLI's two-step mapping exactly:
+    #   fp_kind = None if fingerprint == "none" else (None if fingerprint == "auto" else fingerprint)
+    #   fp_arg  = _FP_AUTO if fingerprint == "auto" else fp_kind
+    fp_kind = None if fingerprint == "none" else (None if fingerprint == "auto" else fingerprint)
+    fp_arg = _FP_AUTO if fingerprint == "auto" else fp_kind
+
+    # --- Resolve path, parse, and import ------------------------------------
+    resolved = library.resolve(path_raw)
+    events = list(parse_media_csv(
+        resolved,
+        service=service,
+        category=category,
+        column_map=cm,
+        tz=tz,
+        confidence=confidence,
+        fingerprint_kind=fp_arg,
+    ))
+    _import_events(ctx, events, service)
+
+
+GENERIC_CSV_PLUGIN = Plugin(
+    id="generic-csv",
+    name="Generic media CSV",
+    kind="manual",
+    run=_run_generic_csv,
+    default_interval=None,
     required_credentials=(),
 )
