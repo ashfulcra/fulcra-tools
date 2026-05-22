@@ -1,7 +1,10 @@
 """Shared test fixtures for fulcra-dayone."""
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -25,11 +28,6 @@ def recording_transport():
     def make(handler: Callable[[httpx.Request], httpx.Response]) -> RecordingTransport:
         return RecordingTransport(handler)
     return make
-
-
-import sqlite3
-from datetime import datetime, timezone
-from pathlib import Path
 
 # Core Data epoch — seconds since 2001-01-01 UTC.
 _CD_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)

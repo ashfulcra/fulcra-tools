@@ -81,6 +81,7 @@ def read_local_db(db_path: Path | None = None) -> list[DayOneEntry]:
         raise ValueError(f"{_SCHEMA_ERROR} ({exc})") from exc
     finally:
         conn.close()
+        shutil.rmtree(snapshot.parent, ignore_errors=True)
 
 
 def _read(conn: sqlite3.Connection) -> list[DayOneEntry]:
