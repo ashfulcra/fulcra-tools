@@ -21,6 +21,8 @@ from fulcra_media.collect_plugins import (
     GOODREADS_PLUGIN,
     DEEZER_PLUGIN,
     TRAKT_PLUGIN,
+    APPLE_PODCASTS_PLUGIN,
+    APPLE_PODCASTS_TIMEMACHINE_PLUGIN,
 )
 
 
@@ -879,3 +881,178 @@ def test_trakt_plugin_auto_discards_twins_when_policy_is_auto_discard(monkeypatc
 
     assert len(discard_calls) == 1
     assert "low-id" in discard_calls[0]
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts (on-device) plugin
+# ---------------------------------------------------------------------------
+
+def test_apple_podcasts_plugin_metadata():
+    from datetime import timedelta
+    assert APPLE_PODCASTS_PLUGIN.id == "apple-podcasts"
+    assert APPLE_PODCASTS_PLUGIN.name == "Apple Podcasts (on-device)"
+    assert APPLE_PODCASTS_PLUGIN.kind == "scheduled"
+    assert APPLE_PODCASTS_PLUGIN.default_interval == timedelta(hours=6)
+    assert APPLE_PODCASTS_PLUGIN.requires_network is False
+    perm_ids = {p.id for p in APPLE_PODCASTS_PLUGIN.required_permissions}
+    assert "full-disk-access" in perm_ids
+
+
+def test_apple_podcasts_plugin_run_imports_and_advances_watermark(monkeypatch):
+    """parse_db is called; events are imported; watermark advances when posted > 0."""
+    ev = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.parse_db",
+        lambda db_path: iter([ev]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx("apple-podcasts", {})
+    APPLE_PODCASTS_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [ev]
+    assert fake_client.calls["ensure_tag"] == "apple-podcasts"
+    assert st.watermark == "2026-05-22T10:00:00+00:00"
+
+
+def test_apple_podcasts_plugin_uses_config_db_path(monkeypatch, tmp_path):
+    """When db_path is set in config, that path is passed to parse_db."""
+    custom_db = tmp_path / "custom.sqlite"
+    custom_db.touch()
+
+    received_paths = []
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.parse_db",
+        lambda db_path: (received_paths.append(db_path) or iter([])),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    ctx, _ = _make_ctx("apple-podcasts", {"db_path": str(custom_db)})
+    APPLE_PODCASTS_PLUGIN.run(ctx)
+
+    assert received_paths[0] == custom_db
+
+
+def test_apple_podcasts_plugin_snapshot_error_becomes_runtime_error(monkeypatch):
+    """A SnapshotError from parse_db must be re-raised as RuntimeError."""
+    from fulcra_media.importers.apple_podcasts import SnapshotError
+
+    def _raise_snapshot_error(db_path):
+        raise SnapshotError("stalled")
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.parse_db",
+        _raise_snapshot_error,
+    )
+
+    ctx, _ = _make_ctx("apple-podcasts", {})
+    with pytest.raises(RuntimeError, match="stalled"):
+        APPLE_PODCASTS_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts (Time Machine recovery) plugin
+# ---------------------------------------------------------------------------
+
+def test_apple_podcasts_timemachine_plugin_metadata():
+    assert APPLE_PODCASTS_TIMEMACHINE_PLUGIN.id == "apple-podcasts-timemachine"
+    assert APPLE_PODCASTS_TIMEMACHINE_PLUGIN.name == "Apple Podcasts (Time Machine recovery)"
+    assert APPLE_PODCASTS_TIMEMACHINE_PLUGIN.kind == "manual"
+    assert APPLE_PODCASTS_TIMEMACHINE_PLUGIN.requires_network is False
+    perm_ids = {p.id for p in APPLE_PODCASTS_TIMEMACHINE_PLUGIN.required_permissions}
+    assert "full-disk-access" in perm_ids
+
+
+def test_apple_podcasts_timemachine_plugin_run_imports_all_snapshots(monkeypatch, tmp_path):
+    """All events from all snapshots are imported; no watermark is set."""
+    snap1 = tmp_path / "snap1.sqlite"
+    snap2 = tmp_path / "snap2.sqlite"
+    ev1 = _make_event("2026-05-20T10:00:00+00:00")
+    ev2 = _make_event("2026-05-21T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+
+    def fake_parse_db(path):
+        return iter([ev1] if path == snap1 else [ev2])
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        lambda: [snap1, snap2],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.parse_db",
+        fake_parse_db,
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    ctx, st = _make_ctx("apple-podcasts-timemachine", {})
+    APPLE_PODCASTS_TIMEMACHINE_PLUGIN.run(ctx)
+
+    assert set(fake_client.calls["imported"]) == {ev1, ev2}
+    assert fake_client.calls["ensure_tag"] == "apple-podcasts"
+    # Manual plugin: watermark must NOT be set
+    assert st.watermark is None
+
+
+def test_apple_podcasts_timemachine_plugin_skips_erroring_snapshots(monkeypatch, tmp_path):
+    """A SnapshotError on one snapshot is logged and skipped; others still import."""
+    from fulcra_media.importers.apple_podcasts import SnapshotError
+
+    snap1 = tmp_path / "good.sqlite"
+    snap2 = tmp_path / "bad.sqlite"
+    ev1 = _make_event("2026-05-20T10:00:00+00:00")
+
+    log_warnings = []
+    fake_client = _FakeClient()
+
+    class _FakeLog:
+        def warning(self, *args, **kwargs):
+            log_warnings.append(args)
+
+    def fake_parse_db(path):
+        if path == snap2:
+            raise SnapshotError("bad snapshot")
+        return iter([ev1])
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        lambda: [snap1, snap2],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.parse_db",
+        fake_parse_db,
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    st = PluginState("apple-podcasts-timemachine")
+    ctx = RunContext(
+        plugin_id="apple-podcasts-timemachine",
+        config={},
+        credentials={},
+        state=st,
+        log=_FakeLog(),
+        _emit=lambda e: None,
+    )
+    APPLE_PODCASTS_TIMEMACHINE_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [ev1]
+    assert len(log_warnings) == 1
+
+
+def test_apple_podcasts_timemachine_plugin_raises_when_no_snapshots(monkeypatch):
+    """When find_timemachine_snapshots returns empty, raise RuntimeError."""
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        lambda: [],
+    )
+
+    ctx, _ = _make_ctx("apple-podcasts-timemachine", {})
+    with pytest.raises(RuntimeError, match="Time Machine"):
+        APPLE_PODCASTS_TIMEMACHINE_PLUGIN.run(ctx)

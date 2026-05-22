@@ -10,12 +10,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fulcra_collect.plugin import Credential, Plugin, RunContext
+from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext
 from fulcra_csv import ClusterPolicy, apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
 
 from . import library
 from . import twin_cache
 from .fulcra import FulcraClient
+from .importers import apple_podcasts as ap
 from .importers import apple_takeout as apple_takeout_importer
 from .importers import deezer as deezer_importer
 from .importers import generic_rss as rss_importer
@@ -581,5 +582,125 @@ GOODREADS_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_goodreads,
     default_interval=timedelta(hours=12),
+    required_credentials=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts — shared helpers
+# ---------------------------------------------------------------------------
+
+_FULL_DISK_ACCESS_PERMISSION = Permission(
+    id="full-disk-access",
+    explanation=(
+        "Reads the on-device Apple Podcasts database (~/Library/...), which macOS "
+        "guards behind Full Disk Access."
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts (on-device) scheduled plugin
+# ---------------------------------------------------------------------------
+
+def _run_apple_podcasts(ctx: RunContext) -> None:
+    """Read the local Apple Podcasts SQLite DB and import played episodes.
+
+    Reads ctx.config["db_path"] if set, otherwise uses the default DB location
+    (~/Library/Group Containers/…/MTLibrary.sqlite).  The whole DB is parsed on
+    every run; source-id dedup in the ingest layer handles re-imports.  The
+    watermark is advanced after a successful run so progress is visible.
+
+    A SnapshotError (the DB is I/O-stalled, e.g. mid-iCloud-sync) is surfaced
+    as a RuntimeError with a clear message so the scheduler can retry later.
+    """
+    raw_path = ctx.config.get("db_path")
+    db_path = Path(raw_path) if raw_path else ap.DEFAULT_DB_PATH
+
+    try:
+        events = list(ap.parse_db(db_path))
+    except ap.SnapshotError as exc:
+        raise RuntimeError(
+            f"apple-podcasts: DB snapshot failed — the database is likely "
+            f"I/O-stalled (iCloud sync in progress). Try again later. "
+            f"Details: {exc}"
+        ) from exc
+
+    ctx.progress(stage="parsed", count=len(events))
+    media_state = _state_load(STATE_PATH)
+    client = FulcraClient()
+    client.ensure_tag("apple-podcasts", media_state)
+    result = client.run_import(events, media_state)
+    ctx.progress(stage="imported", posted=result.posted,
+                 skipped=result.skipped_existing)
+
+    if result.posted > 0:
+        new_wm = newest_event_iso(events)
+        if new_wm:
+            ctx.state.watermark = new_wm
+
+
+APPLE_PODCASTS_PLUGIN = Plugin(
+    id="apple-podcasts",
+    name="Apple Podcasts (on-device)",
+    kind="scheduled",
+    run=_run_apple_podcasts,
+    default_interval=timedelta(hours=6),
+    requires_network=False,
+    required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
+    required_credentials=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts (Time Machine recovery) manual plugin
+# ---------------------------------------------------------------------------
+
+def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
+    """Walk all Time Machine snapshots and import Apple Podcasts history from each.
+
+    This is a one-shot recovery operation — it imports every played episode
+    found across every Time Machine backup.  No watermark is advanced because
+    the run is manual and non-incremental; source-id dedup in the ingest layer
+    prevents duplicate annotations.
+
+    Raises RuntimeError if no Time Machine snapshots are found (volume not
+    mounted).  A SnapshotError on an individual snapshot is logged and skipped
+    so a single bad backup does not abort the whole recovery walk.
+    """
+    snapshots = ap.find_timemachine_snapshots()
+    if not snapshots:
+        raise RuntimeError(
+            "apple-podcasts-timemachine: no Time Machine snapshots found — "
+            "a Time Machine volume must be mounted"
+        )
+
+    all_events: list = []
+    for snap in snapshots:
+        try:
+            all_events.extend(ap.parse_db(snap))
+        except ap.SnapshotError as exc:
+            ctx.log.warning(
+                "apple-podcasts-timemachine: skipping snapshot %s — %s", snap, exc
+            )
+
+    ctx.progress(stage="parsed", count=len(all_events))
+    media_state = _state_load(STATE_PATH)
+    client = FulcraClient()
+    client.ensure_tag("apple-podcasts", media_state)
+    result = client.run_import(all_events, media_state)
+    ctx.progress(stage="imported", posted=result.posted,
+                 skipped=result.skipped_existing)
+    # No watermark advance — this is a manual, one-shot recovery run.
+
+
+APPLE_PODCASTS_TIMEMACHINE_PLUGIN = Plugin(
+    id="apple-podcasts-timemachine",
+    name="Apple Podcasts (Time Machine recovery)",
+    kind="manual",
+    run=_run_apple_podcasts_timemachine,
+    default_interval=None,
+    requires_network=False,
+    required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
 )
