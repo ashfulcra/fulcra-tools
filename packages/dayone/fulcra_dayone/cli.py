@@ -58,6 +58,8 @@ def import_cmd(
         raise click.UsageError("Pass either a SOURCE path or --local-db, not both.")
     if not local_db and source is None:
         raise click.UsageError("Provide a SOURCE path (.zip or folder), or use --local-db.")
+    if db_path is not None and not local_db:
+        raise click.UsageError("--db-path only applies with --local-db.")
 
     entries = read(source, local_db=local_db, db_path=db_path)
     selected = select(
@@ -75,7 +77,8 @@ def import_cmd(
     if dry_run:
         journals_seen = sorted({e.journal for e in selected})
         dates = sorted(e.creation_date for e in selected)
-        click.echo(f"Would import {len(selected)} entries.")
+        n = len(selected)
+        click.echo(f"Would import {n} {'entry' if n == 1 else 'entries'}.")
         click.echo(f"  journals: {', '.join(journals_seen)}")
         click.echo(f"  date range: {dates[0].date()} .. {dates[-1].date()}")
         return

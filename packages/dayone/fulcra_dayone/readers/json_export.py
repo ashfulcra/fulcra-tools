@@ -27,7 +27,12 @@ def _compose_location(loc: dict) -> str | None:
 
 def _entries_from_json(path: Path) -> tuple[list[DayOneEntry], int]:
     journal = path.stem
-    doc = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"json_export: skipping malformed file {path.name}: {exc}",
+              file=sys.stderr)
+        return [], 0
     out: list[DayOneEntry] = []
     skipped = 0
     for raw in doc.get("entries", []):
