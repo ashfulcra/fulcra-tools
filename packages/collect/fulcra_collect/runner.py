@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from datetime import datetime
 
 from . import state
@@ -22,17 +23,32 @@ def worker_command(plugin_id: str) -> list[str]:
 
 
 def run(plugin_id: str, command: list[str], *, now: datetime,
-        timeout_s: float = DEFAULT_TIMEOUT_S) -> str:
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        on_spawn: Callable[[subprocess.Popen], None] | None = None) -> str:
     """Run one plugin via `command`, record the outcome, return it
-    ("done" | "error" | "timeout")."""
+    ("done" | "error" | "timeout").
+
+    If `on_spawn` is given it is called with the worker `Popen` right
+    after the process is created, so a caller (the daemon) can track the
+    process and terminate it on shutdown."""
     outcome = "error"
     error: str | None = "worker emitted no result"
     watermark: str | None = None
     try:
-        proc = subprocess.run(
-            command, capture_output=True, text=True, timeout=timeout_s,
+        proc = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-        for line in proc.stdout.splitlines():
+        if on_spawn is not None:
+            on_spawn(proc)
+        try:
+            stdout, _stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            # Mirror subprocess.run's internal timeout handling: kill the
+            # worker, then drain its pipes so they are not left dangling.
+            proc.kill()
+            proc.communicate()
+            raise
+        for line in stdout.splitlines():
             line = line.strip()
             if not line:
                 continue
