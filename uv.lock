@@ -326,6 +326,7 @@ version = "0.1.0"
 source = { editable = "packages/dayone" }
 dependencies = [
     { name = "click" },
+    { name = "fulcra-collect" },
     { name = "fulcra-common" },
     { name = "fulcra-csv-importer" },
     { name = "httpx" },
@@ -340,6 +341,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
+    { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "fulcra-csv-importer", editable = "packages/csv-importer" },
     { name = "httpx", specifier = ">=0.27" },
