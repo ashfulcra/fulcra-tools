@@ -68,12 +68,20 @@ class FulcraClient(BaseFulcraClient):
         if ev.external_ids:
             data_inner["external_ids"] = ev.external_ids
 
-        recorded_at: dict = {
-            "start_time": ev.start_time.isoformat().replace("+00:00", "Z"),
-        }
+        # recorded_at is a union: a {start_time, end_time} range for a
+        # duration event, or a bare scalar datetime for an instant one. A
+        # {start_time}-only object matches neither arm — Fulcra's ingest
+        # rejects it (and the fire-and-forget batch endpoint drops it
+        # silently, with a 204), so the instant case must emit a scalar.
+        recorded_at: str | dict
         if ev.annotation_type == DURATION:
             assert ev.end_time is not None  # enforced in GenericEvent
-            recorded_at["end_time"] = ev.end_time.isoformat().replace("+00:00", "Z")
+            recorded_at = {
+                "start_time": ev.start_time.isoformat().replace("+00:00", "Z"),
+                "end_time": ev.end_time.isoformat().replace("+00:00", "Z"),
+            }
+        else:
+            recorded_at = ev.start_time.isoformat().replace("+00:00", "Z")
 
         # Source array: source_id is always first (the per-row dedup key).
         # The annotation-def source is appended ONLY when targeting a
