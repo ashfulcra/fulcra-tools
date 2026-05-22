@@ -63,3 +63,16 @@ def test_main_reports_unknown_plugin_id(collect_home: Path, capsys):
     import json as _json
     assert _json.loads(last)["outcome"] == "error"
     assert rc == 1
+
+
+def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: Path):
+    from fulcra_collect.plugin import Credential
+    ran = []
+    plugin = Plugin(id="needs-key", name="Needs Key", kind="manual",
+                    run=lambda ctx: ran.append(True),
+                    required_credentials=(Credential(key="api-key", label="K", help="h"),))
+    events = _run_capturing(plugin, collect_home)
+    assert ran == []  # run() was never called
+    assert events[-1]["type"] == "result"
+    assert events[-1]["outcome"] == "error"
+    assert "api-key" in events[-1]["error"]

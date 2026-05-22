@@ -37,6 +37,14 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         log=logging.getLogger(f"fulcra_collect.plugin.{plugin.id}"),
         _emit=emit,
     )
+    missing = sorted(c.key for c in plugin.required_credentials
+                     if not ctx.credentials.get(c.key))
+    if missing:
+        emit({"type": "result", "outcome": "error",
+              "error": (f"missing required credential(s): {', '.join(missing)} — "
+                        f"set with: fulcra-collect set-credential {plugin.id} <key>"),
+              "watermark": getattr(ctx.state, "watermark", None)})
+        return "error"
     try:
         plugin.run(ctx)
     except Exception as exc:  # noqa: BLE001 — report, never propagate
