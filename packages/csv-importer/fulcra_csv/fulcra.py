@@ -10,10 +10,10 @@ can be overridden for custom annotation kinds.
 """
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 
 from fulcra_common import BaseFulcraClient, ImportResult
+from fulcra_common import wire
 
 from .events import DURATION, GenericEvent
 
@@ -68,40 +68,15 @@ class FulcraClient(BaseFulcraClient):
         if ev.external_ids:
             data_inner["external_ids"] = ev.external_ids
 
-        # recorded_at is a union: a {start_time, end_time} range for a
-        # duration event, or a bare scalar datetime for an instant one. A
-        # {start_time}-only object matches neither arm — Fulcra's ingest
-        # rejects it (and the fire-and-forget batch endpoint drops it
-        # silently, with a 204), so the instant case must emit a scalar.
-        recorded_at: str | dict
-        if ev.annotation_type == DURATION:
-            assert ev.end_time is not None  # enforced in GenericEvent
-            recorded_at = {
-                "start_time": ev.start_time.isoformat().replace("+00:00", "Z"),
-                "end_time": ev.end_time.isoformat().replace("+00:00", "Z"),
-            }
-        else:
-            recorded_at = ev.start_time.isoformat().replace("+00:00", "Z")
-
-        # Source array: source_id is always first (the per-row dedup key).
-        # The annotation-def source is appended ONLY when targeting a
-        # user-defined annotation. Built-in data types (BodyMass, HeartRate,
-        # ...) don't have a definition id and dedup purely on source_id.
-        source: list[str] = [ev.source_id]
-        if definition_id:
-            source.append(f"com.fulcradynamics.annotation.{definition_id}")
-
-        return {
-            "specversion": 1,
-            "data": json.dumps(data_inner, sort_keys=True),
-            "metadata": {
-                "data_type": data_type or _default_data_type(ev.annotation_type),
-                "recorded_at": recorded_at,
-                "tags": tag_ids,
-                "source": source,
-                "content_type": "application/json",
-            },
-        }
+        return wire.build_record(
+            data_type=data_type or _default_data_type(ev.annotation_type),
+            start_time=ev.start_time,
+            end_time=ev.end_time if ev.annotation_type == DURATION else None,
+            data=data_inner,
+            source_id=ev.source_id,
+            tags=tag_ids,
+            definition_id=definition_id,
+        )
 
     def ingest_batch(
         self,
@@ -114,19 +89,16 @@ class FulcraClient(BaseFulcraClient):
         if not events:
             return
         tag_id_for = tag_id_for or {}
-        lines = [
-            json.dumps(
-                self._build_record(
-                    ev, definition_id=definition_id, tag_id_for=tag_id_for,
-                    data_type=data_type,
-                ),
-                sort_keys=True,
-            ).encode()
+        body = wire.encode_batch([
+            self._build_record(
+                ev, definition_id=definition_id, tag_id_for=tag_id_for,
+                data_type=data_type,
+            )
             for ev in events
-        ]
+        ])
         r = self._client().post(
             "/ingest/v1/record/batch",
-            content=b"\n".join(lines),
+            content=body,
             headers={
                 **self._authed_headers(),
                 "content-type": "application/x-jsonl",
