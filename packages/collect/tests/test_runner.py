@@ -65,3 +65,23 @@ def test_runner_persists_the_watermark_from_the_result(collect_home: Path):
     runner.run("p", _python_worker(script),
                now=datetime(2026, 5, 22, tzinfo=timezone.utc))
     assert state.load("p").watermark == "2026-05-22T12:00:00Z"
+
+
+def test_runner_calls_on_spawn_with_the_worker_process(collect_home: Path):
+    """`on_spawn` is invoked with the live worker Popen so a caller (the
+    daemon) can track it and terminate it on shutdown."""
+    import subprocess
+
+    script = (
+        "import json,sys;"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done','error':None})+chr(10))"
+    )
+    spawned: list[subprocess.Popen] = []
+    outcome = runner.run("p", _python_worker(script),
+                         now=datetime(2026, 5, 22, tzinfo=timezone.utc),
+                         on_spawn=spawned.append)
+    assert outcome == "done"
+    assert len(spawned) == 1
+    assert isinstance(spawned[0], subprocess.Popen)
+    # the worker has been awaited, so it is finished by the time run returns
+    assert spawned[0].poll() is not None

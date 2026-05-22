@@ -7,6 +7,8 @@ scheduled dispatch.
 """
 from __future__ import annotations
 
+import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -41,6 +43,13 @@ class Daemon:
                  config: Config | None = None) -> None:
         self.registry = registry if registry is not None else discover()
         self.config = config if config is not None else config_mod.load()
+        # In-flight guard: a scheduled plugin must run at most once at a
+        # time. `_inflight` holds the ids currently running; `_inflight_procs`
+        # maps those ids to their live worker Popen so shutdown can stop
+        # them. Both are guarded by `_inflight_lock`.
+        self._inflight: set[str] = set()
+        self._inflight_procs: dict[str, subprocess.Popen] = {}
+        self._inflight_lock = threading.Lock()
 
     # ---- control-socket request handling -------------------------------
 
@@ -75,20 +84,42 @@ class Daemon:
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
             return {"ok": False, "error": f"unknown plugin {plugin_id!r}"}
-        self._trigger(plugin_id)
-        return {"ok": True}
+        started = self._trigger(plugin_id)
+        if started:
+            return {"ok": True, "started": True}
+        return {"ok": True, "started": False, "note": "already running"}
 
-    def _trigger(self, plugin_id: str) -> None:
+    def _trigger(self, plugin_id: str) -> bool:
         """Fire one run of a plugin in a background thread — non-blocking,
         so a long run never stalls the tick loop or the control socket.
-        Overridden in tests."""
-        import threading
-        threading.Thread(
-            target=runner.run,
-            args=(plugin_id, runner.worker_command(plugin_id)),
-            kwargs={"now": datetime.now(timezone.utc)},
-            daemon=True,
-        ).start()
+
+        Returns True if a run was started, False if one was already
+        in-flight for this plugin (the in-flight guard prevents concurrent
+        duplicate runs of the same scheduled plugin). Overridden in tests."""
+        with self._inflight_lock:
+            if plugin_id in self._inflight:
+                return False
+            self._inflight.add(plugin_id)
+
+        def _work() -> None:
+            try:
+                runner.run(
+                    plugin_id, runner.worker_command(plugin_id),
+                    now=datetime.now(timezone.utc),
+                    on_spawn=lambda proc: self._register_proc(plugin_id, proc),
+                )
+            finally:
+                with self._inflight_lock:
+                    self._inflight.discard(plugin_id)
+                    self._inflight_procs.pop(plugin_id, None)
+
+        threading.Thread(target=_work, daemon=True).start()
+        return True
+
+    def _register_proc(self, plugin_id: str, proc: subprocess.Popen) -> None:
+        """Track a worker Popen so `serve`'s shutdown can terminate it."""
+        with self._inflight_lock:
+            self._inflight_procs[plugin_id] = proc
 
     def _spawn_service(self, plugin_id: str):
         """Spawn a service plugin's worker subprocess (kept alive by the
@@ -110,8 +141,6 @@ class Daemon:
         skipped (deferred), not run into a failure. Scheduled runs are
         dispatched on background threads so a long run never blocks the
         tick loop or the control socket."""
-        import threading
-
         from .supervisor import ServiceSupervisor
 
         server = ControlServer(_control_socket_path(), self.handle_request)
@@ -136,3 +165,13 @@ class Daemon:
         finally:
             server.shutdown()
             supervisor.shutdown_all()
+            # Terminate any still-running scheduled-run worker processes so
+            # they do not survive as orphans after the daemon exits.
+            with self._inflight_lock:
+                procs = list(self._inflight_procs.values())
+            for proc in procs:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
