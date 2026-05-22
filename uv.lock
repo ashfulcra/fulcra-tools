@@ -246,6 +246,7 @@ version = "0.1.0"
 source = { editable = "packages/collect" }
 dependencies = [
     { name = "click" },
+    { name = "fulcra-common" },
     { name = "keyring" },
     { name = "tomli-w" },
 ]
@@ -259,6 +260,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
+    { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "keyring", specifier = ">=25" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },

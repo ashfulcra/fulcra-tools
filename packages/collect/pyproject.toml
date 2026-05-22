@@ -11,7 +11,11 @@ dependencies = [
     "click>=8.1",
     "keyring>=25",
     "tomli-w>=1.0",
+    "fulcra-common",
 ]
+
+[tool.uv.sources]
+fulcra-common = { workspace = true }
 
 [project.scripts]
 fulcra-collect = "fulcra_collect.cli:cli"
