@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fulcra_collect.supervisor import RestartDecision, ServiceSupervisor, decide_restart
+from fulcra_collect.supervisor import (
+    DEGRADED_RECOVERY_COOLDOWN,
+    RestartDecision,
+    ServiceSupervisor,
+    decide_restart,
+)
 
 T0 = datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -134,3 +139,81 @@ def test_supervisor_terminates_a_service_that_becomes_disabled():
     sup.tick(now=T0, enabled_ids={"relay"}, spawn=spawn)
     sup.tick(now=T0 + timedelta(seconds=30), enabled_ids=set(), spawn=spawn)
     assert procs[0].terminated is True
+
+
+class CleanExitProc:
+    """A service process that exits cleanly (return code 0) — a deliberate,
+    correct shutdown, not a crash."""
+    def poll(self):
+        return 0
+
+    def terminate(self):
+        pass
+
+
+def test_clean_exit_respawns_without_crash_loop_accounting():
+    # A service that exits cleanly (rc 0) on every poll. A clean exit must
+    # NOT be recorded as a crash: it gets respawned immediately, never
+    # accumulates exit history, and never reaches the crash-loop threshold.
+    sup = ServiceSupervisor()
+    spawned = 0
+
+    def spawn(pid):
+        nonlocal spawned
+        spawned += 1
+        return CleanExitProc()
+
+    t = T0
+    for _ in range(20):
+        sup.tick(now=t, enabled_ids={"relay"}, spawn=spawn)
+        t += timedelta(seconds=1)
+
+    # Respawned every tick (no backoff), never degraded, no exit history.
+    assert spawned == 20
+    assert "relay" not in sup.degraded
+    assert sup._exits.get("relay", []) == []
+
+
+def test_disable_clears_all_supervisor_state_for_the_plugin():
+    # A disabled service must be a clean slate when re-enabled: no stale
+    # exit history, no stale backoff, no lingering degraded membership.
+    sup = ServiceSupervisor()
+    sup._exits["relay"] = [T0 - timedelta(seconds=5), T0]
+    sup._backoff_until["relay"] = T0 + timedelta(seconds=60)
+    sup.degraded.add("relay")
+    sup._procs["relay"] = FakeProc()
+
+    # A tick with "relay" no longer enabled disables it.
+    sup.tick(now=T0, enabled_ids=set(), spawn=lambda pid: FakeProc())
+
+    assert "relay" not in sup._exits
+    assert "relay" not in sup._backoff_until
+    assert "relay" not in sup.degraded
+
+
+def test_degraded_service_auto_recovers_after_cooldown():
+    # A service degraded by a transient crash loop must get another chance:
+    # once its most recent crash is older than DEGRADED_RECOVERY_COOLDOWN,
+    # the next tick clears the degraded mark and respawns it.
+    sup = ServiceSupervisor()
+    spawned: list[str] = []
+
+    def spawn(pid):
+        spawned.append(pid)
+        return FakeProc()  # this time it stays alive
+
+    sup.degraded.add("relay")
+    sup._exits["relay"] = [T0]
+
+    # Still inside the cooldown: stays degraded, not respawned.
+    sup.tick(now=T0 + DEGRADED_RECOVERY_COOLDOWN - timedelta(seconds=1),
+             enabled_ids={"relay"}, spawn=spawn)
+    assert "relay" in sup.degraded
+    assert spawned == []
+
+    # Past the cooldown: recovered and respawned with a fresh crash budget.
+    sup.tick(now=T0 + DEGRADED_RECOVERY_COOLDOWN + timedelta(seconds=1),
+             enabled_ids={"relay"}, spawn=spawn)
+    assert "relay" not in sup.degraded
+    assert spawned == ["relay"]
+    assert sup._exits.get("relay", []) == []

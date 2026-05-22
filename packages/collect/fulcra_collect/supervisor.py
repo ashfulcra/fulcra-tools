@@ -16,6 +16,9 @@ CRASH_WINDOW = timedelta(seconds=60)
 CRASH_LOOP_THRESHOLD = 6   # exits within CRASH_WINDOW -> degraded
 BASE_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
+# A degraded service gets one more chance once its most recent crash is
+# this old — a transient failure recovers; a real one re-degrades.
+DEGRADED_RECOVERY_COOLDOWN = timedelta(minutes=5)
 
 
 @dataclass
@@ -71,18 +74,39 @@ class ServiceSupervisor:
         An exit is recorded only when a tracked process is observed to
         have died — never for a tick that is merely waiting out a backoff.
         """
-        # Terminate services that are no longer enabled.
+        # Terminate services that are no longer enabled, and wipe their
+        # supervisor state — a disable -> re-enable cycle is a clean slate.
         for pid in list(self._procs):
             if pid not in enabled_ids:
                 _terminate(self._procs.pop(pid))
+                self._exits.pop(pid, None)
+                self._backoff_until.pop(pid, None)
+                self.degraded.discard(pid)
         for pid in sorted(enabled_ids):
             if pid in self.degraded:
-                continue
+                # Auto-recovery: a degraded service whose most recent crash
+                # is older than the cooldown gets one more chance — clear
+                # the mark and a fresh crash budget, then fall through.
+                last_exit = max(self._exits.get(pid, []), default=None)
+                if last_exit is not None and now - last_exit > DEGRADED_RECOVERY_COOLDOWN:
+                    self.degraded.discard(pid)
+                    self._exits.pop(pid, None)
+                else:
+                    continue
             proc = self._procs.get(pid)
-            if proc is not None and proc.poll() is None:
-                continue  # still running
-            if proc is not None:  # observed dead since the last tick
+            if proc is not None:
+                rc = proc.poll()
+                if rc is None:
+                    continue  # still running
+                # Observed dead since the last tick.
                 self._procs.pop(pid, None)
+                if rc == 0:
+                    # Clean, deliberate exit — not a crash. Respawn now;
+                    # do not record an exit or set a backoff. The ~30s
+                    # tick rate already bounds the respawn rate.
+                    self._procs[pid] = spawn(pid)
+                    continue
+                # Non-zero exit — a crash. Record it and apply policy.
                 self._exits.setdefault(pid, []).append(now)
                 decision = decide_restart(self._exits[pid], now)
                 if not decision.should_restart:
