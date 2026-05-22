@@ -76,6 +76,46 @@ def test_run_raises_a_clear_error_when_the_api_key_is_missing(monkeypatch):
         LASTFM_PLUGIN.run(ctx)
 
 
+def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
+    """Finding 10: the watermark must advance even when every fetched event
+    was already in Fulcra (posted == 0, skipped_existing > 0).
+
+    The 1-hour rewind in `_since_from_watermark` re-fetches an overlapping
+    window every run, so the steady state is posted == 0. Freezing the
+    watermark there means the re-fetched window grows without bound any
+    time the user goes quiet — this asserts the freeze is gone.
+    """
+    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+                        lambda creds, since, max_pages: [{"raw": 1}])
+    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+                        lambda raw: ["event-1"])
+
+    class AllDupResult:
+        posted = 0          # nothing new
+        skipped_existing = 1  # already in Fulcra
+        verified = 1
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return AllDupResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+    monkeypatch.setattr("fulcra_media.collect_plugins.newest_event_iso",
+                        lambda events: "2026-05-22T12:00:00Z")
+
+    st = PluginState("lastfm")
+    ctx = RunContext(plugin_id="lastfm", config={}, credentials={"api-key": "K"},
+                     state=st, log=logging.getLogger("t"), _emit=lambda e: None)
+    LASTFM_PLUGIN.run(ctx)
+
+    # Every event was successfully processed (skipped_existing means already
+    # ingested into Fulcra), so the watermark must reflect that progress.
+    assert st.watermark == "2026-05-22T12:00:00Z"
+
+
 # ---------------------------------------------------------------------------
 # Helpers shared by file-plugin tests
 # ---------------------------------------------------------------------------
@@ -455,6 +495,40 @@ def test_generic_rss_plugin_max_entries(monkeypatch):
     GENERIC_RSS_PLUGIN.run(ctx)
 
     assert len(fake_client.calls["imported"]) == 2
+
+
+def test_generic_rss_plugin_newest_first_feed_keeps_oldest_block(monkeypatch):
+    """Finding 10b: when the underlying feed is newest-first and `max_entries`
+    is set, the cap must keep the *oldest* events — not the newest. Otherwise
+    older history is permanently un-imported because the watermark advances
+    past it on the very next run.
+    """
+    newest = _make_event("2026-05-22T12:00:00+00:00")
+    middle = _make_event("2026-05-22T11:00:00+00:00")
+    oldest = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    # Newest-first ordering, as many real RSS feeds emit.
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        lambda feed_url, service, category: iter([newest, middle, oldest]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    # Don't stub newest_event_iso — let the real one run on what we actually imported,
+    # so the watermark assertion below proves we advanced to a *safe* timestamp.
+
+    ctx, st = _make_ctx(
+        "generic-rss",
+        {"feed_url": "https://example.com/f.rss", "service": "s", "category": "watched",
+         "max_entries": 2},
+    )
+    GENERIC_RSS_PLUGIN.run(ctx)
+
+    # The two oldest events were imported (a contiguous oldest-block); newest is deferred.
+    assert fake_client.calls["imported"] == [oldest, middle]
+    # The watermark advances to the newest of what we imported — middle, not newest.
+    # Next run will see `newest` (which is now older than nothing imported above) again.
+    assert st.watermark == "2026-05-22T11:00:00+00:00"
 
 
 def test_generic_rss_plugin_raises_without_feed_url():

@@ -108,6 +108,48 @@ def test_worker_error_result_scrubs_a_secret_in_the_exception(collect_home: Path
     assert "token=<redacted>" in events[-1]["error"]
 
 
+def test_worker_isolates_plugin_stdout_from_event_stream(
+    collect_home: Path, monkeypatch, capsys,
+):
+    """Finding 9: a stray print() inside plugin.run must NOT corrupt the JSON
+    event stream. The worker's runner parses `out` via splitlines() + json.loads
+    and silently skips non-JSON lines, so a plain print() that lands between
+    the progress and result emits would cause the result to be silently lost —
+    the run is recorded as 'error' (no result emitted) and any watermark the
+    plugin advanced gets dropped.
+
+    Fix contract: stdout writes from *inside* plugin.run get redirected to
+    stderr for the duration of the run, while the JSON event stream still
+    goes to the `out` parameter the worker captured before the call. Mirrors
+    the real worker entrypoint in `main()`, which passes the real `sys.stdout`
+    as `out` — so `out` and `sys.stdout` are the same stream at call time.
+    """
+    import sys
+
+    def run(ctx):
+        # A library somewhere calls print(); the worker must not let this leak
+        # into the JSON event stream that `out` carries.
+        print("hello from a noisy library")
+        ctx.state.watermark = "2026-05-22T12:00:00Z"
+
+    plugin = Plugin(id="noisy", name="Noisy", kind="manual", run=run)
+    # Re-bind sys.stdout to a buffer and pass it as `out` — same identity, as
+    # in worker.main(). The whole point is that a stray print() (which writes
+    # to whatever sys.stdout currently is) must not land on `out`.
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    worker.run_plugin(plugin, out=buf)
+    # Restore stdout for capsys before assertions.
+    monkeypatch.undo()
+
+    lines = [l for l in buf.getvalue().splitlines() if l]
+    # Every line on `out` must be valid JSON — no stray "hello..." string.
+    parsed = [json.loads(l) for l in lines]
+    assert parsed[-1]["type"] == "result"
+    assert parsed[-1]["outcome"] == "done"
+    assert parsed[-1]["watermark"] == "2026-05-22T12:00:00Z"
+
+
 def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: Path):
     from fulcra_collect.plugin import Credential
     ran = []

@@ -120,10 +120,13 @@ def _run_scheduled_import(
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
 
-    if result.posted > 0:
-        new_wm = newest_event_iso(events)
-        if new_wm:
-            ctx.state.watermark = new_wm
+    # Advance even when posted == 0: every event in `events` was either posted
+    # OR skipped-as-already-in-Fulcra — both count as successfully processed.
+    # Gating on posted > 0 froze the watermark indefinitely in the all-duplicate
+    # steady state created by the 1-hour rewind window above.
+    new_wm = newest_event_iso(events)
+    if new_wm:
+        ctx.state.watermark = new_wm
 
 
 # ---------------------------------------------------------------------------
@@ -274,10 +277,12 @@ def _run_trakt(ctx: RunContext) -> None:
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
 
-    if result.posted > 0:
-        new_wm = newest_event_iso(events)
-        if new_wm:
-            ctx.state.watermark = new_wm
+    # Advance even when posted == 0 — see _run_scheduled_import for the full
+    # rationale. Skipped-existing means the event is already in Fulcra; both
+    # outcomes are progress the watermark must reflect.
+    new_wm = newest_event_iso(events)
+    if new_wm:
+        ctx.state.watermark = new_wm
 
 
 TRAKT_PLUGIN = Plugin(
@@ -466,12 +471,18 @@ def _rss_import_and_advance(
 
     This is the shared tail common to all three RSS plugins:
       1. Filter to events at/after `since` (skip when since is None — full backfill).
-      2. Apply max_entries cap when configured.
+      2. Sort ascending by start_time, then apply max_entries cap.
       3. ensure_tag + run_import.
-      4. Advance ctx.state.watermark when events were posted.
+      4. Advance ctx.state.watermark to the newest processed event.
     """
     if since is not None:
         events = [e for e in events if e.start_time >= since]
+    # Sort oldest-first so the `max_entries` cap deterministically keeps the
+    # oldest contiguous block. Without this, a newest-first feed would lose
+    # its older middle history forever: the cap would keep the newest N, the
+    # watermark would jump past everything older, and the next run would
+    # filter that older history out via `since`.
+    events.sort(key=lambda e: e.start_time)
     if max_entries is not None:
         events = events[:max_entries]
 
@@ -483,10 +494,10 @@ def _rss_import_and_advance(
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
 
-    if result.posted > 0:
-        new_wm = newest_event_iso(events)
-        if new_wm:
-            ctx.state.watermark = new_wm
+    # Advance even when posted == 0 — see _run_scheduled_import for rationale.
+    new_wm = newest_event_iso(events)
+    if new_wm:
+        ctx.state.watermark = new_wm
 
 
 # ---------------------------------------------------------------------------
@@ -636,10 +647,10 @@ def _run_apple_podcasts(ctx: RunContext) -> None:
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
 
-    if result.posted > 0:
-        new_wm = newest_event_iso(events)
-        if new_wm:
-            ctx.state.watermark = new_wm
+    # Advance even when posted == 0 — see _run_scheduled_import for rationale.
+    new_wm = newest_event_iso(events)
+    if new_wm:
+        ctx.state.watermark = new_wm
 
 
 APPLE_PODCASTS_PLUGIN = Plugin(

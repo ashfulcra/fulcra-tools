@@ -7,6 +7,7 @@ its own process so a plugin's crash, hang, or dependencies are isolated.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -73,7 +74,16 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
               "watermark": getattr(ctx.state, "watermark", None)})
         return "error"
     try:
-        plugin.run(ctx)
+        # Redirect sys.stdout → stderr for the duration of plugin.run only.
+        # A stray print() inside a plugin (or any library it imports) would
+        # otherwise land in the middle of the JSON event stream — the runner
+        # silently skips lines that fail json.loads, so a print() that broke
+        # the `result` line would lose the result entirely and a watermark
+        # advance with it. The `emit` closure above writes to the saved `out`
+        # reference (the real stdout), so JSON events still get through; only
+        # accidental writes from inside plugin.run are quarantined to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            plugin.run(ctx)
     except Exception as exc:  # noqa: BLE001 — report, never propagate
         # The watermark is reported even on error: a plugin may advance it
         # partway through a run, and a partial advance must still persist.
