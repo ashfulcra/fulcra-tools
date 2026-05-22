@@ -115,6 +115,24 @@ already obtain it through `fulcra_common.BaseFulcraClient.get_token()`
 or override `fulcra-api`'s auth. The hub keychain is only for
 plugin-*source* secrets (Last.fm API key, Trakt token, Strava token).
 
+### Annotation wire format is single-sourced in fulcra-common
+
+How a Fulcra annotation is written on the wire — the record envelope
+(`specversion` / `data` / `metadata`), the `data_type` values, the
+`recorded_at` shape (instant vs duration), the `source` array, the JSONL
+batch encoding, and the definition-creation payloads — is **one body of
+knowledge that lives in exactly one place: `fulcra-common`**. Plugins do
+not build wire records; nor does the `collect` core. A plugin produces
+normalized events and hands them to its package's importer, which builds
+records through `fulcra-common`'s wire module. When Fulcra changes the
+format, it changes there once and every importer and plugin follows.
+
+This is a prerequisite refactor: today that knowledge is duplicated
+across `fulcra_attention`, `fulcra_csv`, and `fulcra_media`. It is
+consolidated into `fulcra-common` *before* `fulcra-collect` is built,
+so `collect` and every adapter sit on the single source of truth. (See
+the separate consolidation plan.)
+
 ## Hub core components
 
 The core is one long-lived process. Files under `fulcra_collect/`:
