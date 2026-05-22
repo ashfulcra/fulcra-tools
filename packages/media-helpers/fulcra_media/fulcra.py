@@ -11,11 +11,11 @@ soft-delete, and event readback come from the base.
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from fulcra_common import BaseFulcraClient, ImportResult
+from fulcra_common import wire
 
 from .state import State
 
@@ -65,17 +65,7 @@ class FulcraClient(BaseFulcraClient):
             )
 
     def _create_duration_definition(self, name: str, description: str, tags: list[str]) -> str:
-        body = {
-            "annotation_type": "duration",
-            "name": name,
-            "description": description,
-            "tags": tags,
-            "measurement_spec": {
-                "measurement_type": "duration",
-                "value_type": "duration",
-                "unit": None,
-            },
-        }
+        body = wire.duration_definition_payload(name=name, description=description, tags=tags)
         r = self._client().post(
             "/user/v1alpha1/annotation",
             json=body,
@@ -89,7 +79,7 @@ class FulcraClient(BaseFulcraClient):
     ) -> None:
         if not events:
             return
-        lines: list[bytes] = []
+        records: list[dict] = []
         category_to_def = {
             "watched":  state.watched_definition_id,
             "listened": state.listened_definition_id,
@@ -110,23 +100,16 @@ class FulcraClient(BaseFulcraClient):
             }
             service_tag = state.tag_ids.get(ev.service)
             tags = [service_tag] if service_tag else []
-            metadata = {
-                "data_type": "DurationAnnotation",
-                "recorded_at": {
-                    "start_time": ev.start_time.isoformat().replace("+00:00", "Z"),
-                    "end_time":   ev.end_time.isoformat().replace("+00:00", "Z"),
-                },
-                "tags": tags,
-                "source": [ev.deterministic_id, f"com.fulcradynamics.annotation.{def_id}"],
-                "content_type": "application/json",
-            }
-            line = {
-                "specversion": 1,
-                "data": json.dumps(data_inner, sort_keys=True),
-                "metadata": metadata,
-            }
-            lines.append(json.dumps(line, sort_keys=True).encode())
-        body = b"\n".join(lines)
+            records.append(wire.build_record(
+                data_type=wire.DURATION_ANNOTATION,
+                start_time=ev.start_time,
+                end_time=ev.end_time,
+                data=data_inner,
+                source_id=ev.deterministic_id,
+                tags=tags,
+                definition_id=def_id,
+            ))
+        body = wire.encode_batch(records)
         r = self._client().post(
             "/ingest/v1/record/batch",
             content=body,
