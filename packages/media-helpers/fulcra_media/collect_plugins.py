@@ -1,7 +1,8 @@
 """fulcra-collect plugins exported by fulcra-media-helpers.
 
-Exposes one scheduled plugin (Last.fm) and five manual file-based plugins:
-Netflix, Spotify Extended, YouTube, Spotify IFTTT, and Apple TV takeout.
+Exposes scheduled plugins (Last.fm, Generic RSS, Letterboxd, Goodreads) and
+five manual file-based plugins: Netflix, Spotify Extended, YouTube,
+Spotify IFTTT, and Apple TV takeout.
 """
 from __future__ import annotations
 
@@ -14,6 +15,9 @@ from fulcra_collect.plugin import Credential, Plugin, RunContext
 from . import library
 from .fulcra import FulcraClient
 from .importers import apple_takeout as apple_takeout_importer
+from .importers import generic_rss as rss_importer
+from .importers import goodreads as gr_importer
+from .importers import letterboxd as lb_importer
 from .importers import netflix as netflix_importer
 from .importers import spotify as spotify_importer
 from .importers import spotify_ifttt as spotify_ifttt_importer
@@ -223,5 +227,156 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
     kind="manual",
     run=_run_apple_takeout,
     default_interval=None,
+    required_credentials=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared helper for RSS scheduled plugins
+# ---------------------------------------------------------------------------
+
+def _rss_since(ctx: RunContext) -> datetime | None:
+    """Parse ctx.state.watermark into a tz-aware datetime, or None for full backfill.
+
+    RSS feeds are append-only and ordered, so a plain >= comparison is
+    sufficient — no rewind needed (unlike Last.fm's 1-hour rewind).
+    """
+    if not ctx.state.watermark:
+        return None
+    return datetime.fromisoformat(
+        ctx.state.watermark.replace("Z", "+00:00")
+    )
+
+
+def _rss_import_and_advance(
+    ctx: RunContext,
+    events: list,
+    *,
+    tag: str,
+    since: datetime | None,
+    max_entries: int | None,
+) -> None:
+    """Filter events by watermark, optionally cap, import, and advance watermark.
+
+    This is the shared tail common to all three RSS plugins:
+      1. Filter to events at/after `since` (skip when since is None — full backfill).
+      2. Apply max_entries cap when configured.
+      3. ensure_tag + run_import.
+      4. Advance ctx.state.watermark when events were posted.
+    """
+    if since is not None:
+        events = [e for e in events if e.start_time >= since]
+    if max_entries is not None:
+        events = events[:max_entries]
+
+    ctx.progress(stage="fetched", count=len(events))
+    media_state = _state_load(STATE_PATH)
+    client = FulcraClient()
+    client.ensure_tag(tag, media_state)
+    result = client.run_import(events, media_state)
+    ctx.progress(stage="imported", posted=result.posted,
+                 skipped=result.skipped_existing)
+
+    if result.posted > 0:
+        new_wm = newest_event_iso(events)
+        if new_wm:
+            ctx.state.watermark = new_wm
+
+
+# ---------------------------------------------------------------------------
+# Generic RSS/Atom scheduled plugin
+# ---------------------------------------------------------------------------
+
+def _run_generic_rss(ctx: RunContext) -> None:
+    feed_url = ctx.config.get("feed_url")
+    if not feed_url:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'feed_url' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+    service = ctx.config.get("service")
+    if not service:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'service' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+    category = ctx.config.get("category")
+    if not category:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'category' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+    max_entries: int | None = ctx.config.get("max_entries")
+
+    since = _rss_since(ctx)
+    all_events = list(rss_importer.normalize_feed(feed_url, service=service, category=category))
+    _rss_import_and_advance(ctx, all_events, tag=service, since=since,
+                            max_entries=max_entries)
+
+
+GENERIC_RSS_PLUGIN = Plugin(
+    id="generic-rss",
+    name="Generic RSS/Atom feed",
+    kind="scheduled",
+    run=_run_generic_rss,
+    default_interval=timedelta(hours=6),
+    required_credentials=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Letterboxd film diary scheduled plugin
+# ---------------------------------------------------------------------------
+
+def _run_letterboxd(ctx: RunContext) -> None:
+    username = ctx.config.get("username")
+    if not username:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'username' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+    max_entries: int | None = ctx.config.get("max_entries")
+
+    since = _rss_since(ctx)
+    all_events = list(lb_importer.fetch_diary(username))
+    _rss_import_and_advance(ctx, all_events, tag="letterboxd", since=since,
+                            max_entries=max_entries)
+
+
+LETTERBOXD_PLUGIN = Plugin(
+    id="letterboxd",
+    name="Letterboxd film diary",
+    kind="scheduled",
+    run=_run_letterboxd,
+    default_interval=timedelta(hours=12),
+    required_credentials=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Goodreads read shelf scheduled plugin
+# ---------------------------------------------------------------------------
+
+def _run_goodreads(ctx: RunContext) -> None:
+    user_id = ctx.config.get("user_id")
+    if not user_id:
+        raise RuntimeError(
+            f"{ctx.plugin_id}: 'user_id' is not configured — "
+            f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
+        )
+    max_entries: int | None = ctx.config.get("max_entries")
+
+    since = _rss_since(ctx)
+    all_events = list(gr_importer.fetch_diary(user_id))
+    _rss_import_and_advance(ctx, all_events, tag="goodreads", since=since,
+                            max_entries=max_entries)
+
+
+GOODREADS_PLUGIN = Plugin(
+    id="goodreads",
+    name="Goodreads read shelf",
+    kind="scheduled",
+    run=_run_goodreads,
+    default_interval=timedelta(hours=12),
     required_credentials=(),
 )
