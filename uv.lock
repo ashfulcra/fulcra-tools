@@ -217,6 +217,7 @@ source = { editable = "packages/attention" }
 dependencies = [
     { name = "click" },
     { name = "fulcra-api" },
+    { name = "fulcra-collect" },
     { name = "fulcra-common" },
     { name = "httpx" },
 ]
@@ -232,6 +233,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "fulcra-api", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
