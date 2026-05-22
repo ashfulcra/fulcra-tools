@@ -20,15 +20,20 @@ dependencies = [
     # Sibling packages in this monorepo.
     "fulcra-common",
     "fulcra-csv-importer",  # the shared CSV → annotation parser
+    "fulcra-collect",
 ]
 
 [project.scripts]
 fulcra-media = "fulcra_media.cli:cli"
 
+[project.entry-points."fulcra_collect.plugins"]
+lastfm = "fulcra_media.collect_plugins:LASTFM_PLUGIN"
+
 [tool.uv.sources]
 # Resolve the sibling packages from the workspace, not PyPI.
 fulcra-common = { workspace = true }
 fulcra-csv-importer = { workspace = true }
+fulcra-collect = { workspace = true }
 
 [project.optional-dependencies]
 dev = [
