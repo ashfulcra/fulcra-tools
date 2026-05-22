@@ -124,7 +124,6 @@ class Daemon:
     def _spawn_service(self, plugin_id: str):
         """Spawn a service plugin's worker subprocess (kept alive by the
         ServiceSupervisor)."""
-        import subprocess
         return subprocess.Popen(runner.worker_command(plugin_id))
 
     # ---- the run loop --------------------------------------------------
