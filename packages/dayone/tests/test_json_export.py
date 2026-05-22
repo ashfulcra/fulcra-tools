@@ -51,10 +51,6 @@ def test_reads_a_folder_export(tmp_path: Path):
     assert first.creation_date.hour == 9
 
 
-def test_entry_without_optional_fields_is_tolerated():
-    pass  # covered by BBB222 below
-
-
 def test_second_entry_has_empty_optionals(tmp_path: Path):
     folder = _write_export_folder(tmp_path / "export")
     entries = read_json_export(folder)
@@ -80,6 +76,16 @@ def test_journal_name_comes_from_the_json_filename(tmp_path: Path):
     (folder / "Travel Journal.json").write_text(json.dumps(SAMPLE), encoding="utf-8")
     entries = read_json_export(folder)
     assert all(e.journal == "Travel Journal" for e in entries)
+
+
+def test_malformed_json_file_is_skipped_not_fatal(tmp_path: Path):
+    folder = tmp_path / "export"
+    folder.mkdir()
+    # One good journal, one corrupt — the good one must still import.
+    (folder / "Personal.json").write_text(json.dumps(SAMPLE), encoding="utf-8")
+    (folder / "Broken.json").write_text("{not valid json", encoding="utf-8")
+    entries = read_json_export(folder)
+    assert {e.uuid for e in entries} == {"AAA111", "BBB222"}
 
 
 def test_rejects_a_path_that_is_neither_zip_nor_folder(tmp_path: Path):

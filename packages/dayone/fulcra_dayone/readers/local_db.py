@@ -73,14 +73,16 @@ def read_local_db(db_path: Path | None = None) -> list[DayOneEntry]:
     if not src.exists():
         raise FileNotFoundError(f"Day One database not found: {src}")
     snapshot = _snapshot(src)
-    conn = sqlite3.connect(snapshot)
-    conn.row_factory = sqlite3.Row
     try:
-        return _read(conn)
-    except sqlite3.OperationalError as exc:
-        raise ValueError(f"{_SCHEMA_ERROR} ({exc})") from exc
+        conn = sqlite3.connect(snapshot)
+        conn.row_factory = sqlite3.Row
+        try:
+            return _read(conn)
+        except sqlite3.OperationalError as exc:
+            raise ValueError(f"{_SCHEMA_ERROR} ({exc})") from exc
+        finally:
+            conn.close()
     finally:
-        conn.close()
         shutil.rmtree(snapshot.parent, ignore_errors=True)
 
 

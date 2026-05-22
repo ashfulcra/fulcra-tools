@@ -38,6 +38,14 @@ def test_no_filters_without_all_is_an_error(tmp_path: Path):
     assert "--all" in res.output
 
 
+def test_db_path_without_local_db_is_an_error(tmp_path: Path):
+    res = CliRunner().invoke(
+        cli, ["import", str(_export(tmp_path)), "--all", "--db-path", "/tmp/x.sqlite"],
+    )
+    assert res.exit_code != 0
+    assert "--db-path" in res.output
+
+
 def test_dry_run_reports_counts_without_network(tmp_path: Path):
     res = CliRunner().invoke(cli, ["import", str(_export(tmp_path)), "--all", "--dry-run"])
     assert res.exit_code == 0, res.output
@@ -49,7 +57,7 @@ def test_dry_run_with_starred_filter(tmp_path: Path):
         cli, ["import", str(_export(tmp_path)), "--starred", "--dry-run"],
     )
     assert res.exit_code == 0, res.output
-    assert "Would import 1 entries" in res.output
+    assert "Would import 1 entry" in res.output
 
 
 def test_import_posts_to_fulcra(tmp_path: Path, monkeypatch):
