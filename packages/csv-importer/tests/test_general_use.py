@@ -125,8 +125,11 @@ def test_run_import_to_builtin_type_omits_annotation_def_source(monkeypatch):
     # No note (None text) is fine on built-in types
     assert payload.get("note") == "82.4"
     assert "title" not in payload
-    # Instant: only start_time in recorded_at
-    assert "end_time" not in line["metadata"]["recorded_at"]
+    # Instant events carry recorded_at as a bare scalar datetime string.
+    # Fulcra's recorded_at field is a union — a scalar datetime OR a
+    # {start_time, end_time} range — and an instant has no range, so a
+    # {start_time}-only object matches neither arm and is rejected.
+    assert line["metadata"]["recorded_at"] == "2026-01-01T00:00:00Z"
 
 
 def test_run_import_to_user_def_keeps_annotation_def_source(monkeypatch):
