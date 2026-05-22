@@ -12,14 +12,19 @@ dependencies = [
     "httpx>=0.27",
     "fulcra-common",
     "fulcra-csv-importer",
+    "fulcra-collect",
 ]
 
 [project.scripts]
 fulcra-dayone = "fulcra_dayone.cli:cli"
 
+[project.entry-points."fulcra_collect.plugins"]
+dayone = "fulcra_dayone.collect_plugin:PLUGIN"
+
 [tool.uv.sources]
 fulcra-common = { workspace = true }
 fulcra-csv-importer = { workspace = true }
+fulcra-collect = { workspace = true }
 
 [project.optional-dependencies]
 dev = [
