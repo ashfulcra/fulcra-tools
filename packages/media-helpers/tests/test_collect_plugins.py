@@ -19,6 +19,8 @@ from fulcra_media.collect_plugins import (
     GENERIC_RSS_PLUGIN,
     LETTERBOXD_PLUGIN,
     GOODREADS_PLUGIN,
+    DEEZER_PLUGIN,
+    TRAKT_PLUGIN,
 )
 
 
@@ -593,3 +595,287 @@ def test_goodreads_plugin_raises_without_user_id():
     ctx, _ = _make_ctx("goodreads", {})
     with pytest.raises(RuntimeError, match="user_id"):
         GOODREADS_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Deezer plugin
+# ---------------------------------------------------------------------------
+
+def test_deezer_plugin_metadata():
+    from datetime import timedelta
+    assert DEEZER_PLUGIN.id == "deezer"
+    assert DEEZER_PLUGIN.kind == "scheduled"
+    assert DEEZER_PLUGIN.default_interval == timedelta(hours=2)
+    assert {c.key for c in DEEZER_PLUGIN.required_credentials} == {"access-token"}
+
+
+def test_deezer_plugin_run_imports_and_advances_watermark(monkeypatch):
+    """fetch_history + normalize_history are called; watermark advances on posted > 0."""
+    fetch_calls = {}
+
+    def fake_fetch(creds, since, max_pages):
+        fetch_calls["creds"] = creds
+        fetch_calls["since"] = since
+        return [{"raw": 1}]
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        fake_fetch,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        lambda raw: ["ev-deezer"],
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx("deezer", {})
+    ctx = RunContext(
+        plugin_id="deezer", config={},
+        credentials={"access-token": "mytoken"},
+        state=st, log=logging.getLogger("t"), _emit=lambda e: None,
+    )
+    DEEZER_PLUGIN.run(ctx)
+
+    assert fetch_calls["creds"] == {"access_token": "mytoken"}
+    assert fetch_calls["since"] is None  # no watermark → full backfill
+    assert fake_client.calls["imported"] == ["ev-deezer"]
+    assert fake_client.calls["ensure_tag"] == "deezer"
+    assert st.watermark == "2026-05-22T10:00:00+00:00"
+
+
+def test_deezer_plugin_rewinds_watermark_by_one_hour(monkeypatch):
+    """When a watermark is set, since = watermark - 1h."""
+    from datetime import datetime, timezone, timedelta
+
+    received_since = {}
+
+    def fake_fetch(creds, since, max_pages):
+        received_since["since"] = since
+        return []
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        fake_fetch,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        lambda raw: [],
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    ctx, st = _make_ctx("deezer", {})
+    st.watermark = "2026-05-22T12:00:00+00:00"
+    ctx = RunContext(
+        plugin_id="deezer", config={},
+        credentials={"access-token": "tok"},
+        state=st, log=logging.getLogger("t"), _emit=lambda e: None,
+    )
+    DEEZER_PLUGIN.run(ctx)
+
+    expected = datetime(2026, 5, 22, 11, 0, 0, tzinfo=timezone.utc)
+    assert received_since["since"] == expected
+
+
+def test_deezer_plugin_raises_when_credential_missing():
+    ctx, st = _make_ctx("deezer", {})
+    ctx = RunContext(
+        plugin_id="deezer", config={}, credentials={},
+        state=st, log=logging.getLogger("t"), _emit=lambda e: None,
+    )
+    with pytest.raises(RuntimeError, match="access-token"):
+        DEEZER_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Trakt plugin
+# ---------------------------------------------------------------------------
+
+def test_trakt_plugin_metadata():
+    from datetime import timedelta
+    assert TRAKT_PLUGIN.id == "trakt"
+    assert TRAKT_PLUGIN.kind == "scheduled"
+    assert TRAKT_PLUGIN.default_interval == timedelta(hours=6)
+    assert not TRAKT_PLUGIN.required_credentials  # creds come from the file wizard
+
+
+def test_trakt_plugin_run_imports_and_advances_watermark(monkeypatch):
+    """fetch_history + normalize_history run; cluster/twin helpers are called;
+    watermark advances when posted > 0."""
+    fake_client = _FakeClient()
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        lambda: [{"id": 1, "type": "movie", "watched_at": "2026-05-22T10:00:00.000Z"}],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: ["ev-trakt"],
+    )
+    # Stub out cluster and twin helpers — no clusters, no twins.
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.apply_cluster_policy",
+        lambda events, policy: events,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.find_low_conf_twins",
+        lambda events, extra_pool: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        lambda: [],
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx("trakt", {})
+    TRAKT_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == ["ev-trakt"]
+    assert fake_client.calls["ensure_tag"] == "trakt"
+    assert st.watermark == "2026-05-22T10:00:00+00:00"
+
+
+def test_trakt_plugin_raises_when_clusters_is_ask(monkeypatch):
+    """clusters='ask' is interactive and must raise RuntimeError in headless mode."""
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [],
+    )
+
+    ctx, _ = _make_ctx("trakt", {"clusters": "ask"})
+    with pytest.raises(RuntimeError, match="ask"):
+        TRAKT_PLUGIN.run(ctx)
+
+
+def test_trakt_plugin_raises_when_twin_policy_is_ask(monkeypatch):
+    """twin_policy='ask' is interactive and must raise RuntimeError in headless mode."""
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [],
+    )
+
+    ctx, _ = _make_ctx("trakt", {"twin_policy": "ask"})
+    with pytest.raises(RuntimeError, match="ask"):
+        TRAKT_PLUGIN.run(ctx)
+
+
+def test_trakt_plugin_drops_clusters_when_policy_is_drop(monkeypatch):
+    """clusters='drop' should call apply_cluster_policy with action='drop'."""
+    from fulcra_csv import ClusterPolicy
+
+    applied_policies = []
+
+    def fake_apply(events, policy):
+        applied_policies.append(policy)
+        return events
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: ["ev"],
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.apply_cluster_policy", fake_apply)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.find_low_conf_twins",
+        lambda events, extra_pool: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        lambda: [],
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, _ = _make_ctx("trakt", {"clusters": "drop"})
+    TRAKT_PLUGIN.run(ctx)
+
+    assert len(applied_policies) == 1
+    assert applied_policies[0].action == "drop"
+
+
+def test_trakt_plugin_auto_discards_twins_when_policy_is_auto_discard(monkeypatch):
+    """twin_policy='auto-discard' discards low-conf twins from the twin cache."""
+    from datetime import datetime, timezone
+
+    class _FakeLowConf:
+        deterministic_id = "low-id"
+        external_ids = {"content_fingerprint": "fp:music:artist:title"}
+        timestamp_confidence = "low"
+        start_time = datetime(2026, 5, 22, 10, tzinfo=timezone.utc)
+
+    class _FakeHighConf:
+        source_id = "high-id"
+        external_ids = {"content_fingerprint": "fp:music:artist:title",
+                        "importer": "lastfm"}
+        timestamp_confidence = "high"
+        start_time = datetime(2026, 5, 22, 10, tzinfo=timezone.utc)
+
+    low = _FakeLowConf()
+    high = _FakeHighConf()
+
+    discard_calls = []
+
+    def fake_apply_twin(events, discard_ids):
+        discard_calls.append(discard_ids)
+        return [e for e in events if getattr(e, "deterministic_id", None) not in discard_ids]
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [low],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.apply_cluster_policy",
+        lambda events, policy: events,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.find_low_conf_twins",
+        lambda events, extra_pool: [(low, high)],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        lambda: [high],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.apply_twin_decisions",
+        fake_apply_twin,
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: None,
+    )
+
+    ctx, _ = _make_ctx("trakt", {"twin_policy": "auto-discard"})
+    TRAKT_PLUGIN.run(ctx)
+
+    assert len(discard_calls) == 1
+    assert "low-id" in discard_calls[0]
