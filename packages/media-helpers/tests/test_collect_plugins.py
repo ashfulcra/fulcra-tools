@@ -1056,3 +1056,168 @@ def test_apple_podcasts_timemachine_plugin_raises_when_no_snapshots(monkeypatch)
     ctx, _ = _make_ctx("apple-podcasts-timemachine", {})
     with pytest.raises(RuntimeError, match="Time Machine"):
         APPLE_PODCASTS_TIMEMACHINE_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Generic CSV plugin
+# ---------------------------------------------------------------------------
+
+from fulcra_media.collect_plugins import GENERIC_CSV_PLUGIN  # noqa: E402
+from fulcra_media.importers.generic_csv import _FP_AUTO  # noqa: E402
+
+
+def test_generic_csv_plugin_metadata():
+    assert GENERIC_CSV_PLUGIN.id == "generic-csv"
+    assert GENERIC_CSV_PLUGIN.name == "Generic media CSV"
+    assert GENERIC_CSV_PLUGIN.kind == "manual"
+    assert GENERIC_CSV_PLUGIN.default_interval is None
+    assert not GENERIC_CSV_PLUGIN.required_credentials
+
+
+def test_generic_csv_plugin_run_imports_with_column_map_and_service_category(
+    monkeypatch, tmp_path
+):
+    """run() parses the CSV, passes a ColumnMap + service/category, and runs the import."""
+    from fulcra_csv import ColumnMap
+
+    fake_csv = tmp_path / "data.csv"
+    fake_csv.write_text("timestamp,title,artist,id\n")
+
+    received = {}
+
+    def fake_parse(path, *, service, category, column_map, tz, confidence, fingerprint_kind):
+        received["service"] = service
+        received["category"] = category
+        received["column_map"] = column_map
+        received["tz"] = tz
+        received["confidence"] = confidence
+        received["fingerprint_kind"] = fingerprint_kind
+        return iter(["ev-csv"])
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.parse_media_csv",
+        fake_parse,
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    ctx, _ = _make_ctx(
+        "generic-csv",
+        {
+            "path": str(fake_csv),
+            "service": "myservice",
+            "category": "listened",
+        },
+    )
+    GENERIC_CSV_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == ["ev-csv"]
+    assert fake_client.calls["ensure_tag"] == "myservice"
+    assert received["service"] == "myservice"
+    assert received["category"] == "listened"
+    assert isinstance(received["column_map"], ColumnMap)
+    # Defaults: ts_col=timestamp, title_col=title, subtitle_col=artist, id_col=id
+    assert received["column_map"].timestamp == "timestamp"
+    assert received["column_map"].title == "title"
+    assert received["column_map"].subtitle == "artist"
+    assert received["column_map"].source_id == "id"
+    # tz default is UTC (timezone.utc)
+    from datetime import timezone
+    assert received["tz"] is timezone.utc
+    assert received["confidence"] == "medium"
+    # fingerprint default is "auto" → _FP_AUTO sentinel
+    assert received["fingerprint_kind"] is _FP_AUTO
+
+
+def test_generic_csv_plugin_raises_when_path_missing():
+    ctx, _ = _make_ctx("generic-csv", {"service": "svc", "category": "watched"})
+    with pytest.raises(RuntimeError, match="path"):
+        GENERIC_CSV_PLUGIN.run(ctx)
+
+
+def test_generic_csv_plugin_raises_when_service_missing():
+    ctx, _ = _make_ctx("generic-csv", {"path": "/tmp/x.csv", "category": "watched"})
+    with pytest.raises(RuntimeError, match="service"):
+        GENERIC_CSV_PLUGIN.run(ctx)
+
+
+def test_generic_csv_plugin_raises_when_category_missing():
+    ctx, _ = _make_ctx("generic-csv", {"path": "/tmp/x.csv", "service": "svc"})
+    with pytest.raises(RuntimeError, match="category"):
+        GENERIC_CSV_PLUGIN.run(ctx)
+
+
+def test_generic_csv_plugin_fingerprint_none_maps_to_none(monkeypatch, tmp_path):
+    """fingerprint='none' must pass None as fingerprint_kind to parse_media_csv."""
+    fake_csv = tmp_path / "data.csv"
+    fake_csv.write_text("timestamp,title,artist,id\n")
+
+    received = {}
+    fake_client = _FakeClient()
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.parse_media_csv",
+        lambda path, *, service, category, column_map, tz, confidence, fingerprint_kind: (
+            received.update({"fingerprint_kind": fingerprint_kind}) or iter([])
+        ),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    ctx, _ = _make_ctx(
+        "generic-csv",
+        {"path": str(fake_csv), "service": "svc", "category": "watched", "fingerprint": "none"},
+    )
+    GENERIC_CSV_PLUGIN.run(ctx)
+
+    assert received["fingerprint_kind"] is None
+
+
+def test_generic_csv_plugin_fingerprint_auto_maps_to_fp_auto(monkeypatch, tmp_path):
+    """fingerprint='auto' (the default) must pass _FP_AUTO as fingerprint_kind."""
+    fake_csv = tmp_path / "data.csv"
+    fake_csv.write_text("timestamp,title,artist,id\n")
+
+    received = {}
+    fake_client = _FakeClient()
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.parse_media_csv",
+        lambda path, *, service, category, column_map, tz, confidence, fingerprint_kind: (
+            received.update({"fingerprint_kind": fingerprint_kind}) or iter([])
+        ),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    ctx, _ = _make_ctx(
+        "generic-csv",
+        {"path": str(fake_csv), "service": "svc", "category": "watched", "fingerprint": "auto"},
+    )
+    GENERIC_CSV_PLUGIN.run(ctx)
+
+    assert received["fingerprint_kind"] is _FP_AUTO
+
+
+def test_generic_csv_plugin_fingerprint_explicit_passes_through(monkeypatch, tmp_path):
+    """fingerprint='music' (or any explicit kind) passes the string through unchanged."""
+    fake_csv = tmp_path / "data.csv"
+    fake_csv.write_text("timestamp,title,artist,id\n")
+
+    received = {}
+    fake_client = _FakeClient()
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.parse_media_csv",
+        lambda path, *, service, category, column_map, tz, confidence, fingerprint_kind: (
+            received.update({"fingerprint_kind": fingerprint_kind}) or iter([])
+        ),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+
+    ctx, _ = _make_ctx(
+        "generic-csv",
+        {"path": str(fake_csv), "service": "svc", "category": "watched", "fingerprint": "music"},
+    )
+    GENERIC_CSV_PLUGIN.run(ctx)
+
+    assert received["fingerprint_kind"] == "music"
