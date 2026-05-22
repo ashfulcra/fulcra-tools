@@ -16,6 +16,9 @@ from fulcra_media.collect_plugins import (
     YOUTUBE_PLUGIN,
     SPOTIFY_IFTTT_PLUGIN,
     APPLE_TAKEOUT_PLUGIN,
+    GENERIC_RSS_PLUGIN,
+    LETTERBOXD_PLUGIN,
+    GOODREADS_PLUGIN,
 )
 
 
@@ -343,3 +346,250 @@ def test_apple_takeout_plugin_raises_without_path():
     ctx, _ = _make_ctx("apple-takeout", {})
     with pytest.raises(RuntimeError, match="path"):
         APPLE_TAKEOUT_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers for RSS scheduled plugin tests
+# ---------------------------------------------------------------------------
+
+def _make_event(start_iso: str):
+    """Return a minimal fake NormalizedEvent-like object with start_time set."""
+    from datetime import datetime, timezone
+
+    class _FakeEvent:
+        def __init__(self, iso: str):
+            self.start_time = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+    return _FakeEvent(start_iso)
+
+
+# ---------------------------------------------------------------------------
+# Generic RSS plugin
+# ---------------------------------------------------------------------------
+
+def test_generic_rss_plugin_metadata():
+    from datetime import timedelta
+    assert GENERIC_RSS_PLUGIN.id == "generic-rss"
+    assert GENERIC_RSS_PLUGIN.kind == "scheduled"
+    assert GENERIC_RSS_PLUGIN.default_interval == timedelta(hours=6)
+    assert not GENERIC_RSS_PLUGIN.required_credentials
+
+
+def test_generic_rss_plugin_run_imports_and_advances_watermark(monkeypatch):
+    ev = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        lambda feed_url, service, category: iter([ev]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx(
+        "generic-rss",
+        {"feed_url": "https://example.com/feed.rss", "service": "mypodcast", "category": "listened"},
+    )
+    GENERIC_RSS_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [ev]
+    assert fake_client.calls["ensure_tag"] == "mypodcast"
+    assert st.watermark == "2026-05-22T10:00:00+00:00"
+
+
+def test_generic_rss_plugin_filters_by_watermark(monkeypatch):
+    """Events before the watermark must be excluded."""
+    old_ev = _make_event("2026-05-20T00:00:00+00:00")
+    new_ev = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        lambda feed_url, service, category: iter([old_ev, new_ev]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx(
+        "generic-rss",
+        {"feed_url": "https://example.com/feed.rss", "service": "s", "category": "watched"},
+    )
+    st.watermark = "2026-05-21T00:00:00+00:00"
+    GENERIC_RSS_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [new_ev]
+
+
+def test_generic_rss_plugin_max_entries(monkeypatch):
+    """max_entries slices the filtered list."""
+    events = [_make_event("2026-05-22T10:00:00+00:00"),
+              _make_event("2026-05-22T11:00:00+00:00"),
+              _make_event("2026-05-22T12:00:00+00:00")]
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        lambda feed_url, service, category: iter(events),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda evs: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, _ = _make_ctx(
+        "generic-rss",
+        {"feed_url": "https://example.com/f.rss", "service": "s", "category": "watched",
+         "max_entries": 2},
+    )
+    GENERIC_RSS_PLUGIN.run(ctx)
+
+    assert len(fake_client.calls["imported"]) == 2
+
+
+def test_generic_rss_plugin_raises_without_feed_url():
+    ctx, _ = _make_ctx("generic-rss", {"service": "s", "category": "watched"})
+    with pytest.raises(RuntimeError, match="feed_url"):
+        GENERIC_RSS_PLUGIN.run(ctx)
+
+
+def test_generic_rss_plugin_raises_without_service():
+    ctx, _ = _make_ctx("generic-rss", {"feed_url": "https://x.com/f", "category": "watched"})
+    with pytest.raises(RuntimeError, match="service"):
+        GENERIC_RSS_PLUGIN.run(ctx)
+
+
+def test_generic_rss_plugin_raises_without_category():
+    ctx, _ = _make_ctx("generic-rss", {"feed_url": "https://x.com/f", "service": "s"})
+    with pytest.raises(RuntimeError, match="category"):
+        GENERIC_RSS_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Letterboxd plugin
+# ---------------------------------------------------------------------------
+
+def test_letterboxd_plugin_metadata():
+    from datetime import timedelta
+    assert LETTERBOXD_PLUGIN.id == "letterboxd"
+    assert LETTERBOXD_PLUGIN.kind == "scheduled"
+    assert LETTERBOXD_PLUGIN.default_interval == timedelta(hours=12)
+    assert not LETTERBOXD_PLUGIN.required_credentials
+
+
+def test_letterboxd_plugin_run_imports_and_advances_watermark(monkeypatch):
+    ev = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.lb_importer.fetch_diary",
+        lambda username: iter([ev]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx("letterboxd", {"username": "johndoe"})
+    LETTERBOXD_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [ev]
+    assert fake_client.calls["ensure_tag"] == "letterboxd"
+    assert st.watermark == "2026-05-22T10:00:00+00:00"
+
+
+def test_letterboxd_plugin_filters_by_watermark(monkeypatch):
+    old_ev = _make_event("2026-05-20T00:00:00+00:00")
+    new_ev = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.lb_importer.fetch_diary",
+        lambda username: iter([old_ev, new_ev]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx("letterboxd", {"username": "johndoe"})
+    st.watermark = "2026-05-21T00:00:00+00:00"
+    LETTERBOXD_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [new_ev]
+
+
+def test_letterboxd_plugin_raises_without_username():
+    ctx, _ = _make_ctx("letterboxd", {})
+    with pytest.raises(RuntimeError, match="username"):
+        LETTERBOXD_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Goodreads plugin
+# ---------------------------------------------------------------------------
+
+def test_goodreads_plugin_metadata():
+    from datetime import timedelta
+    assert GOODREADS_PLUGIN.id == "goodreads"
+    assert GOODREADS_PLUGIN.kind == "scheduled"
+    assert GOODREADS_PLUGIN.default_interval == timedelta(hours=12)
+    assert not GOODREADS_PLUGIN.required_credentials
+
+
+def test_goodreads_plugin_run_imports_and_advances_watermark(monkeypatch):
+    ev = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        lambda user_id: iter([ev]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx("goodreads", {"user_id": "12345"})
+    GOODREADS_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [ev]
+    assert fake_client.calls["ensure_tag"] == "goodreads"
+    assert st.watermark == "2026-05-22T10:00:00+00:00"
+
+
+def test_goodreads_plugin_filters_by_watermark(monkeypatch):
+    old_ev = _make_event("2026-05-20T00:00:00+00:00")
+    new_ev = _make_event("2026-05-22T10:00:00+00:00")
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        lambda user_id: iter([old_ev, new_ev]),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T10:00:00+00:00",
+    )
+
+    ctx, st = _make_ctx("goodreads", {"user_id": "12345"})
+    st.watermark = "2026-05-21T00:00:00+00:00"
+    GOODREADS_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [new_ev]
+
+
+def test_goodreads_plugin_raises_without_user_id():
+    ctx, _ = _make_ctx("goodreads", {})
+    with pytest.raises(RuntimeError, match="user_id"):
+        GOODREADS_PLUGIN.run(ctx)
