@@ -47,37 +47,49 @@ A macOS menubar app — `Fulcra Collect.app` — that:
 ## Package
 
 - Product name: **Fulcra Collect.app**
-- Directory: `packages/menubar/` (a standalone Xcode project; *not* a
-  `uv` workspace member — Python doesn't enter this directory).
+- Directory: `packages/menubar/` (a `uv` workspace member, alongside
+  `collect`, `attention`, `dayone`, etc.)
+- Python module: `fulcra_menubar`
 - Bundle identifier: `com.fulcradynamics.collect.menubar`
-- Distribution: a `.app` produced by `xcodebuild`. Signing and
+- Language: **Python 3.12** + PyObjC. (Swift port is a separate later
+  project — see "Stack decision" and "UX lock and the Swift handoff".)
+- Libraries: `rumps` for the `NSStatusItem` baseline; `pyobjc-core`
+  +`pyobjc-framework-Cocoa` + `pyobjc-framework-UserNotifications` for
+  the custom popover, Preferences window, and notifications;
+  `tomlkit` for round-tripping `config.toml` without losing comments;
+  `py2app` for the `.app` build.
+- Distribution: a `.app` built with `py2app` for local install; a
+  `python -m fulcra_menubar` entry point for developer mode (runs the
+  app from a terminal with live logging). Code signing and
   notarization land in sub-project 3.
-- Language: Swift 5.10+ targeting **macOS 13 (Ventura)** or newer.
-- Frameworks: SwiftUI for the popover and Preferences window; AppKit for
-  `NSStatusItem`; `Network.framework` for the UDS socket; the
-  `UserNotifications` framework for failure alerts.
 
-### Stack decision (Swift vs. Python+rumps)
+### Stack decision (Python now, Swift after UX lock)
 
-The rest of the monorepo is Python, so picking Swift here is a
-deliberate departure. The trade-off:
+The user's call is **Python first, Swift after UX is locked.** The
+spec follows that.
 
-- **Swift / SwiftUI / AppKit** (chosen). Native menubar UX, easy to nail
-  the brand-on-white aesthetic, ships as a small `.app`. Cost: a new
-  toolchain (Xcode) and a new language in the repo. Sub-project 3's
-  code-signing/notarization story is also more straightforward for a
-  signed `.app` than for a Python-bundled binary.
-- **Python + `rumps`** (rejected). Stays in-language, but `rumps` gives
-  a basic `NSStatusItem` only — a custom popover with rows, buttons,
-  badges, and tinted accents is hand-written PyObjC. The line count to
-  reach parity with a SwiftUI implementation is roughly the same, with
-  worse polish and worse tooling.
-- **Tauri (Rust + webview)** (rejected). Brings full HTML/CSS, but adds
-  Rust to the repo and a webview process per menubar window. Overweight
-  for a status display.
+- **Python + PyObjC + `rumps`** (chosen for v1). Stays in-language
+  with the rest of the monorepo so the team can iterate on UX
+  quickly. `rumps` handles the `NSStatusItem` baseline; PyObjC backs
+  the custom popover, Preferences window, and Notifications because
+  `rumps` alone tops out at a basic menu. Cost: PyObjC code is wordier
+  than SwiftUI and the AppKit layer is hand-rolled. That cost is
+  acceptable while the UX is moving — the goal of v1 is to learn
+  which surfaces actually matter, not to ship the production app.
+- **Swift / SwiftUI / AppKit** (deferred). The production target.
+  Picked up once the UX has been used long enough to lock the popover
+  layout, the Preferences structure, the notification triggers, and
+  the palette. AppKit ↔ PyObjC has a near-1:1 mapping, so the port is
+  largely transcription, not redesign. The handoff criteria are
+  enumerated in "UX lock and the Swift handoff" below.
+- **Tauri (Rust + webview)** (rejected). Brings a webview process per
+  window. Overweight for this surface, and the UX it produces would
+  not faithfully predict the final native UX, which defeats the
+  purpose of v1.
 
-The decision is reversible: the daemon's wire protocol is the contract.
-A Python rewrite later would not change a line of sub-project 1.
+The decision is reversible in both directions: the daemon's wire
+protocol is the contract. The Python app and the eventual Swift app
+both speak the same JSON over the same UDS.
 
 ## Communication with the daemon
 
@@ -93,12 +105,16 @@ connects as the same user as the daemon — anything else fails by design.
 
 On launch and after every connection error, the app:
 
-1. Opens an `NWConnection` over `.unix(path: ...)`.
+1. Opens a `socket.AF_UNIX` connection to the control-socket path.
+   Reuses the same client helper sub-project 1 already ships
+   (`fulcra_collect.control.send_request`) — imported directly, since
+   `fulcra-menubar` declares `fulcra-collect` as a workspace
+   dependency.
 2. Sends `{"cmd":"status"}\n` and reads one newline-terminated JSON
-   response.
-3. If `connect()` refuses or the file doesn't exist, the app enters a
-   **Daemon stopped** state and the popover shows the bootstrap card
-   (see "Bootstrap" below).
+   response (5s timeout).
+3. If `connect()` refuses or the socket file doesn't exist, the app
+   enters a **Daemon stopped** state and the popover shows the
+   bootstrap card (see "Bootstrap" below).
 
 ### Polling
 
@@ -109,9 +125,15 @@ The polling schedule has two regimes:
 - **Popover closed:** poll every 10 seconds. Just often enough to update
   the menubar icon badge and fire failure notifications.
 
-Polling is suspended while the machine is asleep — the app subscribes to
-`NSWorkspace.willSleepNotification` / `didWakeNotification`. On wake,
-the next tick fires immediately.
+The poll runs on a dedicated background thread; results are dispatched
+to the main thread via PyObjC's
+`NSObject.performSelectorOnMainThread_withObject_waitUntilDone_` so
+view updates happen on the AppKit event loop. Polling is suspended
+while the machine is asleep — the app subscribes to
+`NSWorkspace.sharedWorkspace().notificationCenter()` for
+`NSWorkspaceWillSleepNotification` and
+`NSWorkspaceDidWakeNotification`. On wake, the next tick fires
+immediately.
 
 ### Existing commands (used as-is from sub-project 1)
 
@@ -170,9 +192,9 @@ to see the popover.
 
 ## Popover
 
-A SwiftUI popover anchored to the menubar item. Width 360pt, max height
-600pt (scrolls), white background, 14pt corner radius, standard macOS
-material shadow.
+An `NSPopover` (PyObjC) anchored to the menubar item. Width 360pt,
+max height 600pt (scrolls), white background, 14pt corner radius,
+standard macOS material shadow.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
@@ -316,8 +338,9 @@ fulcra-collect service install
 fulcra-collect service start
 ```
 
-via `Process` with stdout/stderr captured into a small log sheet
-(useful for diagnosing "not on PATH" cases).
+via `subprocess.Popen` with stdout/stderr captured into a small log
+sheet (useful for diagnosing "not on PATH" cases). The shell-out runs
+on a background thread so the popover stays responsive.
 
 The app does **not** bundle the daemon binary. The user must have
 `fulcra-collect` on `PATH` (installed via `uv tool install
@@ -330,8 +353,10 @@ just a UI; the Python tool is the engine.
 
 ## Notifications
 
-Native macOS notifications via `UserNotifications`. The app requests
-authorization on first launch.
+Native macOS notifications via the `UserNotifications` framework,
+called from Python through PyObjC
+(`pyobjc-framework-UserNotifications`). The app requests authorization
+on first launch.
 
 Triggers (each de-duplicated to at most one per plugin per hour):
 
@@ -393,85 +418,102 @@ accents are tuned the way they are.
 
 ### Typography
 
-- System font (SF Pro Display) at standard SwiftUI scales.
+- System font (SF Pro), set via `NSFont.systemFontOfSize_weight_`.
 - 16pt semibold — popover title.
 - 14pt regular — row labels, body.
 - 12pt regular — subtitles, secondary metadata.
-- 11pt monospaced (SF Mono) — error strings, ids on disambiguation
-  lines.
+- 11pt monospaced (`NSFont.monospacedSystemFontOfSize_weight_`) —
+  error strings, ids on disambiguation lines.
 
 ### Iconography
 
-SF Symbols throughout (`circle.fill`, `arrow.clockwise`, `gear`,
-`square.and.pencil`, `xmark.circle`). The menubar item is a custom
-template PDF asset (the Fulcra mark, monochrome) shipped in the asset
-catalogue.
+SF Symbols throughout, loaded via
+`NSImage.imageWithSystemSymbolName_accessibilityDescription_`
+(`circle.fill`, `arrow.clockwise`, `gear`, `square.and.pencil`,
+`xmark.circle`). The menubar item is a custom template PDF asset (the
+Fulcra mark, monochrome) shipped in `fulcra_menubar/assets/` and
+loaded via `NSImage` with `setTemplate_(True)`.
 
 ## Components
 
 ```
 packages/menubar/
-  FulcraCollect.xcodeproj/
-  FulcraCollect/
-    App/
-      FulcraCollectApp.swift         # @main, NSStatusItem, popover wiring
-      AppDelegate.swift              # popover lifecycle, sleep/wake
-    Daemon/
-      DaemonClient.swift             # NWConnection + JSON request/response
-      DaemonModel.swift              # @Observable status snapshot
-      PollingScheduler.swift         # 2s open / 10s closed, sleep-aware
-    UI/
-      StatusItemView.swift           # menubar icon + badge overlay
-      Popover/
-        PopoverRoot.swift
-        Header.swift
-        PluginRow.swift
-        BootstrapCard.swift
-      Preferences/
-        PreferencesWindow.swift
-        PluginsTab.swift
-        NotificationsTab.swift
-        AboutTab.swift
-    Notifications/
-      NotificationCentre.swift       # debounced post helpers
-    Theme/
-      Palette.swift                  # the colour tokens above
-      Typography.swift
-    Assets.xcassets/
-      MenubarIcon                    # template PDF
-      AppIcon
-  FulcraCollectTests/
-    DaemonClientTests.swift          # fake UDS server fixture
-    PollingSchedulerTests.swift
-    NotificationCentreTests.swift    # de-dup logic
+  pyproject.toml                       # uv workspace member;
+                                       #   declares fulcra-collect dep
+  fulcra_menubar/
+    __init__.py
+    __main__.py                        # `python -m fulcra_menubar`
+    app.py                             # rumps.App subclass; status item,
+                                       #   popover/Preferences wiring,
+                                       #   sleep/wake hooks
+    daemon_client.py                   # AF_UNIX + JSON request/response;
+                                       #   wraps fulcra_collect.control
+    model.py                           # in-memory status snapshot,
+                                       #   in-flight set, observer protocol
+    polling.py                         # 2s open / 10s closed, sleep-aware
+    status_item.py                     # menubar icon + badge overlay
+                                       #   (NSImage + CALayer pulse)
+    popover/
+      __init__.py
+      root.py                          # NSPopover host
+      header.py                        # title + status pill
+      plugin_row.py                    # one row per plugin
+      bootstrap.py                     # "daemon not running" card
+    preferences/
+      __init__.py
+      window.py                        # NSWindowController, tab view
+      plugins_tab.py
+      notifications_tab.py
+      about_tab.py
+    notifications.py                   # UserNotifications wrapper,
+                                       #   one-per-plugin-per-hour de-dup
+    theme/
+      palette.py                       # the colour tokens above as
+                                       #   NSColor factories
+      typography.py
+    assets/
+      menubar-icon.pdf                 # template image
+      app-icon.icns                    # for the .app bundle
+  setup.py                             # py2app entry point
+  tests/
+    test_daemon_client.py              # fake UDS server fixture
+    test_polling.py                    # fake clock
+    test_notifications.py              # de-dup logic
+    test_model.py                      # in-flight set, status diff
 ```
 
-`Daemon/` is a pure model layer: JSON in, structs out, no UI. SwiftUI
-views observe it. This is the only layer with unit tests; the UI is
-exercised by manual smoke and by snapshot screenshots at three states.
+`daemon_client.py` + `model.py` + `polling.py` + `notifications.py` are
+a **pure model layer**: no AppKit imports, no PyObjC. Status JSON
+goes in, observer callbacks go out. This is the layer with unit tests
+and the layer that ports unchanged to Swift later. Everything in
+`status_item.py`, `popover/`, and `preferences/` is the AppKit/PyObjC
+view layer — exercised by manual smoke, not unit tests, because that
+layer is the thing being prototyped.
 
 ## Data flow
 
-1. `FulcraCollectApp` instantiates `DaemonClient` and `DaemonModel` at
-   launch.
-2. `PollingScheduler` calls `DaemonClient.status()` on its schedule.
-   The decoded snapshot is published into `DaemonModel`
-   (`@Observable`).
-3. `StatusItemView` observes `DaemonModel` to choose its rendering
-   (idle / running / failure / down).
-4. Clicking the status item shows the popover, which observes the same
-   model.
-5. Clicking **Run now** calls `DaemonClient.run(pluginId:)` and adds
+1. `fulcra_menubar.app` (a `rumps.App`) instantiates `DaemonClient`,
+   `StatusModel`, and `PollingScheduler` at launch.
+2. `PollingScheduler` runs a background thread that calls
+   `DaemonClient.status()` on its schedule. The decoded snapshot is
+   pushed into `StatusModel`, which fires its observers.
+3. `StatusItem` (subclasses the model observer protocol) chooses its
+   rendering (idle / running / failure / down) and updates the
+   `NSStatusItem`'s image and badge layer on the main thread.
+4. Clicking the status item opens an `NSPopover` anchored to the
+   status-item button; the popover views also observe `StatusModel`.
+5. Clicking **Run now** calls `DaemonClient.run(plugin_id)` and adds
    the id to the in-flight set; the next status poll removes it when
    `last_run` advances.
-6. Failure-threshold detection runs after every status update: a plugin
-   transitioning from `consecutive_failures < 3` to `>= 3` triggers a
-   notification (de-duped per hour).
+6. Failure-threshold detection runs after every status update: a
+   plugin transitioning from `consecutive_failures < 3` to `>= 3`
+   triggers a notification via `notifications.post(...)` (de-duped
+   per hour, in-process).
 7. Preferences config edits write to
-   `~/.config/fulcra-collect/config.toml` using a Swift TOML library
-   (TOMLKit), then send `{"cmd":"reload"}`. Two clients (CLI + UI)
-   editing the same file is acceptable: writes are short, the schema is
-   small, and the daemon re-reads on reload.
+   `~/.config/fulcra-collect/config.toml` via `tomlkit` (which
+   preserves comments and key order), then send `{"cmd":"reload"}`.
+   Two clients (CLI + UI) editing the same file is acceptable: writes
+   are short, the schema is small, and the daemon re-reads on reload.
 
 ## Error handling
 
@@ -492,42 +534,97 @@ The daemon is the source of truth. The UI never invents state.
 
 ## Testing
 
-- **`DaemonClientTests`** — spins up an in-process fake daemon over a
-  `socketpair`, answers canned JSON to each command. Verifies request
-  framing, JSON decoding, and the 5s timeout.
-- **`PollingSchedulerTests`** — uses a fake clock to verify the
-  2s-open / 10s-closed cadence and sleep/wake suspension.
-- **`NotificationCentreTests`** — one-per-plugin-per-hour de-dup, and
-  "Mute all" suppresses everything.
-- **Snapshot tests** — three popover states (healthy, running,
-  failing) and the bootstrap card, via `swift-snapshot-testing`. Run
-  in `xcodebuild test`.
+`pytest` for everything below. The pure-model layer is the only thing
+covered by unit tests; the view layer is exercised by manual smoke.
+
+- **`test_daemon_client.py`** — spins up an in-process fake daemon
+  using `socket.socketpair()` (or a real UDS in `tmp_path`), answers
+  canned JSON to each command. Verifies request framing, JSON
+  decoding, the 5s timeout, and the "daemon stopped" branch.
+- **`test_polling.py`** — uses a fake clock (`freezegun` or a
+  hand-rolled monkeypatch on `time.monotonic`) to verify the 2s-open
+  / 10s-closed cadence and sleep/wake suspension.
+- **`test_notifications.py`** — one-per-plugin-per-hour de-dup, and
+  "Mute all" suppresses everything. Patches the PyObjC notification
+  post so nothing actually fires on the developer's mac during CI.
+- **`test_model.py`** — `StatusModel` diff: in-flight set additions
+  and removals, transition into and out of `consecutive_failures >= 3`,
+  daemon-down transitions. Pure data; no AppKit.
 - **Manual smoke** — listed in the implementation plan as a final
   checklist (popover renders, Run now fires the daemon, a forced
   failure produces a notification, Preferences edits round-trip
   through `reload`).
 
-CI does not run the menubar tests against a real daemon — that would
-need a real keychain entry and a Fulcra token. The fake UDS fixture
-covers the protocol; the rest is local-machine validation.
+CI runs the `pytest` suite on macOS (PyObjC needs the real Apple
+runtime; Linux runners can't import it). The view layer is not in CI —
+that's what the UX-iteration phase is for.
 
 ## Deployment
 
-Sub-project 2 produces `Fulcra Collect.app` via `xcodebuild`. The
-implementation plan stops at "builds, runs locally, talks to my daemon"
-— that is sub-project 2's done line.
+Sub-project 2 produces `Fulcra Collect.app` via `py2app`. The
+implementation plan stops at "builds, runs locally, talks to my
+daemon" — that is sub-project 2's done line.
 
-Sub-project 3 (separate spec) adds code-signing, notarization, the
-hardened runtime, a homebrew cask, and auto-update. Until then, the app
-runs from "Build and Run" in Xcode or from a locally-installed unsigned
-build.
+Developer mode: `python -m fulcra_menubar` runs the app directly from
+the workspace with live logging to the terminal — the iteration loop
+during the UX-lock phase.
 
-On first launch, the app offers to set itself as a login item
-(`SMAppService.mainApp`). Removing it is a toggle in Preferences >
-About.
+End-user mode: `py2app` builds `Fulcra Collect.app` from
+`packages/menubar/setup.py`. Until sub-project 3 adds signing and
+notarization, the `.app` is unsigned and will trip Gatekeeper on first
+launch — acceptable for v1, since this app is for the team and the
+user, not the public.
+
+On first launch, the app offers to set itself as a login item via the
+modern `SMAppService.main_app` API (callable from PyObjC). Removing
+it is a toggle in Preferences > About.
 
 The app does **not** bundle the daemon. The bootstrap card teaches the
 user to install `fulcra-collect` if it isn't on PATH.
+
+## UX lock and the Swift handoff
+
+The Python v1 is a UX laboratory. "UX is locked" means all of the
+following are true and have lived on the user's mac for at least a
+couple of weeks of daily use without changes:
+
+1. The popover layout is frozen — section order, row anatomy, the
+   exact set of footer actions.
+2. The Preferences tab set is frozen, and each tab's controls are
+   frozen.
+3. The notification triggers are frozen (which events fire, what they
+   say, the de-dup window).
+4. The palette is frozen, including any deviations from the brand kit
+   the user wants kept.
+5. The bootstrap flow has been tested on a fresh machine and the
+   wording is what the user wants strangers to see.
+6. The menubar icon states (idle / running / failure / down) are
+   frozen and have a final icon asset.
+
+When all six are true, the Swift port begins as sub-project 2.5 (or
+gets rolled into sub-project 3 alongside signing/notarization — the
+user's call). The port is largely transcription:
+
+- `daemon_client.py` → `DaemonClient.swift` (PyObjC `NSSocket` /
+  `socket.AF_UNIX` → Swift `Network.framework`; JSON decode shape is
+  identical).
+- `model.py` / `polling.py` → `DaemonModel.swift` (an `@Observable`
+  class) + `PollingScheduler.swift`. Same logic, same tests
+  re-written in XCTest against the same fake daemon.
+- `notifications.py` → `NotificationCentre.swift` (PyObjC
+  `UserNotifications` → Swift `UserNotifications`, near-identical
+  API).
+- `status_item.py` + `popover/*` + `preferences/*` → SwiftUI views.
+  The Python layout is implemented in AppKit primitives that map
+  1:1 to SwiftUI containers (`HStack` ↔ `NSStackView` horizontal,
+  `VStack` ↔ `NSStackView` vertical, `Form` ↔ `NSGridView`).
+- `theme/palette.py` → `Palette.swift`. The hex tokens transcribe
+  unchanged.
+
+The daemon's wire protocol does not change. The four pre-work
+handlers added in sub-project 1 stay. The .app's bundle id stays. A
+user upgrading from the Python build to the Swift build keeps their
+config, credentials, and login-item registration.
 
 ## Required pre-work in sub-project 1
 
@@ -593,7 +690,7 @@ treats them as task zero of the menubar work.
 - Light/dark theme switch in the popover. (v1 is light-only by design;
   the brand-on-white is the entire visual hook.)
 - A Linux GTK tray app that consumes the same JSON protocol.
-- Per-plugin custom rows (a plugin ships a tiny SwiftUI snippet via a
+- Per-plugin custom rows (a plugin ships a small UI snippet via a
   manifest field, the menubar renders it). Heavy lift; out for now.
 - An iOS / iPadOS companion that connects to the daemon over Tailscale.
 - Integration with the Fulcra Context macOS app (if/when it exists) so
