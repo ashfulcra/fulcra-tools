@@ -1,8 +1,9 @@
 """The hub daemon: holds the registry + config, answers control-socket
-requests, and (in `serve`) runs the scheduler + supervisor loop.
+requests, and runs the scheduler + supervisor loop.
 
 The request handler and status snapshot are pure enough to unit-test;
-`serve` is a thin loop wired in Task 18's end-to-end check.
+`serve` runs the full loop: control socket, service supervision, and
+scheduled dispatch.
 """
 from __future__ import annotations
 
@@ -78,33 +79,60 @@ class Daemon:
         return {"ok": True}
 
     def _trigger(self, plugin_id: str) -> None:
-        """Fire one run of a plugin. Overridden in tests."""
-        runner.run(plugin_id, runner.worker_command(plugin_id),
-                   now=datetime.now(timezone.utc))
+        """Fire one run of a plugin in a background thread — non-blocking,
+        so a long run never stalls the tick loop or the control socket.
+        Overridden in tests."""
+        import threading
+        threading.Thread(
+            target=runner.run,
+            args=(plugin_id, runner.worker_command(plugin_id)),
+            kwargs={"now": datetime.now(timezone.utc)},
+            daemon=True,
+        ).start()
+
+    def _spawn_service(self, plugin_id: str):
+        """Spawn a service plugin's worker subprocess (kept alive by the
+        ServiceSupervisor)."""
+        import subprocess
+        return subprocess.Popen(runner.worker_command(plugin_id))
 
     # ---- the run loop --------------------------------------------------
 
     def serve(self, *, tick_seconds: float = 30.0) -> None:
-        """Run the daemon: serve the control socket and, each tick, fire
-        any scheduled plugin that is due. Blocks until the process is
-        signalled. (Service-plugin supervision is wired in Task 18.)
+        """Run the daemon: serve the control socket, keep service plugins
+        alive, and fire any scheduled plugin that is due. Blocks until the
+        process is signalled.
 
         The tick uses a short relative sleep, so a system sleep suspends
         it and it resumes on wake — a machine asleep for hours catches up
         within one tick of waking, each overdue plugin firing once. While
-        the machine is offline, network-requiring plugins are skipped
-        (deferred), not run into a failure."""
+        the machine is offline, network-requiring scheduled plugins are
+        skipped (deferred), not run into a failure. Scheduled runs are
+        dispatched on background threads so a long run never blocks the
+        tick loop or the control socket."""
         import threading
+
+        from .supervisor import ServiceSupervisor
+
         server = ControlServer(_control_socket_path(), self.handle_request)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        supervisor = ServiceSupervisor()
         try:
             while True:
+                now = datetime.now(timezone.utc)
+                service_ids = {
+                    pid for pid in self.config.enabled
+                    if pid in self.registry.plugins
+                    and self.registry.plugins[pid].kind == "service"
+                }
+                supervisor.tick(now=now, enabled_ids=service_ids,
+                                spawn=self._spawn_service)
                 states = {pid: state.load(pid) for pid in self.registry.plugins}
                 online = is_online()
                 for pid in due_plugins(self.registry.plugins, self.config,
-                                       states, datetime.now(timezone.utc),
-                                       online=online):
+                                       states, now, online=online):
                     self._trigger(pid)
                 time.sleep(tick_seconds)
         finally:
             server.shutdown()
+            supervisor.shutdown_all()

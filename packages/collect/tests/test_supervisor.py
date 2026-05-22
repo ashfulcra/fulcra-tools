@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fulcra_collect.supervisor import RestartDecision, decide_restart
+from fulcra_collect.supervisor import RestartDecision, ServiceSupervisor, decide_restart
 
 T0 = datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -36,3 +36,91 @@ def test_old_exits_outside_the_window_do_not_count():
     assert d.should_restart is True
     assert d.degraded is False
     assert d.backoff_seconds == 1.0
+
+
+class FakeProc:
+    """A stand-in service process. `alive` controls what poll() reports."""
+    def __init__(self) -> None:
+        self.alive = True
+        self.terminated = False
+
+    def poll(self):
+        return None if self.alive else 1
+
+    def terminate(self):
+        self.terminated = True
+
+
+def test_supervisor_spawns_an_enabled_service_on_the_first_tick():
+    sup = ServiceSupervisor()
+    spawned: list[str] = []
+
+    def spawn(pid):
+        spawned.append(pid)
+        return FakeProc()
+
+    sup.tick(now=T0, enabled_ids={"relay"}, spawn=spawn)
+    assert spawned == ["relay"]
+
+
+def test_supervisor_leaves_a_running_service_alone():
+    sup = ServiceSupervisor()
+    procs = []
+
+    def spawn(pid):
+        p = FakeProc()
+        procs.append(p)
+        return p
+
+    sup.tick(now=T0, enabled_ids={"relay"}, spawn=spawn)
+    sup.tick(now=T0 + timedelta(seconds=30), enabled_ids={"relay"}, spawn=spawn)
+    assert len(procs) == 1  # not respawned
+
+
+def test_supervisor_restarts_an_exited_service_after_backoff():
+    sup = ServiceSupervisor()
+    procs = []
+
+    def spawn(pid):
+        p = FakeProc()
+        procs.append(p)
+        return p
+
+    sup.tick(now=T0, enabled_ids={"relay"}, spawn=spawn)
+    procs[0].alive = False  # the service crashed
+    # The tick that observes the exit records it + sets a backoff — no respawn yet.
+    sup.tick(now=T0 + timedelta(seconds=30), enabled_ids={"relay"}, spawn=spawn)
+    assert len(procs) == 1
+    # A later tick, past the backoff, respawns.
+    sup.tick(now=T0 + timedelta(seconds=120), enabled_ids={"relay"}, spawn=spawn)
+    assert len(procs) == 2
+
+
+def test_supervisor_marks_a_crash_looping_service_degraded():
+    sup = ServiceSupervisor()
+
+    def spawn(pid):
+        return FakeProc()  # every spawn immediately "dead" on next poll
+
+    # Drive 7 ticks 1s apart; each spawned proc is dead by the next tick.
+    t = T0
+    for _ in range(8):
+        for p in list(sup._procs.values()):
+            p.alive = False
+        sup.tick(now=t, enabled_ids={"relay"}, spawn=spawn)
+        t += timedelta(seconds=1)
+    assert "relay" in sup.degraded
+
+
+def test_supervisor_terminates_a_service_that_becomes_disabled():
+    sup = ServiceSupervisor()
+    procs = []
+
+    def spawn(pid):
+        p = FakeProc()
+        procs.append(p)
+        return p
+
+    sup.tick(now=T0, enabled_ids={"relay"}, spawn=spawn)
+    sup.tick(now=T0 + timedelta(seconds=30), enabled_ids=set(), spawn=spawn)
+    assert procs[0].terminated is True
