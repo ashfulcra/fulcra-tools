@@ -28,6 +28,11 @@ fulcra-media = "fulcra_media.cli:cli"
 
 [project.entry-points."fulcra_collect.plugins"]
 lastfm = "fulcra_media.collect_plugins:LASTFM_PLUGIN"
+netflix = "fulcra_media.collect_plugins:NETFLIX_PLUGIN"
+spotify-extended = "fulcra_media.collect_plugins:SPOTIFY_EXTENDED_PLUGIN"
+youtube = "fulcra_media.collect_plugins:YOUTUBE_PLUGIN"
+spotify-ifttt = "fulcra_media.collect_plugins:SPOTIFY_IFTTT_PLUGIN"
+apple-takeout = "fulcra_media.collect_plugins:APPLE_TAKEOUT_PLUGIN"
 
 [tool.uv.sources]
 # Resolve the sibling packages from the workspace, not PyPI.
