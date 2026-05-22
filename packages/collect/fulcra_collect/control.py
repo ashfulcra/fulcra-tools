@@ -25,18 +25,37 @@ _MAX_SOCK_PATH = 104
 
 
 def _short_bind_path(long_path: Path) -> Path:
-    """Return a short substitute path in the system temp dir."""
+    """Return a short substitute path in a per-user temp directory.
+
+    The socket file lives in `<system-temp>/fulcra-collect-<uid>/`, a
+    directory owned by and accessible only to the current user (0700).
+    Using a per-uid dir — never the shared temp root — keeps another
+    local user from pre-creating or replacing the socket path (a TOCTOU
+    on the unlink-then-bind sequence below).
+    """
+    user_dir = Path(tempfile.gettempdir()) / f"fulcra-collect-{os.getuid()}"
+    user_dir.mkdir(mode=0o700, exist_ok=True)
+    # Tighten even a pre-existing, loosely-permissioned dir on every call.
+    user_dir.chmod(0o700)
     digest = hashlib.sha1(str(long_path).encode()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"fc_{digest}.sock"
+    return user_dir / f"fc_{digest}.sock"
 
 
-def _read_line(conn: socket.socket) -> bytes:
+def _read_line(conn: socket.socket, max_bytes: int = 65536) -> bytes:
+    """Read a single newline-delimited message. Bounded by `max_bytes`
+    (control messages are tiny JSON objects — 64 KiB is huge headroom)
+    so a peer that streams bytes without a newline can't grow the buffer
+    until the daemon runs out of memory."""
     chunks: list[bytes] = []
+    total = 0
     while True:
         b = conn.recv(4096)
         if not b:
             break
         chunks.append(b)
+        total += len(b)
+        if total > max_bytes:
+            raise ValueError("control request too large")
         if b.endswith(b"\n"):
             break
     return b"".join(chunks)
@@ -76,6 +95,10 @@ class ControlServer:
 
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(str(bind_path))
+        # AF_UNIX connect() permission is governed by the socket file's
+        # mode; restrict it to the owner so no other local user/process
+        # can connect and issue run/reload/status.
+        os.chmod(bind_path, 0o600)
         self._sock.listen(8)
         self._sock.settimeout(0.2)
 
@@ -96,8 +119,11 @@ class ControlServer:
                 p.unlink()
 
     def _serve_one(self, conn: socket.socket) -> None:
-        raw = _read_line(conn)
+        # The accept loop is single-threaded: a stalled or silent peer
+        # must not wedge it forever. Drop a peer that goes quiet mid-read.
+        conn.settimeout(5.0)
         try:
+            raw = _read_line(conn)
             request = json.loads(raw.decode() or "{}")
             reply = self._handler(request)
         except Exception as exc:  # noqa: BLE001 — a bad request must not kill the server

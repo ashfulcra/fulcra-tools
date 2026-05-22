@@ -20,6 +20,10 @@ def config_dir() -> Path:
     override = os.environ.get("FULCRA_COLLECT_HOME")
     base = Path(override) if override else Path.home() / ".config" / "fulcra-collect"
     base.mkdir(parents=True, exist_ok=True)
+    # It holds the control socket and per-plugin state files — restrict to
+    # the owner. Done unconditionally (like state._state_dir) so a
+    # pre-existing, loosely-permissioned dir is tightened on every call.
+    base.chmod(0o700)
     return base
 
 

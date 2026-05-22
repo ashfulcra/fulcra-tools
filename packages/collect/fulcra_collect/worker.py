@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import traceback
 from typing import TextIO
@@ -16,6 +17,32 @@ from typing import TextIO
 from . import config, credentials, state
 from .plugin import Plugin, RunContext
 from .registry import RegistryResult, discover
+
+# Query-parameter names (case-insensitive) whose values are secrets.
+_SECRET_PARAM_NAMES = (
+    "token", "key", "secret", "password", "passwd", "pwd", "auth",
+    "access_token", "refresh_token", "api_key", "apikey", "bearer",
+    "sig", "signature",
+)
+# `name=value` where name is secret-bearing — capture the value to redact.
+_SECRET_PARAM_RE = re.compile(
+    r"(?i)\b(" + "|".join(_SECRET_PARAM_NAMES) + r")=([^&\s\"']+)"
+)
+# `Bearer <token>` (optionally prefixed by `Authorization:`).
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._\-+/=]+)")
+_MAX_ERROR_LEN = 4000
+
+
+def _scrub_secrets(text: str) -> str:
+    """Redact secrets that a plugin's exception/traceback might embed —
+    a token leaked here would land in `state/<id>.json` and every
+    `status` reply. Redacts secret-named URL query values and `Bearer`
+    tokens, then truncates to a bounded length."""
+    text = _SECRET_PARAM_RE.sub(r"\1=<redacted>", text)
+    text = _BEARER_RE.sub("Bearer <redacted>", text)
+    if len(text) > _MAX_ERROR_LEN:
+        text = text[:_MAX_ERROR_LEN] + "… (truncated)"
+    return text
 
 
 def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
@@ -51,7 +78,8 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         # The watermark is reported even on error: a plugin may advance it
         # partway through a run, and a partial advance must still persist.
         emit({"type": "result", "outcome": "error",
-              "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+              "error": _scrub_secrets(
+                  f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"),
               "watermark": getattr(ctx.state, "watermark", None)})
         return "error"
     # The plugin advanced ctx.state.watermark in this (worker) process; the
