@@ -1,6 +1,8 @@
 """Hub config + config directory."""
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 from fulcra_collect import config
@@ -8,6 +10,13 @@ from fulcra_collect import config
 
 def test_config_dir_honours_the_env_override(collect_home: Path):
     assert config.config_dir() == collect_home
+
+
+def test_config_dir_is_owner_only(collect_home: Path):
+    """M2: the config dir holds the control socket and state — 0700 only."""
+    d = config.config_dir()
+    mode = stat.S_IMODE(os.stat(d).st_mode)
+    assert mode == 0o700, f"expected 0700, got {oct(mode)}"
 
 
 def test_load_returns_empty_config_when_no_file(collect_home: Path):

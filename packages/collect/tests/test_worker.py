@@ -8,6 +8,7 @@ from pathlib import Path
 from fulcra_collect import worker
 from fulcra_collect.plugin import Plugin
 from fulcra_collect.registry import RegistryResult
+from fulcra_collect.worker import _scrub_secrets
 
 
 def _run_capturing(plugin: Plugin, collect_home: Path) -> list[dict]:
@@ -63,6 +64,48 @@ def test_main_reports_unknown_plugin_id(collect_home: Path, capsys):
     import json as _json
     assert _json.loads(last)["outcome"] == "error"
     assert rc == 1
+
+
+def test_scrub_secrets_redacts_a_url_query_param():
+    """M1: a secret-named URL query value is replaced, non-secret params kept."""
+    text = "GET https://api.x/v1?api_key=ABC123&page=2 failed"
+    scrubbed = _scrub_secrets(text)
+    assert "ABC123" not in scrubbed
+    assert "api_key=<redacted>" in scrubbed
+    assert "page=2" in scrubbed  # non-secret param untouched
+
+
+def test_scrub_secrets_redacts_a_bearer_token():
+    """M1: a Bearer token in a traceback message is replaced."""
+    text = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.SECRETPART"
+    scrubbed = _scrub_secrets(text)
+    assert "SECRETPART" not in scrubbed
+    assert "eyJhbGciOiJIUzI1NiJ9" not in scrubbed
+    assert "<redacted>" in scrubbed
+
+
+def test_scrub_secrets_leaves_non_secret_text_intact():
+    """M1: ordinary error text passes through unchanged."""
+    text = "RuntimeError: connection reset by peer at line 42"
+    assert _scrub_secrets(text) == text
+
+
+def test_scrub_secrets_truncates_a_pathological_traceback():
+    """M1: the result is bounded so a huge traceback can't bloat state."""
+    scrubbed = _scrub_secrets("x" * 10_000)
+    assert len(scrubbed) <= 4000 + len("… (truncated)")
+    assert scrubbed.endswith("… (truncated)")
+
+
+def test_worker_error_result_scrubs_a_secret_in_the_exception(collect_home: Path):
+    """M1: a secret raised in a plugin exception never reaches the event."""
+    def run(ctx):
+        raise RuntimeError("auth failed for https://api.x/v1?token=TOPSECRET")
+    plugin = Plugin(id="leaky", name="Leaky", kind="manual", run=run)
+    events = _run_capturing(plugin, collect_home)
+    assert events[-1]["outcome"] == "error"
+    assert "TOPSECRET" not in events[-1]["error"]
+    assert "token=<redacted>" in events[-1]["error"]
 
 
 def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: Path):
