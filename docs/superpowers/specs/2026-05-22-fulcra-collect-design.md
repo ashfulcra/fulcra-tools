@@ -305,6 +305,35 @@ All tests use fakes/mocks — no live APIs, no real keychain prompts.
   the hub; network-touching importers reuse their package's existing
   mock-transport test infrastructure.
 
+## Deployment topology (one hub, many extension machines)
+
+`collect` is a per-machine daemon — per-machine config, keychain, state,
+and launchd/systemd agent. The expected deployment is **one** machine
+running `collect`: the user's "hub."
+
+The Chrome attention extension is lightweight and expected on
+**multiple** machines (laptop, desktop, …). It posts to a relay at
+`127.0.0.1:8771` — a *loopback* endpoint — so a relay must run on
+**every** machine that has the extension, not only the hub. The relay
+therefore has two deployment modes, both of which must keep working:
+
+1. **On the hub machine** — the relay runs as the `collect`
+   `attention-relay` service plugin.
+2. **On an extension-only machine** — the relay runs standalone via
+   `fulcra-attention setup` and its own launchd/systemd agent;
+   `collect` is not installed there.
+
+Consequences:
+
+- Adapting the relay as a `collect` plugin is strictly **additive**.
+  `fulcra-attention`'s standalone `setup` / `relay` / `bootstrap` CLI and
+  its `service_manager` are **not** removed — extension-only machines
+  depend on them.
+- Sub-project 2's onboarding must distinguish "this is my hub machine"
+  (install `collect` + plugins) from "this machine only runs the browser
+  extension" (install just the standalone relay). This is a primary
+  input to that brainstorm.
+
 ## Out of scope
 
 - The menubar / tray UI and the permission-explaining onboarding flow —
