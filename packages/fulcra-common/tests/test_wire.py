@@ -6,12 +6,12 @@ from datetime import datetime, timezone
 
 from fulcra_common.wire import (
     DURATION_ANNOTATION,
-    INSTANT_ANNOTATION,
+    MOMENT_ANNOTATION,
     build_record,
-    default_data_type,
-    definition_payload,
+    duration_definition_payload,
     encode_batch,
     iso_z,
+    moment_definition_payload,
 )
 
 UTC = timezone.utc
@@ -21,19 +21,17 @@ def test_iso_z_formats_with_trailing_z():
     assert iso_z(datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)) == "2026-05-22T12:00:00Z"
 
 
-def test_default_data_type_maps_kind_to_wire_type():
-    assert default_data_type("duration") == DURATION_ANNOTATION == "DurationAnnotation"
-    assert default_data_type("instant") == INSTANT_ANNOTATION == "InstantAnnotation"
+def test_annotation_type_constants():
+    assert DURATION_ANNOTATION == "DurationAnnotation"
+    assert MOMENT_ANNOTATION == "MomentAnnotation"
 
 
-def test_build_record_duration_full_envelope():
+def test_build_record_duration_uses_a_start_end_range():
     rec = build_record(
         data_type="DurationAnnotation",
         start_time=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
         end_time=datetime(2026, 5, 22, 12, 5, 0, tzinfo=UTC),
-        data={"note": "hi"},
-        source_id="src-1",
-        tags=["tag-a", "tag-b"],
+        data={"note": "hi"}, source_id="src-1", tags=["tag-a", "tag-b"],
         definition_id="def-1",
     )
     assert rec["specversion"] == 1
@@ -49,16 +47,17 @@ def test_build_record_duration_full_envelope():
     assert md["content_type"] == "application/json"
 
 
-def test_build_record_instant_omits_end_time():
+def test_build_record_moment_uses_a_bare_scalar_recorded_at():
+    # A point-in-time event: recorded_at is a bare ISO string, NOT a
+    # {start_time} object — that object matches neither arm of Fulcra's
+    # recorded_at union and the record is silently dropped.
     rec = build_record(
-        data_type="InstantAnnotation",
+        data_type="MomentAnnotation",
         start_time=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
-        data={},
-        source_id="s",
-        tags=[],
+        data={}, source_id="s", tags=[],
     )
-    assert "end_time" not in rec["metadata"]["recorded_at"]
-    assert rec["metadata"]["recorded_at"]["start_time"] == "2026-05-22T12:00:00Z"
+    assert rec["metadata"]["recorded_at"] == "2026-05-22T12:00:00Z"
+    assert rec["metadata"]["data_type"] == "MomentAnnotation"
 
 
 def test_build_record_without_definition_id_has_only_the_source_id():
@@ -76,9 +75,8 @@ def test_encode_batch_joins_records_with_newlines():
                      start_time=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
                      end_time=datetime(2026, 5, 22, 12, 1, 0, tzinfo=UTC),
                      data={"x": 1}, source_id="a", tags=[])
-    b = build_record(data_type="DurationAnnotation",
+    b = build_record(data_type="MomentAnnotation",
                      start_time=datetime(2026, 5, 22, 13, 0, 0, tzinfo=UTC),
-                     end_time=datetime(2026, 5, 22, 13, 1, 0, tzinfo=UTC),
                      data={"x": 2}, source_id="b", tags=[])
     body = encode_batch([a, b])
     expected = (json.dumps(a, sort_keys=True).encode() + b"\n"
@@ -86,9 +84,9 @@ def test_encode_batch_joins_records_with_newlines():
     assert body == expected
 
 
-def test_definition_payload_duration_defaults_value_type_to_duration():
-    p = definition_payload(name="Watched", description="things watched",
-                           annotation_type="duration", tags=["t1"])
+def test_duration_definition_payload_includes_measurement_spec():
+    p = duration_definition_payload(name="Watched", description="things watched",
+                                    tags=["t1"])
     assert p == {
         "annotation_type": "duration",
         "name": "Watched",
@@ -102,18 +100,14 @@ def test_definition_payload_duration_defaults_value_type_to_duration():
     }
 
 
-def test_definition_payload_instant_defaults_value_type_to_none():
-    p = definition_payload(name="Journal", description="entries",
-                           annotation_type="instant", tags=[])
-    assert p["measurement_spec"] == {
-        "measurement_type": "instant", "value_type": "none", "unit": None,
+def test_moment_definition_payload_omits_measurement_spec():
+    # A moment definition carries no measurement_spec — verified against
+    # the live Fulcra API.
+    p = moment_definition_payload(name="Journal", description="entries", tags=[])
+    assert p == {
+        "annotation_type": "moment",
+        "name": "Journal",
+        "description": "entries",
+        "tags": [],
     }
-
-
-def test_definition_payload_explicit_value_type_and_unit():
-    p = definition_payload(name="Body Mass", description="kg",
-                           annotation_type="instant", tags=[],
-                           value_type="float", unit="kg")
-    assert p["measurement_spec"] == {
-        "measurement_type": "instant", "value_type": "float", "unit": "kg",
-    }
+    assert "measurement_spec" not in p
