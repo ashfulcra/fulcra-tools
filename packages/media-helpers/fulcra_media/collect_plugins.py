@@ -104,7 +104,10 @@ def _run_scheduled_import(
     """Shared tail for simple fetch-normalize-import-advance scheduled plugins.
 
     Calls ``fetch(since)`` → ``normalize(raw)`` → ensure_tag + run_import →
-    advances ctx.state.watermark when events were posted.
+    advances ctx.state.watermark to the newest processed event whenever the
+    import completes — both posted and skipped-existing count as progress, so
+    the all-duplicate steady state created by the 1-hour rewind window does
+    not freeze the watermark.
 
     This eliminates copy-pasted watermark logic between Last.fm-shaped plugins.
     """

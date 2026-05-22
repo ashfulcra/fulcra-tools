@@ -52,9 +52,13 @@ def test_run_command_rejects_an_unknown_plugin(collect_home: Path):
 def test_run_command_triggers_a_known_plugin(collect_home: Path):
     d = Daemon(registry=_registry(), config=Config())
     triggered: list[str] = []
-    d._trigger = lambda pid: triggered.append(pid)  # injected for the test
+    def _fake_trigger(pid: str) -> bool:
+        triggered.append(pid)
+        return True
+    d._trigger = _fake_trigger  # injected for the test
     reply = d.handle_request({"cmd": "run", "plugin": "dayone"})
     assert reply["ok"] is True
+    assert reply["started"] is True
     assert triggered == ["dayone"]
 
 
