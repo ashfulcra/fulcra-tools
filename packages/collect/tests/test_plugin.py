@@ -1,11 +1,13 @@
 """The plugin API types."""
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 import pytest
 
-from fulcra_collect.plugin import Credential, Permission, Plugin
+from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext
+from fulcra_collect.state import PluginState
 
 
 def _noop(ctx) -> None:
@@ -52,3 +54,76 @@ def test_requires_network_defaults_true_and_is_overridable():
                         requires_network=False)
     assert online.requires_network is True
     assert offline_ok.requires_network is False
+
+
+# ---------------------------------------------------------------------------
+# RunContext.resolved_definition_id tests.
+#
+# The helper hides the resolver + state caching from plugin code. It is
+# exercised via a fake fulcra_client and a fresh PluginState — the
+# resolver itself is tested in fulcra-common.
+# ---------------------------------------------------------------------------
+
+
+class _FakeClient:
+    def __init__(self):
+        self.list_calls = 0
+        self.create_calls = 0
+
+    def list_definitions(self, *, name):
+        self.list_calls += 1
+        return []
+
+    def create_definition(self, *, name, **spec):
+        self.create_calls += 1
+        return {"id": "def-fresh", "name": name, **spec}
+
+
+def _make_ctx(state, client):
+    return RunContext(
+        plugin_id="lastfm",
+        config={},
+        credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=lambda evt: None,
+        _fulcra_client_factory=lambda: client,
+    )
+
+
+def test_resolved_definition_id_calls_resolver_when_state_empty():
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "def-fresh"
+    assert state.definition_id == "def-fresh"
+    assert client.create_calls == 1
+
+
+def test_resolved_definition_id_uses_cache_on_second_call():
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id")
+    client = _FakeClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "cached-id"
+    assert client.list_calls == 0   # resolver was NOT called
+    assert client.create_calls == 0
+
+
+def test_canonical_definition_name_is_optional_on_plugin():
+    # Plugins without a canonical name (e.g. dayone moments) must
+    # still construct cleanly.
+    p = Plugin(id="dayone", name="Day One", kind="manual", run=_noop)
+    assert p.canonical_definition_name is None
+
+
+def test_canonical_definition_name_persists_when_set():
+    p = Plugin(
+        id="lastfm", name="Last.fm", kind="manual",
+        run=_noop,
+        canonical_definition_name="lastfm-listens",
+    )
+    assert p.canonical_definition_name == "lastfm-listens"

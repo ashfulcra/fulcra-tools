@@ -54,6 +54,7 @@ class Plugin:
     requires_network: bool = True
     required_permissions: tuple[Permission, ...] = ()
     required_credentials: tuple[Credential, ...] = ()
+    canonical_definition_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -73,6 +74,7 @@ class RunContext:
     state: "object"        # a PluginState (fulcra_collect.state) — duck-typed here
     log: logging.Logger
     _emit: Callable[[dict], None] = field(repr=False)
+    _fulcra_client_factory: Callable[[], object] | None = field(default=None, repr=False)
 
     def progress(self, **fields: object) -> None:
         """Report structured progress back to the hub core."""
@@ -82,3 +84,46 @@ class RunContext:
         """The Fulcra access token, via the existing fulcra-api auth path."""
         from fulcra_common import BaseFulcraClient
         return BaseFulcraClient().get_token()
+
+    def resolved_definition_id(
+        self,
+        expected_spec: dict,
+        *,
+        canonical_name: str,
+        force_new: bool = False,
+    ) -> str:
+        """Return the cached Fulcra definition id for this plugin, or call
+        the resolver, cache the result in state, and return the freshly
+        resolved id.
+
+        `expected_spec` is the shape the plugin expects — at minimum an
+        `annotation_type` key; Duration annotations also supply a
+        `measurement_spec` dict.  `canonical_name` is the stable, human-
+        readable name used to find (or create) the definition in Fulcra
+        across machines.
+
+        The fulcra client is built by `_fulcra_client_factory` — the
+        worker supplies this factory so `plugin.py` never has to know
+        how to construct an HTTP client or handle auth directly. Plugins
+        that do not call this method can leave the factory unset.
+        """
+        cached = getattr(self.state, "definition_id", None)
+        if cached and not force_new:
+            return cached
+
+        from fulcra_common.definitions import resolve_definition_id
+
+        if self._fulcra_client_factory is None:
+            raise RuntimeError(
+                "RunContext has no _fulcra_client_factory — the runner must "
+                "supply one when the plugin uses resolved_definition_id."
+            )
+        client = self._fulcra_client_factory()
+        new_id = resolve_definition_id(
+            canonical_name=canonical_name,
+            expected_spec=expected_spec,
+            fulcra_client=client,
+            force_new=force_new,
+        )
+        self.state.definition_id = new_id
+        return new_id
