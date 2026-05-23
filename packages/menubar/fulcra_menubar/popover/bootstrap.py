@@ -66,17 +66,33 @@ def make_bootstrap_card(width: float, height: float) -> NSView:
                     ["fulcra-collect", "service", "install"],
                     capture_output=True, text=True, timeout=30,
                 )
-                p2 = subprocess.run(
-                    ["fulcra-collect", "service", "start"],
-                    capture_output=True, text=True, timeout=30,
-                )
-                output = (p1.stdout + p1.stderr + p2.stdout + p2.stderr).strip()
+                p1_out = (p1.stdout + p1.stderr).strip()
+                if p1.returncode != 0:
+                    output = (
+                        f"ERROR: Step 1 (install) failed with exit code {p1.returncode}."
+                        + (f"\n{p1_out}" if p1_out else "")
+                    )
+                else:
+                    p2 = subprocess.run(
+                        ["fulcra-collect", "service", "start"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    p2_out = (p2.stdout + p2.stderr).strip()
+                    if p2.returncode != 0:
+                        output = (
+                            f"ERROR: Step 2 (start) failed with exit code {p2.returncode}."
+                            " Daemon installed but not running; check Console.app log."
+                            + (f"\n{p2_out}" if p2_out else "")
+                        )
+                    else:
+                        combined = "\n".join(filter(None, [p1_out, p2_out]))
+                        output = combined or "Daemon installed and started."
             except Exception as exc:
                 output = f"{type(exc).__name__}: {exc}"
             # Update label on main thread.
             from AppKit import NSOperationQueue  # type: ignore[import-not-found]
             def main():
-                log.setStringValue_(output[:400] or "Daemon started.")
+                log.setStringValue_(output[:400])
             NSOperationQueue.mainQueue().addOperationWithBlock_(main)
 
         threading.Thread(target=work, daemon=True).start()
