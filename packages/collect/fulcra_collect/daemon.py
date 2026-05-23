@@ -90,6 +90,8 @@ class Daemon:
             return {"ok": True}
         if cmd == "version":
             return {"ok": True, **self._version_snapshot}
+        if cmd == "credential_status":
+            return self._credential_status(request.get("plugin", ""))
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
     def _status(self) -> dict:
@@ -128,6 +130,16 @@ class Daemon:
         except _im.PackageNotFoundError:
             daemon_version = "unknown"
         return {"daemon_version": daemon_version, "plugins": plugins}
+
+    def _credential_status(self, plugin_id: str) -> dict:
+        plugin = self.registry.plugins.get(plugin_id)
+        if plugin is None:
+            return {"ok": False, "error": f"unknown plugin {plugin_id!r}"}
+        from . import credentials  # local import; avoids cycles in tests
+        out: dict[str, str] = {}
+        for cred in plugin.required_credentials:
+            out[cred.key] = "set" if credentials.has_secret(plugin_id, cred.key) else "missing"
+        return {"ok": True, "credentials": out}
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
