@@ -13,7 +13,10 @@ import logging
 import re
 import sys
 import traceback
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from fulcra_common import BaseFulcraClient
 
 from . import config, credentials, state
 from .plugin import Plugin, RunContext
@@ -34,7 +37,7 @@ class _FulcraDefinitionAdapter:
     place where the gap is bridged so the resolver stays HTTP-agnostic.
     """
 
-    def __init__(self, base_client: "object") -> None:
+    def __init__(self, base_client: "BaseFulcraClient") -> None:
         self._c = base_client  # BaseFulcraClient instance
 
     def list_definitions(self, *, name: str) -> list[dict]:
