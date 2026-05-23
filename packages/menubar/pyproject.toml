@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-menubar"
+version = "0.1.0"
+description = "macOS menubar UI for fulcra-collect (Python v1, pre-Swift)."
+requires-python = ">=3.12"
+dependencies = [
+    "fulcra-collect",
+    "tomlkit>=0.12",
+]
+
+[project.optional-dependencies]
+macos = [
+    "rumps>=0.4",
+    "pyobjc-core>=10",
+    "pyobjc-framework-Cocoa>=10",
+    "pyobjc-framework-UserNotifications>=10",
+    "pyobjc-framework-ServiceManagement>=10",
+]
+dev = [
+    "pytest>=7.4,<8",
+    "ruff>=0.5",
+]
+build = [
+    "py2app>=0.28",
+]
+
+[tool.uv.sources]
+fulcra-collect = { workspace = true }
+
+[project.scripts]
+fulcra-menubar = "fulcra_menubar.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_menubar"]
