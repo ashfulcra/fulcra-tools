@@ -3,3 +3,22 @@
 # intra-repo `fulcra-common` dependency from source.
 [tool.uv.workspace]
 members = ["packages/*"]
+
+# Workspace-wide pytest settings — applied when running `pytest packages/`
+# from the monorepo root.  Each package also has its own [tool.pytest.ini_options]
+# for per-package invocations.
+[tool.pytest.ini_options]
+# importlib mode imports each test file by its absolute path rather than by
+# dotted module name, which prevents ImportPathMismatchError / module-name
+# collisions when multiple packages share identically-named test files
+# (e.g. tests/test_cli.py, tests/conftest.py) under a workspace-wide run.
+addopts = "--import-mode=importlib"
+# Each package's tests/ directory is added to sys.path so that test modules
+# can do `import media_test_helpers` / `import dayone_test_helpers` (plain
+# helper functions that aren't pytest fixtures).  Module names are
+# package-prefixed to avoid sys.path shadowing between packages.
+# Only the two packages that have helper modules are listed here.
+pythonpath = [
+    "packages/dayone/tests",
+    "packages/media-helpers/tests",
+]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 
 import httpx
@@ -29,7 +28,3 @@ def recording_transport():
     def make(handler: Callable[[httpx.Request], httpx.Response]) -> RecordingTransport:
         return RecordingTransport(handler)
     return make
-
-
-def json_response(status: int, body: dict | list) -> httpx.Response:
-    return httpx.Response(status, content=json.dumps(body).encode(), headers={"content-type": "application/json"})
