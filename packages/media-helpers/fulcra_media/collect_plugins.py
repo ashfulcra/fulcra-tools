@@ -391,7 +391,39 @@ NETFLIX_PLUGIN = Plugin(
 # Spotify Extended Streaming History manual plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Listened" DurationAnnotation
+# used by the spotify-extended plugin.  Identical structure to
+# LASTFM_LISTENED_SPEC — both plugins produce "Listened" Duration annotations
+# against the same shared definition.  Kept as a distinct constant so the
+# resolver call below is self-documenting and so spec-shape tests are local to
+# each plugin block.
+SPOTIFY_EXTENDED_LISTENED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_spotify_extended(ctx: RunContext) -> None:
+    # Ensure the "Listened" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # listened_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Listened" definition
+    # rather than creating a duplicate.  lastfm and spotify-extended share the
+    # same State.listened_definition_id field — whichever plugin runs first
+    # on a new machine will populate it; the other will find it already set.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.listened_definition_id:
+        def_id = ctx.resolved_definition_id(
+            SPOTIFY_EXTENDED_LISTENED_SPEC,
+            canonical_name="Listened",
+        )
+        media_state.listened_definition_id = def_id
+        _state_save(media_state)
+
     _run_file_import(
         ctx,
         parse=spotify_importer.parse_extended_zip,
@@ -405,6 +437,7 @@ SPOTIFY_EXTENDED_PLUGIN = Plugin(
     kind="manual",
     run=_run_spotify_extended,
     default_interval=None,
+    canonical_definition_name="Listened",
     required_credentials=(),
 )
 
