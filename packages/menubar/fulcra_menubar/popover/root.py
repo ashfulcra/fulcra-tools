@@ -1,13 +1,8 @@
-"""The NSPopover host. White background, fixed width, scrolling body.
-
-Section content (plugin rows, bootstrap card) is added in later tasks.
-For now this task lands the popover shell and the header — enough to
-verify the white surface and the header refreshes on model changes.
-"""
+"""The NSPopover host. White background, fixed width, scrolling body."""
 from __future__ import annotations
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSPopover, NSView, NSViewController, NSMakeRect, NSMakeSize,
+    NSPopover, NSScrollView, NSView, NSViewController, NSMakeRect, NSMakeSize,
 )
 
 from ..model import StatusModel
@@ -20,8 +15,9 @@ DEFAULT_HEIGHT = 240.0
 
 
 class PopoverRoot:
-    def __init__(self, model: StatusModel) -> None:
+    def __init__(self, model: StatusModel, client) -> None:
         self._model = model
+        self._client = client
         self._popover = NSPopover.alloc().init()
         # NSPopoverBehaviorTransient = 1
         self._popover.setBehavior_(1)
@@ -35,6 +31,45 @@ class PopoverRoot:
         header = make_header(model)
         header.setFrame_(NSMakeRect(0, DEFAULT_HEIGHT - 56, WIDTH, 56))
         root.addSubview_(header)
+
+        from .plugin_row import make_row, ROW_HEIGHT
+
+        # Section body: a flipped, vertically-stacked list of plugin rows.
+        from AppKit import NSScrollView, NSClipView  # type: ignore[import-not-found]
+
+        body_height = DEFAULT_HEIGHT - 56  # below the header
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, WIDTH, body_height)
+        )
+        scroll.setHasVerticalScroller_(True)
+        scroll.setBorderType_(0)
+        scroll.setDrawsBackground_(False)
+
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, 0))
+        content.setWantsLayer_(True)
+        content.layer().setBackgroundColor_(colors.bg().CGColor())
+        scroll.setDocumentView_(content)
+        root.addSubview_(scroll)
+
+        def rebuild_rows(_model=None):
+            # Clear existing subviews.
+            for sv in list(content.subviews()):
+                sv.removeFromSuperview()
+            ordered = sorted(self._model.plugins, key=lambda p: (
+                {"service": 0, "scheduled": 1, "manual": 2}.get(p.kind, 3), p.name
+            ))
+            y = 0
+            for snapshot in ordered:
+                row = make_row(
+                    snapshot, client=self._client, model=self._model, width=WIDTH,
+                )
+                row.setFrame_(NSMakeRect(0, y, WIDTH, ROW_HEIGHT))
+                content.addSubview_(row)
+                y += ROW_HEIGHT
+            content.setFrame_(NSMakeRect(0, 0, WIDTH, max(y, body_height)))
+
+        rebuild_rows()
+        model.add_observer(rebuild_rows)
 
         controller.setView_(root)
         self._popover.setContentViewController_(controller)
