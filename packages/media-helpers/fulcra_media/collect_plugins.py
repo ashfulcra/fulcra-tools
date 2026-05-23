@@ -219,6 +219,19 @@ DEEZER_PLUGIN = Plugin(
 # Trakt watch history scheduled plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Watched" DurationAnnotation
+# used by the trakt plugin.  Same structure as NETFLIX_WATCHED_SPEC —
+# all Watched plugins share the same definition.
+TRAKT_WATCHED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_trakt(ctx: RunContext) -> None:
     """Fetch Trakt watch history and import it, applying cluster and twin-dedup policy.
 
@@ -306,8 +319,21 @@ def _run_trakt(ctx: RunContext) -> None:
             to_drop = {twin_cache._source_id_of(low) for low, _high in pairs}
             events = apply_twin_decisions(events, to_drop)
 
-    # --- import + watermark advance ---------------------------------------
+    # --- definition resolver + import + watermark advance ----------------
+    # Ensure the "Watched" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # watched_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Watched" definition
+    # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
+    if not media_state.watched_definition_id:
+        def_id = ctx.resolved_definition_id(
+            TRAKT_WATCHED_SPEC,
+            canonical_name="Watched",
+        )
+        media_state.watched_definition_id = def_id
+        _state_save(media_state)
+
     client = FulcraClient()
     client.ensure_tag("trakt", media_state)
     result = client.run_import(events, media_state)
@@ -328,6 +354,7 @@ TRAKT_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_trakt,
     default_interval=timedelta(hours=6),
+    canonical_definition_name="Watched",
     required_credentials=(),  # Auth is managed by the trakt.json creds file.
 )
 
