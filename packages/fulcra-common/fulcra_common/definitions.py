@@ -69,7 +69,7 @@ def resolve_definition_id(
     Raises `DefinitionSchemaMismatch` when an existing def with the
     same name has a different schema."""
     if force_new:
-        suffix = machine_id or platform.node().split(".", 1)[0]
+        suffix = machine_id or platform.node().split(".", 1)[0] or "unknown-host"
         new_name = f"{canonical_name} ({suffix})"
         return fulcra_client.create_definition(name=new_name, **expected_spec)["id"]
 
@@ -77,6 +77,14 @@ def resolve_definition_id(
     if not candidates:
         return fulcra_client.create_definition(name=canonical_name, **expected_spec)["id"]
 
+    # Sort deterministically so every machine converges on the same def.
+    # Prefer oldest by created_at (matching the attention package's
+    # _find_attention_definition policy); fall back to id-sort when
+    # created_at is absent so order is still stable.
+    candidates = sorted(
+        candidates,
+        key=lambda d: (d.get("created_at") is None, d.get("created_at", ""), d.get("id", "")),
+    )
     existing = candidates[0]
     if _spec_matches(existing, expected_spec):
         return existing["id"]
