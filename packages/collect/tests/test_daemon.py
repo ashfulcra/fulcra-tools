@@ -172,3 +172,48 @@ def test_version_handler_returns_daemon_and_plugin_versions(collect_home: Path, 
     assert reply["ok"] is True
     assert reply["daemon_version"] == "0.1.0"
     assert reply["plugins"] == {"lastfm": "0.4.2"}
+
+
+def test_credential_status_reports_set_and_missing(collect_home: Path, monkeypatch):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm",
+        name="Last.fm",
+        kind="manual",
+        run=lambda ctx: None,
+        required_credentials=(
+            Credential(key="session_key", label="Session key", help=""),
+            Credential(key="api_key", label="API key", help=""),
+        ),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    fake_store = {("lastfm", "session_key"): True, ("lastfm", "api_key"): False}
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.has_secret",
+        lambda pid, key: fake_store[(pid, key)],
+    )
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+
+    reply = d.handle_request({"cmd": "credential_status", "plugin": "lastfm"})
+
+    assert reply == {
+        "ok": True,
+        "credentials": {"session_key": "set", "api_key": "missing"},
+    }
+
+
+def test_credential_status_unknown_plugin_returns_error(collect_home: Path):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.registry import RegistryResult
+
+    d = daemon_mod.Daemon(registry=RegistryResult(), config=daemon_mod.Config())
+
+    reply = d.handle_request({"cmd": "credential_status", "plugin": "nope"})
+
+    assert reply["ok"] is False
+    assert "nope" in reply["error"]
