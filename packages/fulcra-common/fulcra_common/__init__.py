@@ -2,5 +2,12 @@
 from __future__ import annotations
 
 from .client import DEFAULT_BASE_URL, BaseFulcraClient, ImportResult
+from .definitions import DefinitionSchemaMismatch, resolve_definition_id
 
-__all__ = ["BaseFulcraClient", "ImportResult", "DEFAULT_BASE_URL"]
+__all__ = [
+    "BaseFulcraClient",
+    "ImportResult",
+    "DEFAULT_BASE_URL",
+    "resolve_definition_id",
+    "DefinitionSchemaMismatch",
+]

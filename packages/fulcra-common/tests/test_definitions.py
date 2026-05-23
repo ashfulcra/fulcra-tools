@@ -125,7 +125,7 @@ def test_resolve_force_new_creates_even_when_match_exists():
 
 
 def test_resolve_force_new_defaults_machine_id_to_platform_node(monkeypatch):
-    monkeypatch.setattr("platform.node", lambda: "Ash-MacBook.local")
+    monkeypatch.setattr("fulcra_common.definitions.platform.node", lambda: "Ash-MacBook.local")
     client = _FakeClient()
     out = resolve_definition_id(
         canonical_name="attention",
@@ -136,4 +136,48 @@ def test_resolve_force_new_defaults_machine_id_to_platform_node(monkeypatch):
     # Hostname suffix only the first dotted component:
     assert client.create_calls == [
         {"name": "attention (Ash-MacBook)", "annotation_type": "moment"}
+    ]
+
+
+def test_resolve_picks_oldest_when_multiple_candidates():
+    spec = {"annotation_type": "moment"}
+    client = _FakeClient(existing=[
+        {"id": "newer", "name": "lastfm-listens",
+         "created_at": "2026-05-23T12:00:00Z", **spec},
+        {"id": "older", "name": "lastfm-listens",
+         "created_at": "2026-04-01T08:00:00Z", **spec},
+    ])
+    out = resolve_definition_id(
+        canonical_name="lastfm-listens",
+        expected_spec=spec, fulcra_client=client,
+    )
+    assert out == "older"   # the oldest wins; every machine agrees
+
+
+def test_resolve_falls_back_to_id_sort_when_no_created_at():
+    # If Fulcra returns candidates without created_at (older defs, or
+    # edge cases), the resolver still picks deterministically by id.
+    spec = {"annotation_type": "moment"}
+    client = _FakeClient(existing=[
+        {"id": "ccc", "name": "x", **spec},
+        {"id": "aaa", "name": "x", **spec},
+        {"id": "bbb", "name": "x", **spec},
+    ])
+    out = resolve_definition_id(
+        canonical_name="x", expected_spec=spec, fulcra_client=client,
+    )
+    assert out == "aaa"
+
+
+def test_resolve_force_new_handles_empty_hostname(monkeypatch):
+    monkeypatch.setattr("fulcra_common.definitions.platform.node", lambda: "")
+    client = _FakeClient()
+    out = resolve_definition_id(
+        canonical_name="attention",
+        expected_spec={"annotation_type": "moment"},
+        fulcra_client=client, force_new=True,
+    )
+    assert out == "new-101"
+    assert client.create_calls == [
+        {"name": "attention (unknown-host)", "annotation_type": "moment"}
     ]
