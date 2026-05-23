@@ -44,6 +44,19 @@ class PopoverRoot:
         root.addSubview_(body_container)
 
         def render(_model=None):
+            # Capture the current scroll origin before tearing down so we
+            # can restore it on the new scrollview after the rebuild. This
+            # prevents the popover snapping back to the top every 2 seconds
+            # while the model-poll fires with the user scrolled down.
+            saved_scroll = None
+            try:
+                for sv in body_container.subviews():
+                    if isinstance(sv, NSScrollView):
+                        saved_scroll = sv.contentView().bounds().origin
+                        break
+            except Exception:
+                saved_scroll = None
+
             for sv in list(body_container.subviews()):
                 sv.removeFromSuperview()
             if self._model.daemon_stopped:
@@ -73,6 +86,14 @@ class PopoverRoot:
                 y += ROW_HEIGHT
             content.setFrame_(NSMakeRect(0, 0, WIDTH, max(y, body_height)))
             body_container.addSubview_(scroll)
+            # Restore the scroll position captured before teardown so the
+            # user's view doesn't jump back to the top on every poll tick.
+            if saved_scroll is not None:
+                try:
+                    scroll.contentView().scrollToPoint_(saved_scroll)
+                    scroll.reflectScrolledClipView_(scroll.contentView())
+                except Exception:
+                    pass
 
         render()
         model.add_observer(on_main_thread(render))
