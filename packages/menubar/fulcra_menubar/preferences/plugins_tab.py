@@ -17,6 +17,7 @@ from Foundation import NSObject  # type: ignore[import-not-found]
 
 from fulcra_collect import config as _config
 
+from .._dispatch import on_main_thread
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
 from ..theme import colors, typography
@@ -35,7 +36,18 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
     content.layer().setBackgroundColor_(colors.bg().CGColor())
     scroll.setDocumentView_(content)
 
+    # Track the last plugin id set so we can short-circuit observer calls when
+    # the plugin list hasn't changed (e.g. a mere status-timestamp update).
+    # credential_status is a blocking UDS call; skipping it on unchanged lists
+    # prevents the N-plugin × 5 s freeze described in Bug 4.
+    _last_state: dict = {"plugin_ids": None}
+
     def rebuild(_model=None):
+        plugin_ids = tuple(sorted(p.id for p in model.plugins))
+        if plugin_ids == _last_state["plugin_ids"]:
+            return  # plugin set unchanged — no need to rebuild the tab
+        _last_state["plugin_ids"] = plugin_ids
+
         for sv in list(content.subviews()):
             sv.removeFromSuperview()
         y = 0
@@ -49,7 +61,7 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
         content.setFrame_(NSMakeRect(0, 0, width, max(y, height)))
 
     rebuild()
-    model.add_observer(rebuild)
+    model.add_observer(on_main_thread(rebuild))
     return scroll
 
 

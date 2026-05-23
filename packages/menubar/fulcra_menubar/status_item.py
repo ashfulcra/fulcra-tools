@@ -23,6 +23,7 @@ from Quartz import (  # type: ignore[import-not-found]
     CABasicAnimation, CALayer, kCAFillModeForwards,
 )
 
+from ._dispatch import on_main_thread
 from .model import OverallState, StatusModel
 from .theme import palette
 
@@ -76,7 +77,7 @@ class StatusItemController:
             self._with_badge = None
         self._pulse_layer = None
         self._apply()
-        model.add_observer(lambda _m: self._apply())
+        model.add_observer(on_main_thread(lambda _m: self._apply()))
 
     def _ns_button(self):
         try:

@@ -69,6 +69,11 @@ class PollingScheduler:
     def _tick(self) -> None:
         try:
             self._on_tick()
+        except Exception:
+            import logging
+            logging.getLogger("fulcra_menubar.polling").exception(
+                "on_tick raised; continuing polling"
+            )
         finally:
             for hook in self._post_tick_hooks:
                 hook()

@@ -37,7 +37,7 @@ class DaemonClient:
     def _send(self, request: dict) -> dict:
         try:
             return _send_request(self.socket_path, request, timeout=self.timeout)
-        except ConnectionError as exc:
+        except (ConnectionError, OSError) as exc:
             raise DaemonUnavailable(str(exc)) from exc
 
     # ---- commands --------------------------------------------------

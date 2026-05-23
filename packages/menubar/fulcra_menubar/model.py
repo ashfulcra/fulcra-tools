@@ -55,6 +55,10 @@ class StatusModel:
     _observers: list[Callable[["StatusModel"], None]] = field(default_factory=list)
     _failure_observers: list[Callable[[str], None]] = field(default_factory=list)
     _known_failing: set[str] = field(default_factory=set)
+    # Maps plugin_id → the last_run value observed at the moment mark_in_flight
+    # was called. _reconcile_in_flight only clears in_flight when the snapshot's
+    # last_run has advanced past this baseline, not merely when it is non-null.
+    _in_flight_baseline: dict[str, str | None] = field(default_factory=dict)
 
     def add_observer(self, fn: Callable[["StatusModel"], None]) -> None:
         self._observers.append(fn)
@@ -82,6 +86,13 @@ class StatusModel:
     def mark_in_flight(self, plugin_id: str) -> None:
         if plugin_id not in self.in_flight:
             self.in_flight.add(plugin_id)
+            # Capture the last_run we saw at trigger time. Only release this
+            # id from in_flight when the snapshot's last_run differs (i.e. a
+            # new run has actually completed and the timestamp advanced).
+            current = next(
+                (p.last_run for p in self.plugins if p.id == plugin_id), None
+            )
+            self._in_flight_baseline[plugin_id] = current
             self._notify()
 
     @property
@@ -102,14 +113,19 @@ class StatusModel:
 
     def _reconcile_in_flight(self) -> None:
         """A plugin id leaves in_flight once its snapshot's last_run
-        moves past the value we observed when the run was triggered.
-        Here we approximate: if a plugin is in_flight AND its current
-        snapshot has last_run set, treat the run as completed."""
+        has advanced past the value we captured at mark_in_flight time.
+        This prevents the pulse from clearing immediately for any plugin
+        that already had a non-null last_run before the run was triggered."""
         completed = set()
         for p in self.plugins:
-            if p.id in self.in_flight and p.last_run:
-                completed.add(p.id)
-        self.in_flight -= completed
+            if p.id in self.in_flight:
+                baseline = self._in_flight_baseline.get(p.id)
+                # Only consider completed when last_run has actually advanced.
+                if p.last_run is not None and p.last_run != baseline:
+                    completed.add(p.id)
+        for pid in completed:
+            self.in_flight.discard(pid)
+            self._in_flight_baseline.pop(pid, None)
 
     def _fire_failure_transitions(self) -> None:
         now_failing = {p.id for p in self.plugins

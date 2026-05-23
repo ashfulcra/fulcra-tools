@@ -106,3 +106,47 @@ def test_socket_missing_raises_daemon_unavailable(tmp_path):
     client = DaemonClient(socket_path=tmp_path / "does-not-exist.sock")
     with pytest.raises(DaemonUnavailable):
         client.status()
+
+
+def test_hung_daemon_raises_daemon_unavailable():
+    """A daemon that accepts the connection but never sends a reply must
+    raise DaemonUnavailable (via the socket timeout / OSError path) rather
+    than propagating a bare TimeoutError that would kill the polling thread.
+
+    Uses a short 0.5 s timeout so the test suite stays fast.
+    """
+    import os
+    import tempfile
+
+    short_dir = Path(tempfile.gettempdir()) / f"fc-hung-{os.getpid()}"
+    short_dir.mkdir(mode=0o700, exist_ok=True)
+    sock_path = short_dir / "hung.sock"
+    if sock_path.exists():
+        sock_path.unlink()
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+
+    stop = threading.Event()
+
+    def _accept_and_hang():
+        server.settimeout(1.0)
+        try:
+            conn, _ = server.accept()
+            # Accept but deliberately never send a reply; hold until test ends.
+            stop.wait(timeout=5.0)
+            conn.close()
+        except socket.timeout:
+            pass
+
+    t = threading.Thread(target=_accept_and_hang, daemon=True)
+    t.start()
+    try:
+        client = DaemonClient(socket_path=sock_path, timeout=0.5)
+        with pytest.raises(DaemonUnavailable):
+            client.status()
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+        server.close()
