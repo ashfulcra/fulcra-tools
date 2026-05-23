@@ -8,6 +8,7 @@ each machine creating its own duplicate. See
 """
 from __future__ import annotations
 
+import platform
 from typing import Any
 
 
@@ -39,3 +40,44 @@ def _spec_matches(existing: dict, expected: dict) -> bool:
     if expected.get("annotation_type") == "moment":
         return True
     return existing.get("measurement_spec") == expected.get("measurement_spec")
+
+
+def resolve_definition_id(
+    *,
+    canonical_name: str,
+    expected_spec: dict,
+    fulcra_client: Any,
+    force_new: bool = False,
+    machine_id: str | None = None,
+) -> str:
+    """Find an existing Fulcra definition with `canonical_name`, or
+    create one. Returns the definition's id.
+
+    `expected_spec` is the shape the plugin expects: at minimum an
+    `annotation_type` key; for Duration annotations also a
+    `measurement_spec` dict.
+
+    `fulcra_client` exposes `list_definitions(name=...)` and
+    `create_definition(name=..., **spec)`. It is injected (not built
+    here) so tests can pass a fake and so the resolver itself never
+    holds an HTTP connection.
+
+    `force_new=True` always creates a new definition. The name carries
+    `machine_id` (or `platform.node()`'s first dotted component) as a
+    suffix so the new and existing defs are distinguishable in Fulcra.
+
+    Raises `DefinitionSchemaMismatch` when an existing def with the
+    same name has a different schema."""
+    if force_new:
+        suffix = machine_id or platform.node().split(".", 1)[0]
+        new_name = f"{canonical_name} ({suffix})"
+        return fulcra_client.create_definition(name=new_name, **expected_spec)["id"]
+
+    candidates = fulcra_client.list_definitions(name=canonical_name)
+    if not candidates:
+        return fulcra_client.create_definition(name=canonical_name, **expected_spec)["id"]
+
+    existing = candidates[0]
+    if _spec_matches(existing, expected_spec):
+        return existing["id"]
+    raise DefinitionSchemaMismatch(canonical_name, existing, expected_spec)
