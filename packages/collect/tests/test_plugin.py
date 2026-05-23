@@ -127,3 +127,20 @@ def test_canonical_definition_name_persists_when_set():
         canonical_definition_name="lastfm-listens",
     )
     assert p.canonical_definition_name == "lastfm-listens"
+
+
+def test_resolved_definition_id_raises_when_factory_not_set():
+    """Important 2: the factory guard must fire BEFORE the lazy import of
+    fulcra_common.definitions. A missing fulcra_common should produce a
+    clear RuntimeError, not a ModuleNotFoundError."""
+    state = PluginState(plugin_id="lastfm")
+    ctx = RunContext(
+        plugin_id="lastfm", config={}, credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=lambda evt: None,
+        # _fulcra_client_factory intentionally omitted
+    )
+    with pytest.raises(RuntimeError, match="_fulcra_client_factory"):
+        ctx.resolved_definition_id({"annotation_type": "moment"},
+                                   canonical_name="lastfm-listens")

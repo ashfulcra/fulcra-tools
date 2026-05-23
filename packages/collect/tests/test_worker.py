@@ -22,7 +22,8 @@ def test_worker_emits_a_done_result_for_a_successful_run(collect_home: Path):
     plugin = Plugin(id="ok", name="OK", kind="manual", run=lambda ctx: None)
     events = _run_capturing(plugin, collect_home)
     assert events[-1] == {"type": "result", "outcome": "done",
-                          "error": None, "watermark": None}
+                          "error": None, "watermark": None,
+                          "definition_id": None}
 
 
 def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):
@@ -31,6 +32,30 @@ def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):
     plugin = Plugin(id="wm", name="WM", kind="manual", run=run)
     events = _run_capturing(plugin, collect_home)
     assert events[-1]["watermark"] == "2026-05-22T12:00:00Z"
+
+
+def test_worker_carries_the_definition_id_set_by_the_plugin(collect_home: Path):
+    """Important 1: definition_id written to ctx.state during the run must
+    appear in the result event so the runner can persist it.  Mirrors the
+    watermark round-trip test above."""
+    def run(ctx):
+        ctx.state.definition_id = "def-xyz789"
+    plugin = Plugin(id="defid", name="DefId", kind="manual", run=run)
+    events = _run_capturing(plugin, collect_home)
+    assert events[-1]["definition_id"] == "def-xyz789"
+
+
+def test_worker_carries_definition_id_on_error_path(collect_home: Path):
+    """Important 1: the resolver may succeed before the plugin crashes;
+    definition_id must still appear in the error-path result event so we
+    don't re-resolve on the next run."""
+    def run(ctx):
+        ctx.state.definition_id = "def-partial"
+        raise RuntimeError("plugin crashed after resolving")
+    plugin = Plugin(id="defid-err", name="DefId-Err", kind="manual", run=run)
+    events = _run_capturing(plugin, collect_home)
+    assert events[-1]["outcome"] == "error"
+    assert events[-1]["definition_id"] == "def-partial"
 
 
 def test_worker_forwards_progress_events(collect_home: Path):

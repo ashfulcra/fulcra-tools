@@ -71,7 +71,8 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         emit({"type": "result", "outcome": "error",
               "error": (f"missing required credential(s): {', '.join(missing)} — "
                         f"set with: fulcra-collect set-credential {plugin.id} <key>"),
-              "watermark": getattr(ctx.state, "watermark", None)})
+              "watermark": getattr(ctx.state, "watermark", None),
+              "definition_id": getattr(ctx.state, "definition_id", None)})
         return "error"
     try:
         # Redirect sys.stdout → stderr for the duration of plugin.run only.
@@ -90,12 +91,15 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         emit({"type": "result", "outcome": "error",
               "error": _scrub_secrets(
                   f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"),
-              "watermark": getattr(ctx.state, "watermark", None)})
+              "watermark": getattr(ctx.state, "watermark", None),
+              "definition_id": getattr(ctx.state, "definition_id", None)})
         return "error"
-    # The plugin advanced ctx.state.watermark in this (worker) process; the
-    # runner — the single state-writer in the core — persists it from here.
+    # The plugin advanced ctx.state.watermark and/or ctx.state.definition_id
+    # in this (worker) process; the runner — the single state-writer in the
+    # core process — persists them from here via the result event.
     emit({"type": "result", "outcome": "done", "error": None,
-          "watermark": getattr(ctx.state, "watermark", None)})
+          "watermark": getattr(ctx.state, "watermark", None),
+          "definition_id": getattr(ctx.state, "definition_id", None)})
     return "done"
 
 

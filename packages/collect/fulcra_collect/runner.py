@@ -34,6 +34,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     outcome = "error"
     error: str | None = "worker emitted no result"
     watermark: str | None = None
+    definition_id: str | None = None
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -60,16 +61,20 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
                 outcome = event.get("outcome", "error")
                 error = event.get("error")
                 watermark = event.get("watermark")
+                definition_id = event.get("definition_id")
     except subprocess.TimeoutExpired:
         outcome = "timeout"
         error = f"worker exceeded {timeout_s:.0f}s"
 
     st = state.load(plugin_id)
-    # Persist the watermark the plugin advanced in the worker process. The
-    # runner is the single writer of plugin state in the core process, so
-    # the watermark crosses the worker boundary via the result event.
+    # Persist values the plugin advanced in the worker process. The runner
+    # is the single writer of plugin state in the core process, so both
+    # watermark and definition_id cross the worker boundary via the result
+    # event.
     if watermark is not None:
         st.watermark = watermark
+    if definition_id is not None:
+        st.definition_id = definition_id
     st.record_finish(outcome=outcome, when=now, error=error)
     state.save(st)
     return outcome
