@@ -92,6 +92,15 @@ class Daemon:
             return {"ok": True, **self._version_snapshot}
         if cmd == "credential_status":
             return self._credential_status(request.get("plugin", ""))
+        if cmd == "set_credential":
+            return self._set_credential(
+                request.get("plugin", ""), request.get("key", ""),
+                request.get("secret", ""),
+            )
+        if cmd == "delete_credential":
+            return self._delete_credential(
+                request.get("plugin", ""), request.get("key", ""),
+            )
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
     def _status(self) -> dict:
@@ -142,6 +151,35 @@ class Daemon:
         for cred in plugin.required_credentials:
             out[cred.key] = "set" if credentials.has_secret(plugin_id, cred.key) else "missing"
         return {"ok": True, "credentials": out}
+
+    def _check_credential_key(self, plugin_id: str, key: str) -> dict | None:
+        """Return an error reply if (plugin_id, key) doesn't name a
+        declared required_credential, else None."""
+        plugin = self.registry.plugins.get(plugin_id)
+        if plugin is None:
+            return {"ok": False, "error": f"unknown plugin {plugin_id!r}"}
+        if not any(c.key == key for c in plugin.required_credentials):
+            return {"ok": False,
+                    "error": f"plugin {plugin_id!r} does not declare credential {key!r}"}
+        return None
+
+    def _set_credential(self, plugin_id: str, key: str, secret: str) -> dict:
+        err = self._check_credential_key(plugin_id, key)
+        if err is not None:
+            return err
+        from . import credentials  # deferred so daemon stays importable without
+                                   # a live keychain; tests monkeypatch on this module
+        credentials.set_secret(plugin_id, key, secret)
+        return {"ok": True}
+
+    def _delete_credential(self, plugin_id: str, key: str) -> dict:
+        err = self._check_credential_key(plugin_id, key)
+        if err is not None:
+            return err
+        from . import credentials  # deferred so daemon stays importable without
+                                   # a live keychain; tests monkeypatch on this module
+        credentials.delete_secret(plugin_id, key)
+        return {"ok": True}
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
