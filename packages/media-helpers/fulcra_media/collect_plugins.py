@@ -889,6 +889,22 @@ _FULL_DISK_ACCESS_PERMISSION = Permission(
 # Apple Podcasts (on-device) scheduled plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Listened" DurationAnnotation
+# used by the apple-podcasts plugin.  Identical structure to
+# LASTFM_LISTENED_SPEC and SPOTIFY_EXTENDED_LISTENED_SPEC — all "Listened"
+# plugins produce Duration annotations against the same shared definition.
+# Kept as a distinct constant so the resolver call below is self-documenting
+# and so spec-shape tests are local to this plugin block.
+APPLE_PODCASTS_LISTENED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_apple_podcasts(ctx: RunContext) -> None:
     """Read the local Apple Podcasts SQLite DB and import played episodes.
 
@@ -913,7 +929,21 @@ def _run_apple_podcasts(ctx: RunContext) -> None:
         ) from exc
 
     ctx.progress(stage="parsed", count=len(events))
+
+    # Ensure the "Listened" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # listened_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Listened" definition
+    # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
+    if not media_state.listened_definition_id:
+        def_id = ctx.resolved_definition_id(
+            APPLE_PODCASTS_LISTENED_SPEC,
+            canonical_name="Listened",
+        )
+        media_state.listened_definition_id = def_id
+        _state_save(media_state)
+
     client = FulcraClient()
     client.ensure_tag("apple-podcasts", media_state)
     result = client.run_import(events, media_state)
@@ -933,6 +963,7 @@ APPLE_PODCASTS_PLUGIN = Plugin(
     run=_run_apple_podcasts,
     default_interval=timedelta(hours=6),
     requires_network=False,
+    canonical_definition_name="Listened",
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
 )
