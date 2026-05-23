@@ -1631,6 +1631,10 @@ def test_deezer_plugin_run_imports_and_advances_watermark(monkeypatch):
         "fulcra_media.collect_plugins.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
+    # BR6: _run_deezer now reads media state; pre-populate so the
+    # resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("deezer", {})
     ctx = RunContext(
@@ -1667,6 +1671,10 @@ def test_deezer_plugin_rewinds_watermark_by_one_hour(monkeypatch):
         lambda raw: [],
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    # BR6: _run_deezer now reads media state; pre-populate so the
+    # resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("deezer", {})
     st.watermark = "2026-05-22T12:00:00+00:00"
@@ -1689,6 +1697,156 @@ def test_deezer_plugin_raises_when_credential_missing():
     )
     with pytest.raises(RuntimeError, match="access-token"):
         DEEZER_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# BR6 regression-guard tests for deezer resolver
+# ---------------------------------------------------------------------------
+
+def test_deezer_plugin_declares_canonical_definition_name():
+    """BR6: the plugin opts into the shared resolver via canonical_definition_name."""
+    assert DEEZER_PLUGIN.canonical_definition_name == "Listened"
+
+
+def test_deezer_listened_spec_shape():
+    """DEEZER_LISTENED_SPEC must declare a duration annotation with a full
+    measurement_spec so the resolver can match existing definitions."""
+    from fulcra_media.collect_plugins import DEEZER_LISTENED_SPEC
+    assert DEEZER_LISTENED_SPEC["annotation_type"] == "duration"
+    ms = DEEZER_LISTENED_SPEC["measurement_spec"]
+    assert ms["measurement_type"] == "duration"
+    assert ms["value_type"] == "duration"
+    assert "unit" in ms  # unit may be None — presence matters for _spec_matches
+
+
+def test_deezer_uses_resolver_when_listened_definition_not_bootstrapped(monkeypatch):
+    """BR6 regression: when listened_definition_id is absent from the media
+    state file (machine 2 never ran bootstrap), _run_deezer must call
+    ctx.resolved_definition_id rather than proceed without a definition ID.
+
+    Uses the creation path: fake client returns no existing def so the
+    resolver creates a new one."""
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        lambda creds, since, max_pages: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        lambda raw: [],
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-deezer-listened"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    class _FakePluginState:
+        definition_id: str | None = None
+        watermark: str | None = None
+
+    ctx = RunContext(
+        plugin_id="deezer",
+        config={},
+        credentials={"access-token": "tok"},
+        state=_FakePluginState(),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    DEEZER_PLUGIN.run(ctx)
+
+    assert fake_def_client.list_calls == ["Listened"]
+    assert fake_def_client.create_calls[0]["name"] == "Listened"
+    assert fake_def_client.create_calls[0]["annotation_type"] == "duration"
+    assert empty_media_state.listened_definition_id == "def-deezer-listened"
+    assert len(saved_states) == 1
+    assert saved_states[0].listened_definition_id == "def-deezer-listened"
+
+
+def test_deezer_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
+    """When listened_definition_id is already in the media state, the resolver
+    must NOT be called — no unnecessary network trip."""
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        lambda creds, since, max_pages: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        lambda raw: [],
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    class _FakePluginState:
+        definition_id: str | None = None
+        watermark: str | None = None
+
+    ctx = RunContext(
+        plugin_id="deezer",
+        config={},
+        credentials={"access-token": "tok"},
+        state=_FakePluginState(),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    DEEZER_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], "resolver must not be called when def id is already cached"
 
 
 # ---------------------------------------------------------------------------
