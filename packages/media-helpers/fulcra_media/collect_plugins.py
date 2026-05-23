@@ -973,6 +973,22 @@ APPLE_PODCASTS_PLUGIN = Plugin(
 # Apple Podcasts (Time Machine recovery) manual plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Listened" DurationAnnotation
+# used by the apple-podcasts-timemachine plugin.  Identical structure to
+# APPLE_PODCASTS_LISTENED_SPEC — both plugins produce "Listened" Duration
+# annotations from Apple Podcasts data against the same shared definition.
+# Kept as a distinct constant so the resolver call below is self-documenting
+# and so spec-shape tests are local to this plugin block.
+APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     """Walk all Time Machine snapshots and import Apple Podcasts history from each.
 
@@ -985,6 +1001,20 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     mounted).  A SnapshotError on an individual snapshot is logged and skipped
     so a single bad backup does not abort the whole recovery walk.
     """
+    # Ensure the "Listened" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # listened_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Listened" definition
+    # rather than creating a duplicate.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.listened_definition_id:
+        def_id = ctx.resolved_definition_id(
+            APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC,
+            canonical_name="Listened",
+        )
+        media_state.listened_definition_id = def_id
+        _state_save(media_state)
+
     snapshots = ap.find_timemachine_snapshots()
     if not snapshots:
         raise RuntimeError(
@@ -1002,7 +1032,6 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
             )
 
     ctx.progress(stage="parsed", count=len(all_events))
-    media_state = _state_load(STATE_PATH)
     client = FulcraClient()
     client.ensure_tag("apple-podcasts", media_state)
     result = client.run_import(all_events, media_state)
@@ -1018,6 +1047,7 @@ APPLE_PODCASTS_TIMEMACHINE_PLUGIN = Plugin(
     run=_run_apple_podcasts_timemachine,
     default_interval=None,
     requires_network=False,
+    canonical_definition_name="Listened",
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
 )
