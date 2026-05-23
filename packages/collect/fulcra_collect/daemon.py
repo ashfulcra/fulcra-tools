@@ -26,15 +26,22 @@ def _control_socket_path():
 
 
 def _distribution_for_plugin(plugin_id: str) -> str | None:
-    """Find the distribution that registered this plugin's entry point."""
+    """Find the distribution that registered this plugin's entry point.
+
+    Returns the distribution name, or None if the plugin isn't found
+    (or its entry point fails to load — the menubar's version display
+    should never crash the hub the same way the plugin registry won't).
+    """
     for ep in _im.entry_points(group="fulcra_collect.plugins"):
         try:
             obj = ep.load()
+            # Two entry-point shapes: a Plugin object directly, or a callable
+            # returning one. Match by id either way.
+            candidate = obj() if callable(obj) and not hasattr(obj, "id") else obj
         except Exception:
+            # A bad plugin must not crash the hub — same policy as
+            # registry.load_plugins.
             continue
-        # Two entry-point shapes: a Plugin object directly, or a callable
-        # returning one. Match by id either way.
-        candidate = obj() if callable(obj) and not hasattr(obj, "id") else obj
         if getattr(candidate, "id", None) == plugin_id:
             return ep.dist.name if ep.dist else None
     return None
@@ -103,6 +110,10 @@ class Daemon:
                 "load_errors": dict(self.registry.errors)}
 
     def _build_version_snapshot(self) -> dict:
+        """Build the version dict cached at construction for the
+        control-socket 'version' handler. Plugins whose distribution
+        can't be resolved are silently omitted; an unresolvable daemon
+        version falls back to 'unknown'."""
         plugins: dict[str, str] = {}
         for pid in self.registry.plugins:
             dist = _distribution_for_plugin(pid)

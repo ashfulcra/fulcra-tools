@@ -148,7 +148,7 @@ def test_run_command_reports_whether_a_run_was_started(
         __import__("time").sleep(0.01)
 
 
-def test_version_handler_returns_daemon_and_plugin_versions(monkeypatch):
+def test_version_handler_returns_daemon_and_plugin_versions(collect_home: Path, monkeypatch):
     from fulcra_collect import daemon as daemon_mod
     from fulcra_collect.plugin import Plugin
     from fulcra_collect.registry import RegistryResult
