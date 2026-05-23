@@ -116,6 +116,10 @@ class Daemon:
                 "last_outcome": st.last_outcome,
                 "last_error": st.last_error,
                 "consecutive_failures": st.consecutive_failures,
+                "default_interval_s": (
+                    int(plugin.default_interval.total_seconds())
+                    if plugin.default_interval else None
+                ),
             })
         return {"ok": True, "plugins": plugins,
                 "load_errors": dict(self.registry.errors)}

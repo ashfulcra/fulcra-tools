@@ -36,6 +36,19 @@ def test_status_reports_registry_load_errors(collect_home: Path):
     assert reply["load_errors"] == {"brokenplugin": "ImportError: bad"}
 
 
+def test_status_includes_default_interval_s(collect_home: Path):
+    """Status reply must expose each plugin's default_interval_s (seconds),
+    or None for non-scheduled plugins, so the menubar can show the correct
+    default rather than a hardcoded 3600."""
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({"cmd": "status"})
+    by_id = {p["id"]: p for p in reply["plugins"]}
+    # lastfm is scheduled with default_interval=timedelta(hours=1) → 3600 s
+    assert by_id["lastfm"]["default_interval_s"] == 3600
+    # dayone is manual — no default_interval
+    assert by_id["dayone"]["default_interval_s"] is None
+
+
 def test_unknown_command_is_an_error_reply(collect_home: Path):
     d = Daemon(registry=_registry(), config=Config())
     reply = d.handle_request({"cmd": "frobnicate"})
