@@ -10,6 +10,7 @@ from fulcra_collect.plugin import RunContext
 from fulcra_collect.state import PluginState
 
 from fulcra_media.collect_plugins import (
+    LASTFM_LISTENED_SPEC,
     LASTFM_PLUGIN,
     NETFLIX_PLUGIN,
     SPOTIFY_EXTENDED_PLUGIN,
@@ -24,7 +25,33 @@ from fulcra_media.collect_plugins import (
     APPLE_PODCASTS_PLUGIN,
     APPLE_PODCASTS_TIMEMACHINE_PLUGIN,
 )
+from fulcra_media.state import State as MediaState
 
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _make_bootstrapped_media_state() -> MediaState:
+    """A MediaState with all definition IDs pre-populated (simulates bootstrap
+    having been run). Tests that exercise the normal import path use this to
+    ensure the resolver is NOT invoked."""
+    return MediaState(
+        watched_definition_id="def-watched-123",
+        listened_definition_id="def-listened-456",
+        read_definition_id="def-read-789",
+    )
+
+
+def _make_empty_media_state() -> MediaState:
+    """A MediaState with no definition IDs (simulates machine 2 that has never
+    run bootstrap). Tests that exercise the R6 resolver path use this."""
+    return MediaState()
+
+
+# ---------------------------------------------------------------------------
+# Metadata tests
+# ---------------------------------------------------------------------------
 
 def test_lastfm_plugin_metadata_is_scheduled():
     assert LASTFM_PLUGIN.id == "lastfm"
@@ -32,6 +59,25 @@ def test_lastfm_plugin_metadata_is_scheduled():
     assert LASTFM_PLUGIN.default_interval is not None
     assert {c.key for c in LASTFM_PLUGIN.required_credentials} == {"api-key"}
 
+
+def test_lastfm_plugin_declares_canonical_definition_name():
+    """R6: the plugin opts into the shared resolver via canonical_definition_name."""
+    assert LASTFM_PLUGIN.canonical_definition_name == "Listened"
+
+
+def test_lastfm_listened_spec_shape():
+    """LASTFM_LISTENED_SPEC must declare a duration annotation with a full
+    measurement_spec so the resolver can match existing definitions."""
+    assert LASTFM_LISTENED_SPEC["annotation_type"] == "duration"
+    ms = LASTFM_LISTENED_SPEC["measurement_spec"]
+    assert ms["measurement_type"] == "duration"
+    assert ms["value_type"] == "duration"
+    assert "unit" in ms  # unit may be None — presence matters for _spec_matches
+
+
+# ---------------------------------------------------------------------------
+# Normal import path (media state already bootstrapped)
+# ---------------------------------------------------------------------------
 
 def test_run_fetches_normalizes_imports_and_advances_watermark(monkeypatch):
     calls = {}
@@ -57,6 +103,8 @@ def test_run_fetches_normalizes_imports_and_advances_watermark(monkeypatch):
                         lambda: FakeClient())
     monkeypatch.setattr("fulcra_media.collect_plugins.newest_event_iso",
                         lambda events: "2026-05-22T12:00:00Z")
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("lastfm")
     ctx = RunContext(plugin_id="lastfm", config={}, credentials={"api-key": "K"},
@@ -105,6 +153,8 @@ def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
                         lambda: FakeClient())
     monkeypatch.setattr("fulcra_media.collect_plugins.newest_event_iso",
                         lambda events: "2026-05-22T12:00:00Z")
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("lastfm")
     ctx = RunContext(plugin_id="lastfm", config={}, credentials={"api-key": "K"},
@@ -114,6 +164,141 @@ def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
     # Every event was successfully processed (skipped_existing means already
     # ingested into Fulcra), so the watermark must reflect that progress.
     assert st.watermark == "2026-05-22T12:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# R6 resolver path (no pre-existing listened_definition_id)
+# ---------------------------------------------------------------------------
+
+def test_run_uses_resolver_when_listened_definition_not_bootstrapped(monkeypatch):
+    """R6 regression: when listened_definition_id is absent from the media
+    state file (machine 2 never ran bootstrap), run() must call
+    ctx.resolved_definition_id rather than raise RuntimeError.
+
+    The resolver is mocked at the RunContext level: we supply a
+    _fulcra_client_factory whose client returns a known id. After run()
+    completes, the media state must be persisted with that id so subsequent
+    runs (and other importers that share the "Listened" definition) find it."""
+    # Media state starts empty (no bootstrap)
+    empty_media_state = _make_empty_media_state()
+    saved_states: list[MediaState] = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+                        lambda creds, since, max_pages: [])
+    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+                        lambda raw: [])
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    # Resolver fake: list_definitions returns nothing → create_definition called
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-resolver-new-listened"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    # Give ctx.state a PluginState-like object so resolved_definition_id can
+    # cache the id there (it writes ctx.state.definition_id). It also needs a
+    # watermark attribute because _since_from_watermark reads ctx.state.watermark.
+    class _FakePluginState:
+        definition_id: str | None = None
+        watermark: str | None = None
+
+    ctx = RunContext(
+        plugin_id="lastfm",
+        config={},
+        credentials={"api-key": "K"},
+        state=_FakePluginState(),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    LASTFM_PLUGIN.run(ctx)
+
+    # Resolver was used with the canonical name "Listened"
+    assert fake_def_client.list_calls == ["Listened"]
+    assert fake_def_client.create_calls[0]["name"] == "Listened"
+    assert fake_def_client.create_calls[0]["annotation_type"] == "duration"
+
+    # The resolved id was written into the media state
+    assert empty_media_state.listened_definition_id == "def-resolver-new-listened"
+
+    # The media state was persisted to disk
+    assert len(saved_states) == 1
+    assert saved_states[0].listened_definition_id == "def-resolver-new-listened"
+
+
+def test_run_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
+    """When listened_definition_id is already in the media state (bootstrap
+    has been run), the resolver must NOT be called — no network trip."""
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+                        lambda creds, since, max_pages: [])
+    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+                        lambda raw: [])
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    st = PluginState("lastfm")
+    ctx = RunContext(
+        plugin_id="lastfm",
+        config={},
+        credentials={"api-key": "K"},
+        state=st,
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    # Intercept resolved_definition_id at the RunContext level
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    LASTFM_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], "resolver must not be called when def id is already cached"
 
 
 # ---------------------------------------------------------------------------

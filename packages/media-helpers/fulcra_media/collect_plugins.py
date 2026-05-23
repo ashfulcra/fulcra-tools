@@ -32,6 +32,7 @@ from .importers.generic_csv import _FP_AUTO, parse_media_csv
 from .importers.lastfm import fetch_recent_tracks, normalize_history
 from .state import DEFAULT_PATH as STATE_PATH
 from .state import load as _state_load
+from .state import save as _state_save
 
 
 def newest_event_iso(events: list) -> str | None:
@@ -46,12 +47,44 @@ def newest_event_iso(events: list) -> str | None:
 # Last.fm scheduled plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Listened" DurationAnnotation.
+# Passed to ctx.resolved_definition_id as the expected_spec so the shared
+# resolver can verify an adopted definition has the right structure, or create
+# a new one when none exists. Mirrors the payload produced by
+# wire.duration_definition_payload (the bootstrap CLI path) — annotation_type
+# and measurement_spec are the two axes that _spec_matches compares.
+LASTFM_LISTENED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_lastfm(ctx: RunContext) -> None:
     api_key = ctx.credentials.get("api-key")
     if not api_key:
         raise RuntimeError("lastfm: credential 'api-key' is not set — "
                            "run `fulcra-collect set-credential lastfm api-key`")
     creds = {"api_key": api_key}
+
+    # Ensure the "Listened" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # listened_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Listened" definition
+    # rather than creating a duplicate — giving the same multi-machine dedup
+    # guarantee that bootstrap provides without requiring bootstrap to have
+    # been run on every machine.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.listened_definition_id:
+        def_id = ctx.resolved_definition_id(
+            LASTFM_LISTENED_SPEC,
+            canonical_name="Listened",
+        )
+        media_state.listened_definition_id = def_id
+        _state_save(media_state)
 
     # Delegate to the shared helper; `since` (watermark - 1h) is computed
     # there so it stays consistent with the Deezer plugin.
@@ -69,6 +102,7 @@ LASTFM_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_lastfm,
     default_interval=timedelta(hours=1),
+    canonical_definition_name="Listened",
     required_credentials=(
         Credential(key="api-key", label="Last.fm API key",
                    help="Create one at https://www.last.fm/api/account/create"),
