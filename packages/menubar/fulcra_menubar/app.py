@@ -31,7 +31,19 @@ class FulcraMenubarApp(rumps.App):
         self.poller.set_popover_open(False)
         threading.Thread(target=self.poller.run, daemon=True).start()
 
-        self.menu = ["Open Fulcra Collect", None, "Quit"]
+        # Notification centre — real PyObjC post path lands in Task 18.
+        from .notifications import NotificationCentre
+        self.notifications = NotificationCentre(
+            post=lambda title, body: print(f"[notify] {title}: {body}"),
+        )
+        # Hook failure-threshold transitions to notifications.
+        self.model.add_failure_transition_observer(
+            lambda pid: self.notifications.notify_failure(pid, "consecutive failures ≥ 3")
+        )
+
+        self._prefs_controller = None
+
+        self.menu = ["Open Fulcra Collect", "Preferences…", None, "Quit"]
 
     @rumps.clicked("Open Fulcra Collect")
     def _open(self, _sender) -> None:
@@ -41,6 +53,17 @@ class FulcraMenubarApp(rumps.App):
             return
         self.popover.toggle(btn)
         self.poller.set_popover_open(self.popover.is_shown)
+
+    @rumps.clicked("Preferences…")
+    def _open_prefs(self, _sender) -> None:
+        from .preferences.window import PreferencesController
+        if self._prefs_controller is None:
+            self._prefs_controller = PreferencesController.create(
+                model=self.model, client=self.client, centre=self.notifications,
+            )
+        self._prefs_controller.window().makeKeyAndOrderFront_(None)
+        from AppKit import NSApp  # type: ignore[import-not-found]
+        NSApp.activateIgnoringOtherApps_(True)
 
     @rumps.clicked("Quit")
     def _quit(self, _sender) -> None:
