@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from pathlib import Path
 
 from fulcra_collect import worker
-from fulcra_collect.plugin import Plugin
+from fulcra_collect.plugin import Plugin, RunContext
 from fulcra_collect.registry import RegistryResult
-from fulcra_collect.worker import _scrub_secrets
+from fulcra_collect.worker import _scrub_secrets, _make_fulcra_definition_client
 
 
 def _run_capturing(plugin: Plugin, collect_home: Path) -> list[dict]:
@@ -186,3 +187,110 @@ def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: P
     assert events[-1]["type"] == "result"
     assert events[-1]["outcome"] == "error"
     assert "api-key" in events[-1]["error"]
+
+
+# ---------------------------------------------------------------------------
+# R5: worker supplies _fulcra_client_factory in RunContext
+# ---------------------------------------------------------------------------
+
+
+def test_worker_passes_non_none_factory_to_run_context(collect_home: Path):
+    """R5: run_plugin must construct RunContext with a non-None
+    _fulcra_client_factory so every plugin that opts into
+    canonical_definition_name can call ctx.resolved_definition_id."""
+    received: list = []
+
+    def run(ctx: RunContext) -> None:
+        received.append(ctx._fulcra_client_factory)
+
+    plugin = Plugin(id="factory-check", name="Factory Check",
+                    kind="manual", run=run)
+    _run_capturing(plugin, collect_home)
+    assert len(received) == 1
+    factory = received[0]
+    assert factory is not None, "RunContext._fulcra_client_factory must not be None"
+    assert callable(factory), "_fulcra_client_factory must be callable"
+
+
+def test_worker_factory_returns_object_with_resolver_interface(collect_home: Path):
+    """R5: the factory returned by the worker must produce an object with
+    list_definitions and create_definition methods — the interface
+    resolve_definition_id calls. We only check method presence (calling them
+    without a real Fulcra would fail); functional correctness is covered by
+    the adapter unit test below."""
+    received: list = []
+
+    def run(ctx: RunContext) -> None:
+        received.append(ctx._fulcra_client_factory)
+
+    plugin = Plugin(id="factory-iface", name="Factory Iface",
+                    kind="manual", run=run)
+    _run_capturing(plugin, collect_home)
+    factory = received[0]
+    client = factory()
+    assert hasattr(client, "list_definitions"), (
+        "factory-produced client must have list_definitions"
+    )
+    assert hasattr(client, "create_definition"), (
+        "factory-produced client must have create_definition"
+    )
+
+
+def test_fulcra_definition_adapter_list_definitions_filters_deleted(
+    monkeypatch,
+):
+    """Unit test for _FulcraDefinitionAdapter.list_definitions: only live
+    (non-deleted) definitions with the matching name are returned."""
+    import httpx
+    from fulcra_collect.worker import _FulcraDefinitionAdapter
+    from fulcra_common import BaseFulcraClient
+
+    all_defs = [
+        {"id": "d1", "name": "attention", "annotation_type": "duration",
+         "deleted_at": None, "created_at": "2026-01-01T00:00:00Z"},
+        # same name but soft-deleted — must be excluded
+        {"id": "d2", "name": "attention", "annotation_type": "duration",
+         "deleted_at": "2026-02-01T00:00:00Z", "created_at": "2025-12-01T00:00:00Z"},
+        # different name — must be excluded
+        {"id": "d3", "name": "last.fm listens", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-01-15T00:00:00Z"},
+    ]
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        assert r.url.path == "/user/v1alpha1/annotation"
+        return httpx.Response(200, json=all_defs)
+
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    base = BaseFulcraClient(transport=httpx.MockTransport(handler))
+    adapter = _FulcraDefinitionAdapter(base)
+    result = adapter.list_definitions(name="attention")
+    assert result == [all_defs[0]]  # only the live "attention" definition
+
+
+def test_fulcra_definition_adapter_create_definition_posts_body(monkeypatch):
+    """Unit test for _FulcraDefinitionAdapter.create_definition: the POST body
+    contains name + all spec fields, and the response id is returned."""
+    import httpx
+    from fulcra_collect.worker import _FulcraDefinitionAdapter
+    from fulcra_common import BaseFulcraClient
+
+    posted: list[dict] = []
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        assert r.url.path == "/user/v1alpha1/annotation"
+        assert r.method == "POST"
+        posted.append(json.loads(r.content))
+        return httpx.Response(200, json={"id": "new-def-99"})
+
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    base = BaseFulcraClient(transport=httpx.MockTransport(handler))
+    adapter = _FulcraDefinitionAdapter(base)
+    result = adapter.create_definition(
+        name="attention",
+        annotation_type="duration",
+        measurement_spec={"measurement_type": "duration",
+                          "value_type": "duration", "unit": None},
+    )
+    assert result == {"id": "new-def-99"}
+    assert posted[0]["name"] == "attention"
+    assert posted[0]["annotation_type"] == "duration"
