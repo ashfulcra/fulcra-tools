@@ -26,7 +26,7 @@ class FulcraMenubarApp(rumps.App):
         self.client = DaemonClient()
         self.model = StatusModel()
         self.status_item = StatusItemController(self, self.model)
-        self.popover = PopoverRoot(self.model)
+        self.popover = PopoverRoot(self.model, self.client)
         self.poller = PollingScheduler(on_tick=self._poll_once)
         self.poller.set_popover_open(False)
         threading.Thread(target=self.poller.run, daemon=True).start()
