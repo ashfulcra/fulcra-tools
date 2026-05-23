@@ -572,7 +572,34 @@ SPOTIFY_IFTTT_PLUGIN = Plugin(
 # Apple TV playback (takeout) manual plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Watched" DurationAnnotation
+# used by the apple-takeout plugin.  Same structure as NETFLIX_WATCHED_SPEC —
+# all Watched plugins share the same definition.
+APPLE_TAKEOUT_WATCHED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_apple_takeout(ctx: RunContext) -> None:
+    # Ensure the "Watched" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # watched_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Watched" definition
+    # rather than creating a duplicate.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.watched_definition_id:
+        def_id = ctx.resolved_definition_id(
+            APPLE_TAKEOUT_WATCHED_SPEC,
+            canonical_name="Watched",
+        )
+        media_state.watched_definition_id = def_id
+        _state_save(media_state)
+
     resolved = _resolve_path(ctx)
     if resolved.is_dir():
         matches = list(resolved.rglob("Playback Activity.csv"))
@@ -591,6 +618,7 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
     kind="manual",
     run=_run_apple_takeout,
     default_interval=None,
+    canonical_definition_name="Watched",
     required_credentials=(),
 )
 
