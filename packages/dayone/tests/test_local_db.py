@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fulcra_dayone.readers.local_db import read_local_db
-from tests.conftest import build_dayone_db
+from dayone_test_helpers import build_dayone_db
 
 
 def test_reads_entries_from_a_core_data_db(tmp_path: Path):

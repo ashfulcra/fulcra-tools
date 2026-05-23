@@ -15,7 +15,7 @@ import pytest
 from fulcra_media.fulcra import FulcraClient
 from fulcra_media.importers.netflix import parse_slim
 from fulcra_media.state import State
-from tests.conftest import json_response
+from media_test_helpers import json_response
 
 
 REAL_CSV = Path(__file__).parent.parent / "takeouts" / "NetflixViewingHistory.csv"

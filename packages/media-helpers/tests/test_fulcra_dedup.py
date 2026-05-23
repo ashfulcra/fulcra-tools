@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from fulcra_media.fulcra import FulcraClient
-from tests.conftest import json_response
+from media_test_helpers import json_response
 
 
 @pytest.fixture(autouse=True)

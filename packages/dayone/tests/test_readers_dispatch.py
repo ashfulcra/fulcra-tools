@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fulcra_dayone.readers import read
-from tests.conftest import build_dayone_db
+from dayone_test_helpers import build_dayone_db
 
 _SAMPLE = {"entries": [
     {"uuid": "AAA111", "creationDate": "2024-01-15T09:30:00Z", "text": "hi"},

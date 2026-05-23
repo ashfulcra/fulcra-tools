@@ -34,7 +34,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --import-mode=importlib"
+# Adds tests/ to sys.path so test modules can `import dayone_test_helpers`
+# (plain helper functions extracted from conftest that aren't pytest fixtures).
+pythonpath = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["fulcra_dayone"]
