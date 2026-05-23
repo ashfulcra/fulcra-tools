@@ -25,3 +25,10 @@ def get_secret(plugin_id: str, key: str) -> str | None:
 
 def delete_secret(plugin_id: str, key: str) -> None:
     keyring.delete_password(_service(plugin_id), key)
+
+
+def has_secret(plugin_id: str, key: str) -> bool:
+    """Return True iff a non-empty secret is present in the keychain for
+    (plugin_id, key). The menubar UI's `credential_status` handler is the
+    only caller — it reports presence without ever reading the value."""
+    return bool(get_secret(plugin_id, key))
