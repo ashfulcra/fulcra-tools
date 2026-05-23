@@ -913,6 +913,10 @@ def test_spotify_ifttt_plugin_run(monkeypatch, tmp_path):
                         lambda path, tz: ["ev-ifttt"])
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
                         lambda: fake_client)
+    # BR7: _run_spotify_ifttt now reads media state; pre-populate so the
+    # resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("spotify-ifttt", {"path": str(fake_zip), "tz": "America/New_York"})
     SPOTIFY_IFTTT_PLUGIN.run(ctx)
@@ -937,6 +941,10 @@ def test_spotify_ifttt_plugin_defaults_tz_to_utc(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
                         lambda: fake_client)
+    # BR7: _run_spotify_ifttt now reads media state; pre-populate so the
+    # resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("spotify-ifttt", {"path": str(fake_zip)})
     SPOTIFY_IFTTT_PLUGIN.run(ctx)
@@ -944,10 +952,154 @@ def test_spotify_ifttt_plugin_defaults_tz_to_utc(monkeypatch, tmp_path):
     assert received_tz["tz"] == ZoneInfo("UTC")
 
 
-def test_spotify_ifttt_plugin_raises_without_path():
+def test_spotify_ifttt_plugin_raises_without_path(monkeypatch):
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("spotify-ifttt", {})
     with pytest.raises(RuntimeError, match="path"):
         SPOTIFY_IFTTT_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# BR7 regression-guard tests for spotify-ifttt resolver
+# ---------------------------------------------------------------------------
+
+def test_spotify_ifttt_plugin_declares_canonical_definition_name():
+    """BR7: the plugin opts into the shared resolver via canonical_definition_name."""
+    assert SPOTIFY_IFTTT_PLUGIN.canonical_definition_name == "Listened"
+
+
+def test_spotify_ifttt_listened_spec_shape():
+    """SPOTIFY_IFTTT_LISTENED_SPEC must declare a duration annotation with a full
+    measurement_spec so the resolver can match existing definitions."""
+    from fulcra_media.collect_plugins import SPOTIFY_IFTTT_LISTENED_SPEC
+    assert SPOTIFY_IFTTT_LISTENED_SPEC["annotation_type"] == "duration"
+    ms = SPOTIFY_IFTTT_LISTENED_SPEC["measurement_spec"]
+    assert ms["measurement_type"] == "duration"
+    assert ms["value_type"] == "duration"
+    assert "unit" in ms  # unit may be None — presence matters for _spec_matches
+
+
+def test_spotify_ifttt_uses_resolver_when_listened_definition_not_bootstrapped(
+    monkeypatch, tmp_path
+):
+    """BR7 regression: when listened_definition_id is absent from the media
+    state file (machine 2 never ran bootstrap), _run_spotify_ifttt must call
+    ctx.resolved_definition_id rather than proceed without a definition ID.
+
+    Uses the adoption path: fake client returns an existing def so the
+    resolver adopts it without creating a duplicate."""
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+
+    fake_zip = tmp_path / "ifttt.zip"
+    fake_zip.write_bytes(b"PK")
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+                        lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_ifttt_importer.parse_ifttt_zip",
+                        lambda path, tz: [])
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-spotify-ifttt-listened"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="spotify-ifttt",
+        config={"path": str(fake_zip)},
+        credentials={},
+        state=PluginState("spotify-ifttt"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    SPOTIFY_IFTTT_PLUGIN.run(ctx)
+
+    assert fake_def_client.list_calls == ["Listened"]
+    assert fake_def_client.create_calls[0]["name"] == "Listened"
+    assert fake_def_client.create_calls[0]["annotation_type"] == "duration"
+    assert empty_media_state.listened_definition_id == "def-spotify-ifttt-listened"
+    assert len(saved_states) == 1
+    assert saved_states[0].listened_definition_id == "def-spotify-ifttt-listened"
+
+
+def test_spotify_ifttt_does_not_call_resolver_when_definition_already_bootstrapped(
+    monkeypatch, tmp_path
+):
+    """When listened_definition_id is already in the media state, the resolver
+    must NOT be called — no unnecessary network trip."""
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    fake_zip = tmp_path / "ifttt.zip"
+    fake_zip.write_bytes(b"PK")
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+                        lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_ifttt_importer.parse_ifttt_zip",
+                        lambda path, tz: [])
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    ctx = RunContext(
+        plugin_id="spotify-ifttt",
+        config={"path": str(fake_zip)},
+        credentials={},
+        state=PluginState("spotify-ifttt"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    SPOTIFY_IFTTT_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], "resolver must not be called when def id is already cached"
 
 
 # ---------------------------------------------------------------------------
