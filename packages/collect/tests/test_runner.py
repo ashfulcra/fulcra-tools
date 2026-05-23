@@ -67,6 +67,20 @@ def test_runner_persists_the_watermark_from_the_result(collect_home: Path):
     assert state.load("p").watermark == "2026-05-22T12:00:00Z"
 
 
+def test_runner_persists_the_definition_id_from_the_result(collect_home: Path):
+    """Important 1: definition_id set by the worker must cross the subprocess
+    boundary and be written to saved state — mirroring how watermark already
+    travels the same path."""
+    script = (
+        "import json,sys;"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done',"
+        "'error':None,'watermark':None,'definition_id':'def-abc123'})+chr(10))"
+    )
+    runner.run("p", _python_worker(script),
+               now=datetime(2026, 5, 22, tzinfo=timezone.utc))
+    assert state.load("p").definition_id == "def-abc123"
+
+
 def test_runner_calls_on_spawn_with_the_worker_process(collect_home: Path):
     """`on_spawn` is invoked with the live worker Popen so a caller (the
     daemon) can track it and terminate it on shutdown."""

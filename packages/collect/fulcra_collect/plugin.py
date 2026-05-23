@@ -110,14 +110,12 @@ class RunContext:
         cached = getattr(self.state, "definition_id", None)
         if cached and not force_new:
             return cached
-
-        from fulcra_common.definitions import resolve_definition_id
-
         if self._fulcra_client_factory is None:
             raise RuntimeError(
                 "RunContext has no _fulcra_client_factory — the runner must "
                 "supply one when the plugin uses resolved_definition_id."
             )
+        from fulcra_common.definitions import resolve_definition_id
         client = self._fulcra_client_factory()
         new_id = resolve_definition_id(
             canonical_name=canonical_name,
