@@ -229,3 +229,92 @@ def test_credential_status_empty_credentials_returns_empty_dict(collect_home: Pa
     d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
     reply = d.handle_request({"cmd": "credential_status", "plugin": "noop"})
     assert reply == {"ok": True, "credentials": {}}
+
+
+def test_set_credential_writes_to_keyring(collect_home: Path, monkeypatch):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        required_credentials=(Credential(key="session_key", label="", help=""),),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    calls = []
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.set_secret",
+        lambda pid, k, v: calls.append(("set", pid, k, v)),
+    )
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({
+        "cmd": "set_credential", "plugin": "lastfm",
+        "key": "session_key", "secret": "abc-secret",
+    })
+
+    assert reply == {"ok": True}
+    assert calls == [("set", "lastfm", "session_key", "abc-secret")]
+
+
+def test_delete_credential_calls_keyring(collect_home: Path, monkeypatch):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        required_credentials=(Credential(key="session_key", label="", help=""),),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    calls = []
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.delete_secret",
+        lambda pid, k: calls.append(("delete", pid, k)),
+    )
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({
+        "cmd": "delete_credential", "plugin": "lastfm", "key": "session_key",
+    })
+
+    assert reply == {"ok": True}
+    assert calls == [("delete", "lastfm", "session_key")]
+
+
+def test_set_credential_rejects_unknown_plugin(collect_home: Path):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.registry import RegistryResult
+
+    d = daemon_mod.Daemon(registry=RegistryResult(), config=daemon_mod.Config())
+
+    reply = d.handle_request({
+        "cmd": "set_credential", "plugin": "nope", "key": "x", "secret": "y",
+    })
+
+    assert reply["ok"] is False
+    assert "nope" in reply["error"]
+
+
+def test_set_credential_rejects_unknown_key(collect_home: Path):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        required_credentials=(Credential(key="session_key", label="", help=""),),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+
+    reply = d.handle_request({
+        "cmd": "set_credential", "plugin": "lastfm",
+        "key": "not_a_real_key", "secret": "x",
+    })
+
+    assert reply["ok"] is False
+    assert "not_a_real_key" in reply["error"]
