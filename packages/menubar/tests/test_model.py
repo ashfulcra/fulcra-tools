@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from fulcra_menubar.model import StatusModel, OverallState
+
+
+HEALTHY = {
+    "ok": True, "plugins": [
+        {"id": "lastfm", "name": "Last.fm", "kind": "scheduled",
+         "enabled": True, "last_run": "2026-05-23T12:00:00+00:00",
+         "last_outcome": "done", "last_error": None,
+         "consecutive_failures": 0},
+    ], "load_errors": {},
+}
+
+FAILING = {
+    "ok": True, "plugins": [
+        {"id": "lastfm", "name": "Last.fm", "kind": "scheduled",
+         "enabled": True, "last_run": "2026-05-23T12:05:00+00:00",
+         "last_outcome": "error", "last_error": "401 unauthorized",
+         "consecutive_failures": 3},
+    ], "load_errors": {},
+}
+
+
+def test_initial_state_is_unknown():
+    m = StatusModel()
+    assert m.overall is OverallState.UNKNOWN
+    assert m.plugins == []
+
+
+def test_healthy_snapshot_yields_healthy_overall():
+    m = StatusModel()
+    m.update_from_status(HEALTHY)
+    assert m.overall is OverallState.HEALTHY
+
+
+def test_failing_snapshot_yields_failing_overall():
+    m = StatusModel()
+    m.update_from_status(FAILING)
+    assert m.overall is OverallState.FAILING
+
+
+def test_observers_called_on_change():
+    m = StatusModel()
+    calls = []
+    m.add_observer(lambda model: calls.append(model.overall))
+    m.update_from_status(HEALTHY)
+    m.update_from_status(FAILING)
+    assert calls == [OverallState.HEALTHY, OverallState.FAILING]
+
+
+def test_observers_not_called_when_snapshot_unchanged():
+    m = StatusModel()
+    calls = []
+    m.add_observer(lambda model: calls.append(model.overall))
+    m.update_from_status(HEALTHY)
+    m.update_from_status(HEALTHY)  # identical
+    assert calls == [OverallState.HEALTHY]
+
+
+def test_in_flight_set_drives_running_overall():
+    m = StatusModel()
+    m.update_from_status(HEALTHY)
+    m.mark_in_flight("lastfm")
+    assert m.overall is OverallState.RUNNING
+    advanced = {**HEALTHY, "plugins": [{**HEALTHY["plugins"][0],
+                                         "last_run": "2026-05-23T12:10:00+00:00"}]}
+    m.update_from_status(advanced)
+    assert m.overall is OverallState.HEALTHY
+    assert "lastfm" not in m.in_flight
+
+
+def test_daemon_stopped_overrides_everything():
+    m = StatusModel()
+    m.update_from_status(FAILING)
+    m.mark_daemon_stopped()
+    assert m.overall is OverallState.DAEMON_STOPPED
+
+
+def test_failure_threshold_transitions():
+    m = StatusModel()
+    m.update_from_status(HEALTHY)
+    transitions = []
+    m.add_failure_transition_observer(transitions.append)
+    m.update_from_status(FAILING)
+    assert transitions == ["lastfm"]
+    m.update_from_status(FAILING)
+    assert transitions == ["lastfm"]
+
+
+def test_failure_transition_only_on_first_crossing():
+    m = StatusModel()
+    transitions = []
+    m.add_failure_transition_observer(transitions.append)
+    m.update_from_status(FAILING)
+    assert transitions == ["lastfm"]
