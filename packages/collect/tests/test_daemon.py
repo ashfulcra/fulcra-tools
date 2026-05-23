@@ -318,3 +318,33 @@ def test_set_credential_rejects_unknown_key(collect_home: Path):
 
     assert reply["ok"] is False
     assert "not_a_real_key" in reply["error"]
+
+
+def test_delete_credential_rejects_unknown_plugin(collect_home: Path):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.registry import RegistryResult
+
+    d = daemon_mod.Daemon(registry=RegistryResult(), config=daemon_mod.Config())
+    reply = d.handle_request({
+        "cmd": "delete_credential", "plugin": "nope", "key": "x",
+    })
+    assert reply["ok"] is False
+    assert "nope" in reply["error"]
+
+
+def test_delete_credential_rejects_unknown_key(collect_home: Path):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        required_credentials=(Credential(key="session_key", label="", help=""),),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({
+        "cmd": "delete_credential", "plugin": "lastfm", "key": "not_a_real_key",
+    })
+    assert reply["ok"] is False
+    assert "not_a_real_key" in reply["error"]
