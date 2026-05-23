@@ -81,3 +81,35 @@ def test_save_is_atomic_and_leaves_no_torn_file(collect_home: Path):
     # the final file is always valid JSON (never torn)
     import json
     json.loads(final.read_text(encoding="utf-8"))
+
+
+def test_definition_id_round_trips(collect_home):
+    from fulcra_collect import state
+    st = state.load("attention")
+    assert st.definition_id is None  # default
+    st.definition_id = "fulcra-uuid-123"
+    state.save(st)
+    again = state.load("attention")
+    assert again.definition_id == "fulcra-uuid-123"
+
+
+def test_old_state_file_without_definition_id_loads_as_none(collect_home, tmp_path):
+    import json
+    from fulcra_collect import config as cfg, state
+    # Hand-write an "old" state file with no definition_id key.
+    path = cfg.config_dir() / "state" / "lastfm.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "plugin_id": "lastfm",
+        "last_run": "2026-05-23T10:00:00+00:00",
+        "last_outcome": "done",
+        "last_error": None,
+        "consecutive_failures": 0,
+        "watermark": None,
+        # NOTE: no definition_id key
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = state.load("lastfm")
+    assert loaded.definition_id is None
+    assert loaded.last_outcome == "done"  # rest of fields still load

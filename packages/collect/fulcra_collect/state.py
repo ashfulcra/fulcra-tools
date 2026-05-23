@@ -29,6 +29,7 @@ class PluginState:
     last_error: str | None = None
     consecutive_failures: int = 0
     watermark: str | None = None         # ISO string, plugin-defined
+    definition_id: str | None = None      # adopted-by-resolver Fulcra def id
 
     def record_finish(self, *, outcome: str, when: datetime,
                        error: str | None = None) -> None:
@@ -57,6 +58,7 @@ def load(plugin_id: str) -> PluginState:
             last_error=doc.get("last_error"),
             consecutive_failures=doc.get("consecutive_failures", 0),
             watermark=doc.get("watermark"),
+            definition_id=doc.get("definition_id"),   # backwards compat: missing → None
         )
     except (json.JSONDecodeError, OSError, ValueError):
         # A torn / corrupt / unreadable file must not crash the daemon
