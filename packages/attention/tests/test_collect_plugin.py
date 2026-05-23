@@ -47,7 +47,7 @@ def test_plugin_metadata_is_a_service():
 
 def test_plugin_declares_canonical_definition_name():
     """R5: the plugin opts into the shared resolver via canonical_definition_name."""
-    assert PLUGIN.canonical_definition_name == "attention"
+    assert PLUGIN.canonical_definition_name == "Attention"
 
 
 def test_plugin_declares_the_loopback_server_permission():
@@ -139,7 +139,6 @@ def test_run_uses_resolver_when_definition_not_bootstrapped(monkeypatch, tmp_pat
     class _FakePluginState:
         definition_id: str | None = None
 
-    ctx = _make_ctx(factory=lambda: fake_client)
     ctx = RunContext(
         plugin_id="attention-relay",
         config={},
@@ -152,8 +151,8 @@ def test_run_uses_resolver_when_definition_not_bootstrapped(monkeypatch, tmp_pat
     PLUGIN.run(ctx)
 
     # Resolver was used
-    assert fake_client.list_calls == ["attention"]
-    assert fake_client.create_calls[0]["name"] == "attention"
+    assert fake_client.list_calls == ["Attention"]
+    assert fake_client.create_calls[0]["name"] == "Attention"
     assert fake_client.create_calls[0]["annotation_type"] == "duration"
 
     # The id was written back to the attention state

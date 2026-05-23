@@ -53,7 +53,7 @@ def run(ctx: RunContext) -> None:
         # requiring bootstrap to have been run on every machine.
         def_id = ctx.resolved_definition_id(
             ATTENTION_SPEC,
-            canonical_name="attention",
+            canonical_name="Attention",
         )
         state.attention_definition_id = def_id
         _state_save(state)
@@ -70,7 +70,7 @@ PLUGIN = Plugin(
     name="Attention relay",
     kind="service",
     run=run,
-    canonical_definition_name="attention",
+    canonical_definition_name="Attention",
     required_permissions=(
         Permission(id="network-loopback-server",
                    explanation="Runs a local server on 127.0.0.1:8771 that the "
