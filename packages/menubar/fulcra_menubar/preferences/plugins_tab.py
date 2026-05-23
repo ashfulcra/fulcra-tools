@@ -48,13 +48,31 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
             return  # plugin set unchanged — no need to rebuild the tab
         _last_state["plugin_ids"] = plugin_ids
 
+        # Hoist credential_status fetches so row-height calculation has the
+        # actual credential count before any row view is created. Each call is
+        # a single blocking UDS round-trip; the short-circuit above ensures
+        # this block runs only when the plugin set genuinely changes.
+        cred_map: dict[str, dict[str, str]] = {}
+        for snap in model.plugins:
+            try:
+                cred_reply = client.credential_status(snap.id)
+                cred_map[snap.id] = (
+                    cred_reply.get("credentials", {})
+                    if cred_reply.get("ok")
+                    else {}
+                )
+            except Exception:
+                cred_map[snap.id] = {}
+
         for sv in list(content.subviews()):
             sv.removeFromSuperview()
         y = 0
         ordered = sorted(model.plugins, key=lambda p: (p.kind, p.name))
         for snap in ordered:
-            row_height = 80 + 24 * len(_creds_for(snap))
-            row = _make_plugin_row(snap, width, row_height, client=client, model=model)
+            credentials = cred_map.get(snap.id, {})
+            row_height = 80 + 24 * len(credentials)
+            row = _make_plugin_row(snap, width, row_height, credentials=credentials,
+                                   client=client, model=model)
             row.setFrame_(NSMakeRect(0, y, width, row_height))
             content.addSubview_(row)
             y += row_height
@@ -65,15 +83,9 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
     return scroll
 
 
-def _creds_for(snap: PluginSnapshot) -> list:
-    # The snapshot doesn't include the plugin's required_credentials
-    # declaration — only the daemon-side registry knows. The Plugins
-    # tab fetches credential_status on tab build to learn the keys.
-    return []  # populated below via the deferred fetch
-
-
 def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
-                     *, client: DaemonClient, model: StatusModel) -> NSView:
+                     *, credentials: dict[str, str],
+                     client: DaemonClient, model: StatusModel) -> NSView:
     row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
 
     name = NSTextField.labelWithString_(f"{snap.name}  ({snap.id})")
@@ -101,7 +113,8 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
     # Interval input — scheduled only.
     if snap.kind == "scheduled":
         cfg = _config.load()
-        seconds = cfg.interval_overrides.get(snap.id, 3600)
+        override = cfg.interval_overrides.get(snap.id)
+        seconds = override if override is not None else (snap.default_interval_s or 3600)
         interval_label = NSTextField.labelWithString_("Interval (minutes):")
         interval_label.setFont_(typography.small())
         interval_label.setFrame_(NSMakeRect(16, height - 56, 140, 16))
@@ -138,13 +151,7 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
         _Target.attach(run_btn, on_run)
         row.addSubview_(run_btn)
 
-    # Credentials block — fetched live.
-    try:
-        cred_status = client.credential_status(snap.id)
-        credentials = cred_status.get("credentials", {}) if cred_status.get("ok") else {}
-    except Exception:
-        credentials = {}
-
+    # Credentials block — pre-fetched by rebuild() and passed in.
     yoff = 16 + 24
     for key, state in credentials.items():
         label = NSTextField.labelWithString_(f"  {key}: ")
