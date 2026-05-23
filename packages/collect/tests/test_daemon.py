@@ -217,3 +217,15 @@ def test_credential_status_unknown_plugin_returns_error(collect_home: Path):
 
     assert reply["ok"] is False
     assert "nope" in reply["error"]
+
+
+def test_credential_status_empty_credentials_returns_empty_dict(collect_home: Path):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(id="noop", name="Noop", kind="manual", run=lambda ctx: None)
+    registry = RegistryResult(plugins={"noop": plugin})
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({"cmd": "credential_status", "plugin": "noop"})
+    assert reply == {"ok": True, "credentials": {}}

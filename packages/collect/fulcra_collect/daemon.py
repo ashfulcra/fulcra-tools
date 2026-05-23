@@ -135,7 +135,9 @@ class Daemon:
         plugin = self.registry.plugins.get(plugin_id)
         if plugin is None:
             return {"ok": False, "error": f"unknown plugin {plugin_id!r}"}
-        from . import credentials  # local import; avoids cycles in tests
+        from . import credentials  # deferred so daemon stays importable
+                                   # without a live keychain; tests
+                                   # monkeypatch has_secret on this module
         out: dict[str, str] = {}
         for cred in plugin.required_credentials:
             out[cred.key] = "set" if credentials.has_secret(plugin_id, cred.key) else "missing"
