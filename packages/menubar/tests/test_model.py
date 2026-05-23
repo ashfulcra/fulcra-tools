@@ -94,3 +94,26 @@ def test_failure_transition_only_on_first_crossing():
     m.add_failure_transition_observer(transitions.append)
     m.update_from_status(FAILING)
     assert transitions == ["lastfm"]
+
+
+def test_in_flight_holds_until_last_run_advances():
+    """Bug 3 regression: for a plugin that already has a last_run, in_flight
+    must NOT clear on the very next poll with the same snapshot. It must only
+    clear when last_run actually advances past the value at trigger time."""
+    m = StatusModel()
+    m.update_from_status(HEALTHY)  # lastfm has last_run = 12:00
+    m.mark_in_flight("lastfm")
+
+    # Same snapshot — should stay in_flight.
+    m.update_from_status(HEALTHY)
+    assert "lastfm" in m.in_flight, (
+        "in_flight should not clear when last_run is unchanged since trigger"
+    )
+
+    # New snapshot with an advanced timestamp — should now clear.
+    advanced = {**HEALTHY, "plugins": [{**HEALTHY["plugins"][0],
+                                        "last_run": "2026-05-23T12:10:00+00:00"}]}
+    m.update_from_status(advanced)
+    assert "lastfm" not in m.in_flight, (
+        "in_flight should clear once last_run advances past the baseline"
+    )

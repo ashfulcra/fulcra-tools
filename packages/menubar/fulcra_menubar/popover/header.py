@@ -5,6 +5,7 @@ from AppKit import (  # type: ignore[import-not-found]
     NSColor, NSTextField, NSView, NSMakeRect,
 )
 
+from .._dispatch import on_main_thread
 from ..model import OverallState, StatusModel
 from ..theme import colors, palette, typography
 
@@ -55,7 +56,7 @@ def make_header(model: StatusModel) -> NSView:
         )
 
     refresh()
-    model.add_observer(refresh)
+    model.add_observer(on_main_thread(refresh))
     return view
 
 

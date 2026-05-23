@@ -5,6 +5,7 @@ from AppKit import (  # type: ignore[import-not-found]
     NSPopover, NSScrollView, NSView, NSViewController, NSMakeRect, NSMakeSize,
 )
 
+from .._dispatch import on_main_thread
 from ..model import StatusModel
 from ..theme import colors
 from .header import make_header
@@ -74,7 +75,7 @@ class PopoverRoot:
             body_container.addSubview_(scroll)
 
         render()
-        model.add_observer(render)
+        model.add_observer(on_main_thread(render))
 
         controller.setView_(root)
         self._popover.setContentViewController_(controller)
