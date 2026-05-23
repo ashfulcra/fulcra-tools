@@ -11,8 +11,7 @@ from __future__ import annotations
 
 from AppKit import (  # type: ignore[import-not-found]
     NSButton, NSBezelStyleRounded, NSScrollView, NSSecureTextField,
-    NSStackView, NSStackViewDistributionFill, NSSwitch, NSTextField,
-    NSView, NSMakeRect, NSUserInterfaceLayoutOrientationVertical,
+    NSSwitch, NSTextField, NSView, NSMakeRect,
 )
 from Foundation import NSObject  # type: ignore[import-not-found]
 
@@ -20,7 +19,7 @@ from fulcra_collect import config as _config
 
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
-from ..theme import colors, palette, typography
+from ..theme import colors, typography
 
 
 def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:

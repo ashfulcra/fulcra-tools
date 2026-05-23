@@ -13,7 +13,7 @@ from Foundation import NSObject  # type: ignore[import-not-found]
 from fulcra_collect import config as _config
 
 from ..daemon_client import DaemonClient, DaemonUnavailable
-from ..theme import colors, palette, typography
+from ..theme import colors, typography
 
 
 def make_about_tab(*, client: DaemonClient):
@@ -33,11 +33,11 @@ def make_about_tab(*, client: DaemonClient):
         plugin_versions = {}
 
     def row(label_text: str, value_text: str, y: float):
-        l = NSTextField.labelWithString_(label_text)
-        l.setFont_(typography.small())
-        l.setTextColor_(colors.text_secondary())
-        l.setFrame_(NSMakeRect(16, y, 220, 16))
-        view.addSubview_(l)
+        lbl = NSTextField.labelWithString_(label_text)
+        lbl.setFont_(typography.small())
+        lbl.setTextColor_(colors.text_secondary())
+        lbl.setFrame_(NSMakeRect(16, y, 220, 16))
+        view.addSubview_(lbl)
         v = NSTextField.labelWithString_(value_text)
         v.setFont_(typography.small())
         v.setTextColor_(colors.text())

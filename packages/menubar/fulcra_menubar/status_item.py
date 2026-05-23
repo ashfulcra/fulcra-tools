@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSBezierPath, NSColor, NSCompositingOperationSourceOver, NSGraphicsContext,
+    NSBezierPath, NSColor, NSCompositingOperationSourceOver,
     NSImage, NSMakeRect,
 )
 from Quartz import (  # type: ignore[import-not-found]

@@ -11,12 +11,12 @@ import subprocess
 import threading
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSBezelStyleRounded, NSButton, NSColor, NSScrollView, NSTextField,
-    NSTextView, NSView, NSMakeRect, NSMakeSize,
+    NSBezelStyleRounded, NSButton, NSTextField,
+    NSView, NSMakeRect,
 )
 from Foundation import NSObject  # type: ignore[import-not-found]
 
-from ..theme import colors, palette, typography
+from ..theme import colors, typography
 
 
 def make_bootstrap_card(width: float, height: float) -> NSView:
