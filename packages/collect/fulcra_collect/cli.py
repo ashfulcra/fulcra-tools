@@ -124,3 +124,20 @@ def set_credential(plugin_id: str, key: str) -> None:
 def _worker(plugin_id: str) -> None:
     """Internal — the worker-subprocess entrypoint."""
     sys.exit(worker.main([plugin_id]))
+
+
+@cli.group()
+def plugin() -> None:
+    """Per-plugin state and configuration commands."""
+
+
+@plugin.command("reset-definition")
+@click.argument("plugin_id")
+def reset_definition(plugin_id: str) -> None:
+    """Clear the cached Fulcra definition id for a plugin so the next
+    run re-resolves (and possibly adopts a different definition)."""
+    from . import state
+    st = state.load(plugin_id)
+    st.definition_id = None
+    state.save(st)
+    click.echo(f"Cleared definition_id cache for {plugin_id!r}.")

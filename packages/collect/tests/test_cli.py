@@ -50,3 +50,16 @@ def test_set_credential_stores_into_the_keychain(collect_home: Path, monkeypatch
                              input="SECRET123\n")
     assert res.exit_code == 0
     assert stored == {("lastfm", "api-key"): "SECRET123"}
+
+
+def test_reset_definition_clears_cache(collect_home: Path, monkeypatch):
+    from fulcra_collect import state
+
+    st = state.PluginState(plugin_id="lastfm", definition_id="cached-uuid")
+    state.save(st)
+
+    result = CliRunner().invoke(cli, ["plugin", "reset-definition", "lastfm"])
+    assert result.exit_code == 0, result.output
+
+    after = state.load("lastfm")
+    assert after.definition_id is None
