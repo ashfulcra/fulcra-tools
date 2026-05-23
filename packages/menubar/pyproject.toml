@@ -19,6 +19,7 @@ macos = [
     "pyobjc-framework-Cocoa>=10",
     "pyobjc-framework-UserNotifications>=10",
     "pyobjc-framework-ServiceManagement>=10",
+    "pyobjc-framework-Quartz>=10",
 ]
 dev = [
     "pytest>=7.4,<8",
