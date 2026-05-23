@@ -60,33 +60,23 @@ def test_secrets_are_namespaced_per_plugin():
     assert credentials.get_secret("trakt", "token") == "B"
 
 
-def test_has_secret_returns_true_when_secret_set(monkeypatch):
-    store = {}
-
-    def fake_get(service, key):
-        return store.get((service, key))
-
-    monkeypatch.setattr("keyring.get_password", fake_get)
-    store[("fulcra-collect:lastfm", "session_key")] = "abc"
-
+def test_has_secret_returns_true_when_secret_set(_in_memory_keyring):
     from fulcra_collect import credentials
 
+    credentials.set_secret("lastfm", "session_key", "abc")
     assert credentials.has_secret("lastfm", "session_key") is True
 
 
-def test_has_secret_returns_false_when_missing(monkeypatch):
-    monkeypatch.setattr("keyring.get_password", lambda s, k: None)
-
+def test_has_secret_returns_false_when_missing(_in_memory_keyring):
     from fulcra_collect import credentials
 
     assert credentials.has_secret("lastfm", "session_key") is False
 
 
-def test_has_secret_returns_false_for_empty_string(monkeypatch):
+def test_has_secret_returns_false_for_empty_string(_in_memory_keyring):
     # An empty string in the keychain counts as "no credential set" — the
     # menubar UI should still prompt the user to connect.
-    monkeypatch.setattr("keyring.get_password", lambda s, k: "")
-
     from fulcra_collect import credentials
 
+    credentials.set_secret("lastfm", "session_key", "")
     assert credentials.has_secret("lastfm", "session_key") is False
