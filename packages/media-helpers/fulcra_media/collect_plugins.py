@@ -1261,6 +1261,20 @@ GENERIC_CSV_PLUGIN = Plugin(
 # Note: the CLI does not currently include "::1" in the guard; we match it exactly.
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
+# The Fulcra annotation definition shape for the "Watched" DurationAnnotation
+# used by the media-webhook plugin.  Same structure as NETFLIX_WATCHED_SPEC and
+# all other Watched plugins — they all share the same definition.  Kept as a
+# distinct constant so the resolver call below is self-documenting and so
+# spec-shape tests are local to this plugin block.
+MEDIA_WEBHOOK_WATCHED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
 
 def _run_media_webhook(ctx: RunContext) -> None:
     """Long-running Plex/Jellyfin webhook receiver.
@@ -1268,6 +1282,10 @@ def _run_media_webhook(ctx: RunContext) -> None:
     Binds an HTTP server on host:port (default 127.0.0.1:8765) and serves
     forever.  Refuses to start on a non-loopback host without a bearer token,
     mirroring the `fulcra-media webhook` CLI's safety check.
+
+    Resolves the "Watched" definition at startup (before the receive loop
+    begins) so the service works standalone on a fresh machine that has never
+    run `fulcra-attention bootstrap` or another Watched-producing plugin.
     """
     host: str = ctx.config.get("host", "127.0.0.1")
     port: int = int(ctx.config.get("port", 8765))
@@ -1283,11 +1301,22 @@ def _run_media_webhook(ctx: RunContext) -> None:
             "or bind on 127.0.0.1."
         )
 
+    # Ensure the "Watched" annotation definition is known before entering the
+    # receive loop.  On a fresh machine where the user only enables media-webhook
+    # (no fulcra-attention bootstrap, no other Watched-producing plugin) the
+    # media state has no watched_definition_id, so the service couldn't start.
+    # The shared resolver adopts Machine 1's existing "Watched" definition rather
+    # than creating a duplicate — the same multi-machine guarantee every other
+    # Watched plugin gets.  After a supervisor restart the cached state makes
+    # this call fast (no network round-trip needed).
     media_state = _state_load(STATE_PATH)
     if not media_state.watched_definition_id:
-        raise RuntimeError(
-            "media annotations not bootstrapped — run `fulcra-media bootstrap` first"
+        def_id = ctx.resolved_definition_id(
+            MEDIA_WEBHOOK_WATCHED_SPEC,
+            canonical_name="Watched",
         )
+        media_state.watched_definition_id = def_id
+        _state_save(media_state)
 
     client = FulcraClient()
     server = webhook_receiver.make_server(
@@ -1307,6 +1336,7 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
     name="Plex/Jellyfin webhook receiver",
     kind="service",
     run=_run_media_webhook,
+    canonical_definition_name="Watched",
     required_permissions=(
         Permission(
             id="network-loopback-server",

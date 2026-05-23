@@ -3208,7 +3208,7 @@ from fulcra_media.importers.generic_csv import _FP_AUTO  # noqa: E402
 # media-webhook service plugin
 # ---------------------------------------------------------------------------
 
-from fulcra_media.collect_plugins import MEDIA_WEBHOOK_PLUGIN  # noqa: E402
+from fulcra_media.collect_plugins import MEDIA_WEBHOOK_PLUGIN, MEDIA_WEBHOOK_WATCHED_SPEC  # noqa: E402
 
 
 def test_media_webhook_plugin_metadata():
@@ -3305,20 +3305,123 @@ def test_media_webhook_plugin_non_loopback_without_token_raises(monkeypatch):
         MEDIA_WEBHOOK_PLUGIN.run(ctx)
 
 
-def test_media_webhook_plugin_raises_when_not_bootstrapped(monkeypatch):
-    """If watched_definition_id is not set, raise RuntimeError about bootstrap."""
-    class _UnbootstrappedState:
-        watched_definition_id = None
+def test_media_webhook_plugin_declares_canonical_definition_name():
+    """The plugin opts into the shared resolver via canonical_definition_name."""
+    assert MEDIA_WEBHOOK_PLUGIN.canonical_definition_name == "Watched"
+
+
+def test_media_webhook_watched_spec_shape():
+    """MEDIA_WEBHOOK_WATCHED_SPEC must declare a duration annotation with a full
+    measurement_spec so the resolver can match existing definitions."""
+    assert MEDIA_WEBHOOK_WATCHED_SPEC["annotation_type"] == "duration"
+    ms = MEDIA_WEBHOOK_WATCHED_SPEC["measurement_spec"]
+    assert ms["measurement_type"] == "duration"
+    assert ms["value_type"] == "duration"
+    assert "unit" in ms  # unit may be None — presence matters for _spec_matches
+
+
+def test_run_uses_resolver_when_watched_definition_not_bootstrapped(monkeypatch):
+    """Resolver retrofit: when watched_definition_id is absent from the media
+    state file (fresh machine, no bootstrap, no other Watched-producing plugin),
+    _run_media_webhook must call ctx.resolved_definition_id at startup rather
+    than raise RuntimeError — allowing the service to start standalone.
+
+    After the resolver call the media state must be persisted with the resolved
+    id so subsequent restarts find it already set (fast cached path)."""
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
 
     monkeypatch.setattr(
         "fulcra_media.collect_plugins._state_load",
-        lambda path: _UnbootstrappedState(),
+        lambda path: empty_media_state,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_save",
+        lambda state, path=None: saved_states.append(state),
+    )
+
+    class _FakeServer:
+        def serve_forever(self):
+            pass  # don't actually run the loop
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        lambda *, host, port, state, client, bearer_token, log_stream: _FakeServer(),
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
 
-    ctx, _ = _make_ctx("media-webhook", {})
-    with pytest.raises(RuntimeError, match="bootstrap"):
-        MEDIA_WEBHOOK_PLUGIN.run(ctx)
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-mw"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="media-webhook",
+        config={"host": "127.0.0.1", "port": "8765"},
+        credentials={},
+        state=PluginState("media-webhook"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    MEDIA_WEBHOOK_PLUGIN.run(ctx)
+
+    # Resolver was invoked with canonical name "Watched"
+    assert fake_def_client.list_calls == ["Watched"]
+    assert fake_def_client.create_calls[0]["name"] == "Watched"
+    assert fake_def_client.create_calls[0]["annotation_type"] == "duration"
+
+    # The resolved id was written into the shared media state
+    assert empty_media_state.watched_definition_id == "def-mw"
+
+    # The media state was persisted to disk
+    assert len(saved_states) == 1
+    assert saved_states[0].watched_definition_id == "def-mw"
+
+
+def test_run_skips_resolver_when_watched_definition_already_bootstrapped(monkeypatch):
+    """When watched_definition_id is already in the media state, the resolver
+    must NOT be called — no unnecessary network trip on supervisor restart."""
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _make_bootstrapped_media_state(),
+    )
+
+    class _FakeServer:
+        def serve_forever(self):
+            pass
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        lambda *, host, port, state, client, bearer_token, log_stream: _FakeServer(),
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(self, spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    ctx, _ = _make_ctx("media-webhook", {"host": "127.0.0.1", "port": "8765"})
+    MEDIA_WEBHOOK_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], (
+        "resolved_definition_id should not be called when watched_definition_id "
+        "is already in the media state"
+    )
 
 
 def test_generic_csv_plugin_metadata():
