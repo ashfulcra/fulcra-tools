@@ -170,6 +170,22 @@ def _run_scheduled_import(
 # Deezer listening history scheduled plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Listened" DurationAnnotation
+# used by the deezer plugin.  Identical structure to LASTFM_LISTENED_SPEC and
+# SPOTIFY_EXTENDED_LISTENED_SPEC — all three plugins produce "Listened" Duration
+# annotations against the same shared definition.  Kept as a distinct constant
+# so the resolver call below is self-documenting and so spec-shape tests are
+# local to this plugin block.
+DEEZER_LISTENED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_deezer(ctx: RunContext) -> None:
     """Fetch the authenticated user's Deezer play history and import it.
 
@@ -185,6 +201,22 @@ def _run_deezer(ctx: RunContext) -> None:
             "run `fulcra-collect set-credential deezer access-token`"
         )
     creds = {"access_token": access_token}
+
+    # Ensure the "Listened" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # listened_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Listened" definition
+    # rather than creating a duplicate — giving the same multi-machine dedup
+    # guarantee that bootstrap provides without requiring bootstrap to have
+    # been run on every machine.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.listened_definition_id:
+        def_id = ctx.resolved_definition_id(
+            DEEZER_LISTENED_SPEC,
+            canonical_name="Listened",
+        )
+        media_state.listened_definition_id = def_id
+        _state_save(media_state)
 
     _run_scheduled_import(
         ctx,
@@ -202,6 +234,7 @@ DEEZER_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_deezer,
     default_interval=timedelta(hours=2),
+    canonical_definition_name="Listened",
     required_credentials=(
         Credential(
             key="access-token",
