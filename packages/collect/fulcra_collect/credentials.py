@@ -7,6 +7,7 @@ other keychain item.
 from __future__ import annotations
 
 import keyring
+import keyring.errors
 
 _SERVICE_PREFIX = "fulcra-collect"
 
@@ -24,7 +25,12 @@ def get_secret(plugin_id: str, key: str) -> str | None:
 
 
 def delete_secret(plugin_id: str, key: str) -> None:
-    keyring.delete_password(_service(plugin_id), key)
+    """Idempotent: silently no-ops if the entry is already absent. The
+    UI calls this on every 'Disconnect' click; absence is success."""
+    try:
+        keyring.delete_password(_service(plugin_id), key)
+    except keyring.errors.PasswordDeleteError:
+        pass
 
 
 def has_secret(plugin_id: str, key: str) -> bool:

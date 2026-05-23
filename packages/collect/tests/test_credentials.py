@@ -80,3 +80,22 @@ def test_has_secret_returns_false_for_empty_string(_in_memory_keyring):
 
     credentials.set_secret("lastfm", "session_key", "")
     assert credentials.has_secret("lastfm", "session_key") is False
+
+
+def test_delete_secret_is_idempotent_when_already_absent(monkeypatch):
+    # The menubar Disconnect button calls delete_credential even when no
+    # credential was ever stored (or was already cleared).  delete_secret must
+    # swallow PasswordDeleteError so the user never sees a confusing error.
+    import keyring
+    import keyring.errors
+    from fulcra_collect import credentials
+
+    def _raising_delete(service, username):
+        raise keyring.errors.PasswordDeleteError("not found")
+
+    monkeypatch.setattr(keyring, "delete_password", _raising_delete)
+
+    # Should not raise even though the underlying keyring always raises.
+    credentials.delete_secret("lastfm", "session_key")
+    # And calling it twice still doesn't raise:
+    credentials.delete_secret("lastfm", "session_key")
