@@ -1363,6 +1363,10 @@ def test_generic_rss_plugin_run_imports_and_advances_watermark(monkeypatch):
         "fulcra_media.collect_plugins.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
+    # BR11: _run_generic_rss now reads media state; pre-populate so the resolver
+    # guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx(
         "generic-rss",
@@ -1390,6 +1394,9 @@ def test_generic_rss_plugin_filters_by_watermark(monkeypatch):
         "fulcra_media.collect_plugins.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
+    # BR11: pre-populate state so the resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx(
         "generic-rss",
@@ -1417,6 +1424,9 @@ def test_generic_rss_plugin_max_entries(monkeypatch):
         "fulcra_media.collect_plugins.newest_event_iso",
         lambda evs: "2026-05-22T10:00:00+00:00",
     )
+    # BR11: pre-populate state so the resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
         "generic-rss",
@@ -1447,6 +1457,9 @@ def test_generic_rss_plugin_newest_first_feed_keeps_oldest_block(monkeypatch):
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
     # Don't stub newest_event_iso — let the real one run on what we actually imported,
     # so the watermark assertion below proves we advanced to a *safe* timestamp.
+    # BR11: pre-populate state so the resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx(
         "generic-rss",
@@ -1478,6 +1491,197 @@ def test_generic_rss_plugin_raises_without_category():
     ctx, _ = _make_ctx("generic-rss", {"feed_url": "https://x.com/f", "service": "s"})
     with pytest.raises(RuntimeError, match="category"):
         GENERIC_RSS_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# BR11 regression-guard tests for generic-rss resolver
+# ---------------------------------------------------------------------------
+
+def test_generic_rss_plugin_canonical_definition_name_is_none():
+    """BR11: generic-rss has no static canonical name — it depends on runtime
+    config.  The Plugin object must NOT declare canonical_definition_name."""
+    assert GENERIC_RSS_PLUGIN.canonical_definition_name is None
+
+
+def test_generic_rss_uses_resolver_for_watched_category(monkeypatch):
+    """BR11 regression: when category='watched' and watched_definition_id is
+    absent, the resolver is called with canonical_name='Watched'."""
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        lambda feed_url, service, category: iter([]),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: None,
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-generic-rss-watched"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="generic-rss",
+        config={"feed_url": "https://x.com/f.rss", "service": "s", "category": "watched"},
+        credentials={},
+        state=PluginState("generic-rss"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    GENERIC_RSS_PLUGIN.run(ctx)
+
+    assert fake_def_client.list_calls == ["Watched"]
+    assert fake_def_client.create_calls[0]["name"] == "Watched"
+    assert empty_media_state.watched_definition_id == "def-generic-rss-watched"
+    assert len(saved_states) == 1
+    assert saved_states[0].watched_definition_id == "def-generic-rss-watched"
+
+
+def test_generic_rss_uses_resolver_for_listened_category(monkeypatch):
+    """BR11 regression: when category='listened' and listened_definition_id is
+    absent, the resolver is called with canonical_name='Listened'."""
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        lambda feed_url, service, category: iter([]),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: None,
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-generic-rss-listened"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="generic-rss",
+        config={"feed_url": "https://x.com/f.rss", "service": "s", "category": "listened"},
+        credentials={},
+        state=PluginState("generic-rss"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    GENERIC_RSS_PLUGIN.run(ctx)
+
+    assert fake_def_client.list_calls == ["Listened"]
+    assert fake_def_client.create_calls[0]["name"] == "Listened"
+    assert empty_media_state.listened_definition_id == "def-generic-rss-listened"
+    assert len(saved_states) == 1
+    assert saved_states[0].listened_definition_id == "def-generic-rss-listened"
+
+
+def test_generic_rss_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
+    """When the target definition_id is already in the media state, the resolver
+    must NOT be called — no unnecessary network trip."""
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        lambda feed_url, service, category: iter([]),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: None,
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    ctx = RunContext(
+        plugin_id="generic-rss",
+        config={"feed_url": "https://x.com/f.rss", "service": "s", "category": "watched"},
+        credentials={},
+        state=PluginState("generic-rss"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    GENERIC_RSS_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], "resolver must not be called when def id is already cached"
 
 
 # ---------------------------------------------------------------------------

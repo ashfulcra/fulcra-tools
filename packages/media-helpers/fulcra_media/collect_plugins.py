@@ -749,6 +749,28 @@ def _rss_import_and_advance(
 # Generic RSS/Atom scheduled plugin
 # ---------------------------------------------------------------------------
 
+# Maps the runtime config category to the canonical Fulcra definition name.
+# canonical_definition_name is intentionally absent from GENERIC_RSS_PLUGIN
+# because it depends on runtime config, not on the Plugin definition itself.
+_CATEGORY_TO_CANONICAL: dict[str, str] = {
+    "watched": "Watched",
+    "listened": "Listened",
+    "read": "Read",
+}
+
+# Shared duration-annotation spec shape used by all three category branches.
+# All typed-media definitions share the same structure; category is expressed
+# only via the canonical_name argument passed to the resolver.
+_GENERIC_DURATION_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_generic_rss(ctx: RunContext) -> None:
     feed_url = ctx.config.get("feed_url")
     if not feed_url:
@@ -770,6 +792,23 @@ def _run_generic_rss(ctx: RunContext) -> None:
         )
     max_entries: int | None = ctx.config.get("max_entries")
 
+    # Ensure the correct annotation definition is known before importing.
+    # The category (watched/listened/read) is set per-instance via plugin config,
+    # so we look it up at run-time and call the resolver with the matching
+    # canonical name.  On a fresh install (machine 2) the target field in
+    # media state may be absent; the resolver adopts the existing definition
+    # rather than creating a duplicate.
+    canonical = _CATEGORY_TO_CANONICAL[category]
+    target_field = f"{category}_definition_id"
+    media_state = _state_load(STATE_PATH)
+    if not getattr(media_state, target_field):
+        def_id = ctx.resolved_definition_id(
+            _GENERIC_DURATION_SPEC,
+            canonical_name=canonical,
+        )
+        setattr(media_state, target_field, def_id)
+        _state_save(media_state)
+
     since = _rss_since(ctx)
     all_events = list(rss_importer.normalize_feed(feed_url, service=service, category=category))
     _rss_import_and_advance(ctx, all_events, tag=service, since=since,
@@ -782,6 +821,9 @@ GENERIC_RSS_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_generic_rss,
     default_interval=timedelta(hours=6),
+    # canonical_definition_name is intentionally absent: the canonical identity
+    # depends on the runtime config value of "category", not on the Plugin
+    # definition itself.  See _CATEGORY_TO_CANONICAL and _run_generic_rss.
     required_credentials=(),
 )
 
