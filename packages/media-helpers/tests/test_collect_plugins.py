@@ -1711,6 +1711,10 @@ def test_goodreads_plugin_run_imports_and_advances_watermark(monkeypatch):
         "fulcra_media.collect_plugins.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
+    # BR10: _run_goodreads now reads media state; pre-populate so the resolver
+    # guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("goodreads", {"user_id": "12345"})
     GOODREADS_PLUGIN.run(ctx)
@@ -1734,6 +1738,9 @@ def test_goodreads_plugin_filters_by_watermark(monkeypatch):
         "fulcra_media.collect_plugins.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
+    # BR10: pre-populate state so the resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("goodreads", {"user_id": "12345"})
     st.watermark = "2026-05-21T00:00:00+00:00"
@@ -1746,6 +1753,144 @@ def test_goodreads_plugin_raises_without_user_id():
     ctx, _ = _make_ctx("goodreads", {})
     with pytest.raises(RuntimeError, match="user_id"):
         GOODREADS_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# BR10 regression-guard tests for goodreads resolver
+# ---------------------------------------------------------------------------
+
+def test_goodreads_plugin_declares_canonical_definition_name():
+    """BR10: the plugin opts into the shared resolver via canonical_definition_name."""
+    assert GOODREADS_PLUGIN.canonical_definition_name == "Read"
+
+
+def test_goodreads_read_spec_shape():
+    """GOODREADS_READ_SPEC must declare a duration annotation with a full
+    measurement_spec so the resolver can match existing definitions."""
+    from fulcra_media.collect_plugins import GOODREADS_READ_SPEC
+    assert GOODREADS_READ_SPEC["annotation_type"] == "duration"
+    ms = GOODREADS_READ_SPEC["measurement_spec"]
+    assert ms["measurement_type"] == "duration"
+    assert ms["value_type"] == "duration"
+    assert "unit" in ms  # unit may be None — presence matters for _spec_matches
+
+
+def test_goodreads_uses_resolver_when_read_definition_not_bootstrapped(monkeypatch):
+    """BR10 regression: when read_definition_id is absent from the media state
+    file (machine 2 never ran bootstrap), _run_goodreads must call
+    ctx.resolved_definition_id rather than proceed without a definition ID."""
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        lambda user_id: iter([]),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: None,
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-goodreads-read"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="goodreads",
+        config={"user_id": "12345"},
+        credentials={},
+        state=PluginState("goodreads"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    GOODREADS_PLUGIN.run(ctx)
+
+    assert fake_def_client.list_calls == ["Read"]
+    assert fake_def_client.create_calls[0]["name"] == "Read"
+    assert fake_def_client.create_calls[0]["annotation_type"] == "duration"
+    assert empty_media_state.read_definition_id == "def-goodreads-read"
+    assert len(saved_states) == 1
+    assert saved_states[0].read_definition_id == "def-goodreads-read"
+
+
+def test_goodreads_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
+    """When read_definition_id is already in the media state, the resolver
+    must NOT be called — no unnecessary network trip."""
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        lambda user_id: iter([]),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: None,
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    ctx = RunContext(
+        plugin_id="goodreads",
+        config={"user_id": "12345"},
+        credentials={},
+        state=PluginState("goodreads"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    GOODREADS_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], "resolver must not be called when def id is already cached"
 
 
 # ---------------------------------------------------------------------------

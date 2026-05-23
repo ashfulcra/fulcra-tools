@@ -847,6 +847,21 @@ LETTERBOXD_PLUGIN = Plugin(
 # Goodreads read shelf scheduled plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Read" DurationAnnotation
+# used by the goodreads plugin.  Same structure as NETFLIX_WATCHED_SPEC and
+# LASTFM_LISTENED_SPEC — all typed-media plugins share the same duration shape;
+# only the canonical name differs.  Kept as a distinct constant so the resolver
+# call below is self-documenting and spec-shape tests are local to this block.
+GOODREADS_READ_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_goodreads(ctx: RunContext) -> None:
     user_id = ctx.config.get("user_id")
     if not user_id:
@@ -855,6 +870,20 @@ def _run_goodreads(ctx: RunContext) -> None:
             f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
         )
     max_entries: int | None = ctx.config.get("max_entries")
+
+    # Ensure the "Read" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # read_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Read" definition
+    # rather than creating a duplicate.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.read_definition_id:
+        def_id = ctx.resolved_definition_id(
+            GOODREADS_READ_SPEC,
+            canonical_name="Read",
+        )
+        media_state.read_definition_id = def_id
+        _state_save(media_state)
 
     since = _rss_since(ctx)
     all_events = list(gr_importer.fetch_diary(user_id))
@@ -868,6 +897,7 @@ GOODREADS_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_goodreads,
     default_interval=timedelta(hours=12),
+    canonical_definition_name="Read",
     required_credentials=(),
 )
 
