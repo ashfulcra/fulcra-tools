@@ -1,8 +1,7 @@
 """The rumps.App subclass.
 
 Hosts the model layer, wires the status item, opens the popover on
-click. Sleep/wake observers, preferences, and the notification post
-path land in later tasks.
+click. Sleep/wake observers and preferences land in later tasks.
 """
 from __future__ import annotations
 
@@ -31,11 +30,9 @@ class FulcraMenubarApp(rumps.App):
         self.poller.set_popover_open(False)
         threading.Thread(target=self.poller.run, daemon=True).start()
 
-        # Notification centre — real PyObjC post path lands in Task 18.
         from .notifications import NotificationCentre
-        self.notifications = NotificationCentre(
-            post=lambda title, body: print(f"[notify] {title}: {body}"),
-        )
+        self.notifications = NotificationCentre(post=self._post_notification)
+        self._request_notification_authorization()
         # Hook failure-threshold transitions to notifications.
         self.model.add_failure_transition_observer(
             lambda pid: self.notifications.notify_failure(pid, "consecutive failures ≥ 3")
@@ -68,6 +65,41 @@ class FulcraMenubarApp(rumps.App):
     @rumps.clicked("Quit")
     def _quit(self, _sender) -> None:
         rumps.quit_application()
+
+    def _request_notification_authorization(self) -> None:
+        try:
+            from UserNotifications import (  # type: ignore[import-not-found]
+                UNAuthorizationOptionAlert, UNAuthorizationOptionSound,
+                UNUserNotificationCenter,
+            )
+        except ImportError:
+            return
+        centre = UNUserNotificationCenter.currentNotificationCenter()
+        opts = UNAuthorizationOptionAlert | UNAuthorizationOptionSound
+
+        def handler(granted, err):
+            if err is not None:
+                logger.warning("UN authorization error: %s", err)
+        centre.requestAuthorizationWithOptions_completionHandler_(opts, handler)
+
+    def _post_notification(self, title: str, body: str) -> None:
+        try:
+            from UserNotifications import (  # type: ignore[import-not-found]
+                UNMutableNotificationContent, UNNotificationRequest,
+                UNUserNotificationCenter,
+            )
+        except ImportError:
+            print(f"[notify] {title}: {body}")
+            return
+        import uuid
+        content = UNMutableNotificationContent.alloc().init()
+        content.setTitle_(title)
+        content.setBody_(body)
+        request = UNNotificationRequest.requestWithIdentifier_content_trigger_(
+            str(uuid.uuid4()), content, None,
+        )
+        UNUserNotificationCenter.currentNotificationCenter() \
+            .addNotificationRequest_withCompletionHandler_(request, None)
 
     def _poll_once(self) -> None:
         try:
