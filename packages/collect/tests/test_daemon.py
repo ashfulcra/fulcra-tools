@@ -348,3 +348,91 @@ def test_delete_credential_rejects_unknown_key(collect_home: Path):
     })
     assert reply["ok"] is False
     assert "not_a_real_key" in reply["error"]
+
+
+# ---- keychain exception sanitization tests --------------------------------
+# These verify that if keyring (or any future backend) raises an exception
+# whose str() contains a secret-looking value, the daemon never forwards
+# that raw message to the control-socket caller.
+
+
+def test_set_credential_does_not_leak_keyring_exception_message(
+        collect_home: Path, monkeypatch):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        required_credentials=(Credential(key="session_key", label="", help=""),),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    def boom(*a, **kw):
+        raise RuntimeError("SENSITIVE_TOKEN_VALUE_DO_NOT_LEAK")
+
+    monkeypatch.setattr("fulcra_collect.credentials.set_secret", boom)
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({
+        "cmd": "set_credential", "plugin": "lastfm",
+        "key": "session_key", "secret": "abc",
+    })
+
+    assert reply["ok"] is False
+    assert "SENSITIVE_TOKEN_VALUE_DO_NOT_LEAK" not in reply["error"]
+    assert "keychain" in reply["error"].lower()
+
+
+def test_delete_credential_does_not_leak_keyring_exception_message(
+        collect_home: Path, monkeypatch):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        required_credentials=(Credential(key="session_key", label="", help=""),),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    def boom(*a, **kw):
+        raise RuntimeError("SENSITIVE_TOKEN_VALUE_DO_NOT_LEAK")
+
+    monkeypatch.setattr("fulcra_collect.credentials.delete_secret", boom)
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({
+        "cmd": "delete_credential", "plugin": "lastfm", "key": "session_key",
+    })
+
+    assert reply["ok"] is False
+    assert "SENSITIVE_TOKEN_VALUE_DO_NOT_LEAK" not in reply["error"]
+    assert "keychain" in reply["error"].lower()
+
+
+def test_credential_status_does_not_leak_keyring_exception_message(
+        collect_home: Path, monkeypatch):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Credential, Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(
+        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        required_credentials=(Credential(key="session_key", label="", help=""),),
+    )
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    def boom(*a, **kw):
+        raise RuntimeError("SENSITIVE_TOKEN_VALUE_DO_NOT_LEAK")
+
+    monkeypatch.setattr("fulcra_collect.credentials.has_secret", boom)
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({
+        "cmd": "credential_status", "plugin": "lastfm",
+    })
+
+    assert reply["ok"] is False
+    assert "SENSITIVE_TOKEN_VALUE_DO_NOT_LEAK" not in reply["error"]
+    assert "keychain" in reply["error"].lower()
