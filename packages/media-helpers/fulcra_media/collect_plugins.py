@@ -643,6 +643,19 @@ GENERIC_RSS_PLUGIN = Plugin(
 # Letterboxd film diary scheduled plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Watched" DurationAnnotation
+# used by the letterboxd plugin.  Same structure as NETFLIX_WATCHED_SPEC —
+# all Watched plugins share the same definition.
+LETTERBOXD_WATCHED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_letterboxd(ctx: RunContext) -> None:
     username = ctx.config.get("username")
     if not username:
@@ -651,6 +664,20 @@ def _run_letterboxd(ctx: RunContext) -> None:
             f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
         )
     max_entries: int | None = ctx.config.get("max_entries")
+
+    # Ensure the "Watched" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # watched_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Watched" definition
+    # rather than creating a duplicate.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.watched_definition_id:
+        def_id = ctx.resolved_definition_id(
+            LETTERBOXD_WATCHED_SPEC,
+            canonical_name="Watched",
+        )
+        media_state.watched_definition_id = def_id
+        _state_save(media_state)
 
     since = _rss_since(ctx)
     all_events = list(lb_importer.fetch_diary(username))
@@ -664,6 +691,7 @@ LETTERBOXD_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_letterboxd,
     default_interval=timedelta(hours=12),
+    canonical_definition_name="Watched",
     required_credentials=(),
 )
 
