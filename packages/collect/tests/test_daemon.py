@@ -146,3 +146,29 @@ def test_run_command_reports_whether_a_run_was_started(
     deadline = __import__("time").time() + 5
     while d._inflight and __import__("time").time() < deadline:
         __import__("time").sleep(0.01)
+
+
+def test_version_handler_returns_daemon_and_plugin_versions(monkeypatch):
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    def fake_run(ctx): pass
+
+    plugin = Plugin(id="lastfm", name="Last.fm", kind="manual", run=fake_run)
+    registry = RegistryResult(plugins={"lastfm": plugin})
+
+    def fake_version(dist_name):
+        return {"fulcra-collect": "0.1.0", "fulcra-media-helpers": "0.4.2"}[dist_name]
+
+    monkeypatch.setattr("fulcra_collect.daemon._distribution_for_plugin",
+                        lambda pid: "fulcra-media-helpers")
+    monkeypatch.setattr("importlib.metadata.version", fake_version)
+
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+
+    reply = d.handle_request({"cmd": "version"})
+
+    assert reply["ok"] is True
+    assert reply["daemon_version"] == "0.1.0"
+    assert reply["plugins"] == {"lastfm": "0.4.2"}

@@ -7,6 +7,7 @@ scheduled dispatch.
 """
 from __future__ import annotations
 
+import importlib.metadata as _im
 import subprocess
 import threading
 import time
@@ -22,6 +23,21 @@ from .scheduler import due_plugins
 
 def _control_socket_path():
     return config_mod.config_dir() / "control.sock"
+
+
+def _distribution_for_plugin(plugin_id: str) -> str | None:
+    """Find the distribution that registered this plugin's entry point."""
+    for ep in _im.entry_points(group="fulcra_collect.plugins"):
+        try:
+            obj = ep.load()
+        except Exception:
+            continue
+        # Two entry-point shapes: a Plugin object directly, or a callable
+        # returning one. Match by id either way.
+        candidate = obj() if callable(obj) and not hasattr(obj, "id") else obj
+        if getattr(candidate, "id", None) == plugin_id:
+            return ep.dist.name if ep.dist else None
+    return None
 
 
 def is_online(*, timeout: float = 2.0) -> bool:
@@ -50,6 +66,9 @@ class Daemon:
         self._inflight: set[str] = set()
         self._inflight_procs: dict[str, subprocess.Popen] = {}
         self._inflight_lock = threading.Lock()
+        # Versions are cheap to compute but only at startup; the
+        # menubar's About pane calls `version` every time the tab opens.
+        self._version_snapshot = self._build_version_snapshot()
 
     # ---- control-socket request handling -------------------------------
 
@@ -62,6 +81,8 @@ class Daemon:
         if cmd == "reload":
             self.config = config_mod.load()
             return {"ok": True}
+        if cmd == "version":
+            return {"ok": True, **self._version_snapshot}
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
     def _status(self) -> dict:
@@ -80,6 +101,22 @@ class Daemon:
             })
         return {"ok": True, "plugins": plugins,
                 "load_errors": dict(self.registry.errors)}
+
+    def _build_version_snapshot(self) -> dict:
+        plugins: dict[str, str] = {}
+        for pid in self.registry.plugins:
+            dist = _distribution_for_plugin(pid)
+            if dist is None:
+                continue
+            try:
+                plugins[pid] = _im.version(dist)
+            except _im.PackageNotFoundError:
+                continue
+        try:
+            daemon_version = _im.version("fulcra-collect")
+        except _im.PackageNotFoundError:
+            daemon_version = "unknown"
+        return {"daemon_version": daemon_version, "plugins": plugins}
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
