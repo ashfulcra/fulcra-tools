@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import threading
-import time
-
 from fulcra_menubar.polling import PollingScheduler
 
 

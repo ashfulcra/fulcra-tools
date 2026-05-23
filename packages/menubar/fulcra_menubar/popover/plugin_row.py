@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSButton, NSColor, NSImage, NSTextField, NSView, NSMakeRect,
+    NSButton, NSColor, NSTextField, NSView, NSMakeRect,
     NSBezelStyleRounded,
 )
 
@@ -80,14 +80,16 @@ def _relative(iso: str) -> str:
         return iso
     delta = datetime.now(timezone.utc) - when
     sec = int(delta.total_seconds())
-    if sec < 60: return f"{sec}s ago"
-    if sec < 3600: return f"{sec // 60}m ago"
-    if sec < 86400: return f"{sec // 3600}h ago"
+    if sec < 60:
+        return f"{sec}s ago"
+    if sec < 3600:
+        return f"{sec // 60}m ago"
+    if sec < 86400:
+        return f"{sec // 3600}h ago"
     return f"{sec // 86400}d ago"
 
 
 def _status_dot(s: PluginSnapshot, _model: StatusModel) -> NSView:
-    from AppKit import NSBezierPath  # type: ignore[import-not-found]
     color_hex = (
         palette.TEXT_TERTIARY if not s.enabled
         else palette.ERROR if s.consecutive_failures > 0
