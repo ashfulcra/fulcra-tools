@@ -33,28 +33,32 @@ class PopoverRoot:
         root.addSubview_(header)
 
         from .plugin_row import make_row, ROW_HEIGHT
-
-        # Section body: a flipped, vertically-stacked list of plugin rows.
-        from AppKit import NSScrollView, NSClipView  # type: ignore[import-not-found]
+        from .bootstrap import make_bootstrap_card
 
         body_height = DEFAULT_HEIGHT - 56  # below the header
-        scroll = NSScrollView.alloc().initWithFrame_(
+
+        body_container = NSView.alloc().initWithFrame_(
             NSMakeRect(0, 0, WIDTH, body_height)
         )
-        scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(0)
-        scroll.setDrawsBackground_(False)
+        root.addSubview_(body_container)
 
-        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, 0))
-        content.setWantsLayer_(True)
-        content.layer().setBackgroundColor_(colors.bg().CGColor())
-        scroll.setDocumentView_(content)
-        root.addSubview_(scroll)
-
-        def rebuild_rows(_model=None):
-            # Clear existing subviews.
-            for sv in list(content.subviews()):
+        def render(_model=None):
+            for sv in list(body_container.subviews()):
                 sv.removeFromSuperview()
+            if self._model.daemon_stopped:
+                card = make_bootstrap_card(WIDTH, body_height)
+                body_container.addSubview_(card)
+                return
+            scroll = NSScrollView.alloc().initWithFrame_(
+                NSMakeRect(0, 0, WIDTH, body_height)
+            )
+            scroll.setHasVerticalScroller_(True)
+            scroll.setBorderType_(0)
+            scroll.setDrawsBackground_(False)
+            content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, 0))
+            content.setWantsLayer_(True)
+            content.layer().setBackgroundColor_(colors.bg().CGColor())
+            scroll.setDocumentView_(content)
             ordered = sorted(self._model.plugins, key=lambda p: (
                 {"service": 0, "scheduled": 1, "manual": 2}.get(p.kind, 3), p.name
             ))
@@ -67,9 +71,10 @@ class PopoverRoot:
                 content.addSubview_(row)
                 y += ROW_HEIGHT
             content.setFrame_(NSMakeRect(0, 0, WIDTH, max(y, body_height)))
+            body_container.addSubview_(scroll)
 
-        rebuild_rows()
-        model.add_observer(rebuild_rows)
+        render()
+        model.add_observer(render)
 
         controller.setView_(root)
         self._popover.setContentViewController_(controller)
