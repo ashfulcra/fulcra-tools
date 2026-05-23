@@ -19,6 +19,55 @@ from . import config, credentials, state
 from .plugin import Plugin, RunContext
 from .registry import RegistryResult, discover
 
+
+class _FulcraDefinitionAdapter:
+    """Thin adapter over BaseFulcraClient exposing the interface expected by
+    ``fulcra_common.definitions.resolve_definition_id``:
+
+    * ``list_definitions(name=...)`` — returns every **live** (non-deleted)
+      annotation definition whose ``name`` matches exactly.
+    * ``create_definition(name=..., **spec)`` — POSTs a new annotation
+      definition and returns the JSON response dict (must have ``"id"``).
+
+    ``BaseFulcraClient`` has no public ``list_definitions`` / ``create_definition``
+    methods — it exposes the raw HTTP primitives. This adapter is the single
+    place where the gap is bridged so the resolver stays HTTP-agnostic.
+    """
+
+    def __init__(self, base_client: "object") -> None:
+        self._c = base_client  # BaseFulcraClient instance
+
+    def list_definitions(self, *, name: str) -> list[dict]:
+        """Return live (non-deleted) annotation definitions named ``name``."""
+        r = self._c._client().get(
+            "/user/v1alpha1/annotation",
+            headers=self._c._authed_headers(),
+        )
+        r.raise_for_status()
+        return [
+            d for d in r.json()
+            if d.get("name") == name and not d.get("deleted_at")
+        ]
+
+    def create_definition(self, *, name: str, **spec) -> dict:
+        """POST a new annotation definition and return the response body."""
+        r = self._c._client().post(
+            "/user/v1alpha1/annotation",
+            json={"name": name, **spec},
+            headers=self._c._authed_headers(),
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+def _make_fulcra_definition_client() -> _FulcraDefinitionAdapter:
+    """Zero-arg factory: return a definition adapter over a fresh
+    ``BaseFulcraClient``.  The worker passes this factory into every
+    ``RunContext`` so plugins that call ``ctx.resolved_definition_id`` have
+    everything they need without importing HTTP machinery themselves."""
+    from fulcra_common import BaseFulcraClient
+    return _FulcraDefinitionAdapter(BaseFulcraClient())
+
 # Query-parameter names (case-insensitive) whose values are secrets.
 _SECRET_PARAM_NAMES = (
     "token", "key", "secret", "password", "passwd", "pwd", "auth",
@@ -64,6 +113,7 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         state=state.load(plugin.id),
         log=logging.getLogger(f"fulcra_collect.plugin.{plugin.id}"),
         _emit=emit,
+        _fulcra_client_factory=_make_fulcra_definition_client,
     )
     missing = sorted(c.key for c in plugin.required_credentials
                      if not ctx.credentials.get(c.key))
