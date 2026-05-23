@@ -147,10 +147,17 @@ class Daemon:
         from . import credentials  # deferred so daemon stays importable
                                    # without a live keychain; tests
                                    # monkeypatch has_secret on this module
-        out: dict[str, str] = {}
-        for cred in plugin.required_credentials:
-            out[cred.key] = "set" if credentials.has_secret(plugin_id, cred.key) else "missing"
-        return {"ok": True, "credentials": out}
+        try:
+            out: dict[str, str] = {}
+            for cred in plugin.required_credentials:
+                out[cred.key] = "set" if credentials.has_secret(plugin_id, cred.key) else "missing"
+            return {"ok": True, "credentials": out}
+        except Exception:
+            import logging
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "credential_status failed for %s", plugin_id,
+            )
+            return {"ok": False, "error": "keychain read failed"}
 
     def _check_credential_key(self, plugin_id: str, key: str) -> dict | None:
         """Return an error reply if (plugin_id, key) doesn't name a
@@ -169,8 +176,15 @@ class Daemon:
             return err
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
-        credentials.set_secret(plugin_id, key, secret)
-        return {"ok": True}
+        try:
+            credentials.set_secret(plugin_id, key, secret)
+            return {"ok": True}
+        except Exception:
+            import logging
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "set_credential failed for %s/%s", plugin_id, key,
+            )
+            return {"ok": False, "error": "keychain write failed"}
 
     def _delete_credential(self, plugin_id: str, key: str) -> dict:
         err = self._check_credential_key(plugin_id, key)
@@ -178,8 +192,15 @@ class Daemon:
             return err
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
-        credentials.delete_secret(plugin_id, key)
-        return {"ok": True}
+        try:
+            credentials.delete_secret(plugin_id, key)
+            return {"ok": True}
+        except Exception:
+            import logging
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "delete_credential failed for %s/%s", plugin_id, key,
+            )
+            return {"ok": False, "error": "keychain delete failed"}
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
