@@ -29,6 +29,7 @@ class FulcraMenubarApp(rumps.App):
         self.poller = PollingScheduler(on_tick=self._poll_once)
         self.poller.set_popover_open(False)
         threading.Thread(target=self.poller.run, daemon=True).start()
+        self._install_sleep_wake_observers()
 
         from .notifications import NotificationCentre
         self.notifications = NotificationCentre(post=self._post_notification)
@@ -100,6 +101,42 @@ class FulcraMenubarApp(rumps.App):
         )
         UNUserNotificationCenter.currentNotificationCenter() \
             .addNotificationRequest_withCompletionHandler_(request, None)
+
+    def _install_sleep_wake_observers(self) -> None:
+        """Register NSWorkspace sleep/wake observers so the poller pauses on sleep.
+
+        On wake, PollingScheduler.resume() fires the next tick immediately so
+        stale status is cleared within ~2 s of unlock instead of waiting for
+        the next 10 s heartbeat.
+
+        Silently skipped on non-Darwin platforms where AppKit/Foundation are
+        unavailable.
+        """
+        try:
+            from AppKit import NSWorkspace  # type: ignore[import-not-found]
+            from Foundation import NSObject  # type: ignore[import-not-found]
+        except ImportError:
+            return
+
+        centre = NSWorkspace.sharedWorkspace().notificationCenter()
+        outer = self
+
+        class _Listener(NSObject):
+            def onSleep_(self, _n):
+                outer.poller.suspend()
+
+            def onWake_(self, _n):
+                outer.poller.resume()
+
+        self._sleep_listener = _Listener.alloc().init()
+        centre.addObserver_selector_name_object_(
+            self._sleep_listener, "onSleep:",
+            "NSWorkspaceWillSleepNotification", None,
+        )
+        centre.addObserver_selector_name_object_(
+            self._sleep_listener, "onWake:",
+            "NSWorkspaceDidWakeNotification", None,
+        )
 
     def _poll_once(self) -> None:
         try:
