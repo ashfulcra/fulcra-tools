@@ -369,7 +369,34 @@ def _run_file_import(ctx: RunContext, *, parse, tag: str) -> None:
 # Netflix manual plugin
 # ---------------------------------------------------------------------------
 
+# The Fulcra annotation definition shape for the "Watched" DurationAnnotation
+# used by the netflix plugin.  Mirrors wire.duration_definition_payload
+# defaults and LASTFM_LISTENED_SPEC — same structure, different canonical name.
+NETFLIX_WATCHED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
 def _run_netflix(ctx: RunContext) -> None:
+    # Ensure the "Watched" annotation definition is known before importing.
+    # On a fresh install (machine 2) the media state file may have no
+    # watched_definition_id because bootstrap was never run on this machine.
+    # The shared resolver adopts Machine 1's existing "Watched" definition
+    # rather than creating a duplicate.
+    media_state = _state_load(STATE_PATH)
+    if not media_state.watched_definition_id:
+        def_id = ctx.resolved_definition_id(
+            NETFLIX_WATCHED_SPEC,
+            canonical_name="Watched",
+        )
+        media_state.watched_definition_id = def_id
+        _state_save(media_state)
+
     _run_file_import(
         ctx,
         parse=netflix_importer.parse_auto,
@@ -383,6 +410,7 @@ NETFLIX_PLUGIN = Plugin(
     kind="manual",
     run=_run_netflix,
     default_interval=None,
+    canonical_definition_name="Watched",
     required_credentials=(),
 )
 
