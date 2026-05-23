@@ -7,11 +7,10 @@ live in the keychain (see credentials.py).
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import tomli_w
+import tomlkit
 
 
 def config_dir() -> Path:
@@ -51,7 +50,7 @@ def load() -> Config:
     path = _config_path()
     if not path.exists():
         return Config()
-    doc = tomllib.loads(path.read_text(encoding="utf-8"))
+    doc = tomlkit.parse(path.read_text(encoding="utf-8"))
     return Config(
         enabled=set(doc.get("enabled", [])),
         interval_overrides=dict(doc.get("interval_overrides", {})),
@@ -60,9 +59,17 @@ def load() -> Config:
 
 
 def save(cfg: Config) -> None:
-    doc = {
-        "enabled": sorted(cfg.enabled),
-        "interval_overrides": cfg.interval_overrides,
-        "plugin_settings": cfg.plugin_settings,
-    }
-    _config_path().write_text(tomli_w.dumps(doc), encoding="utf-8")
+    path = _config_path()
+    # Read the existing document to preserve any comments and custom
+    # sections the user may have added. If the file doesn't exist yet,
+    # start from an empty tomlkit document.
+    if path.exists():
+        doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+    else:
+        doc = tomlkit.document()
+
+    doc["enabled"] = sorted(cfg.enabled)
+    doc["interval_overrides"] = cfg.interval_overrides
+    doc["plugin_settings"] = cfg.plugin_settings
+
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")

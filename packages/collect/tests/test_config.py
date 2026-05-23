@@ -48,3 +48,20 @@ def test_plugin_settings_round_trip(collect_home: Path):
     cfg.plugin_settings["dayone"] = {"local_db": True}
     config.save(cfg)
     assert config.load().plugin_settings["dayone"] == {"local_db": True}
+
+
+def test_save_preserves_comments(collect_home: Path):
+    """config.save() must not strip comments the user added by hand."""
+    toml_path = config.config_dir() / "config.toml"
+    toml_path.write_text(
+        "# this is a comment\nenabled = [\"lastfm\"]\n",
+        encoding="utf-8",
+    )
+    cfg = config.load()
+    assert cfg.enabled == {"lastfm"}
+    cfg.enable("dayone")
+    config.save(cfg)
+    raw = toml_path.read_text(encoding="utf-8")
+    assert "# this is a comment" in raw, (
+        "tomlkit round-trip should preserve the hand-written comment"
+    )
