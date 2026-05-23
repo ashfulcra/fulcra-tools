@@ -359,6 +359,10 @@ def test_netflix_plugin_run(monkeypatch, tmp_path):
                         lambda path: ["ev-netflix"])
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
                         lambda: fake_client)
+    # R8: _run_netflix now reads media state; pre-populate so the resolver
+    # guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("netflix", {"path": str(fake_csv)})
     NETFLIX_PLUGIN.run(ctx)
@@ -371,6 +375,153 @@ def test_netflix_plugin_raises_without_path():
     ctx, _ = _make_ctx("netflix", {})
     with pytest.raises(RuntimeError, match="path"):
         NETFLIX_PLUGIN.run(ctx)
+
+
+# ---------------------------------------------------------------------------
+# R8 regression-guard tests for netflix resolver
+# ---------------------------------------------------------------------------
+
+def test_netflix_plugin_declares_canonical_definition_name():
+    """R8: the plugin opts into the shared resolver via canonical_definition_name."""
+    assert NETFLIX_PLUGIN.canonical_definition_name == "Watched"
+
+
+def test_netflix_watched_spec_shape():
+    """NETFLIX_WATCHED_SPEC must declare a duration annotation with a full
+    measurement_spec so the resolver can match existing definitions."""
+    from fulcra_media.collect_plugins import NETFLIX_WATCHED_SPEC
+    assert NETFLIX_WATCHED_SPEC["annotation_type"] == "duration"
+    ms = NETFLIX_WATCHED_SPEC["measurement_spec"]
+    assert ms["measurement_type"] == "duration"
+    assert ms["value_type"] == "duration"
+    assert "unit" in ms  # unit may be None — presence matters for _spec_matches
+
+
+def test_netflix_uses_resolver_when_watched_definition_not_bootstrapped(
+    monkeypatch, tmp_path
+):
+    """R8 regression: when watched_definition_id is absent from the media
+    state file (machine 2 never ran bootstrap), _run_netflix must call
+    ctx.resolved_definition_id rather than proceed without a definition ID.
+
+    After run() completes, the media state must be persisted with the resolved
+    id so subsequent runs (and other Watched plugins) find it."""
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+
+    fake_csv = tmp_path / "viewing.csv"
+    fake_csv.write_text("Title,Date\n")
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+                        lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.collect_plugins.netflix_importer.parse_auto",
+                        lambda path: [])
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-netflix-watched"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="netflix",
+        config={"path": str(fake_csv)},
+        credentials={},
+        state=PluginState("netflix"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    NETFLIX_PLUGIN.run(ctx)
+
+    # Resolver was invoked with the canonical name "Watched"
+    assert fake_def_client.list_calls == ["Watched"]
+    assert fake_def_client.create_calls[0]["name"] == "Watched"
+    assert fake_def_client.create_calls[0]["annotation_type"] == "duration"
+
+    # The resolved id was written into the shared media state
+    assert empty_media_state.watched_definition_id == "def-netflix-watched"
+
+    # The media state was persisted to disk
+    assert len(saved_states) == 1
+    assert saved_states[0].watched_definition_id == "def-netflix-watched"
+
+
+def test_netflix_does_not_call_resolver_when_definition_already_bootstrapped(
+    monkeypatch, tmp_path
+):
+    """When watched_definition_id is already in the media state, the resolver
+    must NOT be called — no unnecessary network trip."""
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    fake_csv = tmp_path / "viewing.csv"
+    fake_csv.write_text("Title,Date\n")
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+                        lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.collect_plugins.netflix_importer.parse_auto",
+                        lambda path: [])
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    ctx = RunContext(
+        plugin_id="netflix",
+        config={"path": str(fake_csv)},
+        credentials={},
+        state=PluginState("netflix"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    NETFLIX_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], "resolver must not be called when def id is already cached"
 
 
 # ---------------------------------------------------------------------------
