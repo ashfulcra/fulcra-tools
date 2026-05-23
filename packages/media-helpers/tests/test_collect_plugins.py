@@ -3356,6 +3356,10 @@ def test_generic_csv_plugin_run_imports_with_column_map_and_service_category(
         fake_parse,
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    # BR12: _run_generic_csv now reads media state; pre-populate so the resolver
+    # guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
         "generic-csv",
@@ -3418,6 +3422,9 @@ def test_generic_csv_plugin_fingerprint_none_maps_to_none(monkeypatch, tmp_path)
         ),
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    # BR12: pre-populate state so the resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
         "generic-csv",
@@ -3443,6 +3450,9 @@ def test_generic_csv_plugin_fingerprint_auto_maps_to_fp_auto(monkeypatch, tmp_pa
         ),
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    # BR12: pre-populate state so the resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
         "generic-csv",
@@ -3468,6 +3478,9 @@ def test_generic_csv_plugin_fingerprint_explicit_passes_through(monkeypatch, tmp
         ),
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    # BR12: pre-populate state so the resolver guard exits without a network call.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
         "generic-csv",
@@ -3476,3 +3489,196 @@ def test_generic_csv_plugin_fingerprint_explicit_passes_through(monkeypatch, tmp
     GENERIC_CSV_PLUGIN.run(ctx)
 
     assert received["fingerprint_kind"] == "music"
+
+
+# ---------------------------------------------------------------------------
+# BR12 regression-guard tests for generic-csv resolver
+# ---------------------------------------------------------------------------
+
+def test_generic_csv_plugin_canonical_definition_name_is_none():
+    """BR12: generic-csv has no static canonical name — it depends on runtime
+    config.  The Plugin object must NOT declare canonical_definition_name."""
+    assert GENERIC_CSV_PLUGIN.canonical_definition_name is None
+
+
+def test_generic_csv_uses_resolver_for_watched_category(monkeypatch, tmp_path):
+    """BR12 regression: when category='watched' and watched_definition_id is
+    absent, the resolver is called with canonical_name='Watched'."""
+    fake_csv = tmp_path / "data.csv"
+    fake_csv.write_text("timestamp,title,artist,id\n")
+
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.parse_media_csv",
+        lambda *a, **kw: iter([]),
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-generic-csv-watched"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="generic-csv",
+        config={"path": str(fake_csv), "service": "svc", "category": "watched"},
+        credentials={},
+        state=PluginState("generic-csv"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    GENERIC_CSV_PLUGIN.run(ctx)
+
+    assert fake_def_client.list_calls == ["Watched"]
+    assert fake_def_client.create_calls[0]["name"] == "Watched"
+    assert empty_media_state.watched_definition_id == "def-generic-csv-watched"
+    assert len(saved_states) == 1
+    assert saved_states[0].watched_definition_id == "def-generic-csv-watched"
+
+
+def test_generic_csv_uses_resolver_for_listened_category(monkeypatch, tmp_path):
+    """BR12 regression: when category='listened' and listened_definition_id is
+    absent, the resolver is called with canonical_name='Listened'."""
+    fake_csv = tmp_path / "data.csv"
+    fake_csv.write_text("timestamp,title,artist,id\n")
+
+    empty_media_state = _make_empty_media_state()
+    saved_states: list = []
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: empty_media_state)
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+                        lambda state, path=None: saved_states.append(state))
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.parse_media_csv",
+        lambda *a, **kw: iter([]),
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    class _FakeDefinitionClient:
+        def __init__(self):
+            self.list_calls: list = []
+            self.create_calls: list = []
+
+        def list_definitions(self, *, name: str) -> list:
+            self.list_calls.append(name)
+            return []
+
+        def create_definition(self, *, name: str, **spec) -> dict:
+            self.create_calls.append({"name": name, **spec})
+            return {"id": "def-generic-csv-listened"}
+
+    fake_def_client = _FakeDefinitionClient()
+
+    ctx = RunContext(
+        plugin_id="generic-csv",
+        config={"path": str(fake_csv), "service": "svc", "category": "listened"},
+        credentials={},
+        state=PluginState("generic-csv"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+        _fulcra_client_factory=lambda: fake_def_client,
+    )
+    GENERIC_CSV_PLUGIN.run(ctx)
+
+    assert fake_def_client.list_calls == ["Listened"]
+    assert fake_def_client.create_calls[0]["name"] == "Listened"
+    assert empty_media_state.listened_definition_id == "def-generic-csv-listened"
+    assert len(saved_states) == 1
+    assert saved_states[0].listened_definition_id == "def-generic-csv-listened"
+
+
+def test_generic_csv_does_not_call_resolver_when_definition_already_bootstrapped(
+    monkeypatch, tmp_path
+):
+    """When the target definition_id is already in the media state, the resolver
+    must NOT be called — no unnecessary network trip."""
+    fake_csv = tmp_path / "data.csv"
+    fake_csv.write_text("timestamp,title,artist,id\n")
+
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.parse_media_csv",
+        lambda *a, **kw: iter([]),
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+
+    resolver_calls: list = []
+
+    def _fake_resolver(spec, *, canonical_name):
+        resolver_calls.append(canonical_name)
+        return "should-not-be-returned"
+
+    ctx = RunContext(
+        plugin_id="generic-csv",
+        config={"path": str(fake_csv), "service": "svc", "category": "watched"},
+        credentials={},
+        state=PluginState("generic-csv"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    monkeypatch.setattr(RunContext, "resolved_definition_id", _fake_resolver)
+
+    GENERIC_CSV_PLUGIN.run(ctx)
+
+    assert resolver_calls == [], "resolver must not be called when def id is already cached"

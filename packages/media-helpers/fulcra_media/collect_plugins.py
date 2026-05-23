@@ -1208,6 +1208,23 @@ def _run_generic_csv(ctx: RunContext) -> None:
     fp_kind = None if fingerprint == "none" else (None if fingerprint == "auto" else fingerprint)
     fp_arg = _FP_AUTO if fingerprint == "auto" else fp_kind
 
+    # --- Ensure the annotation definition is known before importing ----------
+    # The category (watched/listened/read) is set per-instance via plugin
+    # config, so we look it up at run-time and call the resolver with the
+    # matching canonical name.  On a fresh install (machine 2) the target
+    # field in media state may be absent; the resolver adopts the existing
+    # definition rather than creating a duplicate.
+    canonical = _CATEGORY_TO_CANONICAL[category]
+    target_field = f"{category}_definition_id"
+    media_state = _state_load(STATE_PATH)
+    if not getattr(media_state, target_field):
+        def_id = ctx.resolved_definition_id(
+            _GENERIC_DURATION_SPEC,
+            canonical_name=canonical,
+        )
+        setattr(media_state, target_field, def_id)
+        _state_save(media_state)
+
     # --- Resolve path, parse, and import ------------------------------------
     resolved = library.resolve(path_raw)
     events = list(parse_media_csv(
@@ -1228,6 +1245,9 @@ GENERIC_CSV_PLUGIN = Plugin(
     kind="manual",
     run=_run_generic_csv,
     default_interval=None,
+    # canonical_definition_name is intentionally absent: the canonical identity
+    # depends on the runtime config value of "category", not on the Plugin
+    # definition itself.  See _CATEGORY_TO_CANONICAL and _run_generic_csv.
     required_credentials=(),
 )
 
