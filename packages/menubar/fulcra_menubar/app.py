@@ -65,6 +65,8 @@ class FulcraMenubarApp(rumps.App):
 
     @rumps.clicked("Quit")
     def _quit(self, _sender) -> None:
+        from .popover.bootstrap import cancel_pending
+        cancel_pending()
         rumps.quit_application()
 
     def _request_notification_authorization(self) -> None:
