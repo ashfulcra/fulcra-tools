@@ -36,10 +36,6 @@ class FulcraMenubarApp(rumps.App):
         self.status_item = StatusItemController(self, self.model)
         self._prefs_controller = None
 
-        # rumps would otherwise show its default menu on left-click;
-        # clear it so our setTarget_/setAction_ takes effect.
-        self._nsapp.nsstatusitem.setMenu_(None)
-
         self.popover = PopoverRoot(
             self.model, self.client,
             on_preferences=self._open_prefs,
@@ -58,10 +54,43 @@ class FulcraMenubarApp(rumps.App):
             lambda pid: self.notifications.notify_failure(pid, "consecutive failures ≥ 3")
         )
 
-        # Wire the status-item button to open the popover directly on left-click.
-        # This replaces the old rumps menu approach.  We retain the target object
-        # on self so PyObjC doesn't garbage-collect it.
-        self._status_target = _install_click_target(self)
+        # _status_target is set in _post_launch_setup (after run() creates _nsapp).
+        self._status_target = None
+
+    # ── Post-launch setup ─────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        """Schedule post-launch setup, then start the rumps run loop.
+
+        ``self._nsapp`` is only created inside ``rumps.App.run()`` (at the
+        point where it calls ``NSApp.alloc().init()``), so any access to
+        ``_nsapp`` in ``__init__`` raises ``AttributeError``.  We queue a
+        one-shot block on the main operation queue; it fires on the next
+        main-queue tick — after the NSApplication loop has started and
+        ``_nsapp`` is guaranteed to exist — and then does the work that
+        requires a live status item.
+        """
+        from AppKit import NSOperationQueue  # type: ignore[import-not-found]
+        NSOperationQueue.mainQueue().addOperationWithBlock_(self._post_launch_setup)
+        super().run()
+
+    def _post_launch_setup(self) -> None:
+        """One-shot setup block that runs after the NSApplication loop starts.
+
+        By the time this fires, ``self._nsapp`` exists and we can:
+          1. Clear the rumps-default menu so it never flashes on left-click.
+          2. Install the click target that routes left-click to the popover.
+        """
+        try:
+            self._nsapp.nsstatusitem.setMenu_(None)
+            self._status_target = _install_click_target(self)
+        except AttributeError:
+            # Defensive: if _nsapp still isn't ready (shouldn't happen), log
+            # and skip.  Left-click will fall back to the default rumps menu.
+            logger.warning(
+                "post-launch setup couldn't access _nsapp; "
+                "left-click will use the default rumps menu",
+            )
 
     # ── Popover ───────────────────────────────────────────────────────────────
 
