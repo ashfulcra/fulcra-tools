@@ -1,0 +1,28 @@
+/* Brand palette: white background, Fulcra accents. */
+:root {
+  --accent-violet: #6B5BEE;
+  --accent-mint: #2D8267;
+  --accent-cyan: #10C7BE;
+  --warning: #B7791F;
+  --error: #DC2626;
+  --text: #0B0D17;
+  --text-secondary: #5A6072;
+  --border: #E5E7EB;
+  --bg: #FFFFFF;
+  --bg-elev: #F7F8FA;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.text-secondary { color: var(--text-secondary); }
+.bg-elev { background: var(--bg-elev); }
+.border-fulcra { border-color: var(--border); }
+.text-fulcra-violet { color: var(--accent-violet); }
+.text-fulcra-mint { color: var(--accent-mint); }
+.text-fulcra-error { color: var(--error); }
+.bg-fulcra-violet { background: var(--accent-violet); }
+.bg-fulcra-mint { background: var(--accent-mint); }

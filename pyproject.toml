@@ -3,6 +3,7 @@
 # intra-repo `fulcra-common` dependency from source.
 [tool.uv.workspace]
 members = ["packages/*"]
+exclude = ["packages/web-ui"]
 
 # Workspace-wide pytest settings — applied when running `pytest packages/`
 # from the monorepo root.  Each package also has its own [tool.pytest.ini_options]

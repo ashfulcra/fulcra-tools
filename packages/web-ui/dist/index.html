@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fulcra Collect</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body class="bg-white text-slate-900 min-h-screen" x-data="app()" x-init="boot()">
+  <main class="max-w-5xl mx-auto p-6">
+    <header class="flex items-center gap-3 mb-8">
+      <img src="/static/logo.svg" alt="Fulcra" class="w-8 h-8">
+      <h1 class="text-2xl font-semibold tracking-tight">Fulcra Collect</h1>
+    </header>
+
+    <template x-if="route === 'loading'">
+      <div class="text-slate-500">Loading…</div>
+    </template>
+
+    <template x-if="route === 'error'">
+      <div class="border border-red-200 bg-red-50 text-red-800 p-4 rounded">
+        <strong>Could not connect to the daemon.</strong>
+        <p x-text="errorMessage" class="text-sm mt-1"></p>
+      </div>
+    </template>
+
+    <template x-if="route === 'onboarding'">
+      <section>
+        <h2 class="text-xl font-medium mb-4">Welcome</h2>
+        <p class="text-slate-600 mb-6">
+          The onboarding wizard renders here (Phase C). For now, this
+          confirms the web UI is wired correctly.
+        </p>
+        <div class="text-xs text-slate-400">
+          Fulcra signed in: <span x-text="fulcraAuth?.authenticated ? 'yes' : 'no'"></span> ·
+          Plugins enabled: <span x-text="plugins.filter(p => p.enabled).length"></span> /
+                            <span x-text="plugins.length"></span>
+        </div>
+      </section>
+    </template>
+
+    <template x-if="route === 'dashboard'">
+      <section>
+        <h2 class="text-xl font-medium mb-4">Dashboard</h2>
+        <p class="text-slate-600 mb-6">The dashboard renders here (Phase D).</p>
+        <ul class="space-y-2">
+          <template x-for="p in plugins" :key="p.id">
+            <li class="flex justify-between border border-slate-200 rounded px-4 py-2">
+              <span class="font-medium" x-text="p.name"></span>
+              <span class="text-sm text-slate-500" x-text="p.kind + ' · ' + (p.enabled ? 'enabled' : 'disabled')"></span>
+            </li>
+          </template>
+        </ul>
+      </section>
+    </template>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
