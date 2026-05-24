@@ -2,6 +2,11 @@
 
 Tabs: Plugins, Notifications, About. Each tab is a separate NSView
 factory in its own module; this file just wires them up.
+
+Use ``make_preferences_controller(...)`` (module-level function) rather than
+``PreferencesController.create(...)`` — PyObjC's NSObject subclass transform
+rejects Python keyword-only arguments because ObjC selectors can't represent
+them, causing a BadPrototypeError at click time.
 """
 from __future__ import annotations
 
@@ -21,38 +26,53 @@ HEIGHT = 480.0
 
 
 class PreferencesController(NSWindowController):
-    @classmethod
-    def create(cls, *, model: StatusModel, client: DaemonClient,
-                centre: NotificationCentre) -> "PreferencesController":
-        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, WIDTH, HEIGHT),
-            NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask,
-            NSBackingStoreBuffered, False,
-        )
-        window.setTitle_("Fulcra Collect — Preferences")
-        window.center()
+    """NSWindowController subclass for the Preferences window.
 
-        tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, HEIGHT - 22))
+    Do not add classmethods with keyword-only (*) arguments — PyObjC's NSObject
+    transform machinery will raise BadPrototypeError when such a method is
+    looked up via the ObjC runtime.  Construction helpers live at module scope
+    instead (see ``make_preferences_controller``).
+    """
 
-        from .plugins_tab import make_plugins_tab
-        from .notifications_tab import make_notifications_tab
-        from .about_tab import make_about_tab
 
-        plugins_view = make_plugins_tab(model=model, client=client)
-        notifs_view = make_notifications_tab(centre=centre)
-        about_view = make_about_tab(client=client)
+def make_preferences_controller(
+    *, model: StatusModel, client: DaemonClient, centre: NotificationCentre
+) -> PreferencesController:
+    """Build and return a PreferencesController without attaching it to the class.
 
-        for label, view in (
-            ("Plugins", plugins_view),
-            ("Notifications", notifs_view),
-            ("About", about_view),
-        ):
-            item = NSTabViewItem.alloc().initWithIdentifier_(label)
-            item.setLabel_(label)
-            item.setView_(view)
-            tabs.addTabViewItem_(item)
+    Keeping the factory at module scope sidesteps PyObjC's NSObject transform,
+    which rejects Python keyword-only arguments (``*,``) because ObjC selectors
+    have no equivalent representation.
+    """
+    window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(0, 0, WIDTH, HEIGHT),
+        NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask,
+        NSBackingStoreBuffered, False,
+    )
+    window.setTitle_("Fulcra Collect — Preferences")
+    window.center()
 
-        window.contentView().addSubview_(tabs)
+    tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, HEIGHT - 22))
 
-        controller = cls.alloc().initWithWindow_(window)
-        return controller
+    from .plugins_tab import make_plugins_tab
+    from .notifications_tab import make_notifications_tab
+    from .about_tab import make_about_tab
+
+    plugins_view = make_plugins_tab(model=model, client=client)
+    notifs_view = make_notifications_tab(centre=centre)
+    about_view = make_about_tab(client=client)
+
+    for label, view in (
+        ("Plugins", plugins_view),
+        ("Notifications", notifs_view),
+        ("About", about_view),
+    ):
+        item = NSTabViewItem.alloc().initWithIdentifier_(label)
+        item.setLabel_(label)
+        item.setView_(view)
+        tabs.addTabViewItem_(item)
+
+    window.contentView().addSubview_(tabs)
+
+    controller = PreferencesController.alloc().initWithWindow_(window)
+    return controller
