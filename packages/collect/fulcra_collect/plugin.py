@@ -34,6 +34,36 @@ class Credential:
 
 
 @dataclass(frozen=True)
+class Setting:
+    """A non-secret config field a plugin needs.
+
+    Parallel to Credential. Stored in config.toml rather than the keychain.
+    kind meanings:
+      text        — single-line free text
+      long_text   — multi-line text area
+      path        — local filesystem path (file or directory)
+      url         — URL string
+      port        — TCP port number
+      enum        — one of enum_values; rendered as a dropdown
+      toggle      — boolean on/off switch
+      interval    — duration / polling interval (seconds or ISO8601)
+      secret      — short-lived secret kept in config.toml (true secrets like
+                    API keys go in Credential + the OS keychain instead)
+    """
+    key: str
+    label: str
+    kind: Literal[
+        "text", "long_text", "path", "url", "port",
+        "enum", "toggle", "interval", "secret",
+    ]
+    help: str = ""
+    enum_values: tuple[str, ...] | None = None
+    default: object = None
+    required: bool = True
+    placeholder: str = ""
+
+
+@dataclass(frozen=True)
 class Plugin:
     """A hub plugin: metadata plus a `run(ctx)` callable.
 
@@ -60,6 +90,7 @@ class Plugin:
     requires_network: bool = True
     required_permissions: tuple[Permission, ...] = ()
     required_credentials: tuple[Credential, ...] = ()
+    required_settings: tuple[Setting, ...] = ()
     canonical_definition_name: str | None = None
 
     def __post_init__(self) -> None:
