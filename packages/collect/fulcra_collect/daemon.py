@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from . import activity as _activity
 from . import config as config_mod
 from . import runner, state
 from .config import Config
@@ -77,6 +78,10 @@ class Daemon:
         # Versions are cheap to compute but only at startup; the
         # menubar's About pane calls `version` every time the tab opens.
         self._version_snapshot = self._build_version_snapshot()
+        # In-memory ring buffer of recent annotation writes — powers the web
+        # UI's dashboard "Recently" feed. Lost on daemon restart (v1); sqlite
+        # persistence is v1.5.
+        self.activity = _activity.make_singleton()
         # One-shot migration: copy the first per-plugin bearer-token to
         # the new user-level shared location. Idempotent after first run.
         try:

@@ -577,3 +577,275 @@ def test_oauth_callback_rejects_invalid_state(collect_home):
     client = _client(daemon)
     r = client.get("/api/oauth/x/callback?code=AUTH&state=never-issued")
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Phase D — activity feed
+# ---------------------------------------------------------------------------
+
+def test_activity_route_empty(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/activity")
+    assert r.status_code == 200
+    assert r.json() == {"entries": []}
+
+
+def test_activity_route_returns_newest_first(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    daemon.activity.add(plugin_id="lastfm", summary="A")
+    daemon.activity.add(plugin_id="lastfm", summary="B")
+    client = _client(daemon)
+    r = client.get("/api/activity?limit=10")
+    body = r.json()
+    assert body["entries"][0]["summary"] == "B"
+    assert body["entries"][1]["summary"] == "A"
+
+
+def test_activity_route_validates_limit(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    assert client.get("/api/activity?limit=0").status_code == 400
+    assert client.get("/api/activity?limit=500").status_code == 400
+
+
+def test_activity_route_entry_shape(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    daemon.activity.add(plugin_id="trakt", summary="Watched: Breaking Bad", ok=True)
+    daemon.activity.add(plugin_id="lastfm", summary="auth failed", ok=False)
+    client = _client(daemon)
+    r = client.get("/api/activity?limit=2")
+    entries = r.json()["entries"]
+    assert entries[0]["plugin_id"] == "lastfm"
+    assert entries[0]["ok"] is False
+    assert entries[1]["plugin_id"] == "trakt"
+    assert entries[1]["ok"] is True
+    for e in entries:
+        assert "timestamp" in e
+        assert e["timestamp"].endswith("Z")
+
+
+def test_activity_route_requires_auth(collect_home):
+    from fastapi.testclient import TestClient
+    from fulcra_collect.web import build_app
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    client = TestClient(app)  # no auth header
+    r = client.get("/api/activity")
+    assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Phase E — definition routes
+# ---------------------------------------------------------------------------
+
+def test_definitions_route_requires_fulcra_auth(collect_home, _in_memory_keyring):
+    """Without a stored Fulcra bearer-token the route returns 401."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/definitions")
+    assert r.status_code == 401
+
+
+def test_definitions_route_returns_list(collect_home, _in_memory_keyring, monkeypatch):
+    """With a valid token the route returns definitions from the Fulcra API."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    # Monkeypatch httpx.Client to avoid hitting the real Fulcra API
+    import httpx
+    import json as _json
+
+    fake_defs = [
+        {"id": "def-1", "name": "Watched", "annotation_type": "duration",
+         "deleted_at": None},
+        {"id": "def-2", "name": "Listened", "annotation_type": "duration",
+         "deleted_at": None},
+        {"id": "def-3", "name": "Old", "annotation_type": "duration",
+         "deleted_at": "2026-01-01T00:00:00Z"},  # should be filtered
+    ]
+
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return fake_defs
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **kw): return FakeResponse()
+
+    monkeypatch.setattr("fulcra_collect.web.httpx", type("httpx", (), {"Client": FakeClient})())
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/definitions")
+    assert r.status_code == 200
+    body = r.json()
+    # def-3 is deleted — must be excluded
+    assert len(body["definitions"]) == 2
+    ids = {d["id"] for d in body["definitions"]}
+    assert "def-1" in ids
+    assert "def-3" not in ids
+
+
+def test_definitions_route_filters_by_annotation_type(collect_home, _in_memory_keyring, monkeypatch):
+    """?annotation_type=moment returns only moment-type definitions."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    fake_defs = [
+        {"id": "dur-1", "name": "Watched", "annotation_type": "duration", "deleted_at": None},
+        {"id": "mom-1", "name": "Coffee", "annotation_type": "moment", "deleted_at": None},
+    ]
+
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return fake_defs
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **kw): return FakeResponse()
+
+    monkeypatch.setattr("fulcra_collect.web.httpx", type("httpx", (), {"Client": FakeClient})())
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/definitions?annotation_type=moment")
+    assert r.status_code == 200
+    defs = r.json()["definitions"]
+    assert len(defs) == 1
+    assert defs[0]["annotation_type"] == "moment"
+
+
+def test_definition_recent_requires_fulcra_auth(collect_home, _in_memory_keyring):
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/definitions/some-id/recent")
+    assert r.status_code == 401
+
+
+def test_definition_recent_validates_limit(collect_home, _in_memory_keyring):
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    assert client.get("/api/definitions/x/recent?limit=0").status_code == 400
+    assert client.get("/api/definitions/x/recent?limit=25").status_code == 400
+
+
+def test_definition_recent_returns_entries(collect_home, _in_memory_keyring, monkeypatch):
+    """Returns matching events for the definition, sorted newest-first."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    def_id = "def-abc"
+    def_source = f"com.fulcradynamics.annotation.{def_id}"
+
+    fake_records = [
+        {"metadata": {"source": [def_source], "recorded_at": {"start_time": "2026-05-20T10:00:00Z", "end_time": "2026-05-20T11:00:00Z"}}},
+        {"metadata": {"source": [def_source], "recorded_at": {"start_time": "2026-05-22T10:00:00Z", "end_time": "2026-05-22T11:00:00Z"}}},
+        {"metadata": {"source": ["other-source"], "recorded_at": "2026-05-21T09:00:00Z"}},  # not for this def
+    ]
+
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return fake_records
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **kw): return FakeResponse()
+
+    monkeypatch.setattr("fulcra_collect.web.httpx", type("httpx", (), {"Client": FakeClient})())
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get(f"/api/definitions/{def_id}/recent?limit=5")
+    assert r.status_code == 200
+    entries = r.json()["entries"]
+    # Only 2 records match this definition (the third has other-source)
+    assert len(entries) == 2
+    # Sorted newest-first by end_time
+    end_times = [e["metadata"]["recorded_at"]["end_time"] for e in entries]
+    assert end_times[0] > end_times[1]
+
+
+# ---------------------------------------------------------------------------
+# Phase E — bind / clear definition routes
+# ---------------------------------------------------------------------------
+
+def test_bind_definition_unknown_plugin(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/plugin/no-such/definition",
+                    json={"definition_id": "abc"})
+    assert r.status_code == 404
+
+
+def test_bind_definition_missing_body_fields(collect_home):
+    from fulcra_collect.plugin import Plugin
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    # Body has neither definition_id nor force_new
+    r = client.post("/api/plugin/x/definition", json={})
+    assert r.status_code == 400
+
+
+def test_bind_definition_stores_id(collect_home):
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.post("/api/plugin/x/definition", json={"definition_id": "def-uuid-123"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    st = _state_mod.load("x")
+    assert st.definition_id == "def-uuid-123"
+
+
+def test_bind_definition_force_new_clears_id(collect_home):
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    # Pre-load state with an existing definition_id
+    st = _state_mod.load("x")
+    st.definition_id = "old-def-id"
+    _state_mod.save(st)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.post("/api/plugin/x/definition", json={"force_new": True})
+    assert r.status_code == 200
+    st2 = _state_mod.load("x")
+    assert st2.definition_id is None
+
+
+def test_clear_definition_unknown_plugin(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.delete("/api/plugin/no-such/definition")
+    assert r.status_code == 404
+
+
+def test_clear_definition_removes_id(collect_home):
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    st = _state_mod.load("x")
+    st.definition_id = "some-def"
+    _state_mod.save(st)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.delete("/api/plugin/x/definition")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    st2 = _state_mod.load("x")
+    assert st2.definition_id is None
