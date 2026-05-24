@@ -171,10 +171,34 @@ class RunContext:
         """Report structured progress back to the hub core."""
         self._emit({"type": "progress", **fields})
 
-    def fulcra_token(self) -> str:
-        """The Fulcra access token, via the existing fulcra-api auth path."""
-        from fulcra_common import BaseFulcraClient
-        return BaseFulcraClient().get_token()
+    def fulcra_token(self) -> str | None:
+        """Return the Fulcra access token.
+
+        Resolution order:
+        1. The user-level keychain entry written by the web UI's onboarding
+           wizard (credentials.get_user_secret("bearer-token")).  This is
+           the preferred path once the user has signed in via the daemon.
+        2. The FULCRA_ACCESS_TOKEN environment variable (useful for CI and
+           CLI invocations where a keychain is not available).
+        3. The `fulcra auth print-access-token` CLI subprocess — the
+           original path that reads from the fulcra CLI's credential store.
+
+        Returns None if no token is found via any path (first-launch state
+        before the user has signed in via the web UI's onboarding wizard).
+        """
+        from . import credentials
+        token = credentials.get_user_secret("bearer-token")
+        if token:
+            return token
+        # Fall back to the fulcra-common path (env var + CLI subprocess).
+        # BaseFulcraClient.get_token() raises RuntimeError when the CLI is
+        # missing or fails; catch that so callers can treat it the same as
+        # "no token configured yet."
+        try:
+            from fulcra_common import BaseFulcraClient
+            return BaseFulcraClient().get_token()
+        except (RuntimeError, OSError):
+            return None
 
     def resolved_definition_id(
         self,
