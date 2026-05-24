@@ -13,7 +13,7 @@ from setuptools import setup
 APP = ["fulcra_menubar/__main__.py"]
 DATA_FILES = [
     ("fulcra_menubar/assets", [
-        "fulcra_menubar/assets/menubar-icon.pdf",
+        "fulcra_menubar/assets/menubar-icon.png",
     ]),
 ]
 OPTIONS = {
