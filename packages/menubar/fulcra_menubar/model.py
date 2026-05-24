@@ -130,6 +130,15 @@ class StatusModel:
             self._in_flight_baseline.pop(pid, None)
 
     def _fire_failure_transitions(self) -> None:
+        """Fire observers for every plugin that just crossed into >=3 failures.
+
+        Because _known_failing is overwritten with the current failing set on
+        every call, a plugin that recovers (consecutive_failures drops below 3)
+        is removed from _known_failing. If it subsequently re-fails, the next
+        call treats it as a new crossing and re-fires — intentionally. The user
+        who received an earlier alert wants to know about the new failure even
+        though they were notified about the previous one.
+        """
         now_failing = {p.id for p in self.plugins
                         if p.enabled and p.consecutive_failures >= 3}
         crossings = now_failing - self._known_failing
