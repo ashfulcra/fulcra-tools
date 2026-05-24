@@ -464,7 +464,22 @@ def test_fulcra_auth_status_unauthenticated(collect_home, _in_memory_keyring):
     assert r.json()["authenticated"] is False
 
 
-def test_fulcra_auth_token_set_and_clear(collect_home, _in_memory_keyring):
+def _mock_httpx_success(mocker):
+    """Return a mock httpx.Client context-manager whose GET returns 200."""
+    mock_resp = mocker.Mock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = mocker.Mock()
+    mock_client = mocker.MagicMock()
+    mock_client.__enter__ = mocker.Mock(return_value=mock_client)
+    mock_client.__exit__ = mocker.Mock(return_value=False)
+    mock_client.get = mocker.Mock(return_value=mock_resp)
+    return mock_client
+
+
+def test_fulcra_auth_token_set_and_clear(collect_home, _in_memory_keyring, mocker):
+    mock_client = _mock_httpx_success(mocker)
+    mocker.patch("httpx.Client", return_value=mock_client)
+
     daemon = _build_test_daemon(collect_home)
     client = _client(daemon)
 
@@ -490,7 +505,10 @@ def test_fulcra_auth_token_empty_rejected(collect_home, _in_memory_keyring):
     assert r.status_code == 400
 
 
-def test_fulcra_auth_token_strips_whitespace(collect_home, _in_memory_keyring):
+def test_fulcra_auth_token_strips_whitespace(collect_home, _in_memory_keyring, mocker):
+    mock_client = _mock_httpx_success(mocker)
+    mocker.patch("httpx.Client", return_value=mock_client)
+
     daemon = _build_test_daemon(collect_home)
     client = _client(daemon)
     r = client.post("/api/fulcra/auth/token", json={"token": "  mytoken  "})
@@ -499,6 +517,50 @@ def test_fulcra_auth_token_strips_whitespace(collect_home, _in_memory_keyring):
     # Verify the stored token has no surrounding whitespace
     import fulcra_collect.credentials as _creds
     assert _creds.get_user_secret("bearer-token") == "mytoken"
+
+
+def test_fulcra_auth_token_validates_and_stores_on_success(collect_home, _in_memory_keyring, mocker):
+    """A valid Fulcra token is verified against the API before storage."""
+    daemon = _build_test_daemon(collect_home)
+    mock_client = _mock_httpx_success(mocker)
+    mocker.patch("httpx.Client", return_value=mock_client)
+    client = _client(daemon)
+    r = client.post("/api/fulcra/auth/token", json={"token": "real-token"})
+    assert r.status_code == 200
+    from fulcra_collect import credentials as _creds
+    assert _creds.get_user_secret("bearer-token") == "real-token"
+
+
+def test_fulcra_auth_token_rejects_401_from_fulcra(collect_home, _in_memory_keyring, mocker):
+    """A token that Fulcra rejects with 401 is NOT stored."""
+    daemon = _build_test_daemon(collect_home)
+    mock_resp = mocker.Mock()
+    mock_resp.status_code = 401
+    mock_client = mocker.MagicMock()
+    mock_client.__enter__ = mocker.Mock(return_value=mock_client)
+    mock_client.__exit__ = mocker.Mock(return_value=False)
+    mock_client.get = mocker.Mock(return_value=mock_resp)
+    mocker.patch("httpx.Client", return_value=mock_client)
+    client = _client(daemon)
+    r = client.post("/api/fulcra/auth/token", json={"token": "bad-typo"})
+    assert r.status_code == 401
+    assert "Fulcra rejected" in r.json()["detail"]
+    from fulcra_collect import credentials as _creds
+    assert _creds.get_user_secret("bearer-token") is None
+
+
+def test_fulcra_auth_token_rejects_network_failure(collect_home, _in_memory_keyring, mocker):
+    """If Fulcra is unreachable, the token is NOT stored."""
+    import httpx
+    daemon = _build_test_daemon(collect_home)
+    mock_client = mocker.MagicMock()
+    mock_client.__enter__ = mocker.Mock(return_value=mock_client)
+    mock_client.__exit__ = mocker.Mock(return_value=False)
+    mock_client.get = mocker.Mock(side_effect=httpx.ConnectError("DNS failed"))
+    mocker.patch("httpx.Client", return_value=mock_client)
+    client = _client(daemon)
+    r = client.post("/api/fulcra/auth/token", json={"token": "valid-but-fulcra-down"})
+    assert r.status_code == 502
 
 
 # ---------------------------------------------------------------------------

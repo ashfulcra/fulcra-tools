@@ -401,9 +401,35 @@ def build_app(daemon) -> FastAPI:
     @app.post("/api/fulcra/auth/token", dependencies=[Depends(require_token)])
     def fulcra_auth_set(body: FulcraTokenBody):
         from . import credentials as _creds
-        if not body.token.strip():
+        token = body.token.strip()
+        if not token:
             raise HTTPException(400, "token is empty")
-        _creds.set_user_secret("bearer-token", body.token.strip())
+        # Validate against Fulcra before storing so typos are caught at
+        # the door, not on first plugin run.
+        _log = logging.getLogger("fulcra_collect.web")
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(
+                    "https://api.fulcradynamics.com/data/v0/annotation-defs",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            if r.status_code == 401 or r.status_code == 403:
+                raise HTTPException(
+                    401,
+                    "Fulcra rejected the token. Double-check you copied the full value.",
+                )
+            r.raise_for_status()
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            raise HTTPException(
+                504,
+                "Fulcra didn't respond in time. Check your internet, then try again.",
+            )
+        except httpx.HTTPError as exc:
+            _log.exception("Fulcra token validation failed: %s", exc)
+            raise HTTPException(502, f"Could not reach Fulcra: {type(exc).__name__}")
+        _creds.set_user_secret("bearer-token", token)
         return {"ok": True}
 
     @app.delete("/api/fulcra/auth/token", dependencies=[Depends(require_token)])
