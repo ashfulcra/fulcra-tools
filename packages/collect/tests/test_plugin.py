@@ -206,3 +206,71 @@ def test_resolved_definition_id_raises_when_factory_not_set():
     with pytest.raises(RuntimeError, match="_fulcra_client_factory"):
         ctx.resolved_definition_id({"annotation_type": "moment"},
                                    canonical_name="lastfm-listens")
+
+
+# ---------------------------------------------------------------------------
+# RunContext.fulcra_token() — user-level credential store (B9)
+# ---------------------------------------------------------------------------
+
+def _make_bare_ctx() -> RunContext:
+    """Minimal RunContext for fulcra_token() tests."""
+    return RunContext(
+        plugin_id="test",
+        config={},
+        credentials={},
+        state=None,
+        log=logging.getLogger("test"),
+        _emit=lambda evt: None,
+    )
+
+
+def test_fulcra_token_reads_from_user_level_store(monkeypatch):
+    """RunContext.fulcra_token() returns the token stored in
+    credentials.get_user_secret("bearer-token") without invoking the
+    fulcra CLI or reading any env var."""
+    from fulcra_collect import credentials
+    monkeypatch.setattr(credentials, "get_user_secret",
+                        lambda key: "the-real-token" if key == "bearer-token" else None)
+    ctx = _make_bare_ctx()
+    assert ctx.fulcra_token() == "the-real-token"
+
+
+def test_fulcra_token_returns_none_when_unset(monkeypatch):
+    """When no user-level token is stored and the CLI is unavailable,
+    fulcra_token() returns None rather than raising."""
+    from fulcra_collect import credentials
+    monkeypatch.setattr(credentials, "get_user_secret", lambda key: None)
+    # Simulate CLI unavailable (BaseFulcraClient.get_token raises RuntimeError).
+    import fulcra_common
+    monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token",
+                        lambda self: (_ for _ in ()).throw(
+                            RuntimeError("fulcra CLI not found")))
+    ctx = _make_bare_ctx()
+    assert ctx.fulcra_token() is None
+
+
+def test_fulcra_token_prefers_user_level_over_cli(monkeypatch):
+    """User-level store takes priority; the CLI subprocess is never called
+    when a keychain token is already present."""
+    from fulcra_collect import credentials
+    monkeypatch.setattr(credentials, "get_user_secret",
+                        lambda key: "keychain-token" if key == "bearer-token" else None)
+    cli_called = []
+    import fulcra_common
+    monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token",
+                        lambda self: cli_called.append(True) or "cli-token")
+    ctx = _make_bare_ctx()
+    assert ctx.fulcra_token() == "keychain-token"
+    assert cli_called == [], "CLI must not be invoked when keychain has a token"
+
+
+def test_fulcra_token_falls_back_to_cli_when_no_keychain_token(monkeypatch):
+    """When the user-level store is empty, fulcra_token() falls back to
+    BaseFulcraClient.get_token() (env var + CLI subprocess path)."""
+    from fulcra_collect import credentials
+    monkeypatch.setattr(credentials, "get_user_secret", lambda key: None)
+    import fulcra_common
+    monkeypatch.setattr(fulcra_common.BaseFulcraClient, "get_token",
+                        lambda self: "cli-fallback-token")
+    ctx = _make_bare_ctx()
+    assert ctx.fulcra_token() == "cli-fallback-token"
