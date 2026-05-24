@@ -90,7 +90,25 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
 
         for sv in list(content.subviews()):
             sv.removeFromSuperview()
-        y = 0
+
+        # Onboarding paragraph at the top of the tab. Doubles as the
+        # padding that pushes the first plugin row clear of the tab bar
+        # (without this, the tab buttons sit visually on top of the first
+        # row's name+toggle, making the toggle unclickable).
+        intro_text = (
+            "Enable the plugins you want recorded into Fulcra. Some need "
+            "credentials (paste-secret fields); some are scheduled and run "
+            "automatically; some are manual — for those, click the Fulcra "
+            "Collect icon in the menubar and pick \"Run now\"."
+        )
+        intro = NSTextField.labelWithString_(intro_text)
+        intro.setFont_(typography.small())
+        intro.setTextColor_(colors.text_secondary())
+        intro.setLineBreakMode_(NSLineBreakByWordWrapping)
+        intro.setFrame_(NSMakeRect(16, 12, width - 32, 56))
+        content.addSubview_(intro)
+
+        y = 80  # below the intro paragraph + a touch of breathing room
         ordered = sorted(model.plugins, key=lambda p: (p.kind, p.name))
         for snap in ordered:
             credentials = cred_map.get(snap.id, {})
