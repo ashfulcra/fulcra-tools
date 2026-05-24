@@ -11,7 +11,7 @@ them, causing a BadPrototypeError at click time.
 from __future__ import annotations
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSBackingStoreBuffered, NSTabView, NSTabViewItem, NSTitledWindowMask,
+    NSAppearance, NSBackingStoreBuffered, NSTabView, NSTabViewItem, NSTitledWindowMask,
     NSWindow, NSWindowController, NSClosableWindowMask, NSMiniaturizableWindowMask,
     NSMakeRect,
 )
@@ -51,6 +51,9 @@ def make_preferences_controller(
     )
     window.setTitle_("Fulcra Collect — Preferences")
     window.center()
+    # Force light / Aqua appearance so the Preferences window always renders
+    # on the brand-mandated white background regardless of system Dark Mode.
+    window.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameAqua"))
 
     tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, HEIGHT - 22))
 

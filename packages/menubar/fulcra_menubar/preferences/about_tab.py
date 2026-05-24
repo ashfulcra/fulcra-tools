@@ -18,6 +18,10 @@ from ..theme import colors, typography
 
 def make_about_tab(*, client: DaemonClient):
     view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 640, 440))
+    # Paint the root view white so dark-mode system chrome can never bleed
+    # through a transparent container — the same fix applied to all three tabs.
+    view.setWantsLayer_(True)
+    view.layer().setBackgroundColor_(colors.bg().CGColor())
 
     try:
         app_version = _im.version("fulcra-menubar")
