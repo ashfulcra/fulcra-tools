@@ -621,6 +621,10 @@ def _run_spotify_ifttt(ctx: RunContext) -> None:
     _import_events(ctx, events, "spotify")
 
 
+# NOTE (2026-05-24): SPOTIFY_IFTTT_PLUGIN is intentionally NOT registered as a
+# fulcra_collect.plugins entry-point. It was a one-time backfill tool and does
+# not belong in the default menubar plugin list. The code remains here for
+# manual backfill use via `uv run --package fulcra-media-helpers ...`.
 SPOTIFY_IFTTT_PLUGIN = Plugin(
     id="spotify-ifttt",
     name="Spotify IFTTT/GDrive backfill",
