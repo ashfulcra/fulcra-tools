@@ -17,8 +17,15 @@ from pathlib import Path
 
 from AppKit import (  # type: ignore[import-not-found]
     NSBezierPath, NSColor, NSCompositingOperationSourceOver,
-    NSImage, NSMakeRect,
+    NSImage, NSMakeRect, NSMakeSize,
 )
+
+# macOS menubar items render at 22pt. The source PNG is 88x88 (high-res
+# for retina rendering); we set the LOGICAL size to 22x22 so AppKit
+# displays it at the right scale while keeping the underlying pixels
+# crisp at any density. Without this, the status item is invisible
+# because the 88pt image overflows the menubar slot and gets clipped.
+_MENUBAR_ICON_SIZE = NSMakeSize(22, 22)
 from Quartz import (  # type: ignore[import-not-found]
     CABasicAnimation, CALayer, kCAFillModeForwards,
 )
@@ -71,8 +78,10 @@ class StatusItemController:
         self._model = model
         self._base = NSImage.alloc().initWithContentsOfFile_(str(ASSET))
         if self._base is not None:
+            self._base.setSize_(_MENUBAR_ICON_SIZE)
             self._base.setTemplate_(True)
             self._with_badge = _compose_image_with_badge(self._base, palette.ERROR)
+            self._with_badge.setSize_(_MENUBAR_ICON_SIZE)
         else:
             self._with_badge = None
         self._pulse_layer = None
