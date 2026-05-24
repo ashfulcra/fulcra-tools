@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import io
 import json
-import logging
 from pathlib import Path
 
 from fulcra_collect import worker
 from fulcra_collect.plugin import Plugin, RunContext
 from fulcra_collect.registry import RegistryResult
-from fulcra_collect.worker import _scrub_secrets, _make_fulcra_definition_client
+from fulcra_collect.worker import _scrub_secrets
 
 
 def _run_capturing(plugin: Plugin, collect_home: Path) -> list[dict]:
@@ -86,7 +85,7 @@ def test_worker_emits_an_error_result_when_run_raises(collect_home: Path):
 def test_main_reports_unknown_plugin_id(collect_home: Path, capsys):
     rc = worker.main(["no-such-plugin"], registry=RegistryResult())
     captured = capsys.readouterr()
-    last = [l for l in captured.out.splitlines() if l][-1]
+    last = [ln for ln in captured.out.splitlines() if ln][-1]
     import json as _json
     assert _json.loads(last)["outcome"] == "error"
     assert rc == 1
@@ -168,9 +167,9 @@ def test_worker_isolates_plugin_stdout_from_event_stream(
     # Restore stdout for capsys before assertions.
     monkeypatch.undo()
 
-    lines = [l for l in buf.getvalue().splitlines() if l]
+    lines = [ln for ln in buf.getvalue().splitlines() if ln]
     # Every line on `out` must be valid JSON — no stray "hello..." string.
-    parsed = [json.loads(l) for l in lines]
+    parsed = [json.loads(ln) for ln in lines]
     assert parsed[-1]["type"] == "result"
     assert parsed[-1]["outcome"] == "done"
     assert parsed[-1]["watermark"] == "2026-05-22T12:00:00Z"

@@ -6,6 +6,7 @@ import pytest
 from fulcra_common.definitions import (
     DefinitionSchemaMismatch,
     _spec_matches,
+    resolve_definition_id,
 )
 
 
@@ -65,8 +66,6 @@ class _FakeClient:
         self.existing.append(new)
         return new
 
-
-from fulcra_common.definitions import resolve_definition_id
 
 
 def test_resolve_creates_when_not_found():
