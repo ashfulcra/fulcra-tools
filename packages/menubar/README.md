@@ -10,7 +10,9 @@ Swift rewrite follows once the UX is locked (see
     uv sync --extra macos --package fulcra-menubar
     uv run --package fulcra-menubar python -m fulcra_menubar
 
-The daemon must be running (`fulcra-collect service start`). The
+The daemon must be running (`fulcra-collect install` to set up the
+launchd/systemd user agent, or `fulcra-collect daemon` in a foreground
+terminal for dev). The
 menubar icon appears in the top-right of the screen; click for the
 rumps menu, then "Open Fulcra Collect" for the popover.
 

@@ -1,14 +1,17 @@
 """The 'Daemon not running' card that replaces the plugin list when
 the control socket is unreachable. Single CTA: 'Install & start daemon'
-runs `fulcra-collect service install && fulcra-collect service start`
-in a subprocess on a background thread, captures stdout/stderr, and
-shows the output in a small label below the button.
+runs `fulcra-collect install` (writes the launchd plist) then
+`launchctl load <plist>` (starts the daemon immediately) in subprocesses
+on a background thread, captures stdout/stderr, and shows the output in
+a small label below the button.
 """
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 import threading
+from pathlib import Path
 
 from AppKit import (  # type: ignore[import-not-found]
     NSBezelStyleRounded, NSButton, NSTextField,
@@ -104,18 +107,35 @@ def make_bootstrap_card(width: float, height: float) -> NSView:
         log.setStringValue_("Running…")
         def work():
             try:
-                rc1, p1_out = _run_step(["fulcra-collect", "service", "install"])
+                rc1, p1_out = _run_step(["fulcra-collect", "install"])
                 if rc1 != 0:
                     output = (
-                        f"ERROR: Step 1 (install) failed with exit code {rc1}."
+                        f"ERROR: install failed with exit code {rc1}."
                         + (f"\n{p1_out}" if p1_out else "")
                     )
                 else:
-                    rc2, p2_out = _run_step(["fulcra-collect", "service", "start"])
+                    # Load the service so the daemon starts immediately.
+                    # On macOS the plist has RunAtLoad=true, so launchctl
+                    # load both registers and starts it. On Linux we use
+                    # systemctl --user enable --now.
+                    if platform.system() == "Darwin":
+                        plist = (
+                            Path.home()
+                            / "Library"
+                            / "LaunchAgents"
+                            / "com.fulcra.collect.plist"
+                        )
+                        load_cmd = ["launchctl", "load", str(plist)]
+                    else:
+                        load_cmd = [
+                            "systemctl", "--user", "enable", "--now",
+                            "fulcra-collect",
+                        ]
+                    rc2, p2_out = _run_step(load_cmd)
                     if rc2 != 0:
                         output = (
-                            f"ERROR: Step 2 (start) failed with exit code {rc2}."
-                            " Daemon installed but not running; check Console.app log."
+                            f"ERROR: daemon load failed with exit code {rc2}."
+                            " Service installed but not running; check Console.app log."
                             + (f"\n{p2_out}" if p2_out else "")
                         )
                     else:
