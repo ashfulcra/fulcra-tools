@@ -101,6 +101,7 @@ LASTFM_PLUGIN = Plugin(
     name="Last.fm scrobbles",
     kind="scheduled",
     run=_run_lastfm,
+    description="Imports your Last.fm scrobble history on a schedule. Needs your Last.fm API key.",
     default_interval=timedelta(hours=1),
     canonical_definition_name="Listened",
     required_credentials=(
@@ -233,6 +234,9 @@ DEEZER_PLUGIN = Plugin(
     name="Deezer listening history",
     kind="scheduled",
     run=_run_deezer,
+    description=(
+        "Imports your Deezer listening history on a schedule. Needs a Deezer access token."
+    ),
     default_interval=timedelta(hours=2),
     canonical_definition_name="Listened",
     required_credentials=(
@@ -386,6 +390,9 @@ TRAKT_PLUGIN = Plugin(
     name="Trakt watch history",
     kind="scheduled",
     run=_run_trakt,
+    description=(
+        "Imports your Trakt.tv watch history on a schedule. Needs your Trakt OAuth credentials."
+    ),
     default_interval=timedelta(hours=6),
     canonical_definition_name="Watched",
     required_credentials=(),  # Auth is managed by the trakt.json creds file.
@@ -469,6 +476,10 @@ NETFLIX_PLUGIN = Plugin(
     name="Netflix viewing history",
     kind="manual",
     run=_run_netflix,
+    description=(
+        "Imports a Netflix viewing-history CSV. Manual — download from "
+        "netflix.com/Activity, then point this at the file."
+    ),
     default_interval=None,
     canonical_definition_name="Watched",
     required_credentials=(),
@@ -524,6 +535,10 @@ SPOTIFY_EXTENDED_PLUGIN = Plugin(
     name="Spotify Extended Streaming History",
     kind="manual",
     run=_run_spotify_extended,
+    description=(
+        "Imports an exported Spotify Extended Streaming History JSON file. Manual — "
+        "request the export from Spotify, then point this at the downloaded file."
+    ),
     default_interval=None,
     canonical_definition_name="Listened",
     required_credentials=(),
@@ -574,6 +589,10 @@ YOUTUBE_PLUGIN = Plugin(
     name="YouTube watch history",
     kind="manual",
     run=_run_youtube,
+    description=(
+        "Imports a YouTube watch-history JSON file (Google Takeout). Manual — "
+        "request the takeout, then point this at the file."
+    ),
     default_interval=None,
     canonical_definition_name="Watched",
     required_credentials=(),
@@ -685,6 +704,10 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
     name="Apple TV playback (takeout)",
     kind="manual",
     run=_run_apple_takeout,
+    description=(
+        "Imports an Apple Music takeout XML. Manual — request the takeout from "
+        "privacy.apple.com, then point this at the downloaded file."
+    ),
     default_interval=None,
     canonical_definition_name="Watched",
     required_credentials=(),
@@ -824,6 +847,10 @@ GENERIC_RSS_PLUGIN = Plugin(
     name="Generic RSS/Atom feed",
     kind="scheduled",
     run=_run_generic_rss,
+    description=(
+        "Watches an RSS or Atom feed and records each new entry. You set the feed "
+        "URL and the category (Watched/Listened/Read)."
+    ),
     default_interval=timedelta(hours=6),
     # canonical_definition_name is intentionally absent: the canonical identity
     # depends on the runtime config value of "category", not on the Plugin
@@ -883,6 +910,7 @@ LETTERBOXD_PLUGIN = Plugin(
     name="Letterboxd film diary",
     kind="scheduled",
     run=_run_letterboxd,
+    description="Imports your Letterboxd diary RSS feed on a schedule.",
     default_interval=timedelta(hours=12),
     canonical_definition_name="Watched",
     required_credentials=(),
@@ -942,6 +970,10 @@ GOODREADS_PLUGIN = Plugin(
     name="Goodreads read shelf",
     kind="scheduled",
     run=_run_goodreads,
+    description=(
+        "Imports your Goodreads RSS feed on a schedule. Read-only — anything you "
+        "mark as 'read' on Goodreads gets recorded."
+    ),
     default_interval=timedelta(hours=12),
     canonical_definition_name="Read",
     required_credentials=(),
@@ -1037,6 +1069,10 @@ APPLE_PODCASTS_PLUGIN = Plugin(
     name="Apple Podcasts (on-device)",
     kind="scheduled",
     run=_run_apple_podcasts,
+    description=(
+        "Reads your local Apple Podcasts database for recent listens. Needs Full "
+        "Disk Access for the Podcasts SQLite file."
+    ),
     default_interval=timedelta(hours=6),
     requires_network=False,
     canonical_definition_name="Listened",
@@ -1121,6 +1157,7 @@ APPLE_PODCASTS_TIMEMACHINE_PLUGIN = Plugin(
     name="Apple Podcasts (Time Machine recovery)",
     kind="manual",
     run=_run_apple_podcasts_timemachine,
+    description="Reads historical Apple Podcasts listens from Time Machine snapshots. Manual.",
     default_interval=None,
     requires_network=False,
     canonical_definition_name="Listened",
@@ -1248,6 +1285,10 @@ GENERIC_CSV_PLUGIN = Plugin(
     name="Generic media CSV",
     kind="manual",
     run=_run_generic_csv,
+    description=(
+        "Imports a generic CSV of media events. Manual — set the file path and "
+        "category in this plugin's settings."
+    ),
     default_interval=None,
     # canonical_definition_name is intentionally absent: the canonical identity
     # depends on the runtime config value of "category", not on the Plugin
@@ -1340,6 +1381,11 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
     name="Plex/Jellyfin webhook receiver",
     kind="service",
     run=_run_media_webhook,
+    description=(
+        "Listens for Plex/Jellyfin webhook calls on a local port and records what "
+        "you watch. Needs a Fulcra bearer token; configure your media server to "
+        "point at this app's URL."
+    ),
     canonical_definition_name="Watched",
     required_permissions=(
         Permission(

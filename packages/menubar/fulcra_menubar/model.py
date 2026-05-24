@@ -32,6 +32,7 @@ class PluginSnapshot:
     last_error: str | None
     consecutive_failures: int
     default_interval_s: int | None = None
+    description: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "PluginSnapshot":
@@ -43,6 +44,7 @@ class PluginSnapshot:
             last_error=d.get("last_error"),
             consecutive_failures=d.get("consecutive_failures", 0),
             default_interval_s=d.get("default_interval_s"),
+            description=d.get("description", ""),
         )
 
 

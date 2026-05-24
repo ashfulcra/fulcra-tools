@@ -111,6 +111,7 @@ class Daemon:
                 "id": pid,
                 "name": plugin.name,
                 "kind": plugin.kind,
+                "description": plugin.description,
                 "enabled": pid in self.config.enabled,
                 "last_run": st.last_run.isoformat() if st.last_run else None,
                 "last_outcome": st.last_outcome,
