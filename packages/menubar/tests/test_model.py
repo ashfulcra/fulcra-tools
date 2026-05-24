@@ -96,6 +96,28 @@ def test_failure_transition_only_on_first_crossing():
     assert transitions == ["lastfm"]
 
 
+def test_failure_transition_refires_after_recovery():
+    """A plugin that recovers (consecutive_failures drops below 3) and
+    then fails again should re-fire the failure observer — the user
+    wants to know about the new failure even though they were already
+    notified about the previous one."""
+    m = StatusModel()
+    transitions = []
+    m.add_failure_transition_observer(transitions.append)
+
+    m.update_from_status(FAILING)           # cross into >=3
+    assert transitions == ["lastfm"]
+
+    recovered = {**HEALTHY, "plugins": [{**HEALTHY["plugins"][0],
+                                         "consecutive_failures": 0,
+                                         "last_outcome": "done"}]}
+    m.update_from_status(recovered)
+    assert transitions == ["lastfm"]        # no extra fire on recovery
+
+    m.update_from_status(FAILING)           # re-fail
+    assert transitions == ["lastfm", "lastfm"]  # re-fired
+
+
 def test_in_flight_holds_until_last_run_advances():
     """Bug 3 regression: for a plugin that already has a last_run, in_flight
     must NOT clear on the very next poll with the same snapshot. It must only
