@@ -10,8 +10,8 @@ directly.
 from __future__ import annotations
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSButton, NSBezelStyleRounded, NSScrollView, NSSecureTextField,
-    NSSwitch, NSTextField, NSView, NSMakeRect,
+    NSButton, NSBezelStyleRounded, NSLineBreakByWordWrapping, NSScrollView,
+    NSSecureTextField, NSSwitch, NSTextField, NSView, NSMakeRect,
 )
 
 from fulcra_collect import config as _config
@@ -77,7 +77,8 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
         ordered = sorted(model.plugins, key=lambda p: (p.kind, p.name))
         for snap in ordered:
             credentials = cred_map.get(snap.id, {})
-            row_height = 80 + 24 * len(credentials)
+            # Base 112 pt: 28 name + 32 description + 28 interval-or-pad + 24 run btn
+            row_height = 112 + 24 * len(credentials)
             row = _make_plugin_row(snap, width, row_height, credentials=credentials,
                                    client=client, model=model)
             row.setFrame_(NSMakeRect(0, y, width, row_height))
@@ -102,6 +103,15 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
     name.setFrame_(NSMakeRect(16, height - 28, width - 200, 18))
     row.addSubview_(name)
 
+    # Description label — 12pt secondary text, word-wrapped, ~32pt tall (2 lines).
+    if snap.description:
+        desc = NSTextField.labelWithString_(snap.description)
+        desc.setFont_(typography.small())
+        desc.setTextColor_(colors.text_secondary())
+        desc.setLineBreakMode_(NSLineBreakByWordWrapping)
+        desc.setFrame_(NSMakeRect(16, height - 60, width - 120, 32))
+        row.addSubview_(desc)
+
     enabled_switch = NSSwitch.alloc().initWithFrame_(
         NSMakeRect(width - 80, height - 32, 50, 22)
     )
@@ -118,18 +128,18 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
     _attach(enabled_switch, on_toggle)
     row.addSubview_(enabled_switch)
 
-    # Interval input — scheduled only.
+    # Interval input — scheduled only. Placed below the description block.
     if snap.kind == "scheduled":
         cfg = _config.load()
         override = cfg.interval_overrides.get(snap.id)
         seconds = override if override is not None else (snap.default_interval_s or 3600)
         interval_label = NSTextField.labelWithString_("Interval (minutes):")
         interval_label.setFont_(typography.small())
-        interval_label.setFrame_(NSMakeRect(16, height - 56, 140, 16))
+        interval_label.setFrame_(NSMakeRect(16, height - 88, 140, 16))
         row.addSubview_(interval_label)
 
         interval_field = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(160, height - 60, 60, 22)
+            NSMakeRect(160, height - 92, 60, 22)
         )
         interval_field.setStringValue_(str(max(seconds // 60, 1)))
 

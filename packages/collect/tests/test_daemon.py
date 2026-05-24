@@ -49,6 +49,25 @@ def test_status_includes_default_interval_s(collect_home: Path):
     assert by_id["dayone"]["default_interval_s"] is None
 
 
+def test_status_includes_description(collect_home: Path):
+    """status() must include each plugin's description string so the menubar
+    can render it in the Preferences Plugins tab."""
+    r = RegistryResult()
+    r.plugins["lastfm"] = Plugin(
+        id="lastfm", name="Last.fm", kind="scheduled",
+        run=lambda c: None,
+        description="Imports your Last.fm scrobble history.",
+        default_interval=__import__("datetime").timedelta(hours=1),
+    )
+    r.plugins["dayone"] = Plugin(id="dayone", name="Day One", kind="manual",
+                                 run=lambda c: None)
+    d = Daemon(registry=r, config=Config())
+    reply = d.handle_request({"cmd": "status"})
+    by_id = {p["id"]: p for p in reply["plugins"]}
+    assert by_id["lastfm"]["description"] == "Imports your Last.fm scrobble history."
+    assert by_id["dayone"]["description"] == ""  # default empty string
+
+
 def test_unknown_command_is_an_error_reply(collect_home: Path):
     d = Daemon(registry=_registry(), config=Config())
     reply = d.handle_request({"cmd": "frobnicate"})

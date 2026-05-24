@@ -45,11 +45,17 @@ class Plugin:
     requires_network: when True (the default), the daemon skips this
     plugin's scheduled dispatch while the machine is offline — deferring
     it rather than running it into a guaranteed failure.
+
+    description: one-line human-readable description shown in the Preferences
+    UI. Covers what the plugin imports and what credentials/files/permissions
+    it needs. Defaults to empty string for backwards compatibility with plugins
+    that pre-date this field.
     """
     id: str
     name: str
     kind: PluginKind
     run: Callable[["RunContext"], None]
+    description: str = ""
     default_interval: timedelta | None = None
     requires_network: bool = True
     required_permissions: tuple[Permission, ...] = ()

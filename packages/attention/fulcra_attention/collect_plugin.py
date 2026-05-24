@@ -70,6 +70,10 @@ PLUGIN = Plugin(
     name="Attention relay",
     kind="service",
     run=run,
+    description=(
+        "Captures activity signals from this Mac (which apps you're using, when "
+        "you're idle) and writes them to Fulcra. Needs a Fulcra bearer token."
+    ),
     canonical_definition_name="Attention",
     required_permissions=(
         Permission(id="network-loopback-server",

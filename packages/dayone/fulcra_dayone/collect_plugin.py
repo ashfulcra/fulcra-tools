@@ -50,4 +50,8 @@ PLUGIN = Plugin(
     name="Day One journal",
     kind="manual",
     run=run,
+    description=(
+        "Imports your Day One journal entries as moment annotations. Manual — "
+        "point this at your Day One export."
+    ),
 )

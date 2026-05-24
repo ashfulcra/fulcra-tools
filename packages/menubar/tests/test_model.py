@@ -118,6 +118,32 @@ def test_failure_transition_refires_after_recovery():
     assert transitions == ["lastfm", "lastfm"]  # re-fired
 
 
+def test_plugin_snapshot_reads_description_from_dict():
+    """PluginSnapshot.from_dict must populate description from the daemon reply."""
+    from fulcra_menubar.model import PluginSnapshot
+    d = {
+        "id": "lastfm", "name": "Last.fm", "kind": "scheduled",
+        "enabled": True, "last_run": None, "last_outcome": None,
+        "last_error": None, "consecutive_failures": 0,
+        "description": "Imports your Last.fm scrobble history.",
+    }
+    snap = PluginSnapshot.from_dict(d)
+    assert snap.description == "Imports your Last.fm scrobble history."
+
+
+def test_plugin_snapshot_description_defaults_to_empty():
+    """Older daemon replies without description must not break PluginSnapshot."""
+    from fulcra_menubar.model import PluginSnapshot
+    d = {
+        "id": "lastfm", "name": "Last.fm", "kind": "scheduled",
+        "enabled": True, "last_run": None, "last_outcome": None,
+        "last_error": None, "consecutive_failures": 0,
+        # no "description" key — simulates a pre-description daemon
+    }
+    snap = PluginSnapshot.from_dict(d)
+    assert snap.description == ""
+
+
 def test_in_flight_holds_until_last_run_advances():
     """Bug 3 regression: for a plugin that already has a last_run, in_flight
     must NOT clear on the very next poll with the same snapshot. It must only
