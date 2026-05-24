@@ -23,6 +23,17 @@ from ..model import PluginSnapshot, StatusModel
 from ..theme import colors, typography
 
 
+class _FlippedView(NSView):  # type: ignore[misc]
+    """NSView with a top-left origin (y=0 at top). Used as the Plugins-tab
+    scroll-view document view so the first sorted plugin renders at the
+    top of the visible area. Without flipping, AppKit's default
+    bottom-left origin reverses the visual order and breaks hit-testing
+    for subviews whose frames use `height - X` math."""
+
+    def isFlipped(self):  # noqa: N802 — ObjC selector name
+        return True
+
+
 def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
     width = 640.0
     height = 440.0
@@ -38,7 +49,13 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
     scroll.setBorderType_(0)
     scroll.setDrawsBackground_(False)
 
-    content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 0))
+    # The content view is FLIPPED (y=0 at top) so the first sorted plugin
+    # lands at the top of the scroll view and the visual order matches the
+    # sort. Without this, AppKit's default unflipped semantics put the
+    # first row at the BOTTOM of the content — visually reversing the list
+    # AND causing hit-testing weirdness because subview frames computed
+    # with `height - X` math get mapped wrong relative to scroll position.
+    content = _FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 0))
     content.setWantsLayer_(True)
     content.layer().setBackgroundColor_(colors.bg().CGColor())
     scroll.setDocumentView_(content)
