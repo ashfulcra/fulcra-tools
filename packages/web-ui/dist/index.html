@@ -8,55 +8,615 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 </head>
-<body class="bg-white text-slate-900 min-h-screen" x-data="app()" x-init="boot()">
-  <main class="max-w-5xl mx-auto p-6">
+<body class="bg-white text-slate-900 min-h-screen"
+      x-data="app()"
+      x-init="boot()"
+      @onboarding-complete.window="route = 'dashboard'"
+      @add-plugin.window="route = 'add_plugin'">
+
+  <main class="max-w-2xl mx-auto p-6">
     <header class="flex items-center gap-3 mb-8">
       <img src="/static/logo.svg" alt="Fulcra" class="w-8 h-8">
       <h1 class="text-2xl font-semibold tracking-tight">Fulcra Collect</h1>
     </header>
 
+    <!-- Loading -->
     <template x-if="route === 'loading'">
-      <div class="text-slate-500">Loading…</div>
+      <div class="text-slate-500 animate-pulse">Loading…</div>
     </template>
 
+    <!-- Error connecting to daemon -->
     <template x-if="route === 'error'">
-      <div class="border border-red-200 bg-red-50 text-red-800 p-4 rounded">
+      <div class="border border-red-200 bg-red-50 text-red-800 p-4 rounded-lg">
         <strong>Could not connect to the daemon.</strong>
         <p x-text="errorMessage" class="text-sm mt-1"></p>
+        <button @click="boot()"
+                class="mt-3 px-4 py-2 bg-red-700 text-white rounded text-sm hover:bg-red-800">
+          Retry
+        </button>
       </div>
     </template>
 
+    <!-- ------------------------------------------------------------------ -->
+    <!-- ONBOARDING                                                          -->
+    <!-- ------------------------------------------------------------------ -->
     <template x-if="route === 'onboarding'">
-      <section>
-        <h2 class="text-xl font-medium mb-4">Welcome</h2>
-        <p class="text-slate-600 mb-6">
-          The onboarding wizard renders here (Phase C). For now, this
-          confirms the web UI is wired correctly.
-        </p>
-        <div class="text-xs text-slate-400">
-          Fulcra signed in: <span x-text="fulcraAuth?.authenticated ? 'yes' : 'no'"></span> ·
-          Plugins enabled: <span x-text="plugins.filter(p => p.enabled).length"></span> /
-                            <span x-text="plugins.length"></span>
-        </div>
+      <section x-data="onboarding()" x-init="boot()">
+
+        <!-- Phase: welcome -->
+        <template x-if="phase === 'welcome'">
+          <div class="space-y-6">
+            <div>
+              <h2 class="text-2xl font-semibold mb-4">Welcome to Fulcra Collect</h2>
+              <p class="text-slate-600 leading-relaxed">
+                Fulcra Collect is the local agent that watches your services and your machine,
+                and writes the data into your Fulcra account — where you can see it alongside
+                your health metrics, location, and calendar. It records your media life,
+                attention, and personal logs in one place so you can ask Fulcra
+                "what was I doing on Tuesday afternoon?" and get a real answer.
+              </p>
+            </div>
+            <button @click="goToSignin()"
+                    class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
+              Get Started
+            </button>
+          </div>
+        </template>
+
+        <!-- Phase: signin -->
+        <template x-if="phase === 'signin'">
+          <div class="space-y-6">
+            <div>
+              <h2 class="text-2xl font-semibold mb-2">Sign in to Fulcra</h2>
+              <p class="text-slate-600 text-sm">
+                Paste your Fulcra access token below. You can find it in
+                <a href="https://app.fulcra.io/settings/api" target="_blank"
+                   class="text-violet-600 underline">Fulcra Settings → API</a>.
+              </p>
+            </div>
+
+            <div class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Access token</label>
+                <input type="password"
+                       x-model="tokenInput"
+                       @keydown.enter="submitToken()"
+                       placeholder="Paste your token here…"
+                       class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent">
+              </div>
+
+              <template x-if="signinError">
+                <p class="text-red-600 text-sm" x-text="signinError"></p>
+              </template>
+
+              <div class="flex gap-3">
+                <button @click="submitToken()"
+                        :disabled="signinLoading"
+                        class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 disabled:opacity-50 transition-colors">
+                  <span x-text="signinLoading ? 'Verifying…' : 'Sign In'"></span>
+                </button>
+                <button @click="phase = 'welcome'"
+                        class="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">
+                  Back
+                </button>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- Phase: pick_plugins -->
+        <template x-if="phase === 'pick_plugins'">
+          <div class="space-y-6">
+            <div>
+              <h2 class="text-2xl font-semibold mb-2">Pick what to collect</h2>
+              <p class="text-slate-600 text-sm">
+                Choose the services you want to record. You can add more later.
+              </p>
+            </div>
+
+            <template x-if="pickLoading">
+              <div class="text-slate-500 text-sm animate-pulse">Loading plugins…</div>
+            </template>
+
+            <template x-if="pickError">
+              <div class="text-red-600 text-sm" x-text="pickError"></div>
+            </template>
+
+            <template x-if="!pickLoading && !pickError">
+              <div class="space-y-5">
+                <template x-for="cat in categories" :key="cat.slug">
+                  <div>
+                    <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2"
+                        x-text="cat.name"></h3>
+                    <div class="space-y-1 border border-slate-200 rounded-lg overflow-hidden">
+                      <template x-for="p in cat.plugins" :key="p.id">
+                        <label class="flex items-start gap-3 px-4 py-3 hover:bg-slate-50 cursor-pointer border-b border-slate-100 last:border-0">
+                          <input type="checkbox"
+                                 :checked="isSelected(p.id)"
+                                 @change="togglePlugin(p.id)"
+                                 class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500">
+                          <div class="flex-1 min-w-0">
+                            <div class="font-medium text-sm" x-text="p.name"></div>
+                            <div class="text-xs text-slate-500 mt-0.5 truncate"
+                                 x-text="p.description || ''"></div>
+                          </div>
+                          <template x-if="p.enabled">
+                            <span class="text-xs text-violet-600 font-medium shrink-0 mt-0.5">enabled</span>
+                          </template>
+                        </label>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+
+                <div class="flex items-center gap-3 pt-2">
+                  <button @click="startConfigure()"
+                          class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
+                    <span x-text="selectedCount > 0 ? `Set up ${selectedCount} plugin${selectedCount !== 1 ? 's' : ''}` : 'Skip for now'"></span>
+                  </button>
+                  <span class="text-sm text-slate-500"
+                        x-show="selectedCount > 0"
+                        x-text="`${selectedCount} selected`"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Phase: configure (per-plugin wizard walk) -->
+        <template x-if="phase === 'configure'">
+          <div class="space-y-6">
+            <!-- Progress indicator for multi-plugin flow -->
+            <div class="text-xs text-slate-500 font-medium" x-text="configureProgressLabel"></div>
+
+            <!-- Plugin with no setup_steps -->
+            <template x-if="currentWizard && currentWizard._noSteps">
+              <div class="space-y-5">
+                <div>
+                  <h2 class="text-xl font-semibold mb-1" x-text="currentWizard.pluginName"></h2>
+                  <p class="text-slate-600 text-sm">
+                    This plugin doesn't have a setup wizard yet — it will be
+                    configured in Preferences once enabled.
+                  </p>
+                </div>
+                <button @click="currentWizard.confirmNoSteps()"
+                        class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700">
+                  Enable &amp; Continue
+                </button>
+              </div>
+            </template>
+
+            <!-- Plugin with setup_steps — wizard renderer -->
+            <template x-if="currentWizard && !currentWizard._noSteps">
+              <div x-data="currentWizard" class="space-y-5">
+
+                <!-- Step indicator -->
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 bg-slate-200 rounded-full h-1.5">
+                    <div class="bg-violet-600 h-1.5 rounded-full transition-all"
+                         :style="`width: ${progress_pct}%`"></div>
+                  </div>
+                  <span class="text-xs text-slate-500 shrink-0" x-text="progress_label"></span>
+                </div>
+
+                <!-- Step title -->
+                <h2 class="text-xl font-semibold" x-text="current_step.title"></h2>
+
+                <!-- ---- intro ---- -->
+                <template x-if="current_step.kind === 'intro'">
+                  <div class="prose prose-sm text-slate-700 max-w-none"
+                       x-html="body_html"></div>
+                </template>
+
+                <!-- ---- external_action ---- -->
+                <template x-if="current_step.kind === 'external_action'">
+                  <div class="space-y-4">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+                    <template x-if="current_step.external_link">
+                      <a :href="current_step.external_link"
+                         target="_blank" rel="noopener"
+                         class="inline-flex items-center gap-2 px-4 py-2 rounded bg-slate-100 text-slate-700 hover:bg-slate-200 text-sm font-medium">
+                        Open
+                        <span x-text="current_step.external_link.replace(/^https?:\/\//, '').split('/')[0]"></span>
+                        <svg class="w-3 h-3" viewBox="0 0 12 12" fill="none">
+                          <path d="M5 1H1v10h10V7M7 1h4v4M4.5 7.5 11 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                      </a>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- ---- input ---- -->
+                <template x-if="current_step.kind === 'input'">
+                  <div class="space-y-4">
+                    <template x-for="field in input_fields" :key="field.key">
+                      <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1"
+                               x-text="field.label"></label>
+
+                        <!-- enum → select -->
+                        <template x-if="field.kind === 'enum' && field.enum_values">
+                          <select :value="field.value"
+                                  @change="updateField(field.key, $event.target.value)"
+                                  class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
+                            <template x-for="opt in field.enum_values" :key="opt">
+                              <option :value="opt" :selected="opt === field.value" x-text="opt"></option>
+                            </template>
+                          </select>
+                        </template>
+
+                        <!-- toggle → checkbox -->
+                        <template x-if="field.kind === 'toggle'">
+                          <label class="inline-flex items-center gap-2 cursor-pointer">
+                            <input type="checkbox"
+                                   :checked="field.value === 'true' || field.value === true"
+                                   @change="updateField(field.key, $event.target.checked ? 'true' : 'false')"
+                                   class="h-4 w-4 rounded border-slate-300 text-violet-600">
+                            <span class="text-sm text-slate-600">Enabled</span>
+                          </label>
+                        </template>
+
+                        <!-- password / secret / credential -->
+                        <template x-if="field.kind === 'password' || field.kind === 'secret'">
+                          <input type="password"
+                                 :value="field.value"
+                                 @input="updateField(field.key, $event.target.value)"
+                                 :placeholder="field.placeholder || ''"
+                                 class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
+                        </template>
+
+                        <!-- default → text -->
+                        <template x-if="field.kind !== 'enum' && field.kind !== 'toggle' && field.kind !== 'password' && field.kind !== 'secret'">
+                          <input :type="field.kind === 'url' ? 'url' : field.kind === 'port' ? 'number' : 'text'"
+                                 :value="field.value"
+                                 @input="updateField(field.key, $event.target.value)"
+                                 :placeholder="field.placeholder || ''"
+                                 class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
+                        </template>
+
+                        <template x-if="field.help">
+                          <p class="text-xs text-slate-500 mt-1" x-text="field.help"></p>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- ---- file_upload ---- -->
+                <template x-if="current_step.kind === 'file_upload'">
+                  <div class="space-y-4">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+                    <div class="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:border-violet-400 transition-colors">
+                      <input type="file"
+                             @change="onFileChange($event)"
+                             class="hidden"
+                             id="fileUploadInput">
+                      <label for="fileUploadInput" class="cursor-pointer">
+                        <div class="text-slate-400 mb-2">
+                          <svg class="w-8 h-8 mx-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                                  d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M16 8l-4-4-4 4M12 4v12"/>
+                          </svg>
+                        </div>
+                        <p class="text-sm text-slate-600">
+                          <span class="text-violet-600 font-medium">Click to choose a file</span>
+                          or drag and drop
+                        </p>
+                        <template x-if="uploadedFileName">
+                          <p class="text-sm text-slate-800 mt-2 font-medium" x-text="uploadedFileName"></p>
+                        </template>
+                      </label>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- ---- permission_request ---- -->
+                <template x-if="current_step.kind === 'permission_request'">
+                  <div class="space-y-4">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+                    <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+                      macOS will show you a permission dialog when you click Next. Accept it to
+                      allow Fulcra Collect to access the required data.
+                    </div>
+                  </div>
+                </template>
+
+                <!-- ---- browser_extension ---- -->
+                <template x-if="current_step.kind === 'browser_extension'">
+                  <div class="space-y-4">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+                    <template x-if="current_step.extension_url">
+                      <a :href="current_step.extension_url"
+                         target="_blank" rel="noopener"
+                         class="inline-flex items-center gap-2 px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                        Install Extension
+                      </a>
+                    </template>
+                    <div class="mt-2">
+                      <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox"
+                               :checked="extensionConfirmed"
+                               @change="confirmExtension()"
+                               class="h-4 w-4 rounded border-slate-300 text-violet-600">
+                        <span class="text-sm text-slate-600">I've installed the extension</span>
+                      </label>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- ---- test_connection ---- -->
+                <template x-if="current_step.kind === 'test_connection'">
+                  <div class="space-y-4">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+
+                    <template x-if="healthChecking">
+                      <div class="flex items-center gap-3 text-slate-500">
+                        <svg class="animate-spin h-5 w-5 text-violet-600" viewBox="0 0 24 24" fill="none">
+                          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                          <path class="opacity-75" fill="currentColor"
+                                d="M4 12a8 8 0 018-8v8z"/>
+                        </svg>
+                        <span class="text-sm">Testing connection…</span>
+                      </div>
+                    </template>
+
+                    <template x-if="!healthChecking && healthResult">
+                      <div>
+                        <!-- Success -->
+                        <template x-if="healthResult.ok">
+                          <div class="space-y-3">
+                            <div class="flex items-center gap-2 text-green-700">
+                              <svg class="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd"
+                                      d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                      clip-rule="evenodd"/>
+                              </svg>
+                              <span class="font-medium text-sm" x-text="healthResult.summary"></span>
+                            </div>
+                            <template x-if="healthResult.preview && healthResult.preview.length > 0">
+                              <ul class="space-y-1">
+                                <template x-for="(entry, i) in healthResult.preview" :key="i">
+                                  <li class="text-sm text-slate-600 border-l-2 border-green-300 pl-3 py-0.5"
+                                      x-text="entry.title || entry.name || JSON.stringify(entry)"></li>
+                                </template>
+                              </ul>
+                            </template>
+                          </div>
+                        </template>
+
+                        <!-- Failure -->
+                        <template x-if="!healthResult.ok">
+                          <div class="space-y-3">
+                            <div class="flex items-start gap-2 text-red-700">
+                              <svg class="w-5 h-5 mt-0.5 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd"
+                                      d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+                                      clip-rule="evenodd"/>
+                              </svg>
+                              <span class="text-sm" x-text="healthResult.summary"></span>
+                            </div>
+                            <button @click="runHealthCheck()"
+                                    class="px-4 py-2 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50">
+                              Retry
+                            </button>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Health check not available -->
+                    <template x-if="!healthChecking && !healthResult && !healthError">
+                      <p class="text-sm text-slate-500">No health check available for this plugin.</p>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- ---- definition_picker ---- (Phase E stub) ---- -->
+                <template x-if="current_step.kind === 'definition_picker'">
+                  <div class="space-y-3">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+                    <div class="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-600">
+                      Definition picker coming in Phase E. For now this plugin will
+                      auto-resolve its Fulcra annotation on first run.
+                    </div>
+                  </div>
+                </template>
+
+                <!-- ---- oauth ---- (Phase F stub) ---- -->
+                <template x-if="current_step.kind === 'oauth'">
+                  <div class="space-y-3">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+                    <div class="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-600">
+                      OAuth sign-in flow coming in Phase F.
+                    </div>
+                  </div>
+                </template>
+
+                <!-- ---- done ---- -->
+                <template x-if="current_step.kind === 'done'">
+                  <div class="space-y-4">
+                    <div class="flex items-center gap-3 text-green-700">
+                      <svg class="w-10 h-10" viewBox="0 0 40 40" fill="none">
+                        <circle cx="20" cy="20" r="20" fill="#D1FAE5"/>
+                        <path d="M12 20l6 6 10-12" stroke="#059669" stroke-width="2.5"
+                              stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                      <div>
+                        <div class="font-semibold text-lg" x-text="current_step.title"></div>
+                      </div>
+                    </div>
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+                  </div>
+                </template>
+
+                <!-- Step error -->
+                <template x-if="stepError">
+                  <p class="text-red-600 text-sm" x-text="stepError"></p>
+                </template>
+
+                <!-- Back / Next navigation -->
+                <div class="flex items-center gap-3 pt-2 border-t border-slate-100">
+                  <template x-if="has_back">
+                    <button @click="back()"
+                            class="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">
+                      Back
+                    </button>
+                  </template>
+
+                  <template x-if="!is_done_step">
+                    <button @click="next()"
+                            :disabled="nextBlocked"
+                            class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 disabled:opacity-40 transition-colors text-sm">
+                      Next
+                    </button>
+                  </template>
+
+                  <template x-if="is_done_step">
+                    <button @click="next()"
+                            class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors text-sm">
+                      Continue
+                    </button>
+                  </template>
+                </div>
+
+              </div>
+            </template>
+
+          </div>
+        </template>
+
+        <!-- Phase: done -->
+        <template x-if="phase === 'done'">
+          <div class="space-y-6">
+            <div class="flex items-center gap-4">
+              <div class="w-14 h-14 rounded-full bg-green-100 flex items-center justify-center">
+                <svg class="w-8 h-8 text-green-600" viewBox="0 0 24 24" fill="none">
+                  <path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div>
+                <h2 class="text-2xl font-semibold">You're all set!</h2>
+                <p class="text-slate-600 text-sm mt-1"
+                   x-text="enabledCount > 0 ? `You enabled ${enabledCount} plugin${enabledCount !== 1 ? 's' : ''}.` : 'You can enable plugins any time from the dashboard.'">
+                </p>
+              </div>
+            </div>
+
+            <p class="text-slate-600 text-sm">
+              Fulcra Collect is now running in the background. Enabled plugins will
+              sync on their schedules, and you can check on them in the dashboard.
+            </p>
+
+            <button @click="completeDone()"
+                    class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
+              View Dashboard
+            </button>
+          </div>
+        </template>
+
       </section>
     </template>
 
-    <template x-if="route === 'dashboard'">
-      <section>
-        <h2 class="text-xl font-medium mb-4">Dashboard</h2>
-        <p class="text-slate-600 mb-6">The dashboard renders here (Phase D).</p>
-        <ul class="space-y-2">
-          <template x-for="p in plugins" :key="p.id">
-            <li class="flex justify-between border border-slate-200 rounded px-4 py-2">
-              <span class="font-medium" x-text="p.name"></span>
-              <span class="text-sm text-slate-500" x-text="p.kind + ' · ' + (p.enabled ? 'enabled' : 'disabled')"></span>
-            </li>
-          </template>
-        </ul>
+    <!-- ------------------------------------------------------------------ -->
+    <!-- DASHBOARD                                                           -->
+    <!-- ------------------------------------------------------------------ -->
+    <template x-if="route === 'dashboard' || route === 'add_plugin'">
+      <section x-data="dashboard()" x-init="boot()" class="space-y-8">
+
+        <!-- Header row -->
+        <div class="flex items-center justify-between">
+          <h2 class="text-xl font-semibold">Dashboard</h2>
+          <button @click="addPlugin()"
+                  class="px-4 py-2 text-sm rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
+            + Add plugin
+          </button>
+        </div>
+
+        <!-- Loading / error -->
+        <template x-if="loading">
+          <div class="text-slate-400 text-sm animate-pulse">Loading plugins…</div>
+        </template>
+        <template x-if="error">
+          <div class="text-red-600 text-sm" x-text="error"></div>
+        </template>
+
+        <!-- Plugin grid -->
+        <template x-if="!loading && plugins.length > 0">
+          <div class="space-y-2">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Plugins</h3>
+            <template x-for="p in plugins" :key="p.id">
+              <div class="border border-slate-200 rounded-lg px-4 py-3 hover:border-slate-300 transition-colors">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-0.5">
+                      <span class="font-medium text-sm" x-text="p.name"></span>
+                      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                            :class="pillClass(p)"
+                            x-text="pillLabel(p)"></span>
+                    </div>
+                    <p class="text-xs text-slate-500 truncate" x-text="p.description || ''"></p>
+                    <template x-if="humanInterval(p)">
+                      <p class="text-xs text-slate-400 mt-1" x-text="humanInterval(p)"></p>
+                    </template>
+                  </div>
+
+                  <div class="flex items-center gap-2 shrink-0">
+                    <!-- Run now button for manual / scheduled -->
+                    <template x-if="canRunNow(p)">
+                      <button @click="runNow(p)"
+                              :disabled="isRunning(p)"
+                              class="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-600 hover:bg-slate-50 disabled:opacity-40 transition-colors">
+                        <span x-text="isRunning(p) ? 'Running…' : 'Run now'"></span>
+                      </button>
+                    </template>
+
+                    <!-- Configure placeholder (Phase C11 / Phase D detail page) -->
+                    <a href="#"
+                       @click.prevent=""
+                       class="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors"
+                       title="Plugin detail page coming in Phase D">
+                      Configure
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <template x-if="!loading && plugins.length === 0">
+          <div class="text-center py-12 text-slate-400">
+            <p class="text-sm">No plugins configured yet.</p>
+            <button @click="addPlugin()"
+                    class="mt-3 text-violet-600 text-sm hover:underline">Add a plugin to get started</button>
+          </div>
+        </template>
+
+        <!-- Activity feed placeholder (Phase D) -->
+        <div class="border-t border-slate-100 pt-6">
+          <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Activity feed</h3>
+          <div class="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center text-sm text-slate-400">
+            Activity feed coming in Phase D. Recent annotations will appear here.
+          </div>
+        </div>
+
       </section>
     </template>
+
   </main>
 
+  <script src="/static/wizard.js"></script>
+  <script src="/static/onboarding.js"></script>
+  <script src="/static/dashboard.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

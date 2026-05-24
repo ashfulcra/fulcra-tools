@@ -1,19 +1,34 @@
 "use strict";
 
+/**
+ * app.js — root Alpine.js component
+ *
+ * Bootstraps by reading /api/status and /api/fulcra/auth/status then
+ * decides whether to route to onboarding or the dashboard.
+ *
+ * Routes:
+ *   loading      — initial fetch
+ *   error        — daemon unreachable
+ *   onboarding   — first-launch / no auth / no plugins enabled
+ *   dashboard    — normal post-onboarding home
+ *   add_plugin   — re-enter plugin picker from dashboard
+ */
+
 const TOKEN = document.cookie
   .split("; ")
   .find(r => r.startsWith("fulcra_token="))
   ?.split("=")[1];
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    ...opts,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
-      ...(opts.headers ?? {}),
-    },
-  });
+  const headers = {
+    Authorization: `Bearer ${TOKEN}`,
+    ...((opts.headers) ?? {}),
+  };
+  // Only set Content-Type to JSON if we have a body and it is not FormData
+  if (opts.body && typeof opts.body === "string") {
+    headers["Content-Type"] = "application/json";
+  }
+  const res = await fetch(path, { ...opts, headers });
   if (!res.ok) {
     throw new Error(`${res.status} ${res.statusText}`);
   }
@@ -23,18 +38,23 @@ async function api(path, opts = {}) {
 function app() {
   return {
     route: "loading",
-    plugins: [],
-    fulcraAuth: null,
     errorMessage: "",
 
     async boot() {
       try {
-        const status = await api("/api/status");
-        this.plugins = status.plugins ?? [];
-        // Phase B5 doesn't have /api/fulcra/auth/status yet; default unauthenticated.
-        this.fulcraAuth = { authenticated: false };
-        const anyEnabled = this.plugins.some(p => p.enabled);
-        this.route = this.fulcraAuth.authenticated && anyEnabled ? "dashboard" : "onboarding";
+        const [status, authStatus] = await Promise.all([
+          api("/api/status"),
+          api("/api/fulcra/auth/status").catch(() => ({ authenticated: false })),
+        ]);
+
+        const anyEnabled = (status.plugins ?? []).some(p => p.enabled);
+        const signedIn = authStatus.authenticated === true;
+
+        if (signedIn && anyEnabled) {
+          this.route = "dashboard";
+        } else {
+          this.route = "onboarding";
+        }
       } catch (e) {
         this.route = "error";
         this.errorMessage = e.message;
