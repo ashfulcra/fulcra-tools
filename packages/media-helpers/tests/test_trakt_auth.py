@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 
 import httpx
-import pytest
 
 from fulcra_media.importers.trakt import (
     TraktAuth, load_creds, save_creds,

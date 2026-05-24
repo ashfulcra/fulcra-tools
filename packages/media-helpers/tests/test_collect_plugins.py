@@ -1329,7 +1329,7 @@ def test_apple_takeout_does_not_call_resolver_when_definition_already_bootstrapp
 
 def _make_event(start_iso: str):
     """Return a minimal fake NormalizedEvent-like object with start_time set."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     class _FakeEvent:
         def __init__(self, iso: str):
@@ -2154,7 +2154,7 @@ def test_deezer_plugin_run_imports_and_advances_watermark(monkeypatch):
 
 def test_deezer_plugin_rewinds_watermark_by_one_hour(monkeypatch):
     """When a watermark is set, since = watermark - 1h."""
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
 
     received_since = {}
 
@@ -2447,7 +2447,6 @@ def test_trakt_plugin_raises_when_twin_policy_is_ask(monkeypatch):
 
 def test_trakt_plugin_drops_clusters_when_policy_is_drop(monkeypatch):
     """clusters='drop' should call apply_cluster_policy with action='drop'."""
-    from fulcra_csv import ClusterPolicy
 
     applied_policies = []
 

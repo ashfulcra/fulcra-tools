@@ -6,7 +6,7 @@ import hashlib
 import json
 import zipfile
 from collections.abc import Iterator
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .base import NormalizedEvent, content_fingerprint

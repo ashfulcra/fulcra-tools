@@ -1,5 +1,6 @@
 """Build the synthetic Spotify Extended Streaming History fixture."""
-import json, zipfile
+import json
+import zipfile
 from pathlib import Path
 
 OUT = Path(__file__).parent / "spotify_extended_sample.zip"

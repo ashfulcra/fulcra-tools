@@ -8,7 +8,6 @@ from pathlib import Path
 import click
 import httpx
 
-from . import library
 from . import state as state_mod
 from .cli_common import safe_exc_message
 from .fulcra import FulcraClient
@@ -192,8 +191,7 @@ def import_trakt(cluster_threshold: int, cluster_spec: str | None,
                  check_only: bool, json_mode: bool,
                  twin_policy: str | None) -> None:
     """Import Trakt watch history via the Trakt API."""
-    from fulcra_csv import apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
-    from . import twin_cache
+    from fulcra_csv import apply_cluster_policy
     from .cli_common import emit_result, ImportEnvelope, run_and_emit
     from .importers import trakt as trakt_importer
     s = state_mod.load(STATE_PATH)
@@ -1280,10 +1278,10 @@ def webhook_serve(host: str, port: int, bearer_token: str | None,
             err=True,
         )
         click.echo(
-            f"  POST /webhook   accept Plex multipart or Jellyfin JSON",
+            "  POST /webhook   accept Plex multipart or Jellyfin JSON",
             err=True,
         )
-        click.echo(f"  GET  /health    liveness probe", err=True)
+        click.echo("  GET  /health    liveness probe", err=True)
         if bearer_token:
             click.echo("  bearer-token: required (Authorization: Bearer ... "
                        "or ?token=...)", err=True)

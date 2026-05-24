@@ -3,7 +3,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from fulcra_media.importers.youtube import (
     normalize_entry,

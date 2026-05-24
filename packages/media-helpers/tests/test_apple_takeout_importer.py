@@ -1,10 +1,8 @@
 from pathlib import Path
 from datetime import datetime, timezone
 
-import pytest
 
 from fulcra_media.importers.apple_takeout import parse_playback_csv
-from fulcra_media.importers.base import NormalizedEvent
 
 FIXTURE = Path(__file__).parent / "fixtures" / "apple_takeout_playback_sample.csv"
 

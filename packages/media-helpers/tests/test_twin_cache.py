@@ -2,7 +2,6 @@
 import json
 from datetime import datetime, timezone
 
-import pytest
 
 from fulcra_csv import find_low_conf_twins
 from fulcra_media import twin_cache

@@ -2,10 +2,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from fulcra_media.importers.trakt import normalize_history, detect_clusters
-from fulcra_media.importers.base import NormalizedEvent
 
 FIXTURE = Path(__file__).parent / "fixtures" / "trakt_history_sample.json"
 
@@ -76,13 +74,13 @@ def test_normalize_history_deterministic_id_uses_history_id():
     assert history_id_str.isdigit()
 
 
-import time
 import httpx
 
 
 def test_fetch_history_paginates(mocker, tmp_path):
     p = tmp_path / "trakt.json"
-    import json as _j, time as _t
+    import json as _j
+    import time as _t
     p.write_text(_j.dumps({
         "client_id": "cid", "client_secret": "csec",
         "access_token": "tok", "refresh_token": "rt",

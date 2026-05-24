@@ -1,9 +1,7 @@
 """Aggressive edge-case sweep for the Last.fm importer."""
-import json
 from datetime import datetime, timezone
 
 import httpx
-import pytest
 
 from fulcra_media.importers.lastfm import (
     fetch_recent_tracks,

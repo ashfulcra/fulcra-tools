@@ -14,7 +14,6 @@ from __future__ import annotations
 import click
 
 from .service_catalog import (
-    SERVICES,
     ServiceEntry,
     categories,
     services_for_category,
@@ -85,7 +84,7 @@ def _explain_choice(entry: ServiceEntry, echo) -> None:
     if not entry.available:
         echo(f"\n  '{entry.label}' isn't implemented yet — but the pathway is researched.")
         echo(f"  Pathway: {entry.pathway}")
-        echo(f"  See docs/superpowers/research/2026-05-17-media-service-pathways.md")
+        echo("  See docs/superpowers/research/2026-05-17-media-service-pathways.md")
         return
     echo(f"\n  Setting up {entry.label} ({entry.pathway} pathway)\n")
     if entry.wizard:

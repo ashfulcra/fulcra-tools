@@ -1,5 +1,4 @@
 """Tests for fulcra_media.importers.generic_csv (media adapter over fulcra-csv)."""
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
