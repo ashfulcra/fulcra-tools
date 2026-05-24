@@ -81,6 +81,79 @@ def test_runner_persists_the_definition_id_from_the_result(collect_home: Path):
     assert state.load("p").definition_id == "def-abc123"
 
 
+def test_runner_forwards_annotation_events_to_activity_buffer(collect_home: Path):
+    """When a worker emits an annotation event, the runner forwards it to
+    daemon.activity so the web UI's dashboard "Recently" feed reflects real
+    annotation writes."""
+    from fulcra_collect.activity import RecentActivity
+
+    script = (
+        "import json,sys;"
+        "sys.stdout.write(json.dumps({'type':'annotation','summary':'Listened: 3 new scrobbles','ok':True})+chr(10));"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done','error':None})+chr(10))"
+    )
+
+    activity = RecentActivity()
+
+    class MockDaemon:
+        pass
+
+    daemon = MockDaemon()
+    daemon.activity = activity
+
+    outcome = runner.run("lastfm", _python_worker(script),
+                         now=datetime(2026, 5, 24, tzinfo=timezone.utc),
+                         daemon=daemon)
+    assert outcome == "done"
+    entries = activity.recent()
+    assert len(entries) == 1
+    assert entries[0].plugin_id == "lastfm"
+    assert entries[0].summary == "Listened: 3 new scrobbles"
+    assert entries[0].ok is True
+
+
+def test_runner_ignores_annotation_events_without_daemon(collect_home: Path):
+    """Annotation events are silently ignored when no daemon is supplied —
+    no crash, no activity side-effects."""
+    script = (
+        "import json,sys;"
+        "sys.stdout.write(json.dumps({'type':'annotation','summary':'x','ok':True})+chr(10));"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done','error':None})+chr(10))"
+    )
+    # Passes no daemon= — must not raise
+    outcome = runner.run("p", _python_worker(script),
+                         now=datetime(2026, 5, 24, tzinfo=timezone.utc))
+    assert outcome == "done"
+
+
+def test_runner_forwards_multiple_annotation_events(collect_home: Path):
+    """Multiple annotation events from one run all land in the buffer."""
+    from fulcra_collect.activity import RecentActivity
+
+    script = (
+        "import json,sys;"
+        "sys.stdout.write(json.dumps({'type':'annotation','summary':'A','ok':True})+chr(10));"
+        "sys.stdout.write(json.dumps({'type':'annotation','summary':'B','ok':False})+chr(10));"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done','error':None})+chr(10))"
+    )
+
+    activity = RecentActivity()
+
+    class MockDaemon:
+        pass
+
+    daemon = MockDaemon()
+    daemon.activity = activity
+
+    runner.run("p", _python_worker(script),
+               now=datetime(2026, 5, 24, tzinfo=timezone.utc), daemon=daemon)
+    entries = activity.recent()
+    # recent() returns newest-first, so B is first
+    assert len(entries) == 2
+    summaries = {e.summary for e in entries}
+    assert summaries == {"A", "B"}
+
+
 def test_runner_calls_on_spawn_with_the_worker_process(collect_home: Path):
     """`on_spawn` is invoked with the live worker Popen so a caller (the
     daemon) can track it and terminate it on shutdown."""

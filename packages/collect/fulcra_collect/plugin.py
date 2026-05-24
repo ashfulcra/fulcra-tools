@@ -182,6 +182,14 @@ class RunContext:
         """Report structured progress back to the hub core."""
         self._emit({"type": "progress", **fields})
 
+    def annotation(self, summary: str, *, ok: bool = True) -> None:
+        """Report that an annotation was written to Fulcra. Surfaces in
+        the web UI's recent-activity feed as a real receipt of the app
+        working. Call this AFTER a successful (or attempted) annotation
+        POST.
+        """
+        self._emit({"type": "annotation", "summary": summary, "ok": ok})
+
     def fulcra_token(self) -> str | None:
         """Return the Fulcra access token.
 

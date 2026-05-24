@@ -264,6 +264,53 @@ def test_fulcra_token_prefers_user_level_over_cli(monkeypatch):
     assert cli_called == [], "CLI must not be invoked when keychain has a token"
 
 
+def test_annotation_method_emits_annotation_event():
+    """RunContext.annotation() emits a correctly-shaped annotation event."""
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm",
+        config={},
+        credentials={},
+        state=None,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+    )
+    ctx.annotation("Listened: 3 new scrobbles", ok=True)
+    assert emitted == [
+        {"type": "annotation", "summary": "Listened: 3 new scrobbles", "ok": True}
+    ]
+
+
+def test_annotation_method_ok_defaults_to_true():
+    """The `ok` kwarg defaults to True when not supplied."""
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm",
+        config={},
+        credentials={},
+        state=None,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+    )
+    ctx.annotation("Song A — Artist B")
+    assert emitted[0]["ok"] is True
+
+
+def test_annotation_method_accepts_ok_false():
+    """ok=False is forwarded so failed writes can also be surfaced."""
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="x",
+        config={},
+        credentials={},
+        state=None,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+    )
+    ctx.annotation("Write failed", ok=False)
+    assert emitted == [{"type": "annotation", "summary": "Write failed", "ok": False}]
+
+
 def test_fulcra_token_falls_back_to_cli_when_no_keychain_token(monkeypatch):
     """When the user-level store is empty, fulcra_token() falls back to
     BaseFulcraClient.get_token() (env var + CLI subprocess path)."""

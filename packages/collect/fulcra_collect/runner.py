@@ -9,8 +9,12 @@ import json
 import subprocess
 from collections.abc import Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from . import state
+
+if TYPE_CHECKING:
+    from .daemon import Daemon
 
 DEFAULT_TIMEOUT_S = 15 * 60
 
@@ -24,13 +28,18 @@ def worker_command(plugin_id: str) -> list[str]:
 
 def run(plugin_id: str, command: list[str], *, now: datetime,
         timeout_s: float = DEFAULT_TIMEOUT_S,
-        on_spawn: Callable[[subprocess.Popen], None] | None = None) -> str:
+        on_spawn: Callable[[subprocess.Popen], None] | None = None,
+        daemon: "Daemon | None" = None) -> str:
     """Run one plugin via `command`, record the outcome, return it
     ("done" | "error" | "timeout").
 
     If `on_spawn` is given it is called with the worker `Popen` right
     after the process is created, so a caller (the daemon) can track the
-    process and terminate it on shutdown."""
+    process and terminate it on shutdown.
+
+    If `daemon` is given, annotation events emitted by the worker are
+    forwarded to ``daemon.activity`` so the web UI's dashboard "Recently"
+    feed reflects real writes to Fulcra."""
     outcome = "error"
     error: str | None = "worker emitted no result"
     watermark: str | None = None
@@ -57,11 +66,21 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") == "result":
+            event_type = event.get("type")
+            if event_type == "result":
                 outcome = event.get("outcome", "error")
                 error = event.get("error")
                 watermark = event.get("watermark")
                 definition_id = event.get("definition_id")
+            elif event_type == "annotation":
+                # Surface this in the daemon's activity buffer so the web UI's
+                # dashboard "Recently" feed shows the receipt.
+                if daemon is not None:
+                    summary = event.get("summary", "")
+                    ok = event.get("ok", True)
+                    daemon.activity.add(
+                        plugin_id=plugin_id, summary=summary, ok=ok,
+                    )
     except subprocess.TimeoutExpired:
         outcome = "timeout"
         error = f"worker exceeded {timeout_s:.0f}s"

@@ -252,6 +252,7 @@ class Daemon:
                     plugin_id, runner.worker_command(plugin_id),
                     now=datetime.now(timezone.utc),
                     on_spawn=lambda proc: self._register_proc(plugin_id, proc),
+                    daemon=self,
                 )
             finally:
                 with self._inflight_lock:
