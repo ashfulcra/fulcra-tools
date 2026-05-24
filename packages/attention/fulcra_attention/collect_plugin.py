@@ -72,7 +72,9 @@ PLUGIN = Plugin(
     run=run,
     description=(
         "Captures activity signals from this Mac (which apps you're using, when "
-        "you're idle) and writes them to Fulcra. Needs a Fulcra bearer token."
+        "you're idle) and writes them to Fulcra. The relay bearer token is a shared "
+        "secret the browser extension sends to authenticate to this local server — "
+        "it is separate from the Fulcra account token."
     ),
     category="activity",
     canonical_definition_name="Attention",

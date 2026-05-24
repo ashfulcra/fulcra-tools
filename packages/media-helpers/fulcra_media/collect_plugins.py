@@ -1396,8 +1396,9 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
     run=_run_media_webhook,
     description=(
         "Listens for Plex/Jellyfin webhook calls on a local port and records what "
-        "you watch. Needs a Fulcra bearer token; configure your media server to "
-        "point at this app's URL."
+        "you watch. Configure your media server to point at this app's URL. "
+        "When binding a non-loopback address, set a webhook bearer token so only "
+        "your media server can post events."
     ),
     category="video",
     canonical_definition_name="Watched",
