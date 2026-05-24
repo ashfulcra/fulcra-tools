@@ -180,6 +180,24 @@ def test_run_command_reports_whether_a_run_was_started(
         __import__("time").sleep(0.01)
 
 
+def test_status_includes_category(collect_home, monkeypatch):
+    """The daemon's status reply must include each plugin's category
+    so the web UI can group plugins by category in the picker."""
+    from fulcra_collect import daemon as daemon_mod
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect.registry import RegistryResult
+
+    plugin = Plugin(id="lastfm", name="Last.fm", kind="scheduled",
+                    run=lambda c: None,
+                    default_interval=__import__("datetime").timedelta(hours=1),
+                    category="music")
+    registry = RegistryResult(plugins={"lastfm": plugin})
+    d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
+    reply = d.handle_request({"cmd": "status"})
+    by_id = {p["id"]: p for p in reply["plugins"]}
+    assert by_id["lastfm"]["category"] == "music"
+
+
 def test_version_handler_returns_daemon_and_plugin_versions(collect_home: Path, monkeypatch):
     from fulcra_collect import daemon as daemon_mod
     from fulcra_collect.plugin import Plugin

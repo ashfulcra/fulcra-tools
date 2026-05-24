@@ -103,6 +103,7 @@ LASTFM_PLUGIN = Plugin(
     run=_run_lastfm,
     description="Imports your Last.fm scrobble history on a schedule. Needs your Last.fm API key.",
     default_interval=timedelta(hours=1),
+    category="music",
     canonical_definition_name="Listened",
     required_credentials=(
         Credential(key="api-key", label="Last.fm API key",
@@ -238,6 +239,7 @@ DEEZER_PLUGIN = Plugin(
         "Imports your Deezer listening history on a schedule. Needs a Deezer access token."
     ),
     default_interval=timedelta(hours=2),
+    category="music",
     canonical_definition_name="Listened",
     required_credentials=(
         Credential(
@@ -394,6 +396,7 @@ TRAKT_PLUGIN = Plugin(
         "Imports your Trakt.tv watch history on a schedule. Needs your Trakt OAuth credentials."
     ),
     default_interval=timedelta(hours=6),
+    category="video",
     canonical_definition_name="Watched",
     required_credentials=(),  # Auth is managed by the trakt.json creds file.
 )
@@ -481,6 +484,7 @@ NETFLIX_PLUGIN = Plugin(
         "netflix.com/Activity, then point this at the file."
     ),
     default_interval=None,
+    category="video",
     canonical_definition_name="Watched",
     required_credentials=(),
 )
@@ -540,6 +544,7 @@ SPOTIFY_EXTENDED_PLUGIN = Plugin(
         "request the export from Spotify, then point this at the downloaded file."
     ),
     default_interval=None,
+    category="music",
     canonical_definition_name="Listened",
     required_credentials=(),
 )
@@ -594,6 +599,7 @@ YOUTUBE_PLUGIN = Plugin(
         "request the takeout, then point this at the file."
     ),
     default_interval=None,
+    category="video",
     canonical_definition_name="Watched",
     required_credentials=(),
 )
@@ -709,6 +715,7 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
         "privacy.apple.com, then point this at the downloaded file."
     ),
     default_interval=None,
+    category="video",
     canonical_definition_name="Watched",
     required_credentials=(),
 )
@@ -852,6 +859,7 @@ GENERIC_RSS_PLUGIN = Plugin(
         "URL and the category (Watched/Listened/Read)."
     ),
     default_interval=timedelta(hours=6),
+    category="other",
     # canonical_definition_name is intentionally absent: the canonical identity
     # depends on the runtime config value of "category", not on the Plugin
     # definition itself.  See _CATEGORY_TO_CANONICAL and _run_generic_rss.
@@ -912,6 +920,7 @@ LETTERBOXD_PLUGIN = Plugin(
     run=_run_letterboxd,
     description="Imports your Letterboxd diary RSS feed on a schedule.",
     default_interval=timedelta(hours=12),
+    category="video",
     canonical_definition_name="Watched",
     required_credentials=(),
 )
@@ -975,6 +984,7 @@ GOODREADS_PLUGIN = Plugin(
         "mark as 'read' on Goodreads gets recorded."
     ),
     default_interval=timedelta(hours=12),
+    category="books",
     canonical_definition_name="Read",
     required_credentials=(),
 )
@@ -1075,6 +1085,7 @@ APPLE_PODCASTS_PLUGIN = Plugin(
     ),
     default_interval=timedelta(hours=6),
     requires_network=False,
+    category="music",
     canonical_definition_name="Listened",
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
@@ -1160,6 +1171,7 @@ APPLE_PODCASTS_TIMEMACHINE_PLUGIN = Plugin(
     description="Reads historical Apple Podcasts listens from Time Machine snapshots. Manual.",
     default_interval=None,
     requires_network=False,
+    category="music",
     canonical_definition_name="Listened",
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
@@ -1290,6 +1302,7 @@ GENERIC_CSV_PLUGIN = Plugin(
         "category in this plugin's settings."
     ),
     default_interval=None,
+    category="other",
     # canonical_definition_name is intentionally absent: the canonical identity
     # depends on the runtime config value of "category", not on the Plugin
     # definition itself.  See _CATEGORY_TO_CANONICAL and _run_generic_csv.
@@ -1386,6 +1399,7 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
         "you watch. Needs a Fulcra bearer token; configure your media server to "
         "point at this app's URL."
     ),
+    category="video",
     canonical_definition_name="Watched",
     required_permissions=(
         Permission(

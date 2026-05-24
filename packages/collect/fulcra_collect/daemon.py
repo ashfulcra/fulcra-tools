@@ -112,6 +112,7 @@ class Daemon:
                 "name": plugin.name,
                 "kind": plugin.kind,
                 "description": plugin.description,
+                "category": plugin.category,
                 "enabled": pid in self.config.enabled,
                 "last_run": st.last_run.isoformat() if st.last_run else None,
                 "last_outcome": st.last_outcome,
