@@ -112,6 +112,12 @@ function createWizard(plugin_contract, on_complete) {
     nextBlocked: false,
     // Browser extension confirmed?
     extensionConfirmed: false,
+    // Definition picker state
+    dpLoading: false,
+    dpError: "",
+    dpDefinitions: [],        // [{id, name, annotation_type, created_at, _preview, _previewLoading}]
+    dpSelectedId: null,       // id of chosen definition, or null = create new
+    dpForceNew: false,        // true when user chose "Create new instead"
 
     get progress_label() {
       return `Step ${this.step_index + 1} of ${this.total_steps}`;
@@ -198,6 +204,11 @@ function createWizard(plugin_contract, on_complete) {
         if (!ok) return;
       }
 
+      if (step.kind === "definition_picker") {
+        const ok = await this._submitDefinitionPick();
+        if (!ok) return;
+      }
+
       if (step.kind === "done") {
         // Enable the plugin then call the completion callback
         try {
@@ -217,6 +228,12 @@ function createWizard(plugin_contract, on_complete) {
         this.healthError = "";
         this.nextBlocked = false;
         this.extensionConfirmed = false;
+        // Reset definition picker state for clean entry into the next step
+        this.dpLoading = false;
+        this.dpError = "";
+        this.dpDefinitions = [];
+        this.dpSelectedId = null;
+        this.dpForceNew = false;
         this._onStepEnter();
       }
     },
@@ -229,6 +246,12 @@ function createWizard(plugin_contract, on_complete) {
         this.healthResult = null;
         this.nextBlocked = false;
         this.extensionConfirmed = false;
+        // Reset definition picker so it reloads fresh if the user goes forward again
+        this.dpLoading = false;
+        this.dpError = "";
+        this.dpDefinitions = [];
+        this.dpSelectedId = null;
+        this.dpForceNew = false;
       }
     },
 
@@ -241,8 +264,109 @@ function createWizard(plugin_contract, on_complete) {
         this.nextBlocked = true;
       }
       if (this.current_step.kind === "definition_picker") {
-        // Phase E will populate this. For v1, just auto-advance gracefully.
-        // nextBlocked stays false — user clicks Next to skip.
+        // Block Next until the user has made a choice (or explicitly clicked
+        // "Create new instead").
+        this.nextBlocked = true;
+        this._loadDefinitions();
+      }
+    },
+
+    // ---------------------------------------------------------------------------
+    // Definition picker — Phase E
+    // ---------------------------------------------------------------------------
+
+    async _loadDefinitions() {
+      this.dpLoading = true;
+      this.dpError = "";
+      this.dpDefinitions = [];
+      this.dpSelectedId = null;
+      this.dpForceNew = false;
+
+      // The step may hint which annotation_type to filter by (e.g. "duration").
+      const annotationType = this.current_step.annotation_type || "duration";
+      try {
+        const body = await api(`/api/definitions?annotation_type=${encodeURIComponent(annotationType)}`);
+        this.dpDefinitions = (body.definitions || []).map(d => ({
+          ...d,
+          _preview: [],
+          _previewLoading: false,
+          _previewLoaded: false,
+          _previewError: "",
+        }));
+      } catch (e) {
+        this.dpError = e.message;
+      } finally {
+        this.dpLoading = false;
+      }
+    },
+
+    async dpLoadPreview(def) {
+      if (def._previewLoaded || def._previewLoading) return;
+      def._previewLoading = true;
+      def._previewError = "";
+      try {
+        const body = await api(`/api/definitions/${encodeURIComponent(def.id)}/recent?limit=3`);
+        def._preview = body.entries || [];
+        def._previewLoaded = true;
+      } catch (e) {
+        def._previewError = e.message;
+      } finally {
+        def._previewLoading = false;
+      }
+    },
+
+    dpSelectDef(def) {
+      this.dpSelectedId = def.id;
+      this.dpForceNew = false;
+      this.nextBlocked = false;
+      // Eagerly load preview when the user selects a definition
+      this.dpLoadPreview(def);
+    },
+
+    dpChooseForceNew() {
+      this.dpSelectedId = null;
+      this.dpForceNew = true;
+      this.nextBlocked = false;
+    },
+
+    dpHumanDate(isoString) {
+      if (!isoString) return "";
+      try {
+        return new Date(isoString).toLocaleDateString(undefined, {
+          year: "numeric", month: "short", day: "numeric",
+        });
+      } catch (_) {
+        return isoString;
+      }
+    },
+
+    dpEntryLabel(entry) {
+      // Try to extract a human label from a Fulcra event record
+      const rat = (entry.metadata || {}).recorded_at;
+      if (!rat) return "(no timestamp)";
+      if (typeof rat === "string") return rat.slice(0, 10);
+      if (rat.start_time) return rat.start_time.slice(0, 10);
+      return "(unknown date)";
+    },
+
+    // Submit the definition pick to the daemon
+    async _submitDefinitionPick() {
+      try {
+        if (this.dpForceNew) {
+          await api(`/api/plugin/${this.plugin_id}/definition`, {
+            method: "POST",
+            body: JSON.stringify({ force_new: true }),
+          });
+        } else if (this.dpSelectedId) {
+          await api(`/api/plugin/${this.plugin_id}/definition`, {
+            method: "POST",
+            body: JSON.stringify({ definition_id: this.dpSelectedId }),
+          });
+        }
+        return true;
+      } catch (e) {
+        this.stepError = `Failed to save definition choice: ${e.message}`;
+        return false;
       }
     },
 
