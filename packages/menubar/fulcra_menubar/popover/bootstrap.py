@@ -18,6 +18,39 @@ from Foundation import NSObject  # type: ignore[import-not-found]
 
 from ..theme import colors, typography
 
+# Module-level registry of in-flight install subprocesses. The app's _quit
+# handler calls cancel_pending() to terminate them before exit — otherwise
+# Python's daemon-thread teardown kills the Python wrapper but not the OS
+# process beneath, leaving a partial install orphaned under launchd.
+_pending_procs: list[subprocess.Popen] = []
+
+
+def _run_step(cmd: list[str]) -> tuple[int, str]:
+    """Run a subprocess command; track the Popen on _pending_procs so
+    app quit can terminate it. Returns (returncode, combined output)."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    _pending_procs.append(proc)
+    try:
+        out, _ = proc.communicate(timeout=30)
+        return proc.returncode, out.strip()
+    finally:
+        try:
+            _pending_procs.remove(proc)
+        except ValueError:
+            pass
+
+
+def cancel_pending() -> None:
+    """Terminate any in-flight install subprocesses. Called by the
+    app's _quit handler before rumps.quit_application()."""
+    for proc in list(_pending_procs):
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
 
 def make_bootstrap_card(width: float, height: float) -> NSView:
     view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
@@ -62,25 +95,17 @@ def make_bootstrap_card(width: float, height: float) -> NSView:
         log.setStringValue_("Running…")
         def work():
             try:
-                p1 = subprocess.run(
-                    ["fulcra-collect", "service", "install"],
-                    capture_output=True, text=True, timeout=30,
-                )
-                p1_out = (p1.stdout + p1.stderr).strip()
-                if p1.returncode != 0:
+                rc1, p1_out = _run_step(["fulcra-collect", "service", "install"])
+                if rc1 != 0:
                     output = (
-                        f"ERROR: Step 1 (install) failed with exit code {p1.returncode}."
+                        f"ERROR: Step 1 (install) failed with exit code {rc1}."
                         + (f"\n{p1_out}" if p1_out else "")
                     )
                 else:
-                    p2 = subprocess.run(
-                        ["fulcra-collect", "service", "start"],
-                        capture_output=True, text=True, timeout=30,
-                    )
-                    p2_out = (p2.stdout + p2.stderr).strip()
-                    if p2.returncode != 0:
+                    rc2, p2_out = _run_step(["fulcra-collect", "service", "start"])
+                    if rc2 != 0:
                         output = (
-                            f"ERROR: Step 2 (start) failed with exit code {p2.returncode}."
+                            f"ERROR: Step 2 (start) failed with exit code {rc2}."
                             " Daemon installed but not running; check Console.app log."
                             + (f"\n{p2_out}" if p2_out else "")
                         )
