@@ -148,21 +148,35 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
         desc.setFrame_(NSMakeRect(16, height - 60, width - 120, 32))
         row.addSubview_(desc)
 
-    enabled_switch = NSSwitch.alloc().initWithFrame_(
-        NSMakeRect(width - 80, height - 32, 50, 22)
-    )
-    enabled_switch.setState_(1 if snap.enabled else 0)
+    if snap.kind == "manual":
+        # Manual plugins have no automatic firing cycle — the Enable toggle is
+        # meaningless (daemon never auto-polls them). Replace it with a prominent
+        # Run-now button that is always reachable, regardless of enabled state.
+        run_btn_top = NSButton.alloc().initWithFrame_(
+            NSMakeRect(width - 80, height - 36, 64, 28)
+        )
+        run_btn_top.setTitle_("Run now")
+        run_btn_top.setBezelStyle_(NSBezelStyleRounded)
+        _attach(run_btn_top, lambda _s: client.run(snap.id))
+        row.addSubview_(run_btn_top)
+    else:
+        # service / scheduled: keep the Enable toggle so the daemon knows
+        # whether to supervise (service) or include in the polling cycle (scheduled).
+        enabled_switch = NSSwitch.alloc().initWithFrame_(
+            NSMakeRect(width - 80, height - 32, 50, 22)
+        )
+        enabled_switch.setState_(1 if snap.enabled else 0)
 
-    def on_toggle(sender):
-        cfg = _config.load()
-        if sender.state():
-            cfg.enable(snap.id)
-        else:
-            cfg.disable(snap.id)
-        _config.save(cfg)
-        client.reload()
-    _attach(enabled_switch, on_toggle)
-    row.addSubview_(enabled_switch)
+        def on_toggle(sender):
+            cfg = _config.load()
+            if sender.state():
+                cfg.enable(snap.id)
+            else:
+                cfg.disable(snap.id)
+            _config.save(cfg)
+            client.reload()
+        _attach(enabled_switch, on_toggle)
+        row.addSubview_(enabled_switch)
 
     # Interval input — scheduled only. Placed below the description block.
     # Layout:  "Every" [field] "minutes"
@@ -209,8 +223,9 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
         _attach(interval_field, on_interval_change, action="textChanged:")
         row.addSubview_(interval_field)
 
-    # Run now (manual + scheduled, only when enabled).
-    if snap.enabled and snap.kind in ("manual", "scheduled"):
+    # Run now at the bottom of the row — scheduled only and only when enabled.
+    # Manual plugins already have their Run-now button in the top action area above.
+    if snap.enabled and snap.kind == "scheduled":
         run_btn = NSButton.alloc().initWithFrame_(
             NSMakeRect(width - 200, 16, 100, 24)
         )

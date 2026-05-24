@@ -52,9 +52,20 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
     view.addSubview_(pid)
 
     # right_text sits at x=240, leaving a 6pt gap after the name column (x=234).
-    # When a Run-now button is also present (enabled scheduled/manual plugins),
-    # right_text shifts up (y=24) so the two don't overlap vertically.
-    has_button = snapshot.kind in ("scheduled", "manual") and snapshot.enabled
+    # When a Run-now button is also present, right_text shifts up (y=24) so the
+    # two don't overlap vertically.
+    #
+    # Button visibility rules:
+    #   manual    — always visible; daemon never auto-polls, so the button is
+    #               the only way to trigger a run regardless of enabled state.
+    #   scheduled — visible only when enabled (toggle gates the polling cycle).
+    #   service   — never shown; services are daemon-managed, not user-triggered.
+    if snapshot.kind == "manual":
+        has_button = True
+    elif snapshot.kind == "scheduled":
+        has_button = snapshot.enabled
+    else:  # service
+        has_button = False
     rt_y = 24 if has_button else 16
     right_text = NSTextField.labelWithString_(_right_text(snapshot))
     right_text.setFont_(typography.small())
