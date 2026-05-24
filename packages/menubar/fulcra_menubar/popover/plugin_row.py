@@ -23,6 +23,7 @@ from AppKit import (  # type: ignore[import-not-found]
 
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
+from .._objc_targets import attach as _attach
 from ..theme import colors, palette, typography
 
 ROW_HEIGHT = 44
@@ -73,7 +74,7 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
             finally:
                 model.mark_in_flight(snapshot.id)
 
-        _RowTarget.attach(button, _on_click)
+        _attach(button, _on_click)
         view.addSubview_(button)
 
     return view
@@ -131,18 +132,3 @@ def _to_cg(hex_value: str):
     ).CGColor()
 
 
-# AppKit needs an NSObject target for button clicks; this proxies a Python
-# callable.
-class _RowTarget:
-    _retain: list = []
-
-    @classmethod
-    def attach(cls, button, callable_):
-        from Foundation import NSObject  # type: ignore[import-not-found]
-        class _T(NSObject):
-            def call_(self, sender):
-                callable_(sender)
-        target = _T.alloc().init()
-        button.setTarget_(target)
-        button.setAction_("call:")
-        cls._retain.append(target)  # keep alive

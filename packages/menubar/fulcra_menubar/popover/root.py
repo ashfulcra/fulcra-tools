@@ -16,9 +16,10 @@ from AppKit import (  # type: ignore[import-not-found]
 )
 
 from .._dispatch import on_main_thread
+from .._objc_targets import attach as _attach
 from ..model import StatusModel
 from ..theme import colors
-from .header import make_header, _HeaderTarget
+from .header import make_header
 
 
 WIDTH = 360.0
@@ -193,7 +194,7 @@ def _make_footer(*, on_quit: Optional[Callable[[], None]]) -> NSView:
         if on_quit is not None:
             on_quit()
 
-    _HeaderTarget.attach(quit_btn, _on_quit)
+    _attach(quit_btn, _on_quit)
     view.addSubview_(quit_btn)
 
     return view

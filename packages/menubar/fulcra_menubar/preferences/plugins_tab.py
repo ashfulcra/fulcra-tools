@@ -13,11 +13,11 @@ from AppKit import (  # type: ignore[import-not-found]
     NSButton, NSBezelStyleRounded, NSScrollView, NSSecureTextField,
     NSSwitch, NSTextField, NSView, NSMakeRect,
 )
-from Foundation import NSObject  # type: ignore[import-not-found]
 
 from fulcra_collect import config as _config
 
 from .._dispatch import on_main_thread
+from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
 from ..theme import colors, typography
@@ -107,7 +107,7 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
             cfg.disable(snap.id)
         _config.save(cfg)
         client.reload()
-    _Target.attach(enabled_switch, on_toggle)
+    _attach(enabled_switch, on_toggle)
     row.addSubview_(enabled_switch)
 
     # Interval input — scheduled only.
@@ -134,7 +134,7 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
             cfg2.set_interval(snap.id, minutes * 60)
             _config.save(cfg2)
             client.reload()
-        _Target.attach(interval_field, on_interval_change, action="textChanged:")
+        _attach(interval_field, on_interval_change, action="textChanged:")
         row.addSubview_(interval_field)
 
     # Run now (manual + scheduled, only when enabled).
@@ -148,7 +148,7 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
         def on_run(_s):
             client.run(snap.id)
             model.mark_in_flight(snap.id)
-        _Target.attach(run_btn, on_run)
+        _attach(run_btn, on_run)
         row.addSubview_(run_btn)
 
     # Credentials block — pre-fetched by rebuild() and passed in.
@@ -170,7 +170,7 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
             disc = NSButton.alloc().initWithFrame_(NSMakeRect(330, yoff - 4, 100, 24))
             disc.setTitle_("Disconnect")
             disc.setBezelStyle_(NSBezelStyleRounded)
-            _Target.attach(disc, lambda _s, key=key: (
+            _attach(disc, lambda _s, key=key: (
                 client.delete_credential(snap.id, key),
             ))
             row.addSubview_(disc)
@@ -191,7 +191,7 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
                     return
                 client.set_credential(snap.id, key, value)
 
-            _Target.attach(conn, _on_connect)
+            _attach(conn, _on_connect)
             row.addSubview_(conn)
 
         yoff += 24
@@ -199,15 +199,3 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
     return row
 
 
-class _Target:
-    _retain: list = []
-
-    @classmethod
-    def attach(cls, control, callable_, action: str = "call:"):
-        class _T(NSObject):
-            def call_(self, sender):
-                callable_(sender)
-        target = _T.alloc().init()
-        control.setTarget_(target)
-        control.setAction_(action)
-        cls._retain.append(target)

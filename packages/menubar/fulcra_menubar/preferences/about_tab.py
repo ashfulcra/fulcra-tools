@@ -8,10 +8,10 @@ from pathlib import Path
 from AppKit import (  # type: ignore[import-not-found]
     NSButton, NSBezelStyleRounded, NSSwitch, NSTextField, NSView, NSMakeRect,
 )
-from Foundation import NSObject  # type: ignore[import-not-found]
 
 from fulcra_collect import config as _config
 
+from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient, DaemonUnavailable
 from ..theme import colors, typography
 
@@ -69,7 +69,7 @@ def make_about_tab(*, client: DaemonClient):
         # The daemon's launchd log path; falls back to Console.app open.
         log = Path.home() / "Library" / "Logs" / "com.fulcradynamics.collect.log"
         subprocess.Popen(["open", "-a", "Console", str(log) if log.exists() else "/var/log/system.log"])
-    _T.attach(logs_btn, on_logs)
+    _attach(logs_btn, on_logs)
     view.addSubview_(logs_btn)
 
     # Launch at login toggle.
@@ -87,7 +87,7 @@ def make_about_tab(*, client: DaemonClient):
             _register_login_item()
         else:
             _unregister_login_item()
-    _T.attach(launch_switch, on_launch_change)
+    _attach(launch_switch, on_launch_change)
     view.addSubview_(launch_switch)
 
     return view
@@ -122,15 +122,3 @@ def _unregister_login_item() -> None:
     svc.unregisterAndReturnError_(err)
 
 
-class _T:
-    _retain: list = []
-
-    @classmethod
-    def attach(cls, control, fn):
-        class _Target(NSObject):
-            def call_(self, sender):
-                fn(sender)
-        target = _Target.alloc().init()
-        control.setTarget_(target)
-        control.setAction_("call:")
-        cls._retain.append(target)
