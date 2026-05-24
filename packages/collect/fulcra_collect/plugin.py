@@ -144,6 +144,17 @@ class Plugin:
     required_settings: tuple[Setting, ...] = ()
     setup_steps: tuple[SetupStep, ...] = ()
     health_check: Callable[["RunContext"], "HealthResult"] | None = None
+    oauth_handler: Callable[..., dict[str, str]] | None = None
+    """Optional OAuth handler called by the daemon's callback route.
+
+    Signature: (*, plugin_id, code, code_verifier, redirect_uri) -> dict[str, str]
+
+    Returns a dict of tokens (e.g. {"access_token": "...", "refresh_token": "..."})
+    that the callback handler stores in the plugin's credential keychain namespace.
+    Set this on any Plugin that authenticates via browser-based OAuth — the web UI
+    wizard will render an "oauth" SetupStep and call /api/oauth/{plugin_id}/start
+    to begin the flow.
+    """
     category: Literal["music", "video", "books", "journal", "activity", "other"] = "other"
     canonical_definition_name: str | None = None
 

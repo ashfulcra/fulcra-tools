@@ -520,3 +520,60 @@ def test_new_routes_require_auth(collect_home):
     for method, path in paths:
         r = client.request(method, path)
         assert r.status_code == 401, f"{method} {path} should require auth"
+
+
+# ---------------------------------------------------------------------------
+# OAuth routes
+# ---------------------------------------------------------------------------
+
+def test_oauth_start_requires_oauth_handler(collect_home):
+    from fulcra_collect.plugin import Plugin
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    # plugin has no oauth_handler
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.post("/api/oauth/x/start")
+    assert r.status_code == 404
+
+
+def test_oauth_start_returns_state_and_challenge(collect_home):
+    from fulcra_collect.plugin import Plugin
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+                    oauth_handler=lambda **kw: {"access_token": "abc"})
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.post("/api/oauth/x/start")
+    assert r.status_code == 200
+    body = r.json()
+    assert "state" in body and "code_challenge" in body
+
+
+def test_oauth_callback_invokes_handler_and_stores_tokens(collect_home, _in_memory_keyring):
+    from fulcra_collect.plugin import Plugin
+    calls = []
+
+    def fake_handler(*, plugin_id, code, code_verifier, redirect_uri):
+        calls.append({"plugin_id": plugin_id, "code": code})
+        return {"access_token": "token-A", "refresh_token": "token-R"}
+
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+                    oauth_handler=fake_handler)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    start = client.post("/api/oauth/x/start").json()
+    r = client.get(f"/api/oauth/x/callback?code=AUTH-CODE&state={start['state']}")
+    assert r.status_code == 200
+    assert calls[0]["code"] == "AUTH-CODE"
+    from fulcra_collect import credentials as _creds
+    assert _creds.get_secret("x", "access_token") == "token-A"
+    assert _creds.get_secret("x", "refresh_token") == "token-R"
+
+
+def test_oauth_callback_rejects_invalid_state(collect_home):
+    from fulcra_collect.plugin import Plugin
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+                    oauth_handler=lambda **kw: {"access_token": "abc"})
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.get("/api/oauth/x/callback?code=AUTH&state=never-issued")
+    assert r.status_code == 400
