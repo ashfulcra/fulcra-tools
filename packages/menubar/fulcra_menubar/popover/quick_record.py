@@ -17,7 +17,6 @@ from AppKit import (  # type: ignore[import-not-found]
     NSTextField, NSView, NSMakeRect,
 )
 
-from .._dispatch import on_main_thread
 from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
 from ..model import StatusModel
