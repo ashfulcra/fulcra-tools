@@ -74,9 +74,8 @@ def test_root_returns_placeholder_when_frontend_missing(collect_home):
 
 def test_token_file_has_0600_permissions(collect_home, tmp_path, monkeypatch):
     """The web token file must be 0600 so other users can't read it."""
-    import os
     monkeypatch.setenv("FULCRA_COLLECT_HOME", str(tmp_path))
-    token = _ensure_token()
+    _ensure_token()
     p = _web_token_path()
     assert p.exists()
     mode = p.stat().st_mode & 0o777
@@ -541,6 +540,8 @@ def test_oauth_start_returns_state_and_challenge(collect_home):
     plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
                     oauth_handler=lambda **kw: {"access_token": "abc"})
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    # Simulate the URL being available on the daemon (normally set by serve())
+    daemon._web_url = "http://127.0.0.1:9999"
     client = _client(daemon)
     r = client.post("/api/oauth/x/start")
     assert r.status_code == 200
@@ -559,6 +560,8 @@ def test_oauth_callback_invokes_handler_and_stores_tokens(collect_home, _in_memo
     plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
                     oauth_handler=fake_handler)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    # Simulate the URL being available on the daemon (normally set by serve())
+    daemon._web_url = "http://127.0.0.1:9999"
     client = _client(daemon)
     start = client.post("/api/oauth/x/start").json()
     r = client.get(f"/api/oauth/x/callback?code=AUTH-CODE&state={start['state']}")
@@ -653,8 +656,6 @@ def test_definitions_route_returns_list(collect_home, _in_memory_keyring, monkey
     _creds_mod.set_user_secret("bearer-token", "valid-token")
 
     # Monkeypatch httpx.Client to avoid hitting the real Fulcra API
-    import httpx
-    import json as _json
 
     fake_defs = [
         {"id": "def-1", "name": "Watched", "annotation_type": "duration",
@@ -877,7 +878,6 @@ def _fake_httpx_for_daemon(monkeypatch, *, get_data=None, post_exc=None):
                 raise post_exc
             return _FakeResp({"ok": True})
 
-    import fulcra_collect.daemon as daemon_mod
 
     class _FakeClientFactory:
         def __init__(self, **kw): pass

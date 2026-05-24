@@ -12,30 +12,48 @@
  *
  * Supports step kinds: intro, external_action, input, file_upload,
  * permission_request, browser_extension, test_connection,
- * definition_picker, done.
- *
- * The "oauth" kind is reserved for Phase F (Trakt OAuth flow); for v1
- * it renders a graceful "OAuth flow coming soon" placeholder.
+ * definition_picker, oauth, done.
  */
+
+// ---------------------------------------------------------------------------
+// HTML entity escaper — prevents XSS from plugin-authored body_md content.
+// ---------------------------------------------------------------------------
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
 
 // ---------------------------------------------------------------------------
 // Tiny markdown renderer — handles bold, links, line-breaks, code spans.
 // Sufficient for the short, authored body_md strings we use in setup steps.
+//
+// Security: input is HTML-escaped first, then markdown transforms are applied
+// on the safe escaped text. Link URLs are allowlisted to http(s) only — any
+// other scheme (javascript:, data:, etc.) is rendered as plain text.
 // ---------------------------------------------------------------------------
 
 function renderMd(text) {
   if (!text) return "";
-  return text
+  // Escape HTML entities before any markdown processing so that raw HTML
+  // in plugin-authored body_md cannot inject tags or event handlers.
+  let s = escapeHtml(text);
+  return s
     // Bold: **text** or __text__
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/__(.+?)__/g, "<strong>$1</strong>")
     // Inline code: `text`
     .replace(/`([^`]+)`/g, "<code class=\"bg-slate-100 text-slate-800 px-1 rounded text-sm\">$1</code>")
-    // Links: [text](url)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<a href=\"$2\" target=\"_blank\" rel=\"noopener\" class=\"text-violet-600 underline\">$1</a>")
-    // Bare URLs (not already inside an href)
+    // Links: [text](url) — only http(s) URLs are linked; unsafe schemes
+    // (javascript:, data:, etc.) are rendered as plain text.
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, linkText, url) => {
+      if (!/^https?:\/\//i.test(url)) return linkText;
+      return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-violet-600 underline">${linkText}</a>`;
+    })
+    // Bare URLs (not already inside an href) — already https? validated by regex
     .replace(/(?<!["\(=])https?:\/\/[^\s<)"]+/g, (url) =>
-      `<a href="${url}" target="_blank" rel="noopener" class="text-violet-600 underline">${url}</a>`
+      `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-violet-600 underline">${url}</a>`
     )
     // List items: lines starting with "- " or "* "
     .replace(/^[\-\*] (.+)$/gm, "<li class=\"ml-4 list-disc\">$1</li>")
@@ -97,6 +115,8 @@ function createWizard(plugin_contract, on_complete) {
     total_steps: steps.length,
     current_step: steps[0],
 
+    // OAuth step state
+    oauthStatus: "",
     // Input values collected from "input" steps (key → value)
     inputValues: {},
     // File upload state
@@ -118,6 +138,22 @@ function createWizard(plugin_contract, on_complete) {
     dpDefinitions: [],        // [{id, name, annotation_type, created_at, _preview, _previewLoading}]
     dpSelectedId: null,       // id of chosen definition, or null = create new
     dpForceNew: false,        // true when user chose "Create new instead"
+
+    // Alpine 3 calls init() automatically when the component is initialized.
+    // We register a postMessage listener here so the OAuth callback tab can
+    // signal completion without polling.
+    init() {
+      const self = this;
+      window.addEventListener("message", function (e) {
+        // Only accept messages from the same origin — prevents a cross-origin
+        // page from spoofing an oauth_complete signal.
+        if (e.origin !== window.location.origin) return;
+        if (!e.data || e.data.type !== "oauth_complete") return;
+        if (e.data.plugin_id !== self.plugin_id) return;
+        self.nextBlocked = false;
+        self.oauthStatus = "Signed in successfully.";
+      });
+    },
 
     get progress_label() {
       return `Step ${this.step_index + 1} of ${this.total_steps}`;
@@ -228,6 +264,7 @@ function createWizard(plugin_contract, on_complete) {
         this.healthError = "";
         this.nextBlocked = false;
         this.extensionConfirmed = false;
+        this.oauthStatus = "";
         // Reset definition picker state for clean entry into the next step
         this.dpLoading = false;
         this.dpError = "";
@@ -268,6 +305,29 @@ function createWizard(plugin_contract, on_complete) {
         // "Create new instead").
         this.nextBlocked = true;
         this._loadDefinitions();
+      }
+      if (this.current_step.kind === "oauth") {
+        // Block Next until the OAuth callback page posts "oauth_complete"
+        // back to this window.
+        this.nextBlocked = true;
+        this.oauthStatus = "";
+      }
+    },
+
+    // Initiate the OAuth flow for the current step. Calls the start route,
+    // then opens the returned authorize_url in a new tab.
+    async startOAuth() {
+      this.oauthStatus = "opening…";
+      try {
+        const result = await api(`/api/oauth/${this.plugin_id}/start`, { method: "POST" });
+        if (result.authorize_url) {
+          window.open(result.authorize_url, "_blank", "noopener,noreferrer");
+          this.oauthStatus = "Waiting for sign-in… (complete it in the new tab)";
+        } else {
+          this.oauthStatus = "Error: server did not return an authorize_url.";
+        }
+      } catch (e) {
+        this.oauthStatus = `Error: ${e.message}`;
       }
     },
 
