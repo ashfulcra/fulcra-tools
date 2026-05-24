@@ -4,8 +4,8 @@ from __future__ import annotations
 from AppKit import (  # type: ignore[import-not-found]
     NSSwitch, NSTextField, NSView, NSMakeRect,
 )
-from Foundation import NSObject  # type: ignore[import-not-found]
 
+from .._objc_targets import attach as _attach
 from ..notifications import NotificationCentre
 from ..theme import colors, typography
 
@@ -48,7 +48,7 @@ def make_notifications_tab(*, centre: NotificationCentre):
         if sender.state() == 0:
             centre.mute_all = True
             mute_switch.setState_(1)
-    _T.attach(fail_switch, on_fail_change)
+    _attach(fail_switch, on_fail_change)
 
     def on_mute_change(sender):
         centre.mute_all = bool(sender.state())
@@ -56,21 +56,9 @@ def make_notifications_tab(*, centre: NotificationCentre):
             fail_switch.setState_(0)
         else:
             fail_switch.setState_(1)
-    _T.attach(mute_switch, on_mute_change)
+    _attach(mute_switch, on_mute_change)
     view.addSubview_(mute_switch)
 
     return view
 
 
-class _T:
-    _retain: list = []
-
-    @classmethod
-    def attach(cls, control, fn):
-        class _Target(NSObject):
-            def call_(self, sender):
-                fn(sender)
-        target = _Target.alloc().init()
-        control.setTarget_(target)
-        control.setAction_("call:")
-        cls._retain.append(target)

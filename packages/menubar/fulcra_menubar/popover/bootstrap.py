@@ -17,8 +17,8 @@ from AppKit import (  # type: ignore[import-not-found]
     NSBezelStyleRounded, NSButton, NSTextField,
     NSView, NSMakeRect,
 )
-from Foundation import NSObject  # type: ignore[import-not-found]
 
+from .._objc_targets import attach as _attach
 from ..theme import colors, typography
 
 # Module-level registry of in-flight install subprocesses. The app's _quit
@@ -151,19 +151,7 @@ def make_bootstrap_card(width: float, height: float) -> NSView:
 
         threading.Thread(target=work, daemon=True).start()
 
-    _ButtonTarget.attach(button, on_click)
+    _attach(button, on_click)
     return view
 
 
-class _ButtonTarget:
-    _retain: list = []
-
-    @classmethod
-    def attach(cls, button, callable_):
-        class _T(NSObject):
-            def call_(self, sender):
-                callable_(sender)
-        target = _T.alloc().init()
-        button.setTarget_(target)
-        button.setAction_("call:")
-        cls._retain.append(target)

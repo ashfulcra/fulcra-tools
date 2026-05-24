@@ -9,6 +9,7 @@ from AppKit import (  # type: ignore[import-not-found]
 
 from .._dispatch import on_main_thread
 from ..model import OverallState, StatusModel
+from .._objc_targets import attach as _attach
 from ..theme import colors, palette, typography
 
 
@@ -75,7 +76,7 @@ def make_header(
         else:
             gear_btn.setTitle_("⚙")  # fallback for older macOS without SF Symbols
 
-        _HeaderTarget.attach(gear_btn, lambda _sender: on_preferences())
+        _attach(gear_btn, lambda _sender: on_preferences())
         view.addSubview_(gear_btn)
 
     def refresh(_m=None):
@@ -105,23 +106,3 @@ def _color(hex_value: str):
     )
 
 
-class _HeaderTarget:
-    """AppKit button-target proxy — keeps the Python callable alive via a class-
-    level retain list and wires it to the button's ObjC action mechanism.
-
-    Follows the same pattern as ``_RowTarget`` in ``plugin_row.py``.
-    """
-    _retain: list = []
-
-    @classmethod
-    def attach(cls, button, callable_) -> None:
-        from Foundation import NSObject  # type: ignore[import-not-found]
-
-        class _T(NSObject):
-            def call_(self, sender):
-                callable_(sender)
-
-        target = _T.alloc().init()
-        button.setTarget_(target)
-        button.setAction_("call:")
-        cls._retain.append(target)  # prevent GC

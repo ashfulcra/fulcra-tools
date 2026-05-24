@@ -217,8 +217,9 @@ def _install_click_target(app: FulcraMenubarApp):
     Returns the target object which the caller must retain on ``self`` so
     PyObjC doesn't garbage-collect it before the button fires.
 
-    The pattern mirrors ``_RowTarget`` in ``popover/plugin_row.py``: an
-    NSObject subclass whose ``open_:`` selector is set as the button's action.
+    Uses a dedicated NSObject subclass whose ``open_:`` selector is set as the
+    button's action (separate from the shared ``_CallableTarget`` proxy because
+    this target exposes a different selector name).
     """
     try:
         import objc  # type: ignore[import-not-found]
