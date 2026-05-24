@@ -35,6 +35,15 @@ def _run_step(cmd: list[str]) -> tuple[int, str]:
     try:
         out, _ = proc.communicate(timeout=30)
         return proc.returncode, out.strip()
+    except subprocess.TimeoutExpired:
+        # Kill the hung process before letting the exception propagate
+        # so it doesn't outlive the menubar.
+        proc.kill()
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        raise
     finally:
         try:
             _pending_procs.remove(proc)
