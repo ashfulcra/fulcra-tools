@@ -1,7 +1,16 @@
-"""One row per plugin. 44pt tall. Layout:
+"""One row per plugin. 44pt tall. Layout (360pt wide):
 
-  [dot]  Name           …  last-run-relative   [Run now]
-         id                                       (or kind pill)
+  [dot]  Name (truncated)   right_text   [Run now]
+         id   (truncated)
+
+Column boundaries (no-overlap):
+  dot:        x=16, w=10
+  name+id:    x=34, w=200 → ends at x=234
+  right_text: x=240, w=70 → ends at x=310  (right-aligned, y=24)
+  button:     x=260, w=84 → ends at x=344  (y=10, below right_text)
+
+When both right_text and button are present (enabled scheduled/manual)
+they stack vertically in the bottom-right corner.
 """
 from __future__ import annotations
 
@@ -9,7 +18,7 @@ from datetime import datetime, timezone
 
 from AppKit import (  # type: ignore[import-not-found]
     NSButton, NSColor, NSTextField, NSView, NSMakeRect,
-    NSBezelStyleRounded,
+    NSBezelStyleRounded, NSLineBreakByTruncatingTail,
 )
 
 from ..daemon_client import DaemonClient
@@ -30,24 +39,31 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
     name = NSTextField.labelWithString_(snapshot.name)
     name.setFont_(typography.body())
     name.setTextColor_(colors.text() if snapshot.enabled else colors.text_tertiary())
-    name.setFrame_(NSMakeRect(34, 22, 180, 18))
+    name.setLineBreakMode_(NSLineBreakByTruncatingTail)
+    name.setFrame_(NSMakeRect(34, 22, 200, 18))  # ends at x=234
     view.addSubview_(name)
 
     pid = NSTextField.labelWithString_(snapshot.id)
     pid.setFont_(typography.small())
     pid.setTextColor_(colors.text_secondary())
-    pid.setFrame_(NSMakeRect(34, 6, 180, 14))
+    pid.setLineBreakMode_(NSLineBreakByTruncatingTail)
+    pid.setFrame_(NSMakeRect(34, 6, 200, 14))  # ends at x=234
     view.addSubview_(pid)
 
+    # right_text sits at x=240, leaving a 6pt gap after the name column (x=234).
+    # When a Run-now button is also present (enabled scheduled/manual plugins),
+    # right_text shifts up (y=24) so the two don't overlap vertically.
+    has_button = snapshot.kind in ("scheduled", "manual") and snapshot.enabled
+    rt_y = 24 if has_button else 16
     right_text = NSTextField.labelWithString_(_right_text(snapshot))
     right_text.setFont_(typography.small())
     right_text.setTextColor_(colors.text_secondary())
     right_text.setAlignment_(2)  # right
-    right_text.setFrame_(NSMakeRect(width - 200, 16, 96, 14))
+    right_text.setFrame_(NSMakeRect(240, rt_y, 70, 14))  # x=240, ends at x=310
     view.addSubview_(right_text)
 
-    if snapshot.kind in ("scheduled", "manual") and snapshot.enabled:
-        button = NSButton.alloc().initWithFrame_(NSMakeRect(width - 96, 12, 80, 22))
+    if has_button:
+        button = NSButton.alloc().initWithFrame_(NSMakeRect(260, 8, 84, 22))  # ends x=344
         button.setTitle_("Run now")
         button.setBezelStyle_(NSBezelStyleRounded)
 
