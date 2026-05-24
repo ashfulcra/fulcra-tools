@@ -1,6 +1,5 @@
 """Aggressive sweep: every import command emits a valid JSON envelope on --json."""
 import json
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner

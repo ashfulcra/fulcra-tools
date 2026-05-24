@@ -1,7 +1,6 @@
 """End-to-end integration: import → cache populated → next import sees twins."""
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner

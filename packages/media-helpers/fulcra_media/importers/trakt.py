@@ -13,7 +13,7 @@ import os
 import time
 from collections import Counter
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx

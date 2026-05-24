@@ -1,10 +1,9 @@
 """Plugin discovery + validation."""
 from __future__ import annotations
 
-from datetime import timedelta
 
 from fulcra_collect.plugin import Plugin
-from fulcra_collect.registry import RegistryResult, load_plugins
+from fulcra_collect.registry import load_plugins
 
 
 class FakeEntry:

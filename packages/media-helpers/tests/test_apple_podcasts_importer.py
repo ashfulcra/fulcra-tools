@@ -1,10 +1,7 @@
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
 
-import pytest
 
 from fulcra_media.importers.apple_podcasts import parse_db
-from fulcra_media.importers.base import NormalizedEvent
 
 FIXTURE = Path(__file__).parent / "fixtures" / "apple_podcasts_mtlibrary.sqlite"
 

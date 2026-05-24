@@ -1,7 +1,6 @@
 """Tests for watermark management."""
 from datetime import datetime, timezone
 
-import pytest
 
 from fulcra_media import watermarks
 from fulcra_media.state import State

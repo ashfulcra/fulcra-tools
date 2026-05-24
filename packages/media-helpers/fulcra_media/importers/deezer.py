@@ -158,7 +158,6 @@ def fetch_history(
             _check_deezer_error(data)
 
             items = data.get("data") or []
-            any_yielded = False
             any_below_bar = False
             for t in items:
                 ts = t.get("timestamp")
@@ -170,7 +169,6 @@ def fetch_history(
                     except (TypeError, ValueError):
                         pass
                 yield t
-                any_yielded = True
 
             page += 1
             if max_pages is not None and page >= max_pages:

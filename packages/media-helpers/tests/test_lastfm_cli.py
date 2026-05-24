@@ -6,7 +6,6 @@ FulcraClient + a mock Last.fm fetch so nothing hits the real network.
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner

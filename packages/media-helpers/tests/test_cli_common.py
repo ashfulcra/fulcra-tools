@@ -2,7 +2,6 @@
 import json
 
 import click
-import pytest
 from click.testing import CliRunner
 
 from fulcra_media.cli_common import (

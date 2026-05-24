@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 from fulcra_collect.supervisor import (
     DEGRADED_RECOVERY_COOLDOWN,
-    RestartDecision,
     ServiceSupervisor,
     decide_restart,
 )
