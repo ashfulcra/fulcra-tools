@@ -26,6 +26,13 @@ from ..theme import colors, typography
 def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
     width = 640.0
     height = 440.0
+    # Wrap the scroll view in a parent NSView so the tab's root view can be
+    # painted white — prevents dark-mode system chrome bleeding through the
+    # transparent NSScrollView chrome.
+    outer = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+    outer.setWantsLayer_(True)
+    outer.layer().setBackgroundColor_(colors.bg().CGColor())
+
     scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
     scroll.setHasVerticalScroller_(True)
     scroll.setBorderType_(0)
@@ -80,7 +87,8 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
 
     rebuild()
     model.add_observer(on_main_thread(rebuild))
-    return scroll
+    outer.addSubview_(scroll)
+    return outer
 
 
 def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,

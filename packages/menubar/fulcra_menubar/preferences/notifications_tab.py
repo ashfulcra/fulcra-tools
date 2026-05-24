@@ -12,6 +12,10 @@ from ..theme import colors, typography
 
 def make_notifications_tab(*, centre: NotificationCentre):
     view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 640, 440))
+    # Paint the root view white so dark-mode system chrome can never bleed
+    # through a transparent container — the same fix applied to all three tabs.
+    view.setWantsLayer_(True)
+    view.layer().setBackgroundColor_(colors.bg().CGColor())
 
     title = NSTextField.labelWithString_("Notify me when a plugin fails repeatedly")
     title.setFont_(typography.body())
