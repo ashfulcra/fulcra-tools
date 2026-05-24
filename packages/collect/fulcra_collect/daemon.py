@@ -8,6 +8,7 @@ scheduled dispatch.
 from __future__ import annotations
 
 import importlib.metadata as _im
+import logging
 import subprocess
 import threading
 import time
@@ -271,6 +272,18 @@ class Daemon:
 
         server = ControlServer(_control_socket_path(), self.handle_request)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        # Start the HTTP server alongside the UDS control server
+        try:
+            from .web import serve as _web_serve
+            _web_url, _web_thread = _web_serve(self)
+            self._web_url = _web_url
+            logging.getLogger("fulcra_collect").info("web UI: %s", _web_url)
+        except Exception:
+            logging.getLogger("fulcra_collect").exception(
+                "web UI failed to start; the daemon will keep running without it",
+            )
+
         supervisor = ServiceSupervisor()
         try:
             while True:
