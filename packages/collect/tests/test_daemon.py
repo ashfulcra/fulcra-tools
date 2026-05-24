@@ -488,3 +488,201 @@ def test_credential_status_does_not_leak_keyring_exception_message(
     assert reply["ok"] is False
     assert "SENSITIVE_TOKEN_VALUE_DO_NOT_LEAK" not in reply["error"]
     assert "keychain" in reply["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase G — quick_record_list + record_annotation commands
+# ---------------------------------------------------------------------------
+
+class _FakeHttpxResponse:
+    status_code = 200
+    def raise_for_status(self): pass
+    def json(self): return self._data
+
+    def __init__(self, data):
+        self._data = data
+
+
+class _FakeHttpxClient:
+    """httpx.Client stub that records calls and returns preset responses."""
+    def __init__(self, *, get_data=None, post_status=200):
+        self._get_data = get_data or []
+        self._post_status = post_status
+        self.requests: list[dict] = []
+
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
+    def get(self, url, **kw):
+        self.requests.append({"method": "GET", "url": url, **kw})
+        resp = _FakeHttpxResponse(self._get_data)
+        return resp
+
+    def post(self, url, **kw):
+        self.requests.append({"method": "POST", "url": url, **kw})
+        resp = _FakeHttpxResponse({"ok": True})
+        resp.status_code = self._post_status
+        return resp
+
+
+def _make_fake_client_factory(client_obj):
+    """Return a class whose constructor always returns client_obj."""
+    class _Cls:
+        def __new__(cls, **kw):
+            return client_obj
+    return _Cls
+
+
+def test_quick_record_list_returns_empty_when_unauthenticated(collect_home, monkeypatch):
+    """quick_record_list returns ok=False with empty list when no bearer token."""
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: None)
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({"cmd": "quick_record_list"})
+    assert reply["ok"] is False
+    assert "authenticated" in reply["error"].lower()
+    assert reply["definitions"] == []
+
+
+def test_quick_record_list_happy_path(collect_home, monkeypatch):
+    """quick_record_list filters to moments, excludes deleted, caps at 20."""
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
+
+    defs = [
+        {"id": f"m-{i}", "name": f"Moment {i}", "annotation_type": "moment",
+         "deleted_at": None, "created_at": f"2026-05-{i+1:02d}T00:00:00Z"}
+        for i in range(25)
+    ] + [
+        {"id": "dur-1", "name": "Duration", "annotation_type": "duration",
+         "deleted_at": None, "created_at": "2026-05-01T00:00:00Z"},
+        {"id": "deleted-mom", "name": "Gone", "annotation_type": "moment",
+         "deleted_at": "2026-01-01T00:00:00Z", "created_at": "2026-04-01T00:00:00Z"},
+    ]
+
+    fake_client = _FakeHttpxClient(get_data=defs)
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (), {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._quick_record_list()
+
+    assert reply["ok"] is True
+    # Should return at most 20 moments, excluding deleted and duration
+    assert len(reply["definitions"]) == 20
+    # All returned are moments
+    assert all(d["annotation_type"] == "moment" for d in reply["definitions"])
+    # All returned are non-deleted
+    assert all(d["deleted_at"] is None for d in reply["definitions"])
+
+
+def test_quick_record_list_caches_result(collect_home, monkeypatch):
+    """Second call within 60s returns cached result without hitting the API."""
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
+
+    fake_client = _FakeHttpxClient(get_data=[
+        {"id": "m1", "name": "Coffee", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-01T00:00:00Z"},
+    ])
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (), {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    r1 = d._quick_record_list()
+    # Clear the fake_client's request log so we can check if a second GET fires
+    initial_count = len(fake_client.requests)
+    r2 = d._quick_record_list()
+
+    assert r1["ok"] is True and r2["ok"] is True
+    assert r1["definitions"] == r2["definitions"]
+    # No additional GET was issued (the second hit the cache)
+    assert len(fake_client.requests) == initial_count
+
+
+def test_quick_record_list_api_error_returns_graceful_response(collect_home, monkeypatch):
+    """quick_record_list returns ok=False with empty list on API failure."""
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
+
+    class _ErrorClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, *a, **kw): raise RuntimeError("network failure")
+
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (), {"Client": lambda timeout=None: _ErrorClient()})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._quick_record_list()
+    assert reply["ok"] is False
+    assert "Fulcra API" in reply["error"]
+    assert reply["definitions"] == []
+
+
+def test_record_annotation_missing_definition_id(collect_home):
+    """record_annotation rejects an empty definition_id."""
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({"cmd": "record_annotation", "definition_id": ""})
+    assert reply["ok"] is False
+    assert "definition_id" in reply["error"]
+
+
+def test_record_annotation_unauthenticated(collect_home, monkeypatch):
+    """record_annotation returns ok=False when no Fulcra token."""
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: None)
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({"cmd": "record_annotation", "definition_id": "def-abc"})
+    assert reply["ok"] is False
+    assert "authenticated" in reply["error"].lower()
+
+
+def test_record_annotation_happy_path(collect_home, monkeypatch):
+    """record_annotation calls Fulcra POST and surfaces ok=True + activity entry."""
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
+
+    fake_client = _FakeHttpxClient()
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (), {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    # Pre-populate cache so _quick_record_list doesn't interfere
+    reply = d._record_annotation("def-abcdef12", None)
+
+    assert reply == {"ok": True}
+    # One POST was issued
+    post_reqs = [r for r in fake_client.requests if r["method"] == "POST"]
+    assert len(post_reqs) == 1
+    # Activity buffer has one entry
+    entries = d.activity.recent(limit=1)
+    assert entries[0].ok is True
+    assert entries[0].plugin_id == "quick-record"
+    assert "def-abcd" in entries[0].summary
+
+
+def test_record_annotation_api_error_surfaces_activity_failure(collect_home, monkeypatch):
+    """record_annotation records a failure entry in the activity buffer on API error."""
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
+
+    class _ErrorClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, *a, **kw): raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (), {"Client": lambda timeout=None, follow_redirects=True: _ErrorClient()})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._record_annotation("def-xyz", None)
+
+    assert reply["ok"] is False
+    assert "Fulcra API" in reply["error"]
+    entries = d.activity.recent(limit=1)
+    assert entries[0].ok is False
+    assert entries[0].plugin_id == "quick-record"

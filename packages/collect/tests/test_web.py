@@ -849,3 +849,165 @@ def test_clear_definition_removes_id(collect_home):
     assert r.json()["ok"] is True
     st2 = _state_mod.load("x")
     assert st2.definition_id is None
+
+
+# ---------------------------------------------------------------------------
+# Phase G — quick-record HTTP routes
+# ---------------------------------------------------------------------------
+
+def _fake_httpx_for_daemon(monkeypatch, *, get_data=None, post_exc=None):
+    """Patch httpx inside fulcra_collect.daemon so daemon methods don't
+    hit the real network."""
+    import fulcra_collect.daemon as daemon_mod
+
+    get_data = get_data or []
+
+    class _FakeResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return self._data
+        def __init__(self, data): self._data = data
+
+    class _FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, *a, **kw): return _FakeResp(get_data)
+        def post(self, *a, **kw):
+            if post_exc:
+                raise post_exc
+            return _FakeResp({"ok": True})
+
+    import fulcra_collect.daemon as daemon_mod
+
+    class _FakeClientFactory:
+        def __init__(self, **kw): pass
+        def __enter__(self): return _FakeClient()
+        def __exit__(self, *a): pass
+
+    # We need to wrap in a class so both context-manager forms work
+    class _WrappedClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, *a, **kw): return _FakeResp(get_data)
+        def post(self, *a, **kw):
+            if post_exc:
+                raise post_exc
+            return _FakeResp({"ok": True})
+
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (), {"Client": _WrappedClient})())
+
+
+def test_quick_record_definitions_requires_auth(collect_home):
+    """GET /api/quick-record/definitions requires the web Bearer token."""
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    from fastapi.testclient import TestClient
+    client = TestClient(app)  # no auth header
+    r = client.get("/api/quick-record/definitions")
+    assert r.status_code == 401
+
+
+def test_quick_record_definitions_unauthenticated_fulcra(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Route returns ok=False with empty list when no Fulcra bearer token."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/quick-record/definitions")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert body["definitions"] == []
+
+
+def test_quick_record_definitions_returns_moments(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Route returns Moment defs from the daemon's quick_record_list handler."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    fake_defs = [
+        {"id": "m1", "name": "Coffee", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-10T00:00:00Z"},
+        {"id": "dur1", "name": "Work", "annotation_type": "duration",
+         "deleted_at": None, "created_at": "2026-05-09T00:00:00Z"},
+    ]
+    _fake_httpx_for_daemon(monkeypatch, get_data=fake_defs)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/quick-record/definitions")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    # Only moments are returned; duration filtered out
+    assert len(body["definitions"]) == 1
+    assert body["definitions"][0]["annotation_type"] == "moment"
+
+
+def test_record_annotation_requires_auth(collect_home):
+    """POST /api/annotations requires the web Bearer token."""
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    from fastapi.testclient import TestClient
+    c = TestClient(app)
+    r = c.post("/api/annotations", json={"definition_id": "abc"})
+    assert r.status_code == 401
+
+
+def test_record_annotation_unauthenticated_fulcra(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Route returns ok=False when no Fulcra bearer token is stored."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/annotations", json={"definition_id": "def-abc"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+
+
+def test_record_annotation_happy_path(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Route calls Fulcra POST and returns ok=True. Activity buffer is updated."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _fake_httpx_for_daemon(monkeypatch)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/annotations",
+                    json={"definition_id": "def-abcdef12", "comment": None})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    # Activity buffer has one success entry
+    entries = daemon.activity.recent(limit=1)
+    assert entries[0].ok is True
+    assert entries[0].plugin_id == "quick-record"
+
+
+def test_record_annotation_api_failure_returns_error(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Route returns ok=False and surfaces activity entry on Fulcra API failure."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _fake_httpx_for_daemon(monkeypatch, post_exc=RuntimeError("connection refused"))
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/annotations", json={"definition_id": "def-xyz"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "Fulcra API" in body["error"]
+    entries = daemon.activity.recent(limit=1)
+    assert entries[0].ok is False
+
+
+def test_record_annotation_missing_definition_id_rejected(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Route returns 422 when definition_id is missing from the body."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    # definition_id is a required field; omitting it gives a validation error
+    r = client.post("/api/annotations", json={})
+    assert r.status_code == 422

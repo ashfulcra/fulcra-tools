@@ -67,6 +67,11 @@ class DefinitionBindBody(BaseModel):
     force_new: bool = False
 
 
+class RecordAnnotationBody(BaseModel):
+    definition_id: str
+    comment: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -591,6 +596,27 @@ def build_app(daemon) -> FastAPI:
         st.definition_id = None
         _state_mod.save(st)
         return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # Quick-record surface — menubar popover Moment annotations
+    # ------------------------------------------------------------------
+
+    @app.get("/api/quick-record/definitions", dependencies=[Depends(require_token)])
+    def get_quick_record_definitions():
+        """Return the user's Moment annotation definitions for the menubar
+        quick-record surface. Delegates to the daemon's quick_record_list
+        handler which applies its own 60-second in-memory cache."""
+        return daemon.handle_request({"cmd": "quick_record_list"})
+
+    @app.post("/api/annotations", dependencies=[Depends(require_token)])
+    def record_annotation(body: RecordAnnotationBody):
+        """Write one Moment annotation immediately to Fulcra. Used by the
+        menubar quick-record buttons and any direct web UI callers."""
+        return daemon.handle_request({
+            "cmd": "record_annotation",
+            "definition_id": body.definition_id,
+            "comment": body.comment,
+        })
 
     return app
 

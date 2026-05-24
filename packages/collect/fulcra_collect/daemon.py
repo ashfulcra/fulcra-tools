@@ -14,6 +14,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import httpx
+
 from . import activity as _activity
 from . import config as config_mod
 from . import runner, state
@@ -118,6 +120,13 @@ class Daemon:
         if cmd == "delete_credential":
             return self._delete_credential(
                 request.get("plugin", ""), request.get("key", ""),
+            )
+        if cmd == "quick_record_list":
+            return self._quick_record_list()
+        if cmd == "record_annotation":
+            return self._record_annotation(
+                request.get("definition_id", ""),
+                request.get("comment", None),
             )
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
@@ -225,6 +234,79 @@ class Daemon:
                 "delete_credential failed for %s/%s", plugin_id, key,
             )
             return {"ok": False, "error": "keychain delete failed"}
+
+    def _quick_record_list(self) -> dict:
+        """List Moment annotation definitions for the menubar popover's
+        quick-record surface. Calls Fulcra's annotation-defs endpoint;
+        filters to annotation_type == 'moment'; sorts by most-recent-use.
+        Caches for 60s in-memory."""
+        from . import credentials as _creds
+        cache_ttl = 60.0
+        now = time.monotonic()
+        cached = getattr(self, "_quick_record_cache", None)
+        if cached and (now - cached["at"]) < cache_ttl:
+            return {"ok": True, "definitions": cached["defs"]}
+        token = _creds.get_user_secret("bearer-token")
+        if not token:
+            return {"ok": False, "error": "Fulcra not authenticated", "definitions": []}
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                r = client.get(
+                    "https://api.fulcradynamics.com/data/v0/annotation-defs",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                r.raise_for_status()
+                all_defs = r.json()
+        except Exception as exc:
+            return {"ok": False, "error": f"Fulcra API: {exc}", "definitions": []}
+        # Filter to moments, exclude soft-deleted
+        moments = [d for d in all_defs
+                   if d.get("annotation_type") == "moment"
+                   and not d.get("deleted_at")]
+        # Sort by created_at descending as a v1 proxy for "recently used"
+        # (proper sort by recent annotation event timestamp is v1.5)
+        moments.sort(key=lambda d: d.get("created_at", ""), reverse=True)
+        # Limit to top 20 so popover doesn't get long
+        moments = moments[:20]
+        self._quick_record_cache = {"at": now, "defs": moments}
+        return {"ok": True, "definitions": moments}
+
+    def _record_annotation(self, definition_id: str, comment: str | None) -> dict:
+        """Write one Moment annotation immediately to Fulcra. Used by the
+        menubar's quick-record buttons. Records timestamp=now."""
+        from . import credentials as _creds
+        if not definition_id:
+            return {"ok": False, "error": "definition_id required"}
+        token = _creds.get_user_secret("bearer-token")
+        if not token:
+            return {"ok": False, "error": "Fulcra not authenticated"}
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        payload: dict = {
+            "annotation_def_id": definition_id,
+            "recorded_at": now_iso,
+            # Moments don't need value/end_time
+        }
+        if comment:
+            payload["comment"] = comment
+        try:
+            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                r = client.post(
+                    "https://api.fulcradynamics.com/data/v0/annotations",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=[payload],  # batch of one
+                )
+                r.raise_for_status()
+        except Exception as exc:
+            # Record the failed attempt in the activity buffer so the user
+            # sees something happened
+            self.activity.add(plugin_id="quick-record",
+                              summary=f"failed: {exc}", ok=False)
+            return {"ok": False, "error": f"Fulcra API: {exc}"}
+        # Surface in the activity buffer
+        self.activity.add(plugin_id="quick-record",
+                          summary=f"Recorded annotation {definition_id[:8]}…",
+                          ok=True)
+        return {"ok": True}
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
