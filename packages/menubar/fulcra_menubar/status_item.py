@@ -27,7 +27,7 @@ from ._dispatch import on_main_thread
 from .model import OverallState, StatusModel
 from .theme import palette
 
-ASSET = Path(__file__).parent / "assets" / "menubar-icon.pdf"
+ASSET = Path(__file__).parent / "assets" / "menubar-icon.png"
 
 
 def _hex_to_cgcolor(hex_value: str, alpha: float = 1.0):
