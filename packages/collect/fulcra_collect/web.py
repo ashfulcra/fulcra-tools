@@ -8,9 +8,11 @@ seeded into a cookie on the initial HTML load.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import socket
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -33,13 +35,28 @@ def _web_url_path() -> Path:
     return _config.config_dir() / "web-url"
 
 
+def _write_secret_file(path: Path, content: str) -> None:
+    """Write content to path with 0600 permissions atomically.
+
+    For newly-created files, uses O_CREAT|O_EXCL so there is never a
+    world-readable window between write_text and chmod. For files that
+    already exist (already restricted), falls back to a plain overwrite.
+    """
+    if path.exists():
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+        return
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
 def _ensure_token() -> str:
     p = _web_token_path()
     if p.exists():
         return p.read_text(encoding="utf-8").strip()
     token = secrets.token_urlsafe(32)
-    p.write_text(token, encoding="utf-8")
-    p.chmod(0o600)
+    _write_secret_file(p, token)
     return token
 
 
@@ -80,8 +97,12 @@ def _oauth_success_html(plugin_id: str) -> str:
     """Small static page shown in the OAuth redirect tab on success.
 
     Posts a message to the opener wizard tab so it can advance to the
-    next step, then auto-closes after 2 seconds.
+    next step, then auto-closes after 2 seconds. The postMessage target
+    origin is set to window.location.origin (same origin) rather than
+    "*" to prevent message interception by cross-origin frames.
     """
+    import html as _html
+    safe_id = _html.escape(plugin_id)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Signed in — Fulcra Collect</title>
@@ -93,12 +114,13 @@ def _oauth_success_html(plugin_id: str) -> str:
 </style>
 </head>
 <body>
-  <h1>Signed in to {plugin_id}</h1>
+  <h1>Signed in to {safe_id}</h1>
   <p>This tab will close automatically…</p>
   <script>
     if (window.opener) {{
       window.opener.postMessage(
-        {{ type: "oauth_complete", plugin_id: {plugin_id!r} }}, "*"
+        {{ type: "oauth_complete", plugin_id: {plugin_id!r} }},
+        window.location.origin
       );
       setTimeout(() => window.close(), 2000);
     }}
@@ -139,7 +161,8 @@ def build_app(daemon) -> FastAPI:
     bearer = HTTPBearer(auto_error=False)
 
     def require_token(creds: HTTPAuthorizationCredentials = Depends(bearer)):
-        if creds is None or creds.credentials != token:
+        # Use secrets.compare_digest to prevent timing-based token oracle attacks.
+        if creds is None or not secrets.compare_digest(creds.credentials, token):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "auth required")
 
     # ------------------------------------------------------------------
@@ -312,6 +335,7 @@ def build_app(daemon) -> FastAPI:
                     "settings_keys": list(s.settings_keys),
                     "external_link": s.external_link,
                     "extension_url": s.extension_url,
+                    "annotation_type": s.annotation_type,
                 }
                 for s in plugin.setup_steps
             ],
@@ -330,12 +354,21 @@ def build_app(daemon) -> FastAPI:
         if plugin.health_check is None:
             return {"available": False}
         # Build a minimal RunContext for the health probe.
+        # Populate credentials from the keychain so health checks that
+        # call ctx.credentials.get("api_key") see real values, not an
+        # empty dict.
+        from . import credentials as _creds
         from . import state as _state_mod
         from .plugin import RunContext
+        ctx_credentials = {}
+        for c in plugin.required_credentials:
+            val = _creds.get_secret(plugin_id, c.key)
+            if val is not None:
+                ctx_credentials[c.key] = val
         ctx = RunContext(
             plugin_id=plugin_id,
             config={},
-            credentials={},
+            credentials=ctx_credentials,
             state=_state_mod.load(plugin_id),
             log=logging.getLogger(f"fulcra_collect.health.{plugin_id}"),
             _emit=lambda evt: None,
@@ -389,23 +422,40 @@ def build_app(daemon) -> FastAPI:
         if plugin is None or plugin.oauth_handler is None:
             raise HTTPException(404, f"plugin {plugin_id!r} has no oauth_handler")
         from .oauth import start_flow
-        # Prefer the persisted web-url file (exact host:port from the bound
-        # server); fall back to localhost default for tests and cases where
-        # the file has not been written yet (e.g. build_app called directly
-        # in tests without going through serve()).
-        url_file = _web_url_path()
-        if url_file.exists():
-            base_url = url_file.read_text(encoding="utf-8").strip()
-        else:
-            base_url = "http://localhost"
+        # Prefer the URL held on the daemon object (set by serve() after the
+        # socket is bound and uvicorn is ready). Fall back to the persisted
+        # web-url file, then to the daemon's _web_url attribute if present,
+        # then error — "http://localhost" (port-less) would cause Trakt to
+        # redirect to port 80, where nothing listens.
+        base_url: str | None = getattr(daemon, "_web_url", None)
+        if not base_url:
+            url_file = _web_url_path()
+            if url_file.exists():
+                base_url = url_file.read_text(encoding="utf-8").strip()
+        if not base_url:
+            raise HTTPException(
+                503,
+                "Server URL not yet available — retry in a moment once the"
+                " daemon has finished starting.",
+            )
         redirect_uri = f"{base_url}/api/oauth/{plugin_id}/callback"
         state, _verifier, challenge = start_flow(plugin_id, redirect_uri)
-        return {
+        response: dict = {
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "redirect_uri": redirect_uri,
         }
+        # If the plugin supplies an oauth_authorize_url callable, use it to
+        # build the full authorize URL so the wizard can open it directly in
+        # a new tab without knowing the plugin's OAuth endpoint or client_id.
+        if plugin.oauth_authorize_url is not None:
+            from . import credentials as _creds
+            client_id = _creds.get_secret(plugin_id, "client_id") or ""
+            response["authorize_url"] = plugin.oauth_authorize_url(
+                client_id, redirect_uri, state, challenge
+            )
+        return response
 
     @app.get("/api/oauth/{plugin_id}/callback")  # no Bearer required — comes from the third party
     def oauth_callback(
@@ -622,22 +672,51 @@ def build_app(daemon) -> FastAPI:
 
 
 def serve(daemon, *, host: str = "127.0.0.1", port: int = 0) -> tuple[str, threading.Thread]:
-    """Start the HTTP server in a background thread. Returns (url, thread)."""
+    """Start the HTTP server in a background thread. Returns (url, thread).
+
+    Port-assignment strategy: when port=0, we open a socket, bind it to an
+    ephemeral port, and hand the *already-bound* file descriptor to uvicorn
+    via uvicorn.Config(fd=...) — no close/reopen race window. uvicorn 0.30+
+    supports the fd parameter.
+    """
+    bound_socket_fd: int | None = None
     if port == 0:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host, 0))
+        s.listen()
         port = s.getsockname()[1]
-        s.close()
+        bound_socket_fd = s.fileno()
+        # Keep s alive until we've handed the fd to uvicorn; the fd stays
+        # valid across the Config/Server construction below.
 
     app = build_app(daemon)
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    config_kwargs: dict = {"app": app, "host": host, "port": port, "log_level": "warning"}
+    if bound_socket_fd is not None:
+        config_kwargs["fd"] = bound_socket_fd
+    config = uvicorn.Config(**config_kwargs)
     server = uvicorn.Server(config)
 
     url = f"http://{host}:{port}"
-    url_file = _web_url_path()
-    url_file.write_text(url, encoding="utf-8")
-    url_file.chmod(0o600)
 
     thread = threading.Thread(target=server.run, daemon=True, name="fulcra-web")
     thread.start()
+
+    # Wait for uvicorn to finish binding before advertising the URL. The
+    # server.started flag is set inside uvicorn after the socket is in the
+    # accept loop. Timeout is generous (5 s); if uvicorn never sets it we
+    # proceed anyway — the menubar's retry loop will catch a brief delay.
+    for _ in range(50):
+        if getattr(server, "started", False):
+            break
+        time.sleep(0.1)
+
+    # Store URL on the daemon object so oauth_start can use it without
+    # reading the file (avoids a race if the file hasn't been written yet).
+    if hasattr(daemon, "_web_url"):
+        daemon._web_url = url
+
+    url_file = _web_url_path()
+    _write_secret_file(url_file, url)
+
     return url, thread

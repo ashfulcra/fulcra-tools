@@ -298,7 +298,7 @@ def _make_back_bar(
     # Hairline separator at the bottom of the bar
     sep = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, 1))
     sep.setWantsLayer_(True)
-    sep.layer().setBackgroundColor_(_NSColor.separatorColor().CGColor())
+    sep.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
     view.addSubview_(sep)
 
     back_btn = NSButton.alloc().initWithFrame_(NSMakeRect(8, 4, 160, 24))

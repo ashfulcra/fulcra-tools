@@ -6,7 +6,9 @@
   <title>Fulcra Collect</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="https://cdn.tailwindcss.com"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <!-- Alpine pinned to an exact version to prevent wildcard auto-update.
+       TODO before production: add an integrity="sha384-..." SRI hash. -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
 </head>
 <body class="bg-white text-slate-900 min-h-screen"
       x-data="app()"
@@ -505,14 +507,18 @@
                   </div>
                 </template>
 
-                <!-- ---- oauth ---- (Phase F stub) ---- -->
+                <!-- ---- oauth ---- -->
                 <template x-if="current_step.kind === 'oauth'">
                   <div class="space-y-3">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
-                    <div class="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-600">
-                      OAuth sign-in flow coming in Phase F.
-                    </div>
+                    <button @click="startOAuth()"
+                            class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                      Click here to authenticate
+                    </button>
+                    <template x-if="oauthStatus">
+                      <p class="text-sm text-slate-600" x-text="oauthStatus"></p>
+                    </template>
                   </div>
                 </template>
 
@@ -656,11 +662,11 @@
                       </button>
                     </template>
 
-                    <!-- Configure placeholder (Phase C11 / Phase D detail page) -->
+                    <!-- Plugin settings page (not yet implemented) -->
                     <a href="#"
                        @click.prevent=""
                        class="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors"
-                       title="Plugin detail page coming in Phase D">
+                       title="Plugin settings page — not yet implemented">
                       Configure
                     </a>
                   </div>

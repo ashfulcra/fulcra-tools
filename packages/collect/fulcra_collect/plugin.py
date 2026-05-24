@@ -95,6 +95,11 @@ class SetupStep:
     settings_keys: tuple[str, ...] = ()
     external_link: str = ""
     extension_url: str = ""
+    annotation_type: str = ""
+    """Hint for the definition_picker step: which annotation_type to filter
+    by (e.g. "duration", "moment"). Emitted in the plugin contract so the
+    wizard can pass ?annotation_type=... to /api/definitions. Empty string
+    means no filter (wizard defaults to "duration")."""
 
 
 @dataclass
@@ -154,6 +159,19 @@ class Plugin:
     Set this on any Plugin that authenticates via browser-based OAuth — the web UI
     wizard will render an "oauth" SetupStep and call /api/oauth/{plugin_id}/start
     to begin the flow.
+    """
+    oauth_authorize_url: Callable[..., str] | None = None
+    """Optional callable that builds the provider's full authorize URL.
+
+    Signature: (client_id: str, redirect_uri: str, state: str,
+                code_challenge: str) -> str
+
+    When present, the oauth_start route calls this after start_flow() and
+    includes the result as "authorize_url" in the response body. The wizard
+    opens that URL in a new tab instead of asking the user to construct it
+    manually. Implement this on any plugin that uses browser OAuth so the
+    wizard can drive the entire flow without knowing the provider's
+    endpoint or client_id.
     """
     category: Literal["music", "video", "books", "journal", "activity", "other"] = "other"
     canonical_definition_name: str | None = None
