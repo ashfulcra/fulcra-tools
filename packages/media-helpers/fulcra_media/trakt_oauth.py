@@ -52,7 +52,7 @@ def trakt_oauth_handler(
     client_secret = _creds.get_secret(plugin_id, "client_secret")
     if not client_id or not client_secret:
         raise RuntimeError(
-            f"trakt: client_id / client_secret not configured — "
+            "trakt: client_id / client_secret not configured — "
             "complete the 'Paste your Trakt OAuth credentials' step first"
         )
 
