@@ -15,7 +15,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -63,6 +63,62 @@ class FulcraTokenBody(BaseModel):
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
+
+def _oauth_success_html(plugin_id: str) -> str:
+    """Small static page shown in the OAuth redirect tab on success.
+
+    Posts a message to the opener wizard tab so it can advance to the
+    next step, then auto-closes after 2 seconds.
+    """
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Signed in — Fulcra Collect</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 480px;
+         margin: 80px auto; text-align: center; color: #1a1a1a; }}
+  h1 {{ color: #16a34a; font-size: 1.5rem; }}
+  p {{ color: #555; }}
+</style>
+</head>
+<body>
+  <h1>Signed in to {plugin_id}</h1>
+  <p>This tab will close automatically…</p>
+  <script>
+    if (window.opener) {{
+      window.opener.postMessage(
+        {{ type: "oauth_complete", plugin_id: {plugin_id!r} }}, "*"
+      );
+      setTimeout(() => window.close(), 2000);
+    }}
+  </script>
+</body>
+</html>
+"""
+
+
+def _oauth_failure_html(reason: str) -> str:
+    """Small static page shown in the OAuth redirect tab on failure."""
+    import html as _html
+    safe_reason = _html.escape(reason)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign-in failed — Fulcra Collect</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 480px;
+         margin: 80px auto; text-align: center; color: #1a1a1a; }}
+  h1 {{ color: #dc2626; font-size: 1.5rem; }}
+  p {{ color: #555; }}
+  code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }}
+</style>
+</head>
+<body>
+  <h1>Sign-in failed</h1>
+  <p><code>{safe_reason}</code></p>
+  <p>Close this tab and try again from Fulcra Collect.</p>
+</body>
+</html>
+"""
+
 
 def build_app(daemon) -> FastAPI:
     """Construct the FastAPI app with the daemon injected."""
@@ -310,6 +366,76 @@ def build_app(daemon) -> FastAPI:
         from . import credentials as _creds
         _creds.delete_user_secret("bearer-token")
         return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # OAuth flow — plugin-agnostic start + callback routes
+    # ------------------------------------------------------------------
+
+    @app.post("/api/oauth/{plugin_id}/start", dependencies=[Depends(require_token)])
+    def oauth_start(plugin_id: str):
+        plugin = daemon.registry.plugins.get(plugin_id)
+        if plugin is None or plugin.oauth_handler is None:
+            raise HTTPException(404, f"plugin {plugin_id!r} has no oauth_handler")
+        from .oauth import start_flow
+        # Prefer the persisted web-url file (exact host:port from the bound
+        # server); fall back to localhost default for tests and cases where
+        # the file has not been written yet (e.g. build_app called directly
+        # in tests without going through serve()).
+        url_file = _web_url_path()
+        if url_file.exists():
+            base_url = url_file.read_text(encoding="utf-8").strip()
+        else:
+            base_url = "http://localhost"
+        redirect_uri = f"{base_url}/api/oauth/{plugin_id}/callback"
+        state, _verifier, challenge = start_flow(plugin_id, redirect_uri)
+        return {
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "redirect_uri": redirect_uri,
+        }
+
+    @app.get("/api/oauth/{plugin_id}/callback")  # no Bearer required — comes from the third party
+    def oauth_callback(
+        plugin_id: str,
+        code: str | None = None,
+        state: str | None = None,
+        error: str | None = None,
+    ):
+        from .oauth import complete_flow
+        from . import credentials as _creds
+        if error:
+            return HTMLResponse(_oauth_failure_html(error), status_code=400)
+        if not code or not state:
+            return HTMLResponse(
+                _oauth_failure_html("missing code or state"), status_code=400
+            )
+        pending = complete_flow(state)
+        if pending is None or pending.plugin_id != plugin_id:
+            return HTMLResponse(
+                _oauth_failure_html("invalid or expired state"), status_code=400
+            )
+        plugin = daemon.registry.plugins.get(plugin_id)
+        if plugin is None or plugin.oauth_handler is None:
+            return HTMLResponse(
+                _oauth_failure_html("plugin not found or no handler"), status_code=400
+            )
+        try:
+            tokens = plugin.oauth_handler(
+                plugin_id=plugin_id,
+                code=code,
+                code_verifier=pending.code_verifier,
+                redirect_uri=pending.redirect_uri,
+            )
+        except Exception as exc:
+            return HTMLResponse(
+                _oauth_failure_html(f"token exchange failed: {exc}"), status_code=500
+            )
+        # Store each returned token under the plugin's credentials namespace.
+        for key, value in tokens.items():
+            if value:
+                _creds.set_secret(plugin_id, key, value)
+        return HTMLResponse(_oauth_success_html(plugin_id), status_code=200)
 
     return app
 
