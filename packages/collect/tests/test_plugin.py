@@ -120,6 +120,29 @@ def test_canonical_definition_name_is_optional_on_plugin():
     assert p.canonical_definition_name is None
 
 
+def test_setting_dataclass_fields():
+    from fulcra_collect.plugin import Setting
+    s = Setting(key="feed_url", label="RSS feed URL", kind="url",
+                help="Where to fetch the feed from.", default=None,
+                required=True, placeholder="https://example.com/feed.xml")
+    assert s.key == "feed_url"
+    assert s.kind == "url"
+    assert s.required is True
+
+
+def test_setting_enum_kind_with_values():
+    from fulcra_collect.plugin import Setting
+    s = Setting(key="category", label="Category", kind="enum",
+                enum_values=("watched", "listened", "read"), default="watched")
+    assert s.enum_values == ("watched", "listened", "read")
+
+
+def test_plugin_required_settings_default_empty():
+    from fulcra_collect.plugin import Plugin
+    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    assert p.required_settings == ()
+
+
 def test_canonical_definition_name_persists_when_set():
     p = Plugin(
         id="lastfm", name="Last.fm", kind="manual",
