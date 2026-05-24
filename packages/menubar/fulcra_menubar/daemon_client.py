@@ -67,3 +67,24 @@ class DaemonClient:
         return self._send({
             "cmd": "delete_credential", "plugin": plugin_id, "key": key,
         })
+
+    def quick_record_list(self) -> dict:
+        """Return Moment annotation definitions for the menubar quick-record
+        surface. The daemon caches the result for 60 seconds."""
+        return self._send({"cmd": "quick_record_list"})
+
+    def record_annotation(self, definition_id: str,
+                          comment: str | None = None) -> dict:
+        """Write one Moment annotation to Fulcra immediately.
+
+        Parameters
+        ----------
+        definition_id:
+            UUID of the Fulcra annotation definition to record.
+        comment:
+            Optional free-text comment attached to the annotation.
+        """
+        req: dict = {"cmd": "record_annotation", "definition_id": definition_id}
+        if comment is not None:
+            req["comment"] = comment
+        return self._send(req)
