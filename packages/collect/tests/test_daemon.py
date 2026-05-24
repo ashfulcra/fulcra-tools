@@ -118,7 +118,8 @@ def test_trigger_skips_a_second_dispatch_while_a_run_is_in_flight(
     started = threading.Event()
     runs: list[str] = []
 
-    def fake_run(plugin_id, command, *, now, on_spawn=None, timeout_s=None):
+    def fake_run(plugin_id, command, *, now, on_spawn=None, timeout_s=None,
+                 daemon=None):
         runs.append(plugin_id)
         started.set()
         release.wait(timeout=5)
@@ -158,7 +159,8 @@ def test_run_command_reports_whether_a_run_was_started(
     release = threading.Event()
     started = threading.Event()
 
-    def fake_run(plugin_id, command, *, now, on_spawn=None, timeout_s=None):
+    def fake_run(plugin_id, command, *, now, on_spawn=None, timeout_s=None,
+                 daemon=None):
         started.set()
         release.wait(timeout=5)
         return "done"

@@ -160,6 +160,12 @@ def _run_scheduled_import(
     result = client.run_import(events, media_state)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
+    if result.posted > 0:
+        ctx.annotation(
+            f"{tag.capitalize()}: {result.posted} new annotation"
+            + ("s" if result.posted != 1 else ""),
+            ok=True,
+        )
 
     # Advance even when posted == 0: every event in `events` was either posted
     # OR skipped-as-already-in-Fulcra — both count as successfully processed.
@@ -400,6 +406,12 @@ def _run_trakt(ctx: RunContext) -> None:
     result = client.run_import(events, media_state)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
+    if result.posted > 0:
+        ctx.annotation(
+            f"Trakt: {result.posted} new annotation"
+            + ("s" if result.posted != 1 else ""),
+            ok=True,
+        )
 
     # Advance even when posted == 0 — see _run_scheduled_import for the full
     # rationale. Skipped-existing means the event is already in Fulcra; both
@@ -532,6 +544,12 @@ def _import_events(ctx: RunContext, events: list, tag: str) -> None:
     result = client.run_import(events, media_state)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
+    if result.posted > 0:
+        ctx.annotation(
+            f"{tag.capitalize()}: {result.posted} new annotation"
+            + ("s" if result.posted != 1 else ""),
+            ok=True,
+        )
 
 
 def _run_file_import(ctx: RunContext, *, parse, tag: str) -> None:
@@ -878,6 +896,12 @@ def _rss_import_and_advance(
     result = client.run_import(events, media_state)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
+    if result.posted > 0:
+        ctx.annotation(
+            f"{tag.capitalize()}: {result.posted} new annotation"
+            + ("s" if result.posted != 1 else ""),
+            ok=True,
+        )
 
     # Advance even when posted == 0 — see _run_scheduled_import for rationale.
     new_wm = newest_event_iso(events)
@@ -1173,6 +1197,12 @@ def _run_apple_podcasts(ctx: RunContext) -> None:
     result = client.run_import(events, media_state)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
+    if result.posted > 0:
+        ctx.annotation(
+            f"Apple-podcasts: {result.posted} new annotation"
+            + ("s" if result.posted != 1 else ""),
+            ok=True,
+        )
 
     # Advance even when posted == 0 — see _run_scheduled_import for rationale.
     new_wm = newest_event_iso(events)
@@ -1266,6 +1296,12 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     result = client.run_import(all_events, media_state)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
+    if result.posted > 0:
+        ctx.annotation(
+            f"Apple-podcasts: {result.posted} new annotation"
+            + ("s" if result.posted != 1 else ""),
+            ok=True,
+        )
     # No watermark advance — this is a manual, one-shot recovery run.
 
 
