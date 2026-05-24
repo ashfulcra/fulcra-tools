@@ -99,3 +99,84 @@ def test_delete_secret_is_idempotent_when_already_absent(monkeypatch):
     credentials.delete_secret("lastfm", "session_key")
     # And calling it twice still doesn't raise:
     credentials.delete_secret("lastfm", "session_key")
+
+
+# ---------------------------------------------------------------------------
+# User-level credential helpers
+# ---------------------------------------------------------------------------
+
+def test_set_user_secret_stores(_in_memory_keyring):
+    from fulcra_collect import credentials
+    credentials.set_user_secret("bearer-token", "abc-secret")
+    assert credentials.get_user_secret("bearer-token") == "abc-secret"
+
+
+def test_has_user_secret_true_when_set(_in_memory_keyring):
+    from fulcra_collect import credentials
+    credentials.set_user_secret("bearer-token", "abc")
+    assert credentials.has_user_secret("bearer-token") is True
+
+
+def test_has_user_secret_false_when_missing(_in_memory_keyring):
+    from fulcra_collect import credentials
+    assert credentials.has_user_secret("bearer-token") is False
+
+
+def test_has_user_secret_false_for_empty_string(_in_memory_keyring):
+    from fulcra_collect import credentials
+    credentials.set_user_secret("bearer-token", "")
+    assert credentials.has_user_secret("bearer-token") is False
+
+
+def test_delete_user_secret_is_idempotent(_in_memory_keyring):
+    from fulcra_collect import credentials
+    credentials.delete_user_secret("bearer-token")  # absent — should not raise
+    credentials.set_user_secret("bearer-token", "x")
+    credentials.delete_user_secret("bearer-token")
+    credentials.delete_user_secret("bearer-token")  # idempotent — should not raise
+    assert credentials.has_user_secret("bearer-token") is False
+
+
+def test_user_secret_is_separate_from_plugin_secret(_in_memory_keyring):
+    """User-level and plugin-level use different keyring service names
+    so they don't collide."""
+    from fulcra_collect import credentials
+    credentials.set_secret("lastfm", "bearer-token", "plugin-value")
+    credentials.set_user_secret("bearer-token", "user-value")
+    assert credentials.get_secret("lastfm", "bearer-token") == "plugin-value"
+    assert credentials.get_user_secret("bearer-token") == "user-value"
+
+
+# ---------------------------------------------------------------------------
+# Bearer-token migration
+# ---------------------------------------------------------------------------
+
+def test_migration_no_op_when_user_token_already_set(_in_memory_keyring):
+    from fulcra_collect import credentials
+    credentials.set_user_secret("bearer-token", "already-here")
+    result = credentials.migrate_bearer_token_to_user_level()
+    assert result["status"].startswith("skipped")
+
+
+def test_migration_no_op_when_no_per_plugin_token_exists(_in_memory_keyring):
+    from fulcra_collect import credentials
+    result = credentials.migrate_bearer_token_to_user_level()
+    assert result["status"].startswith("skipped")
+
+
+def test_migration_copies_first_plugin_token_to_user_level(_in_memory_keyring, monkeypatch):
+    """When a legacy plugin entry exists, migration moves it to user level."""
+    from fulcra_collect import credentials
+    # Temporarily add a legacy plugin so migration has something to do.
+    monkeypatch.setattr(credentials, "_BEARER_TOKEN_LEGACY_PLUGINS",
+                        ("legacy-plugin-a", "legacy-plugin-b"))
+    credentials.set_secret("legacy-plugin-a", "bearer-token", "the-token")
+    credentials.set_secret("legacy-plugin-b", "bearer-token", "the-token")
+    result = credentials.migrate_bearer_token_to_user_level()
+    assert result["status"] == "migrated"
+    assert result["source"] == "legacy-plugin-a"
+    assert "legacy-plugin-a" in result["cleaned"]
+    assert "legacy-plugin-b" in result["cleaned"]
+    assert credentials.get_user_secret("bearer-token") == "the-token"
+    assert credentials.get_secret("legacy-plugin-a", "bearer-token") is None
+    assert credentials.get_secret("legacy-plugin-b", "bearer-token") is None
