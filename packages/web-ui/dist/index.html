@@ -416,14 +416,91 @@
                   </div>
                 </template>
 
-                <!-- ---- definition_picker ---- (Phase E stub) ---- -->
+                <!-- ---- definition_picker ---- Phase E ---- -->
                 <template x-if="current_step.kind === 'definition_picker'">
-                  <div class="space-y-3">
+                  <div class="space-y-4">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
-                    <div class="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-600">
-                      Definition picker coming in Phase E. For now this plugin will
-                      auto-resolve its Fulcra annotation on first run.
+
+                    <!-- Loading state -->
+                    <template x-if="dpLoading">
+                      <div class="text-slate-400 text-sm animate-pulse">Loading your Fulcra annotations…</div>
+                    </template>
+
+                    <!-- Error state -->
+                    <template x-if="dpError && !dpLoading">
+                      <div class="text-red-600 text-sm bg-red-50 border border-red-200 rounded p-3"
+                           x-text="dpError"></div>
+                    </template>
+
+                    <!-- Definition list -->
+                    <template x-if="!dpLoading && dpDefinitions.length > 0">
+                      <div class="space-y-2">
+                        <p class="text-xs text-slate-500 font-medium">Choose an existing annotation or create a new one:</p>
+                        <template x-for="def in dpDefinitions" :key="def.id">
+                          <div class="border rounded-lg p-3 cursor-pointer transition-colors"
+                               :class="dpSelectedId === def.id
+                                 ? 'border-violet-400 bg-violet-50'
+                                 : 'border-slate-200 hover:border-slate-300'"
+                               @click="dpSelectDef(def)">
+                            <div class="flex items-start justify-between gap-2">
+                              <div class="flex-1 min-w-0">
+                                <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
+                                <div class="text-xs text-slate-500 mt-0.5"
+                                     x-text="`${def.annotation_type} · created ${dpHumanDate(def.created_at)}`"></div>
+                              </div>
+                              <!-- Selected indicator -->
+                              <template x-if="dpSelectedId === def.id">
+                                <svg class="w-5 h-5 text-violet-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                                </svg>
+                              </template>
+                            </div>
+
+                            <!-- Preview entries (loaded when selected) -->
+                            <template x-if="dpSelectedId === def.id">
+                              <div class="mt-2 border-t border-violet-100 pt-2">
+                                <template x-if="def._previewLoading">
+                                  <div class="text-xs text-slate-400 animate-pulse">Loading recent entries…</div>
+                                </template>
+                                <template x-if="def._previewError">
+                                  <div class="text-xs text-red-500" x-text="def._previewError"></div>
+                                </template>
+                                <template x-if="!def._previewLoading && def._preview.length === 0 && def._previewLoaded">
+                                  <div class="text-xs text-slate-400">No recent entries found.</div>
+                                </template>
+                                <template x-if="def._preview.length > 0">
+                                  <div class="space-y-0.5">
+                                    <div class="text-xs text-slate-500 font-medium mb-1">Recent entries:</div>
+                                    <template x-for="entry in def._preview" :key="dpEntryLabel(entry)">
+                                      <div class="text-xs text-slate-600 truncate"
+                                           x-text="dpEntryLabel(entry)"></div>
+                                    </template>
+                                  </div>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- No definitions found -->
+                    <template x-if="!dpLoading && dpDefinitions.length === 0 && !dpError">
+                      <div class="text-sm text-slate-500 bg-slate-50 border border-slate-200 rounded p-3">
+                        No matching Fulcra annotations found. A new one will be created on first run.
+                      </div>
+                    </template>
+
+                    <!-- Create new instead footer -->
+                    <div class="pt-1">
+                      <button @click="dpChooseForceNew()"
+                              class="text-sm font-medium transition-colors"
+                              :class="dpForceNew
+                                ? 'text-emerald-600'
+                                : 'text-slate-400 hover:text-slate-600'">
+                        <span x-text="dpForceNew ? '✓ Will create a new annotation on first run' : 'Create a new annotation instead'"></span>
+                      </button>
                     </div>
                   </div>
                 </template>
@@ -601,12 +678,39 @@
           </div>
         </template>
 
-        <!-- Activity feed placeholder (Phase D) -->
+        <!-- Activity feed — Phase D: polls /api/activity every 5s while dashboard is active -->
         <div class="border-t border-slate-100 pt-6">
-          <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Activity feed</h3>
-          <div class="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center text-sm text-slate-400">
-            Activity feed coming in Phase D. Recent annotations will appear here.
-          </div>
+          <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Recently</h3>
+
+          <template x-if="activityLoading && activityEntries.length === 0">
+            <div class="text-slate-400 text-sm animate-pulse">Loading activity…</div>
+          </template>
+
+          <template x-if="activityError">
+            <div class="text-red-500 text-xs" x-text="activityError"></div>
+          </template>
+
+          <template x-if="!activityLoading && activityEntries.length === 0">
+            <div class="text-slate-400 text-sm py-4 text-center">
+              No activity yet — annotations will appear here as plugins write to Fulcra.
+            </div>
+          </template>
+
+          <template x-if="activityEntries.length > 0">
+            <div class="divide-y divide-slate-100">
+              <template x-for="entry in activityEntries" :key="entry.timestamp + entry.plugin_id + entry.summary">
+                <div class="flex items-center gap-3 py-2">
+                  <span class="text-xs text-slate-400 w-20 shrink-0"
+                        x-text="timeAgo(entry.timestamp)"></span>
+                  <span class="text-xs font-medium uppercase tracking-wide text-slate-500 w-28 shrink-0 truncate"
+                        x-text="entry.plugin_id"></span>
+                  <span class="text-sm truncate"
+                        :class="entry.ok ? 'text-slate-900' : 'text-red-600'"
+                        x-text="entry.summary"></span>
+                </div>
+              </template>
+            </div>
+          </template>
         </div>
 
       </section>
