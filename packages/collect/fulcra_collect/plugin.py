@@ -97,6 +97,23 @@ class SetupStep:
     extension_url: str = ""
 
 
+@dataclass
+class HealthResult:
+    """Result of a plugin's health_check call.
+
+    ok:      True when the plugin is operational (credentials valid, service
+             reachable, etc.).
+    summary: Short human-readable description of the health state shown in the
+             dashboard pill (e.g. "5 recent scrobbles", "Not signed in.").
+    preview: Optional list of recent items from the source, surfaced in the
+             onboarding wizard's test_connection step so the user can see that
+             data is actually flowing.
+    """
+    ok: bool
+    summary: str
+    preview: list[dict] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class Plugin:
     """A hub plugin: metadata plus a `run(ctx)` callable.
@@ -126,6 +143,7 @@ class Plugin:
     required_credentials: tuple[Credential, ...] = ()
     required_settings: tuple[Setting, ...] = ()
     setup_steps: tuple[SetupStep, ...] = ()
+    health_check: Callable[["RunContext"], "HealthResult"] | None = None
     canonical_definition_name: str | None = None
 
     def __post_init__(self) -> None:

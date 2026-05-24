@@ -162,6 +162,26 @@ def test_plugin_setup_steps_default_empty():
     assert p.setup_steps == ()
 
 
+def test_health_result_basic():
+    from fulcra_collect.plugin import HealthResult
+    r = HealthResult(ok=True, summary="5 recent scrobbles",
+                     preview=[{"title": "Song A"}, {"title": "Song B"}])
+    assert r.ok is True
+    assert len(r.preview) == 2
+
+
+def test_health_result_default_empty_preview():
+    from fulcra_collect.plugin import HealthResult
+    r = HealthResult(ok=False, summary="Not signed in.")
+    assert r.preview == []
+
+
+def test_plugin_health_check_optional():
+    from fulcra_collect.plugin import Plugin
+    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    assert p.health_check is None
+
+
 def test_canonical_definition_name_persists_when_set():
     p = Plugin(
         id="lastfm", name="Last.fm", kind="manual",
