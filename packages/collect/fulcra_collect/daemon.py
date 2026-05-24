@@ -77,6 +77,18 @@ class Daemon:
         # Versions are cheap to compute but only at startup; the
         # menubar's About pane calls `version` every time the tab opens.
         self._version_snapshot = self._build_version_snapshot()
+        # One-shot migration: copy the first per-plugin bearer-token to
+        # the new user-level shared location. Idempotent after first run.
+        try:
+            from . import credentials as _creds
+            _result = _creds.migrate_bearer_token_to_user_level()
+            if _result.get("status") == "migrated":
+                logging.getLogger("fulcra_collect").info(
+                    "migrated bearer-token from plugin %s to user level; cleaned: %s",
+                    _result["source"], _result["cleaned"],
+                )
+        except Exception:
+            logging.getLogger("fulcra_collect").exception("bearer-token migration failed")
 
     # ---- control-socket request handling -------------------------------
 

@@ -38,3 +38,77 @@ def has_secret(plugin_id: str, key: str) -> bool:
     (plugin_id, key). Intended for the menubar's `credential_status`
     handler, which reports credential presence without revealing values."""
     return bool(get_secret(plugin_id, key))
+
+
+# ---------------------------------------------------------------------------
+# User-level (account-scoped) secrets
+# ---------------------------------------------------------------------------
+
+_USER_SERVICE = "fulcra-collect:user"
+
+
+def set_user_secret(key: str, value: str) -> None:
+    """Store a user-level (not plugin-specific) secret in the OS keychain.
+    Used for the shared Fulcra bearer token and any other user-account-
+    level credential."""
+    keyring.set_password(_USER_SERVICE, key, value)
+
+
+def get_user_secret(key: str) -> str | None:
+    return keyring.get_password(_USER_SERVICE, key)
+
+
+def has_user_secret(key: str) -> bool:
+    """True iff a non-empty user-level secret is present for `key`."""
+    return bool(get_user_secret(key))
+
+
+def delete_user_secret(key: str) -> None:
+    """Idempotent: silently no-ops if the entry is already absent."""
+    try:
+        keyring.delete_password(_USER_SERVICE, key)
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Bearer-token migration
+# ---------------------------------------------------------------------------
+
+# Plugins that historically declared a bearer-token Credential.
+# When the bearer-token cleanup migration runs, we look for entries
+# in each of these plugin's keychain locations and migrate the
+# first non-empty one we find to the user-level shared location.
+# Order is intentional: attention-relay is the most likely to be
+# populated since it's been around longest.
+#
+# NOTE: investigation (B7 Step 1) showed that attention-relay's
+# bearer-token is actually its *relay* auth secret (what the Chrome
+# extension sends), not the Fulcra API token — so this list is kept
+# for forward-compatibility but will be empty in practice until a
+# future plugin explicitly stores the Fulcra API token per-plugin.
+# The migration is still safe to run: it only copies if user-level is
+# empty AND a per-plugin entry exists.
+_BEARER_TOKEN_LEGACY_PLUGINS: tuple[str, ...] = ()
+
+
+def migrate_bearer_token_to_user_level() -> dict[str, str | None]:
+    """One-shot at daemon startup. If user-level bearer-token is empty
+    AND any per-plugin bearer-token is set, copy the first one to
+    user level and delete all per-plugin copies. Returns a dict of
+    what happened for logging/tests."""
+    if has_user_secret("bearer-token"):
+        return {"status": "skipped — user-level token already set"}
+
+    for pid in _BEARER_TOKEN_LEGACY_PLUGINS:
+        token = get_secret(pid, "bearer-token")
+        if token:
+            set_user_secret("bearer-token", token)
+            cleaned = []
+            for cleanup_pid in _BEARER_TOKEN_LEGACY_PLUGINS:
+                if get_secret(cleanup_pid, "bearer-token"):
+                    delete_secret(cleanup_pid, "bearer-token")
+                    cleaned.append(cleanup_pid)
+            return {"status": "migrated", "source": pid, "cleaned": cleaned}
+
+    return {"status": "skipped — no per-plugin token found"}
