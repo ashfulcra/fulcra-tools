@@ -17,6 +17,7 @@ from AppKit import (  # type: ignore[import-not-found]
 from fulcra_collect import config as _config
 
 from .._dispatch import on_main_thread
+from .._humanize import humanize_minutes
 from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
@@ -164,25 +165,43 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
     row.addSubview_(enabled_switch)
 
     # Interval input — scheduled only. Placed below the description block.
+    # Layout:  "Every" [field] "minutes"
+    #          ≈ 6 hours            (live caption, updates as user types)
     if snap.kind == "scheduled":
         cfg = _config.load()
         override = cfg.interval_overrides.get(snap.id)
         seconds = override if override is not None else (snap.default_interval_s or 3600)
-        interval_label = NSTextField.labelWithString_("Interval (minutes):")
-        interval_label.setFont_(typography.small())
-        interval_label.setFrame_(NSMakeRect(16, height - 88, 140, 16))
-        row.addSubview_(interval_label)
+        initial_minutes = max(seconds // 60, 1)
+
+        every_label = NSTextField.labelWithString_("Every")
+        every_label.setFont_(typography.small())
+        every_label.setFrame_(NSMakeRect(16, height - 88, 44, 16))
+        row.addSubview_(every_label)
 
         interval_field = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(160, height - 92, 60, 22)
+            NSMakeRect(64, height - 92, 60, 22)
         )
-        interval_field.setStringValue_(str(max(seconds // 60, 1)))
+        interval_field.setStringValue_(str(initial_minutes))
 
-        def on_interval_change(sender):
+        minutes_label = NSTextField.labelWithString_("minutes")
+        minutes_label.setFont_(typography.small())
+        minutes_label.setFrame_(NSMakeRect(130, height - 88, 60, 16))
+        row.addSubview_(minutes_label)
+
+        humanize_caption = NSTextField.labelWithString_(
+            f"≈ {humanize_minutes(initial_minutes)}"
+        )
+        humanize_caption.setFont_(typography.small())
+        humanize_caption.setTextColor_(colors.text_secondary())
+        humanize_caption.setFrame_(NSMakeRect(16, height - 110, 200, 16))
+        row.addSubview_(humanize_caption)
+
+        def on_interval_change(sender, _caption=humanize_caption):
             try:
                 minutes = max(int(sender.stringValue()), 1)
             except ValueError:
                 return
+            _caption.setStringValue_(f"≈ {humanize_minutes(minutes)}")
             cfg2 = _config.load()
             cfg2.set_interval(snap.id, minutes * 60)
             _config.save(cfg2)
