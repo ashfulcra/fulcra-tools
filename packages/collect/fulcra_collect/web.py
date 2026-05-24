@@ -11,8 +11,10 @@ import logging
 import secrets
 import socket
 import threading
+from dataclasses import asdict
 from pathlib import Path
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.responses import FileResponse, HTMLResponse
@@ -58,6 +60,11 @@ class SecretBody(BaseModel):
 
 class FulcraTokenBody(BaseModel):
     token: str
+
+
+class DefinitionBindBody(BaseModel):
+    definition_id: str | None = None
+    force_new: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +443,154 @@ def build_app(daemon) -> FastAPI:
             if value:
                 _creds.set_secret(plugin_id, key, value)
         return HTMLResponse(_oauth_success_html(plugin_id), status_code=200)
+
+    # ------------------------------------------------------------------
+    # Activity feed — recent annotation writes / attempts
+    # ------------------------------------------------------------------
+
+    @app.get("/api/activity", dependencies=[Depends(require_token)])
+    def get_activity(limit: int = 50):
+        if limit < 1 or limit > 200:
+            raise HTTPException(400, "limit must be 1-200")
+        entries = daemon.activity.recent(limit=limit)
+        return {"entries": [asdict(e) for e in entries]}
+
+    # ------------------------------------------------------------------
+    # Definitions — list, preview recent entries, bind / clear
+    # ------------------------------------------------------------------
+
+    def _fulcra_token_or_401():
+        """Return the shared user-level Fulcra bearer token, or raise 401."""
+        from . import credentials as _creds
+        token_val = _creds.get_user_secret("bearer-token")
+        if not token_val:
+            raise HTTPException(401, "Fulcra not authenticated — set a bearer token first")
+        return token_val
+
+    def _fulcra_http_client(fulcra_token: str):
+        """Return an httpx.Client pre-configured to talk to the Fulcra API."""
+        from fulcra_common import DEFAULT_BASE_URL
+        return httpx.Client(
+            base_url=DEFAULT_BASE_URL,
+            timeout=15.0,
+            headers={
+                "Authorization": f"Bearer {fulcra_token}",
+                "User-Agent": "fulcra-collect/web-ui",
+            },
+            follow_redirects=True,
+        )
+
+    @app.get("/api/definitions", dependencies=[Depends(require_token)])
+    def list_definitions(annotation_type: str | None = None):
+        """List Fulcra annotation definitions, optionally filtered by
+        annotation_type (e.g. 'duration', 'moment').
+
+        Calls the Fulcra API directly with the user-level bearer token.
+        Returns only non-deleted definitions.
+        """
+        fulcra_token = _fulcra_token_or_401()
+        try:
+            with _fulcra_http_client(fulcra_token) as client:
+                r = client.get("/user/v1alpha1/annotation")
+                r.raise_for_status()
+                defs = r.json()
+        except Exception as exc:
+            raise HTTPException(502, f"Fulcra API error: {exc}") from exc
+        # Filter out soft-deleted definitions
+        defs = [d for d in defs if not d.get("deleted_at")]
+        if annotation_type:
+            defs = [d for d in defs if d.get("annotation_type") == annotation_type]
+        return {"definitions": defs}
+
+    @app.get("/api/definitions/{def_id}/recent", dependencies=[Depends(require_token)])
+    def definition_recent(def_id: str, limit: int = 5):
+        """Return the last N annotations from a Fulcra definition for
+        preview in the definition-picker UI.
+
+        Uses the DurationAnnotation data type by default; the response
+        contains raw event records from the Fulcra API. limit must be 1-20.
+        """
+        if limit < 1 or limit > 20:
+            raise HTTPException(400, "limit must be 1-20")
+        fulcra_token = _fulcra_token_or_401()
+        try:
+            from datetime import datetime, timezone, timedelta
+            now = datetime.now(timezone.utc)
+            # Look back 1 year as a practical window for "recent" entries.
+            start = now - timedelta(days=365)
+            with _fulcra_http_client(fulcra_token) as client:
+                # Try DurationAnnotation first, fall back to MomentAnnotation
+                # if the definition has no duration events.
+                entries: list[dict] = []
+                for data_type in ("DurationAnnotation", "MomentAnnotation"):
+                    r = client.get(
+                        f"/data/v1alpha1/event/{data_type}",
+                        params={
+                            "start_time": start.isoformat().replace("+00:00", "Z"),
+                            "end_time": now.isoformat().replace("+00:00", "Z"),
+                        },
+                    )
+                    r.raise_for_status()
+                    body = r.json()
+                    records = body if isinstance(body, list) else body.get("data", []) or []
+                    # Filter to only events belonging to this definition
+                    def_source = f"com.fulcradynamics.annotation.{def_id}"
+                    matched = [
+                        rec for rec in records
+                        if def_source in (rec.get("metadata", {}).get("source") or [])
+                        or rec.get("source_id") == def_source
+                    ]
+                    entries.extend(matched)
+                    if entries:
+                        break
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, f"Fulcra API error: {exc}") from exc
+        # Sort by recorded_at descending and return the most recent `limit`
+        def _sort_key(rec: dict) -> str:
+            rat = (rec.get("metadata") or {}).get("recorded_at") or ""
+            if isinstance(rat, dict):
+                return rat.get("end_time") or rat.get("start_time") or ""
+            return str(rat)
+        entries.sort(key=_sort_key, reverse=True)
+        return {"entries": entries[:limit]}
+
+    @app.post("/api/plugin/{plugin_id}/definition", dependencies=[Depends(require_token)])
+    def bind_definition(plugin_id: str, body: DefinitionBindBody):
+        """Bind a plugin to a chosen Fulcra definition id, or clear the cached
+        id so the next run force-resolves a new one.
+
+        Body: {"definition_id": "<uuid>"} to pick an existing definition, or
+        {"force_new": true} to clear the cache and let the next run create a
+        fresh definition (the plugin's canonical_name gets a machine-id suffix).
+        """
+        if plugin_id not in daemon.registry.plugins:
+            raise HTTPException(404, f"unknown plugin {plugin_id!r}")
+        if not body.definition_id and not body.force_new:
+            raise HTTPException(400, "body must include definition_id or force_new=true")
+        from . import state as _state_mod
+        st = _state_mod.load(plugin_id)
+        if body.force_new:
+            # Clear the cached definition_id; the plugin's next run will
+            # call resolve_definition_id with force_new=True via RunContext.
+            st.definition_id = None
+        else:
+            st.definition_id = body.definition_id
+        _state_mod.save(st)
+        return {"ok": True}
+
+    @app.delete("/api/plugin/{plugin_id}/definition", dependencies=[Depends(require_token)])
+    def clear_definition(plugin_id: str):
+        """Clear the plugin's cached definition_id. The next run will
+        re-resolve (adopt an existing matching definition, or create one)."""
+        if plugin_id not in daemon.registry.plugins:
+            raise HTTPException(404, f"unknown plugin {plugin_id!r}")
+        from . import state as _state_mod
+        st = _state_mod.load(plugin_id)
+        st.definition_id = None
+        _state_mod.save(st)
+        return {"ok": True}
 
     return app
 
