@@ -94,6 +94,15 @@ def make_about_tab(*, client: DaemonClient):
     _attach(launch_switch, on_launch_change)
     view.addSubview_(launch_switch)
 
+    # Caption 18pt below the toggle — explains the control for first-time users.
+    launch_caption = NSTextField.labelWithString_(
+        "Open Fulcra Collect automatically when you log in to your Mac."
+    )
+    launch_caption.setFont_(typography.small())
+    launch_caption.setTextColor_(colors.text_secondary())
+    launch_caption.setFrame_(NSMakeRect(16, 2, 380, 16))
+    view.addSubview_(launch_caption)
+
     return view
 
 
