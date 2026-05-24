@@ -184,9 +184,14 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
             conn = NSButton.alloc().initWithFrame_(NSMakeRect(430, yoff - 4, 80, 24))
             conn.setTitle_("Connect")
             conn.setBezelStyle_(NSBezelStyleRounded)
-            _Target.attach(conn, lambda _s, key=key, field=field: (
-                client.set_credential(snap.id, key, field.stringValue()),
-            ))
+
+            def _on_connect(_s, key=key, field=field):
+                value = field.stringValue().strip()
+                if not value:
+                    return
+                client.set_credential(snap.id, key, value)
+
+            _Target.attach(conn, _on_connect)
             row.addSubview_(conn)
 
         yoff += 24
