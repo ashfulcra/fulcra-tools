@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import httpx
 
+from fulcra_collect.plugin import HealthResult
+
 TRAKT_API_BASE = "https://api.trakt.tv"
 
 
-def trakt_health_check(ctx) -> "HealthResult":
+def trakt_health_check(ctx) -> HealthResult:
     """Probe the Trakt API with the stored access token.
 
     Performs two API calls:
@@ -25,7 +27,6 @@ def trakt_health_check(ctx) -> "HealthResult":
     Returns HealthResult(ok=False) when credentials are missing, when
     the token has expired (HTTP 401), or when the Trakt API is unreachable.
     """
-    from fulcra_collect.plugin import HealthResult
     from fulcra_collect import credentials as _creds
 
     token = _creds.get_secret(ctx.plugin_id, "access_token")
