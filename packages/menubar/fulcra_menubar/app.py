@@ -10,7 +10,7 @@ UX model
 - The popover header contains a small gear (⚙) icon; clicking it opens
   the Preferences window.
 - The popover footer contains a "Quit" button.
-- No rumps menu is attached to the status item (self.menu = None).
+- No rumps menu is attached to the status item (cleared via NSStatusItem.setMenu_(None)).
 """
 from __future__ import annotations
 
@@ -36,8 +36,9 @@ class FulcraMenubarApp(rumps.App):
         self.status_item = StatusItemController(self, self.model)
         self._prefs_controller = None
 
-        # No rumps menu — left-click goes straight to the popover.
-        self.menu = None
+        # rumps would otherwise show its default menu on left-click;
+        # clear it so our setTarget_/setAction_ takes effect.
+        self._nsapp.nsstatusitem.setMenu_(None)
 
         self.popover = PopoverRoot(
             self.model, self.client,
