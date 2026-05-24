@@ -64,6 +64,40 @@ class Setting:
 
 
 @dataclass(frozen=True)
+class SetupStep:
+    """One step in a plugin's onboarding wizard.
+
+    The web UI iterates over Plugin.setup_steps and renders each step using
+    a generic renderer keyed on `kind` — no plugin-specific UI code required.
+
+    kind meanings:
+      intro              — introductory text page; no user input
+      external_action    — user must do something outside the app (e.g. visit a
+                           URL); show external_link as a button
+      input              — collect values for the keys in settings_keys
+      oauth              — OAuth flow; the UI drives the redirect/callback cycle
+      file_upload        — ask the user to choose a file (path Setting)
+      permission_request — prompt the user to grant an OS permission
+      browser_extension  — prompt the user to install a browser extension;
+                           show extension_url as an install link
+      test_connection    — invoke Plugin.health_check and show the result
+      definition_picker  — let the user choose (or confirm) a Fulcra annotation
+                           definition for this plugin
+      done               — final confirmation / success screen
+    """
+    kind: Literal[
+        "intro", "external_action", "input", "oauth", "file_upload",
+        "permission_request", "browser_extension", "test_connection",
+        "definition_picker", "done",
+    ]
+    title: str
+    body_md: str = ""
+    settings_keys: tuple[str, ...] = ()
+    external_link: str = ""
+    extension_url: str = ""
+
+
+@dataclass(frozen=True)
 class Plugin:
     """A hub plugin: metadata plus a `run(ctx)` callable.
 
@@ -91,6 +125,7 @@ class Plugin:
     required_permissions: tuple[Permission, ...] = ()
     required_credentials: tuple[Credential, ...] = ()
     required_settings: tuple[Setting, ...] = ()
+    setup_steps: tuple[SetupStep, ...] = ()
     canonical_definition_name: str | None = None
 
     def __post_init__(self) -> None:

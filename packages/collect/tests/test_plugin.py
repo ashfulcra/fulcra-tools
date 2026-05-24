@@ -143,6 +143,25 @@ def test_plugin_required_settings_default_empty():
     assert p.required_settings == ()
 
 
+def test_setup_step_dataclass():
+    from fulcra_collect.plugin import SetupStep
+    s = SetupStep(kind="intro", title="What this does", body_md="…")
+    assert s.kind == "intro"
+
+
+def test_setup_step_input_kind_with_settings_keys():
+    from fulcra_collect.plugin import SetupStep
+    s = SetupStep(kind="input", title="Paste your API key",
+                  settings_keys=("api_key",))
+    assert s.settings_keys == ("api_key",)
+
+
+def test_plugin_setup_steps_default_empty():
+    from fulcra_collect.plugin import Plugin
+    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    assert p.setup_steps == ()
+
+
 def test_canonical_definition_name_persists_when_set():
     p = Plugin(
         id="lastfm", name="Last.fm", kind="manual",
