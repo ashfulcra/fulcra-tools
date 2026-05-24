@@ -46,6 +46,34 @@ def test_definition_schema_mismatch_message_includes_both_shapes():
     assert "moment" in msg
 
 
+def test_definition_schema_mismatch_message_omits_unrelated_fields():
+    """The exception message must only surface annotation_type and
+    measurement_spec — the two axes _spec_matches compares. Fields that
+    come back from the Fulcra API but are irrelevant to schema comparison
+    (e.g. name, created_at, id) should NOT appear in the user-visible
+    string."""
+    existing = {
+        "annotation_type": "duration",
+        "measurement_spec": {"unit": "seconds"},
+        "name": "xyz",
+        "created_at": "2026-01-01T00:00:00Z",
+        "id": "def-abc-123",
+    }
+    expected = {"annotation_type": "moment"}
+    err = DefinitionSchemaMismatch("attention", existing, expected)
+    msg = str(err)
+    # Relevant fields present.
+    assert "duration" in msg
+    assert "moment" in msg
+    # Unrelated API fields absent from the message.
+    assert "xyz" not in msg
+    assert "2026-01-01" not in msg
+    assert "def-abc-123" not in msg
+    # Full existing dict still accessible programmatically.
+    assert err.existing["name"] == "xyz"
+    assert err.existing["id"] == "def-abc-123"
+
+
 class _FakeClient:
     """A fake fulcra_client for resolver tests. Records every call."""
 

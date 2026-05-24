@@ -22,9 +22,13 @@ class DefinitionSchemaMismatch(RuntimeError):
         self.name = name
         self.existing = existing
         self.expected = expected
+        existing_shape = {
+            "annotation_type": existing.get("annotation_type"),
+            "measurement_spec": existing.get("measurement_spec"),
+        }
         super().__init__(
             f"Fulcra definition {name!r} exists but its schema does not "
-            f"match what the plugin expects; existing={existing}, "
+            f"match what the plugin expects; existing={existing_shape}, "
             f"expected={expected}"
         )
 
