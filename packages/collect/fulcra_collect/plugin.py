@@ -144,6 +144,7 @@ class Plugin:
     required_settings: tuple[Setting, ...] = ()
     setup_steps: tuple[SetupStep, ...] = ()
     health_check: Callable[["RunContext"], "HealthResult"] | None = None
+    category: Literal["music", "video", "books", "journal", "activity", "other"] = "other"
     canonical_definition_name: str | None = None
 
     def __post_init__(self) -> None:

@@ -74,6 +74,7 @@ PLUGIN = Plugin(
         "Captures activity signals from this Mac (which apps you're using, when "
         "you're idle) and writes them to Fulcra. Needs a Fulcra bearer token."
     ),
+    category="activity",
     canonical_definition_name="Attention",
     required_permissions=(
         Permission(id="network-loopback-server",
