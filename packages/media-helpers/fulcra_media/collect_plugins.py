@@ -10,12 +10,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext
+from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext, SetupStep
 from fulcra_csv import ClusterPolicy, ColumnMap, apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
 
 from . import library
 from . import twin_cache
 from . import webhook_receiver
+from .trakt_oauth import trakt_oauth_handler
+from .trakt_health import trakt_health_check
 from .fulcra import FulcraClient
 from .importers import apple_podcasts as ap
 from .importers import apple_takeout as apple_takeout_importer
@@ -274,10 +276,15 @@ TRAKT_WATCHED_SPEC: dict = {
 def _run_trakt(ctx: RunContext) -> None:
     """Fetch Trakt watch history and import it, applying cluster and twin-dedup policy.
 
-    Authentication: Trakt credentials are read from
-    ~/.config/fulcra-media/trakt.json — the user must have completed the
-    Trakt device-flow wizard first (``fulcra-media wizard trakt``).  If the
-    credentials file is missing, raises RuntimeError with a clear instruction.
+    Authentication: credentials are resolved in the following order:
+      1. Keychain (set via the web-UI onboarding wizard OAuth flow — the new path).
+         Reads ctx.credentials["access_token"] and ctx.credentials["client_id"].
+      2. File-based TraktAuth (~/.config/fulcra-media/trakt.json) — the legacy
+         path used by the old CLI wizard. Preserved for users who set up via
+         `fulcra-media wizard trakt` before the web UI existed.
+
+    If neither source provides credentials, raises RuntimeError with a clear
+    instruction pointing to the web-UI wizard.
 
     Interactive cluster/twin-dedup policies are NOT supported in headless mode.
     Configure them via ctx.config:
@@ -303,14 +310,29 @@ def _run_trakt(ctx: RunContext) -> None:
             "set twin_policy to auto-discard or keep in config"
         )
 
-    # Fetch — TraktAuth reads ~/.config/fulcra-media/trakt.json internally.
-    # Surface a clear error if the file is absent or malformed.
-    try:
-        items = list(trakt_importer.fetch_history())
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            "trakt: not authenticated — run `fulcra-media wizard trakt` first"
-        ) from exc
+    # Fetch — prefer keychain credentials (set via web-UI OAuth wizard);
+    # fall back to the legacy file-based TraktAuth for users who authenticated
+    # via the old `fulcra-media wizard trakt` CLI path.
+    access_token = ctx.credentials.get("access_token")
+    client_id = ctx.credentials.get("client_id")
+    if access_token and client_id:
+        # New path: credentials came from the web-UI OAuth flow (keychain).
+        api_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "trakt-api-version": "2",
+            "trakt-api-key": client_id,
+            "Content-Type": "application/json",
+        }
+        items = list(trakt_importer.fetch_history_with_headers(api_headers))
+    else:
+        # Legacy path: try the file-based creds from the old CLI wizard.
+        try:
+            items = list(trakt_importer.fetch_history())
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "trakt: not authenticated — sign in via Fulcra Collect's "
+                "web UI wizard or run `fulcra-media wizard trakt` first"
+            ) from exc
 
     events = list(trakt_importer.normalize_history(items, cluster_threshold=cluster_threshold))
     ctx.progress(stage="fetched", count=len(events))
@@ -393,12 +415,96 @@ TRAKT_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_trakt,
     description=(
-        "Imports your Trakt.tv watch history on a schedule. Needs your Trakt OAuth credentials."
+        "Records your TV and movie watch history from Trakt.tv. "
+        "We sync new watches every 6 hours."
     ),
     default_interval=timedelta(hours=6),
     category="video",
     canonical_definition_name="Watched",
-    required_credentials=(),  # Auth is managed by the trakt.json creds file.
+    required_credentials=(
+        Credential(
+            key="client_id",
+            label="Trakt Client ID",
+            help="From your Trakt OAuth application's settings page.",
+        ),
+        Credential(
+            key="client_secret",
+            label="Trakt Client Secret",
+            help="From your Trakt OAuth application's settings page.",
+        ),
+        Credential(
+            key="access_token",
+            label="Trakt Access Token",
+            help="Set automatically when you sign in to Trakt.",
+        ),
+        Credential(
+            key="refresh_token",
+            label="Trakt Refresh Token",
+            help="Set automatically when you sign in to Trakt.",
+        ),
+    ),
+    oauth_handler=trakt_oauth_handler,
+    health_check=trakt_health_check,
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What Trakt does",
+            body_md=(
+                "Trakt tracks your TV and movie watch history. "
+                "Once connected, every time you finish a show or movie, "
+                "it'll be recorded as a Watched annotation in your "
+                "Fulcra account."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Create a Trakt OAuth app",
+            body_md=(
+                "Visit https://trakt.tv/oauth/applications and "
+                "click **New Application**. Use these settings:\n\n"
+                "- **Name:** Fulcra Collect\n"
+                "- **Redirect URI:** the URL shown on the next step "
+                "(we'll fill it in for you)\n\n"
+                "Click Save App and copy the **Client ID** and "
+                "**Client Secret** to the next step."
+            ),
+            external_link="https://trakt.tv/oauth/applications",
+        ),
+        SetupStep(
+            kind="input",
+            title="Paste your Trakt OAuth credentials",
+            settings_keys=("client_id", "client_secret"),
+        ),
+        SetupStep(
+            kind="oauth",
+            title="Sign in to Trakt",
+            body_md=(
+                "Click below to authorize Fulcra Collect to read "
+                "your Trakt history."
+            ),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Verify connection",
+            body_md="Fetching your most recent watches from Trakt…",
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Trakt watches?",
+            body_md=(
+                "We can write to your existing 'Watched' annotation "
+                "or create a new one."
+            ),
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "Trakt will sync every 6 hours. "
+                "You can change this in Preferences."
+            ),
+        ),
+    ),
 )
 
 

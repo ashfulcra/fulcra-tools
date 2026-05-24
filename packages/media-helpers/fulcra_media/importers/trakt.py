@@ -164,15 +164,33 @@ def normalize_history(items: list[dict], cluster_threshold: int = 5) -> Iterator
 
 
 def fetch_history(per_page: int = 1000) -> Iterator[dict]:
-    """Iterate all history items, paginating most-recent-first."""
+    """Iterate all history items using the file-based TraktAuth credentials.
+
+    This is the legacy path used by the old CLI wizard flow that stored
+    credentials in ~/.config/fulcra-media/trakt.json. The new web-UI flow
+    stores credentials in the OS keychain and uses fetch_history_with_headers
+    instead. Both paths are supported during the transition period.
+    """
     auth = TraktAuth()
+    yield from fetch_history_with_headers(auth.headers(), per_page=per_page)
+
+
+def fetch_history_with_headers(
+    headers: dict[str, str], per_page: int = 1000
+) -> Iterator[dict]:
+    """Iterate all history items, paginating most-recent-first.
+
+    Accepts explicit HTTP headers so callers can supply auth credentials
+    from any source (file-based TraktAuth or keychain-based tokens).
+    Used directly by _run_trakt when credentials come from the keychain.
+    """
     page = 1
     with httpx.Client(timeout=60) as client:
         while True:
             r = client.get(
                 f"{TRAKT_BASE}/sync/history",
                 params={"extended": "full", "limit": per_page, "page": page},
-                headers=auth.headers(),
+                headers=headers,
             )
             r.raise_for_status()
             items = r.json()

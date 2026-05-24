@@ -2359,7 +2359,14 @@ def test_trakt_plugin_metadata():
     assert TRAKT_PLUGIN.id == "trakt"
     assert TRAKT_PLUGIN.kind == "scheduled"
     assert TRAKT_PLUGIN.default_interval == timedelta(hours=6)
-    assert not TRAKT_PLUGIN.required_credentials  # creds come from the file wizard
+    # Credentials are now managed via the web-UI OAuth wizard and stored in
+    # the OS keychain. The plugin declares all four so the credential-status
+    # UI knows what to show (set / missing).
+    cred_keys = {c.key for c in TRAKT_PLUGIN.required_credentials}
+    assert cred_keys == {"client_id", "client_secret", "access_token", "refresh_token"}
+    assert TRAKT_PLUGIN.oauth_handler is not None
+    assert TRAKT_PLUGIN.health_check is not None
+    assert len(TRAKT_PLUGIN.setup_steps) == 7
 
 
 def test_trakt_plugin_run_imports_and_advances_watermark(monkeypatch):
