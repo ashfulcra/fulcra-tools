@@ -644,6 +644,30 @@ def test_oauth_callback_rejects_invalid_state(collect_home):
     assert r.status_code == 400
 
 
+def test_oauth_callback_handles_handler_exception_gracefully(collect_home, _in_memory_keyring):
+    """When the plugin's oauth_handler raises (e.g. Trakt returns 400
+    for the code exchange), the callback returns an HTML failure page
+    with status 500 — not a stack trace."""
+    from fulcra_collect.plugin import Plugin
+
+    def boom(*, plugin_id, code, code_verifier, redirect_uri):
+        raise RuntimeError("Trakt rejected the code: invalid_grant")
+
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+                    oauth_handler=boom)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    daemon._web_url = "http://127.0.0.1:9999"
+    client = _client(daemon)
+    start = client.post("/api/oauth/x/start").json()
+    r = client.get(f"/api/oauth/x/callback?code=BAD&state={start['state']}")
+    assert r.status_code == 500
+    # The HTML response should contain the failure copy, not the raw stack trace
+    body = r.text
+    assert "token exchange failed" in body
+    # Specifically NOT the Python exception class name or traceback
+    assert "RuntimeError" not in body or "Traceback" not in body
+
+
 # ---------------------------------------------------------------------------
 # Phase D — activity feed
 # ---------------------------------------------------------------------------

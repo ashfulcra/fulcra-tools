@@ -3791,3 +3791,136 @@ def test_generic_csv_does_not_call_resolver_when_definition_already_bootstrapped
     GENERIC_CSV_PLUGIN.run(ctx)
 
     assert resolver_calls == [], "resolver must not be called when def id is already cached"
+
+
+# ---------------------------------------------------------------------------
+# GAP 12 — _run_trakt OAuth credentials path
+# ---------------------------------------------------------------------------
+
+def test_run_trakt_uses_keychain_oauth_credentials_when_available(monkeypatch):
+    """When ctx.credentials has access_token + client_id from the OAuth wizard
+    path, _run_trakt calls fetch_history_with_headers with those values instead
+    of falling back to the legacy file-based device-flow auth.
+
+    This is the primary production path for new users who onboard via the web
+    UI OAuth wizard; was previously untested."""
+    captured_headers: list[dict] = []
+
+    def fake_fetch_with_headers(api_headers):
+        captured_headers.append(dict(api_headers))
+        return iter([])
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.fetch_history_with_headers",
+        fake_fetch_with_headers,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.apply_cluster_policy",
+        lambda events, policy: events,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.find_low_conf_twins",
+        lambda events, extra_pool: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: None,
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _make_bootstrapped_media_state(),
+    )
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state): pass
+        def run_import(self, events, state, check_only=False): return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: FakeClient())
+
+    st = PluginState("trakt")
+    ctx = RunContext(
+        plugin_id="trakt",
+        config={},
+        credentials={"access_token": "my-access-tok", "client_id": "my-client-id"},
+        state=st,
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+    TRAKT_PLUGIN.run(ctx)
+
+    # fetch_history_with_headers must have been called (not the legacy fetch_history)
+    assert len(captured_headers) == 1, "fetch_history_with_headers should be called once"
+    headers = captured_headers[0]
+    assert headers["Authorization"] == "Bearer my-access-tok"
+    assert headers["trakt-api-key"] == "my-client-id"
+    assert headers["trakt-api-version"] == "2"
+
+
+# ---------------------------------------------------------------------------
+# GAP 14 — annotation events emit verification
+# ---------------------------------------------------------------------------
+
+def test_lastfm_emits_annotation_event_on_successful_writes(monkeypatch):
+    """When lastfm successfully posts new scrobbles, _run_lastfm emits an
+    annotation event (via ctx.annotation) so the dashboard activity feed sees
+    the write.  Catches silently-broken plugins that stop reporting writes."""
+    emitted: list[dict] = []
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.fetch_recent_tracks",
+        lambda creds, since, max_pages: [{"raw": 1}],
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.normalize_history",
+        lambda raw: ["event-1"],
+    )
+
+    class FakeResult:
+        posted = 3       # non-zero → annotation event must be emitted
+        skipped_existing = 0
+        verified = 3
+
+    class FakeClient:
+        def ensure_tag(self, name, state): pass
+        def run_import(self, events, state, check_only=False): return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: FakeClient())
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.newest_event_iso",
+        lambda events: "2026-05-22T12:00:00Z",
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _make_bootstrapped_media_state(),
+    )
+
+    st = PluginState("lastfm")
+    ctx = RunContext(
+        plugin_id="lastfm",
+        config={},
+        credentials={"api-key": "K"},
+        state=st,
+        log=logging.getLogger("t"),
+        _emit=emitted.append,
+    )
+    LASTFM_PLUGIN.run(ctx)
+
+    annotation_events = [e for e in emitted if e.get("type") == "annotation"]
+    assert len(annotation_events) >= 1, "at least one annotation event must be emitted"
+    evt = annotation_events[0]
+    assert evt["ok"] is True
+    # The summary should reference the tag name and count
+    assert "lastfm" in evt["summary"].lower() or "3" in evt["summary"]
