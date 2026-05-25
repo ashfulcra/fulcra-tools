@@ -4,6 +4,10 @@ Browser-based UI for Fulcra Collect. The daemon's HTTP server (in
 packages/collect/fulcra_collect/web.py) serves these static files
 from `dist/`.
 
+> **First time here?** See [docs/TESTING.md](../../docs/TESTING.md) for
+> the end-to-end walkthrough: install, start the daemon, paste your
+> Fulcra token, and walk Trakt onboarding step by step.
+
 Tech: vanilla HTML5 + CSS3 + JavaScript + Alpine.js (CDN) +
 Tailwind CSS (CDN). No build step.
 
