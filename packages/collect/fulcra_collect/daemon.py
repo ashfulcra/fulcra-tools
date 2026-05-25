@@ -258,7 +258,14 @@ class Daemon:
                 r.raise_for_status()
                 all_defs = r.json()
         except Exception as exc:
-            return {"ok": False, "error": f"Fulcra API: {exc}", "definitions": []}
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "_quick_record_list: Fulcra API request failed"
+            )
+            return {
+                "ok": False,
+                "error": "Fulcra didn't respond. Check your internet, then try again.",
+                "definitions": [],
+            }
         # Filter to moments, exclude soft-deleted
         moments = [d for d in all_defs
                    if d.get("annotation_type") == "moment"
@@ -297,11 +304,17 @@ class Daemon:
                 )
                 r.raise_for_status()
         except Exception as exc:
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "_record_annotation(%s): Fulcra API request failed", definition_id
+            )
             # Record the failed attempt in the activity buffer so the user
             # sees something happened
             self.activity.add(plugin_id="quick-record",
                               summary=f"failed: {exc}", ok=False)
-            return {"ok": False, "error": f"Fulcra API: {exc}"}
+            return {
+                "ok": False,
+                "error": "Fulcra didn't accept that request. Check your internet, then try again.",
+            }
         # Surface in the activity buffer
         self.activity.add(plugin_id="quick-record",
                           summary=f"Recorded annotation {definition_id[:8]}…",

@@ -1084,7 +1084,7 @@ def test_record_annotation_api_failure_returns_error(
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
-    assert "Fulcra API" in body["error"]
+    assert "Fulcra" in body["error"]
     entries = daemon.activity.recent(limit=1)
     assert entries[0].ok is False
 

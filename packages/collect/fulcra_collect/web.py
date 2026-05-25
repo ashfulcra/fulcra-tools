@@ -569,14 +569,21 @@ def build_app(daemon) -> FastAPI:
         Calls the Fulcra API directly with the user-level bearer token.
         Returns only non-deleted definitions.
         """
+        _log = logging.getLogger("fulcra_collect.web")
         fulcra_token = _fulcra_token_or_401()
         try:
             with _fulcra_http_client(fulcra_token) as client:
                 r = client.get("/user/v1alpha1/annotation")
                 r.raise_for_status()
                 defs = r.json()
+        except HTTPException:
+            raise
         except Exception as exc:
-            raise HTTPException(502, f"Fulcra API error: {exc}") from exc
+            _log.exception("list_definitions: Fulcra API request failed")
+            raise HTTPException(
+                502,
+                "Fulcra didn't respond. Check your internet, then try again.",
+            ) from exc
         # Filter out soft-deleted definitions
         defs = [d for d in defs if not d.get("deleted_at")]
         if annotation_type:
@@ -627,7 +634,13 @@ def build_app(daemon) -> FastAPI:
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(502, f"Fulcra API error: {exc}") from exc
+            logging.getLogger("fulcra_collect.web").exception(
+                "definition_recent(%s): Fulcra API request failed", def_id
+            )
+            raise HTTPException(
+                502,
+                "Fulcra didn't respond. Check your internet, then try again.",
+            ) from exc
         # Sort by recorded_at descending and return the most recent `limit`
         def _sort_key(rec: dict) -> str:
             rat = (rec.get("metadata") or {}).get("recorded_at") or ""
