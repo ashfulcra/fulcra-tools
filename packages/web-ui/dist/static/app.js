@@ -30,7 +30,17 @@ async function api(path, opts = {}) {
   }
   const res = await fetch(path, { ...opts, headers });
   if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}`);
+    // Try to surface the API's "detail" field (FastAPI convention) so
+    // user-facing error messages like "Fulcra rejected the token" reach
+    // the UI rather than the raw HTTP status line.
+    let detail = "";
+    try {
+      const body = await res.clone().json();
+      detail = body.detail || body.error || "";
+    } catch (_) {
+      // non-JSON body — fall through to status line
+    }
+    throw new Error(detail || `${res.status} ${res.statusText}`);
   }
   return res.json();
 }

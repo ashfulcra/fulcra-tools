@@ -47,7 +47,7 @@ def trakt_health_check(ctx) -> HealthResult:
             if me.status_code == 401:
                 return HealthResult(
                     ok=False,
-                    summary="Trakt access token expired. Re-authenticate via the plugin settings.",
+                    summary="Your Trakt sign-in expired. Re-authenticate in Preferences.",
                 )
             me.raise_for_status()
             account = me.json()
@@ -83,12 +83,28 @@ def trakt_health_check(ctx) -> HealthResult:
         )
 
     except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if 500 <= status < 600:
+            return HealthResult(
+                ok=False,
+                summary="Trakt is having a temporary issue. We'll retry on the next sync.",
+            )
         return HealthResult(
             ok=False,
-            summary=f"Trakt API error: {exc.response.status_code}",
+            summary=f"Unexpected: Trakt returned {status}.",
+        )
+    except httpx.TimeoutException:
+        return HealthResult(
+            ok=False,
+            summary="Could not reach Trakt. Check your internet.",
+        )
+    except httpx.HTTPError:
+        return HealthResult(
+            ok=False,
+            summary="Could not reach Trakt. Check your internet.",
         )
     except Exception as exc:
         return HealthResult(
             ok=False,
-            summary=f"Could not reach Trakt: {exc}",
+            summary=f"Unexpected: {type(exc).__name__}.",
         )

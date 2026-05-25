@@ -618,7 +618,7 @@ def test_quick_record_list_api_error_returns_graceful_response(collect_home, mon
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
     assert reply["ok"] is False
-    assert "Fulcra API" in reply["error"]
+    assert "Fulcra" in reply["error"]
     assert reply["definitions"] == []
 
 
@@ -682,7 +682,7 @@ def test_record_annotation_api_error_surfaces_activity_failure(collect_home, mon
     reply = d._record_annotation("def-xyz", None)
 
     assert reply["ok"] is False
-    assert "Fulcra API" in reply["error"]
+    assert "Fulcra" in reply["error"]
     entries = d.activity.recent(limit=1)
     assert entries[0].ok is False
     assert entries[0].plugin_id == "quick-record"
