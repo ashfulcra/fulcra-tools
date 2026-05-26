@@ -140,7 +140,9 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // Definition picker state
     dpLoading: false,
     dpError: "",
-    dpDefinitions: [],        // [{id, name, annotation_type, created_at, _preview, _previewLoading}]
+    dpDefinitions: [],        // compatible defs — annotation_type matches current step
+    dpOtherDefinitions: [],   // defs present on the account but a different type
+    dpShowOther: false,       // whether the "Other annotations" section is expanded
     dpSelectedId: null,       // id of chosen definition, or null = create new
     dpForceNew: false,        // true when user chose "Create new instead"
     // Permission check state (task #66) — backend verifies the OS permission
@@ -320,7 +322,19 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       }
 
       if (this.has_next) {
-        this.step_index += 1;
+        // Advance, skipping any steps whose condition isn't satisfied.
+        let nextIdx = this.step_index + 1;
+        while (nextIdx < this.steps.length && !this._stepConditionMet(nextIdx)) {
+          nextIdx += 1;
+        }
+        if (nextIdx >= this.steps.length) {
+          // Skipped past the end — treat as "at the last real step"; let the
+          // existing has_next / done-step logic handle completion on the next
+          // next() call. In practice this shouldn't happen for a well-formed
+          // wizard (there's always an unconditional "done" step).
+          return;
+        }
+        this.step_index = nextIdx;
         this.current_step = this.steps[this.step_index];
         this.healthResult = null;
         this.healthChecking = false;
@@ -332,6 +346,8 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this.dpLoading = false;
         this.dpError = "";
         this.dpDefinitions = [];
+        this.dpOtherDefinitions = [];
+        this.dpShowOther = false;
         this.dpSelectedId = null;
         this.dpForceNew = false;
         // Reset permission check transient state
@@ -346,7 +362,12 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     back() {
       this.stepError = "";
       if (this.has_back) {
-        this.step_index -= 1;
+        // Retreat, skipping any steps whose condition isn't satisfied.
+        let prevIdx = this.step_index - 1;
+        while (prevIdx > 0 && !this._stepConditionMet(prevIdx)) {
+          prevIdx -= 1;
+        }
+        this.step_index = prevIdx;
         this.current_step = this.steps[this.step_index];
         this.healthResult = null;
         this.nextBlocked = false;
@@ -355,6 +376,8 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this.dpLoading = false;
         this.dpError = "";
         this.dpDefinitions = [];
+        this.dpOtherDefinitions = [];
+        this.dpShowOther = false;
         this.dpSelectedId = null;
         this.dpForceNew = false;
         // Reset permission check transient state
@@ -385,6 +408,8 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this.dpLoading = false;
         this.dpError = "";
         this.dpDefinitions = [];
+        this.dpOtherDefinitions = [];
+        this.dpShowOther = false;
         this.dpSelectedId = null;
         this.dpForceNew = false;
         this.permissionResult = null;
@@ -410,6 +435,22 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // (task #64)
     backToPluginList() {
       if (on_back_to_pick_plugins) on_back_to_pick_plugins();
+    },
+
+    // Returns true when the step at `index` has no condition, or when its
+    // condition is satisfied by the current inputValues. A key that is absent
+    // from inputValues (undefined / not yet set) counts as NOT satisfied so
+    // conditional steps that depend on earlier input steps are reliably
+    // skipped until the user actually fills in the gating field.
+    _stepConditionMet(index) {
+      const step = this.steps[index];
+      if (!step || !step.condition) return true;
+      for (const [key, acceptable] of Object.entries(step.condition)) {
+        const val = this.inputValues[key];
+        if (val === undefined || val === null || val === "") return false;
+        if (!acceptable.includes(val)) return false;
+      }
+      return true;
     },
 
     // Called after step index advances — trigger auto-actions
@@ -554,12 +595,22 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
 
     // Initiate the OAuth flow for the current step. Calls the start route,
     // then opens the returned authorize_url in a new tab.
+    //
+    // NOTE: we deliberately do NOT pass "noopener" here, even though it's
+    // the usual safe-default for window.open. The OAuth callback page is
+    // served by THIS daemon at the same origin (127.0.0.1:9292/api/oauth/
+    // {plugin}/callback), and it needs `window.opener.postMessage(...)` to
+    // tell the wizard tab that sign-in completed. With noopener, opener
+    // is null, the postMessage no-ops silently, and the user sits at
+    // "Waiting for sign-in…" forever (bug seen live 2026-05-26). The
+    // tradeoff is safe because we control the callback page; a third-
+    // party page can't end up holding window.opener.
     async startOAuth() {
       this.oauthStatus = "opening…";
       try {
         const result = await api(`/api/oauth/${this.plugin_id}/start`, { method: "POST" });
         if (result.authorize_url) {
-          window.open(result.authorize_url, "_blank", "noopener,noreferrer");
+          window.open(result.authorize_url, "_blank");
           this.oauthStatus = "Waiting for sign-in… (complete it in the new tab)";
         } else {
           this.oauthStatus = "Error: server did not return an authorize_url.";
@@ -577,25 +628,47 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       this.dpLoading = true;
       this.dpError = "";
       this.dpDefinitions = [];
+      this.dpOtherDefinitions = [];
+      this.dpShowOther = false;
       this.dpSelectedId = null;
       this.dpForceNew = false;
 
-      // The step may hint which annotation_type to filter by (e.g. "duration").
+      // The step hints which annotation_type is compatible (e.g. "duration").
+      // We fetch ALL defs and partition client-side so the user can see and
+      // optionally pick from their other-type annotations too.
       const annotationType = this.current_step.annotation_type || "duration";
       try {
-        const body = await api(`/api/definitions?annotation_type=${encodeURIComponent(annotationType)}`);
-        this.dpDefinitions = (body.definitions || []).map(d => ({
+        const body = await api(`/api/definitions`);
+        const allDefs = (body.definitions || []).map(d => ({
           ...d,
           _preview: [],
           _previewLoading: false,
           _previewLoaded: false,
           _previewError: "",
         }));
-        // task #67 — if there are no matching defs there's nothing for the
-        // user to choose between; the only path is "create a new one on
-        // first run". Auto-select that and unblock Next so the user isn't
-        // stuck staring at a disabled button.
-        if (this.dpDefinitions.length === 0) {
+        // Stable display order: alphabetical by name (case-insensitive),
+        // then oldest-first by created_at as a tiebreaker so duplicate-
+        // named defs (e.g. multiple "Listened" from different machines)
+        // group together with the canonical original first.
+        const sortByNameThenCreated = (a, b) => {
+          const na = (a.name || "").toLowerCase();
+          const nb = (b.name || "").toLowerCase();
+          if (na < nb) return -1;
+          if (na > nb) return 1;
+          const ca = a.created_at || "";
+          const cb = b.created_at || "";
+          if (ca < cb) return -1;
+          if (ca > cb) return 1;
+          return 0;
+        };
+        allDefs.sort(sortByNameThenCreated);
+        this.dpDefinitions = allDefs.filter(d => d.annotation_type === annotationType);
+        this.dpOtherDefinitions = allDefs.filter(d => d.annotation_type !== annotationType);
+        // Expand "other" section by default only when there are no compatible defs.
+        this.dpShowOther = this.dpDefinitions.length === 0 && this.dpOtherDefinitions.length > 0;
+        // task #67 — if there are no defs at all, auto-select "create new"
+        // and unblock Next so the user isn't stuck staring at a disabled button.
+        if (allDefs.length === 0) {
           this.dpForceNew = true;
           this.nextBlocked = false;
         }

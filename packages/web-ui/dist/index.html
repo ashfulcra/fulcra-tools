@@ -229,8 +229,15 @@
         <!-- Phase: configure (per-plugin wizard walk) -->
         <template x-if="phase === 'configure'">
           <div class="space-y-6">
-            <!-- Progress indicator for multi-plugin flow -->
-            <div class="text-xs text-slate-500 font-medium" x-text="configureProgressLabel"></div>
+            <!-- Per-plugin header: small "Plugin N of M" progress label,
+                 then the plugin name prominent on its own line so the
+                 user can tell at a glance which plugin they're configuring. -->
+            <div>
+              <div class="text-xs text-slate-500 font-medium uppercase tracking-wide"
+                   x-text="configureProgressLabel"></div>
+              <div class="text-xl font-semibold text-slate-900 mt-0.5"
+                   x-text="configurePluginName"></div>
+            </div>
 
             <!-- Plugin with no setup_steps -->
             <template x-if="currentWizard && currentWizard._noSteps">
@@ -597,10 +604,48 @@
                       </div>
                     </template>
 
-                    <!-- No definitions found -->
-                    <template x-if="!dpLoading && dpDefinitions.length === 0 && !dpError">
+                    <!-- No compatible definitions found (but may have other-type ones) -->
+                    <template x-if="!dpLoading && dpDefinitions.length === 0 && dpOtherDefinitions.length === 0 && !dpError">
                       <div class="text-sm text-slate-500 bg-slate-50 border border-slate-200 rounded p-3">
-                        No matching Fulcra annotations found. A new one will be created on first run.
+                        No Fulcra annotations found. A new one will be created on first run.
+                      </div>
+                    </template>
+
+                    <!-- Other annotations (different type) — collapsible -->
+                    <template x-if="!dpLoading && dpOtherDefinitions.length > 0">
+                      <div class="space-y-2 border-t border-slate-100 pt-3">
+                        <button @click="dpShowOther = !dpShowOther"
+                                class="flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors">
+                          <svg class="w-3.5 h-3.5 transition-transform" :class="dpShowOther ? 'rotate-90' : ''" viewBox="0 0 12 12" fill="currentColor">
+                            <path d="M4.5 2 L9 6 L4.5 10" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                          </svg>
+                          Other annotations (<span x-text="dpOtherDefinitions.length"></span>, different type)
+                        </button>
+                        <template x-if="dpShowOther">
+                          <div class="space-y-1.5">
+                            <p class="text-xs text-slate-400">These annotations exist on your account but are a different type from what this plugin expects. Picking one may cause events to not render correctly.</p>
+                            <template x-for="def in dpOtherDefinitions" :key="def.id">
+                              <div class="border rounded-lg p-3 cursor-pointer transition-colors"
+                                   :class="dpSelectedId === def.id
+                                     ? 'border-violet-400 bg-violet-50'
+                                     : 'border-slate-200 hover:border-slate-300'"
+                                   @click="dpSelectDef(def)">
+                                <div class="flex items-start justify-between gap-2">
+                                  <div class="flex-1 min-w-0">
+                                    <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
+                                    <div class="text-xs text-slate-400 mt-0.5"
+                                         x-text="`(${def.annotation_type} annotation) · created ${dpHumanDate(def.created_at)}`"></div>
+                                  </div>
+                                  <template x-if="dpSelectedId === def.id">
+                                    <svg class="w-5 h-5 text-violet-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                                    </svg>
+                                  </template>
+                                </div>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
                       </div>
                     </template>
 
@@ -608,13 +653,25 @@
                          are existing defs to choose between. When the list
                          is empty, _loadDefinitions auto-sets dpForceNew so
                          the user can just click Next (task #67). -->
-                    <div class="pt-1" x-show="dpDefinitions.length > 0">
+                    <div class="pt-1" x-show="dpDefinitions.length > 0 || dpOtherDefinitions.length > 0">
+                      <!-- Outline button — promoted from a text link 2026-05-26 so
+                           the "create new" path is as visually weighty as the
+                           cards above it. Selected state (dpForceNew) flips to
+                           emerald + check; default state is a neutral outline. -->
                       <button @click="dpChooseForceNew()"
-                              class="text-sm font-medium transition-colors"
+                              class="px-4 py-2 rounded border text-sm font-medium transition-colors"
                               :class="dpForceNew
-                                ? 'text-emerald-600'
-                                : 'text-slate-400 hover:text-slate-600'">
-                        <span x-text="dpForceNew ? '✓ Will create a new annotation on first run' : 'Create a new annotation instead'"></span>
+                                ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                                : 'border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400'">
+                        <span x-text="
+                          dpForceNew
+                            ? (plugin_contract.canonical_definition_name
+                                ? `✓ Will create a new '${plugin_contract.canonical_definition_name}' annotation on first run`
+                                : '✓ Will create a new annotation on first run')
+                            : (plugin_contract.canonical_definition_name
+                                ? `+ Create a new '${plugin_contract.canonical_definition_name}' annotation`
+                                : '+ Create a new annotation')
+                        "></span>
                       </button>
                     </div>
                   </div>
@@ -1127,7 +1184,43 @@
                   </div>
                 </template>
 
-                <div class="pt-1" x-show="dpDefinitions.length > 0">
+                <!-- No compatible definitions found (but may have other-type ones) -->
+                <template x-if="!dpLoading && dpDefinitions.length === 0 && dpOtherDefinitions.length === 0 && !dpError">
+                  <div class="text-sm text-slate-500 bg-slate-50 border border-slate-200 rounded p-3">
+                    No Fulcra annotations found. A new one will be created on first run.
+                  </div>
+                </template>
+
+                <!-- Other annotations (different type) — collapsible -->
+                <template x-if="!dpLoading && dpOtherDefinitions.length > 0">
+                  <div class="space-y-2 border-t border-slate-100 pt-3">
+                    <button @click="dpShowOther = !dpShowOther"
+                            class="flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors">
+                      <svg class="w-3.5 h-3.5 transition-transform" :class="dpShowOther ? 'rotate-90' : ''" viewBox="0 0 12 12" fill="currentColor">
+                        <path d="M4.5 2 L9 6 L4.5 10" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                      Other annotations (<span x-text="dpOtherDefinitions.length"></span>, different type)
+                    </button>
+                    <template x-if="dpShowOther">
+                      <div class="space-y-1.5">
+                        <p class="text-xs text-slate-400">These annotations exist on your account but are a different type from what this plugin expects. Picking one may cause events to not render correctly.</p>
+                        <template x-for="def in dpOtherDefinitions" :key="def.id">
+                          <div class="border rounded-lg p-3 cursor-pointer transition-colors"
+                               :class="dpSelectedId === def.id
+                                 ? 'border-violet-400 bg-violet-50'
+                                 : 'border-slate-200 hover:border-slate-300'"
+                               @click="dpSelectDef(def)">
+                            <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
+                            <div class="text-xs text-slate-400 mt-0.5"
+                                 x-text="`(${def.annotation_type} annotation) · created ${dpHumanDate(def.created_at)}`"></div>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <div class="pt-1" x-show="dpDefinitions.length > 0 || dpOtherDefinitions.length > 0">
                   <button @click="dpChooseForceNew()"
                           class="text-sm font-medium transition-colors"
                           :class="dpForceNew ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'">

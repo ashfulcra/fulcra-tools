@@ -326,10 +326,18 @@ function onboarding() {
     // Computed helpers for the template
     // ---------------------------------------------------------------------------
 
+    // Two-line header for the per-plugin wizard walk: small "Plugin N of M"
+    // progress label on top, prominent plugin name below. The plugin name
+    // is the actual context for everything happening on the current step,
+    // so it deserves its own line + heading weight instead of being buried
+    // in a small gray progress string.
     get configureProgressLabel() {
       const total = this.pluginsToSetup.length;
       const current = this.currentSetupIndex + 1;
-      return `Plugin ${current} of ${total}: ${this.currentContract?.name || ""}`;
+      return `Plugin ${current} of ${total}`;
+    },
+    get configurePluginName() {
+      return this.currentContract?.name || "";
     },
   };
 }

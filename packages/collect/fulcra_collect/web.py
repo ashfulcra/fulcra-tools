@@ -499,6 +499,12 @@ def build_app(daemon) -> FastAPI:
             "kind": plugin.kind,
             "category": plugin.category,
             "description": plugin.description,
+            # Surface the canonical definition name so the wizard's
+            # definition_picker can show "Create a new 'Journal' annotation
+            # instead" instead of the generic "Create a new annotation".
+            # Lets first-time users (whose account has no def of this
+            # plugin's canonical name yet) see what they'll get.
+            "canonical_definition_name": plugin.canonical_definition_name,
             "default_interval_s": (
                 int(plugin.default_interval.total_seconds())
                 if plugin.default_interval else None
@@ -534,6 +540,10 @@ def build_app(daemon) -> FastAPI:
                     "external_link": s.external_link,
                     "extension_url": s.extension_url,
                     "annotation_type": s.annotation_type,
+                    "condition": (
+                        {k: list(v) for k, v in s.condition.items()}
+                        if s.condition else None
+                    ),
                 }
                 for s in plugin.setup_steps
             ],
@@ -944,12 +954,14 @@ def build_app(daemon) -> FastAPI:
         )
 
     @app.get("/api/definitions", dependencies=[Depends(require_token)])
-    def list_definitions(annotation_type: str | None = None):
-        """List Fulcra annotation definitions, optionally filtered by
-        annotation_type (e.g. 'duration', 'moment').
+    def list_definitions(annotation_type: str | None = None):  # noqa: ARG001
+        """List all non-deleted Fulcra annotation definitions.
+
+        The annotation_type query parameter is accepted for backwards
+        compatibility but ignored — all definitions are returned so the
+        frontend can group compatible vs. other types itself.
 
         Calls the Fulcra API directly with the user-level bearer token.
-        Returns only non-deleted definitions.
         """
         _log = logging.getLogger("fulcra_collect.web")
         fulcra_token = _fulcra_token_or_401()
@@ -960,16 +972,46 @@ def build_app(daemon) -> FastAPI:
                 defs = r.json()
         except HTTPException:
             raise
-        except Exception as exc:
-            _log.exception("list_definitions: Fulcra API request failed")
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            _log.warning("list_definitions: Fulcra returned %s", status)
+            if status in (401, 403):
+                raise HTTPException(
+                    401,
+                    "Fulcra rejected the request — your sign-in may have expired. "
+                    "Re-run sign-in from the wizard or paste a fresh token.",
+                ) from exc
+            if 500 <= status < 600:
+                raise HTTPException(
+                    502,
+                    f"Fulcra returned {status}. Try again in a moment.",
+                ) from exc
             raise HTTPException(
                 502,
-                "Fulcra didn't respond. Check your internet, then try again.",
+                f"Fulcra returned an unexpected {status}.",
             ) from exc
-        # Filter out soft-deleted definitions
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            _log.warning("list_definitions: connect failed: %r", exc)
+            raise HTTPException(
+                502,
+                "Couldn't reach Fulcra. Check your internet, then try again.",
+            ) from exc
+        except httpx.TimeoutException as exc:
+            _log.warning("list_definitions: timed out: %r", exc)
+            raise HTTPException(
+                504,
+                "Fulcra took too long to respond. Try again in a moment.",
+            ) from exc
+        except Exception as exc:
+            _log.exception("list_definitions: unexpected failure")
+            raise HTTPException(
+                502,
+                f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
+                "Check the daemon log for details.",
+            ) from exc
+        # Filter out soft-deleted definitions; annotation_type filtering is
+        # intentionally NOT applied — the frontend groups types itself.
         defs = [d for d in defs if not d.get("deleted_at")]
-        if annotation_type:
-            defs = [d for d in defs if d.get("annotation_type") == annotation_type]
         return {"definitions": defs}
 
     @app.get("/api/definitions/{def_id}/recent", dependencies=[Depends(require_token)])
@@ -1015,13 +1057,50 @@ def build_app(daemon) -> FastAPI:
                         break
         except HTTPException:
             raise
-        except Exception as exc:
-            logging.getLogger("fulcra_collect.web").exception(
-                "definition_recent(%s): Fulcra API request failed", def_id
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            _log = logging.getLogger("fulcra_collect.web")
+            _log.warning("definition_recent(%s): Fulcra returned %s",
+                          def_id, status)
+            if status in (401, 403):
+                raise HTTPException(
+                    401,
+                    "Fulcra rejected the request — your sign-in may have "
+                    "expired. Re-run sign-in from the wizard or paste a "
+                    "fresh token.",
+                ) from exc
+            if 500 <= status < 600:
+                raise HTTPException(
+                    502,
+                    f"Fulcra returned {status}. Try again in a moment.",
+                ) from exc
+            raise HTTPException(
+                502, f"Fulcra returned an unexpected {status}.",
+            ) from exc
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            logging.getLogger("fulcra_collect.web").warning(
+                "definition_recent(%s): connect failed: %r", def_id, exc,
             )
             raise HTTPException(
                 502,
-                "Fulcra didn't respond. Check your internet, then try again.",
+                "Couldn't reach Fulcra. Check your internet, then try again.",
+            ) from exc
+        except httpx.TimeoutException as exc:
+            logging.getLogger("fulcra_collect.web").warning(
+                "definition_recent(%s): timed out: %r", def_id, exc,
+            )
+            raise HTTPException(
+                504,
+                "Fulcra took too long to respond. Try again in a moment.",
+            ) from exc
+        except Exception as exc:
+            logging.getLogger("fulcra_collect.web").exception(
+                "definition_recent(%s): unexpected failure", def_id,
+            )
+            raise HTTPException(
+                502,
+                f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
+                "Check the daemon log for details.",
             ) from exc
         # Sort by recorded_at descending and return the most recent `limit`
         def _sort_key(rec: dict) -> str:
