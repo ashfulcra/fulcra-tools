@@ -58,6 +58,23 @@ function onboarding() {
     enabledCount: 0,
 
     async boot() {
+      // Check whether app() requested a specific entry phase. app.addPlugin()
+      // writes 'pick_plugins' to window.__fulcraOnboardingEntryPhase before
+      // setting route = 'onboarding', so onboarding.boot() can jump straight
+      // to the plugin picker without replaying welcome or signin.
+      // app.runOnboarding() leaves the flag null (full flow). We consume the
+      // flag here and immediately clear it so a later boot() call sees null.
+      const requestedPhase = window.__fulcraOnboardingEntryPhase;
+      window.__fulcraOnboardingEntryPhase = null;
+
+      if (requestedPhase === "pick_plugins") {
+        // Caller guarantees the user is already authenticated; skip straight
+        // to the plugin picker without hitting the auth endpoints.
+        this.phase = "pick_plugins";
+        await this._loadPlugins();
+        return;
+      }
+
       // 1) Daemon already has a stored token — skip sign-in entirely.
       try {
         const authStatus = await api("/api/fulcra/auth/status");
