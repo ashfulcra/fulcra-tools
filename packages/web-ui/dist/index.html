@@ -14,7 +14,8 @@
       x-data="app()"
       x-init="boot()"
       @onboarding-complete.window="route = 'dashboard'"
-      @add-plugin.window="route = 'add_plugin'"
+      @add-plugin.window="addPlugin()"
+      @run-onboarding.window="runOnboarding()"
       @configure-plugin.window="openSetupForPlugin($event.detail.id)">
 
   <main class="max-w-2xl mx-auto p-6">
@@ -1270,7 +1271,10 @@
     <!-- ------------------------------------------------------------------ -->
     <!-- DASHBOARD                                                           -->
     <!-- ------------------------------------------------------------------ -->
-    <template x-if="route === 'dashboard' || route === 'add_plugin'">
+    <!-- 'add_plugin' route no longer exists: clicking "+ Add plugin" now sets
+         route = 'onboarding' (with a pick_plugins entry flag) so the shared
+         onboarding flow handles the picker UI. -->
+    <template x-if="route === 'dashboard'">
       <section x-data="dashboard()" x-init="boot()" class="space-y-8">
 
         <!-- Header row -->
@@ -1280,7 +1284,11 @@
             <!-- Escape hatch back into onboarding for users who skipped out
                  mid-flow or want to re-pick plugins. Wired via the parent
                  app() so route + state are reset cleanly. (task #62) -->
-            <button @click="$root.runOnboarding()"
+            <!-- $dispatch bubbles to the body's @run-onboarding.window listener,
+                 which calls app().runOnboarding() — the only place that knows
+                 how to reset route + wizard state. $root doesn't reach app()
+                 from inside a nested x-data scope. -->
+            <button @click="$dispatch('run-onboarding')"
                     class="text-xs text-slate-400 hover:text-violet-600 underline"
                     title="Restart the onboarding wizard">
               Run setup wizard

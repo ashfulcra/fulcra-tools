@@ -9,9 +9,12 @@
  * Routes:
  *   loading      — initial fetch
  *   error        — daemon unreachable
- *   onboarding   — first-launch / no auth / no plugins enabled
+ *   onboarding   — first-launch / no auth / no plugins enabled; also used by
+ *                  "+ Add plugin" (which sets window.__fulcraOnboardingEntryPhase
+ *                  so onboarding.boot() skips to pick_plugins) and by
+ *                  "Run setup wizard" (which goes through the full welcome flow)
  *   dashboard    — normal post-onboarding home
- *   add_plugin   — re-enter plugin picker from dashboard
+ *   setup-plugin — per-plugin reconfiguration wizard (opened by Configure button)
  */
 
 const TOKEN = document.cookie
@@ -89,10 +92,23 @@ function app() {
     // Restart the onboarding flow from the dashboard. Used by the small
     // "Run setup wizard" link in the dashboard header — gives users a way
     // back in if they bailed out mid-flow.
+    // Clears the window flag so onboarding.boot() runs its full logic:
+    // welcome → signin (if needed) → pick_plugins.
     runOnboarding() {
       this.setupPluginId = null;
       this.setupContract = null;
       this.setupWizard = null;
+      window.__fulcraOnboardingEntryPhase = null;
+      this.route = "onboarding";
+    },
+
+    // Jump straight to the plugin picker inside the onboarding flow. Used by
+    // the "+ Add plugin" button on the dashboard — the user is already signed
+    // in so there's no reason to show welcome or signin again.
+    // Sets the window flag before flipping the route so onboarding.boot()
+    // picks it up on mount and skips straight to pick_plugins.
+    addPlugin() {
+      window.__fulcraOnboardingEntryPhase = "pick_plugins";
       this.route = "onboarding";
     },
 
