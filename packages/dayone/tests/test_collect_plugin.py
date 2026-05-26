@@ -17,10 +17,14 @@ def _ctx(config: dict) -> RunContext:
                       _emit=lambda e: None)
 
 
-def test_plugin_metadata_is_manual():
+def test_plugin_metadata_is_scheduled():
+    # Switched from manual to scheduled (every 6 h) so live-app mode picks
+    # up new entries automatically; export-file users can still trigger via
+    # Run Now and the run() naturally no-ops when there's nothing new.
+    from datetime import timedelta
     assert PLUGIN.id == "dayone"
-    assert PLUGIN.kind == "manual"
-    assert PLUGIN.default_interval is None
+    assert PLUGIN.kind == "scheduled"
+    assert PLUGIN.default_interval == timedelta(hours=6)
 
 
 def test_local_db_mode_runs_the_pipeline(monkeypatch):

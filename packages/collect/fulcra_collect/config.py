@@ -30,11 +30,25 @@ def _config_path() -> Path:
     return config_dir() / "config.toml"
 
 
+# Default TCP port the daemon's HTTP server binds to. Chosen far from
+# common conflict ports (8000/8080/8888) and far from any other Fulcra
+# loopback service. Stable across daemon restarts so OAuth redirect URIs
+# (which are baked into the third-party app registration) and the
+# attention browser extension (which posts to a known endpoint) don't
+# break every time the daemon restarts. Override via `[daemon] web_port`
+# in `config.toml` if 9292 collides on the user's machine.
+DEFAULT_WEB_PORT = 9292
+
+
 @dataclass
 class Config:
     enabled: set[str] = field(default_factory=set)
     interval_overrides: dict[str, int] = field(default_factory=dict)  # plugin id -> seconds
     plugin_settings: dict[str, dict] = field(default_factory=dict)
+    # Daemon-wide settings (currently just web_port). Kept on the top-level
+    # Config rather than nested under plugin_settings because the web server
+    # is part of the daemon, not a plugin.
+    web_port: int = DEFAULT_WEB_PORT
 
     def enable(self, plugin_id: str) -> None:
         self.enabled.add(plugin_id)
@@ -51,10 +65,20 @@ def load() -> Config:
     if not path.exists():
         return Config()
     doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+    # `[daemon] web_port = N` overrides the default. Stored under a
+    # `[daemon]` table so a future daemon-wide setting can sit alongside
+    # without leaking into plugin_settings. Tolerate the table being
+    # missing (older config files) or the field being absent.
+    daemon_section = doc.get("daemon", {}) or {}
+    try:
+        web_port = int(daemon_section.get("web_port", DEFAULT_WEB_PORT))
+    except (TypeError, ValueError):
+        web_port = DEFAULT_WEB_PORT
     return Config(
         enabled=set(doc.get("enabled", [])),
         interval_overrides=dict(doc.get("interval_overrides", {})),
         plugin_settings=dict(doc.get("plugin_settings", {})),
+        web_port=web_port,
     )
 
 
@@ -71,5 +95,16 @@ def save(cfg: Config) -> None:
     doc["enabled"] = sorted(cfg.enabled)
     doc["interval_overrides"] = cfg.interval_overrides
     doc["plugin_settings"] = cfg.plugin_settings
+    # Only persist web_port when it differs from the default — this keeps
+    # the default config file small and avoids writing a `[daemon]` table
+    # the user never asked for. If the user wrote `web_port = 9292`
+    # explicitly we silently drop it; that's fine, the loader uses the
+    # default when the field is absent.
+    if cfg.web_port != DEFAULT_WEB_PORT:
+        daemon_table = doc.get("daemon")
+        if daemon_table is None:
+            daemon_table = tomlkit.table()
+            doc["daemon"] = daemon_table
+        daemon_table["web_port"] = cfg.web_port
 
     path.write_text(tomlkit.dumps(doc), encoding="utf-8")

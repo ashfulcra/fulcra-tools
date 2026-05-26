@@ -29,6 +29,7 @@ def make_quick_record_view(
     model: StatusModel,
     on_view_status: Callable[[], None],
     width: float,
+    height: float = 360.0,
 ) -> NSView:
     """Build the quick-record primary view.
 
@@ -44,8 +45,14 @@ def make_quick_record_view(
         switch to the plugin-status secondary view.
     width:
         Popover content width in points.
+    height:
+        Body height the popover root has allotted to this view. The
+        internal header / scroll / footer split is sized against this
+        value, so the view fills its container rather than rendering
+        components off-screen when the popover is smaller than the
+        legacy default of 360 pt.
     """
-    HEIGHT = 360.0
+    HEIGHT = float(height)
     HEADER_H = 40.0
     FOOTER_H = 40.0
     BODY_H = HEIGHT - HEADER_H - FOOTER_H

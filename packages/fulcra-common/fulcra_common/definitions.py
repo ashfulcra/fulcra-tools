@@ -37,13 +37,28 @@ def _spec_matches(existing: dict, expected: dict) -> bool:
     """Compare `existing` (as returned by Fulcra) with `expected` (as
     declared by the plugin). For Moment annotations only the
     `annotation_type` is compared (Moments carry no measurement_spec).
-    For Duration annotations both `annotation_type` and
-    `measurement_spec` must match."""
+    For Duration annotations the annotation_type must match AND every
+    field the *expected* measurement_spec specifies must equal what's
+    in existing.
+
+    Permissive on Fulcra-side extras: when Fulcra adds server-side
+    defaults like `metric_kind: discrete` that the client never sent,
+    the def is still semantically what the client wanted. Strict
+    equality used to mis-flag those as schema mismatches and rejected
+    cross-plugin def adoption (the 2026-05-26 Apple Podcasts +
+    Generic RSS failures both hit this). Compare each expected field
+    individually; ignore extras on the existing side.
+    """
     if existing.get("annotation_type") != expected.get("annotation_type"):
         return False
     if expected.get("annotation_type") == "moment":
         return True
-    return existing.get("measurement_spec") == expected.get("measurement_spec")
+    exp_ms = expected.get("measurement_spec") or {}
+    cur_ms = existing.get("measurement_spec") or {}
+    for k, v in exp_ms.items():
+        if cur_ms.get(k) != v:
+            return False
+    return True
 
 
 def resolve_definition_id(

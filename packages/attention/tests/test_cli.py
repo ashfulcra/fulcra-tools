@@ -1,4 +1,10 @@
-"""CLI entry point — exercised via click's CliRunner."""
+"""CLI entry point — exercised via click's CliRunner.
+
+Phase 2 change: the `setup` command no longer generates a relay
+bearer token or installs a launchd/systemd unit (the daemon owns the
+HTTP listener now). It just registers the `machine:<host>` tag.
+The standalone `relay` subcommand is gone.
+"""
 from __future__ import annotations
 
 import json
@@ -54,15 +60,11 @@ def test_bootstrap_creates_def_and_tags(_isolate_state, mocker):
     assert res.exit_code == 0, res.output
     assert "def-attention" in res.output
 
-    # State persisted
     s = state_mod.load(_isolate_state)
     assert s.attention_definition_id == "def-attention"
 
 
 def test_bootstrap_idempotent(_isolate_state, mocker):
-    # Pre-populate state with definition AND every vocab tag; transport should
-    # never be hit since ensure_definitions always re-ensures vocab tags
-    # (cache-first) on every bootstrap.
     state_mod.save(
         state_mod.State(
             attention_definition_id="def-existing",
@@ -104,91 +106,45 @@ def _patch_setup_client(mocker, posted_tags: list[dict] | None = None):
     return posted_tags
 
 
-def test_setup_generates_bearer_token_and_relay_json(_isolate_state, tmp_path, mocker, monkeypatch):
-    # Bootstrap must have run first — pre-populate state
+def test_setup_registers_machine_tag(_isolate_state, tmp_path, mocker):
+    """setup() now just registers a machine:<host> tag — no bearer
+    token, no launchd unit (the daemon owns the HTTP listener)."""
     state_mod.save(
-        state_mod.State(attention_definition_id="def-setup-test", tag_ids=_pre_cached_tags()),
+        state_mod.State(
+            attention_definition_id="def-setup-test", tag_ids=_pre_cached_tags(),
+        ),
         _isolate_state,
     )
     posted_tags = _patch_setup_client(mocker)
-    relay_dir = tmp_path / "fulcra-attention-config"
-    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_dir / "relay.json"))
-    # Skip service install on the test box.
-    fake_install = mocker.patch(
-        "fulcra_attention.cli.service_manager.install",
-        return_value=tmp_path / "fake-service-file",
-    )
     res = CliRunner().invoke(cli, ["setup", "--hostname", "testbox"])
     assert res.exit_code == 0, res.output
-    relay_json = relay_dir / "relay.json"
-    assert relay_json.exists()
-    body = json.loads(relay_json.read_text())
-    assert "bearer_token" in body and len(body["bearer_token"]) >= 40
-    assert body["port"] == 8771
-    # Token printed for paste-into-extension
-    assert body["bearer_token"] in res.output
-    fake_install.assert_called_once()
     # machine:<hostname> tag was created and persisted
     assert {"name": "machine:testbox"} in posted_tags
     s = state_mod.load(_isolate_state)
     assert s.hostname == "testbox"
     assert s.tag_ids["machine:testbox"] == "tag-machine:testbox"
+    # User is told to set the extension-token in the web UI
+    assert "extension-token" in res.output.lower() or "extension token" in res.output.lower()
 
 
-def test_setup_is_idempotent_preserves_existing_token(_isolate_state, tmp_path, mocker, monkeypatch):
-    # Bootstrap must have run first — pre-populate state
-    pre = _pre_cached_tags()
-    pre["machine:testbox"] = "tag-existing-machine"
-    state_mod.save(
-        state_mod.State(
-            attention_definition_id="def-idempotent",
-            tag_ids=pre,
-            hostname="testbox",
-        ),
-        _isolate_state,
-    )
-    _patch_setup_client(mocker)  # cache-hit means transport is never called
-    relay_json = tmp_path / "relay.json"
-    relay_json.write_text(json.dumps({"bearer_token": "PRE-EXISTING", "port": 8771}))
-    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
-    mocker.patch("fulcra_attention.cli.service_manager.install",
-                 return_value=tmp_path / "fake")
-    res = CliRunner().invoke(cli, ["setup", "--hostname", "testbox"])
-    assert res.exit_code == 0
-    body = json.loads(relay_json.read_text())
-    assert body["bearer_token"] == "PRE-EXISTING"
-    assert "PRE-EXISTING" in res.output
-
-
-def test_setup_strips_local_suffix_from_hostname(_isolate_state, tmp_path, mocker, monkeypatch):
+def test_setup_strips_local_suffix_from_hostname(_isolate_state, tmp_path, mocker):
     """`.local` mDNS suffix is stripped so the tag stays portable across networks."""
     state_mod.save(
         state_mod.State(attention_definition_id="def-x", tag_ids=_pre_cached_tags()),
         _isolate_state,
     )
     _patch_setup_client(mocker)
-    relay_json = tmp_path / "relay.json"
-    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
-    mocker.patch("fulcra_attention.cli.service_manager.install",
-                 return_value=tmp_path / "fake")
     res = CliRunner().invoke(cli, ["setup", "--hostname", "DeskBookPro.local"])
     assert res.exit_code == 0, res.output
     s = state_mod.load(_isolate_state)
     assert s.hostname == "deskbookpro"
 
 
-def test_setup_requires_bootstrap_first(_isolate_state, tmp_path, mocker, monkeypatch):
-    relay_json = tmp_path / "relay.json"
-    monkeypatch.setenv("FULCRA_ATTENTION_RELAY_JSON", str(relay_json))
-    # service_manager.install would be called only on the happy path — patch it
-    # to fail loud if reached.
-    mocker.patch("fulcra_attention.cli.service_manager.install",
-                 side_effect=AssertionError("should not be called"))
+def test_setup_requires_bootstrap_first(_isolate_state, tmp_path, mocker):
     # No bootstrap has run — state is empty
     res = CliRunner().invoke(cli, ["setup"])
     assert res.exit_code != 0
     assert "bootstrap" in res.output.lower()
-    assert not relay_json.exists()  # nothing written
 
 
 def test_status_prints_state_json(_isolate_state):
@@ -214,7 +170,7 @@ def test_reset_requires_confirm(_isolate_state):
         _isolate_state,
     )
     res = CliRunner().invoke(cli, ["reset"])
-    assert res.exit_code != 0  # UsageError without --confirm
+    assert res.exit_code != 0
     assert "--confirm" in res.output
 
 
@@ -278,8 +234,8 @@ def test_defs_lists_all_attention_definitions(_isolate_state, mocker):
     assert res.exit_code == 0, res.output
     assert "def-old" in res.output
     assert "def-mine" in res.output
-    assert "THIS MACHINE" in res.output  # marks the def this machine uses
-    assert "def-unrelated" not in res.output  # only "Attention" defs listed
+    assert "THIS MACHINE" in res.output
+    assert "def-unrelated" not in res.output
 
 
 def test_adopt_points_local_state_at_given_definition(_isolate_state):

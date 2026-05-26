@@ -1,17 +1,18 @@
-"""click CLI entry point."""
+"""click CLI entry point.
+
+NOTE: the standalone HTTP relay (port 8771) has been removed; browser
+extension events now go to the fulcra-collect daemon's
+`/api/extension/attention` endpoint on its stable port. This CLI keeps
+the bootstrap / setup / status / defs / adopt / reset commands for
+multi-machine wrangling, but no longer runs a relay process of its own.
+"""
 from __future__ import annotations
 
 import json as _json
-import os as _os
-import secrets as _secrets
-import shutil as _shutil
 import socket as _socket
-import stat as _stat
-from pathlib import Path as _Path
 
 import click
 
-from . import service_manager
 from . import state as state_mod
 from .fulcra import FulcraClient, sanitize_tag_value
 
@@ -30,31 +31,19 @@ def bootstrap() -> None:
     click.echo(f"attention={s.attention_definition_id}")
 
 
-def _relay_json_path() -> _Path:
-    return _Path(
-        _os.environ.get("FULCRA_ATTENTION_RELAY_JSON")
-        or _os.path.expanduser("~/.config/fulcra-attention/relay.json")
-    )
-
-
-def _load_or_create_relay_json(port: int = 8771) -> dict:
-    path = _relay_json_path()
-    if path.exists():
-        return _json.loads(path.read_text())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = {"bearer_token": _secrets.token_urlsafe(32), "port": port}
-    path.write_text(_json.dumps(body, indent=2, sort_keys=True))
-    _os.chmod(path, _stat.S_IRUSR | _stat.S_IWUSR)  # 0600
-    return body
-
-
-@cli.command(help="Generate bearer token and install the relay as a system service.")
+@cli.command(help="Register this machine's hostname tag (machine:<host>).")
 @click.option(
     "--hostname",
     default=None,
     help="Override autodetected hostname for the `machine:<host>` tag.",
 )
 def setup(hostname: str | None) -> None:
+    """Per-machine setup: registers a `machine:<host>` tag so events
+    can be filtered by machine. No longer installs a launchd/systemd
+    unit (the daemon owns the HTTP listener now); no longer manages a
+    bearer token (set the extension-token via the Fulcra Collect web UI
+    instead).
+    """
     s = state_mod.load(state_mod.DEFAULT_PATH)
     if not s.attention_definition_id:
         raise click.ClickException(
@@ -73,15 +62,13 @@ def setup(hostname: str | None) -> None:
     client.ensure_machine_tag(short, s)
     s.hostname = short
     state_mod.save(s, state_mod.DEFAULT_PATH)
-    relay = _load_or_create_relay_json()
-    exe = _shutil.which("fulcra-attention") or "fulcra-attention"
-    path = service_manager.install(executable=exe)
-    click.echo(f"Hostname:     {short} (tag: machine:{short})")
-    click.echo(f"Bearer token: {relay['bearer_token']}")
-    click.echo(f"Port:         {relay['port']}")
-    click.echo(f"Service file: {path}")
+    click.echo(f"Hostname: {short} (tag: machine:{short})")
     click.echo()
-    click.echo("Paste the bearer token into the Chrome extension popup.")
+    click.echo(
+        "Set an extension-token in the Fulcra Collect web UI "
+        "(Attention plugin setup) and paste the same value into the "
+        "browser extension's options page.",
+    )
 
 
 @cli.command(help="Print the cached state.json contents.")
@@ -119,18 +106,18 @@ def defs() -> None:
         click.echo(f"{d.get('id')}  created={d.get('created_at', '?')}{suffix}")
 
 
-@cli.command(help="Point this machine's relay at a specific Attention definition id.")
+@cli.command(help="Point this machine's daemon at a specific Attention definition id.")
 @click.argument("definition_id")
 def adopt(definition_id: str) -> None:
-    # Local-only: rewrites state.json so this machine's relay forwards
+    # Local-only: rewrites state.json so this machine's daemon forwards
     # events to an existing definition instead of its own. Used to merge
     # a machine onto another machine's definition. Copy the id from the
-    # `defs` output. Does not touch Fulcra — restart the relay to apply.
+    # `defs` output. Does not touch Fulcra — restart the daemon to apply.
     s = state_mod.load(state_mod.DEFAULT_PATH)
     s.attention_definition_id = definition_id
     state_mod.save(s, state_mod.DEFAULT_PATH)
     click.echo(f"adopted: {definition_id}")
-    click.echo("Restart the relay for this to take effect.")
+    click.echo("Restart the daemon for this to take effect.")
 
 
 @cli.command(help="Soft-delete the Attention def + clear local state.")
@@ -150,21 +137,3 @@ def reset(confirm: bool) -> None:
         s.attention_definition_id = None
     s.watermarks = {}
     state_mod.save(s, state_mod.DEFAULT_PATH)
-
-
-@cli.command(help="Foreground-run the relay (intended for launchd/systemd).")
-@click.option("--host", default="127.0.0.1", show_default=True)
-@click.option("--port", default=None, type=int,
-              help="Override port from ~/.config/fulcra-attention/relay.json.")
-def relay(host: str, port: int | None) -> None:
-    from .relay import ReceiverContext, make_server
-    cfg = _load_or_create_relay_json()
-    actual_port = port or cfg["port"]
-    s = state_mod.load(state_mod.DEFAULT_PATH)
-    if not s.attention_definition_id:
-        raise click.ClickException("run `fulcra-attention bootstrap` first")
-    client = FulcraClient()
-    ctx = ReceiverContext(client=client, state=s, bearer_token=cfg["bearer_token"])
-    server = make_server(host=host, port=actual_port, context=ctx)
-    click.echo(f"listening on http://{host}:{actual_port}/attention")
-    server.serve_forever()

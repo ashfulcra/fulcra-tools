@@ -6,7 +6,13 @@ import json
 import httpx
 import pytest
 
-from fulcra_attention.fulcra import CATEGORY_VOCAB, FulcraClient, sanitize_tag_value
+from fulcra_attention.fulcra import (
+    CATEGORY_VOCAB,
+    TAG_NAME_MAX,
+    FulcraClient,
+    build_tag_name,
+    sanitize_tag_value,
+)
 from fulcra_attention.state import State
 
 
@@ -28,9 +34,6 @@ from fulcra_attention.state import State
 )
 def test_sanitize_tag_value_collapses_disallowed_chars(raw: str, expected: str):
     assert sanitize_tag_value(raw) == expected
-
-
-from fulcra_attention.fulcra import TAG_NAME_MAX, build_tag_name
 
 
 def test_build_tag_name_short_value_no_hash():

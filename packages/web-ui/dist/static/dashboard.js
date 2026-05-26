@@ -40,6 +40,29 @@ function timeAgo(isoString) {
   return `${days} days ago`;
 }
 
+// Pick the cleanest unit for a frequency interval in seconds. Used by the
+// dashboard row to show "Every 6 hours" / "Every 30 min".
+function humanizeInterval(seconds) {
+  if (!seconds || seconds <= 0) return null;
+  if (seconds < 3600) {
+    const m = Math.round(seconds / 60);
+    return `Every ${m} min`;
+  }
+  if (seconds < 86400) {
+    const h = Math.round(seconds / 3600);
+    return `Every ${h} hour${h !== 1 ? "s" : ""}`;
+  }
+  const d = Math.round(seconds / 86400);
+  return `Every ${d} day${d !== 1 ? "s" : ""}`;
+}
+
+// Same shape as timeAgo, but with a "Last run: " / "Never run" framing so
+// the dashboard row can drop the result in directly.
+function humanizeRelativeTime(isoString) {
+  if (!isoString) return "Never run";
+  return `Last run: ${timeAgo(isoString)}`;
+}
+
 // ---------------------------------------------------------------------------
 // Per-plugin status pill — richer than v1's Enabled/Disabled
 // ---------------------------------------------------------------------------
@@ -150,17 +173,48 @@ function dashboard() {
       return pillFor(plugin).label;
     },
 
+    // Frequency line. Scheduled plugins → "Every N hours/min". Service
+    // plugins → "Continuous (service)". Manual plugins → null (no line).
     humanInterval(plugin) {
-      // Render the default_interval_s as a human string.
-      const s = plugin.default_interval_s;
-      if (!s) return null;
-      if (s < 3600) return `Every ${Math.round(s / 60)} min`;
-      if (s < 86400) {
-        const h = Math.round(s / 3600);
-        return `Every ${h} hour${h !== 1 ? "s" : ""}`;
+      if (plugin.kind === "service") return "Continuous (service)";
+      if (plugin.kind === "manual") return null;
+      return humanizeInterval(plugin.default_interval_s);
+    },
+
+    // Last-run line. Manual plugins use the slightly friendlier "Not run yet"
+    // when they've never been triggered, vs. the generic "Never run" for
+    // scheduled/service rows.
+    lastRunLabel(plugin) {
+      if (plugin.last_run) {
+        return `Last run: ${timeAgo(plugin.last_run)}`;
       }
-      const d = Math.round(s / 86400);
-      return `Every ${d} day${d !== 1 ? "s" : ""}`;
+      return plugin.kind === "manual" ? "Not run yet" : "Never run";
+    },
+
+    // Plugins enabled by the user, sorted by kind then name. Surfaced at the
+    // top of the dashboard so the "what's running" set is immediately visible.
+    get enabledPlugins() {
+      return this._sortedByKindName(this.plugins.filter(p => p.enabled));
+    },
+
+    // Plugins the user could turn on but hasn't. Sorted the same way and
+    // rendered in a collapsed-feeling section below the enabled list.
+    get disabledPlugins() {
+      return this._sortedByKindName(this.plugins.filter(p => !p.enabled));
+    },
+
+    _sortedByKindName(arr) {
+      return [...arr].sort((a, b) => {
+        const ka = (a.kind || "").localeCompare(b.kind || "");
+        if (ka !== 0) return ka;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+    },
+
+    // Hand control back to the parent app() so it can switch the route to the
+    // per-plugin setup wizard. Triggered by the Configure button on each row.
+    configurePlugin(plugin) {
+      this.$dispatch("configure-plugin", { id: plugin.id });
     },
 
     canRunNow(plugin) {

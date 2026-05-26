@@ -29,6 +29,35 @@ def test_spec_matches_duration_compares_measurement_spec():
     assert _spec_matches(existing, different_unit) is False
 
 
+def test_spec_matches_ignores_fulcra_added_extras_on_existing():
+    """Regression for the 2026-05-26 Apple Podcasts / Generic RSS failure:
+    Fulcra adds server-side defaults (e.g. metric_kind=discrete) on
+    create that the client never sent. Strict equality used to flag
+    those as schema mismatches and reject cross-plugin def adoption.
+    Now permissive: only the fields the expected spec specifies need
+    to match; existing-side extras are ignored.
+    """
+    expected = {
+        "annotation_type": "duration",
+        "measurement_spec": {
+            "measurement_type": "duration",
+            "value_type": "duration",
+            "unit": None,
+        },
+    }
+    existing_with_extras = {
+        "annotation_type": "duration",
+        "measurement_spec": {
+            # Same as expected, plus a Fulcra-added field:
+            "measurement_type": "duration",
+            "value_type": "duration",
+            "unit": None,
+            "metric_kind": "discrete",  # <-- server-side default
+        },
+    }
+    assert _spec_matches(existing_with_extras, expected) is True
+
+
 def test_spec_matches_mixed_types_never_match():
     existing = {"annotation_type": "duration",
                 "measurement_spec": {"unit": "seconds"}}

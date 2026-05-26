@@ -306,9 +306,79 @@ def main() -> int:
                     assert body.get("authenticated") is False, f"body={body}"
 
                 # --------------------------------------------------------
-                # Step 2 — Paste Fulcra token
+                # Steps 2–5 — Browser-based sign-in via the `fulcra` CLI.
+                #
+                # The daemon shells out to `fulcra auth login` (opens the
+                # user's browser, polls for device-auth completion) and then
+                # `fulcra auth print-access-token` to capture the token. We
+                # mock both subprocess.run AND shutil.which so the smoke runs
+                # without the real CLI being installed.
                 # --------------------------------------------------------
-                @step("POST /api/fulcra/auth/token → ok:true")
+                from unittest.mock import patch as _patch
+
+                @step("GET /api/fulcra/auth/cli_status (no CLI) → available:false")
+                def step_cli_status_absent():
+                    with _patch("shutil.which", return_value=None):
+                        r = client.get("/api/fulcra/auth/cli_status", headers=h)
+                    assert r.status_code == 200, f"status={r.status_code}"
+                    body = r.json()
+                    assert body.get("available") is False, f"body={body}"
+                    assert body.get("signed_in") is False, f"body={body}"
+
+                @step("POST /api/fulcra/auth/cli_login (no CLI) → 424")
+                def step_cli_login_absent():
+                    with _patch("shutil.which", return_value=None):
+                        r = client.post("/api/fulcra/auth/cli_login", headers=h)
+                    assert r.status_code == 424, (
+                        f"expected 424 when CLI absent; got {r.status_code} {r.text}"
+                    )
+
+                @step("GET /api/fulcra/auth/cli_status (CLI present, signed out) "
+                      "→ available:true, signed_in:false")
+                def step_cli_status_present():
+                    fake = MagicMock()
+                    fake.returncode = 1
+                    fake.stdout = ""
+                    with _patch("shutil.which", return_value="/fake/path/fulcra"), \
+                         _patch("subprocess.run", return_value=fake):
+                        r = client.get("/api/fulcra/auth/cli_status", headers=h)
+                    assert r.status_code == 200
+                    body = r.json()
+                    assert body.get("available") is True, f"body={body}"
+                    assert body.get("signed_in") is False, f"body={body}"
+
+                @step("POST /api/fulcra/auth/cli_login (CLI sign-in succeeds) → ok:true")
+                def step_cli_login_success():
+                    login_ok = MagicMock()
+                    login_ok.returncode = 0
+                    login_ok.stdout = "Signed in.\n"
+                    login_ok.stderr = ""
+
+                    token_ok = MagicMock()
+                    token_ok.returncode = 0
+                    token_ok.stdout = "mocked-fulcra-cli-token\n"
+                    token_ok.stderr = ""
+
+                    with _patch("shutil.which", return_value="/fake/path/fulcra"), \
+                         _patch("subprocess.run", side_effect=[login_ok, token_ok]):
+                        r = client.post("/api/fulcra/auth/cli_login", headers=h)
+                    assert r.status_code == 200, f"status={r.status_code} body={r.text}"
+                    assert r.json().get("ok") is True
+
+                # --------------------------------------------------------
+                # Step 6 — Clear the CLI-set token so the fallback paste-token
+                # path also gets exercised end-to-end below.
+                # --------------------------------------------------------
+                @step("DELETE /api/fulcra/auth/token → ok (resets for paste-token test)")
+                def step_clear_auth():
+                    r = client.delete("/api/fulcra/auth/token", headers=h)
+                    assert r.status_code == 200
+                    assert r.json().get("ok") is True
+
+                # --------------------------------------------------------
+                # Step 7 — Paste Fulcra token (fallback path)
+                # --------------------------------------------------------
+                @step("POST /api/fulcra/auth/token → ok:true (paste-token fallback)")
                 def step_02():
                     r = client.post("/api/fulcra/auth/token",
                                     json={"token": "mocked-fulcra-token"},
@@ -317,7 +387,7 @@ def main() -> int:
                     assert r.json().get("ok") is True
 
                 # --------------------------------------------------------
-                # Step 3 — Fulcra auth status now authenticated
+                # Step 8 — Fulcra auth status now authenticated
                 # --------------------------------------------------------
                 @step("GET /api/fulcra/auth/status → authenticated:true")
                 def step_03():
@@ -403,7 +473,11 @@ def main() -> int:
                     oauth_state = body["state"]
 
                 # Run steps so far; bail on critical failure before OAuth callback
-                for fn in [step_01, step_02, step_03, step_04, step_05,
+                for fn in [step_01,
+                           step_cli_status_absent, step_cli_login_absent,
+                           step_cli_status_present, step_cli_login_success,
+                           step_clear_auth,
+                           step_02, step_03, step_04, step_05,
                            step_06, step_07, step_08]:
                     try:
                         fn()

@@ -71,7 +71,7 @@ describe("flushOutbox", () => {
     await flushOutbox();
     expect(f).toHaveBeenCalledTimes(2);
     const [url, init] = f.mock.calls[0];
-    expect(url).toBe("http://127.0.0.1:8771/attention");
+    expect(url).toBe("http://127.0.0.1:9292/api/extension/attention");
     expect((init as RequestInit).headers).toMatchObject({
       "Authorization": "Bearer test-tok",
       "Content-Type": "application/json",
