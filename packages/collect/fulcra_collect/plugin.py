@@ -115,6 +115,14 @@ class SetupStep:
     by (e.g. "duration", "moment"). Emitted in the plugin contract so the
     wizard can pass ?annotation_type=... to /api/definitions. Empty string
     means no filter (wizard defaults to "duration")."""
+    condition: dict[str, tuple[str, ...]] | None = None
+    """Optional display condition: maps setting keys to tuples of acceptable
+    values. When set, the wizard shows this step only when *all* keys match —
+    i.e. inputValues[key] is in the acceptable-values tuple for every key in
+    the dict. Steps that do not satisfy their condition are auto-skipped in
+    both the Next and Back directions. If a key hasn't been filled yet
+    (inputValues[key] is undefined), the condition is NOT satisfied — the
+    step is skipped. Unconditional steps (condition=None) are always shown."""
 
 
 @dataclass

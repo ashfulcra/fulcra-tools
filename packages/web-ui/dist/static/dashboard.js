@@ -68,6 +68,13 @@ function humanizeRelativeTime(isoString) {
 // ---------------------------------------------------------------------------
 
 function pillFor(plugin) {
+  // Consistent schema: the badge represents the plugin's STATE only — never
+  // its kind. Kind (manual / scheduled / service) lives in the metadata
+  // line below the description ("Manual", "Every 6 hours", "Continuous
+  // (service)"). Mixing kind into the badge meant a scheduled plugin that
+  // hadn't run yet looked like a different kind from one that had — same
+  // plugin, different badge for time-of-day reasons. See user feedback
+  // 2026-05-26.
   if (!plugin.enabled) {
     return { label: "Disabled", cls: "bg-slate-100 text-slate-500" };
   }
@@ -80,14 +87,11 @@ function pillFor(plugin) {
   if (plugin.last_outcome === "done") {
     return { label: "Healthy", cls: "bg-emerald-100 text-emerald-800" };
   }
-  if (plugin.kind === "manual") {
-    return { label: "Manual", cls: "bg-emerald-50 text-emerald-700" };
-  }
-  // Scheduled but hasn't run yet (or last_outcome is null/error but failures < 3)
-  if (plugin.kind === "scheduled" || plugin.kind === "service") {
-    return { label: "Scheduled", cls: "bg-slate-100 text-slate-700" };
-  }
-  return { label: "Enabled", cls: "bg-violet-100 text-violet-700" };
+  // Enabled but no successful run yet (never run, or last run failed but
+  // failure count < 3). Same label regardless of plugin kind — the
+  // metadata line below tells the user whether it's manual, scheduled,
+  // or continuous.
+  return { label: "Not run yet", cls: "bg-slate-100 text-slate-700" };
 }
 
 // ---------------------------------------------------------------------------
@@ -173,11 +177,13 @@ function dashboard() {
       return pillFor(plugin).label;
     },
 
-    // Frequency line. Scheduled plugins → "Every N hours/min". Service
-    // plugins → "Continuous (service)". Manual plugins → null (no line).
+    // Frequency line. Manual plugins show "Manual" (they only run when the
+    // user triggers them) — the kind label moved out of the status badge to
+    // here so the badge can be a pure state indicator. Scheduled plugins →
+    // "Every N hours/min". Service plugins → "Continuous (service)".
     humanInterval(plugin) {
       if (plugin.kind === "service") return "Continuous (service)";
-      if (plugin.kind === "manual") return null;
+      if (plugin.kind === "manual") return "Manual";
       return humanizeInterval(plugin.default_interval_s);
     },
 

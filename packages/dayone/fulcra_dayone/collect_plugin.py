@@ -199,22 +199,22 @@ PLUGIN = Plugin(
                 "Open **System Settings -> Privacy & Security -> Full Disk "
                 "Access**, click **+**, and add the terminal you're running "
                 "the daemon from (or the bundled fulcra-collect.app once it "
-                "exists). Safe to skip if you picked export_file mode.\n\n"
+                "exists).\n\n"
                 "Also for live-app mode: don't quit Day One entirely — "
                 "entries from your other devices sync locally only while "
                 "the app is running."
             ),
+            condition={"local_db": ("live_app",)},
         ),
         SetupStep(
             kind="file_upload",
             title="Upload your Day One export",
             body_md=(
-                "Only needed for **export_file** mode — point at the .zip "
-                "Day One produces from File -> Export (or the unzipped "
-                "folder). If you picked **live_app** mode above, skip this "
-                "step."
+                "Point at the .zip Day One produces from File -> Export "
+                "(or the unzipped folder)."
             ),
             settings_keys=("path",),
+            condition={"local_db": ("export_file",)},
         ),
         SetupStep(
             kind="definition_picker",

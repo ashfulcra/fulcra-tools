@@ -425,6 +425,30 @@ def test_plugin_contract_enum_labels_round_trip(collect_home):
     assert s["enum_labels"] == ["Live app (continuous)", "Export file (one-shot)"]
 
 
+def test_plugin_contract_setup_step_condition_round_trip(collect_home):
+    """SetupStep.condition survives the contract serializer as a JSON object
+    with list values (tuples become arrays in JSON). None-condition steps
+    serialize as null so the frontend can branch deterministically."""
+    from fulcra_collect.plugin import Plugin, SetupStep
+    plugin = Plugin(
+        id="cond", name="Cond", kind="manual", run=lambda c: None,
+        setup_steps=(
+            SetupStep(kind="intro", title="Intro"),
+            SetupStep(kind="file_upload", title="Upload",
+                      condition={"mode": ("export_file",)}),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={"cond": plugin})
+    client = _client(daemon)
+    r = client.get("/api/plugin/cond/contract")
+    assert r.status_code == 200
+    steps = r.json()["setup_steps"]
+    # Unconditional step → null
+    assert steps[0]["condition"] is None
+    # Conditional step → dict with list values
+    assert steps[1]["condition"] == {"mode": ["export_file"]}
+
+
 # ---------------------------------------------------------------------------
 # Plugin health check
 # ---------------------------------------------------------------------------
@@ -809,8 +833,13 @@ def test_definitions_route_returns_list(collect_home, _in_memory_keyring, monkey
     assert "def-3" not in ids
 
 
-def test_definitions_route_filters_by_annotation_type(collect_home, _in_memory_keyring, monkeypatch):
-    """?annotation_type=moment returns only moment-type definitions."""
+def test_definitions_route_ignores_annotation_type_param(collect_home, _in_memory_keyring, monkeypatch):
+    """?annotation_type=moment no longer filters — all non-deleted defs are returned.
+
+    Server-side filtering was removed so the frontend can group compatible vs.
+    other-type annotations itself. The query param is accepted for backwards
+    compatibility but has no effect.
+    """
     import fulcra_collect.credentials as _creds_mod
     _creds_mod.set_user_secret("bearer-token", "valid-token")
 
@@ -834,11 +863,19 @@ def test_definitions_route_filters_by_annotation_type(collect_home, _in_memory_k
 
     daemon = _build_test_daemon(collect_home)
     client = _client(daemon)
+
+    # With annotation_type param — both defs must come back (no server filter).
     r = client.get("/api/definitions?annotation_type=moment")
     assert r.status_code == 200
     defs = r.json()["definitions"]
-    assert len(defs) == 1
-    assert defs[0]["annotation_type"] == "moment"
+    assert len(defs) == 2, "annotation_type param must not filter server-side"
+    ids = {d["id"] for d in defs}
+    assert ids == {"dur-1", "mom-1"}
+
+    # Without the param — same result.
+    r2 = client.get("/api/definitions")
+    assert r2.status_code == 200
+    assert len(r2.json()["definitions"]) == 2
 
 
 def test_definition_recent_requires_fulcra_auth(collect_home, _in_memory_keyring):

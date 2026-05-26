@@ -156,6 +156,19 @@ def test_setup_step_input_kind_with_settings_keys():
     assert s.settings_keys == ("api_key",)
 
 
+def test_setup_step_condition_defaults_to_none():
+    from fulcra_collect.plugin import SetupStep
+    s = SetupStep(kind="intro", title="Unconditional")
+    assert s.condition is None
+
+
+def test_setup_step_condition_accepted():
+    from fulcra_collect.plugin import SetupStep
+    s = SetupStep(kind="file_upload", title="Upload export",
+                  condition={"mode": ("export_file",)})
+    assert s.condition == {"mode": ("export_file",)}
+
+
 def test_plugin_setup_steps_default_empty():
     from fulcra_collect.plugin import Plugin
     p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
