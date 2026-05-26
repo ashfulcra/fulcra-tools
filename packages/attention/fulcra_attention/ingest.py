@@ -1,13 +1,16 @@
 # fulcra_attention/ingest.py
 """Build DurationAnnotation events for fulcra-attention.
 
-Converts a single relay-shaped payload to the wire format ingested by
-FulcraClient.ingest_batch. Source-id is sha256-derived for idempotency.
+Converts a single extension-shaped payload to the wire format ingested
+by FulcraClient.ingest_batch. Source-id is sha256-derived for
+idempotency. The HTTP transport that used to live in relay.py is gone
+— the fulcra-collect daemon's `/api/extension/attention` route now
+calls `validate_payload()` and then `build_attention_event()` directly.
 """
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -16,6 +19,52 @@ from fulcra_common import wire
 from .fulcra import build_tag_name
 from .scrub import scrub_url
 from .state import State
+
+
+_STRING_FIELDS = (
+    "url", "category", "title", "og_description", "favicon_url",
+    "chrome_identity", "og_type", "lang", "client",
+    "start_time", "end_time",
+)
+
+
+def validate_payload(payload: dict) -> None:
+    """Raise ValueError with a human-readable message on schema violation.
+
+    The same validator the old standalone relay used. Lifted here so the
+    daemon's extension route can share it without depending on the
+    deleted relay module.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+    required = ("start_time", "end_time", "client")
+    missing = [k for k in required if k not in payload]
+    if missing:
+        raise ValueError(f"missing fields: {missing}")
+    # Type-check every string field — refuse ints, lists, dicts in places
+    # we expect strings. Closes off a class of accidental
+    # crash-via-malformed-payload paths and prevents weird types from
+    # flowing into sanitize_tag_value / build_tag_name downstream.
+    for k in _STRING_FIELDS:
+        v = payload.get(k)
+        if v is not None and not isinstance(v, str):
+            raise ValueError(
+                f"field {k!r} must be string or null, got {type(v).__name__}",
+            )
+    url = payload.get("url")
+    cat = payload.get("category")
+    if (url is None) == (cat is None):
+        raise ValueError("exactly one of {url, category} must be non-null")
+    try:
+        st = _parse_iso(payload["start_time"])
+        en = _parse_iso(payload["end_time"])
+    except ValueError as exc:
+        raise ValueError(f"unparseable timestamp: {exc}") from exc
+    if st > en:
+        raise ValueError("start_time > end_time")
+    now = datetime.now(timezone.utc)
+    if en > now + timedelta(minutes=5):
+        raise ValueError("end_time more than 5 minutes in the future")
 
 # Bumped 2026-05-19 from v1 → v2 so that source_ids generated post-reset
 # can never collide with v1 source_ids that are still in Fulcra (under

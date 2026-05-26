@@ -61,6 +61,32 @@ def test_lastfm_plugin_metadata_is_scheduled():
     assert {c.key for c in LASTFM_PLUGIN.required_credentials} == {"api-key"}
 
 
+def test_lastfm_setup_steps_contain_a_test_connection_step():
+    """The Last.fm wizard must verify entered creds before letting the
+    user advance to definition_picker / done. Without this step, bad
+    api-key/username combos silently persist and only surface as a run
+    failure an hour later. The step lives between the paste-creds input
+    and the definition_picker.
+    """
+    kinds = [s.kind for s in LASTFM_PLUGIN.setup_steps]
+    assert "test_connection" in kinds, (
+        f"Last.fm wizard is missing a test_connection step. Got kinds: {kinds}"
+    )
+    # And it must be reachable BEFORE definition_picker — otherwise the
+    # user has already bound a Fulcra def before they discover their
+    # Last.fm creds are wrong.
+    assert kinds.index("test_connection") < kinds.index("definition_picker")
+    # …and AFTER the input step (no point testing empty creds).
+    assert kinds.index("input") < kinds.index("test_connection")
+
+
+def test_lastfm_plugin_declares_a_health_check():
+    """The wizard's test_connection step is wired by the daemon's
+    /api/plugin/{id}/health_check route to plugin.health_check. Without
+    one declared, the step renders empty and Next is unreachable."""
+    assert LASTFM_PLUGIN.health_check is not None
+
+
 def test_lastfm_plugin_declares_canonical_definition_name():
     """R6: the plugin opts into the shared resolver via canonical_definition_name."""
     assert LASTFM_PLUGIN.canonical_definition_name == "Listened"
@@ -108,7 +134,9 @@ def test_run_fetches_normalizes_imports_and_advances_watermark(monkeypatch):
                         lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("lastfm")
-    ctx = RunContext(plugin_id="lastfm", config={}, credentials={"api-key": "K"},
+    ctx = RunContext(plugin_id="lastfm",
+                     config={"username": "test_user"},
+                     credentials={"api-key": "K"},
                      state=st, log=logging.getLogger("t"), _emit=lambda e: None)
     LASTFM_PLUGIN.run(ctx)
 
@@ -119,10 +147,70 @@ def test_run_fetches_normalizes_imports_and_advances_watermark(monkeypatch):
 
 def test_run_raises_a_clear_error_when_the_api_key_is_missing(monkeypatch):
     st = PluginState("lastfm")
-    ctx = RunContext(plugin_id="lastfm", config={}, credentials={},
+    ctx = RunContext(plugin_id="lastfm",
+                     config={"username": "test_user"},
+                     credentials={},
                      state=st, log=logging.getLogger("t"), _emit=lambda e: None)
     with pytest.raises(RuntimeError, match="api-key"):
         LASTFM_PLUGIN.run(ctx)
+
+
+def test_run_raises_a_clear_error_when_username_setting_is_missing(monkeypatch):
+    """Regression for the 2026-05-25 Last.fm KeyError bug. Username lives in
+    settings (configured via the wizard or `set-setting`), api-key in
+    credentials. Before the fix, _run_lastfm forwarded only api_key, so the
+    importer crashed with KeyError: 'username' the moment a real sync ran.
+    Now we fail fast with a clear, actionable RuntimeError instead.
+    """
+    st = PluginState("lastfm")
+    ctx = RunContext(plugin_id="lastfm",
+                     config={},
+                     credentials={"api-key": "K"},
+                     state=st, log=logging.getLogger("t"), _emit=lambda e: None)
+    with pytest.raises(RuntimeError, match="username"):
+        LASTFM_PLUGIN.run(ctx)
+
+
+def test_run_forwards_username_and_api_key_to_the_importer(monkeypatch):
+    """Companion to the regression above: when both credential + setting are
+    present, the importer receives both — keyed exactly as it expects
+    (`api_key` and `username`).
+    """
+    captured = {}
+
+    def fake_fetch(creds, since, max_pages):
+        captured["creds"] = creds
+        return []  # no scrobbles, nothing else to do
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+                        fake_fetch)
+    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+                        lambda raw: [])
+
+    class FakeResult:
+        posted = 0
+        skipped_existing = 0
+        verified = 0
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False):
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+                        lambda: FakeClient())
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    st = PluginState("lastfm")
+    ctx = RunContext(plugin_id="lastfm",
+                     config={"username": "alice"},
+                     credentials={"api-key": "secret"},
+                     state=st, log=logging.getLogger("t"), _emit=lambda e: None)
+    LASTFM_PLUGIN.run(ctx)
+
+    assert captured["creds"] == {"api_key": "secret", "username": "alice"}
 
 
 def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
@@ -158,7 +246,9 @@ def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
                         lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("lastfm")
-    ctx = RunContext(plugin_id="lastfm", config={}, credentials={"api-key": "K"},
+    ctx = RunContext(plugin_id="lastfm",
+                     config={"username": "test_user"},
+                     credentials={"api-key": "K"},
                      state=st, log=logging.getLogger("t"), _emit=lambda e: None)
     LASTFM_PLUGIN.run(ctx)
 
@@ -233,7 +323,7 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped(monkeypatch
 
     ctx = RunContext(
         plugin_id="lastfm",
-        config={},
+        config={"username": "test_user"},
         credentials={"api-key": "K"},
         state=_FakePluginState(),
         log=logging.getLogger("t"),
@@ -288,7 +378,7 @@ def test_run_does_not_call_resolver_when_definition_already_bootstrapped(monkeyp
     st = PluginState("lastfm")
     ctx = RunContext(
         plugin_id="lastfm",
-        config={},
+        config={"username": "test_user"},
         credentials={"api-key": "K"},
         state=st,
         log=logging.getLogger("t"),
@@ -371,7 +461,15 @@ def test_netflix_plugin_run(monkeypatch, tmp_path):
     assert fake_client.calls["ensure_tag"] == "netflix"
 
 
-def test_netflix_plugin_raises_without_path():
+def test_netflix_plugin_raises_without_path(monkeypatch):
+    # Make hermetic: stub _state_load so the resolver guard exits
+    # without needing a fulcra client (which this ctx doesn't have).
+    # Previously this test relied on a leftover ~/.config/fulcra-media/
+    # state.json containing a cached watched_definition_id. After the
+    # 2026-05-26 state-clear that file is empty, exposing the env
+    # dependency.
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("netflix", {})
     with pytest.raises(RuntimeError, match="path"):
         NETFLIX_PLUGIN.run(ctx)
@@ -558,7 +656,9 @@ def test_spotify_extended_plugin_run(monkeypatch, tmp_path):
     assert fake_client.calls["ensure_tag"] == "spotify"
 
 
-def test_spotify_extended_plugin_raises_without_path():
+def test_spotify_extended_plugin_raises_without_path(monkeypatch):
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("spotify-extended", {})
     with pytest.raises(RuntimeError, match="path"):
         SPOTIFY_EXTENDED_PLUGIN.run(ctx)
@@ -746,7 +846,9 @@ def test_youtube_plugin_run(monkeypatch, tmp_path):
     assert fake_client.calls["ensure_tag"] == "youtube"
 
 
-def test_youtube_plugin_raises_without_path():
+def test_youtube_plugin_raises_without_path(monkeypatch):
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("youtube", {})
     with pytest.raises(RuntimeError, match="path"):
         YOUTUBE_PLUGIN.run(ctx)
@@ -1178,7 +1280,9 @@ def test_apple_takeout_plugin_raises_when_no_csv_in_dir(monkeypatch, tmp_path):
         APPLE_TAKEOUT_PLUGIN.run(ctx)
 
 
-def test_apple_takeout_plugin_raises_without_path():
+def test_apple_takeout_plugin_raises_without_path(monkeypatch):
+    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+                        lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("apple-takeout", {})
     with pytest.raises(RuntimeError, match="path"):
         APPLE_TAKEOUT_PLUGIN.run(ctx)
@@ -3910,7 +4014,7 @@ def test_lastfm_emits_annotation_event_on_successful_writes(monkeypatch):
     st = PluginState("lastfm")
     ctx = RunContext(
         plugin_id="lastfm",
-        config={},
+        config={"username": "test_user"},
         credentials={"api-key": "K"},
         state=st,
         log=logging.getLogger("t"),

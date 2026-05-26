@@ -16,9 +16,14 @@ def test_registry_discovers_the_three_reference_plugins():
     assert "attention-relay" in result.plugins
     assert "lastfm" in result.plugins
     assert "dayone" in result.plugins
-    assert result.plugins["attention-relay"].kind == "service"
+    # attention-relay is now `manual` — the daemon hosts the
+    # extension endpoint directly, so the plugin no longer runs a
+    # supervised HTTP server. It exists as a manual sanity-check.
+    assert result.plugins["attention-relay"].kind == "manual"
     assert result.plugins["lastfm"].kind == "scheduled"
-    assert result.plugins["dayone"].kind == "manual"
+    # dayone is now scheduled (every 6 h) so live-app mode keeps a fresh
+    # watermark without the user clicking Run Now.
+    assert result.plugins["dayone"].kind == "scheduled"
 
 
 def test_daemon_status_lists_the_discovered_plugins(collect_home: Path):

@@ -19,6 +19,13 @@ const TOKEN = document.cookie
   .find(r => r.startsWith("fulcra_token="))
   ?.split("=")[1];
 
+// Exposed for wizard.js's _submitFileUpload, which uses XHR (not fetch) so it
+// can surface upload-progress events for multi-GB takeouts. Keeping the token
+// resolution in one place avoids the two helpers drifting apart.
+function apiToken() {
+  return TOKEN;
+}
+
 async function api(path, opts = {}) {
   const headers = {
     Authorization: `Bearer ${TOKEN}`,
@@ -50,6 +57,14 @@ function app() {
     route: "loading",
     errorMessage: "",
 
+    // ID of the plugin currently being configured via the per-plugin setup
+    // wizard. Set when the dashboard's Configure button is clicked; the
+    // setup-plugin route reads this to know which contract to load.
+    setupPluginId: null,
+    setupContract: null,
+    setupContractError: "",
+    setupWizard: null,
+
     async boot() {
       try {
         const [status, authStatus] = await Promise.all([
@@ -68,6 +83,38 @@ function app() {
       } catch (e) {
         this.route = "error";
         this.errorMessage = e.message;
+      }
+    },
+
+    // Restart the onboarding flow from the dashboard. Used by the small
+    // "Run setup wizard" link in the dashboard header — gives users a way
+    // back in if they bailed out mid-flow.
+    runOnboarding() {
+      this.setupPluginId = null;
+      this.setupContract = null;
+      this.setupWizard = null;
+      this.route = "onboarding";
+    },
+
+    // Triggered by the dashboard's Configure button via the @configure-plugin
+    // window event. Switches to the setup-plugin route and fetches the
+    // contract so the wizard can render.
+    async openSetupForPlugin(pluginId) {
+      this.setupPluginId = pluginId;
+      this.setupContract = null;
+      this.setupContractError = "";
+      this.setupWizard = null;
+      this.route = "setup-plugin";
+      try {
+        const contract = await api(`/api/plugin/${pluginId}/contract`);
+        this.setupContract = contract;
+        this.setupWizard = createWizard(
+          contract,
+          () => { this.route = "dashboard"; },   // on_complete → back to dashboard
+          () => { this.route = "dashboard"; },   // on_skip_plugin → back to dashboard
+        );
+      } catch (e) {
+        this.setupContractError = e.message || "Could not load plugin setup.";
       }
     },
   };

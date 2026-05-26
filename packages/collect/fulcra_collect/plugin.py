@@ -58,6 +58,14 @@ class Setting:
     ]
     help: str = ""
     enum_values: tuple[str, ...] | None = None
+    # Optional human-readable labels for each enum_values entry — one per
+    # value, positionally. When omitted, the wizard renders the raw enum
+    # value as the label (used to be the only option, which left users
+    # staring at `live_app` / `export_file` in production UI). Length must
+    # match enum_values; the dataclass doesn't enforce it but the contract
+    # serializer round-trips both and the renderer falls back to the value
+    # when labels are missing or short.
+    enum_labels: tuple[str, ...] | None = None
     default: object = None
     required: bool = True
     placeholder: str = ""
@@ -80,6 +88,13 @@ class SetupStep:
       permission_request — prompt the user to grant an OS permission
       browser_extension  — prompt the user to install a browser extension;
                            show extension_url as an install link
+      extension_pair     — one-click pairing handshake with the installed
+                           Fulcra Attention browser extension. The wizard
+                           generates a fresh extension-token via the daemon,
+                           postMessages it to the page, and waits for an
+                           ack from the extension's content script. Falls
+                           back to a copy-paste manual paste if no ack
+                           arrives within 3 seconds.
       test_connection    — invoke Plugin.health_check and show the result
       definition_picker  — let the user choose (or confirm) a Fulcra annotation
                            definition for this plugin
@@ -87,8 +102,8 @@ class SetupStep:
     """
     kind: Literal[
         "intro", "external_action", "input", "oauth", "file_upload",
-        "permission_request", "browser_extension", "test_connection",
-        "definition_picker", "done",
+        "permission_request", "browser_extension", "extension_pair",
+        "test_connection", "definition_picker", "done",
     ]
     title: str
     body_md: str = ""
@@ -149,6 +164,14 @@ class Plugin:
     required_settings: tuple[Setting, ...] = ()
     setup_steps: tuple[SetupStep, ...] = ()
     health_check: Callable[["RunContext"], "HealthResult"] | None = None
+    permission_check: Callable[["RunContext"], dict] | None = None
+    """Optional callable that verifies an OS-level permission is actually
+    granted (e.g. Full Disk Access). Returns
+    {"granted": bool, "hint": str | None}. The wizard's permission_request
+    step uses this so it can show "verified" instead of the misleading
+    "macOS will prompt when you click Next" (which is false for FDA — there
+    is no dialog; the user must add the binary in System Settings).
+    """
     oauth_handler: Callable[..., dict[str, str]] | None = None
     """Optional OAuth handler called by the daemon's callback route.
 
@@ -173,7 +196,7 @@ class Plugin:
     wizard can drive the entire flow without knowing the provider's
     endpoint or client_id.
     """
-    category: Literal["music", "video", "books", "journal", "activity", "other"] = "other"
+    category: Literal["audio", "video", "books", "journal", "activity", "other"] = "other"
     canonical_definition_name: str | None = None
 
     def __post_init__(self) -> None:
@@ -258,10 +281,37 @@ class RunContext:
         worker supplies this factory so `plugin.py` never has to know
         how to construct an HTTP client or handle auth directly. Plugins
         that do not call this method can leave the factory unset.
+
+        Stale-cache guard: when `state.definition_id` is set, validate
+        that the def still exists on the *current* Fulcra account before
+        returning it. After a daemon re-auth to a different account, the
+        cached id points at a def that doesn't exist here — ingest
+        accepts events keyed to it silently and they end up orphaned in
+        the timeline. On a stale hit we clear the cache and fall through
+        to the resolver. Implementation requires the factory to provide
+        a client whose `definition_exists(def_id)` is implemented (the
+        worker's `_FulcraDefinitionAdapter`); a fake client without
+        that method skips validation, which is fine for tests that
+        don't exercise the stale path.
         """
         cached = getattr(self.state, "definition_id", None)
         if cached and not force_new:
-            return cached
+            client = (self._fulcra_client_factory()
+                      if self._fulcra_client_factory is not None else None)
+            still_present = True
+            if client is not None and hasattr(client, "definition_exists"):
+                try:
+                    still_present = client.definition_exists(cached)
+                except Exception:
+                    # Network/adapter failure — be conservative and trust
+                    # the cache. The next run will retry the check.
+                    still_present = True
+            if still_present:
+                return cached
+            # Stale: clear and re-resolve. Caller's state mutation is
+            # picked up by the runner at run end (state.definition_id
+            # is part of the result envelope).
+            self.state.definition_id = None
         if self._fulcra_client_factory is None:
             raise RuntimeError(
                 "RunContext has no _fulcra_client_factory — the runner must "
@@ -276,4 +326,76 @@ class RunContext:
             force_new=force_new,
         )
         self.state.definition_id = new_id
+        return new_id
+
+    def ensure_definition(
+        self,
+        *,
+        cached: str | None,
+        expected_spec: dict,
+        canonical_name: str,
+    ) -> str:
+        """Return a guaranteed-fresh definition id for callers that
+        maintain their own per-package cache (alongside the per-plugin
+        ``state.definition_id``).
+
+        Pattern: media-helpers has a ``state.json`` with fields like
+        ``listened_definition_id`` shared across Last.fm + Deezer +
+        Spotify because they all write to the same canonical "Listened"
+        def. Without this helper, each plugin's run does
+        ``if not media_state.listened_definition_id: resolve`` — which
+        trusts the per-package cache blindly across account switches.
+
+        With this helper, callers pass their cached value in. If it's
+        still live on the current account, we return it as-is (cheap
+        round trip, cached). If it's stale or unset, we re-resolve and
+        the caller writes the fresh id back to both per-package state
+        and (via ``resolved_definition_id``) per-plugin state.
+
+        On stale-cache re-resolution, also emits an annotation event so
+        the dashboard activity feed surfaces a one-line note — mirrors
+        the attention extension route's recovery surface and keeps the
+        user informed when their data suddenly attaches to a different
+        def after a daemon re-auth.
+        """
+        if cached:
+            client = (self._fulcra_client_factory()
+                      if self._fulcra_client_factory is not None else None)
+            if client is not None and hasattr(client, "definition_exists"):
+                try:
+                    if client.definition_exists(cached):
+                        # Keep the per-plugin cache in sync — important
+                        # so future ``resolved_definition_id`` calls hit
+                        # without another round trip.
+                        if getattr(self.state, "definition_id", None) != cached:
+                            self.state.definition_id = cached
+                        return cached
+                except Exception:
+                    if getattr(self.state, "definition_id", None) != cached:
+                        self.state.definition_id = cached
+                    return cached
+            else:
+                # No validator available; trust the cache.
+                if getattr(self.state, "definition_id", None) != cached:
+                    self.state.definition_id = cached
+                return cached
+        # Stale or unset: re-resolve. resolved_definition_id will write
+        # the new id to per-plugin state; the caller is responsible for
+        # writing it to per-package state too.
+        had_stale_cache = bool(cached)
+        self.state.definition_id = None
+        new_id = self.resolved_definition_id(
+            expected_spec, canonical_name=canonical_name,
+        )
+        if had_stale_cache and new_id != cached:
+            # Surface the auto-recovery in the dashboard. ok=True
+            # because the recovery itself succeeded — the user just
+            # benefits from knowing why their data is now attached to
+            # a different def.
+            self.annotation(
+                f"Definition \"{canonical_name}\" re-resolved: "
+                f"previous {cached[:8]}… not present on this Fulcra "
+                f"account; now {new_id[:8]}…",
+                ok=True,
+            )
         return new_id

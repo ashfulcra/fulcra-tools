@@ -84,18 +84,195 @@ class Daemon:
         # UI's dashboard "Recently" feed. Lost on daemon restart (v1); sqlite
         # persistence is v1.5.
         self.activity = _activity.make_singleton()
-        # One-shot migration: copy the first per-plugin bearer-token to
-        # the new user-level shared location. Idempotent after first run.
+        # Throttle state for /api/extension/attention activity-feed entries.
+        # The extension can POST several events a minute during active
+        # browsing — pushing one feed entry per POST would blow through the
+        # 50-entry ring in minutes. We coalesce: at most one entry per
+        # _attention_activity_interval_s, summarising N events since last
+        # push. See note_attention_event for the producer hook and
+        # web.py extension_attention for the caller.
+        # -inf so the very first POST after a daemon restart fires
+        # immediately — the user opening the dashboard wants to see
+        # "yes, the extension is alive" without waiting 60s. Subsequent
+        # POSTs within the window get coalesced.
+        self._attention_activity_last_at: float = float("-inf")
+        self._attention_activity_count: int = 0
+        self._attention_activity_clients: set[str] = set()
+        self._attention_activity_interval_s: float = 60.0
+        # Indirection so tests can inject a fake clock without monkeypatching
+        # time.monotonic globally (which breaks pytest's own timing). The
+        # production callable is set in __init__ and replaced in tests.
+        import time as _time_mod
+        self._monotonic = _time_mod.monotonic
+        # TTL cache for attention-def validation. The extension POST route
+        # re-checks every _attention_validation_interval_s that the cached
+        # attention_definition_id still exists on the current Fulcra
+        # account — protects against the daemon being re-authed to a
+        # different account leaving stale def IDs in attention/state.json
+        # that ingest happily references but the timeline can't render.
+        self._attention_def_validated_at: float = float("-inf")
+        self._attention_def_validated_id: str | None = None
+        self._attention_validation_interval_s: float = 300.0
+
+        # Account-switch pre-flight: invalidate cached def_ids + tag_ids
+        # across all plugin state when the bearer-token's account has
+        # changed since the daemon last booted. Lazy per-call recovery
+        # already exists for the attention route and per-plugin runs,
+        # but doing it eagerly at startup saves the user from seeing
+        # "Run failed: <orphan 422>" on their first dashboard open.
         try:
-            from . import credentials as _creds
-            _result = _creds.migrate_bearer_token_to_user_level()
-            if _result.get("status") == "migrated":
-                logging.getLogger("fulcra_collect").info(
-                    "migrated bearer-token from plugin %s to user level; cleaned: %s",
-                    _result["source"], _result["cleaned"],
-                )
+            self._check_account_fingerprint()
         except Exception:
-            logging.getLogger("fulcra_collect").exception("bearer-token migration failed")
+            # Pre-flight failures must NOT block daemon startup. The
+            # lazy recovery paths still work as a fallback.
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "account-fingerprint pre-flight failed"
+            )
+
+    # ---- account-switch pre-flight -------------------------------------
+
+    def _check_account_fingerprint(self) -> None:
+        """Detect a Fulcra-account switch since the previous boot and
+        invalidate per-plugin caches that hold per-account UUIDs.
+
+        Fingerprint is a SHA-256 prefix of the bearer-token. False
+        positives on token rotation (same account → new JWT after refresh)
+        are acceptable: the recovery is just a cache rebuild on the
+        first run of each plugin, no data loss.
+        """
+        import hashlib
+        from . import credentials as _creds
+        token = _creds.get_user_secret("bearer-token") or ""
+        if not token:
+            # Not signed in yet — nothing to invalidate, nothing to
+            # remember. The fingerprint file gets written the first time
+            # we boot WITH a token.
+            return
+        fingerprint = hashlib.sha256(token.encode()).hexdigest()[:16]
+        fingerprint_path = config_mod.config_dir() / "auth-fingerprint"
+        previous = (fingerprint_path.read_text().strip()
+                    if fingerprint_path.exists() else None)
+        if previous == fingerprint:
+            return
+        if previous is not None:
+            self._invalidate_plugin_caches(
+                reason=f"Fulcra account fingerprint changed "
+                       f"({previous}→{fingerprint})",
+            )
+        fingerprint_path.parent.mkdir(parents=True, exist_ok=True)
+        fingerprint_path.write_text(fingerprint)
+        try:
+            import os
+            os.chmod(fingerprint_path, 0o600)
+        except OSError:
+            pass
+
+    def _invalidate_plugin_caches(self, *, reason: str) -> None:
+        """Clear per-plugin and per-package def_ids + tag_ids on the
+        host. Plugins re-resolve fresh defs on their next run.
+
+        Best-effort: each clear is wrapped, a failure in one plugin
+        doesn't block invalidation of others. Day One isn't touched
+        because it re-queries by name on every run — no cache to clear.
+        """
+        import importlib
+        logger = logging.getLogger("fulcra_collect.daemon")
+        logger.warning("Invalidating plugin caches: %s", reason)
+        cleared: list[str] = []
+        # Per-plugin state files at state/<id>.json — clear definition_id.
+        state_dir = config_mod.config_dir() / "state"
+        if state_dir.exists():
+            for path in state_dir.glob("*.json"):
+                plugin_id = path.stem
+                try:
+                    st = state.load(plugin_id)
+                    if getattr(st, "definition_id", None) is not None:
+                        st.definition_id = None
+                        state.save(st)
+                        cleared.append(f"state/{plugin_id}.json")
+                except Exception:
+                    logger.exception("invalidate: failed for %s", plugin_id)
+        # Per-package state files (media, attention). Deferred import
+        # tolerates either being absent.
+        for label, module_name, attrs in (
+            ("media", "fulcra_media.state",
+             ("listened_definition_id", "watched_definition_id",
+              "read_definition_id", "activity_definition_id", "tag_ids")),
+            ("attention", "fulcra_attention.state",
+             ("attention_definition_id", "tag_ids")),
+        ):
+            try:
+                mod = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            try:
+                s = mod.load()
+                touched = False
+                for attr in attrs:
+                    if not hasattr(s, attr):
+                        continue
+                    cur = getattr(s, attr)
+                    if isinstance(cur, dict):
+                        if cur:
+                            setattr(s, attr, {})
+                            touched = True
+                    elif cur is not None:
+                        setattr(s, attr, None)
+                        touched = True
+                if touched:
+                    mod.save(s)
+                    cleared.append(f"{label} state.json")
+            except Exception:
+                logger.exception("invalidate: failed for %s state", label)
+        # Reset the in-process attention-def-validation cache too, so the
+        # extension route re-validates on the next POST instead of trusting
+        # whatever was cached pre-invalidation.
+        self._attention_def_validated_id = None
+        self._attention_def_validated_at = float("-inf")
+        # Dashboard surface so the user can see what happened.
+        self.activity.add(
+            plugin_id="daemon",
+            summary=(
+                "Account change detected. Invalidated cached def IDs + tag "
+                f"UUIDs across {len(cleared)} state file"
+                f"{'s' if len(cleared) != 1 else ''}. "
+                "Plugins will re-resolve on next run."
+            ),
+            ok=True,
+        )
+
+    def note_attention_event(self, *, client: str | None) -> None:
+        """Record one attention POST for the dashboard activity feed.
+
+        Coalesces: per-POST entries would saturate the 50-entry ring in
+        minutes during active browsing, so we accumulate until the throttle
+        window elapses, then emit one summary entry covering the burst.
+
+        Idempotent w.r.t. failures: this is best-effort UI plumbing, never
+        the cause of a failed ingest. The caller (web.extension_attention)
+        invokes this only after a successful Fulcra POST.
+        """
+        self._attention_activity_count += 1
+        if client:
+            self._attention_activity_clients.add(client)
+        now_mono = self._monotonic()
+        if (now_mono - self._attention_activity_last_at
+                < self._attention_activity_interval_s):
+            return
+        n = self._attention_activity_count
+        clients = ", ".join(sorted(self._attention_activity_clients))
+        summary = (
+            f"Attention: {n} event"
+            f"{'s' if n != 1 else ''} from {clients or 'extension'}"
+        )
+        self.activity.add(
+            plugin_id="attention-relay",
+            summary=summary,
+            ok=True,
+        )
+        self._attention_activity_last_at = now_mono
+        self._attention_activity_count = 0
+        self._attention_activity_clients.clear()
 
     # ---- control-socket request handling -------------------------------
 
@@ -252,12 +429,12 @@ class Daemon:
         try:
             with httpx.Client(timeout=10.0) as client:
                 r = client.get(
-                    "https://api.fulcradynamics.com/data/v0/annotation-defs",
+                    "https://api.fulcradynamics.com/user/v1alpha1/annotation",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 r.raise_for_status()
                 all_defs = r.json()
-        except Exception as exc:
+        except Exception:
             logging.getLogger("fulcra_collect.daemon").exception(
                 "_quick_record_list: Fulcra API request failed"
             )
@@ -280,27 +457,68 @@ class Daemon:
 
     def _record_annotation(self, definition_id: str, comment: str | None) -> dict:
         """Write one Moment annotation immediately to Fulcra. Used by the
-        menubar's quick-record buttons. Records timestamp=now."""
+        menubar's quick-record buttons and the web UI's /api/annotations
+        endpoint. Records timestamp=now.
+
+        Uses the same /ingest/v1/record/batch + CloudEvents wire format as
+        every plugin importer (see fulcra_common.wire). Until 2026-05-25
+        this method POSTed to a dead /data/v0/annotations URL with the
+        wrong payload shape and got a silent 404 every time."""
+        import uuid
+        from fulcra_common import wire
         from . import credentials as _creds
         if not definition_id:
             return {"ok": False, "error": "definition_id required"}
         token = _creds.get_user_secret("bearer-token")
         if not token:
             return {"ok": False, "error": "Fulcra not authenticated"}
-        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        payload: dict = {
-            "annotation_def_id": definition_id,
-            "recorded_at": now_iso,
-            # Moments don't need value/end_time
-        }
-        if comment:
-            payload["comment"] = comment
+
+        # We need the def's tags to attach to the event so Fulcra associates
+        # the moment with the same tag membership the def declares. Cheapest
+        # path: the _quick_record_list cache already has the full def dict.
+        # If the cache is cold or stale (the user posts before opening the
+        # popover), warm it on demand — same source of truth, no second URL.
+        cached = getattr(self, "_quick_record_cache", None)
+        def_dict: dict | None = None
+        if cached:
+            def_dict = next((d for d in cached["defs"]
+                             if d.get("id") == definition_id), None)
+        if def_dict is None:
+            warm = self._quick_record_list()
+            if not warm.get("ok"):
+                return {"ok": False,
+                        "error": warm.get("error",
+                                          "Could not look up the annotation "
+                                          "definition.")}
+            def_dict = next((d for d in warm.get("definitions", [])
+                             if d.get("id") == definition_id), None)
+        if def_dict is None:
+            return {"ok": False,
+                    "error": f"unknown definition id {definition_id!r}"}
+
+        now = datetime.now(timezone.utc)
+        record = wire.build_record(
+            data_type=wire.MOMENT_ANNOTATION,
+            start_time=now,
+            data={"comment": comment or ""},
+            # Per-call UUID — duplicate clicks should produce duplicate
+            # moments rather than dedup, since "I want to record this NOW"
+            # is the menubar button's whole job.
+            source_id=(f"com.fulcradynamics.fulcra-collect.quick-record."
+                       f"{uuid.uuid4()}"),
+            tags=def_dict.get("tags") or [],
+            definition_id=definition_id,
+        )
+        body = wire.encode_batch([record])
         try:
             with httpx.Client(timeout=10.0, follow_redirects=True) as client:
                 r = client.post(
-                    "https://api.fulcradynamics.com/data/v0/annotations",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json=[payload],  # batch of one
+                    "https://api.fulcradynamics.com/ingest/v1/record/batch",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "content-type": "application/x-jsonl",
+                    },
+                    content=body,
                 )
                 r.raise_for_status()
         except Exception as exc:
@@ -315,9 +533,11 @@ class Daemon:
                 "ok": False,
                 "error": "Fulcra didn't accept that request. Check your internet, then try again.",
             }
-        # Surface in the activity buffer
+        # Surface in the activity buffer with the def name (the id prefix
+        # was opaque to the user).
+        name = def_dict.get("name") or definition_id[:8] + "…"
         self.activity.add(plugin_id="quick-record",
-                          summary=f"Recorded annotation {definition_id[:8]}…",
+                          summary=f"Recorded \"{name}\"",
                           ok=True)
         return {"ok": True}
 

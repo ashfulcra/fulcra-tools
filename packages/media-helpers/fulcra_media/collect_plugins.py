@@ -10,13 +10,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext, SetupStep
+from fulcra_collect.plugin import Credential, Permission, Plugin, RunContext, Setting, SetupStep
 from fulcra_csv import ClusterPolicy, ColumnMap, apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
 
 from . import library
 from . import twin_cache
 from . import webhook_receiver
-from .trakt_oauth import trakt_oauth_handler
+from .trakt_oauth import trakt_authorize_url, trakt_oauth_handler
 from .trakt_health import trakt_health_check
 from .fulcra import FulcraClient
 from .importers import apple_podcasts as ap
@@ -32,9 +32,45 @@ from .importers import trakt as trakt_importer
 from .importers import youtube as youtube_importer
 from .importers.generic_csv import _FP_AUTO, parse_media_csv
 from .importers.lastfm import fetch_recent_tracks, normalize_history
+from .lastfm_health import lastfm_health_check
 from .state import DEFAULT_PATH as STATE_PATH
 from .state import load as _state_load
 from .state import save as _state_save
+
+
+def _ensure_media_def(ctx: RunContext, media_state, *,
+                       attr: str, spec: dict, canonical_name: str) -> str:
+    """Get/refresh a canonical definition id stored on the shared media
+    state file. Wraps `ctx.ensure_definition` to also write the new id
+    back to per-package state when it changes.
+
+    Replaces the older `if not media_state.<attr>: resolve; save` pattern
+    that trusted the per-package cache blindly across daemon re-auths
+    to a different Fulcra account — the same orphan-ingest hazard task
+    #12 fixed for the attention plugin. See [[task #13]] for the
+    generalisation and [[task #16]] for the tag_ids parity.
+
+    When the def is re-resolved (cached value was stale on the current
+    account), also invalidate the tag_ids dict — those tag UUIDs were
+    populated alongside the now-orphan def and almost certainly belong
+    to the prior account too. ensure_tag will repopulate fresh UUIDs
+    from the current account on next access. Costs O(N) round-trips
+    once, only after an account switch.
+    """
+    cached = getattr(media_state, attr, None)
+    def_id = ctx.ensure_definition(
+        cached=cached, expected_spec=spec, canonical_name=canonical_name,
+    )
+    if cached != def_id:
+        setattr(media_state, attr, def_id)
+        # Stale-def detected → tag cache is also suspect on an account
+        # switch. Clear only when `cached` was truthy (i.e. we had a
+        # cache and it was wrong) — first-run resolves shouldn't pay
+        # the tag-rebuild cost.
+        if cached and hasattr(media_state, "tag_ids"):
+            media_state.tag_ids = {}
+        _state_save(media_state)
+    return def_id
 
 
 def newest_event_iso(events: list) -> str | None:
@@ -70,7 +106,18 @@ def _run_lastfm(ctx: RunContext) -> None:
     if not api_key:
         raise RuntimeError("lastfm: credential 'api-key' is not set — "
                            "run `fulcra-collect set-credential lastfm api-key`")
-    creds = {"api_key": api_key}
+    # The importer expects username + api_key in one dict. Username is a
+    # Setting (configured via the wizard or `fulcra-collect set-setting`),
+    # api-key is a Credential (encrypted store). Until 2026-05-25 this
+    # function only forwarded api_key, so every run crashed with
+    # KeyError: 'username' inside fetch_recent_tracks the moment a real
+    # sync was attempted.
+    username = ctx.config.get("username")
+    if not username:
+        raise RuntimeError("lastfm: setting 'username' is not set — "
+                           "run `fulcra-collect set-setting lastfm username <your-lastfm-handle>` "
+                           "or re-run the Last.fm setup wizard from the dashboard.")
+    creds = {"api_key": api_key, "username": username}
 
     # Ensure the "Listened" annotation definition is known before importing.
     # On a fresh install (machine 2) the media state file may have no
@@ -80,13 +127,8 @@ def _run_lastfm(ctx: RunContext) -> None:
     # guarantee that bootstrap provides without requiring bootstrap to have
     # been run on every machine.
     media_state = _state_load(STATE_PATH)
-    if not media_state.listened_definition_id:
-        def_id = ctx.resolved_definition_id(
-            LASTFM_LISTENED_SPEC,
-            canonical_name="Listened",
-        )
-        media_state.listened_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="listened_definition_id",
+                       spec=LASTFM_LISTENED_SPEC, canonical_name="Listened")
 
     # Delegate to the shared helper; `since` (watermark - 1h) is computed
     # there so it stays consistent with the Deezer plugin.
@@ -103,13 +145,88 @@ LASTFM_PLUGIN = Plugin(
     name="Last.fm scrobbles",
     kind="scheduled",
     run=_run_lastfm,
-    description="Imports your Last.fm scrobble history on a schedule. Needs your Last.fm API key.",
+    description=(
+        "Captures your music listening history via Last.fm — the universal "
+        "scrobble aggregator that catches Spotify, Apple Music, Tidal, and "
+        "more. Runs every hour. You'll need a free Last.fm API key and your "
+        "Last.fm username."
+    ),
     default_interval=timedelta(hours=1),
-    category="music",
+    category="audio",
     canonical_definition_name="Listened",
     required_credentials=(
         Credential(key="api-key", label="Last.fm API key",
                    help="Create one at https://www.last.fm/api/account/create"),
+    ),
+    required_settings=(
+        Setting(
+            key="username",
+            label="Last.fm username",
+            kind="text",
+            help="Your Last.fm account name — e.g. the one in the URL last.fm/user/<this>.",
+        ),
+    ),
+    health_check=lastfm_health_check,
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What Last.fm does",
+            body_md=(
+                "Last.fm is the universal music sidecar — even when you "
+                "listen via Spotify, Apple Music, or another player, "
+                "Last.fm scrobbles capture it. We import your scrobble "
+                "history every hour."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Create a Last.fm API account",
+            body_md=(
+                "Visit https://www.last.fm/api/account/create and fill in "
+                "the form. **Application name:** `Fulcra Collect` (or "
+                "anything you like). **Application description:** optional. "
+                "**Callback URL:** leave blank. **Application homepage:** "
+                "leave blank. Click **Submit**. Last.fm will show you an "
+                "**API Key** and a **Shared Secret** — you only need the "
+                "API Key for the next step."
+            ),
+            external_link="https://www.last.fm/api/account/create",
+        ),
+        SetupStep(
+            kind="input",
+            title="Paste your Last.fm API key and username",
+            body_md=(
+                "**API Key** is the first value Last.fm showed you on the "
+                "API account page. **username** is the slug after "
+                "`last.fm/user/` in your profile URL — typically your "
+                "account name."
+            ),
+            settings_keys=("api-key", "username"),
+        ),
+        # Verify the entered creds before letting the user advance — without
+        # this, bad key/username silently writes to the settings store and
+        # surfaces as a runtime crash an hour later. The wizard's generic
+        # test_connection renderer calls /api/plugin/lastfm/health_check,
+        # which runs lastfm_health_check above and gates Next on ok=True.
+        SetupStep(
+            kind="test_connection",
+            title="Verify your Last.fm connection",
+            body_md="Asking Last.fm for your 5 most recent scrobbles…",
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your scrobbles?",
+            body_md=(
+                "We can write to your existing 'Listened' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md="Last.fm will sync every hour.",
+        ),
     ),
 )
 
@@ -220,13 +337,8 @@ def _run_deezer(ctx: RunContext) -> None:
     # guarantee that bootstrap provides without requiring bootstrap to have
     # been run on every machine.
     media_state = _state_load(STATE_PATH)
-    if not media_state.listened_definition_id:
-        def_id = ctx.resolved_definition_id(
-            DEEZER_LISTENED_SPEC,
-            canonical_name="Listened",
-        )
-        media_state.listened_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="listened_definition_id",
+                       spec=DEEZER_LISTENED_SPEC, canonical_name="Listened")
 
     _run_scheduled_import(
         ctx,
@@ -244,10 +356,12 @@ DEEZER_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_deezer,
     description=(
-        "Imports your Deezer listening history on a schedule. Needs a Deezer access token."
+        "Polls your Deezer listening history every 2 hours and records "
+        "each track as a 'Listened' annotation. Requires a Deezer OAuth "
+        "access token (free Deezer dev account)."
     ),
     default_interval=timedelta(hours=2),
-    category="music",
+    category="audio",
     canonical_definition_name="Listened",
     required_credentials=(
         Credential(
@@ -257,6 +371,55 @@ DEEZER_PLUGIN = Plugin(
                 "Mint an access token at https://developers.deezer.com/api/oauth "
                 "or run `fulcra-media wizard deezer` for the guided flow."
             ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Deezer exposes your listening history through its "
+                "Web API. We poll it every 2 hours and record each "
+                "track you finish as a 'Listened' annotation in Fulcra."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Get a Deezer access token",
+            body_md=(
+                "Visit https://developers.deezer.com/api/oauth and "
+                "register a new application (any name and redirect URI "
+                "will do — Deezer's OAuth playground accepts "
+                "`http://localhost`). Complete the OAuth flow with the "
+                "`listening_history` permission to mint an access "
+                "token. If this is too fiddly via the web UI, run "
+                "`fulcra-media wizard deezer` from your terminal for a "
+                "guided flow."
+            ),
+            external_link="https://developers.deezer.com/api/oauth",
+        ),
+        SetupStep(
+            kind="input",
+            title="Paste your Deezer access token",
+            body_md=(
+                "Paste the access token Deezer minted for you. We'll "
+                "store it in your macOS keychain."
+            ),
+            settings_keys=("access-token",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Deezer listens?",
+            body_md=(
+                "We can write to your existing 'Listened' annotation "
+                "or create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md="Deezer will sync every 2 hours.",
         ),
     ),
 )
@@ -393,13 +556,8 @@ def _run_trakt(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Watched" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.watched_definition_id:
-        def_id = ctx.resolved_definition_id(
-            TRAKT_WATCHED_SPEC,
-            canonical_name="Watched",
-        )
-        media_state.watched_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="watched_definition_id",
+                       spec=TRAKT_WATCHED_SPEC, canonical_name="Watched")
 
     client = FulcraClient()
     client.ensure_tag("trakt", media_state)
@@ -427,8 +585,10 @@ TRAKT_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_trakt,
     description=(
-        "Records your TV and movie watch history from Trakt.tv. "
-        "We sync new watches every 6 hours."
+        "Records your TV and movie watch history from Trakt.tv — which "
+        "covers Netflix, Apple TV+, Plex, and most other video services "
+        "via Trakt's scrobbler plugins. We sync new watches every 6 hours. "
+        "You'll create a free Trakt OAuth app and sign in once."
     ),
     default_interval=timedelta(hours=6),
     category="video",
@@ -456,6 +616,7 @@ TRAKT_PLUGIN = Plugin(
         ),
     ),
     oauth_handler=trakt_oauth_handler,
+    oauth_authorize_url=trakt_authorize_url,
     health_check=trakt_health_check,
     setup_steps=(
         SetupStep(
@@ -472,12 +633,23 @@ TRAKT_PLUGIN = Plugin(
             kind="external_action",
             title="Create a Trakt OAuth app",
             body_md=(
-                "Visit https://trakt.tv/oauth/applications and "
-                "click **New Application**. Use these settings:\n\n"
-                "- **Name:** Fulcra Collect\n"
-                "- **Redirect URI:** the URL shown on the next step "
-                "(we'll fill it in for you)\n\n"
-                "Click Save App and copy the **Client ID** and "
+                "Go to https://trakt.tv/oauth/applications and click "
+                "**New Application**. Fill the form in like this:\n\n"
+                "- **Name:** `Fulcra Collect`\n"
+                "- **Icon:** leave blank — we don't need it.\n"
+                "- **Description:** leave blank (or write anything you "
+                "like; it's only shown when the app asks for permissions).\n"
+                "- **Redirect URI:** the URL the wizard shows on the next "
+                "step. (Note: ports change between daemon restarts — if "
+                "you reuse this app later, update the URI to match the "
+                "new port. Or set a stable port; see Preferences.)\n"
+                "- **JavaScript (CORS) origins:** leave blank.\n"
+                "- **Permissions:** **uncheck both `/checkin` and "
+                "`/scrobble`**. Fulcra Collect only reads your watch "
+                "history, so it doesn't need write access. "
+                "(`/users/me/history` is gated by the OAuth grant itself, "
+                "not these scopes.)\n\n"
+                "Click **Save App** and copy the **Client ID** and "
                 "**Client Secret** to the next step."
             ),
             external_link="https://trakt.tv/oauth/applications",
@@ -485,6 +657,12 @@ TRAKT_PLUGIN = Plugin(
         SetupStep(
             kind="input",
             title="Paste your Trakt OAuth credentials",
+            body_md=(
+                "Trakt will have shown you the **Client ID** and **Client "
+                "Secret** after you saved the app. Paste each into the "
+                "matching field below. The wizard will store them in your "
+                "macOS keychain."
+            ),
             settings_keys=("client_id", "client_secret"),
         ),
         SetupStep(
@@ -507,6 +685,7 @@ TRAKT_PLUGIN = Plugin(
                 "We can write to your existing 'Watched' annotation "
                 "or create a new one."
             ),
+            annotation_type="duration",
         ),
         SetupStep(
             kind="done",
@@ -583,13 +762,8 @@ def _run_netflix(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Watched" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.watched_definition_id:
-        def_id = ctx.resolved_definition_id(
-            NETFLIX_WATCHED_SPEC,
-            canonical_name="Watched",
-        )
-        media_state.watched_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="watched_definition_id",
+                       spec=NETFLIX_WATCHED_SPEC, canonical_name="Watched")
 
     _run_file_import(
         ctx,
@@ -604,13 +778,72 @@ NETFLIX_PLUGIN = Plugin(
     kind="manual",
     run=_run_netflix,
     description=(
-        "Imports a Netflix viewing-history CSV. Manual — download from "
-        "netflix.com/Activity, then point this at the file."
+        "Imports a Netflix viewing-history CSV. Manual — download "
+        "ViewingActivity.csv from netflix.com/Activity, then point this "
+        "plugin at the file. Each watch becomes a 'Watched' annotation."
     ),
     default_interval=None,
     category="video",
     canonical_definition_name="Watched",
     required_credentials=(),
+    required_settings=(
+        Setting(
+            key="path",
+            label="Netflix CSV path",
+            kind="path",
+            help="Local path to the ViewingActivity.csv downloaded from Netflix.",
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Netflix exports your full viewing history as a CSV. "
+                "Upload it here and we'll record each watch as a "
+                "'Watched' annotation in Fulcra."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Download your Netflix CSV",
+            body_md=(
+                "Sign in to https://www.netflix.com/Activity and click "
+                "**Download all** at the bottom of the page. Netflix will "
+                "give you a `ViewingActivity.csv` file. Save it somewhere "
+                "you can find — you'll upload it on the next step."
+            ),
+            external_link="https://www.netflix.com/Activity",
+        ),
+        SetupStep(
+            kind="file_upload",
+            title="Upload your ViewingActivity.csv",
+            body_md=(
+                "Pick the `ViewingActivity.csv` you just downloaded. We'll "
+                "store its path; the import runs whenever you click **Run "
+                "now** on the dashboard."
+            ),
+            settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Netflix watches?",
+            body_md=(
+                "We can write to your existing 'Watched' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "Netflix is set up. Click **Run now** from the dashboard "
+                "to import the CSV. Re-upload a fresh CSV whenever you "
+                "want to pull in new watches."
+            ),
+        ),
+    ),
 )
 
 
@@ -643,13 +876,9 @@ def _run_spotify_extended(ctx: RunContext) -> None:
     # same State.listened_definition_id field — whichever plugin runs first
     # on a new machine will populate it; the other will find it already set.
     media_state = _state_load(STATE_PATH)
-    if not media_state.listened_definition_id:
-        def_id = ctx.resolved_definition_id(
-            SPOTIFY_EXTENDED_LISTENED_SPEC,
-            canonical_name="Listened",
-        )
-        media_state.listened_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="listened_definition_id",
+                       spec=SPOTIFY_EXTENDED_LISTENED_SPEC,
+                       canonical_name="Listened")
 
     _run_file_import(
         ctx,
@@ -664,13 +893,78 @@ SPOTIFY_EXTENDED_PLUGIN = Plugin(
     kind="manual",
     run=_run_spotify_extended,
     description=(
-        "Imports an exported Spotify Extended Streaming History JSON file. Manual — "
-        "request the export from Spotify, then point this at the downloaded file."
+        "Imports the Spotify Extended Streaming History GDPR export — a "
+        "zip of `Streaming_History_Audio_*.json` files covering your full "
+        "lifetime of Spotify listens. Manual; request the export from "
+        "Spotify Account Privacy, wait ~30 days, then upload the zip."
     ),
     default_interval=None,
-    category="music",
+    category="audio",
     canonical_definition_name="Listened",
     required_credentials=(),
+    required_settings=(
+        Setting(
+            key="path",
+            label="Spotify export zip path",
+            kind="path",
+            help=(
+                "Local path to the `my_spotify_data.zip` (or similar) "
+                "you downloaded from Spotify."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Spotify's Extended Streaming History is the deepest "
+                "archive of your listens — it covers your entire account "
+                "lifetime, not just the last year. Once you've requested "
+                "the export and Spotify has emailed you the download, "
+                "upload the zip here."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Request your Spotify export",
+            body_md=(
+                "Open https://www.spotify.com/account/privacy/ and scroll "
+                "to **Download your data**. Tick **Extended streaming "
+                "history** (the third option — the lifetime archive) and "
+                "click **Request data**. Spotify will email you within ~30 "
+                "days with a download link. Save the zip somewhere you "
+                "can find."
+            ),
+            external_link="https://www.spotify.com/account/privacy/",
+        ),
+        SetupStep(
+            kind="file_upload",
+            title="Upload your Spotify export zip",
+            body_md=(
+                "Pick the zip Spotify sent you. We'll read every "
+                "`Streaming_History_Audio_*.json` file inside it."
+            ),
+            settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Spotify listens?",
+            body_md=(
+                "We can write to your existing 'Listened' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "Spotify Extended History is configured. Click **Run "
+                "now** from the dashboard to import the zip."
+            ),
+        ),
+    ),
 )
 
 
@@ -698,13 +992,8 @@ def _run_youtube(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Watched" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.watched_definition_id:
-        def_id = ctx.resolved_definition_id(
-            YOUTUBE_WATCHED_SPEC,
-            canonical_name="Watched",
-        )
-        media_state.watched_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="watched_definition_id",
+                       spec=YOUTUBE_WATCHED_SPEC, canonical_name="Watched")
 
     _run_file_import(
         ctx,
@@ -719,11 +1008,75 @@ YOUTUBE_PLUGIN = Plugin(
     kind="manual",
     run=_run_youtube,
     description=(
-        "Imports a YouTube watch-history JSON file (Google Takeout). Manual — "
-        "request the takeout, then point this at the file."
+        "Imports a YouTube `watch-history.json` from Google Takeout. "
+        "Manual — request a Takeout containing YouTube, then upload the "
+        "JSON file here. Each watch becomes a 'Watched' annotation."
     ),
     default_interval=None,
     category="video",
+    required_settings=(
+        Setting(
+            key="path",
+            label="watch-history.json path",
+            kind="path",
+            help=(
+                "Local path to the `watch-history.json` file from your "
+                "Google Takeout (inside the YouTube and YouTube Music folder)."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Google Takeout can hand you a JSON of every YouTube "
+                "video you've watched. Upload that file here and we'll "
+                "import each watch as a 'Watched' annotation."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Request a Google Takeout",
+            body_md=(
+                "Go to https://takeout.google.com, click **Deselect "
+                "all**, then check just **YouTube and YouTube Music**. "
+                "Under that, click **All YouTube data included** and "
+                "leave only **history** ticked. Choose **JSON** as the "
+                "format. Submit the export; Google emails you a download "
+                "link, typically within a few hours. Unzip and find "
+                "`watch-history.json` inside the YouTube folder."
+            ),
+            external_link="https://takeout.google.com",
+        ),
+        SetupStep(
+            kind="file_upload",
+            title="Upload your watch-history.json",
+            body_md=(
+                "Pick the `watch-history.json` you extracted from the "
+                "Takeout zip."
+            ),
+            settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your YouTube watches?",
+            body_md=(
+                "We can write to your existing 'Watched' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "YouTube is configured. Click **Run now** from the "
+                "dashboard to import the JSON. Re-upload a fresh Takeout "
+                "whenever you want to pull in newer watches."
+            ),
+        ),
+    ),
     canonical_definition_name="Watched",
     required_credentials=(),
 )
@@ -756,13 +1109,9 @@ def _run_spotify_ifttt(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Listened" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.listened_definition_id:
-        def_id = ctx.resolved_definition_id(
-            SPOTIFY_IFTTT_LISTENED_SPEC,
-            canonical_name="Listened",
-        )
-        media_state.listened_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="listened_definition_id",
+                       spec=SPOTIFY_IFTTT_LISTENED_SPEC,
+                       canonical_name="Listened")
 
     resolved = _resolve_path(ctx)
     tz = ZoneInfo(ctx.config.get("tz", "UTC"))
@@ -809,13 +1158,9 @@ def _run_apple_takeout(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Watched" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.watched_definition_id:
-        def_id = ctx.resolved_definition_id(
-            APPLE_TAKEOUT_WATCHED_SPEC,
-            canonical_name="Watched",
-        )
-        media_state.watched_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="watched_definition_id",
+                       spec=APPLE_TAKEOUT_WATCHED_SPEC,
+                       canonical_name="Watched")
 
     resolved = _resolve_path(ctx)
     if resolved.is_dir():
@@ -835,13 +1180,78 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
     kind="manual",
     run=_run_apple_takeout,
     description=(
-        "Imports an Apple Music takeout XML. Manual — request the takeout from "
-        "privacy.apple.com, then point this at the downloaded file."
+        "Imports `Playback Activity.csv` from your Apple Data & Privacy "
+        "takeout — Apple TV+ watches across every Apple device tied to "
+        "your account. Manual: request the takeout from "
+        "privacy.apple.com, then upload the CSV (or the folder "
+        "containing it)."
     ),
     default_interval=None,
     category="video",
     canonical_definition_name="Watched",
     required_credentials=(),
+    required_settings=(
+        Setting(
+            key="path",
+            label="Playback Activity CSV path",
+            kind="path",
+            help=(
+                "Local path to `Playback Activity.csv`, or to the folder "
+                "that contains it (we'll search recursively)."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Apple's Data & Privacy export includes a `Playback "
+                "Activity.csv` listing every Apple TV+ session across "
+                "your devices. Upload that CSV here and we'll record "
+                "each PLAY event as a 'Watched' annotation."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Request your Apple takeout",
+            body_md=(
+                "Sign in to https://privacy.apple.com and click **Request "
+                "a copy of your data**. Select **Apple Media Services "
+                "information** (the bundle that contains TV playback). "
+                "Apple emails you a download link within a few days. "
+                "Unzip the archive and find `Playback Activity.csv` "
+                "inside the Apple Media Services Information folder."
+            ),
+            external_link="https://privacy.apple.com",
+        ),
+        SetupStep(
+            kind="file_upload",
+            title="Upload Playback Activity.csv",
+            body_md=(
+                "Pick the CSV (or the folder containing it — we'll find "
+                "it recursively)."
+            ),
+            settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Apple TV watches?",
+            body_md=(
+                "We can write to your existing 'Watched' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "Apple takeout is configured. Click **Run now** from the "
+                "dashboard to import the CSV."
+            ),
+        ),
+    ),
 )
 
 
@@ -965,13 +1375,8 @@ def _run_generic_rss(ctx: RunContext) -> None:
     canonical = _CATEGORY_TO_CANONICAL[category]
     target_field = f"{category}_definition_id"
     media_state = _state_load(STATE_PATH)
-    if not getattr(media_state, target_field):
-        def_id = ctx.resolved_definition_id(
-            _GENERIC_DURATION_SPEC,
-            canonical_name=canonical,
-        )
-        setattr(media_state, target_field, def_id)
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr=target_field,
+                       spec=_GENERIC_DURATION_SPEC, canonical_name=canonical)
 
     since = _rss_since(ctx)
     all_events = list(rss_importer.normalize_feed(feed_url, service=service, category=category))
@@ -985,8 +1390,9 @@ GENERIC_RSS_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_generic_rss,
     description=(
-        "Watches an RSS or Atom feed and records each new entry. You set the feed "
-        "URL and the category (Watched/Listened/Read)."
+        "Watches any RSS or Atom feed and records each new entry as a "
+        "Fulcra annotation. You set the feed URL, the service tag, and "
+        "the category (watched / listened / read). Runs every 6 hours."
     ),
     default_interval=timedelta(hours=6),
     category="other",
@@ -994,6 +1400,73 @@ GENERIC_RSS_PLUGIN = Plugin(
     # depends on the runtime config value of "category", not on the Plugin
     # definition itself.  See _CATEGORY_TO_CANONICAL and _run_generic_rss.
     required_credentials=(),
+    required_settings=(
+        Setting(
+            key="feed_url",
+            label="Feed URL",
+            kind="url",
+            help="RSS or Atom feed URL we'll poll every 6 hours.",
+            placeholder="https://example.com/feed.xml",
+        ),
+        Setting(
+            key="service",
+            label="Service tag",
+            kind="text",
+            help=(
+                "Short identifier we'll attach to each event "
+                "(e.g. 'pinboard', 'feedly'). Used for dedup and display."
+            ),
+        ),
+        Setting(
+            key="category",
+            label="Category",
+            kind="enum",
+            enum_values=("watched", "listened", "read"),
+            help=(
+                "Which canonical annotation to write to — 'watched' for "
+                "video, 'listened' for audio, 'read' for text/books."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Point this at any RSS or Atom feed — e.g. a personal "
+                "bookmarking export, a podcast feed, or any service that "
+                "publishes activity over RSS. Every 6 hours we'll fetch "
+                "new entries and record them as Fulcra annotations."
+            ),
+        ),
+        SetupStep(
+            kind="input",
+            title="Configure the feed",
+            body_md=(
+                "Enter the **feed URL**, a short **service** tag we'll "
+                "use to label events, and pick a **category** — "
+                "'watched' for video, 'listened' for audio, 'read' for "
+                "books/text. The category determines which canonical "
+                "annotation we write to."
+            ),
+            settings_keys=("feed_url", "service", "category"),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write these entries?",
+            body_md=(
+                "We can write to your existing Watched/Listened/Read "
+                "annotation (whichever matches your category) or create "
+                "a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md="The feed will be polled every 6 hours.",
+        ),
+    ),
 )
 
 
@@ -1029,13 +1502,9 @@ def _run_letterboxd(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Watched" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.watched_definition_id:
-        def_id = ctx.resolved_definition_id(
-            LETTERBOXD_WATCHED_SPEC,
-            canonical_name="Watched",
-        )
-        media_state.watched_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="watched_definition_id",
+                       spec=LETTERBOXD_WATCHED_SPEC,
+                       canonical_name="Watched")
 
     since = _rss_since(ctx)
     all_events = list(lb_importer.fetch_diary(username))
@@ -1048,11 +1517,63 @@ LETTERBOXD_PLUGIN = Plugin(
     name="Letterboxd film diary",
     kind="scheduled",
     run=_run_letterboxd,
-    description="Imports your Letterboxd diary RSS feed on a schedule.",
+    description=(
+        "Polls your public Letterboxd diary RSS feed every 12 hours. "
+        "Each diary entry becomes a 'Watched' annotation in Fulcra. "
+        "Only needs your Letterboxd username (no API key)."
+    ),
     default_interval=timedelta(hours=12),
     category="video",
     canonical_definition_name="Watched",
     required_credentials=(),
+    required_settings=(
+        Setting(
+            key="username",
+            label="Letterboxd username",
+            kind="text",
+            help=(
+                "Your Letterboxd account name — the slug after "
+                "`letterboxd.com/` on your profile URL."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Letterboxd publishes your public film diary as an RSS "
+                "feed. We poll it every 12 hours and record each entry "
+                "as a 'Watched' annotation. No API key needed — just "
+                "your username."
+            ),
+        ),
+        SetupStep(
+            kind="input",
+            title="Enter your Letterboxd username",
+            body_md=(
+                "Your **username** is the slug after `letterboxd.com/` "
+                "in your profile URL — for example `letterboxd.com/"
+                "yourname` means your username is `yourname`. Your "
+                "diary must be public for the RSS feed to work."
+            ),
+            settings_keys=("username",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Letterboxd diary?",
+            body_md=(
+                "We can write to your existing 'Watched' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md="Letterboxd will sync every 12 hours.",
+        ),
+    ),
 )
 
 
@@ -1090,13 +1611,8 @@ def _run_goodreads(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Read" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.read_definition_id:
-        def_id = ctx.resolved_definition_id(
-            GOODREADS_READ_SPEC,
-            canonical_name="Read",
-        )
-        media_state.read_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="read_definition_id",
+                       spec=GOODREADS_READ_SPEC, canonical_name="Read")
 
     since = _rss_since(ctx)
     all_events = list(gr_importer.fetch_diary(user_id))
@@ -1110,13 +1626,73 @@ GOODREADS_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_goodreads,
     description=(
-        "Imports your Goodreads RSS feed on a schedule. Read-only — anything you "
-        "mark as 'read' on Goodreads gets recorded."
+        "Polls your Goodreads 'read' shelf RSS feed every 12 hours. "
+        "Anything you mark as read on Goodreads becomes a 'Read' "
+        "annotation in Fulcra. Read-only — we never write to Goodreads."
     ),
     default_interval=timedelta(hours=12),
     category="books",
     canonical_definition_name="Read",
     required_credentials=(),
+    required_settings=(
+        Setting(
+            key="user_id",
+            label="Goodreads user ID",
+            kind="text",
+            help=(
+                "The numeric ID from your Goodreads profile URL — "
+                "e.g. the `12345678` in "
+                "`goodreads.com/user/show/12345678-your-name`."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Goodreads publishes your 'read' shelf as an RSS feed. "
+                "We poll it every 12 hours and record each book you "
+                "mark as read as a 'Read' annotation in Fulcra."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Find your Goodreads user ID",
+            body_md=(
+                "Sign in to Goodreads and click your profile picture. "
+                "Your profile URL looks like "
+                "`goodreads.com/user/show/12345678-your-name`. Copy the "
+                "numeric portion (`12345678` in this example) — that's "
+                "your user ID. Your profile must be public for the RSS "
+                "feed to be reachable."
+            ),
+            external_link="https://www.goodreads.com",
+        ),
+        SetupStep(
+            kind="input",
+            title="Enter your Goodreads user ID",
+            body_md=(
+                "Paste the numeric user ID you copied from your "
+                "Goodreads profile URL."
+            ),
+            settings_keys=("user_id",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Goodreads reads?",
+            body_md=(
+                "We can write to your existing 'Read' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md="Goodreads will sync every 12 hours.",
+        ),
+    ),
 )
 
 
@@ -1131,6 +1707,53 @@ _FULL_DISK_ACCESS_PERMISSION = Permission(
         "guards behind Full Disk Access."
     ),
 )
+
+
+def apple_podcasts_permission_check(ctx) -> dict:
+    """Verify Full Disk Access by attempting to open the Podcasts SQLite DB.
+
+    Returns {"granted": bool, "hint": str | None}. The wizard's
+    permission_request step calls this so it can show a real
+    "verified / not verified" status instead of guessing — Full Disk
+    Access never produces an in-app prompt, so this round-trip is the
+    only way to know whether the user actually added the binary in
+    System Settings.
+    """
+    import sqlite3
+    import glob
+    from pathlib import Path
+    pattern = str(
+        Path.home() / "Library/Group Containers/*.podcasts*/Documents/MTLibrary.sqlite"
+    )
+    candidates = glob.glob(pattern)
+    if not candidates:
+        return {
+            "granted": False,
+            "hint": (
+                "No Podcasts database found — Apple Podcasts may not be "
+                "installed or has never run."
+            ),
+        }
+    db_path = candidates[0]
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+        return {"granted": True, "hint": None}
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "permission" in msg or "unable to open" in msg or "authorization denied" in msg:
+            return {
+                "granted": False,
+                "hint": (
+                    "Full Disk Access not granted. Add the terminal running "
+                    "fulcra-collect to System Settings -> Privacy & Security "
+                    "-> Full Disk Access."
+                ),
+            }
+        return {"granted": False, "hint": f"sqlite error: {exc}"}
+    except Exception as exc:
+        return {"granted": False, "hint": f"{type(exc).__name__}: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -1184,13 +1807,9 @@ def _run_apple_podcasts(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Listened" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.listened_definition_id:
-        def_id = ctx.resolved_definition_id(
-            APPLE_PODCASTS_LISTENED_SPEC,
-            canonical_name="Listened",
-        )
-        media_state.listened_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="listened_definition_id",
+                       spec=APPLE_PODCASTS_LISTENED_SPEC,
+                       canonical_name="Listened")
 
     client = FulcraClient()
     client.ensure_tag("apple-podcasts", media_state)
@@ -1216,15 +1835,65 @@ APPLE_PODCASTS_PLUGIN = Plugin(
     kind="scheduled",
     run=_run_apple_podcasts,
     description=(
-        "Reads your local Apple Podcasts database for recent listens. Needs Full "
-        "Disk Access for the Podcasts SQLite file."
+        "Captures podcast episodes you finish on your Mac by reading the "
+        "local Apple Podcasts database directly — the app doesn't need to "
+        "be open. Runs every 6 hours. Needs Full Disk Access so macOS lets "
+        "the daemon read the Podcasts SQLite file."
     ),
     default_interval=timedelta(hours=6),
     requires_network=False,
-    category="music",
+    category="audio",
     canonical_definition_name="Listened",
+    # The wizard's permission_request step currently gates on FDA
+    # (nextBlocked = !permissionResult.ok), so FDA is effectively required
+    # for onboarding even though the underlying importer would work without
+    # it if the daemon process already inherits read access (e.g. its parent
+    # has FDA). See task #74 for the planned soft-gate follow-up.
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "We read your local Apple Podcasts database every 6 hours — "
+                "the Podcasts app doesn't need to be open. iCloud sync stays "
+                "fresh only while macOS can run the Podcasts extension in the "
+                "background; if you quit the app for days, the DB may fall "
+                "behind."
+            ),
+        ),
+        SetupStep(
+            kind="permission_request",
+            title="Grant Full Disk Access",
+            body_md=(
+                "Full Disk Access is the fallback path when sandboxing "
+                "blocks the direct read of the Podcasts database. Click "
+                "Next to test whether access works already. If the test "
+                "fails, grant Full Disk Access in **System Settings -> "
+                "Privacy & Security -> Full Disk Access** by clicking "
+                "**+** and adding the terminal you're running the daemon "
+                "from (or the bundled fulcra-collect.app once it exists)."
+            ),
+        ),
+        # TODO: add a test_connection step once APPLE_PODCASTS_PLUGIN has a
+        # health_check — today there isn't one, so we skip verification.
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your podcast listens?",
+            body_md=(
+                "We can write to your existing 'Listened' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md="Apple Podcasts will sync every 6 hours.",
+        ),
+    ),
+    permission_check=apple_podcasts_permission_check,
 )
 
 
@@ -1266,13 +1935,9 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     # The shared resolver adopts Machine 1's existing "Listened" definition
     # rather than creating a duplicate.
     media_state = _state_load(STATE_PATH)
-    if not media_state.listened_definition_id:
-        def_id = ctx.resolved_definition_id(
-            APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC,
-            canonical_name="Listened",
-        )
-        media_state.listened_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="listened_definition_id",
+                       spec=APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC,
+                       canonical_name="Listened")
 
     snapshots = ap.find_timemachine_snapshots()
     if not snapshots:
@@ -1310,13 +1975,63 @@ APPLE_PODCASTS_TIMEMACHINE_PLUGIN = Plugin(
     name="Apple Podcasts (Time Machine recovery)",
     kind="manual",
     run=_run_apple_podcasts_timemachine,
-    description="Reads historical Apple Podcasts listens from Time Machine snapshots. Manual.",
+    description=(
+        "One-shot recovery: walks every Time Machine backup on the "
+        "mounted backup volume, reads the Apple Podcasts SQLite "
+        "database from each snapshot, and imports every played episode "
+        "found. Run this once if you've lost historical listens but "
+        "have an older Time Machine backup that still has them."
+    ),
     default_interval=None,
     requires_network=False,
-    category="music",
+    category="audio",
     canonical_definition_name="Listened",
     required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "If you've lost historical Apple Podcasts listens (e.g. "
+                "the Podcasts app reset its database), this recovery "
+                "tool walks every Time Machine backup on your mounted "
+                "backup drive and pulls played episodes from each "
+                "snapshot. It's a one-shot manual run — source-id dedup "
+                "handles any overlap with the live database."
+            ),
+        ),
+        SetupStep(
+            kind="permission_request",
+            title="Mount your Time Machine drive and grant access (if needed)",
+            body_md=(
+                "Make sure your Time Machine backup drive is mounted "
+                "before running. macOS may also require Full Disk "
+                "Access for the daemon to read backup snapshots — open "
+                "**System Settings -> Privacy & Security -> Full Disk "
+                "Access** and add the terminal running the daemon if "
+                "the import fails."
+            ),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write recovered listens?",
+            body_md=(
+                "We can write to your existing 'Listened' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "Time Machine recovery is configured. Click **Run "
+                "now** from the dashboard to walk every snapshot — this "
+                "can take a few minutes."
+            ),
+        ),
+    ),
 )
 
 
@@ -1412,13 +2127,8 @@ def _run_generic_csv(ctx: RunContext) -> None:
     canonical = _CATEGORY_TO_CANONICAL[category]
     target_field = f"{category}_definition_id"
     media_state = _state_load(STATE_PATH)
-    if not getattr(media_state, target_field):
-        def_id = ctx.resolved_definition_id(
-            _GENERIC_DURATION_SPEC,
-            canonical_name=canonical,
-        )
-        setattr(media_state, target_field, def_id)
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr=target_field,
+                       spec=_GENERIC_DURATION_SPEC, canonical_name=canonical)
 
     # --- Resolve path, parse, and import ------------------------------------
     resolved = library.resolve(path_raw)
@@ -1440,8 +2150,10 @@ GENERIC_CSV_PLUGIN = Plugin(
     kind="manual",
     run=_run_generic_csv,
     description=(
-        "Imports a generic CSV of media events. Manual — set the file path and "
-        "category in this plugin's settings."
+        "Imports any CSV of media events — IFTTT exports, Pipedream "
+        "dumps, hand-crafted spreadsheets. You configure which columns "
+        "hold the timestamp, title, and subtitle, plus a service tag "
+        "and category (watched / listened / read). Manual."
     ),
     default_interval=None,
     category="other",
@@ -1449,6 +2161,88 @@ GENERIC_CSV_PLUGIN = Plugin(
     # depends on the runtime config value of "category", not on the Plugin
     # definition itself.  See _CATEGORY_TO_CANONICAL and _run_generic_csv.
     required_credentials=(),
+    required_settings=(
+        Setting(
+            key="path",
+            label="CSV file path",
+            kind="path",
+            help="Local path to the CSV file you want to import.",
+        ),
+        Setting(
+            key="service",
+            label="Service tag",
+            kind="text",
+            help=(
+                "Short identifier we'll attach to each event "
+                "(e.g. 'ifttt', 'manual', 'sheets')."
+            ),
+        ),
+        Setting(
+            key="category",
+            label="Category",
+            kind="enum",
+            enum_values=("watched", "listened", "read"),
+            help=(
+                "Which canonical annotation to write to — 'watched' "
+                "for video, 'listened' for audio, 'read' for text/books."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Got a CSV of media events from somewhere we don't "
+                "natively support? Upload it here. You'll tell us which "
+                "columns hold the timestamp, title, and subtitle "
+                "(advanced options live in `config.toml` — defaults "
+                "match common IFTTT/Pipedream exports). Each row "
+                "becomes a Fulcra annotation."
+            ),
+        ),
+        SetupStep(
+            kind="file_upload",
+            title="Upload your CSV",
+            body_md=(
+                "Pick the CSV file. Defaults assume columns named "
+                "`timestamp`, `title`, `artist`, and `id` — tweak "
+                "`ts_col`, `title_col`, etc. in `config.toml` later if "
+                "yours differs."
+            ),
+            settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="input",
+            title="Tag and categorise",
+            body_md=(
+                "Pick a **service** tag (a short label that identifies "
+                "where this CSV came from) and a **category** — "
+                "'watched' for video, 'listened' for audio, 'read' for "
+                "books or articles."
+            ),
+            settings_keys=("service", "category"),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write these events?",
+            body_md=(
+                "We can write to your existing Watched/Listened/Read "
+                "annotation (whichever matches your category) or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "Generic CSV is configured. Click **Run now** from the "
+                "dashboard to import the file. Re-upload a fresh CSV "
+                "any time you want to import new rows."
+            ),
+        ),
+    ),
 )
 
 
@@ -1510,13 +2304,9 @@ def _run_media_webhook(ctx: RunContext) -> None:
     # Watched plugin gets.  After a supervisor restart the cached state makes
     # this call fast (no network round-trip needed).
     media_state = _state_load(STATE_PATH)
-    if not media_state.watched_definition_id:
-        def_id = ctx.resolved_definition_id(
-            MEDIA_WEBHOOK_WATCHED_SPEC,
-            canonical_name="Watched",
-        )
-        media_state.watched_definition_id = def_id
-        _state_save(media_state)
+    _ensure_media_def(ctx, media_state, attr="watched_definition_id",
+                       spec=MEDIA_WEBHOOK_WATCHED_SPEC,
+                       canonical_name="Watched")
 
     client = FulcraClient()
     server = webhook_receiver.make_server(
@@ -1537,10 +2327,10 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
     kind="service",
     run=_run_media_webhook,
     description=(
-        "Listens for Plex/Jellyfin webhook calls on a local port and records what "
-        "you watch. Configure your media server to point at this app's URL. "
-        "When binding a non-loopback address, set a webhook bearer token so only "
-        "your media server can post events."
+        "Captures what you watch on Plex or Jellyfin by running a tiny "
+        "local HTTP server that your media server POSTs playback events "
+        "to. Runs continuously as a service — one annotation per session. "
+        "Plex Pass is required for Plex webhooks; Jellyfin works on any tier."
     ),
     category="video",
     canonical_definition_name="Watched",
@@ -1558,8 +2348,58 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
             key="bearer-token",
             label="Webhook bearer token",
             help=(
-                "Shared secret Plex/Jellyfin must send; required when the "
-                "receiver binds a non-loopback host."
+                "Only required when binding to a non-loopback host. Leave "
+                "empty for the default 127.0.0.1 setup."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "media-webhook is a tiny HTTP server. Configure Plex or "
+                "Jellyfin to POST playback events to it; we write a "
+                "'Watched' annotation per session. Plex Pass is required "
+                "to use Plex webhooks; Jellyfin webhooks need no paid tier."
+            ),
+        ),
+        SetupStep(
+            kind="permission_request",
+            title="Allow a local webhook server",
+            body_md=(
+                "We'll bind a local HTTP server on `127.0.0.1:8765` so "
+                "Plex/Jellyfin can POST playback events to it. Nothing on "
+                "the outside network can reach it."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Wire up your media server",
+            body_md=(
+                "**Plex:** open **Settings -> Webhooks -> Add Webhook**, "
+                "enter `http://127.0.0.1:8765/webhook`, and click **Save**. "
+                "Plex Pass is required for this feature.\n\n"
+                "**Jellyfin:** open **Dashboard -> Plugins -> Webhook -> "
+                "Add Generic Destination**, enter the same URL, and save."
+            ),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your watches?",
+            body_md=(
+                "We can write to your existing 'Watched' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "media-webhook will run as a service — restarting the "
+                "daemon restarts it. Trigger a playback in Plex/Jellyfin "
+                "to see it record."
             ),
         ),
     ),

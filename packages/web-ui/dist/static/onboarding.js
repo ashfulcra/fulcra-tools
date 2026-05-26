@@ -5,7 +5,11 @@
  *
  * Multi-step flow:
  *   0  welcome         — static intro, Next button
- *   1  signin          — paste Fulcra token, verify via POST /api/fulcra/auth/token
+ *   1  signin          — sign in to Fulcra. Default: browser-based device-auth
+ *                        flow via POST /api/fulcra/auth/cli_login. Fallback
+ *                        (when fulcra CLI is unavailable, or user clicks
+ *                        "Use a token instead"): paste-token via POST
+ *                        /api/fulcra/auth/token.
  *   2  pick_plugins    — grouped plugin checkboxes from GET /api/status
  *   3  configure       — walks each picked plugin's setup_steps via createWizard()
  *   4  done            — summary, links to dashboard
@@ -24,6 +28,14 @@ function onboarding() {
     phase: "welcome",
 
     // --- signin state ---
+    // signinMode: "auto" while we're probing for the fulcra CLI; "cli" if it's
+    // present (we offer the browser flow); "token" if not (fallback only).
+    // The user can flip from "cli" to "token" with the "Use a token instead"
+    // link in the template.
+    signinMode: "auto",
+    cliProbed: false,
+    cliAvailable: false,
+    cliSignedIn: false,
     tokenInput: "",
     signinError: "",
     signinLoading: false,
@@ -46,15 +58,31 @@ function onboarding() {
     enabledCount: 0,
 
     async boot() {
-      // Check if already signed in — skip to pick_plugins if so
+      // 1) Daemon already has a stored token — skip sign-in entirely.
       try {
         const authStatus = await api("/api/fulcra/auth/status");
         if (authStatus.authenticated) {
           this.phase = "pick_plugins";
           await this._loadPlugins();
+          return;
         }
       } catch (e) {
-        // Not signed in — start at welcome
+        // Fall through to CLI probe.
+      }
+
+      // 2) Probe the fulcra CLI. Two-purpose call:
+      //    - "available" → can we offer the browser flow?
+      //    - "signed_in" → does the CLI already have credentials we can use?
+      try {
+        const cli = await api("/api/fulcra/auth/cli_status");
+        this.cliProbed = true;
+        this.cliAvailable = !!cli.available;
+        this.cliSignedIn = !!cli.signed_in;
+        this.signinMode = cli.available ? "cli" : "token";
+      } catch (e) {
+        this.cliProbed = true;
+        this.cliAvailable = false;
+        this.signinMode = "token";
       }
     },
 
@@ -66,6 +94,32 @@ function onboarding() {
       this.phase = "signin";
     },
 
+    // Browser-based sign-in via the fulcra CLI. The POST blocks until the
+    // user finishes the device-auth flow in their browser (up to ~2 min),
+    // then the daemon validates+stores the token. We just need to wait and
+    // surface progress/errors.
+    async signinViaCli() {
+      this.signinError = "";
+      this.signinLoading = true;
+      try {
+        const result = await api("/api/fulcra/auth/cli_login", {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        if (result.ok) {
+          this.phase = "pick_plugins";
+          await this._loadPlugins();
+        } else {
+          this.signinError = result.error || "Sign-in didn't complete. Please try again.";
+        }
+      } catch (e) {
+        this.signinError = e.message || "Sign-in failed. Please try again.";
+      } finally {
+        this.signinLoading = false;
+      }
+    },
+
+    // Fallback path: user pasted a token by hand.
     async submitToken() {
       this.signinError = "";
       const tok = this.tokenInput.trim();
@@ -106,8 +160,12 @@ function onboarding() {
           if (!catMap[cat]) catMap[cat] = [];
           catMap[cat].push(p);
         }
-        // Ordered category display
-        const catOrder = ["music", "video", "books", "journal", "activity", "other"];
+        // Ordered category display. NOTE: "audio" replaces the old "music"
+        // category slug (task #54) — plugins that produce listening data
+        // (podcasts, music streams) are now grouped under Audio. Backend
+        // plugin metadata is renamed in parallel; this frontend list stays in
+        // sync.
+        const catOrder = ["audio", "video", "books", "journal", "activity", "other"];
         this.categories = catOrder
           .filter(c => catMap[c])
           .map(c => ({
@@ -183,11 +241,50 @@ function onboarding() {
     _enterCurrentPlugin() {
       const contract = this.pluginsToSetup[this.currentSetupIndex];
       this.currentContract = contract;
-      this.currentWizard = createWizard(contract, () => this._onPluginComplete());
+      // Force the inner `<div x-data="currentWizard">` scope to tear down
+      // and re-mount when switching plugins. Alpine's x-data binding
+      // captures the object reference once at mount time; assigning a
+      // new wizard object to `currentWizard` does NOT re-evaluate the
+      // inner scope, because `x-if="currentWizard && ..."` stays truthy
+      // through the swap. Flipping through null forces x-if to false →
+      // true on the next tick, which tears the inner scope down and
+      // re-initializes it with the new wizard. Without this, advancing
+      // past the first plugin keeps showing the first plugin's content.
+      this.currentWizard = null;
+      setTimeout(() => {
+        this.currentWizard = createWizard(
+          contract,
+          () => this._onPluginComplete(),
+          () => this._onPluginSkipped(),
+          () => this._backToPickPlugins(),
+        );
+      }, 0);
+    },
+
+    // Bail out of the current plugin's wizard back to the pick_plugins
+    // screen so the user can adjust their selection (task #64). We
+    // deliberately PRESERVE this.selectedIds — that's the whole point —
+    // and only reset the wizard machinery so re-entering Configure builds
+    // a fresh set of contracts in case picks changed.
+    _backToPickPlugins() {
+      this.phase = "pick_plugins";
+      this.pluginsToSetup = [];
+      this.currentSetupIndex = 0;
+      this.currentWizard = null;
+      this.currentContract = null;
     },
 
     async _onPluginComplete() {
       this.enabledCount += 1;
+      this._advancePluginOrFinish();
+    },
+
+    _onPluginSkipped() {
+      // Plugin abandoned without enable — don't bump enabledCount.
+      this._advancePluginOrFinish();
+    },
+
+    _advancePluginOrFinish() {
       const nextIndex = this.currentSetupIndex + 1;
       if (nextIndex < this.pluginsToSetup.length) {
         this.currentSetupIndex = nextIndex;
@@ -195,6 +292,12 @@ function onboarding() {
       } else {
         this.phase = "done";
       }
+    },
+
+    // Bail on the entire onboarding flow. No plugins are enabled past what
+    // the user has already completed; the parent app routes to the dashboard.
+    skipOnboarding() {
+      this.phase = "done";
     },
 
     completeDone() {

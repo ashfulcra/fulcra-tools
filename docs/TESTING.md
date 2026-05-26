@@ -59,11 +59,24 @@ uv run fulcra-collect daemon
 Expected output:
 
 ```
-INFO     fulcra_collect: web UI: http://127.0.0.1:<port>
+INFO     fulcra_collect: web UI: http://127.0.0.1:9292
 ```
 
-The port is ephemeral (chosen at startup). The URL is also written to
-`~/.config/fulcra-collect/web-url`.
+The daemon binds to a stable port (default **9292**). The URL is also
+written to `~/.config/fulcra-collect/web-url` for backwards compatibility
+with the menubar and ad-hoc tools, but the value is now the same on every
+restart. To use a different port — for example if 9292 collides with
+another service on your machine — edit
+`~/.config/fulcra-collect/config.toml`:
+
+```toml
+[daemon]
+web_port = 9595
+```
+
+and restart the daemon. If the port is already in use you'll see a clear
+`port N is in use; set [daemon] web_port = ... in config.toml` error
+instead of a cryptic bind failure.
 
 Leave this terminal open. Open a second terminal for the remaining steps.
 
@@ -76,20 +89,29 @@ uv run fulcra-collect start
 
 ---
 
-## Step 3 — Generate a Fulcra access token
+## Step 3 — Install the fulcra CLI (for browser sign-in)
 
-The wizard needs a Fulcra access token to fetch and write annotation
-definitions. Here is where to get one:
+The wizard signs you in to Fulcra by handing off to the official
+`fulcra` CLI, which opens a browser tab for you and handles the OAuth
+device-authorization flow. Install it once with:
 
-1. Sign in at [fulcradynamics.com](https://fulcradynamics.com).
-2. Click your avatar (top-right) → **Settings** → **API tokens**.
-3. Click **Generate new token** → give it a name (e.g. "Fulcra Collect")
-   → **Create**.
-4. Copy the token. It starts with `eyJ…`. You will paste it into the
-   wizard's first screen.
+```bash
+uv tool install fulcra-api
+```
 
-The token is a JWT — it is long (several hundred characters) and does
-not contain spaces. Make sure you copy the whole thing.
+Verify it's on PATH:
+
+```bash
+which fulcra
+```
+
+You don't need to run `fulcra auth login` yourself — the wizard will
+invoke it for you in Step 5.
+
+> **No CLI? Token fallback.** If you can't or won't install the CLI,
+> the wizard falls back to a paste-token form. Get a token at
+> [fulcradynamics.com](https://fulcradynamics.com) → avatar → **Settings**
+> → **API tokens** → **Generate new token**, then paste it where prompted.
 
 ---
 
@@ -107,16 +129,23 @@ Go back to Step 2.
 
 ---
 
-## Step 5 — Paste your Fulcra token
+## Step 5 — Sign in to Fulcra
 
-The wizard's first screen asks for your Fulcra access token.
+The wizard's first screen offers **Sign in with Fulcra**.
 
-1. Paste the token you copied in Step 3 into the field.
-2. Click **Verify token**.
+1. Click the button.
+2. A second browser tab opens with the Fulcra sign-in page. Sign in (or
+   confirm if you're already signed in).
+3. The tab confirms the connection and the wizard advances to the plugin
+   list automatically.
 
-If the token is valid, the wizard advances to the plugin list.
-If you see "Fulcra rejected the token", re-copy it from the website —
-leading/trailing whitespace is the most common cause of failure.
+The flow times out after 2 minutes — if it does, click **Sign in with
+Fulcra** again.
+
+If the button does not appear (the wizard says "checking for the fulcra
+CLI…" and then shows a paste-token form instead), the `fulcra` CLI is
+not on PATH. Either install it (Step 3) and refresh, or paste a token
+from fulcradynamics.com → Settings → API tokens.
 
 ---
 
@@ -234,7 +263,7 @@ all outbound HTTP mocked:
 uv run python scripts/smoke_trakt.py
 ```
 
-All 16 steps should print green checkmarks and the script exits 0. If
+All 21 steps should print green checkmarks and the script exits 0. If
 any step fails, the script identifies which route is broken and what it
 expected.
 
@@ -242,7 +271,17 @@ expected.
 
 ## Troubleshooting
 
-**"Fulcra rejected the token"**
+**"Sign-in didn't complete within 2 minutes"**
+The fulcra CLI polls for 2 minutes after opening the browser. If you
+took longer, just click **Sign in with Fulcra** again. If it keeps
+timing out, run `fulcra auth login` manually in a terminal to see what
+the CLI reports.
+
+**"The fulcra CLI is not on PATH" / no Sign-in button**
+Install it with `uv tool install fulcra-api`, then refresh the wizard.
+Or click **Use a token instead** to fall back to the paste-token form.
+
+**"Fulcra rejected the token" (paste-token path)**
 Re-copy the token from fulcradynamics.com → Settings → API tokens.
 Select all, copy, paste — whitespace at either end silently breaks JWT
 validation.
@@ -282,6 +321,32 @@ curl -sH "Authorization: Bearer $(cat ~/.config/fulcra-collect/web-token)" \
 If `access_token` shows `"missing"`, re-run the OAuth step.
 
 ---
+
+## Attention browser extension
+
+The Attention plugin used to run its own loopback HTTP server on port
+8771 to receive events from the browser extension. That standalone relay
+is gone — the daemon now hosts the extension endpoint directly at:
+
+```
+http://127.0.0.1:9292/api/extension/attention
+```
+
+(swap 9292 for your custom `web_port` if you set one).
+
+To wire up the extension:
+
+1. Walk the Attention plugin's onboarding wizard in the Fulcra Collect
+   web UI. It will ask you to pick a bearer token (the
+   `extension-token`) and prompt you to paste it into the extension's
+   options page along with the URL above.
+2. The daemon validates each POST against the `extension-token` you set
+   in the keychain; mismatched or missing tokens return 401.
+3. Use `fulcra-attention status` to inspect the per-machine state file
+   (definition id, hostname tag, per-client watermarks). The
+   `fulcra-attention relay` subcommand and the launchd-install half of
+   `fulcra-attention setup` are gone. The `setup` subcommand still exists
+   but now only tags this machine's events with its hostname.
 
 ## What the sync does
 

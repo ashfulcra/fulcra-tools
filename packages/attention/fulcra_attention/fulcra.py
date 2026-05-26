@@ -142,6 +142,38 @@ class FulcraClient(BaseFulcraClient):
         r.raise_for_status()
         return [d for d in r.json() if d.get("name") == "Attention"]
 
+    def definition_exists(self, def_id: str) -> bool:
+        """Return True iff `def_id` is a live (non-deleted) definition on
+        the current Fulcra account.
+
+        Used by /api/extension/attention to detect a stale
+        attention_state.attention_definition_id — e.g. after the daemon
+        re-auths to a different Fulcra account, the cached def id points
+        at a def in the previous account. Without this check, Fulcra
+        happily ingests events with a source_id whose def doesn't exist,
+        and those events are invisible in the timeline.
+
+        Implementation: listing all defs and scanning is the safest path
+        because Fulcra's `GET /user/v1alpha1/annotation/{id}` returns the
+        def regardless of deleted_at (we'd still need to inspect the
+        body). One round trip for both checks.
+        """
+        try:
+            r = self._client().get(
+                "/user/v1alpha1/annotation",
+                headers=self._authed_headers(),
+            )
+            r.raise_for_status()
+            for d in r.json():
+                if d.get("id") == def_id and not d.get("deleted_at"):
+                    return True
+            return False
+        except Exception:
+            # Network/API failure — be conservative and assume the def
+            # still exists so we don't keep re-resolving on every flake.
+            # The validation cache will retry on its normal TTL.
+            return True
+
     def _find_attention_definition(self) -> str | None:
         """Return the id of the live "Attention" duration definition.
 

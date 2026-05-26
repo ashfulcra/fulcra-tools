@@ -108,13 +108,17 @@ class PopoverRoot:
         self._showing_status: bool = False
 
         # ── Build the quick-record primary view ───────────────────────────────
+        # Pass body_height so the quick-record view's internal header / scroll /
+        # footer split is sized against the container it'll actually live in,
+        # not the legacy 360 pt assumption that left content rendering above
+        # the visible region (huge empty void in the middle of the popover).
         quick_record_view = make_quick_record_view(
             client=client,
             model=model,
             on_view_status=self._show_status,
             width=WIDTH,
+            height=body_height,
         )
-        # The quick-record view manages its own height; clip it to body_height
         quick_record_view.setFrame_(NSMakeRect(0, 0, WIDTH, body_height))
         self._quick_record_view = quick_record_view
 

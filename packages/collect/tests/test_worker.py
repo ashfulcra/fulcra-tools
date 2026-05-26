@@ -293,3 +293,35 @@ def test_fulcra_definition_adapter_create_definition_posts_body(monkeypatch):
     assert result == {"id": "new-def-99"}
     assert posted[0]["name"] == "attention"
     assert posted[0]["annotation_type"] == "duration"
+    # Defaults injected because Fulcra rejects bodies missing either field
+    # (HTTP 422). Discovered the hard way when task #13's stale-def
+    # re-resolution path tried to create a "Listened" def with the bare
+    # LASTFM_LISTENED_SPEC and Fulcra returned `loc: [body, duration,
+    # description], type: missing`.
+    assert posted[0]["tags"] == []
+    assert posted[0]["description"] == ""
+
+
+def test_fulcra_definition_adapter_create_definition_lets_spec_override_defaults(monkeypatch):
+    """The defaults must not clobber values the spec actually supplies —
+    e.g. attention's duration_definition_payload always includes
+    description + tags, those need to survive."""
+    import httpx
+    from fulcra_collect.worker import _FulcraDefinitionAdapter
+    from fulcra_common import BaseFulcraClient
+
+    posted: list[dict] = []
+    def handler(r: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(r.content))
+        return httpx.Response(200, json={"id": "new-def-100"})
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    base = BaseFulcraClient(transport=httpx.MockTransport(handler))
+    adapter = _FulcraDefinitionAdapter(base)
+    adapter.create_definition(
+        name="attention",
+        description="What the user paid attention to.",
+        tags=["tag-a", "tag-b"],
+        annotation_type="duration",
+    )
+    assert posted[0]["description"] == "What the user paid attention to."
+    assert posted[0]["tags"] == ["tag-a", "tag-b"]

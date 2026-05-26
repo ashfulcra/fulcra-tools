@@ -131,6 +131,35 @@ class BaseFulcraClient:
         r.raise_for_status()
         return r.json()["id"]
 
+    def definition_exists(self, definition_id: str) -> bool:
+        """Return True iff `definition_id` is a live (non-deleted)
+        annotation definition on the current Fulcra account.
+
+        Used by `ctx.resolved_definition_id` / `ctx.ensure_definition` to
+        detect when a cached def id points at a def in a different
+        account or a soft-deleted def — the same hazard that left
+        attention events orphaned after the daemon was re-authed to a
+        different account (see task #12 history). Without this check,
+        Fulcra's ingest endpoint accepts events with a source_id whose
+        def doesn't exist and they're silently invisible in the timeline.
+
+        Network failure → returns True (conservative: assume the def is
+        fine, retry on the next validation window). A flaky API should
+        never trigger spurious re-resolutions.
+        """
+        try:
+            r = self._client().get(
+                "/user/v1alpha1/annotation",
+                headers=self._authed_headers(),
+            )
+            r.raise_for_status()
+            for d in r.json():
+                if d.get("id") == definition_id and not d.get("deleted_at"):
+                    return True
+            return False
+        except Exception:
+            return True
+
     def soft_delete_definition(self, definition_id: str) -> bool:
         """Soft-delete an annotation definition.
 

@@ -14,7 +14,8 @@
       x-data="app()"
       x-init="boot()"
       @onboarding-complete.window="route = 'dashboard'"
-      @add-plugin.window="route = 'add_plugin'">
+      @add-plugin.window="route = 'add_plugin'"
+      @configure-plugin.window="openSetupForPlugin($event.detail.id)">
 
   <main class="max-w-2xl mx-auto p-6">
     <header class="flex items-center gap-3 mb-8">
@@ -45,6 +46,18 @@
     <template x-if="route === 'onboarding'">
       <section x-data="onboarding()" x-init="boot()">
 
+        <!-- Whole-onboarding escape hatch — visible during the active flow
+             (welcome → configure). Hidden on the final "done" screen, which
+             has its own button. -->
+        <template x-if="phase !== 'done'">
+          <div class="flex justify-end mb-2">
+            <button @click="if (confirm('Skip the rest of onboarding? You can finish configuring plugins later from Preferences.')) skipOnboarding()"
+                    class="text-xs text-slate-400 hover:text-slate-600 underline">
+              Skip onboarding
+            </button>
+          </div>
+        </template>
+
         <!-- Phase: welcome -->
         <template x-if="phase === 'welcome'">
           <div class="space-y-6">
@@ -70,14 +83,56 @@
           <div class="space-y-6">
             <div>
               <h2 class="text-2xl font-semibold mb-2">Sign in to Fulcra</h2>
-              <p class="text-slate-600 text-sm">
+              <p class="text-slate-600 text-sm" x-show="signinMode === 'cli'">
+                We'll open a browser tab so you can sign in to Fulcra securely.
+                No tokens to copy and paste.
+              </p>
+              <p class="text-slate-600 text-sm" x-show="signinMode === 'token'">
                 Paste your Fulcra access token below. You can find it in
                 <a href="https://app.fulcra.io/settings/api" target="_blank"
                    class="text-violet-600 underline">Fulcra Settings → API</a>.
               </p>
+              <p class="text-slate-500 text-xs" x-show="signinMode === 'auto'">
+                Checking for the fulcra CLI…
+              </p>
             </div>
 
-            <div class="space-y-3">
+            <!-- CLI / browser flow -->
+            <div class="space-y-3" x-show="signinMode === 'cli'">
+              <template x-if="signinError">
+                <p class="text-red-600 text-sm" x-text="signinError"></p>
+              </template>
+
+              <template x-if="signinLoading">
+                <div class="rounded border border-violet-200 bg-violet-50 p-3 text-sm text-violet-800">
+                  <p class="font-medium">Waiting for browser sign-in…</p>
+                  <p class="text-violet-700 mt-1">
+                    A browser tab should have opened. Finish signing in there;
+                    this page will move on automatically. The flow times out
+                    after 2 minutes.
+                  </p>
+                </div>
+              </template>
+
+              <div class="flex gap-3" x-show="!signinLoading">
+                <button @click="signinViaCli()"
+                        class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
+                  Sign in with Fulcra
+                </button>
+                <button @click="phase = 'welcome'"
+                        class="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">
+                  Back
+                </button>
+              </div>
+
+              <p class="text-xs text-slate-500">
+                <a href="#" @click.prevent="signinMode = 'token'; signinError = ''"
+                   class="text-violet-600 hover:underline">Use a token instead</a>
+              </p>
+            </div>
+
+            <!-- Paste-token fallback flow -->
+            <div class="space-y-3" x-show="signinMode === 'token'">
               <div>
                 <label class="block text-sm font-medium text-slate-700 mb-1">Access token</label>
                 <input type="password"
@@ -102,6 +157,11 @@
                   Back
                 </button>
               </div>
+
+              <p class="text-xs text-slate-500" x-show="cliAvailable">
+                <a href="#" @click.prevent="signinMode = 'cli'; signinError = ''"
+                   class="text-violet-600 hover:underline">Use the browser sign-in instead</a>
+              </p>
             </div>
           </div>
         </template>
@@ -139,7 +199,7 @@
                                  class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500">
                           <div class="flex-1 min-w-0">
                             <div class="font-medium text-sm" x-text="p.name"></div>
-                            <div class="text-xs text-slate-500 mt-0.5 truncate"
+                            <div class="text-xs text-slate-500 mt-0.5"
                                  x-text="p.description || ''"></div>
                           </div>
                           <template x-if="p.enabled">
@@ -201,8 +261,12 @@
                   <span class="text-xs text-slate-500 shrink-0" x-text="progress_label"></span>
                 </div>
 
-                <!-- Step title -->
-                <h2 class="text-xl font-semibold" x-text="current_step.title"></h2>
+                <!-- Step title — skipped for kind="done" because that
+                     step's render block has its own title alongside the
+                     green checkmark (task #71). -->
+                <template x-if="current_step.kind !== 'done'">
+                  <h2 class="text-xl font-semibold" x-text="current_step.title"></h2>
+                </template>
 
                 <!-- ---- intro ---- -->
                 <template x-if="current_step.kind === 'intro'">
@@ -242,8 +306,9 @@
                           <select :value="field.value"
                                   @change="updateField(field.key, $event.target.value)"
                                   class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
-                            <template x-for="opt in field.enum_values" :key="opt">
-                              <option :value="opt" :selected="opt === field.value" x-text="opt"></option>
+                            <template x-for="(opt, i) in field.enum_values" :key="opt">
+                              <option :value="opt" :selected="opt === field.value"
+                                      x-text="(field.enum_labels && field.enum_labels[i]) || opt"></option>
                             </template>
                           </select>
                         </template>
@@ -311,18 +376,62 @@
                         </template>
                       </label>
                     </div>
+                    <template x-if="uploadInFlight">
+                      <div class="space-y-1">
+                        <div class="h-2 bg-slate-200 rounded">
+                          <div class="h-2 bg-violet-600 rounded transition-all"
+                               :style="`width: ${uploadProgress}%`"></div>
+                        </div>
+                        <p class="text-xs text-slate-500"
+                           x-text="`Uploading… ${uploadProgress}%`"></p>
+                      </div>
+                    </template>
                   </div>
                 </template>
 
-                <!-- ---- permission_request ---- -->
+                <!-- ---- permission_request ---- (task #66)
+                     The old "macOS will show you a dialog when you click
+                     Next" message was a lie — macOS does not auto-prompt
+                     for permissions like Full Disk Access. Replace with a
+                     deep-link to the right Privacy pane plus a Verify
+                     button that calls the backend's permission_check. -->
                 <template x-if="current_step.kind === 'permission_request'">
                   <div class="space-y-4">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
-                    <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-                      macOS will show you a permission dialog when you click Next. Accept it to
-                      allow Fulcra Collect to access the required data.
+
+                    <div class="flex gap-2 items-center">
+                      <a x-bind:href="permissionDeepLink(current_permission_id)"
+                         x-show="permissionDeepLink(current_permission_id)"
+                         class="px-3 py-1.5 text-sm rounded border border-slate-300 hover:bg-slate-50">
+                        Open System Settings →
+                      </a>
+                      <button @click="checkPermission()"
+                              x-show="plugin_contract.permission_check_available"
+                              :disabled="permissionChecking"
+                              class="px-3 py-1.5 text-sm rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50">
+                        <span x-text="permissionChecking ? 'Checking…' : 'Verify access'"></span>
+                      </button>
                     </div>
+
+                    <template x-if="permissionResult && permissionResult.granted">
+                      <div class="rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                        ✓ Access granted.
+                      </div>
+                    </template>
+                    <template x-if="permissionResult && !permissionResult.granted">
+                      <div class="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                        <p class="font-medium">Not granted yet.</p>
+                        <p class="text-amber-700 mt-1" x-show="permissionResult.hint" x-text="permissionResult.hint"></p>
+                        <p class="mt-2 text-xs">Open System Settings above, grant access, then click Verify access again.</p>
+                      </div>
+                    </template>
+
+                    <template x-if="!plugin_contract.permission_check_available">
+                      <div class="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                        Follow the steps above, then click Next to continue.
+                      </div>
+                    </template>
                   </div>
                 </template>
 
@@ -494,8 +603,11 @@
                       </div>
                     </template>
 
-                    <!-- Create new instead footer -->
-                    <div class="pt-1">
+                    <!-- Create new instead footer — only shown when there
+                         are existing defs to choose between. When the list
+                         is empty, _loadDefinitions auto-sets dpForceNew so
+                         the user can just click Next (task #67). -->
+                    <div class="pt-1" x-show="dpDefinitions.length > 0">
                       <button @click="dpChooseForceNew()"
                               class="text-sm font-medium transition-colors"
                               :class="dpForceNew
@@ -518,6 +630,77 @@
                     </button>
                     <template x-if="oauthStatus">
                       <p class="text-sm text-slate-600" x-text="oauthStatus"></p>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- ---- extension_pair ---- one-click pairing handshake -->
+                <template x-if="current_step.kind === 'extension_pair'">
+                  <div class="space-y-4">
+                    <div class="prose prose-sm text-slate-700 max-w-none"
+                         x-html="body_html"></div>
+
+                    <!-- idle: show the button -->
+                    <template x-if="pairStatus === 'idle'">
+                      <button @click="startExtensionPair()"
+                              class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                        Pair extension
+                      </button>
+                    </template>
+
+                    <!-- pairing: violet pulse badge -->
+                    <template x-if="pairStatus === 'pairing'">
+                      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-violet-100 text-violet-700 text-sm font-medium animate-pulse">
+                        <svg class="w-4 h-4 animate-spin" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" stroke-opacity="0.25"/>
+                          <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                        Pairing…
+                      </div>
+                    </template>
+
+                    <!-- success: green check -->
+                    <template x-if="pairStatus === 'success'">
+                      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-100 text-green-700 text-sm font-medium">
+                        <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none">
+                          <path d="M3 8l3.5 3.5L13 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        Paired
+                      </div>
+                    </template>
+
+                    <!-- fallback: manual paste UI -->
+                    <template x-if="pairStatus === 'fallback'">
+                      <div class="rounded border border-amber-300 bg-amber-50 p-4 space-y-3">
+                        <div class="text-sm text-amber-900 font-medium">
+                          The extension didn't respond. You can finish setup manually:
+                        </div>
+                        <ol class="text-sm text-amber-900 list-decimal list-inside space-y-1">
+                          <li>Copy the token below.</li>
+                          <li>Open the extension's Options page (right-click the toolbar icon → <strong>Options</strong>).</li>
+                          <li>Paste it into the <strong>Bearer token</strong> field and click <strong>Save</strong>.</li>
+                          <li>Return here and click <strong>I pasted it</strong>.</li>
+                        </ol>
+                        <div class="flex items-center gap-2">
+                          <code class="flex-1 bg-white border border-amber-200 px-2 py-1 rounded text-xs font-mono text-slate-800 break-all"
+                                x-text="pairFallbackToken"></code>
+                          <button @click="copyPairToken()"
+                                  class="px-3 py-1.5 rounded bg-amber-600 text-white text-xs font-medium hover:bg-amber-700">
+                            Copy
+                          </button>
+                        </div>
+                        <template x-if="!pairManuallyConfirmed">
+                          <button @click="confirmManualPair()"
+                                  class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                            I pasted it
+                          </button>
+                        </template>
+                        <template x-if="pairManuallyConfirmed">
+                          <div class="text-sm text-green-700 font-medium">
+                            Click Continue below.
+                          </div>
+                        </template>
+                      </div>
                     </template>
                   </div>
                 </template>
@@ -545,12 +728,26 @@
                   <p class="text-red-600 text-sm" x-text="stepError"></p>
                 </template>
 
-                <!-- Back / Next navigation -->
+                <!-- Back / Next navigation + skip escape hatches -->
                 <div class="flex items-center gap-3 pt-2 border-t border-slate-100">
                   <template x-if="has_back">
                     <button @click="back()"
                             class="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">
                       Back
+                    </button>
+                  </template>
+
+                  <!-- On step 0 of a plugin inside the onboarding multi-plugin
+                       walk, give the user a way back to the pick_plugins screen
+                       so they can add/remove picks without losing existing
+                       selections (task #64). Not shown in the single-plugin
+                       Configure flow from the dashboard — that route doesn't
+                       pass on_back_to_pick_plugins, so has_back_to_pick_plugins
+                       is false. -->
+                  <template x-if="!has_back && has_back_to_pick_plugins">
+                    <button @click="backToPluginList()"
+                            class="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">
+                      ← Plugin list
                     </button>
                   </template>
 
@@ -568,6 +765,23 @@
                       Continue
                     </button>
                   </template>
+
+                  <!-- Skip escape hatches — pushed right so they sit visually
+                       apart from the primary Back/Next pair. Per-step skip
+                       only shown when there's a next step; "Skip plugin"
+                       always available so a stuck user can abandon a single
+                       plugin without bailing on the whole onboarding. -->
+                  <div class="flex-1"></div>
+                  <template x-if="has_next">
+                    <button @click="skipStep()"
+                            class="text-xs text-slate-400 hover:text-slate-600 underline">
+                      Skip step
+                    </button>
+                  </template>
+                  <button @click="if (confirm('Skip this plugin? It won\'t be enabled — you can configure it later from Preferences.')) skipPlugin()"
+                          class="text-xs text-slate-400 hover:text-slate-600 underline">
+                    Skip plugin
+                  </button>
                 </div>
 
               </div>
@@ -610,6 +824,450 @@
     </template>
 
     <!-- ------------------------------------------------------------------ -->
+    <!-- SETUP-PLUGIN (per-plugin re-configure from dashboard)              -->
+    <!--                                                                    -->
+    <!-- Reached via the Configure button on a dashboard row. Loads that    -->
+    <!-- plugin's contract and runs it through the same wizard the          -->
+    <!-- onboarding flow uses, then routes straight back to the dashboard   -->
+    <!-- (no "next plugin", no enabled-count accounting). Task #61.         -->
+    <!-- ------------------------------------------------------------------ -->
+    <template x-if="route === 'setup-plugin'">
+      <section class="space-y-6">
+
+        <!-- Header: back-to-dashboard escape hatch + plugin name -->
+        <div class="flex items-center justify-between">
+          <button @click="route = 'dashboard'"
+                  class="text-xs text-slate-400 hover:text-slate-600 underline">
+            ← Back to dashboard
+          </button>
+        </div>
+
+        <!-- Contract still loading -->
+        <template x-if="!setupContract && !setupContractError">
+          <div class="text-slate-400 text-sm animate-pulse">Loading plugin setup…</div>
+        </template>
+
+        <!-- Contract load failed -->
+        <template x-if="setupContractError">
+          <div class="border border-red-200 bg-red-50 text-red-800 p-4 rounded-lg">
+            <strong>Could not load this plugin's setup.</strong>
+            <p class="text-sm mt-1" x-text="setupContractError"></p>
+            <button @click="route = 'dashboard'"
+                    class="mt-3 px-4 py-2 bg-red-700 text-white rounded text-sm hover:bg-red-800">
+              Back to dashboard
+            </button>
+          </div>
+        </template>
+
+        <!-- Plugin has no setup steps — the wizard renders a "nothing to do" placeholder -->
+        <template x-if="setupWizard && setupWizard._noSteps">
+          <div class="space-y-5">
+            <div>
+              <h2 class="text-xl font-semibold mb-1" x-text="setupWizard.pluginName"></h2>
+              <p class="text-slate-600 text-sm">
+                This plugin doesn't have a setup wizard yet — it will be
+                configured in Preferences once enabled.
+              </p>
+            </div>
+            <button @click="setupWizard.confirmNoSteps()"
+                    class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700">
+              Enable &amp; Return to Dashboard
+            </button>
+          </div>
+        </template>
+
+        <!-- Plugin has setup_steps — reuse the same wizard renderer as onboarding -->
+        <template x-if="setupWizard && !setupWizard._noSteps">
+          <div x-data="setupWizard" class="space-y-5">
+
+            <!-- Step indicator -->
+            <div class="flex items-center gap-3">
+              <div class="flex-1 bg-slate-200 rounded-full h-1.5">
+                <div class="bg-violet-600 h-1.5 rounded-full transition-all"
+                     :style="`width: ${progress_pct}%`"></div>
+              </div>
+              <span class="text-xs text-slate-500 shrink-0" x-text="progress_label"></span>
+            </div>
+
+            <!-- Step title — skipped for kind="done"; see configure-phase
+                 copy at the equivalent block above. (task #71) -->
+            <template x-if="current_step.kind !== 'done'">
+              <h2 class="text-xl font-semibold" x-text="current_step.title"></h2>
+            </template>
+
+            <!-- intro -->
+            <template x-if="current_step.kind === 'intro'">
+              <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+            </template>
+
+            <!-- external_action -->
+            <template x-if="current_step.kind === 'external_action'">
+              <div class="space-y-4">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+                <template x-if="current_step.external_link">
+                  <a :href="current_step.external_link"
+                     target="_blank" rel="noopener"
+                     class="inline-flex items-center gap-2 px-4 py-2 rounded bg-slate-100 text-slate-700 hover:bg-slate-200 text-sm font-medium">
+                    Open
+                    <span x-text="current_step.external_link.replace(/^https?:\/\//, '').split('/')[0]"></span>
+                  </a>
+                </template>
+              </div>
+            </template>
+
+            <!-- input -->
+            <template x-if="current_step.kind === 'input'">
+              <div class="space-y-4">
+                <template x-for="field in input_fields" :key="field.key">
+                  <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1" x-text="field.label"></label>
+
+                    <template x-if="field.kind === 'enum' && field.enum_values">
+                      <select :value="field.value"
+                              @change="updateField(field.key, $event.target.value)"
+                              class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
+                        <template x-for="(opt, i) in field.enum_values" :key="opt">
+                          <option :value="opt" :selected="opt === field.value"
+                                  x-text="(field.enum_labels && field.enum_labels[i]) || opt"></option>
+                        </template>
+                      </select>
+                    </template>
+
+                    <template x-if="field.kind === 'toggle'">
+                      <label class="inline-flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox"
+                               :checked="field.value === 'true' || field.value === true"
+                               @change="updateField(field.key, $event.target.checked ? 'true' : 'false')"
+                               class="h-4 w-4 rounded border-slate-300 text-violet-600">
+                        <span class="text-sm text-slate-600">Enabled</span>
+                      </label>
+                    </template>
+
+                    <template x-if="field.kind === 'password' || field.kind === 'secret'">
+                      <input type="password"
+                             :value="field.value"
+                             @input="updateField(field.key, $event.target.value)"
+                             :placeholder="field.placeholder || ''"
+                             class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
+                    </template>
+
+                    <template x-if="field.kind !== 'enum' && field.kind !== 'toggle' && field.kind !== 'password' && field.kind !== 'secret'">
+                      <input :type="field.kind === 'url' ? 'url' : field.kind === 'port' ? 'number' : 'text'"
+                             :value="field.value"
+                             @input="updateField(field.key, $event.target.value)"
+                             :placeholder="field.placeholder || ''"
+                             class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
+                    </template>
+
+                    <template x-if="field.help">
+                      <p class="text-xs text-slate-500 mt-1" x-text="field.help"></p>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- file_upload -->
+            <template x-if="current_step.kind === 'file_upload'">
+              <div class="space-y-4">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+                <div class="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:border-violet-400 transition-colors">
+                  <input type="file" @change="onFileChange($event)" class="hidden" id="setupFileUploadInput">
+                  <label for="setupFileUploadInput" class="cursor-pointer">
+                    <p class="text-sm text-slate-600">
+                      <span class="text-violet-600 font-medium">Click to choose a file</span>
+                      or drag and drop
+                    </p>
+                    <template x-if="uploadedFileName">
+                      <p class="text-sm text-slate-800 mt-2 font-medium" x-text="uploadedFileName"></p>
+                    </template>
+                  </label>
+                </div>
+                <template x-if="uploadInFlight">
+                  <div class="space-y-1">
+                    <div class="h-2 bg-slate-200 rounded">
+                      <div class="h-2 bg-violet-600 rounded transition-all"
+                           :style="`width: ${uploadProgress}%`"></div>
+                    </div>
+                    <p class="text-xs text-slate-500"
+                       x-text="`Uploading… ${uploadProgress}%`"></p>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- permission_request (task #66) — see the configure-phase
+                 copy above for the rationale. Same UI in both flows. -->
+            <template x-if="current_step.kind === 'permission_request'">
+              <div class="space-y-4">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+
+                <div class="flex gap-2 items-center">
+                  <a x-bind:href="permissionDeepLink(current_permission_id)"
+                     x-show="permissionDeepLink(current_permission_id)"
+                     class="px-3 py-1.5 text-sm rounded border border-slate-300 hover:bg-slate-50">
+                    Open System Settings →
+                  </a>
+                  <button @click="checkPermission()"
+                          x-show="plugin_contract.permission_check_available"
+                          :disabled="permissionChecking"
+                          class="px-3 py-1.5 text-sm rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50">
+                    <span x-text="permissionChecking ? 'Checking…' : 'Verify access'"></span>
+                  </button>
+                </div>
+
+                <template x-if="permissionResult && permissionResult.granted">
+                  <div class="rounded border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                    ✓ Access granted.
+                  </div>
+                </template>
+                <template x-if="permissionResult && !permissionResult.granted">
+                  <div class="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    <p class="font-medium">Not granted yet.</p>
+                    <p class="text-amber-700 mt-1" x-show="permissionResult.hint" x-text="permissionResult.hint"></p>
+                    <p class="mt-2 text-xs">Open System Settings above, grant access, then click Verify access again.</p>
+                  </div>
+                </template>
+
+                <template x-if="!plugin_contract.permission_check_available">
+                  <div class="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                    Follow the steps above, then click Next to continue.
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- browser_extension -->
+            <template x-if="current_step.kind === 'browser_extension'">
+              <div class="space-y-4">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+                <template x-if="current_step.extension_url">
+                  <a :href="current_step.extension_url"
+                     target="_blank" rel="noopener"
+                     class="inline-flex items-center gap-2 px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                    Install Extension
+                  </a>
+                </template>
+                <div class="mt-2">
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox"
+                           :checked="extensionConfirmed"
+                           @change="confirmExtension()"
+                           class="h-4 w-4 rounded border-slate-300 text-violet-600">
+                    <span class="text-sm text-slate-600">I've installed the extension</span>
+                  </label>
+                </div>
+              </div>
+            </template>
+
+            <!-- test_connection -->
+            <template x-if="current_step.kind === 'test_connection'">
+              <div class="space-y-4">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+
+                <template x-if="healthChecking">
+                  <div class="flex items-center gap-3 text-slate-500">
+                    <span class="text-sm">Testing connection…</span>
+                  </div>
+                </template>
+
+                <template x-if="!healthChecking && healthResult">
+                  <div>
+                    <template x-if="healthResult.ok">
+                      <div class="flex items-center gap-2 text-green-700">
+                        <span class="font-medium text-sm" x-text="healthResult.summary"></span>
+                      </div>
+                    </template>
+                    <template x-if="!healthResult.ok">
+                      <div class="space-y-3">
+                        <div class="text-red-700 text-sm" x-text="healthResult.summary"></div>
+                        <button @click="runHealthCheck()"
+                                class="px-4 py-2 text-sm rounded border border-red-300 text-red-700 hover:bg-red-50">
+                          Retry
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <template x-if="!healthChecking && !healthResult && !healthError">
+                  <p class="text-sm text-slate-500">No health check available for this plugin.</p>
+                </template>
+              </div>
+            </template>
+
+            <!-- definition_picker -->
+            <template x-if="current_step.kind === 'definition_picker'">
+              <div class="space-y-4">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+
+                <template x-if="dpLoading">
+                  <div class="text-slate-400 text-sm animate-pulse">Loading your Fulcra annotations…</div>
+                </template>
+
+                <template x-if="dpError && !dpLoading">
+                  <div class="text-red-600 text-sm bg-red-50 border border-red-200 rounded p-3" x-text="dpError"></div>
+                </template>
+
+                <template x-if="!dpLoading && dpDefinitions.length > 0">
+                  <div class="space-y-2">
+                    <p class="text-xs text-slate-500 font-medium">Choose an existing annotation or create a new one:</p>
+                    <template x-for="def in dpDefinitions" :key="def.id">
+                      <div class="border rounded-lg p-3 cursor-pointer transition-colors"
+                           :class="dpSelectedId === def.id
+                             ? 'border-violet-400 bg-violet-50'
+                             : 'border-slate-200 hover:border-slate-300'"
+                           @click="dpSelectDef(def)">
+                        <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
+                        <div class="text-xs text-slate-500 mt-0.5"
+                             x-text="`${def.annotation_type} · created ${dpHumanDate(def.created_at)}`"></div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <div class="pt-1" x-show="dpDefinitions.length > 0">
+                  <button @click="dpChooseForceNew()"
+                          class="text-sm font-medium transition-colors"
+                          :class="dpForceNew ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'">
+                    <span x-text="dpForceNew ? '✓ Will create a new annotation on first run' : 'Create a new annotation instead'"></span>
+                  </button>
+                </div>
+              </div>
+            </template>
+
+            <!-- oauth -->
+            <template x-if="current_step.kind === 'oauth'">
+              <div class="space-y-3">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+                <button @click="startOAuth()"
+                        class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                  Click here to authenticate
+                </button>
+                <template x-if="oauthStatus">
+                  <p class="text-sm text-slate-600" x-text="oauthStatus"></p>
+                </template>
+              </div>
+            </template>
+
+            <!-- extension_pair — see the configure-phase template above for
+                 the rationale; this is the same UI shown from the
+                 single-plugin Configure flow. -->
+            <template x-if="current_step.kind === 'extension_pair'">
+              <div class="space-y-4">
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+
+                <template x-if="pairStatus === 'idle'">
+                  <button @click="startExtensionPair()"
+                          class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                    Pair extension
+                  </button>
+                </template>
+
+                <template x-if="pairStatus === 'pairing'">
+                  <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-violet-100 text-violet-700 text-sm font-medium animate-pulse">
+                    <svg class="w-4 h-4 animate-spin" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" stroke-opacity="0.25"/>
+                      <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    Pairing…
+                  </div>
+                </template>
+
+                <template x-if="pairStatus === 'success'">
+                  <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-100 text-green-700 text-sm font-medium">
+                    <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none">
+                      <path d="M3 8l3.5 3.5L13 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    Paired
+                  </div>
+                </template>
+
+                <template x-if="pairStatus === 'fallback'">
+                  <div class="rounded border border-amber-300 bg-amber-50 p-4 space-y-3">
+                    <div class="text-sm text-amber-900 font-medium">
+                      The extension didn't respond. You can finish setup manually:
+                    </div>
+                    <ol class="text-sm text-amber-900 list-decimal list-inside space-y-1">
+                      <li>Copy the token below.</li>
+                      <li>Open the extension's Options page (right-click the toolbar icon → <strong>Options</strong>).</li>
+                      <li>Paste it into the <strong>Bearer token</strong> field and click <strong>Save</strong>.</li>
+                      <li>Return here and click <strong>I pasted it</strong>.</li>
+                    </ol>
+                    <div class="flex items-center gap-2">
+                      <code class="flex-1 bg-white border border-amber-200 px-2 py-1 rounded text-xs font-mono text-slate-800 break-all"
+                            x-text="pairFallbackToken"></code>
+                      <button @click="copyPairToken()"
+                              class="px-3 py-1.5 rounded bg-amber-600 text-white text-xs font-medium hover:bg-amber-700">
+                        Copy
+                      </button>
+                    </div>
+                    <template x-if="!pairManuallyConfirmed">
+                      <button @click="confirmManualPair()"
+                              class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                        I pasted it
+                      </button>
+                    </template>
+                    <template x-if="pairManuallyConfirmed">
+                      <div class="text-sm text-green-700 font-medium">
+                        Click Next below.
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- done -->
+            <template x-if="current_step.kind === 'done'">
+              <div class="space-y-4">
+                <div class="font-semibold text-lg text-green-700" x-text="current_step.title"></div>
+                <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+              </div>
+            </template>
+
+            <template x-if="stepError">
+              <p class="text-red-600 text-sm" x-text="stepError"></p>
+            </template>
+
+            <!-- Back / Next nav (skipPlugin returns to dashboard via on_skip_plugin) -->
+            <div class="flex items-center gap-3 pt-2 border-t border-slate-100">
+              <template x-if="has_back">
+                <button @click="back()"
+                        class="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">
+                  Back
+                </button>
+              </template>
+
+              <template x-if="!is_done_step">
+                <button @click="next()"
+                        :disabled="nextBlocked"
+                        class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 disabled:opacity-40 transition-colors text-sm">
+                  Next
+                </button>
+              </template>
+
+              <template x-if="is_done_step">
+                <button @click="next()"
+                        class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors text-sm">
+                  Done
+                </button>
+              </template>
+
+              <div class="flex-1"></div>
+              <button @click="if (confirm('Cancel this plugin\'s setup? Any partial changes will not be applied.')) skipPlugin()"
+                      class="text-xs text-slate-400 hover:text-slate-600 underline">
+                Cancel setup
+              </button>
+            </div>
+
+          </div>
+        </template>
+
+      </section>
+    </template>
+
+    <!-- ------------------------------------------------------------------ -->
     <!-- DASHBOARD                                                           -->
     <!-- ------------------------------------------------------------------ -->
     <template x-if="route === 'dashboard' || route === 'add_plugin'">
@@ -617,7 +1275,17 @@
 
         <!-- Header row -->
         <div class="flex items-center justify-between">
-          <h2 class="text-xl font-semibold">Dashboard</h2>
+          <div class="flex items-center gap-3">
+            <h2 class="text-xl font-semibold">Dashboard</h2>
+            <!-- Escape hatch back into onboarding for users who skipped out
+                 mid-flow or want to re-pick plugins. Wired via the parent
+                 app() so route + state are reset cleanly. (task #62) -->
+            <button @click="$root.runOnboarding()"
+                    class="text-xs text-slate-400 hover:text-violet-600 underline"
+                    title="Restart the onboarding wizard">
+              Run setup wizard
+            </button>
+          </div>
           <button @click="addPlugin()"
                   class="px-4 py-2 text-sm rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
             + Add plugin
@@ -632,11 +1300,15 @@
           <div class="text-red-600 text-sm" x-text="error"></div>
         </template>
 
-        <!-- Plugin grid -->
-        <template x-if="!loading && plugins.length > 0">
+        <!-- ============================================================== -->
+        <!-- Plugins, split into Enabled (top) + Disabled (below). Headings -->
+        <!-- collapse when their section is empty so the dashboard reads    -->
+        <!-- cleanly for both first-time and fully-configured users.        -->
+        <!-- ============================================================== -->
+        <template x-if="!loading && enabledPlugins.length > 0">
           <div class="space-y-2">
-            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Plugins</h3>
-            <template x-for="p in plugins" :key="p.id">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Enabled</h3>
+            <template x-for="p in enabledPlugins" :key="p.id">
               <div class="border border-slate-200 rounded-lg px-4 py-3 hover:border-slate-300 transition-colors">
                 <div class="flex items-start justify-between gap-3">
                   <div class="flex-1 min-w-0">
@@ -646,14 +1318,16 @@
                             :class="pillClass(p)"
                             x-text="pillLabel(p)"></span>
                     </div>
-                    <p class="text-xs text-slate-500 truncate" x-text="p.description || ''"></p>
-                    <template x-if="humanInterval(p)">
-                      <p class="text-xs text-slate-400 mt-1" x-text="humanInterval(p)"></p>
-                    </template>
+                    <p class="text-xs text-slate-500" x-text="p.description || ''"></p>
+                    <div class="flex items-center gap-3 mt-1">
+                      <template x-if="humanInterval(p)">
+                        <p class="text-xs text-slate-400" x-text="humanInterval(p)"></p>
+                      </template>
+                      <p class="text-xs text-slate-400" x-text="lastRunLabel(p)"></p>
+                    </div>
                   </div>
 
                   <div class="flex items-center gap-2 shrink-0">
-                    <!-- Run now button for manual / scheduled -->
                     <template x-if="canRunNow(p)">
                       <button @click="runNow(p)"
                               :disabled="isRunning(p)"
@@ -662,13 +1336,46 @@
                       </button>
                     </template>
 
-                    <!-- Plugin settings page (not yet implemented) -->
-                    <a href="#"
-                       @click.prevent=""
-                       class="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors"
-                       title="Plugin settings page — not yet implemented">
+                    <button @click="configurePlugin(p)"
+                            class="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors"
+                            title="Re-run this plugin's setup wizard">
                       Configure
-                    </a>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <template x-if="!loading && disabledPlugins.length > 0">
+          <div class="space-y-2">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Disabled</h3>
+            <template x-for="p in disabledPlugins" :key="p.id">
+              <div class="border border-slate-200 rounded-lg px-4 py-3 hover:border-slate-300 transition-colors">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-0.5">
+                      <span class="font-medium text-sm" x-text="p.name"></span>
+                      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                            :class="pillClass(p)"
+                            x-text="pillLabel(p)"></span>
+                    </div>
+                    <p class="text-xs text-slate-500" x-text="p.description || ''"></p>
+                    <div class="flex items-center gap-3 mt-1">
+                      <template x-if="humanInterval(p)">
+                        <p class="text-xs text-slate-400" x-text="humanInterval(p)"></p>
+                      </template>
+                      <p class="text-xs text-slate-400" x-text="lastRunLabel(p)"></p>
+                    </div>
+                  </div>
+
+                  <div class="flex items-center gap-2 shrink-0">
+                    <button @click="configurePlugin(p)"
+                            class="px-3 py-1.5 text-xs rounded bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 transition-colors"
+                            title="Set up and enable this plugin">
+                      Configure
+                    </button>
                   </div>
                 </div>
               </div>
@@ -698,7 +1405,7 @@
 
           <template x-if="!activityLoading && activityEntries.length === 0">
             <div class="text-slate-400 text-sm py-4 text-center">
-              No activity yet — annotations will appear here as plugins write to Fulcra.
+              No activity yet — plugin runs (and any failures) will show up here.
             </div>
           </template>
 

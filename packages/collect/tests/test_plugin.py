@@ -191,6 +191,194 @@ def test_canonical_definition_name_persists_when_set():
     assert p.canonical_definition_name == "lastfm-listens"
 
 
+class _FakeClientWithValidation(_FakeClient):
+    """Fake that also exposes definition_exists, mirroring the worker's
+    real _FulcraDefinitionAdapter. Used to exercise the stale-cache
+    re-resolution path."""
+    def __init__(self, live_ids: set[str] | None = None):
+        super().__init__()
+        self.live_ids = live_ids or set()
+        self.exists_calls: list[str] = []
+    def definition_exists(self, def_id):
+        self.exists_calls.append(def_id)
+        return def_id in self.live_ids
+
+
+def test_resolved_definition_id_re_resolves_when_cached_def_is_stale():
+    """Regression for task #13. When the cached state.definition_id no
+    longer exists on the current Fulcra account (the daemon got
+    re-authed to a different account, or the def was deleted), the
+    choke point detects it, clears the cache, and re-resolves — without
+    this every plugin's run silently keeps writing to an orphan def id
+    that the timeline can't render."""
+    state = PluginState(plugin_id="lastfm", definition_id="orphan-from-A")
+    # The fake says no defs are live → orphan-from-A is stale.
+    client = _FakeClientWithValidation(live_ids=set())
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert client.exists_calls == ["orphan-from-A"]
+    # Resolver was invoked (list + create) — cache was bypassed.
+    assert client.list_calls == 1
+    assert client.create_calls == 1
+    assert out == "def-fresh"
+    assert state.definition_id == "def-fresh"
+
+
+def test_resolved_definition_id_keeps_cache_when_def_still_live():
+    """Inverse of the stale case: if definition_exists confirms the
+    cached id is live, we return it without invoking the resolver."""
+    state = PluginState(plugin_id="lastfm", definition_id="still-here")
+    client = _FakeClientWithValidation(live_ids={"still-here"})
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "still-here"
+    assert client.exists_calls == ["still-here"]
+    # Resolver NOT called — list_calls + create_calls untouched.
+    assert client.list_calls == 0
+    assert client.create_calls == 0
+
+
+def test_resolved_definition_id_trusts_cache_when_validation_errors():
+    """A flaky network must not trigger spurious re-resolutions — that
+    would create duplicate defs on every transient. definition_exists
+    raising is treated as 'assume live'."""
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id")
+
+    class _FlakyClient(_FakeClient):
+        def definition_exists(self, def_id):
+            raise RuntimeError("network down")
+    client = _FlakyClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "cached-id"
+    assert client.list_calls == 0
+
+
+def test_ensure_definition_returns_cached_when_live():
+    """The per-package helper: cached value is validated and returned
+    as-is. Per-plugin state.definition_id is also synced so the next
+    resolved_definition_id call is fast."""
+    state = PluginState(plugin_id="lastfm")  # per-plugin cache empty
+    client = _FakeClientWithValidation(live_ids={"per-package-cached"})
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached="per-package-cached",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "per-package-cached"
+    assert state.definition_id == "per-package-cached"
+    assert client.create_calls == 0
+
+
+def test_ensure_definition_re_resolves_when_cached_is_stale():
+    """A stale per-package cached id triggers re-resolution, the new id
+    is returned, and per-plugin state is updated."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())  # nothing live
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached="orphan-from-A",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "def-fresh"
+    assert state.definition_id == "def-fresh"
+    assert client.create_calls == 1
+
+
+def test_ensure_definition_emits_recovery_annotation_on_stale_re_resolve():
+    """Activity-feed parity with the attention route: when a stale cache
+    triggers re-resolution, the user gets a one-line dashboard entry
+    explaining why their data now points at a different def. Mirrors
+    the surface added in task #12 for the extension path; task #17
+    extends it to the worker path."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm", config={}, credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+        _fulcra_client_factory=lambda: client,
+    )
+    out = ctx.ensure_definition(
+        cached="orphan-from-A",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "def-fresh"
+    annotations = [e for e in emitted if e.get("type") == "annotation"]
+    assert len(annotations) == 1
+    assert "re-resolved" in annotations[0]["summary"]
+    assert "Listened" in annotations[0]["summary"]
+    assert "orphan-f" in annotations[0]["summary"]
+    assert annotations[0]["ok"] is True
+
+
+def test_ensure_definition_does_not_emit_when_cache_is_fresh():
+    """No noise on the happy path — the recovery surface only fires
+    when something actually recovered."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids={"all-good"})
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm", config={}, credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+        _fulcra_client_factory=lambda: client,
+    )
+    ctx.ensure_definition(
+        cached="all-good",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    annotations = [e for e in emitted if e.get("type") == "annotation"]
+    assert annotations == []
+
+
+def test_ensure_definition_does_not_emit_when_cache_was_empty():
+    """First-run resolves (no prior cache) aren't 're-resolutions' — the
+    user wasn't expecting a different def, so don't crowd the feed."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm", config={}, credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+        _fulcra_client_factory=lambda: client,
+    )
+    ctx.ensure_definition(
+        cached=None,
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    annotations = [e for e in emitted if e.get("type") == "annotation"]
+    assert annotations == []
+
+
+def test_ensure_definition_creates_when_cached_is_none():
+    """No prior per-package cache → falls straight through to resolver."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached=None,
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "def-fresh"
+    # No validation call needed — there was no cached id to check.
+    assert client.exists_calls == []
+
+
 def test_resolved_definition_id_raises_when_factory_not_set():
     """Important 2: the factory guard must fire BEFORE the lazy import of
     fulcra_common.definitions. A missing fulcra_common should produce a

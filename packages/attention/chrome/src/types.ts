@@ -4,7 +4,9 @@
 export const CLIENT = "fulcra-attention-chrome/0.1.0";
 
 /**
- * The POST body sent to http://127.0.0.1:8771/attention.
+ * The POST body sent to http://127.0.0.1:9292/api/extension/attention
+ * (the fulcra-collect daemon's extension-events route, formerly a
+ * standalone relay on port 8771).
  * Exactly one of {url, category} must be non-null.
  * start_time <= end_time <= now + 5min (enforced server-side).
  */
@@ -25,7 +27,7 @@ export interface AttentionEvent {
 /** Persistent settings in chrome.storage.local. */
 export interface Settings {
   bearerToken: string | null;
-  relayPort: number;       // default 8771
+  relayPort: number;       // default 9292 (daemon's stable port)
   enabled: boolean;        // master kill switch
   identityLabel: string | null;  // user override; null means use chrome.identity.getProfileUserInfo
   onboarded: boolean;            // true once the wizard finished (any step beyond Welcome)
@@ -35,7 +37,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   bearerToken: null,
-  relayPort: 8771,
+  relayPort: 9292,
   enabled: true,
   identityLabel: null,
   onboarded: false,

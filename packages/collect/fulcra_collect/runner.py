@@ -44,6 +44,11 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     error: str | None = "worker emitted no result"
     watermark: str | None = None
     definition_id: str | None = None
+    # Track whether the worker pushed any annotation events at all so the
+    # final run-summary entry (added at the bottom) can pick the right
+    # message: "Ran, no new data" when the run was clean but quiet, vs.
+    # nothing-extra when the user already saw "Recorded N items".
+    annotation_count = 0
     try:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -75,6 +80,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
             elif event_type == "annotation":
                 # Surface this in the daemon's activity buffer so the web UI's
                 # dashboard "Recently" feed shows the receipt.
+                annotation_count += 1
                 if daemon is not None:
                     summary = event.get("summary", "")
                     ok = event.get("ok", True)
@@ -96,4 +102,41 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
         st.definition_id = definition_id
     st.record_finish(outcome=outcome, when=now, error=error)
     state.save(st)
+
+    # Add a run-summary entry to the activity feed so failures are visible
+    # in the dashboard without users having to read state files on disk
+    # (the gap that hid the Last.fm KeyError + the quick-record dead URL
+    # bugs during the 2026-05-25 QA pass). The worker already scrubbed
+    # secrets out of `error` before serialising it; we just truncate so
+    # the feed stays readable.
+    if daemon is not None:
+        if outcome == "done":
+            # Skip the "Ran, no new data" entry when the worker already
+            # told the feed about specific writes — otherwise every
+            # successful run with N writes ends up with N+1 entries.
+            if annotation_count == 0:
+                daemon.activity.add(
+                    plugin_id=plugin_id,
+                    summary="Ran successfully — no new data.",
+                    ok=True,
+                )
+        else:
+            # outcome is "error" or "timeout". Surface both.
+            short_err = (error or "Plugin failed.").strip()
+            # Keep summary on one screen line in the dashboard. The full
+            # traceback already lives in state/<id>.json.last_error.
+            if len(short_err) > 200:
+                short_err = short_err[:200].rstrip() + "…"
+            label = "timed out" if outcome == "timeout" else "failed"
+            # First line of the (possibly multi-line) error makes the
+            # most informative one-liner. Plugins emit "ExceptionName: msg"
+            # as the first line of the traceback per worker._scrub_secrets.
+            first_line = short_err.splitlines()[0] if short_err else ""
+            daemon.activity.add(
+                plugin_id=plugin_id,
+                summary=f"Run {label}: {first_line}" if first_line
+                        else f"Run {label}.",
+                ok=False,
+            )
+
     return outcome

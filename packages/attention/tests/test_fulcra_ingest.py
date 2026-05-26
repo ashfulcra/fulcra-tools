@@ -23,7 +23,10 @@ def test_ingest_batch_posts_jsonl_to_record_batch(recording_transport):
 
     transport = recording_transport(responder)
     client = FulcraClient(transport=transport)
-    state = State(
+    # State is built (but unused locally) to confirm the test event shape
+    # below matches the structure ingest_batch expects. Marked _state to
+    # signal the deliberate non-use to lint.
+    _state = State(
         attention_definition_id="def-att",
         tag_ids={"attention": "tag-a", "web": "tag-w"},
     )
