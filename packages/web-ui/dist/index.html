@@ -498,10 +498,12 @@
                      their toString(). It only re-fires on `current_step`
                      identity changes (Next/Back); reactivity for INNER
                      ctx state (healthChecking, dpLoading, firstRunStatus,
-                     …) is handled inside <fulcra-step>'s own
-                     connectedCallback, which installs an Alpine.effect
-                     against the assigned ctx. See step.js for why we
-                     don't enumerate the reactive fields here. -->
+                     …) is driven by an Alpine.effect installed inside the
+                     wizard's init() via _installLitReactivityBridge(),
+                     which dispatches a `fulcra-wizard-tick` CustomEvent
+                     that <fulcra-step>'s connectedCallback listens for.
+                     See step.js for why we don't enumerate the reactive
+                     fields here. -->
                 <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data"></fulcra-step>
 
                 <!-- Step error -->
