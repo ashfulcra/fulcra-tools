@@ -126,6 +126,65 @@ def test_byte_parity_attention_duration():
     assert _bytes(PIPE.build_record(ev)) == _bytes(legacy)
 
 
+def test_byte_parity_attention_category_variant_title_is_null():
+    """Category-variant payloads emit `data.title = None` at top-level —
+    the legacy attention site always emitted title (and note) even when
+    title was None. The pipeline's `_emit_attention_fields=True` flag
+    forces emission to match this shape."""
+    start = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
+    end   = datetime(2026, 5, 22, 12, 1, 30, tzinfo=UTC)
+    legacy_data = {
+        "note": "Attention: banking",
+        "title": None,
+        "service": "web",
+        "category": "banking",
+        "url": None,
+        "og_description": None,
+        "favicon_url": None,
+        "duration_seconds": int((end - start).total_seconds()),
+        "parent_source_id": None,
+        "external_ids": {
+            "client": "c",
+            "host": None,
+            "chrome_identity": None,
+            "og_type": None,
+            "lang": None,
+        },
+    }
+    legacy = wire.build_record(
+        data_type=wire.DURATION_ANNOTATION,
+        start_time=start, end_time=end,
+        data=legacy_data,
+        source_id="com.fulcra.attention.v2.bbbb",
+        tags=["t-attention", "t-web"],
+        definition_id="def-attention",
+    )
+
+    ev = DurationEvent(
+        definition_id="def-attention",
+        source_id="com.fulcra.attention.v2.bbbb",
+        tags=("t-attention", "t-web"),
+        external_ids={
+            "client": "c",
+            "host": None,
+            "chrome_identity": None,
+            "og_type": None,
+            "lang": None,
+        },
+        note="Attention: banking",
+        title=None,
+        service="web",
+        category="banking",
+        url=None,
+        og_description=None,
+        favicon_url=None,
+        parent_source_id=None,
+        _emit_attention_fields=True,
+        start=start, end=end,
+    )
+    assert _bytes(PIPE.build_record(ev)) == _bytes(legacy)
+
+
 def test_byte_parity_csv_importer_duration_with_data_fields():
     """Mirrors fulcra_csv/fulcra.py _build_record (DURATION branch)."""
     start = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)

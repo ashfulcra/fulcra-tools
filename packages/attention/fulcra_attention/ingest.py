@@ -1,20 +1,27 @@
 # fulcra_attention/ingest.py
 """Build DurationAnnotation events for fulcra-attention.
 
-Converts a single extension-shaped payload to the wire format ingested
-by FulcraClient.ingest_batch. Source-id is sha256-derived for
-idempotency. The HTTP transport that used to live in relay.py is gone
-— the fulcra-collect daemon's `/api/extension/attention` route now
-calls `validate_payload()` and then `build_attention_event()` directly.
+Converts a single extension-shaped payload to a typed `DurationEvent`
+that the unified IngestPipeline knows how to POST. Source-id is
+sha256-derived for idempotency. The HTTP transport that used to live in
+relay.py is gone — the fulcra-collect daemon's `/api/extension/attention`
+route now calls `validate_payload()`, then `build_attention_event()` to
+get the typed event, and posts via `IngestPipeline.ingest_one(event)`.
+
+Refactor #69 wire-shape decision (Option B): the five attention
+extension fields (category / url / og_description / favicon_url /
+parent_source_id) stay at top-level `data` — preserved byte-identically
+to the legacy shape rather than being routed under `external_ids`. The
+DurationEvent's `_emit_attention_fields=True` flag opts the pipeline
+into emitting those five keys (with None values when not applicable).
 """
 from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Any
 from urllib.parse import urlsplit
 
-from fulcra_common import wire
+from fulcra_common.ingest import DurationEvent
 
 from .fulcra import build_tag_name
 from .scrub import scrub_url
@@ -96,11 +103,18 @@ def source_id(*, key: str, start_time: datetime) -> str:
     return f"{SOURCE_PREFIX}{h[:16]}"
 
 
-def build_attention_event(payload: dict, *, state: State) -> dict:
-    """Translate a relay-validated payload to a DurationAnnotation wire dict.
+def build_attention_event(payload: dict, *, state: State) -> DurationEvent:
+    """Translate a relay-validated payload to a typed `DurationEvent`.
 
     Caller has already enforced: exactly one of {url, category} non-null,
     bearer token, time bounds. We trust the payload here.
+
+    The pipeline's `_emit_attention_fields=True` flag is set so the five
+    attention-specific top-level data keys (category / url /
+    og_description / favicon_url / parent_source_id) land at the top of
+    the wire payload — matching the byte-shape the legacy site emitted.
+    The #30 defensive `duration_seconds` field is injected by the
+    pipeline, not here.
     """
     url = payload.get("url")
     if url is not None:
@@ -128,39 +142,8 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
         sid_key = category or ""
 
     start_dt = _parse_iso(payload["start_time"])
-    end_dt = _parse_iso(payload["end_time"])
     sid = source_id(key=sid_key, start_time=start_dt)
 
-    # Compute the duration in seconds and surface it on the inner data
-    # payload (in addition to the recorded_at.{start_time,end_time}
-    # envelope wire.build_record sets). The Fulcra DurationAnnotation
-    # definition's measurement_spec declares value_type="duration" — some
-    # downstream renderers (notably the context.fulcradynamics.com
-    # timeline as of 2026-05-26, see task #30) read the duration off the
-    # data payload rather than deriving it from end-start, which causes
-    # events to render as "0 h 0 m total" with invisible markers. Adding
-    # `duration_seconds` here is defensive: harmless if the renderer
-    # already derives correctly, restorative if it doesn't.
-    duration_seconds = max(0, int((end_dt - start_dt).total_seconds()))
-
-    data_inner: dict[str, Any] = {
-        "note": note,
-        "title": title,
-        "service": "web",
-        "category": category,
-        "url": url,
-        "og_description": og_description,
-        "favicon_url": favicon_url,
-        "duration_seconds": duration_seconds,
-        "parent_source_id": None,  # reserved for v2 highlights
-        "external_ids": {
-            "client": client,
-            "host": host,
-            "chrome_identity": chrome_identity,
-            "og_type": og_type,
-            "lang": lang,
-        },
-    }
     assert state.attention_definition_id, "ensure_definitions() must run first"
     tags = [state.tag_ids["attention"], state.tag_ids["web"]]
     # Three optional axes; each only emitted if the relevant tag UUID is
@@ -191,12 +174,27 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
                 tags.append(id_tag)
         except ValueError:
             pass
-    return wire.build_record(
-        data_type=wire.DURATION_ANNOTATION,
-        start_time=start_dt_sec,
-        end_time=end_dt_sec,
-        data=data_inner,
-        source_id=sid,
-        tags=tags,
+
+    return DurationEvent(
         definition_id=state.attention_definition_id,
+        source_id=sid,
+        tags=tuple(tags),
+        external_ids={
+            "client": client,
+            "host": host,
+            "chrome_identity": chrome_identity,
+            "og_type": og_type,
+            "lang": lang,
+        },
+        note=note,
+        title=title,
+        service="web",
+        category=category,
+        url=url,
+        og_description=og_description,
+        favicon_url=favicon_url,
+        parent_source_id=None,  # reserved for v2 highlights
+        _emit_attention_fields=True,
+        start=start_dt_sec,
+        end=end_dt_sec,
     )

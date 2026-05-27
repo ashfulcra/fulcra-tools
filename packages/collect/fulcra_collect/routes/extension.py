@@ -16,6 +16,8 @@ import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
+from fulcra_common.ingest import IngestPipeline
+
 from .. import config as _config
 from ._deps import RouteContext
 
@@ -290,11 +292,13 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                             exc,
                         )
 
-            # Build the wire event and POST to Fulcra via the attention
-            # FulcraClient, which already knows how to talk to /ingest.
+            # Build the typed event and POST to Fulcra via the unified
+            # IngestPipeline (refactor #69). The pipeline wraps the
+            # attention FulcraClient (which carries the bearer-token +
+            # httpx setup) and owns the wire-format construction.
             event = build_attention_event(payload, state=attention_state)
             try:
-                client.ingest_batch([event])
+                IngestPipeline(client=client).ingest_one(event)
             except Exception as exc:
                 _log.warning("extension POST: Fulcra ingest failed: %r", exc)
                 raise HTTPException(

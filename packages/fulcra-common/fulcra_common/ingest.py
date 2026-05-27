@@ -141,11 +141,15 @@ class IngestPipeline:
         data_inner: dict = {}
         # Common optional fields — only emitted when set, matching the
         # csv-importer's conservative approach (avoids polluting built-in
-        # Fulcra schemas with empty keys). Media + attention always set
-        # these, so this is a no-op for them.
-        if event.note is not None:
+        # Fulcra schemas with empty keys). Media always sets these so
+        # this is a no-op for them. Attention's legacy site emitted
+        # `note` and `title` at top-level data UNCONDITIONALLY (even when
+        # title is None for the category-variant payload); the
+        # `_emit_attention_fields` opt-in below also forces note + title
+        # to be emitted to preserve byte parity.
+        if event.note is not None or event._emit_attention_fields:
             data_inner["note"] = event.note
-        if event.title is not None:
+        if event.title is not None or event._emit_attention_fields:
             data_inner["title"] = event.title
         if event.service is not None:
             data_inner["service"] = event.service

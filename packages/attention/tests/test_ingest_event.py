@@ -1,5 +1,11 @@
 # tests/test_ingest_event.py
-"""build_attention_event — payload shape + source-id determinism."""
+"""build_attention_event — payload shape + source-id determinism.
+
+After refactor #69, `build_attention_event` returns a typed
+`DurationEvent` instead of a raw wire dict. The tests inspect the wire
+shape via `IngestPipeline(client=None).build_record(event)` to keep
+asserting byte-level invariants without coupling to the dict shape.
+"""
 from __future__ import annotations
 
 import json
@@ -7,9 +13,20 @@ from datetime import datetime, timezone
 
 import pytest
 
+from fulcra_common.ingest import DurationEvent, IngestPipeline
 from fulcra_attention.fulcra import build_tag_name
 from fulcra_attention.ingest import build_attention_event, source_id
 from fulcra_attention.state import State
+
+
+_PIPE = IngestPipeline(client=None)
+
+
+def _wire(event: DurationEvent) -> dict:
+    """Render the event into its wire-format dict the same way the
+    daemon's IngestPipeline.ingest_one would. Lets tests keep their
+    existing assertions against the wire shape."""
+    return _PIPE.build_record(event)
 
 
 @pytest.fixture
@@ -40,6 +57,28 @@ def test_source_id_changes_when_second_changes():
     assert a != b
 
 
+def test_build_event_returns_duration_event(state: State):
+    """The refactor-#69 contract: build_attention_event returns a typed
+    DurationEvent with service=web and the canonical attention tags."""
+    payload = {
+        "url": "https://example.com/article",
+        "title": "T",
+        "category": None,
+        "start_time": "2026-05-18T14:00:00Z",
+        "end_time":   "2026-05-18T14:05:00Z",
+        "client": "c",
+    }
+    ev = build_attention_event(payload, state=state)
+    assert isinstance(ev, DurationEvent)
+    assert ev.service == "web"
+    assert ev.title == "T"
+    assert ev.source_id.startswith("com.fulcra.attention.v2.")
+    assert ev.definition_id == state.attention_definition_id
+    # The two canonical tags are always emitted first.
+    assert ev.tags[:2] == ("tag-a", "tag-w")
+    assert ev._emit_attention_fields is True
+
+
 def test_build_event_url_variant(state: State):
     payload = {
         "url": "https://example.com/article",
@@ -54,7 +93,7 @@ def test_build_event_url_variant(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "fulcra-attention-chrome/0.1.0",
     }
-    ev = build_attention_event(payload, state=state)
+    ev = _wire(build_attention_event(payload, state=state))
     assert ev["specversion"] == 1
     md = ev["metadata"]
     assert md["data_type"] == "DurationAnnotation"
@@ -90,7 +129,7 @@ def test_build_event_omits_unknown_enrichment_fields(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(payload, state=state)
+    ev = _wire(build_attention_event(payload, state=state))
     data = json.loads(ev["data"])
     assert data["external_ids"]["chrome_identity"] is None
     assert data["external_ids"]["og_type"] is None
@@ -108,7 +147,7 @@ def test_build_event_category_variant(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "fulcra-attention-chrome/0.1.0",
     }
-    ev = build_attention_event(payload, state=state)
+    ev = _wire(build_attention_event(payload, state=state))
     data = json.loads(ev["data"])
     assert data["category"] == "banking"
     assert data["url"] is None
@@ -126,8 +165,8 @@ def test_build_event_source_id_url_keyed_when_url_present(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev1 = build_attention_event(p, state=state)
-    ev2 = build_attention_event(p, state=state)
+    ev1 = _wire(build_attention_event(p, state=state))
+    ev2 = _wire(build_attention_event(p, state=state))
     assert ev1["metadata"]["source"][0] == ev2["metadata"]["source"][0]
 
 
@@ -140,7 +179,7 @@ def test_build_event_source_id_category_keyed_when_categorized(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     assert ev["metadata"]["source"][0].startswith("com.fulcra.attention.v2.")
 
 
@@ -156,7 +195,7 @@ def test_build_event_url_is_scrubbed_defense_in_depth(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(payload, state=state)
+    ev = _wire(build_attention_event(payload, state=state))
     data = json.loads(ev["data"])
     assert data["url"] == "https://example.com/page?id=42"
     assert "access_token" not in data["url"]
@@ -171,7 +210,7 @@ def test_build_event_strips_fractional_seconds_from_recorded_at(state: State):
         "end_time":   "2026-05-18T14:05:00.108Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     assert ev["metadata"]["recorded_at"]["start_time"] == "2026-05-18T14:00:00Z"
     assert ev["metadata"]["recorded_at"]["end_time"] == "2026-05-18T14:05:00Z"
 
@@ -196,7 +235,7 @@ def test_tags_include_machine_when_hostname_set():
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     assert ev["metadata"]["tags"] == ["tag-a", "tag-w", "tag-m-dbp"]
 
 
@@ -209,7 +248,7 @@ def test_tags_omit_machine_when_hostname_unset(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     assert ev["metadata"]["tags"] == ["tag-a", "tag-w"]
 
 
@@ -230,7 +269,7 @@ def test_tags_include_category_when_categorized():
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     assert ev["metadata"]["tags"] == ["tag-a", "tag-w", "tag-c-bank"]
 
 
@@ -246,7 +285,7 @@ def test_tags_omit_category_when_uncategorized_tag_cache_missing(state: State):
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     # Only the always-on tags (no machine, no category mapping in state)
     assert ev["metadata"]["tags"] == ["tag-a", "tag-w"]
 
@@ -274,7 +313,7 @@ def test_tags_include_identity_when_cached():
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     assert ev["metadata"]["tags"] == ["tag-a", "tag-w", "tag-i-ash"]
 
 
@@ -298,7 +337,7 @@ def test_identity_lookup_is_case_insensitive_via_sanitizer():
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     assert "tag-i-ash" in ev["metadata"]["tags"]
 
 
@@ -324,7 +363,7 @@ def test_tags_all_three_axes_at_once():
         "end_time":   "2026-05-18T14:05:00Z",
         "client": "c",
     }
-    ev = build_attention_event(p, state=state)
+    ev = _wire(build_attention_event(p, state=state))
     # Order: always-on first, then machine, category, identity (insertion order).
     assert ev["metadata"]["tags"] == [
         "tag-a", "tag-w", "tag-m-dbp", "tag-c-bank", "tag-i-ash",
