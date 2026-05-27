@@ -1,4 +1,4 @@
-# Fulcra Collect — Session Handoff (2026-05-26 — late)
+# Fulcra Collect — Session Handoff (2026-05-27, end of session before user reboot)
 
 Pick up where we left off. This file is the briefing for the next Claude session.
 
@@ -10,11 +10,14 @@ Pick up where we left off. This file is the briefing for the next Claude session
 
 ## State at handoff
 
-- **Branch:** `session/2026-05-26-account-switch-fixes-and-qa`, working tree dirty (12 modified files, 1 new file, no commits yet on this branch beyond the prior commits documented below).
-- **Nothing committed, nothing pushed since the last review.** The user reviews before pushing.
-- **Daemon:** stable port 9292. Start with `uv run fulcra-collect daemon` from the repo root. URL is mirrored to `~/.config/fulcra-collect/web-url`. SO_REUSEPORT is set so restart-immediate works — no more 60-90s TIME_WAIT pain.
-- **Tests:** **1278 pass** across the workspace (collect 299, common 67, media-helpers 628, attention 131, dayone 43, menubar 37, csv-importer 73) + 1 expected skip (real Netflix takeout absent). **The previously-flaky 5 `pytest-mock` fixture errors are GONE — `pytest-mock>=3.12` is now in `packages/collect/pyproject.toml`.**
-- **Extension:** built at `packages/attention/chrome/dist/`, paired in the user's testing browser. Re-paired via wizard in the prior session; pairing state persists across daemon restarts via `chrome.storage.local`.
+- **Branch:** `session/2026-05-26-account-switch-fixes-and-qa`, working tree CLEAN.
+- **All work PUSHED to origin.** HEAD: `f400cc8`. 10 commits ahead of `b522b23` (last prior-session commit). See `git log b522b23..HEAD` for the full set.
+- **Daemon:** stopped before reboot. Start with `uv run --directory packages/collect fulcra-collect daemon` from the repo root. Bound to `127.0.0.1:9292`. SO_REUSEPORT means restart-immediate works.
+- **Tests:** **1432 pass** across the workspace (collect 359, common 67, media-helpers 653, attention 131, dayone 43, menubar 106, csv-importer 73) + 1 expected skip (real Netflix takeout absent).
+- **Extension:** built at `packages/attention/chrome/dist/`, paired in the user's Arc browser. Pairing state persists across daemon restarts via `chrome.storage.local`.
+- **SQLite state migration complete.** `~/.config/fulcra-collect/state.db` (16K, schema_version 1+2). 7 legacy per-plugin JSON files renamed to `*.json.migrated`. Delete after a soak period.
+- **User has pinned favorite:** the Attention def `b331bb73-aff3-41b7-b8c6-50a70126c3a7` in `~/.config/fulcra-collect/quick_record_favorites.json`.
+- **User's Apple Takeout** at `/Users/Scanning/Desktop/Apple Takeout.zip` (184 MB) — importers verified against it but actual ingestion deferred to the cleanup-and-retry-onboarding flow.
 
 ## What landed in this batch of work (since the morning handoff)
 
@@ -103,36 +106,52 @@ All other previously-filed tasks (#14–#48 except #30) are completed.
 ## Resume command (paste into a fresh Claude session)
 
 ```
-You are picking up a fulcra-tools QA + dev session. Read /Users/Scanning/Developer/fulcra-tools/SESSION_HANDOFF.md (latest handoff) and CREDS_NEEDED.md (status of every plugin's verification).
+You are picking up a fulcra-tools session. Read /Users/Scanning/Developer/fulcra-tools/SESSION_HANDOFF.md (this file) and docs/E2E_STATUS.md (plugin verification matrix) first.
 
 Working directory: /Users/Scanning/Developer/fulcra-tools
 
-The branch is session/2026-05-26-account-switch-fixes-and-qa. Working tree is dirty with the changes documented in the handoff. Run `git status` and `git diff --stat HEAD` to see the shape. 1176 tests pass across the workspace; pytest-mock is now in deps.
+Branch: session/2026-05-26-account-switch-fixes-and-qa. All work is pushed to origin; working tree is clean. HEAD is f400cc8. Run `git log b522b23..HEAD` for the 10 commits added this session. 1432 tests pass across the workspace.
 
-Priority order for THIS session:
-1. Review the dirty working tree with the user. Decide what to commit and in what shape (suggested split: two commits — feat(picker): editable custom name on Create new + feat(settings): soft-delete annotation definitions page; everything else stays in the existing in-progress commit).
-2. If user is around: ask them to spend 30s browsing in the paired Chrome browser so the chrome extension's live data path is finally verified (vs the synthetic POSTs).
-3. Walk any of the live-cred plugins from CREDS_NEEDED.md if user has creds in hand (Trakt is the highest-value unverified surface).
-4. Defer #30 (timeline render bug) — different repo.
+The daemon is NOT running — user rebooted between sessions. When you need to test, restart it yourself (per ~/.claude/CLAUDE.md "Record long-running processes I start"):
 
-Constraint: do NOT commit or push without explicit user approval. Working tree is dirty intentionally.
+  cd /Users/Scanning/Developer/fulcra-tools/packages/collect
+  uv tool install --force --editable .
+  cd /Users/Scanning/Developer/fulcra-tools
+  uv run --directory packages/collect fulcra-collect daemon
+  # ^ via Bash run_in_background:true — capture the task ID and write to memory
+
+Likely directions for THIS session (ASK before assuming):
+1. The user's cleanup-and-retry plan: soft-delete defs from Settings → clear state → re-onboard from welcome.
+2. Tackle refactor #68 (Lit setup-step components) or #69 (unified ingest pipeline) — plans in docs/plans/.
+3. Walk through the Apple takeout ingestion (file at ~/Desktop/Apple Takeout.zip, importers ready).
+4. Whatever new bugs emerge from the user testing the latest pushed code.
+
+Defer #30 (timeline render bug) — different repo.
 ```
 
-## Key files
+## Key files (post-refactor)
 
-- **Daemon HTTP:** `packages/collect/fulcra_collect/web.py` (now includes `DELETE /api/definitions/{def_id}` for soft-delete)
-- **Daemon core (incl. pre-flight + activity throttle):** `packages/collect/fulcra_collect/daemon.py`
-- **Plugin contract + state:** `packages/collect/fulcra_collect/plugin.py`, `packages/collect/fulcra_collect/state.py` (now carries `override_definition_name`)
-- **Plugin definitions:**
-  - Most plugins: `packages/media-helpers/fulcra_media/collect_plugins.py` (uses `_ensure_media_def` helper)
+- **Daemon HTTP — app factory + cookie + static + serve():** `packages/collect/fulcra_collect/web.py` (only 319 lines after refactor B)
+- **HTTP route modules** (one per coherent slice): `packages/collect/fulcra_collect/routes/{status,plugins,definitions,fulcra_auth,oauth,activity,docs,annotations,extension,menubar}.py` plus `_deps.py` (RouteContext + Pydantic body models)
+- **Daemon core:** `packages/collect/fulcra_collect/daemon.py` (1001 lines — refactor #1 Phase 2 will trim when per-package state moves to SQLite)
+- **SQLite state store:** `packages/collect/fulcra_collect/db.py` (connection lifecycle + migrations)
+- **Per-plugin state shim:** `packages/collect/fulcra_collect/state.py` (thin SQLite wrapper, preserves the PluginState dataclass + load/save API)
+- **Plugin contract:** `packages/collect/fulcra_collect/plugin.py`
+- **Plugin definitions** (post-refactor — one file per plugin):
+  - `packages/media-helpers/fulcra_media/plugins/<id>.py` for the 15 media-helpers plugins (lastfm, deezer, trakt, netflix, spotify_extended, youtube, spotify_ifttt, apple_takeout, apple_music_takeout, generic_rss, letterboxd, goodreads, apple_podcasts, apple_podcasts_timemachine, generic_csv, media_webhook)
+  - `packages/media-helpers/fulcra_media/plugins/_common.py` for shared helpers (ensure_media_def, RSS pipeline, file-import dispatch)
+  - `packages/media-helpers/fulcra_media/collect_plugins.py` is a 99-line back-compat shim re-exporting the *_PLUGIN constants
   - Attention: `packages/attention/fulcra_attention/collect_plugin.py`
-  - Day One: `packages/dayone/fulcra_dayone/collect_plugin.py` (re-queries by name on every run)
-- **Plugin health checks:** Last.fm, Trakt, Apple Podcasts (in flight via #49)
+  - Day One: `packages/dayone/fulcra_dayone/collect_plugin.py`
+- **Health checks** (10 plugins now have them): `packages/media-helpers/fulcra_media/{lastfm,trakt,deezer,apple_podcasts,rss,takeout,feed_plugin}_health.py`
+- **Cross-source fingerprint:** `packages/fulcra-common/fulcra_common/cross_source_fingerprint.py` (listened/watched/podcast emitters that share a fingerprint across importers so Fulcra's source_id dedup catches the same listen from multiple sources)
 - **Wizard frontend:** `packages/web-ui/dist/static/{app,dashboard,onboarding,wizard,settings}.js` + `packages/web-ui/dist/index.html`
 - **Browser extension:** `packages/attention/chrome/` (Vite/React; `npm run build` outputs to `dist/`)
 - **Worker adapter:** `packages/collect/fulcra_collect/worker.py`
 - **Shared Fulcra API client:** `packages/fulcra-common/fulcra_common/client.py` (carries `soft_delete_definition`, `definition_exists`)
-- **Data-source pathway reference:** `docs/how-do-i-get-my-data.md`
+- **Menubar daemon-lifecycle controls:** `packages/menubar/fulcra_menubar/daemon_lifecycle.py` + `popover/daemon_bar.py`
+- **Quick-record favorites storage:** `packages/collect/fulcra_collect/quick_record_favorites.py` (local file at `~/.config/fulcra-collect/quick_record_favorites.json`)
+- **Data-source pathway reference:** `docs/how-do-i-get-my-data.md` (served in-app via `/api/docs/how-do-i-get-my-data`)
 
 ## Memory entries worth knowing
 
@@ -151,6 +170,8 @@ Constraint: do NOT commit or push without explicit user approval. Working tree i
 5. **Definition picker's "Create new" is now editable + one-shot.** State carries `override_definition_name`; resolver uses it verbatim (no machine-id suffix) then clears it so a future re-resolve falls back to canonical-name + suffix.
 6. **Soft-delete clears bound plugin state.** `DELETE /api/definitions/{id}` walks every plugin and zeroes `state.definition_id` on matches, then reports the cleared plugin IDs in the response — so a future re-resolve doesn't keep posting events to a tombstone.
 
-## Don't push
+## Push state
 
-The user reviews before pushing. Working tree is dirty intentionally.
+Everything from this session IS pushed to `origin/session/2026-05-26-account-switch-fixes-and-qa` (HEAD `f400cc8`). The branch hasn't been merged into `main` yet — the user reviews before merge. When the user is ready to merge, they'll either squash-merge the 10-commit session or merge as-is; either is fine since each commit's message tells the whole story.
+
+The pre-push orphan/obsolete review + secret-leak scan (per `~/.claude/CLAUDE.md` global rules) was done before each push this session. Both pushes were clean.
