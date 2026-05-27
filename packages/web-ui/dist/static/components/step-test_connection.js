@@ -13,7 +13,7 @@
 // uses the richer onboarding-site rendering — the user gets the better
 // UX in both flows now.
 import { FulcraStepBase, html, nothing } from "./_base.js";
-import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/directives/unsafe-html.js";
+import { unsafeHTML } from "https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js";
 
 class FulcraStepTestConnection extends FulcraStepBase {
   render() {

@@ -25,13 +25,23 @@
        (refactor #68). Pinned + SRI'd exactly like marked + alpine.
        Note: Lit ships as an ES module, so type="module" (not classic) —
        this differs from marked/alpine, which are classic scripts.
+
+       Why the gh/lit/dist@VER/all/lit-all.min.js URL instead of
+       npm/lit@VER/index.js: the npm root entry contains BARE module
+       specifiers (`import {…} from "@lit/reactive-element"`) which
+       browsers cannot resolve without an import map. The lit-all bundle
+       resolves those internally, so it Just Works from a <script
+       type="module">. Found the hard way 2026-05-27 when the first cut
+       at this tag silently failed with "Failed to resolve module
+       specifier '@lit/reactive-element'" in the browser console.
+
        Upgrade dance: bump version, recompute the hash with
-         curl -s https://cdn.jsdelivr.net/npm/lit@<new>/index.js \
+         curl -s https://cdn.jsdelivr.net/gh/lit/dist@<new>/all/lit-all.min.js \
            | openssl dgst -sha384 -binary | openssl base64 -A
        and update both src and integrity below. -->
   <script type="module"
-          src="https://cdn.jsdelivr.net/npm/lit@3.2.1/index.js"
-          integrity="sha384-IZzW+Sfdx55gIfvWXINdnp5aNwUifd4IB0ROrRyipc+QWqXXpJhcbmT2+7tx9CCN"
+          src="https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js"
+          integrity="sha384-6eOP+rg+J4nKf4UtKD8fqsZ6YceRLAp12ABz3pbrJvKSm504E6jX6xow/ITJrBTW"
           crossorigin="anonymous"></script>
   <!-- Setup-step web-component bundle (refactor #68). Module script so it
        resolves AFTER the Lit module above. Order matters: components must
