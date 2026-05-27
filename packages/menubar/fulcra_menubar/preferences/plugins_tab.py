@@ -171,6 +171,52 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
     return outer
 
 
+_COLLECT_MODE_LABEL = {
+    "historical": "Historical",
+    "live_polled": "Live (polled)",
+    "live_continuous": "Live (continuous)",
+}
+
+
+def _make_collect_mode_chip(mode: str) -> NSView:
+    """Build a small bordered chip showing the plugin's collect_mode.
+
+    Augments — does not replace — the kind taxonomy (service / scheduled
+    / manual), per user Q2 on the SP3 plan: "kind" still drives Run-now
+    affordances and interval scheduling in this Preferences tab, while
+    "collect_mode" answers the user-facing question "is this data stream
+    live or historical?" See SP3 D5 in the 2026-05-27 menubar drift
+    audit.
+
+    Implementation note: a plain bordered NSTextField produced a too-loud
+    inset-bezel look on macOS, so we wrap a labelled NSTextField inside
+    a layer-backed NSView whose CALayer carries a thin 1pt border and a
+    pill-shaped corner radius. This gives a clean chip independent of
+    the system's text-field chrome.
+    """
+    label_text = _COLLECT_MODE_LABEL.get(mode, mode)
+    label = NSTextField.labelWithString_(label_text)
+    label.setFont_(typography.small())
+    label.setTextColor_(colors.text_secondary())
+    label.sizeToFit()
+    label_w = float(label.frame().size.width)
+    label_h = float(label.frame().size.height)
+
+    # 8pt horizontal padding inside the chip, 2pt vertical.
+    chip_w = label_w + 16
+    chip_h = label_h + 4
+    chip = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, chip_w, chip_h))
+    chip.setWantsLayer_(True)
+    layer = chip.layer()
+    layer.setBorderWidth_(1.0)
+    layer.setBorderColor_(colors.border().CGColor())
+    layer.setCornerRadius_(chip_h / 2.0)
+
+    label.setFrame_(NSMakeRect(8, 2, label_w, label_h))
+    chip.addSubview_(label)
+    return chip
+
+
 def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
                      *, desc_h: float = 32.0,
                      credentials: dict[str, str],
@@ -182,6 +228,22 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
     name.setTextColor_(colors.text())
     name.setFrame_(NSMakeRect(16, height - 28, width - 200, 18))
     row.addSubview_(name)
+
+    # collect_mode chip — sits to the left of the Run-now button or
+    # Enable switch on the name row. Augments the kind label (which
+    # stays as part of the row's behaviour — kind drives the toggle vs
+    # button affordance below) per user Q2 on the SP3 plan.
+    chip = _make_collect_mode_chip(snap.collect_mode)
+    chip_frame = chip.frame()
+    chip_w = chip_frame.size.width
+    chip_h = chip_frame.size.height
+    # Right-edge of the name row's control column is width-80 (where the
+    # switch / Run-now button starts). Park the chip 8pt to the left of
+    # that, vertically centred on the name baseline.
+    chip_x = width - 80 - chip_w - 8
+    chip_y = height - 28 + (18 - chip_h) / 2.0
+    chip.setFrame_(NSMakeRect(chip_x, chip_y, chip_w, chip_h))
+    row.addSubview_(chip)
 
     # Description label — 12pt secondary text, word-wrapped. Height is
     # computed by the caller (rebuild() in build_plugins_tab) so the row

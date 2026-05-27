@@ -118,12 +118,43 @@ def _relative(iso: str) -> str:
 
 
 def _status_dot(s: PluginSnapshot, _model: StatusModel) -> NSView:
-    color_hex = (
-        palette.TEXT_TERTIARY if not s.enabled
-        else palette.ERROR if s.consecutive_failures > 0
-        else palette.WARNING if s.last_outcome == "running"
-        else palette.ACCENT_MINT
-    )
+    """Three-tier status dot, mirrors the dashboard's per-plugin pill.
+
+    The dashboard's `pillFor(plugin)` in `packages/web-ui/dist/static/
+    dashboard.js` is the source of truth for this mapping (SP3 D4 in the
+    2026-05-27 menubar drift audit). Branches, in priority order:
+
+      not enabled                      → gray   (Disabled)
+      consecutive_failures >= 3        → red    (Failing)
+      last_outcome == "running"        → violet (Running)
+      last_outcome == "done"           → mint   (Healthy)
+      last_outcome in {error, timeout} → amber  (Failed — run again)
+                                                 only reached when
+                                                 consecutive_failures < 3
+      last_run is None                 → gray   (Not run yet)
+
+    The previous two-tier mapping flattened the 1-2-failures case into
+    "red", which hid the difference between a transient blip (Failed —
+    run again) and a persistent failure (>=3, real attention). Matching
+    the dashboard keeps the popover and the web UI internally consistent
+    with each other and with the menubar icon's badge thresholds (see
+    `status_item.py:130-137`, which also splits on `failing_critical`
+    vs `failing_warning`).
+    """
+    if not s.enabled:
+        color_hex = palette.TEXT_TERTIARY
+    elif s.consecutive_failures >= 3:
+        color_hex = palette.ERROR
+    elif s.last_outcome == "running":
+        color_hex = palette.ACCENT_VIOLET
+    elif s.last_outcome == "done":
+        color_hex = palette.ACCENT_MINT
+    elif s.last_outcome in ("error", "timeout"):
+        # 1-2 consecutive failures: softer warning, not the persistent-red.
+        color_hex = palette.WARNING
+    else:
+        # Enabled but never run (last_run is None and last_outcome is None).
+        color_hex = palette.TEXT_TERTIARY
     view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
     view.setWantsLayer_(True)
     from Quartz import CALayer  # type: ignore[import-not-found]
