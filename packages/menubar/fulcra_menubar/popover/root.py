@@ -43,8 +43,11 @@ WIDTH = 360.0
 HEADER_HEIGHT = 56.0
 FOOTER_HEIGHT = 36.0
 SWITCHER_HEIGHT = 32.0  # height of the "← Quick Record" back bar in status view
+DAEMON_BAR_HEIGHT = 64.0  # see popover/daemon_bar.py — always visible
 DEFAULT_BODY_HEIGHT = 240.0
-DEFAULT_HEIGHT = HEADER_HEIGHT + DEFAULT_BODY_HEIGHT + FOOTER_HEIGHT  # 332
+DEFAULT_HEIGHT = (
+    HEADER_HEIGHT + DEFAULT_BODY_HEIGHT + DAEMON_BAR_HEIGHT + FOOTER_HEIGHT  # 396
+)
 
 
 class PopoverRoot:
@@ -55,6 +58,8 @@ class PopoverRoot:
         *,
         on_preferences: Optional[Callable[[], None]] = None,
         on_quit: Optional[Callable[[], None]] = None,
+        notify: Optional[Callable[[str, str], None]] = None,
+        status_item: Optional[object] = None,
     ) -> None:
         """Construct the popover.
 
@@ -72,9 +77,34 @@ class PopoverRoot:
             Called when the user clicks the "Quit" button in the footer.  If
             None, the footer still renders the button but it has no effect
             (safe default; in practice ``app.py`` always passes a handler).
+        notify:
+            Optional ``(title, body)`` callback used by the daemon-controls
+            bar to surface launchctl / SMAppService errors as macOS
+            notifications.  In production, ``app.py`` forwards this to
+            ``NotificationCentre._post`` so the user sees the actual error
+            instead of a silent no-op.  Tests pass None.
+        status_item:
+            Optional reference to the StatusItemController so the
+            quick-record popover can toggle the cyan timer overlay on
+            the menubar icon when a Duration timer starts/stops. Tests
+            pass None.
         """
         self._model = model
         self._client = client
+        self._status_item = status_item
+        # In-memory state shared across popover open/close cycles:
+        # active Duration timers keyed by definition_id, and the
+        # "Recently recorded" list. Doesn't survive a menubar restart —
+        # that's OK because timers are short-lived and recent entries
+        # are recent enough that losing them is acceptable.
+        self._active_timers: dict[str, dict] = {}
+        self._recent: list[dict] = []
+        # Popover-scoped favorites UI state (task #64). Currently just
+        # carries the "Show all annotations" disclosure expansion flag.
+        # Intentionally NOT persisted across popover open/close cycles
+        # so the next opening defaults back to "favorites only" — that's
+        # the point of the favorites surface, after all.
+        self._favorites_view_state: dict = {"expanded": False}
         self._popover = NSPopover.alloc().init()
         # NSPopoverBehaviorTransient = 1
         self._popover.setBehavior_(1)
@@ -95,9 +125,21 @@ class PopoverRoot:
         footer.setFrame_(NSMakeRect(0, 0, WIDTH, FOOTER_HEIGHT))
         root.addSubview_(footer)
 
+        # ── Daemon controls bar (always visible, sits above the footer) ──────
+        # Surfaces Start / Stop / Restart + "Open at Login" toggle.  Refreshes
+        # its state every time the popover is opened (see toggle()), not on
+        # the polling timer — daemon lifecycle is gesture-driven, not realtime.
+        from .daemon_bar import make_daemon_bar
+        daemon_bar = make_daemon_bar(width=WIDTH, notify=notify)
+        daemon_bar.setFrame_(NSMakeRect(0, FOOTER_HEIGHT, WIDTH, DAEMON_BAR_HEIGHT))
+        root.addSubview_(daemon_bar)
+        self._daemon_bar = daemon_bar
+
         # ── Body container — holds one sub-view at a time ─────────────────────
-        body_top = FOOTER_HEIGHT
-        body_height = DEFAULT_HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT
+        body_top = FOOTER_HEIGHT + DAEMON_BAR_HEIGHT
+        body_height = (
+            DEFAULT_HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT - DAEMON_BAR_HEIGHT
+        )
 
         body_container = NSView.alloc().initWithFrame_(
             NSMakeRect(0, body_top, WIDTH, body_height)
@@ -118,6 +160,10 @@ class PopoverRoot:
             on_view_status=self._show_status,
             width=WIDTH,
             height=body_height,
+            active_timers=self._active_timers,
+            recent=self._recent,
+            on_timer_changed=self._on_timer_changed,
+            favorites_view_state=self._favorites_view_state,
         )
         quick_record_view.setFrame_(NSMakeRect(0, 0, WIDTH, body_height))
         self._quick_record_view = quick_record_view
@@ -208,6 +254,28 @@ class PopoverRoot:
         from AppKit import NSAppearance  # type: ignore[import-not-found]
         self._popover.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameAqua"))
 
+    # ── Menubar overlay coordination ──────────────────────────────────────────
+
+    def _on_timer_changed(self) -> None:
+        """Called by the quick-record view whenever a Duration timer
+        starts or stops. We forward the "any timer active?" state to
+        the StatusItemController so it can show / hide the cyan glow
+        overlay on the menubar icon.
+
+        Coexists with the violet running-pulse: both layers can stack.
+        See status_item.py:_apply_timer_overlay for the layering rules.
+        """
+        if self._status_item is None:
+            return
+        active = bool(self._active_timers)
+        try:
+            self._status_item.set_timer_active(active)
+        except Exception:  # pragma: no cover — defensive
+            import logging
+            logging.getLogger("fulcra_menubar.popover").exception(
+                "status_item.set_timer_active raised",
+            )
+
     # ── View switching ─────────────────────────────────────────────────────────
 
     def _show_status(self) -> None:
@@ -239,6 +307,21 @@ class PopoverRoot:
             # Reset to quick-record view on each open so the popover
             # always starts on the primary surface after closing.
             self._show_quick_record()
+            # Reset the favorites disclosure to collapsed each time the
+            # popover opens — task #64 spec: first interaction defaults
+            # to "show favorites only" when any are pinned.
+            self._favorites_view_state["expanded"] = False
+            # Refresh daemon-controls state so the user always sees the
+            # current PID / Running-or-Stopped pill the moment the
+            # popover opens (the lifecycle layer is gesture-driven, not
+            # polled — see popover/daemon_bar.py for the rationale).
+            try:
+                self._daemon_bar.refresh()
+            except Exception:  # pragma: no cover — defensive
+                import logging
+                logging.getLogger("fulcra_menubar.popover").exception(
+                    "daemon_bar.refresh() raised; popover opening anyway",
+                )
             # NSMaxYEdge = 5 (rect anchor edge that places below the menubar item)
             self._popover.showRelativeToRect_ofView_preferredEdge_(
                 anchor_view.bounds(), anchor_view, 5

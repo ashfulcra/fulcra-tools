@@ -224,6 +224,10 @@ def test_version_handler_returns_daemon_and_plugin_versions(collect_home: Path, 
     assert reply["ok"] is True
     assert reply["daemon_version"] == "0.1.0"
     assert reply["plugins"] == {"lastfm": "0.4.2"}
+    # daemon_pid is the PID of the answering process — used by the menubar
+    # to show "Running (PID 12345)" in its daemon-controls header.
+    import os
+    assert reply["daemon_pid"] == os.getpid()
 
 
 def test_credential_status_reports_set_and_missing(collect_home: Path, monkeypatch):
@@ -544,7 +548,9 @@ def test_quick_record_list_returns_empty_when_unauthenticated(collect_home, monk
 
 
 def test_quick_record_list_happy_path(collect_home, monkeypatch):
-    """quick_record_list filters to moments, excludes deleted, caps at 20."""
+    """quick_record_list returns ALL non-deleted defs (Sprint B widened
+    this from Moment-only); excludes soft-deleted; caps at 40; sorted with
+    moments first, then durations, then anything else."""
     import fulcra_collect.daemon as daemon_mod
 
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
@@ -552,10 +558,12 @@ def test_quick_record_list_happy_path(collect_home, monkeypatch):
     defs = [
         {"id": f"m-{i}", "name": f"Moment {i}", "annotation_type": "moment",
          "deleted_at": None, "created_at": f"2026-05-{i+1:02d}T00:00:00Z"}
-        for i in range(25)
+        for i in range(5)
     ] + [
-        {"id": "dur-1", "name": "Duration", "annotation_type": "duration",
+        {"id": "dur-1", "name": "Watched", "annotation_type": "duration",
          "deleted_at": None, "created_at": "2026-05-01T00:00:00Z"},
+        {"id": "dur-2", "name": "Listened", "annotation_type": "duration",
+         "deleted_at": None, "created_at": "2026-05-02T00:00:00Z"},
         {"id": "deleted-mom", "name": "Gone", "annotation_type": "moment",
          "deleted_at": "2026-01-01T00:00:00Z", "created_at": "2026-04-01T00:00:00Z"},
     ]
@@ -568,12 +576,47 @@ def test_quick_record_list_happy_path(collect_home, monkeypatch):
     reply = d._quick_record_list()
 
     assert reply["ok"] is True
-    # Should return at most 20 moments, excluding deleted and duration
-    assert len(reply["definitions"]) == 20
-    # All returned are moments
-    assert all(d["annotation_type"] == "moment" for d in reply["definitions"])
-    # All returned are non-deleted
-    assert all(d["deleted_at"] is None for d in reply["definitions"])
+    # All non-deleted defs returned (5 moments + 2 durations).
+    assert len(reply["definitions"]) == 7
+    types = [d["annotation_type"] for d in reply["definitions"]]
+    # Moments come first, then durations.
+    assert types == ["moment"] * 5 + ["duration"] * 2
+    # Deleted def is filtered out.
+    assert "deleted-mom" not in {d["id"] for d in reply["definitions"]}
+    # Within each group, sorted by created_at desc.
+    moment_ids = [d["id"] for d in reply["definitions"]
+                  if d["annotation_type"] == "moment"]
+    assert moment_ids == ["m-4", "m-3", "m-2", "m-1", "m-0"]
+
+
+def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatch):
+    """Sprint B: a mixed payload with moment + duration + other types
+    must all come back so the menubar can render them in grouped sections.
+    """
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+
+    defs = [
+        {"id": "m-1", "name": "Coffee", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-20T00:00:00Z"},
+        {"id": "d-1", "name": "Movie", "annotation_type": "duration",
+         "deleted_at": None, "created_at": "2026-05-15T00:00:00Z"},
+        {"id": "w-1", "name": "Book", "annotation_type": "read",
+         "deleted_at": None, "created_at": "2026-05-10T00:00:00Z"},
+    ]
+    fake_client = _FakeHttpxClient(get_data=defs)
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._quick_record_list()
+
+    assert reply["ok"] is True
+    returned_types = {d["annotation_type"] for d in reply["definitions"]}
+    assert returned_types == {"moment", "duration", "read"}
 
 
 def test_quick_record_list_caches_result(collect_home, monkeypatch):
@@ -669,7 +712,12 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-abcdef12", "hello from the test")
 
-    assert reply == {"ok": True}
+    assert reply["ok"] is True
+    # source_id is returned so the menubar can track it for Undo.
+    assert reply["source_id"].startswith(
+        "com.fulcradynamics.fulcra-collect.quick-record."
+    )
+    assert reply["name"] == "Test Moment"
 
     # Exactly one POST went out, to the live ingest endpoint with JSONL.
     post_reqs = [r for r in fake_client.requests if r["method"] == "POST"]
@@ -766,6 +814,185 @@ def test_record_annotation_api_error_surfaces_activity_failure(collect_home, mon
 
 
 # ---------------------------------------------------------------------------
+# Sprint B — Duration record + soft-delete tombstone
+# ---------------------------------------------------------------------------
+
+
+def test_record_annotation_duration_writes_duration_record(
+        collect_home, monkeypatch):
+    """When start_time AND end_time are supplied, the daemon writes a
+    DurationAnnotation with recorded_at as the {start,end} object and
+    duration_seconds in the data payload.
+    """
+    import json
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+
+    fake_client = _FakeHttpxClient(get_data=[
+        {"id": "def-dur1", "name": "Movie",
+         "annotation_type": "duration", "tags": ["t-movie"],
+         "created_at": "2026-05-25T00:00:00Z"},
+    ])
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._record_annotation(
+        "def-dur1", "Just watched The Hunt for Red October",
+        start_time="2026-05-26T20:00:00Z",
+        end_time="2026-05-26T22:14:00Z",
+    )
+    assert reply["ok"] is True
+    assert reply["source_id"].startswith(
+        "com.fulcradynamics.fulcra-collect.quick-record."
+    )
+
+    posts = [r for r in fake_client.requests if r["method"] == "POST"]
+    assert len(posts) == 1
+    lines = [ln for ln in posts[0]["content"].decode().split("\n") if ln]
+    record = json.loads(lines[0])
+    md = record["metadata"]
+    assert md["data_type"] == "DurationAnnotation"
+    # recorded_at is an object for durations.
+    assert md["recorded_at"] == {
+        "start_time": "2026-05-26T20:00:00Z",
+        "end_time": "2026-05-26T22:14:00Z",
+    }
+    assert md["tags"] == ["t-movie"]
+    assert "com.fulcradynamics.annotation.def-dur1" in md["source"]
+    payload = json.loads(record["data"])
+    assert payload["comment"] == "Just watched The Hunt for Red October"
+    # 2h 14m = 8040 seconds.
+    assert payload["duration_seconds"] == 8040.0
+
+
+def test_record_annotation_moment_fallback_when_no_times(
+        collect_home, monkeypatch):
+    """With neither start_time nor end_time, the existing Moment behavior
+    is preserved — the daemon writes a MomentAnnotation with a scalar
+    recorded_at."""
+    import json
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+    fake_client = _FakeHttpxClient(get_data=[
+        {"id": "def-mom1", "name": "Coffee",
+         "annotation_type": "moment", "tags": [],
+         "created_at": "2026-05-25T00:00:00Z"},
+    ])
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._record_annotation("def-mom1", None)
+    assert reply["ok"] is True
+
+    posts = [r for r in fake_client.requests if r["method"] == "POST"]
+    record = json.loads(
+        [ln for ln in posts[0]["content"].decode().split("\n") if ln][0]
+    )
+    md = record["metadata"]
+    assert md["data_type"] == "MomentAnnotation"
+    # recorded_at is a scalar string for moments.
+    assert isinstance(md["recorded_at"], str)
+
+
+def test_record_annotation_rejects_partial_duration_spec(
+        collect_home, monkeypatch):
+    """Passing only one of start_time / end_time is a caller bug — refuse
+    upfront (before the def lookup) rather than silently fall through to
+    Moment.
+    """
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._record_annotation("def-x", None,
+                                 start_time="2026-05-26T20:00:00Z",
+                                 end_time=None)
+    assert reply["ok"] is False
+    assert "start_time" in reply["error"] and "end_time" in reply["error"]
+
+
+def test_record_annotation_rejects_end_before_start(
+        collect_home, monkeypatch):
+    """Backwards Duration ranges are rejected upfront, before any
+    network round-trip to Fulcra."""
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._record_annotation("def-x", None,
+                                 start_time="2026-05-26T22:00:00Z",
+                                 end_time="2026-05-26T20:00:00Z")
+    assert reply["ok"] is False
+    assert "end_time" in reply["error"]
+
+
+def test_delete_annotation_writes_tombstone(collect_home, monkeypatch):
+    """delete_annotation posts a sentinel annotation tagged with the
+    original source_id so the user has a paper trail. Returns ok=True.
+
+    Caveat: this is a SOFT marker (Fulcra has no per-event delete
+    primitive); the original record stays on the user's timeline.
+    """
+    import json
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+    fake_client = _FakeHttpxClient(get_data=[])
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({
+        "cmd": "delete_annotation",
+        "source_id": "com.fulcradynamics.fulcra-collect.quick-record.abc123",
+    })
+    assert reply["ok"] is True
+    assert reply["tombstone_source_id"].startswith(
+        "com.fulcradynamics.fulcra-collect.quick-record.undo."
+    )
+
+    posts = [r for r in fake_client.requests if r["method"] == "POST"]
+    assert len(posts) == 1
+    record = json.loads(
+        [ln for ln in posts[0]["content"].decode().split("\n") if ln][0]
+    )
+    payload = json.loads(record["data"])
+    # The tombstone references the original source_id so any future
+    # Fulcra-side superseded-by logic can join them.
+    assert payload["supersedes_source_id"] == (
+        "com.fulcradynamics.fulcra-collect.quick-record.abc123"
+    )
+    assert payload["superseded_by"] == "deleted"
+    # Activity buffer reflects the undo.
+    entries = d.activity.recent(limit=1)
+    assert entries[0].plugin_id == "quick-record"
+    assert "Undid" in entries[0].summary or "undid" in entries[0].summary.lower()
+
+
+def test_delete_annotation_requires_source_id(collect_home, monkeypatch):
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({"cmd": "delete_annotation", "source_id": ""})
+    assert reply["ok"] is False
+    assert "source_id" in reply["error"]
+
+
+def test_delete_annotation_unauthenticated(collect_home, monkeypatch):
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: None)
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({"cmd": "delete_annotation",
+                               "source_id": "src-x"})
+    assert reply["ok"] is False
+    assert "authenticated" in reply["error"].lower()
+
+
+# ---------------------------------------------------------------------------
 # Phase H — account-switch fingerprint pre-flight
 # ---------------------------------------------------------------------------
 
@@ -856,3 +1083,202 @@ def test_fingerprint_preflight_resets_attention_def_validation_cache(
     d2 = Daemon(registry=_registry(), config=Config())
     assert d2._attention_def_validated_id is None
     assert d2._attention_def_validated_at == float("-inf")
+
+
+# ---------------------------------------------------------------------------
+# Task #64 — quick-record favorites: list ordering + dispatch
+# ---------------------------------------------------------------------------
+
+def test_quick_record_list_pinned_defs_sort_first(collect_home, monkeypatch):
+    """When favorites are set, pinned defs come first within each
+    annotation_type group AND each def gets a ``pinned: bool`` field
+    so the menubar can colour the star icon without a second lookup."""
+    import fulcra_collect.daemon as daemon_mod
+    from fulcra_collect import quick_record_favorites as _favs
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+
+    defs = [
+        {"id": "m-1", "name": "Coffee", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-20T00:00:00Z"},
+        {"id": "m-2", "name": "Walk", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-15T00:00:00Z"},
+        {"id": "m-3", "name": "Note", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-10T00:00:00Z"},
+        {"id": "dur-1", "name": "Movie", "annotation_type": "duration",
+         "deleted_at": None, "created_at": "2026-05-05T00:00:00Z"},
+        {"id": "dur-2", "name": "Workout", "annotation_type": "duration",
+         "deleted_at": None, "created_at": "2026-04-30T00:00:00Z"},
+    ]
+    fake_client = _FakeHttpxClient(get_data=defs)
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    # Pin one moment and one duration. Within the moment group, m-3 has
+    # the OLDEST created_at — proves favorites override the recency sort.
+    _favs.save({"m-3", "dur-2"})
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._quick_record_list()
+
+    assert reply["ok"] is True
+    ids = [d_["id"] for d_ in reply["definitions"]]
+    # Moments first (favorite m-3 leads, then the rest by recency).
+    # Then durations (favorite dur-2 leads, then dur-1).
+    assert ids == ["m-3", "m-1", "m-2", "dur-2", "dur-1"]
+    # ``pinned`` flag is present and correct on every entry.
+    by_id = {d_["id"]: d_ for d_ in reply["definitions"]}
+    assert by_id["m-3"]["pinned"] is True
+    assert by_id["dur-2"]["pinned"] is True
+    assert by_id["m-1"]["pinned"] is False
+    assert by_id["dur-1"]["pinned"] is False
+
+
+def test_quick_record_list_no_favorites_keeps_legacy_40_cap(
+        collect_home, monkeypatch):
+    """With NO favorites set, the historical 40-entry cap is preserved
+    so users who never touched the pin UI see the same surface they
+    always did. (The cap is the only behavior that diverges between
+    "no favorites" and "any favorites" states.)"""
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+
+    # 60 moment defs — well above the 40-cap.
+    defs = [
+        {"id": f"m-{i:02d}", "name": f"M{i}", "annotation_type": "moment",
+         "deleted_at": None, "created_at": f"2026-05-{(i % 28) + 1:02d}T00:00:00Z"}
+        for i in range(60)
+    ]
+    fake_client = _FakeHttpxClient(get_data=defs)
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._quick_record_list()
+
+    assert reply["ok"] is True
+    # Legacy 40-cap is still honoured when no favorites are set.
+    assert len(reply["definitions"]) == 40
+    # All entries are marked unpinned (favorites is empty).
+    assert all(d_["pinned"] is False for d_ in reply["definitions"])
+
+
+def test_quick_record_list_with_favorites_keeps_all_pinned_plus_20(
+        collect_home, monkeypatch):
+    """When favorites ARE set, ALL pinned defs come through (even past
+    40) plus up to 20 unpinned — the "show all" disclosure footer in
+    the popover needs both halves."""
+    import fulcra_collect.daemon as daemon_mod
+    from fulcra_collect import quick_record_favorites as _favs
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+
+    # 5 pinned + 60 unpinned moments. The 40-cap would chop the
+    # unpinned list well short; the favorites code path must keep
+    # all 5 pinned + only the first 20 unpinned (= 25 total).
+    defs = []
+    for i in range(5):
+        defs.append({"id": f"p-{i}", "name": f"P{i}",
+                     "annotation_type": "moment",
+                     "deleted_at": None,
+                     "created_at": f"2026-05-{i + 1:02d}T00:00:00Z"})
+    for i in range(60):
+        defs.append({"id": f"u-{i:02d}", "name": f"U{i}",
+                     "annotation_type": "moment",
+                     "deleted_at": None,
+                     "created_at": f"2026-04-{(i % 28) + 1:02d}T00:00:00Z"})
+
+    fake_client = _FakeHttpxClient(get_data=defs)
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    _favs.save({f"p-{i}" for i in range(5)})
+
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d._quick_record_list()
+
+    assert reply["ok"] is True
+    ids = [d_["id"] for d_ in reply["definitions"]]
+    # All 5 pinned defs are first…
+    assert set(ids[:5]) == {f"p-{i}" for i in range(5)}
+    # …followed by exactly 20 unpinned defs.
+    assert len(ids) == 25
+
+
+def test_get_and_set_quick_record_favorites_round_trip(
+        collect_home, monkeypatch):
+    """Dispatch test: set then get returns the same set; the daemon
+    command shape matches what DaemonClient sends."""
+    d = Daemon(registry=_registry(), config=Config())
+
+    # Empty to start.
+    assert d.handle_request({"cmd": "get_quick_record_favorites"}) == {
+        "ok": True, "favorites": [],
+    }
+
+    # Set two.
+    reply = d.handle_request({
+        "cmd": "set_quick_record_favorites",
+        "favorites": ["def-a", "def-b"],
+    })
+    assert reply == {"ok": True}
+
+    # Now get returns them sorted.
+    reply = d.handle_request({"cmd": "get_quick_record_favorites"})
+    assert reply == {"ok": True, "favorites": ["def-a", "def-b"]}
+
+
+def test_set_quick_record_favorites_invalidates_cache(
+        collect_home, monkeypatch):
+    """Setting favorites must immediately invalidate the in-memory
+    quick-record cache so the next _quick_record_list call re-sorts
+    against the freshly-written favorites file — without this, the
+    menubar would keep showing the old order for up to 60s."""
+    import fulcra_collect.daemon as daemon_mod
+
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda key: "tok")
+
+    defs = [
+        {"id": "m-old", "name": "Older", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-01T00:00:00Z"},
+        {"id": "m-new", "name": "Newer", "annotation_type": "moment",
+         "deleted_at": None, "created_at": "2026-05-20T00:00:00Z"},
+    ]
+    fake_client = _FakeHttpxClient(get_data=defs)
+    monkeypatch.setattr(daemon_mod, "httpx",
+                        type("httpx", (),
+                             {"Client": _make_fake_client_factory(fake_client)})())
+
+    d = Daemon(registry=_registry(), config=Config())
+
+    # First call warms the cache with NO favorites → m-new first by recency.
+    r1 = d._quick_record_list()
+    assert [x["id"] for x in r1["definitions"]] == ["m-new", "m-old"]
+
+    # Pin the older def and verify the next list call surfaces it first.
+    d.handle_request({
+        "cmd": "set_quick_record_favorites",
+        "favorites": ["m-old"],
+    })
+    r2 = d._quick_record_list()
+    assert [x["id"] for x in r2["definitions"]] == ["m-old", "m-new"]
+    assert r2["definitions"][0]["pinned"] is True
+    assert r2["definitions"][1]["pinned"] is False
+
+
+def test_set_quick_record_favorites_rejects_non_list(collect_home):
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({
+        "cmd": "set_quick_record_favorites",
+        "favorites": "not a list",
+    })
+    assert reply["ok"] is False
+    assert "list" in reply["error"].lower()

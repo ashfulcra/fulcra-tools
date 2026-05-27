@@ -15,6 +15,14 @@
  *                  "Run setup wizard" (which goes through the full welcome flow)
  *   dashboard    — normal post-onboarding home
  *   setup-plugin — per-plugin reconfiguration wizard (opened by Configure button)
+ *   settings     — Preferences > Annotation tracks (soft-delete UI for
+ *                  Fulcra annotation definitions; task #42)
+ *   docs         — in-app markdown viewer. Currently used for the
+ *                  "Data sources" reference (docs/how-do-i-get-my-data.md);
+ *                  any docs/<name>.md the daemon serves works the same way.
+ *                  The repo is private so a github link would 404 — instead
+ *                  the daemon hosts the markdown at /api/docs/<name> and
+ *                  the client renders it with marked.
  */
 
 const TOKEN = document.cookie
@@ -110,6 +118,64 @@ function app() {
     addPlugin() {
       window.__fulcraOnboardingEntryPhase = "pick_plugins";
       this.route = "onboarding";
+    },
+
+    // Jump to the Settings page (currently a single screen: Annotation
+    // tracks / soft-delete UI). Triggered by the small Settings link in
+    // the dashboard header via the @go-to-settings.window listener on
+    // <body>. Mirrors the route-flip in runOnboarding / addPlugin —
+    // no setup wizard state to reset because settings is read-only of
+    // the daemon and writes go straight to Fulcra.
+    goToSettings() {
+      this.route = "settings";
+    },
+
+    // ---------------------------------------------------------------------
+    // Docs viewer — fetches docs/<name>.md from the daemon and renders it
+    // in-app via marked. Triggered by @go-to-docs.window with detail.name.
+    // We fetch as raw text (NOT api() which expects JSON) and let the
+    // template render marked.parse() over it. Errors flip to docsError
+    // instead of changing route so users can still see the dashboard's
+    // chrome.
+    // ---------------------------------------------------------------------
+
+    docsName: null,        // e.g. "how-do-i-get-my-data"
+    docsTitle: "",         // human label shown in the header
+    docsMarkdown: "",      // raw md text
+    docsError: "",
+    docsLoading: false,
+
+    async goToDocs(name, title) {
+      this.docsName = name;
+      this.docsTitle = title || name;
+      this.docsMarkdown = "";
+      this.docsError = "";
+      this.docsLoading = true;
+      this.route = "docs";
+      try {
+        const res = await fetch(`/api/docs/${encodeURIComponent(name)}`, {
+          headers: { Authorization: `Bearer ${TOKEN}` },
+        });
+        if (!res.ok) {
+          let detail = "";
+          try { detail = (await res.json()).detail || ""; } catch (_) {}
+          throw new Error(detail || `${res.status} ${res.statusText}`);
+        }
+        this.docsMarkdown = await res.text();
+      } catch (e) {
+        this.docsError = e.message || "Could not load doc.";
+      } finally {
+        this.docsLoading = false;
+      }
+    },
+
+    // Computed: HTML of the loaded markdown. marked is loaded from CDN
+    // (with SRI) in index.html. Same renderer config as wizard.js's
+    // renderMd: links forced to http(s) and target=_blank rel=noopener.
+    get docsHtml() {
+      if (!this.docsMarkdown) return "";
+      if (typeof marked === "undefined") return "";
+      return marked.parse(this.docsMarkdown);
     },
 
     // Triggered by the dashboard's Configure button via the @configure-plugin

@@ -27,7 +27,7 @@ from pathlib import Path
 import httpx
 import uvicorn
 from fastapi import FastAPI, Depends, File, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -85,6 +85,13 @@ def _frontend_dir() -> Path:
     return workspace_root / "packages" / "web-ui" / "dist"
 
 
+def _docs_dir() -> Path:
+    # packages/collect/fulcra_collect/web.py → repo-root/docs/
+    here = Path(__file__).resolve()
+    workspace_root = here.parents[3]
+    return workspace_root / "docs"
+
+
 # ---------------------------------------------------------------------------
 # Pydantic request bodies
 # ---------------------------------------------------------------------------
@@ -100,11 +107,28 @@ class FulcraTokenBody(BaseModel):
 class DefinitionBindBody(BaseModel):
     definition_id: str | None = None
     force_new: bool = False
+    # Optional custom name for the "Create new" path — used verbatim
+    # by the resolver (no machine-id suffix). Empty/whitespace = use
+    # the plugin's canonical_definition_name + suffix as before.
+    new_name: str | None = None
 
 
 class RecordAnnotationBody(BaseModel):
     definition_id: str
     comment: str | None = None
+    # Optional Duration record window — both must be set together. ISO-8601
+    # UTC strings (trailing 'Z' or '+00:00' accepted). When unset, the
+    # daemon writes a Moment at now (the original Sprint A behavior).
+    start_time: str | None = None
+    end_time: str | None = None
+
+
+class QuickRecordFavoritesBody(BaseModel):
+    """Replace-all body for PUT /api/quick-record/favorites — the caller
+    sends the full desired set of favorite def_ids each time. Simpler
+    than separate add/remove endpoints (the UI already knows the full
+    list) and lets the daemon write the file in one atomic step."""
+    favorites: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -929,6 +953,70 @@ def build_app(daemon) -> FastAPI:
         return {"entries": [asdict(e) for e in entries]}
 
     # ------------------------------------------------------------------
+    # Menubar app status + manual launch — daemon auto-launches the
+    # menubar on startup but a user who quit it should have a one-click
+    # path back rather than going to a terminal. (#66)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/menubar/status", dependencies=[Depends(require_token)])
+    def menubar_status():
+        from . import menubar_launcher as _ml
+        return {
+            "status": _ml.status(),
+            "command": _ml.menubar_command_display(),
+            "supported": _ml.is_supported(),
+        }
+
+    @app.post("/api/menubar/launch", dependencies=[Depends(require_token)])
+    def menubar_launch():
+        from . import menubar_launcher as _ml
+        if not _ml.is_supported():
+            raise HTTPException(400, "menubar app is macOS-only")
+        if _ml.find_menubar_command() is None:
+            raise HTTPException(
+                404,
+                "menubar app not installed on this machine. Install with "
+                "`uv tool install fulcra-menubar` or run from a checkout "
+                "with `uv run --extra macos fulcra-menubar`.",
+            )
+        ok = _ml.try_launch_menubar(only_if_not_running=True)
+        return {"ok": ok, "status": _ml.status()}
+
+    # ------------------------------------------------------------------
+    # In-app docs viewer — serves docs/<name>.md as raw markdown so the
+    # frontend can render it with the marked library it already loads
+    # for the wizard. Used by the dashboard's "Data sources ↗" link.
+    # The GitHub fallback won't work while the repo is private, so the
+    # daemon hosts these locally instead.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/docs/{name}", dependencies=[Depends(require_token)])
+    def get_docs(name: str):
+        """Return the raw markdown of docs/<name>.md (path-validated).
+
+        `name` must be a single safe identifier — letters, digits,
+        hyphens, underscores only — no slashes, no leading dot, no
+        traversal. We reject anything else with 400 so a typo / a
+        crafted URL can't escape the docs directory.
+        """
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name or ""):
+            raise HTTPException(400, "invalid doc name")
+        path = _docs_dir() / f"{name}.md"
+        # Defence-in-depth: even with the regex above, confirm the
+        # resolved path is inside the docs dir before reading.
+        try:
+            path.resolve().relative_to(_docs_dir().resolve())
+        except (ValueError, OSError):
+            raise HTTPException(400, "invalid doc path")
+        if not path.is_file():
+            raise HTTPException(404, f"no doc named {name!r}")
+        return Response(
+            content=path.read_text(encoding="utf-8"),
+            media_type="text/markdown; charset=utf-8",
+        )
+
+    # ------------------------------------------------------------------
     # Definitions — list, preview recent entries, bind / clear
     # ------------------------------------------------------------------
 
@@ -1049,7 +1137,7 @@ def build_app(daemon) -> FastAPI:
                     def_source = f"com.fulcradynamics.annotation.{def_id}"
                     matched = [
                         rec for rec in records
-                        if def_source in (rec.get("metadata", {}).get("source") or [])
+                        if def_source in ((rec.get("metadata") or {}).get("source") or [])
                         or rec.get("source_id") == def_source
                     ]
                     entries.extend(matched)
@@ -1118,7 +1206,17 @@ def build_app(daemon) -> FastAPI:
 
         Body: {"definition_id": "<uuid>"} to pick an existing definition, or
         {"force_new": true} to clear the cache and let the next run create a
-        fresh definition (the plugin's canonical_name gets a machine-id suffix).
+        fresh definition. If {"force_new": true, "new_name": "My Watched"} is
+        sent, that exact name is persisted on plugin state and used verbatim
+        by the resolver instead of the plugin's canonical_definition_name —
+        no machine-id suffix is appended. Empty or whitespace-only new_name
+        is ignored (falls back to the canonical-name + suffix behavior).
+
+        Implementation: path A (state-carries-name). We persist the override
+        on PluginState; the next run's RunContext.resolved_definition_id
+        consumes and clears it. This avoids needing a Fulcra client at
+        request time and keeps the create deferred to the worker's normal
+        error-handling path.
         """
         if plugin_id not in daemon.registry.plugins:
             raise HTTPException(404, f"unknown plugin {plugin_id!r}")
@@ -1130,10 +1228,128 @@ def build_app(daemon) -> FastAPI:
             # Clear the cached definition_id; the plugin's next run will
             # call resolve_definition_id with force_new=True via RunContext.
             st.definition_id = None
+            override = (body.new_name or "").strip()
+            st.override_definition_name = override or None
         else:
             st.definition_id = body.definition_id
+            # Picking an existing def supersedes any pending override name.
+            st.override_definition_name = None
         _state_mod.save(st)
         return {"ok": True}
+
+    @app.delete("/api/definitions/{def_id}", dependencies=[Depends(require_token)])
+    def delete_definition_route(def_id: str):
+        """Soft-delete a Fulcra annotation definition (task #42).
+
+        Returns 200 with {"ok": True} on success, 404 if the def doesn't
+        exist (or was already soft-deleted server-side). Events written
+        under the def remain in Fulcra but the def no longer appears in
+        the definitions list and any plugin caching it gets its cached
+        definition_id cleared so the next run resolves a fresh one
+        instead of trying to write to a dangling reference.
+        """
+        _log = logging.getLogger("fulcra_collect.web")
+        fulcra_token = _fulcra_token_or_401()
+        # Talk to Fulcra via httpx the same way /api/definitions does —
+        # the BaseFulcraClient.soft_delete_definition primitive expects
+        # its own auth path, and we want to share error-handling +
+        # connection setup with the existing list/recent routes.
+        try:
+            with _fulcra_http_client(fulcra_token) as client:
+                r = client.delete(f"/user/v1alpha1/annotation/{def_id}")
+                if r.status_code == 404:
+                    raise HTTPException(
+                        404,
+                        "Definition not found — it may have already been deleted.",
+                    )
+                if r.status_code != 204:
+                    r.raise_for_status()
+        except HTTPException:
+            raise
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            _log.warning("delete_definition(%s): Fulcra returned %s", def_id, status)
+            if status in (401, 403):
+                raise HTTPException(
+                    401,
+                    "Fulcra rejected the request — your sign-in may have expired. "
+                    "Re-run sign-in from the wizard or paste a fresh token.",
+                ) from exc
+            if 500 <= status < 600:
+                raise HTTPException(
+                    502,
+                    f"Fulcra returned {status}. Try again in a moment.",
+                ) from exc
+            raise HTTPException(
+                502,
+                f"Fulcra returned an unexpected {status}.",
+            ) from exc
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            _log.warning("delete_definition(%s): connect failed: %r", def_id, exc)
+            raise HTTPException(
+                502,
+                "Couldn't reach Fulcra. Check your internet, then try again.",
+            ) from exc
+        except httpx.TimeoutException as exc:
+            _log.warning("delete_definition(%s): timed out: %r", def_id, exc)
+            raise HTTPException(
+                504,
+                "Fulcra took too long to respond. Try again in a moment.",
+            ) from exc
+        except Exception as exc:
+            _log.exception("delete_definition(%s): unexpected failure", def_id)
+            raise HTTPException(
+                502,
+                f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
+                "Check the daemon log for details.",
+            ) from exc
+
+        # Clear the cached definition_id on any plugin that was bound to
+        # the deleted def. Without this the next run would try to write
+        # to a tombstoned def and either silently fail or re-create a new
+        # def on the side (depending on the plugin's error path).
+        from . import state as _state_mod
+        cleared: list[str] = []
+        for p in daemon.registry.plugins.values():
+            try:
+                st = _state_mod.load(p.id)
+            except Exception:
+                # Per-plugin state corruption shouldn't abort the delete.
+                continue
+            if getattr(st, "definition_id", None) == def_id:
+                st.definition_id = None
+                _state_mod.save(st)
+                cleared.append(p.id)
+        if cleared:
+            _log.info(
+                "delete_definition(%s): cleared cached definition_id on %d plugin(s): %s",
+                def_id, len(cleared), ", ".join(cleared),
+            )
+        # Also drop this def from quick-record favorites if it was pinned.
+        # Without this the favorites file would accumulate orphan UUIDs
+        # the menubar would keep trying to surface but Fulcra would no
+        # longer return. Best-effort: a favorites I/O failure shouldn't
+        # roll back the (successful) Fulcra-side delete.
+        try:
+            from . import quick_record_favorites as _favs
+            current = _favs.load()
+            if def_id in current:
+                current.discard(def_id)
+                _favs.save(current)
+                # Bust the daemon's quick-record cache so the next list
+                # call doesn't briefly resurrect the deleted def with a
+                # stale ``pinned`` flag.
+                daemon._quick_record_cache = None
+                _log.info(
+                    "delete_definition(%s): removed from quick-record favorites",
+                    def_id,
+                )
+        except Exception:
+            _log.exception(
+                "delete_definition(%s): could not prune favorites; non-fatal",
+                def_id,
+            )
+        return {"ok": True, "cleared_plugins": cleared}
 
     @app.delete("/api/plugin/{plugin_id}/definition", dependencies=[Depends(require_token)])
     def clear_definition(plugin_id: str):
@@ -1160,12 +1376,61 @@ def build_app(daemon) -> FastAPI:
 
     @app.post("/api/annotations", dependencies=[Depends(require_token)])
     def record_annotation(body: RecordAnnotationBody):
-        """Write one Moment annotation immediately to Fulcra. Used by the
-        menubar quick-record buttons and any direct web UI callers."""
+        """Write one annotation immediately to Fulcra. Used by the
+        menubar quick-record buttons and any direct web UI callers.
+
+        Writes a Moment when ``start_time`` / ``end_time`` are absent;
+        writes a Duration when BOTH are present (Sprint B,
+        2026-05-26 — see daemon._record_annotation for the type-aware
+        wire shape).
+        """
         return daemon.handle_request({
             "cmd": "record_annotation",
             "definition_id": body.definition_id,
             "comment": body.comment,
+            "start_time": body.start_time,
+            "end_time": body.end_time,
+        })
+
+    # ------------------------------------------------------------------
+    # Quick-record favorites — the per-machine pin list (task #64).
+    # Two surfaces share these endpoints: the menubar popover's per-row
+    # star toggle (one-def diff) and the web UI Settings page's bulk
+    # multi-select. Both PUT the full list each time; the daemon's
+    # ``_set_quick_record_favorites`` busts the in-memory quick-record
+    # cache so the very next list call reflects the new order.
+    # ------------------------------------------------------------------
+
+    @app.get("/api/quick-record/favorites",
+             dependencies=[Depends(require_token)])
+    def get_quick_record_favorites():
+        return daemon.handle_request({"cmd": "get_quick_record_favorites"})
+
+    @app.put("/api/quick-record/favorites",
+             dependencies=[Depends(require_token)])
+    def put_quick_record_favorites(body: QuickRecordFavoritesBody):
+        return daemon.handle_request({
+            "cmd": "set_quick_record_favorites",
+            "favorites": body.favorites,
+        })
+
+    @app.delete("/api/annotations/{source_id}",
+                dependencies=[Depends(require_token)])
+    def delete_annotation(source_id: str):
+        """Soft-delete an annotation by writing a tombstone marker.
+
+        Caveat: Fulcra has no per-event delete primitive. This endpoint
+        writes a separate sentinel annotation referencing ``source_id``
+        in its data payload — the menubar uses it for the "Undo"
+        affordance on the Recently-recorded list. The original record
+        remains visible on the user's Fulcra timeline.
+        See ``daemon._delete_annotation`` for the full rationale and
+        ``packages/media-helpers/scripts/probe_soft_delete_3.py`` for
+        the survey of why this is the best we can do.
+        """
+        return daemon.handle_request({
+            "cmd": "delete_annotation",
+            "source_id": source_id,
         })
 
     # ------------------------------------------------------------------

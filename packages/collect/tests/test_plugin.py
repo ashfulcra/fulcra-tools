@@ -102,6 +102,57 @@ def test_resolved_definition_id_calls_resolver_when_state_empty():
     assert client.create_calls == 1
 
 
+def test_resolved_definition_id_uses_override_name_verbatim():
+    """Task #47: when state.override_definition_name is set, the resolver
+    is called with that exact name (no machine-id suffix) and the
+    override is cleared after use."""
+    state = PluginState(plugin_id="lastfm",
+                        override_definition_name="My Custom Listened")
+    client = _FakeClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="Listened",
+                                     force_new=True)
+    assert out == "def-fresh"
+    # The fake's create_definition records the name on the returned dict.
+    # _FakeClient takes the list path first (returns []) then creates with
+    # exactly the override name — NOT canonical_name + suffix.
+    assert client.list_calls == 1
+    assert client.create_calls == 1
+    # Override is one-shot: cleared so a later re-resolve (e.g. account
+    # switch) doesn't silently reuse a name the user picked once.
+    assert state.override_definition_name is None
+    assert state.definition_id == "def-fresh"
+
+
+def test_resolved_definition_id_override_adopts_existing_def():
+    """If a def with the override name already exists on the account,
+    the resolver adopts it instead of creating a duplicate."""
+    state = PluginState(plugin_id="lastfm",
+                        override_definition_name="Already Here")
+
+    class _ExistingClient:
+        def __init__(self):
+            self.created = []
+        def list_definitions(self, *, name):
+            if name == "Already Here":
+                return [{"id": "existing-def", "name": name,
+                         "annotation_type": "moment"}]
+            return []
+        def create_definition(self, *, name, **spec):
+            self.created.append(name)
+            return {"id": "fresh", "name": name, **spec}
+
+    client = _ExistingClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="Listened",
+                                     force_new=True)
+    assert out == "existing-def"
+    assert client.created == []  # adopted, not created
+    assert state.override_definition_name is None
+
+
 def test_resolved_definition_id_uses_cache_on_second_call():
     state = PluginState(plugin_id="lastfm", definition_id="cached-id")
     client = _FakeClient()

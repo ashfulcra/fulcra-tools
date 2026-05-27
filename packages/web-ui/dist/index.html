@@ -6,9 +6,21 @@
   <title>Fulcra Collect</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Alpine pinned to an exact version to prevent wildcard auto-update.
-       TODO before production: add an integrity="sha384-..." SRI hash. -->
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <!-- marked — full CommonMark + GFM renderer used by renderMd() in wizard.js.
+       Pinned to an exact version + SRI hash so a CDN compromise can't
+       silently swap the bundle. To upgrade: bump the version, recompute
+       the hash with
+         curl -s https://cdn.jsdelivr.net/npm/marked@<new-version>/marked.min.js \
+           | openssl dgst -sha384 -binary | openssl base64 -A
+       and update both src and integrity below. -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"
+          integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+"
+          crossorigin="anonymous"></script>
+  <!-- Alpine pinned to an exact version + SRI hash (same upgrade dance
+       as the marked tag above). -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"
+          integrity="sha384-l8f0VcPi/M1iHPv8egOnY/15TDwqgbOR1anMIJWvU6nLRgZVLTLSaNqi/TOoT5Fh"
+          crossorigin="anonymous"></script>
 </head>
 <body class="bg-white text-slate-900 min-h-screen"
       x-data="app()"
@@ -16,7 +28,10 @@
       @onboarding-complete.window="route = 'dashboard'"
       @add-plugin.window="addPlugin()"
       @run-onboarding.window="runOnboarding()"
-      @configure-plugin.window="openSetupForPlugin($event.detail.id)">
+      @configure-plugin.window="openSetupForPlugin($event.detail.id)"
+      @go-to-settings.window="goToSettings()"
+      @go-to-dashboard.window="route = 'dashboard'"
+      @go-to-docs.window="goToDocs($event.detail.name, $event.detail.title)">
 
   <main class="max-w-2xl mx-auto p-6">
     <header class="flex items-center gap-3 mb-8">
@@ -337,7 +352,7 @@
                           <input type="password"
                                  :value="field.value"
                                  @input="updateField(field.key, $event.target.value)"
-                                 :placeholder="field.placeholder || ''"
+                                 :placeholder="_credPresent[field.key] ? '(currently set — leave blank to keep)' : (field.placeholder || '')"
                                  class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
                         </template>
 
@@ -497,11 +512,25 @@
                               </svg>
                               <span class="font-medium text-sm" x-text="healthResult.summary"></span>
                             </div>
+                            <!-- Preview entries — all the new health_checks
+                                 (#60) return {title, subtitle?, watched_at?}.
+                                 Render all three when present so the user can
+                                 confirm freshness (date) and context (subtitle
+                                 = artist/show/author) at a glance, not just
+                                 the title. -->
                             <template x-if="healthResult.preview && healthResult.preview.length > 0">
-                              <ul class="space-y-1">
+                              <ul class="space-y-1.5">
                                 <template x-for="(entry, i) in healthResult.preview" :key="i">
-                                  <li class="text-sm text-slate-600 border-l-2 border-green-300 pl-3 py-0.5"
-                                      x-text="entry.title || entry.name || JSON.stringify(entry)"></li>
+                                  <li class="text-sm text-slate-600 border-l-2 border-green-300 pl-3 py-0.5">
+                                    <div class="font-medium" x-text="entry.title || entry.name || JSON.stringify(entry)"></div>
+                                    <template x-if="entry.subtitle">
+                                      <div class="text-xs text-slate-500" x-text="entry.subtitle"></div>
+                                    </template>
+                                    <template x-if="entry.watched_at || entry.date">
+                                      <div class="text-xs text-slate-400"
+                                           x-text="new Date(entry.watched_at || entry.date).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'})"></div>
+                                    </template>
+                                  </li>
                                 </template>
                               </ul>
                             </template>
@@ -673,6 +702,18 @@
                                 : '+ Create a new annotation')
                         "></span>
                       </button>
+                      <!-- Editable name for the new annotation. Empty input
+                           is allowed — the daemon falls back to the
+                           plugin's canonical_definition_name + a machine
+                           suffix in that case. -->
+                      <template x-if="dpForceNew">
+                        <div class="pt-2">
+                          <label class="block text-xs text-slate-500 mb-1">Annotation name (you can change this):</label>
+                          <input type="text" x-model="dpNewName"
+                                 class="w-full px-3 py-2 text-sm border border-slate-300 rounded focus:outline-none focus:border-violet-500"
+                                 :placeholder="plugin_contract.canonical_definition_name || 'My annotation'" />
+                        </div>
+                      </template>
                     </div>
                   </div>
                 </template>
@@ -778,6 +819,55 @@
                     </div>
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
+
+                    <!-- First-run feedback. Auto-triggered on done-step entry
+                         for non-service plugins (see wizard.js _triggerFirstRun).
+                         User feedback 2026-05-26: "should have offered run for
+                         the first time and reported success when i finished
+                         onboarding". -->
+                    <template x-if="firstRunStatus === 'running'">
+                      <div class="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600 flex items-center gap-2">
+                        <svg class="w-4 h-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none">
+                          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 60" stroke-linecap="round"/>
+                        </svg>
+                        Running first import…
+                      </div>
+                    </template>
+                    <template x-if="firstRunStatus === 'done'">
+                      <div class="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 space-y-2">
+                        <div x-text="`✓ ${firstRunSummary}`"></div>
+                        <!-- Deep-link to the user's Fulcra timeline scoped
+                             to the data they just ingested. Closes the
+                             "I configured this, now where do I see it?"
+                             gap from the 2026-05-26 product brainstorm
+                             (#58). Only shown when the run resolved a
+                             definition_id we can filter on. -->
+                        <template x-if="firstRunTimelineUrl">
+                          <div>
+                            <a :href="firstRunTimelineUrl"
+                               target="_blank"
+                               rel="noopener noreferrer"
+                               class="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-900 underline text-sm font-medium">
+                              View your new data on the Fulcra timeline →
+                            </a>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="firstRunStatus === 'error'">
+                      <div class="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 space-y-1">
+                        <div class="font-medium">First run reported an error.</div>
+                        <div x-text="firstRunSummary"></div>
+                        <div class="text-xs text-amber-700">
+                          You can finish anyway and retry from the dashboard, or
+                          go back and check your settings.
+                        </div>
+                      </div>
+                    </template>
+                    <template x-if="firstRunStatus === 'slow'">
+                      <div class="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"
+                           x-text="firstRunSummary"></div>
+                    </template>
                   </div>
                 </template>
 
@@ -1005,7 +1095,7 @@
                       <input type="password"
                              :value="field.value"
                              @input="updateField(field.key, $event.target.value)"
-                             :placeholder="field.placeholder || ''"
+                             :placeholder="_credPresent[field.key] ? '(currently set — leave blank to keep)' : (field.placeholder || '')"
                              class="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none">
                     </template>
 
@@ -1167,6 +1257,15 @@
                   <div class="text-red-600 text-sm bg-red-50 border border-red-200 rounded p-3" x-text="dpError"></div>
                 </template>
 
+                <!-- IMPORTANT: this block is intentionally a near-verbatim
+                     copy of the definition_picker template inside the
+                     onboarding-flow render site above. Two render sites
+                     exist because they live under different x-data scopes
+                     (onboarding() vs setupWizard) and Alpine doesn't have
+                     partials. If you change one, change the other — the
+                     SVG check, the preview-on-select expansion, and the
+                     other-annotations collapsible all need to stay in
+                     sync to avoid the "this looks different here?" bug. -->
                 <template x-if="!dpLoading && dpDefinitions.length > 0">
                   <div class="space-y-2">
                     <p class="text-xs text-slate-500 font-medium">Choose an existing annotation or create a new one:</p>
@@ -1176,9 +1275,42 @@
                              ? 'border-violet-400 bg-violet-50'
                              : 'border-slate-200 hover:border-slate-300'"
                            @click="dpSelectDef(def)">
-                        <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
-                        <div class="text-xs text-slate-500 mt-0.5"
-                             x-text="`${def.annotation_type} · created ${dpHumanDate(def.created_at)}`"></div>
+                        <div class="flex items-start justify-between gap-2">
+                          <div class="flex-1 min-w-0">
+                            <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
+                            <div class="text-xs text-slate-500 mt-0.5"
+                                 x-text="`${def.annotation_type} · created ${dpHumanDate(def.created_at)}`"></div>
+                          </div>
+                          <template x-if="dpSelectedId === def.id">
+                            <svg class="w-5 h-5 text-violet-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                            </svg>
+                          </template>
+                        </div>
+
+                        <!-- Recent entries (loaded when selected) -->
+                        <template x-if="dpSelectedId === def.id">
+                          <div class="mt-2 border-t border-violet-100 pt-2">
+                            <template x-if="def._previewLoading">
+                              <div class="text-xs text-slate-400 animate-pulse">Loading recent entries…</div>
+                            </template>
+                            <template x-if="def._previewError">
+                              <div class="text-xs text-red-500" x-text="def._previewError"></div>
+                            </template>
+                            <template x-if="!def._previewLoading && def._preview.length === 0 && def._previewLoaded">
+                              <div class="text-xs text-slate-400">No recent entries found.</div>
+                            </template>
+                            <template x-if="def._preview.length > 0">
+                              <div class="space-y-0.5">
+                                <div class="text-xs text-slate-500 font-medium mb-1">Recent entries:</div>
+                                <template x-for="entry in def._preview" :key="dpEntryLabel(entry)">
+                                  <div class="text-xs text-slate-600 truncate"
+                                       x-text="dpEntryLabel(entry)"></div>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
                       </div>
                     </template>
                   </div>
@@ -1210,9 +1342,18 @@
                                  ? 'border-violet-400 bg-violet-50'
                                  : 'border-slate-200 hover:border-slate-300'"
                                @click="dpSelectDef(def)">
-                            <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
-                            <div class="text-xs text-slate-400 mt-0.5"
-                                 x-text="`(${def.annotation_type} annotation) · created ${dpHumanDate(def.created_at)}`"></div>
+                            <div class="flex items-start justify-between gap-2">
+                              <div class="flex-1 min-w-0">
+                                <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
+                                <div class="text-xs text-slate-400 mt-0.5"
+                                     x-text="`(${def.annotation_type} annotation) · created ${dpHumanDate(def.created_at)}`"></div>
+                              </div>
+                              <template x-if="dpSelectedId === def.id">
+                                <svg class="w-5 h-5 text-violet-600 shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                  <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                                </svg>
+                              </template>
+                            </div>
                           </div>
                         </template>
                       </div>
@@ -1221,11 +1362,37 @@
                 </template>
 
                 <div class="pt-1" x-show="dpDefinitions.length > 0 || dpOtherDefinitions.length > 0">
+                  <!-- Outline button — mirrors the onboarding-flow render
+                       site so the "create new" path looks the same whether
+                       the user lands here via first-run onboarding or via
+                       the dashboard's Configure button. Selected state
+                       (dpForceNew) flips to emerald + check; default state
+                       is a neutral outline. -->
                   <button @click="dpChooseForceNew()"
-                          class="text-sm font-medium transition-colors"
-                          :class="dpForceNew ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'">
-                    <span x-text="dpForceNew ? '✓ Will create a new annotation on first run' : 'Create a new annotation instead'"></span>
+                          class="px-4 py-2 rounded border text-sm font-medium transition-colors"
+                          :class="dpForceNew
+                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                            : 'border-slate-300 text-slate-700 hover:bg-slate-50 hover:border-slate-400'">
+                    <span x-text="
+                      dpForceNew
+                        ? (plugin_contract.canonical_definition_name
+                            ? `✓ Will create a new '${plugin_contract.canonical_definition_name}' annotation on first run`
+                            : '✓ Will create a new annotation on first run')
+                        : (plugin_contract.canonical_definition_name
+                            ? `+ Create a new '${plugin_contract.canonical_definition_name}' annotation`
+                            : '+ Create a new annotation')
+                    "></span>
                   </button>
+                  <!-- Editable name input — mirrors the onboarding-flow
+                       render site above. Empty = use canonical name. -->
+                  <template x-if="dpForceNew">
+                    <div class="pt-2">
+                      <label class="block text-xs text-slate-500 mb-1">Annotation name (you can change this):</label>
+                      <input type="text" x-model="dpNewName"
+                             class="w-full px-3 py-2 text-sm border border-slate-300 rounded focus:outline-none focus:border-violet-500"
+                             :placeholder="plugin_contract.canonical_definition_name || 'My annotation'" />
+                    </div>
+                  </template>
                 </div>
               </div>
             </template>
@@ -1317,6 +1484,37 @@
               <div class="space-y-4">
                 <div class="font-semibold text-lg text-green-700" x-text="current_step.title"></div>
                 <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
+
+                <!-- First-run feedback — mirrors the onboarding-flow render
+                     site so the dashboard-Configure flow gets the same
+                     auto-trigger + outcome banner. See wizard.js
+                     _triggerFirstRun. -->
+                <template x-if="firstRunStatus === 'running'">
+                  <div class="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600 flex items-center gap-2">
+                    <svg class="w-4 h-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="40 60" stroke-linecap="round"/>
+                    </svg>
+                    Running first import…
+                  </div>
+                </template>
+                <template x-if="firstRunStatus === 'done'">
+                  <div class="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
+                       x-text="`✓ ${firstRunSummary}`"></div>
+                </template>
+                <template x-if="firstRunStatus === 'error'">
+                  <div class="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 space-y-1">
+                    <div class="font-medium">First run reported an error.</div>
+                    <div x-text="firstRunSummary"></div>
+                    <div class="text-xs text-amber-700">
+                      You can finish anyway and retry from the dashboard, or
+                      go back and check your settings.
+                    </div>
+                  </div>
+                </template>
+                <template x-if="firstRunStatus === 'slow'">
+                  <div class="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"
+                       x-text="firstRunSummary"></div>
+                </template>
               </div>
             </template>
 
@@ -1362,6 +1560,207 @@
     </template>
 
     <!-- ------------------------------------------------------------------ -->
+    <!-- SETTINGS — Annotation tracks (task #42)                            -->
+    <!--                                                                    -->
+    <!-- Lists every non-deleted Fulcra annotation definition on the user's -->
+    <!-- account with a Delete button per row.  Soft-delete is the only     -->
+    <!-- delete primitive Fulcra exposes — events written under the def     -->
+    <!-- remain in Fulcra but the def stops showing up in pickers.  Any     -->
+    <!-- plugin whose cached definition_id matched the deleted def gets     -->
+    <!-- its cache cleared server-side (see web.py:delete_definition_route) -->
+    <!-- so the next run resolves a fresh def rather than writing to a      -->
+    <!-- tombstone.                                                         -->
+    <!-- ------------------------------------------------------------------ -->
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Docs viewer (task #51). Fetches docs/<name>.md from the daemon     -->
+    <!-- and renders it via the marked library already loaded in <head>.    -->
+    <!-- Lives in app() (not its own component) because it has no per-      -->
+    <!-- instance state beyond what app() already tracks. Reached from the  -->
+    <!-- "Data sources" link in the dashboard header.                       -->
+    <!-- ------------------------------------------------------------------ -->
+    <template x-if="route === 'docs'">
+      <section class="space-y-4">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <h2 class="text-xl font-semibold" x-text="docsTitle"></h2>
+            <button @click="route = 'dashboard'"
+                    class="text-xs text-slate-400 hover:text-violet-600 underline">
+              ← Back to dashboard
+            </button>
+          </div>
+        </div>
+
+        <template x-if="docsLoading">
+          <div class="text-slate-400 text-sm animate-pulse">Loading…</div>
+        </template>
+
+        <template x-if="docsError && !docsLoading">
+          <div class="text-red-600 text-sm bg-red-50 border border-red-200 rounded p-3"
+               x-text="docsError"></div>
+        </template>
+
+        <!-- Rendered markdown. Tailwind's prose plugin isn't loaded so
+             we use a manual stack of typography hints via inline classes
+             — keep it readable without pulling in the prose dep. -->
+        <article class="max-w-3xl text-sm text-slate-700 leading-relaxed
+                        [&_h1]:text-2xl [&_h1]:font-semibold [&_h1]:mt-6 [&_h1]:mb-3
+                        [&_h2]:text-lg  [&_h2]:font-semibold [&_h2]:mt-6 [&_h2]:mb-2 [&_h2]:text-slate-900
+                        [&_h3]:text-base [&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-1
+                        [&_p]:mb-3
+                        [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:mb-3 [&_ul]:space-y-1
+                        [&_li]:text-sm
+                        [&_a]:text-violet-600 [&_a:hover]:underline
+                        [&_code]:bg-slate-100 [&_code]:rounded [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-xs [&_code]:font-mono
+                        [&_pre]:bg-slate-900 [&_pre]:text-slate-100 [&_pre]:rounded [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:text-xs
+                        [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0
+                        [&_strong]:font-semibold [&_strong]:text-slate-900
+                        [&_hr]:my-6 [&_hr]:border-slate-200"
+                 x-html="docsHtml"></article>
+      </section>
+    </template>
+
+    <template x-if="route === 'settings'">
+      <section x-data="settings()" x-init="boot()" class="space-y-6">
+
+        <!-- Header: title + back-to-dashboard link -->
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <h2 class="text-xl font-semibold">Settings</h2>
+            <button @click="$dispatch('go-to-dashboard')"
+                    class="text-xs text-slate-400 hover:text-violet-600 underline">
+              ← Back to dashboard
+            </button>
+          </div>
+        </div>
+
+        <!-- ──────────────────────────────────────────────────────────── -->
+        <!-- Quick-record favorites (task #64).                           -->
+        <!-- Per-machine. The menubar's pin toggle and this list share   -->
+        <!-- the same daemon endpoints; opening this page after pinning  -->
+        <!-- in the menubar shows the user's actual current pin state.   -->
+        <!-- ──────────────────────────────────────────────────────────── -->
+        <div class="border border-slate-200 rounded-lg p-4 space-y-3">
+          <div class="flex items-baseline justify-between gap-3">
+            <h3 class="text-base font-semibold">Quick-record favorites</h3>
+            <span class="text-xs text-slate-500"
+                  x-text="`${favoritesCount} favorite${favoritesCount === 1 ? '' : 's'} selected`"></span>
+          </div>
+          <p class="text-xs text-slate-500 max-w-2xl">
+            Pinned annotations appear at the top of the menubar's quick-record list,
+            and the menubar defaults to showing only favorites when any are set.
+            The menubar's pin toggle and this page stay in sync — both write to
+            <code class="text-[10px] bg-slate-100 px-1 py-0.5 rounded">~/.config/fulcra-collect/quick_record_favorites.json</code>
+            on this machine. Cross-machine sync is coming in a later release.
+          </p>
+
+          <template x-if="favoritesError">
+            <div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2"
+                 x-text="favoritesError"></div>
+          </template>
+
+          <template x-if="!loading && sortedDefinitions.length > 0">
+            <div class="divide-y divide-slate-100 border border-slate-100 rounded">
+              <template x-for="def in sortedDefinitions" :key="`fav-${def.id}`">
+                <label class="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                  <input type="checkbox"
+                         :checked="isFavorite(def)"
+                         :disabled="favoritesSaving"
+                         @change="toggleFavorite(def)"
+                         class="w-4 h-4 text-violet-600 border-slate-300 rounded focus:ring-violet-500 disabled:opacity-40">
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm text-slate-900 truncate" x-text="def.name"></div>
+                    <div class="text-[11px] text-slate-500"
+                         x-text="`${def.annotation_type || 'unknown type'} · created ${humanDate(def.created_at)}`"></div>
+                  </div>
+                </label>
+              </template>
+            </div>
+          </template>
+
+          <template x-if="!loading && sortedDefinitions.length === 0">
+            <div class="text-xs text-slate-400">
+              No annotation definitions yet — favorites become available once
+              you have at least one annotation track.
+            </div>
+          </template>
+        </div>
+
+        <!-- ──────────────────────────────────────────────────────────── -->
+        <!-- Annotation tracks (soft-delete; existing task #42 surface). -->
+        <!-- ──────────────────────────────────────────────────────────── -->
+        <h3 class="text-base font-semibold pt-2">Annotation tracks</h3>
+
+        <p class="text-sm text-slate-500 max-w-2xl">
+          These are the annotation definitions on your Fulcra account.
+          Soft-deleting one removes it from pickers; the events already
+          written under it stay in Fulcra but no longer surface in the
+          definitions list. Any plugin currently bound to a deleted track
+          will resolve a fresh one on its next run.
+        </p>
+
+        <!-- Inline success banner (last successful delete) -->
+        <template x-if="lastDeletedName">
+          <div class="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 flex items-center justify-between">
+            <span>Removed <strong x-text="lastDeletedName"></strong>.</span>
+            <button @click="lastDeletedName = ''"
+                    class="text-xs text-emerald-600 hover:text-emerald-800 underline">
+              Dismiss
+            </button>
+          </div>
+        </template>
+
+        <!-- Loading / error -->
+        <template x-if="loading">
+          <div class="text-slate-400 text-sm animate-pulse">
+            Loading your annotation definitions…
+          </div>
+        </template>
+
+        <template x-if="error && !loading">
+          <div class="text-red-600 text-sm bg-red-50 border border-red-200 rounded p-3"
+               x-text="error"></div>
+        </template>
+
+        <!-- Empty state — user has no defs at all (or just deleted the last one) -->
+        <template x-if="!loading && !error && sortedDefinitions.length === 0">
+          <div class="text-center py-12 text-slate-400">
+            <p class="text-sm">No annotation definitions on your account yet.</p>
+            <p class="text-xs mt-1">
+              Enabled plugins create them on first run.
+            </p>
+          </div>
+        </template>
+
+        <!-- Definition list — same visual weight as dashboard plugin rows -->
+        <template x-if="!loading && sortedDefinitions.length > 0">
+          <div class="space-y-2">
+            <template x-for="def in sortedDefinitions" :key="def.id">
+              <div class="border border-slate-200 rounded-lg px-4 py-3 hover:border-slate-300 transition-colors">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <div class="font-medium text-sm text-slate-900" x-text="def.name"></div>
+                    <div class="text-xs text-slate-500 mt-0.5"
+                         x-text="`${def.annotation_type || 'unknown type'} · created ${humanDate(def.created_at)}`"></div>
+                  </div>
+
+                  <div class="flex items-center gap-2 shrink-0">
+                    <button @click="deleteDef(def)"
+                            :disabled="isDeleting(def)"
+                            class="px-3 py-1.5 text-xs rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-40 transition-colors"
+                            title="Soft-delete this annotation definition">
+                      <span x-text="isDeleting(def) ? 'Deleting…' : 'Delete'"></span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+      </section>
+    </template>
+
+    <!-- ------------------------------------------------------------------ -->
     <!-- DASHBOARD                                                           -->
     <!-- ------------------------------------------------------------------ -->
     <!-- 'add_plugin' route no longer exists: clicking "+ Add plugin" now sets
@@ -1385,6 +1784,25 @@
                     class="text-xs text-slate-400 hover:text-violet-600 underline"
                     title="Restart the onboarding wizard">
               Run setup wizard
+            </button>
+            <!-- Settings entry point (task #42). Same dispatch-to-app
+                 pattern as Run setup wizard above — the body's
+                 @go-to-settings.window listener calls goToSettings(). -->
+            <button @click="$dispatch('go-to-settings')"
+                    class="text-xs text-slate-400 hover:text-violet-600 underline"
+                    title="Manage annotation tracks">
+              Settings
+            </button>
+            <!-- "How do I get my data?" reference. The doc is bundled
+                 in the repo at docs/how-do-i-get-my-data.md and served
+                 by the daemon at /api/docs/<name>; the in-app docs
+                 viewer renders it via marked. We can't link to the
+                 GitHub blob URL because the repo is private (it would
+                 404 to any signed-out user). -->
+            <button @click="$dispatch('go-to-docs', { name: 'how-do-i-get-my-data', title: 'How do I get my data into Fulcra?' })"
+                    class="text-xs text-slate-400 hover:text-violet-600 underline"
+                    title="Lookup page: every supported source and pathway">
+              Data sources
             </button>
           </div>
           <button @click="addPlugin()"
@@ -1441,6 +1859,12 @@
                             class="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors"
                             title="Re-run this plugin's setup wizard">
                       Configure
+                    </button>
+
+                    <button @click="disablePlugin(p)"
+                            class="px-3 py-1.5 text-xs rounded border border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors"
+                            title="Stop this plugin from running on its schedule">
+                      Disable
                     </button>
                   </div>
                 </div>
@@ -1535,6 +1959,7 @@
   <script src="/static/wizard.js"></script>
   <script src="/static/onboarding.js"></script>
   <script src="/static/dashboard.js"></script>
+  <script src="/static/settings.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
