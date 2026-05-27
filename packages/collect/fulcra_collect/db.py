@@ -32,6 +32,19 @@ _LOG = logging.getLogger("fulcra_collect.db")
 # thread-locals, so this falls out naturally).
 _tls = threading.local()
 
+# Serialises the FIRST connection's init on a fresh database. The
+# ``PRAGMA journal_mode=WAL`` switchover takes an EXCLUSIVE lock on the
+# database file, and SQLite has a well-known quirk where SQLITE_BUSY
+# during that switchover does NOT invoke the busy_handler — so
+# ``busy_timeout`` is ignored and the loser of a race immediately gets
+# ``sqlite3.OperationalError: database is locked``. The lock also
+# serialises ``migrate()``, which writes the initial ``schema_version``
+# row and would PRIMARY-KEY-collide if two threads ran the same
+# migration concurrently. Once the db is already in WAL mode subsequent
+# ``PRAGMA journal_mode=WAL`` calls are true no-ops with no lock
+# contention, so this lock is only ever briefly contested on first boot.
+_init_lock = threading.Lock()
+
 
 def default_path() -> Path:
     """Where the unified state db lives. Honours ``FULCRA_COLLECT_HOME``
@@ -57,36 +70,40 @@ def open(path: Path | None = None) -> sqlite3.Connection:  # noqa: A001
         return cached
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    # isolation_level=None → autocommit mode, which is what we want with
-    # WAL: every statement is its own transaction unless wrapped in
-    # BEGIN/COMMIT. This matches the per-statement update pattern in
-    # state.save() and avoids the implicit-transaction quirks of
-    # sqlite3's default mode.
-    conn = sqlite3.connect(
-        str(target), isolation_level=None, check_same_thread=True,
-    )
-    conn.row_factory = sqlite3.Row
-    # PRAGMAs every connection sets at open time. journal_mode=WAL is
-    # the load-bearing one — without it, concurrent writers serialise on
-    # a database-level lock and can hit "database is locked" errors.
-    # synchronous=NORMAL is the WAL-recommended setting (safe in the
-    # face of process crashes; only a power-loss could lose the most
-    # recent transaction).
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")  # 5s on contention
 
-    # Tighten file perms (db + WAL sidecars) to owner-only, matching the
-    # restrictive mode the JSON state files used. Best-effort: on a fresh
-    # create the sidecars may not exist yet, in which case chmod errors
-    # are silently ignored.
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
+    # Serialise the actual connection init across threads in this
+    # process. See the ``_init_lock`` comment for why this is required
+    # (PRAGMA journal_mode=WAL race + migrate() row-collisions).
+    with _init_lock:
+        # isolation_level=None → autocommit mode, which is what we want
+        # with WAL: every statement is its own transaction unless wrapped
+        # in BEGIN/COMMIT. This matches the per-statement update pattern
+        # in state.save() and avoids the implicit-transaction quirks of
+        # sqlite3's default mode.
+        conn = sqlite3.connect(
+            str(target), isolation_level=None, check_same_thread=True,
+        )
+        conn.row_factory = sqlite3.Row
+        # busy_timeout still earns its keep on every-day contention
+        # (concurrent writers, checkpointers) even though it cannot
+        # rescue us from the journal-mode switchover race — that race
+        # is handled by ``_init_lock`` above.
+        conn.execute("PRAGMA busy_timeout=5000")  # 5s on contention
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
 
-    migrate(conn)
+        # Tighten file perms (db + WAL sidecars) to owner-only, matching
+        # the restrictive mode the JSON state files used. Best-effort:
+        # on a fresh create the sidecars may not exist yet, in which
+        # case chmod errors are silently ignored.
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+
+        migrate(conn)
+
     cache[target_key] = conn
     return conn
 
