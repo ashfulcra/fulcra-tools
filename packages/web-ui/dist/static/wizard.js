@@ -200,6 +200,60 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       // defaults, so that pre-filled values are not clobbered by defaults
       // and _credPresent is ready before the first input step renders.
       this._loadExisting().then(() => this._seedDefaults());
+
+      // Reactivity bridge to the Lit setup-step components (refactor #68).
+      //
+      // Background: the <fulcra-step> dispatcher and the per-kind
+      // <fulcra-step-*> components are Lit elements that don't know about
+      // Alpine's reactivity. They live inside the wizard's x-data scope
+      // and receive `step` and `ctx` props via x-effect. But x-effect
+      // only re-fires on `current_step` identity changes — the bare
+      // identifier list (or Object.values, etc.) that used to live in
+      // its expression did NOT register inner ctx state as deps because
+      // Alpine's expression evaluator wraps top-level identifier reads
+      // only, not the property reads native iteration helpers perform.
+      //
+      // The reliable bridge is an Alpine.effect installed HERE, inside
+      // the wizard's init(). Because the effect is created inside Alpine's
+      // own reactive context with `this` bound to the reactive proxy,
+      // every `void this.<field>` read DOES register a dep, and any
+      // future mutation re-fires the effect. We dispatch a DOM event so
+      // the Lit dispatcher (which the wizard markup contains) can
+      // requestUpdate() without needing a direct reference.
+      //
+      // The explicit field list mirrors what the components actually
+      // read; keep them in sync when adding a new reactive field. The
+      // void-array form keeps Alpine's evaluator from optimising the
+      // reads away.
+      this._installLitReactivityBridge();
+    },
+
+    // See init() — installs the Alpine.effect that drives Lit re-renders.
+    _installLitReactivityBridge() {
+      window.Alpine.effect(() => {
+        void [
+          this.current_step,
+          this.step_index,
+          this.healthChecking, this.healthResult, this.healthError,
+          this.dpLoading, this.dpError, this.dpDefinitions,
+          this.dpOtherDefinitions, this.dpSelectedId, this.dpShowOther,
+          this.dpForceNew, this.dpNewName,
+          this.oauthStatus,
+          this.uploadedFileName, this.uploadInFlight, this.uploadProgress,
+          this.permissionResult, this.permissionChecking,
+          this.current_permission_id,
+          this.extensionConfirmed,
+          this.pairStatus, this.pairFallbackToken, this.pairManuallyConfirmed,
+          this.firstRunStatus, this.firstRunSummary, this.firstRunTimelineUrl,
+          this.nextBlocked, this.stepError,
+          this.input_fields,
+        ];
+        // Notify every mounted dispatcher. We bubble through window so
+        // both render sites (onboarding flow and dashboard Configure
+        // flow) catch it; the dispatcher's connectedCallback wires up
+        // the listener.
+        window.dispatchEvent(new CustomEvent("fulcra-wizard-tick"));
+      });
     },
 
     // Fetch existing per-plugin state from the daemon on wizard mount. Used

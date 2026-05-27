@@ -1,60 +1,61 @@
 // packages/web-ui/dist/static/components/step.js
 //
-// <fulcra-step> — routes to the kind-specific component by step.kind.
+// <fulcra-step> — routes to the kind-specific component by step.kind,
+// and the Lit half of the reactivity bridge between Alpine's wizard
+// data and Lit's render cycle.
 //
 // Usage from a render site (light DOM, prop binding via x-effect because
-// Alpine's `:prop` only sets attributes, not properties — and we want
-// the .step / .ctx values to be the actual objects, not their toString()):
+// Alpine's `:prop` only sets attributes, not properties — we need real
+// object refs, not their toString()):
 //
-//   <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data;
-//                          void [healthChecking, dpLoading, ...];
-//                          $el.requestUpdate?.()">
+//   <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data">
 //   </fulcra-step>
 //
-// The explicit identifier list inside `void [...]` is the dep-tracker.
-// Alpine's x-effect evaluator only wraps bare identifier reads in
-// dep-tracking — iteration helpers like Object.values($data) /
-// JSON.stringify / spread {...$data} all perform their property reads
-// in native code that doesn't go through Alpine's tracker, so the
-// inner property changes never re-fire the effect. See index.html
-// (around line 327) for the full reactive-field list and why each
-// site has to enumerate it.
+// x-effect only handles binding the two props once on mount and on
+// current_step changes (Next/Back navigation). Reactivity for INNER ctx
+// state (healthChecking, dpLoading, firstRunStatus, etc.) is driven by
+// the `fulcra-wizard-tick` CustomEvent that wizard.js dispatches from
+// an Alpine.effect installed inside the wizard's init() — see
+// `_installLitReactivityBridge` in wizard.js for why the bridge lives
+// there instead of here.
 //
-// Reactivity choreography between Alpine and Lit:
-//
-//  1. Alpine x-effect reads the listed properties of $data, registering
-//     each as a dep.
-//  2. ANY mutation in $data — `this.healthChecking = false`, `this.
-//     dpDefinitions = [...]`, etc. — re-fires x-effect.
-//  3. x-effect writes `$el.step` / `$el.ctx` on the dispatcher. The
-//     references haven't changed (Alpine mutates in place), so we ALSO
-//     call `$el.requestUpdate()` to force a Lit cycle.
-//  4. The dispatcher's render() looks up the right child by kind, caches
-//     it (so we don't re-mount per ctx tick — input fields keep focus,
-//     scroll positions hold), and reassigns `.step` / `.ctx`.
-//  5. FulcraStepBase declares step/ctx with `hasChanged: () => true`
-//     (see _base.js), so each prop reassignment triggers a child render
-//     even though the references are identity-equal.
-//
-// Why caching the child by kind matters:
-//   Without the cache, every dispatcher render created a new child
-//   element, and Lit's ChildPart replaced the old one in DOM. That
-//   wiped focus and scroll on every ctx tick (one tick per reactive
-//   field change → many ticks per real user interaction). Caching
-//   reuses the same DOM node; the hasChanged hook still drives
-//   re-renders inside it.
-//
-// We do NOT call `child.requestUpdate()` explicitly here — the
-// hasChanged hook makes that unnecessary, and calling it from inside
-// the dispatcher's render() caused an infinite loop (the child read
-// ctx during its render, Alpine re-registered deps mid-effect, x-effect
-// re-fired, dispatcher.render ran again, etc.).
+// Render flow:
+//   1. wizard.js's createWizard()._installLitReactivityBridge() registers
+//      an Alpine.effect that reads every reactive field on `this`. Each
+//      read registers a dep via Alpine's reactive proxy traps.
+//   2. Any mutation of one of those fields (`this.healthChecking = false`
+//      etc.) fires the effect, which dispatches `fulcra-wizard-tick` on
+//      window.
+//   3. This dispatcher's connectedCallback registered a window listener
+//      that calls this.requestUpdate().
+//   4. Lit re-runs render(), which routes to the kind-specific child
+//      (cached so DOM identity holds across ticks) and reassigns its
+//      .step / .ctx props.
+//   5. FulcraStepBase declares step/ctx with `hasChanged: () => true`
+//      so the child re-renders even when the references are identical
+//      (Alpine mutates ctx in place).
 import { FulcraStepBase, nothing } from "./_base.js";
 
 class FulcraStep extends FulcraStepBase {
   constructor() {
     super();
+    // Cache children by kind so navigating Back/Next within one wizard
+    // session reuses the same DOM node — keeps input field focus, scroll
+    // positions, etc. Without the cache every dispatcher render would
+    // build a fresh element and Lit's ChildPart would swap it in, wiping
+    // anything the user had touched.
     this._kindChildren = {};
+    this._onWizardTick = () => this.requestUpdate();
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener("fulcra-wizard-tick", this._onWizardTick);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener("fulcra-wizard-tick", this._onWizardTick);
   }
 
   render() {
