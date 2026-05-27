@@ -10,9 +10,11 @@ directly.
 from __future__ import annotations
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSButton, NSBezelStyleRounded, NSLineBreakByWordWrapping, NSScrollView,
-    NSSecureTextField, NSSwitch, NSTextField, NSView, NSMakeRect,
+    NSButton, NSBezelStyleRounded, NSFontAttributeName, NSLineBreakByWordWrapping,
+    NSScrollView, NSSecureTextField, NSStringDrawingUsesLineFragmentOrigin,
+    NSSwitch, NSTextField, NSView, NSMakeRect, NSMakeSize,
 )
+from Foundation import NSString  # type: ignore[import-not-found]
 
 from fulcra_collect import config as _config
 
@@ -22,6 +24,37 @@ from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
 from ..theme import colors, typography
+
+
+def _compute_desc_height(text: str, width: float, font, cap: float = 80.0) -> float:
+    """Measure the rendered height of a word-wrapped description label.
+
+    Why: the description block used to be a hardcoded 32pt — anything
+    past 2 lines was silently clipped. Computing the real height lets
+    the row grow to fit (capped so a runaway description doesn't
+    swallow the whole tab). See SP1 L2 in the 2026-05-27 menubar
+    drift audit.
+
+    Args:
+        text: the description string.
+        width: pixel width the label will be laid out into.
+        font: NSFont to render with.
+        cap: maximum height we'll allow; anything taller will scroll
+             behind clipping (acceptable since the truncation is now
+             very rare — ~5 lines of small text is plenty for our
+             actual plugin descriptions).
+    """
+    if not text:
+        return 32.0
+    attrs = {NSFontAttributeName: font}
+    ns_text = NSString.stringWithString_(text)
+    bound = ns_text.boundingRectWithSize_options_attributes_(
+        NSMakeSize(width, 1000.0),
+        NSStringDrawingUsesLineFragmentOrigin,
+        attrs,
+    )
+    needed = float(bound.size.height) + 4.0  # 4pt visual padding
+    return min(max(needed, 32.0), cap)
 
 
 class _FlippedView(NSView):  # type: ignore[misc]
@@ -113,9 +146,19 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
         ordered = sorted(model.plugins, key=lambda p: (p.kind, p.name))
         for snap in ordered:
             credentials = cred_map.get(snap.id, {})
-            # Base 112 pt: 28 name + 32 description + 28 interval-or-pad + 24 run btn
-            row_height = 112 + 24 * len(credentials)
-            row = _make_plugin_row(snap, width, row_height, credentials=credentials,
+            # Description block grows to fit — capped at 80pt so a runaway
+            # description can't swallow the whole tab. The 4 fixed regions
+            # of the row are: 28 name + desc_h + 28 interval-or-pad + 24
+            # run btn, plus 24pt per credential. See SP1 L2 in the
+            # 2026-05-27 menubar drift audit.
+            desc_h = _compute_desc_height(
+                snap.description or "",
+                width - 120,
+                typography.small(),
+            )
+            row_height = 28 + desc_h + 28 + 24 + 24 * len(credentials)
+            row = _make_plugin_row(snap, width, row_height, desc_h=desc_h,
+                                   credentials=credentials,
                                    client=client, model=model)
             row.setFrame_(NSMakeRect(0, y, width, row_height))
             content.addSubview_(row)
@@ -129,7 +172,8 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
 
 
 def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
-                     *, credentials: dict[str, str],
+                     *, desc_h: float = 32.0,
+                     credentials: dict[str, str],
                      client: DaemonClient, model: StatusModel) -> NSView:
     row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
 
@@ -139,13 +183,18 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
     name.setFrame_(NSMakeRect(16, height - 28, width - 200, 18))
     row.addSubview_(name)
 
-    # Description label — 12pt secondary text, word-wrapped, ~32pt tall (2 lines).
+    # Description label — 12pt secondary text, word-wrapped. Height is
+    # computed by the caller (rebuild() in build_plugins_tab) so the row
+    # grows to fit instead of clipping at 2 lines.
     if snap.description:
         desc = NSTextField.labelWithString_(snap.description)
         desc.setFont_(typography.small())
         desc.setTextColor_(colors.text_secondary())
         desc.setLineBreakMode_(NSLineBreakByWordWrapping)
-        desc.setFrame_(NSMakeRect(16, height - 60, width - 120, 32))
+        # Description sits 28pt below the row top (height - 28 is the
+        # name's baseline; the description bottom is height - 28 - desc_h).
+        desc.setFrame_(NSMakeRect(16, height - 28 - desc_h,
+                                  width - 120, desc_h))
         row.addSubview_(desc)
 
     if snap.kind == "manual":
@@ -187,19 +236,24 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
         seconds = override if override is not None else (snap.default_interval_s or 3600)
         initial_minutes = max(seconds // 60, 1)
 
+        # Interval block top — sits below the description. With desc_h=32
+        # this equals the old hardcoded `height - 88`; for taller
+        # descriptions the whole block slides down to follow.
+        interval_y_top = height - 28 - desc_h - 28
+
         every_label = NSTextField.labelWithString_("Every")
         every_label.setFont_(typography.small())
-        every_label.setFrame_(NSMakeRect(16, height - 88, 44, 16))
+        every_label.setFrame_(NSMakeRect(16, interval_y_top, 44, 16))
         row.addSubview_(every_label)
 
         interval_field = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(64, height - 92, 60, 22)
+            NSMakeRect(64, interval_y_top - 4, 60, 22)
         )
         interval_field.setStringValue_(str(initial_minutes))
 
         minutes_label = NSTextField.labelWithString_("minutes")
         minutes_label.setFont_(typography.small())
-        minutes_label.setFrame_(NSMakeRect(130, height - 88, 60, 16))
+        minutes_label.setFrame_(NSMakeRect(130, interval_y_top, 60, 16))
         row.addSubview_(minutes_label)
 
         humanize_caption = NSTextField.labelWithString_(
@@ -207,7 +261,7 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
         )
         humanize_caption.setFont_(typography.small())
         humanize_caption.setTextColor_(colors.text_secondary())
-        humanize_caption.setFrame_(NSMakeRect(16, height - 110, 200, 16))
+        humanize_caption.setFrame_(NSMakeRect(16, interval_y_top - 22, 200, 16))
         row.addSubview_(humanize_caption)
 
         def on_interval_change(sender, _caption=humanize_caption):
