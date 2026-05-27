@@ -684,7 +684,13 @@ def _make_duration_row(
 
     # Line 2: comment field, inline-duration field, Record-inline button,
     # Start/Stop timer button.
-    COMMENT_W = 140.0
+    #
+    # Widths are tuned so the Record and Timer buttons sit ~24pt apart —
+    # they fire very different actions (Record = log a one-shot duration;
+    # Timer = start/stop a running timer) and used to be 8pt apart, easy
+    # to mis-click. If you widen COMMENT_W back toward 140, the gap
+    # collapses again. See SP1 L1 in the 2026-05-27 menubar drift audit.
+    COMMENT_W = 120.0
     DURATION_W = 64.0
     RECORD_W = 56.0
     TIMER_W = 56.0
