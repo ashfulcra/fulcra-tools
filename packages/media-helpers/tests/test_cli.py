@@ -43,8 +43,10 @@ def test_bootstrap_calls_ensure_definitions(tmp_path: Path, mocker):
     mocker.patch("fulcra_media.fulcra.FulcraClient.ensure_definitions", fake_ensure)
     result = CliRunner().invoke(cli, ["bootstrap"])
     assert result.exit_code == 0, result.output
-    # State persisted to disk
-    persisted = State()
+    # State persisted to disk — read it back from the path the test set
+    # up via state.DEFAULT_PATH redirection and assert the def ids landed.
+    # (Previous code instantiated an unused `State()` here, leftover from
+    # a refactor — flagged by ruff F841.)
     import json as _json
     raw = _json.loads(state_path.read_text())
     assert raw["watched_definition_id"] == "w-id"

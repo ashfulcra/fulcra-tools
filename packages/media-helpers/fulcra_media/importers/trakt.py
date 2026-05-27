@@ -18,6 +18,11 @@ from pathlib import Path
 
 import httpx
 
+from fulcra_common.cross_source_fingerprint import (
+    watched_movie_fingerprint,
+    watched_tv_fingerprint,
+)
+
 from .base import NormalizedEvent, content_fingerprint
 
 CREDS_PATH = Path(os.path.expanduser("~/.config/fulcra-media/trakt.json"))
@@ -124,6 +129,7 @@ def normalize_history(items: list[dict], cluster_threshold: int = 5) -> Iterator
 
         start = datetime.fromisoformat(watched_at.replace("Z", "+00:00"))
 
+        cross: str | None
         if it["type"] == "episode":
             ep = it["episode"]
             show = it["show"]
@@ -136,6 +142,10 @@ def normalize_history(items: list[dict], cluster_threshold: int = 5) -> Iterator
             )
             ext["show_ids"] = show.get("ids", {})
             ext["imdb"] = ep.get("ids", {}).get("imdb") or show.get("ids", {}).get("imdb")
+            cross = watched_tv_fingerprint(
+                timestamp=start, show=show["title"],
+                season=ep["season"], episode=ep["number"],
+            )
         elif it["type"] == "movie":
             mv = it["movie"]
             runtime_min = mv.get("runtime") or 100
@@ -146,6 +156,7 @@ def normalize_history(items: list[dict], cluster_threshold: int = 5) -> Iterator
                 "movie", title=mv["title"], year=mv.get("year")
             )
             ext["imdb"] = mv.get("ids", {}).get("imdb")
+            cross = watched_movie_fingerprint(timestamp=start, title=mv["title"])
         else:
             continue  # skip unknown types
 
@@ -160,6 +171,7 @@ def normalize_history(items: list[dict], cluster_threshold: int = 5) -> Iterator
             deterministic_id=f"com.fulcra.media.trakt.v1.history.{it['id']}",
             timestamp_confidence=confidence,
             external_ids=ext,
+            extra_source_ids=(cross,) if cross else (),
         )
 
 

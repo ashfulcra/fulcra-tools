@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 
+from fulcra_common.cross_source_fingerprint import watched_movie_fingerprint
+
 from . import generic_rss
 from .base import NormalizedEvent, content_fingerprint
 
@@ -68,6 +70,17 @@ def _extra_external_ids(entry: Any) -> dict[str, Any]:
     return out
 
 
+def _extract_extra_source_ids(entry: Any, start: Any) -> tuple[str, ...]:
+    """Build the cross-source movie fingerprint from Letterboxd's
+    namespace tags. Letterboxd diary entries are always movies, so we
+    only emit watched_movie_fingerprint."""
+    title = (entry.get("letterboxd_filmtitle") or entry.get("title") or "").strip()
+    if not title:
+        return ()
+    fp = watched_movie_fingerprint(timestamp=start, title=title)
+    return (fp,) if fp else ()
+
+
 def fetch_diary(
     username: str,
     *,
@@ -76,7 +89,10 @@ def fetch_diary(
     """Yield NormalizedEvents for `username`'s public Letterboxd diary entries.
 
     Wraps generic_rss.normalize_feed with Letterboxd-specific service tag,
-    category, importer name, and the two namespace callbacks.
+    category, importer name, and the namespace callbacks (per-importer
+    content_fingerprint, extra external_ids, and the cross-source
+    fingerprint that lets a Letterboxd entry dedup against the same
+    movie watched via Trakt or Apple TV+).
     """
     yield from generic_rss.normalize_feed(
         feed_url_for(username),
@@ -86,4 +102,5 @@ def fetch_diary(
         transport=transport,
         extract_fingerprint=_extract_fingerprint,
         extra_external_ids=_extra_external_ids,
+        extract_extra_source_ids=_extract_extra_source_ids,
     )

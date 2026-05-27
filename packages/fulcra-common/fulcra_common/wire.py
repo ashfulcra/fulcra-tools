@@ -33,7 +33,8 @@ def iso_z(dt: datetime) -> str:
 def build_record(*, data_type: str, start_time: datetime, data: dict,
                   source_id: str, tags: Sequence[str],
                   end_time: datetime | None = None,
-                  definition_id: str | None = None) -> dict:
+                  definition_id: str | None = None,
+                  extra_source_ids: Sequence[str] = ()) -> dict:
     """Build one annotation record for POST /ingest/v1/record/batch.
 
     `recorded_at` is a union: a {start_time, end_time} object when
@@ -43,6 +44,12 @@ def build_record(*, data_type: str, start_time: datetime, data: dict,
     `data` is the inner payload — serialised here with sorted keys.
     `definition_id`, when given, appends the annotation-definition source
     entry; omit it for built-in data types, which dedup on source_id alone.
+    `extra_source_ids` are appended to the source array AFTER source_id
+    (and before the definition source). Used for cross-source dedup
+    fingerprints — Fulcra dedupes when ANY source-id matches an existing
+    record, so two importers that emit the same content fingerprint dedupe
+    against each other without losing their per-plugin source_ids.
+    Duplicate / empty entries are filtered to keep the array clean.
     """
     recorded_at: str | dict
     if end_time is not None:
@@ -52,7 +59,13 @@ def build_record(*, data_type: str, start_time: datetime, data: dict,
         }
     else:
         recorded_at = iso_z(start_time)
-    source = [source_id]
+    source: list[str] = [source_id]
+    seen = {source_id}
+    for extra in extra_source_ids:
+        if not extra or extra in seen:
+            continue
+        source.append(extra)
+        seen.add(extra)
     if definition_id:
         source.append(f"com.fulcradynamics.annotation.{definition_id}")
     return {

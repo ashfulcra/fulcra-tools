@@ -1222,8 +1222,10 @@ def test_apple_takeout_plugin_run_with_csv_file(monkeypatch, tmp_path):
     fake_client = _FakeClient()
     monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_playback_csv",
-                        lambda path: ["ev-apple"])
+    # _run_apple_takeout now delegates to the importer's parse_any (which
+    # handles file/dir/zip/nested-zip itself); patch that entry point.
+    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+                        lambda path, *, since=None, until=None: ["ev-apple"])
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
                         lambda: fake_client)
     # R8: _run_apple_takeout now reads media state; pre-populate so the
@@ -1239,7 +1241,7 @@ def test_apple_takeout_plugin_run_with_csv_file(monkeypatch, tmp_path):
 
 
 def test_apple_takeout_plugin_run_with_directory(monkeypatch, tmp_path):
-    """When path points to a directory, the plugin searches for 'Playback Activity.csv'."""
+    """When path points to a directory, the importer's parse_any handles the search."""
     subdir = tmp_path / "Apple Media Services" / "Apple TV"
     subdir.mkdir(parents=True)
     csv_file = subdir / "Playback Activity.csv"
@@ -1250,8 +1252,10 @@ def test_apple_takeout_plugin_run_with_directory(monkeypatch, tmp_path):
     monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
                         lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apple_takeout_importer.parse_playback_csv",
-        lambda path: (parsed_paths.append(path) or ["ev-apple-dir"]),
+        "fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+        lambda path, *, since=None, until=None: (
+            parsed_paths.append(path) or ["ev-apple-dir"]
+        ),
     )
     monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
                         lambda: fake_client)
@@ -1262,11 +1266,12 @@ def test_apple_takeout_plugin_run_with_directory(monkeypatch, tmp_path):
     APPLE_TAKEOUT_PLUGIN.run(ctx)
 
     assert fake_client.calls["imported"] == ["ev-apple-dir"]
-    assert parsed_paths[0] == csv_file
+    # The plugin passes the directory through verbatim; parse_any does the search.
+    assert parsed_paths[0] == tmp_path
 
 
 def test_apple_takeout_plugin_raises_when_no_csv_in_dir(monkeypatch, tmp_path):
-    """A directory without 'Playback Activity.csv' raises RuntimeError."""
+    """A directory with no takeout CSV raises RuntimeError."""
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
 
@@ -1276,7 +1281,8 @@ def test_apple_takeout_plugin_raises_when_no_csv_in_dir(monkeypatch, tmp_path):
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("apple-takeout", {"path": str(empty_dir)})
-    with pytest.raises(RuntimeError, match="Playback Activity.csv"):
+    # parse_any mentions both Video Play Activity and Playback Activity now.
+    with pytest.raises(RuntimeError, match="Video Play Activity.csv|Playback Activity.csv"):
         APPLE_TAKEOUT_PLUGIN.run(ctx)
 
 
@@ -1326,8 +1332,8 @@ def test_apple_takeout_uses_resolver_when_watched_definition_not_bootstrapped(
     fake_csv.write_text("header\n")
     monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_playback_csv",
-                        lambda path: [])
+    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+                        lambda path, *, since=None, until=None: [])
 
     class FakeResult:
         posted = 0
@@ -1389,8 +1395,8 @@ def test_apple_takeout_does_not_call_resolver_when_definition_already_bootstrapp
     fake_csv.write_text("header\n")
     monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_playback_csv",
-                        lambda path: [])
+    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+                        lambda path, *, since=None, until=None: [])
 
     class FakeResult:
         posted = 0
@@ -3532,6 +3538,117 @@ def test_run_skips_resolver_when_watched_definition_already_bootstrapped(monkeyp
         "resolved_definition_id should not be called when watched_definition_id "
         "is already in the media state"
     )
+
+
+def test_media_webhook_plugin_declares_host_and_topology_settings():
+    """Wizard topology fix (user feedback 2026-05-26): users on a different
+    machine from the daemon had no way to discover they needed host=0.0.0.0
+    plus a bearer token. The plugin now declares both `host` (so the wizard
+    can collect it) and a `setup_topology` navigation hint (so the setup
+    flow can branch between same-machine and cross-machine setups)."""
+    keys = {s.key: s for s in MEDIA_WEBHOOK_PLUGIN.required_settings}
+    assert "host" in keys, "host must be declared so the wizard can collect it"
+    assert keys["host"].default == "127.0.0.1"
+    assert "setup_topology" in keys, (
+        "setup_topology navigation hint must be declared so conditional "
+        "setup_steps can branch on the user's topology choice"
+    )
+    topo = keys["setup_topology"]
+    assert topo.kind == "enum"
+    assert topo.enum_values == ("same", "lan")
+    assert topo.default == "same"
+    # Daemon-side: setup_topology is wizard-only; the plugin's run function
+    # ignores it. Marking required=False keeps post-setup re-validation
+    # quiet if the user clears it.
+    assert topo.required is False
+
+
+def test_media_webhook_setup_steps_branch_on_topology():
+    """Verify the wizard's conditional flow: the LAN-only input step and
+    each of the two external_action steps gate on setup_topology."""
+    steps = MEDIA_WEBHOOK_PLUGIN.setup_steps
+
+    # Find the LAN input step (collects host + bearer-token)
+    lan_input = [
+        s for s in steps
+        if s.kind == "input"
+        and "host" in s.settings_keys
+        and "bearer-token" in s.settings_keys
+    ]
+    assert len(lan_input) == 1, "expected one LAN-only input step"
+    assert lan_input[0].condition == {"setup_topology": ("lan",)}
+
+    # Both external_action steps must be gated — one for same, one for lan
+    ext_actions = [s for s in steps if s.kind == "external_action"]
+    assert len(ext_actions) == 2, (
+        "expected two external_action steps (one per topology); "
+        "the legacy single hardcoded-URL step must be gone"
+    )
+    conditions = sorted(
+        (tuple(sorted(s.condition.items())) if s.condition else ())
+        for s in ext_actions
+    )
+    assert conditions == sorted([
+        (("setup_topology", ("same",)),),
+        (("setup_topology", ("lan",)),),
+    ])
+
+    # The same-machine external_action still shows the loopback URL verbatim.
+    same_step = next(
+        s for s in ext_actions
+        if s.condition == {"setup_topology": ("same",)}
+    )
+    assert "127.0.0.1:8765/webhook" in same_step.body_md
+
+    # The LAN external_action explains the ?token= query string (which is
+    # how Plex's fixed webhook URL carries the bearer — see
+    # webhook_receiver._authorize).
+    lan_step = next(
+        s for s in ext_actions
+        if s.condition == {"setup_topology": ("lan",)}
+    )
+    assert "?token=" in lan_step.body_md
+    assert "0.0.0.0" not in lan_step.body_md or "LAN IP" in lan_step.body_md, (
+        "LAN step should instruct the user to substitute their Mac's LAN "
+        "IP rather than hand-rolling 0.0.0.0 into the webhook URL"
+    )
+
+
+def test_media_webhook_plugin_run_accepts_non_loopback_with_token(monkeypatch):
+    """Regression: declaring `host` in required_settings must not change the
+    runtime behaviour. With host=0.0.0.0 AND bearer-token set, the server
+    must start (no RuntimeError) and pass both through to make_server."""
+    make_server_calls = {}
+
+    class _FakeServer:
+        def serve_forever(self):
+            pass
+
+    class _FakeState:
+        watched_definition_id = "def-uuid-123"
+
+    def fake_make_server(*, host, port, state, client, bearer_token, log_stream):
+        make_server_calls["host"] = host
+        make_server_calls["port"] = port
+        make_server_calls["bearer_token"] = bearer_token
+        return _FakeServer()
+
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins._state_load",
+        lambda path: _FakeState(),
+    )
+    monkeypatch.setattr(
+        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        fake_make_server,
+    )
+    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+
+    ctx, _ = _make_ctx("media-webhook", {"host": "0.0.0.0", "port": "8765"})
+    ctx.credentials["bearer-token"] = "s" * 32
+    MEDIA_WEBHOOK_PLUGIN.run(ctx)
+
+    assert make_server_calls["host"] == "0.0.0.0"
+    assert make_server_calls["bearer_token"] == "s" * 32
 
 
 def test_generic_csv_plugin_metadata():

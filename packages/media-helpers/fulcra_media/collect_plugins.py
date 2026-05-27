@@ -20,6 +20,7 @@ from .trakt_oauth import trakt_authorize_url, trakt_oauth_handler
 from .trakt_health import trakt_health_check
 from .fulcra import FulcraClient
 from .importers import apple_podcasts as ap
+from .importers import apple_music_takeout as apple_music_takeout_importer
 from .importers import apple_takeout as apple_takeout_importer
 from .importers import deezer as deezer_importer
 from .importers import generic_rss as rss_importer
@@ -33,6 +34,21 @@ from .importers import youtube as youtube_importer
 from .importers.generic_csv import _FP_AUTO, parse_media_csv
 from .importers.lastfm import fetch_recent_tracks, normalize_history
 from .lastfm_health import lastfm_health_check
+from .apple_podcasts_health import apple_podcasts_health_check
+from .deezer_health import deezer_health_check
+from .feed_plugin_health import (
+    generic_rss_health_check,
+    goodreads_health_check,
+    letterboxd_health_check,
+)
+from .takeout_health import (
+    apple_music_takeout_health_check,
+    apple_takeout_health_check,
+    netflix_health_check,
+    spotify_extended_health_check,
+    youtube_health_check,
+)
+from .since_filter import parse_window
 from .state import DEFAULT_PATH as STATE_PATH
 from .state import load as _state_load
 from .state import save as _state_save
@@ -373,6 +389,7 @@ DEEZER_PLUGIN = Plugin(
             ),
         ),
     ),
+    health_check=deezer_health_check,
     setup_steps=(
         SetupStep(
             kind="intro",
@@ -406,6 +423,11 @@ DEEZER_PLUGIN = Plugin(
                 "store it in your macOS keychain."
             ),
             settings_keys=("access-token",),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Verify your Deezer connection",
+            body_md="Asking Deezer for your 5 most recent listens…",
         ),
         SetupStep(
             kind="definition_picker",
@@ -639,14 +661,20 @@ TRAKT_PLUGIN = Plugin(
                 "- **Icon:** leave blank — we don't need it.\n"
                 "- **Description:** leave blank (or write anything you "
                 "like; it's only shown when the app asks for permissions).\n"
-                "- **Redirect URI:** the URL the wizard shows on the next "
-                "step. (Note: ports change between daemon restarts — if "
-                "you reuse this app later, update the URI to match the "
-                "new port. Or set a stable port; see Preferences.)\n"
-                "- **JavaScript (CORS) origins:** leave blank.\n"
-                "- **Permissions:** **uncheck both `/checkin` and "
-                "`/scrobble`**. Fulcra Collect only reads your watch "
-                "history, so it doesn't need write access. "
+                "- **JavaScript (CORS) origins:** leave blank.\n\n"
+                "**Redirect URI — read this carefully.**\n\n"
+                "Trakt pre-fills this field with "
+                "`urn:ietf:wg:oauth:2.0:oob`. **Delete that default** "
+                "and replace it with exactly:\n\n"
+                "`http://127.0.0.1:9292/api/oauth/trakt/callback`\n\n"
+                "If you leave the default in place, the sign-in step will "
+                "fail with 'Invalid redirect URI'. (Note: the port shown "
+                "in the next step may differ if you've changed Preferences "
+                "— update this URI to match if so.)\n\n"
+                "**Permissions — uncheck both checkboxes.**\n\n"
+                "Trakt pre-checks `/checkin` and `/scrobble`. "
+                "**Uncheck both** before saving. Fulcra Collect only reads "
+                "your watch history; it does not need write access. "
                 "(`/users/me/history` is gated by the OAuth grant itself, "
                 "not these scopes.)\n\n"
                 "Click **Save App** and copy the **Client ID** and "
@@ -794,6 +822,7 @@ NETFLIX_PLUGIN = Plugin(
             help="Local path to the ViewingActivity.csv downloaded from Netflix.",
         ),
     ),
+    health_check=netflix_health_check,
     setup_steps=(
         SetupStep(
             kind="intro",
@@ -824,6 +853,15 @@ NETFLIX_PLUGIN = Plugin(
                 "now** on the dashboard."
             ),
             settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Preview your Netflix export",
+            body_md=(
+                "We'll open the CSV and show you the first few rows so "
+                "you can confirm it's the right file before we import "
+                "anything."
+            ),
         ),
         SetupStep(
             kind="definition_picker",
@@ -913,6 +951,7 @@ SPOTIFY_EXTENDED_PLUGIN = Plugin(
             ),
         ),
     ),
+    health_check=spotify_extended_health_check,
     setup_steps=(
         SetupStep(
             kind="intro",
@@ -946,6 +985,14 @@ SPOTIFY_EXTENDED_PLUGIN = Plugin(
                 "`Streaming_History_Audio_*.json` file inside it."
             ),
             settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Preview your Spotify export",
+            body_md=(
+                "We'll peek inside the zip and show you the first few "
+                "listens so you can confirm it's the right file."
+            ),
         ),
         SetupStep(
             kind="definition_picker",
@@ -1059,6 +1106,14 @@ YOUTUBE_PLUGIN = Plugin(
             settings_keys=("path",),
         ),
         SetupStep(
+            kind="test_connection",
+            title="Preview your YouTube takeout",
+            body_md=(
+                "We'll open the JSON and show you the first few watches "
+                "so you can confirm it's the right file."
+            ),
+        ),
+        SetupStep(
             kind="definition_picker",
             title="Where should we write your YouTube watches?",
             body_md=(
@@ -1079,6 +1134,7 @@ YOUTUBE_PLUGIN = Plugin(
     ),
     canonical_definition_name="Watched",
     required_credentials=(),
+    health_check=youtube_health_check,
 )
 
 
@@ -1162,15 +1218,37 @@ def _run_apple_takeout(ctx: RunContext) -> None:
                        spec=APPLE_TAKEOUT_WATCHED_SPEC,
                        canonical_name="Watched")
 
+    # `since` defaults to "1y" — a real Apple takeout can be a decade
+    # deep; importing the whole thing on first run would dump tens of
+    # thousands of orphan-shaped events into the user's account before
+    # they understood what was happening.
+    #
+    # `until` defaults to "" (no upper bound). When set, it's the user's
+    # opt-in fix for the Apple-takeout-vs-realtime-source dedup problem:
+    # Apple TV+ watches also flow in via Trakt, Apple Music listens also
+    # scrobble to Last.fm, etc. The user pins `until` to the date their
+    # realtime source started and this importer fills only the historical
+    # gap. Cross-source dedup (issue #55) makes this unnecessary; until
+    # then the cutoff is the practical workaround.
+    since_str = ctx.config.get("since") or "1y"
+    until_str = ctx.config.get("until") or ""
+    try:
+        since_cutoff = parse_window(since_str)
+    except ValueError as exc:
+        ctx.progress(check="since", ok=False, detail=str(exc))
+        return
+    try:
+        until_cutoff = parse_window(until_str)
+    except ValueError as exc:
+        ctx.progress(check="until", ok=False, detail=str(exc))
+        return
+
     resolved = _resolve_path(ctx)
-    if resolved.is_dir():
-        matches = list(resolved.rglob("Playback Activity.csv"))
-        if not matches:
-            raise RuntimeError(
-                f"apple-takeout: no 'Playback Activity.csv' found under {resolved}"
-            )
-        resolved = matches[0]
-    events = list(apple_takeout_importer.parse_playback_csv(resolved))
+    # The importer's parse_any handles file / dir / zip / nested-zip
+    # itself; we just give it the path the user configured.
+    events = list(apple_takeout_importer.parse_any(
+        resolved, since=since_cutoff, until=until_cutoff,
+    ))
     _import_events(ctx, events, "apple-tv")
 
 
@@ -1179,12 +1257,13 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
     name="Apple TV playback (takeout)",
     kind="manual",
     run=_run_apple_takeout,
+    health_check=apple_takeout_health_check,
     description=(
-        "Imports `Playback Activity.csv` from your Apple Data & Privacy "
-        "takeout — Apple TV+ watches across every Apple device tied to "
-        "your account. Manual: request the takeout from "
-        "privacy.apple.com, then upload the CSV (or the folder "
-        "containing it)."
+        "Imports your Apple TV watch history from an Apple Data & "
+        "Privacy takeout. We handle both `Video Play Activity.csv` (the "
+        "rich per-watch event log) and `Playback Activity.csv` (the "
+        "sparse summary) automatically — point us at the file, the "
+        "folder, or the takeout zip and we'll find what's there."
     ),
     default_interval=None,
     category="video",
@@ -1193,11 +1272,36 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
     required_settings=(
         Setting(
             key="path",
-            label="Playback Activity CSV path",
+            label="Apple takeout path",
             kind="path",
             help=(
-                "Local path to `Playback Activity.csv`, or to the folder "
-                "that contains it (we'll search recursively)."
+                "Local path to a takeout CSV, the folder you got from "
+                "privacy.apple.com, or the original `.zip` download "
+                "(we'll find the right file inside)."
+            ),
+        ),
+        Setting(
+            key="since",
+            label="How far back to import",
+            kind="text",
+            default="1y",
+            help=(
+                "Filter events to AFTER this cutoff. Accepts 'all', a "
+                "relative window like '30d', '90d', '1y', or an absolute "
+                "date 'YYYY-MM-DD'. Default 1y."
+            ),
+        ),
+        Setting(
+            key="until",
+            label="Don't import after",
+            kind="text",
+            default="",
+            help=(
+                "Filter events to BEFORE this cutoff. Useful when another "
+                "source (e.g. Trakt for video) already covers recent "
+                "activity — set 'until' to the date that source started "
+                "to fill only the historical gap. Accepts the same "
+                "formats as 'since'. Empty = no upper bound."
             ),
         ),
     ),
@@ -1206,10 +1310,12 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
             kind="intro",
             title="What this plugin does",
             body_md=(
-                "Apple's Data & Privacy export includes a `Playback "
-                "Activity.csv` listing every Apple TV+ session across "
-                "your devices. Upload that CSV here and we'll record "
-                "each PLAY event as a 'Watched' annotation."
+                "Apple's Data & Privacy export contains your full Apple "
+                "TV+ watch history. We handle both the rich per-watch "
+                "log (`Video Play Activity.csv`) and the sparse summary "
+                "(`Playback Activity.csv`) automatically — give us the "
+                "file or folder you got from privacy.apple.com and "
+                "we'll record each watch as a 'Watched' annotation."
             ),
         ),
         SetupStep(
@@ -1220,19 +1326,66 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
                 "a copy of your data**. Select **Apple Media Services "
                 "information** (the bundle that contains TV playback). "
                 "Apple emails you a download link within a few days. "
-                "Unzip the archive and find `Playback Activity.csv` "
-                "inside the Apple Media Services Information folder."
+                "You can hand us the zip as-is, or unzip it and pick the "
+                "folder."
             ),
             external_link="https://privacy.apple.com",
         ),
         SetupStep(
-            kind="file_upload",
-            title="Upload Playback Activity.csv",
+            kind="intro",
+            title="Heads up: avoiding duplicates with other sources",
             body_md=(
-                "Pick the CSV (or the folder containing it — we'll find "
-                "it recursively)."
+                "Apple's takeouts overlap with realtime sources. If you "
+                "already collect Apple TV+ watches via Trakt — or any "
+                "other source that's already feeding Fulcra — then "
+                "without an upper bound this importer will write the "
+                "same watch a second time. Set the **\"Don't import "
+                "after\"** field in the next steps to the date the "
+                "other source started (or to today, if you only want "
+                "this takeout to fill a one-time backfill) and the "
+                "duplicates go away.\n\n"
+                "Cross-source dedup is on the roadmap (#55) but isn't "
+                "shipped yet."
+            ),
+        ),
+        SetupStep(
+            kind="file_upload",
+            title="Pick the takeout file or folder",
+            body_md=(
+                "Pick the file or folder you got from privacy.apple.com "
+                "(or the unzipped one). We'll search inside for the "
+                "Apple TV playback data."
             ),
             settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Preview your Apple takeout",
+            body_md=(
+                "We'll search inside the file/folder for the playback "
+                "CSV and show you the first few rows so you can confirm "
+                "it's the right export."
+            ),
+        ),
+        SetupStep(
+            kind="input",
+            title="How far back?",
+            body_md=(
+                "Real Apple takeouts can span a decade. The default "
+                "imports the last year — adjust if you want more or less."
+            ),
+            settings_keys=("since",),
+        ),
+        SetupStep(
+            kind="input",
+            title="Don't import after (optional)",
+            body_md=(
+                "If another source already covers your recent Apple TV+ "
+                "watches, pin this to the date that source started so "
+                "this takeout fills only the gap. Same format as "
+                "'How far back?'. Leave empty for no upper bound."
+            ),
+            settings_keys=("until",),
         ),
         SetupStep(
             kind="definition_picker",
@@ -1248,7 +1401,220 @@ APPLE_TAKEOUT_PLUGIN = Plugin(
             title="You're set",
             body_md=(
                 "Apple takeout is configured. Click **Run now** from the "
-                "dashboard to import the CSV."
+                "dashboard to import."
+            ),
+        ),
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# Apple Music listens (takeout) manual plugin
+# ---------------------------------------------------------------------------
+
+# The Fulcra annotation definition shape for the "Listened" DurationAnnotation
+# used by the apple-music-takeout plugin. Same structure as
+# LASTFM_LISTENED_SPEC and the other "Listened" plugins.
+APPLE_MUSIC_TAKEOUT_LISTENED_SPEC: dict = {
+    "annotation_type": "duration",
+    "measurement_spec": {
+        "measurement_type": "duration",
+        "value_type": "duration",
+        "unit": None,
+    },
+}
+
+
+def _run_apple_music_takeout(ctx: RunContext) -> None:
+    # Ensure the "Listened" annotation definition is known before importing.
+    # All audio plugins (Last.fm, Deezer, Spotify Extended, Apple Music)
+    # share the listened_definition_id field — whichever plugin first runs
+    # on this machine populates it; this one will find it already set.
+    media_state = _state_load(STATE_PATH)
+    _ensure_media_def(ctx, media_state, attr="listened_definition_id",
+                       spec=APPLE_MUSIC_TAKEOUT_LISTENED_SPEC,
+                       canonical_name="Listened")
+
+    # `since` defaults to "1y". Apple Music Play Activity can be hundreds
+    # of thousands of rows for long-term subscribers; gate behind a
+    # cutoff by default and let the user widen it explicitly.
+    #
+    # `until` defaults to "" (no upper bound). Same dedup workaround as
+    # apple-takeout: if the user also has Last.fm scrobbling Apple Music
+    # plays in real time, they pin `until` to the Last.fm start date so
+    # this takeout fills only the backfill window. See #55 for the
+    # cross-source dedup that supersedes this knob.
+    since_str = ctx.config.get("since") or "1y"
+    until_str = ctx.config.get("until") or ""
+    try:
+        since_cutoff = parse_window(since_str)
+    except ValueError as exc:
+        ctx.progress(check="since", ok=False, detail=str(exc))
+        return
+    try:
+        until_cutoff = parse_window(until_str)
+    except ValueError as exc:
+        ctx.progress(check="until", ok=False, detail=str(exc))
+        return
+
+    resolved = _resolve_path(ctx)
+    events = list(apple_music_takeout_importer.parse_any(
+        resolved, since=since_cutoff, until=until_cutoff,
+    ))
+    _import_events(ctx, events, "apple-music")
+
+
+APPLE_MUSIC_TAKEOUT_PLUGIN = Plugin(
+    id="apple-music-takeout",
+    name="Apple Music listens (takeout)",
+    kind="manual",
+    run=_run_apple_music_takeout,
+    health_check=apple_music_takeout_health_check,
+    description=(
+        "Imports your Apple Music play history from an Apple Data & "
+        "Privacy takeout. We parse `Apple Music Play Activity.csv` "
+        "(the rich per-listen event log) and write Listened annotations "
+        "to Fulcra. Point us at the file, the folder, or the takeout "
+        "zip."
+    ),
+    default_interval=None,
+    category="audio",
+    canonical_definition_name="Listened",
+    required_credentials=(),
+    required_settings=(
+        Setting(
+            key="path",
+            label="Apple takeout path",
+            kind="path",
+            help=(
+                "Local path to `Apple Music Play Activity.csv`, the "
+                "folder that contains it, or the takeout zip (we'll "
+                "find the file inside)."
+            ),
+        ),
+        Setting(
+            key="since",
+            label="How far back to import",
+            kind="text",
+            default="1y",
+            help=(
+                "Filter events to AFTER this cutoff. Accepts 'all', a "
+                "relative window like '30d', '90d', '1y', or an absolute "
+                "date 'YYYY-MM-DD'. Default 1y."
+            ),
+        ),
+        Setting(
+            key="until",
+            label="Don't import after",
+            kind="text",
+            default="",
+            help=(
+                "Filter events to BEFORE this cutoff. Useful when another "
+                "source (e.g. Last.fm) already covers recent listens — "
+                "set 'until' to the date that source started so this "
+                "takeout fills only the historical gap. Accepts the same "
+                "formats as 'since'. Empty = no upper bound."
+            ),
+        ),
+    ),
+    setup_steps=(
+        SetupStep(
+            kind="intro",
+            title="What this plugin does",
+            body_md=(
+                "Apple's Data & Privacy export includes an `Apple Music "
+                "Play Activity.csv` listing every track you've listened "
+                "to via Apple Music — across every device tied to your "
+                "Apple Account. Give us the file or folder and we'll "
+                "record each listen as a 'Listened' annotation."
+            ),
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Request your Apple takeout",
+            body_md=(
+                "Sign in to https://privacy.apple.com and click **Request "
+                "a copy of your data**. Select **Apple Media Services "
+                "information** (the bundle that contains Apple Music "
+                "activity). Apple emails you a download link within a "
+                "few days. You can hand us the zip as-is, or unzip it "
+                "and pick the folder."
+            ),
+            external_link="https://privacy.apple.com",
+        ),
+        SetupStep(
+            kind="intro",
+            title="Heads up: avoiding duplicates with other sources",
+            body_md=(
+                "Apple's takeouts overlap with realtime sources. If "
+                "Last.fm is already scrobbling your Apple Music listens "
+                "— or any other source is already feeding Fulcra — then "
+                "without an upper bound this importer will write the "
+                "same listen a second time. Set the **\"Don't import "
+                "after\"** field in the next steps to the date the "
+                "other source started (or to today, if you only want "
+                "this takeout to fill a one-time backfill) and the "
+                "duplicates go away.\n\n"
+                "Cross-source dedup is on the roadmap (#55) but isn't "
+                "shipped yet."
+            ),
+        ),
+        SetupStep(
+            kind="file_upload",
+            title="Pick the takeout file or folder",
+            body_md=(
+                "Pick the file or folder you got from privacy.apple.com "
+                "(or the unzipped one). We'll find `Apple Music Play "
+                "Activity.csv` inside."
+            ),
+            settings_keys=("path",),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Preview your Apple Music takeout",
+            body_md=(
+                "We'll find `Apple Music Play Activity.csv` inside the "
+                "file/folder you picked and show you the first few "
+                "listens so you can confirm it's the right export."
+            ),
+        ),
+        SetupStep(
+            kind="input",
+            title="How far back?",
+            body_md=(
+                "Apple Music play history can be hundreds of thousands "
+                "of rows for long-term subscribers. The default imports "
+                "the last year — adjust if you want more or less."
+            ),
+            settings_keys=("since",),
+        ),
+        SetupStep(
+            kind="input",
+            title="Don't import after (optional)",
+            body_md=(
+                "If another source (Last.fm, etc.) already covers your "
+                "recent Apple Music listens, pin this to the date that "
+                "source started so this takeout fills only the gap. "
+                "Same format as 'How far back?'. Leave empty for no "
+                "upper bound."
+            ),
+            settings_keys=("until",),
+        ),
+        SetupStep(
+            kind="definition_picker",
+            title="Where should we write your Apple Music listens?",
+            body_md=(
+                "We can write to your existing 'Listened' annotation or "
+                "create a new one."
+            ),
+            annotation_type="duration",
+        ),
+        SetupStep(
+            kind="done",
+            title="You're set",
+            body_md=(
+                "Apple Music takeout is configured. Click **Run now** "
+                "from the dashboard to import."
             ),
         ),
     ),
@@ -1389,6 +1755,7 @@ GENERIC_RSS_PLUGIN = Plugin(
     name="Generic RSS/Atom feed",
     kind="scheduled",
     run=_run_generic_rss,
+    health_check=generic_rss_health_check,
     description=(
         "Watches any RSS or Atom feed and records each new entry as a "
         "Fulcra annotation. You set the feed URL, the service tag, and "
@@ -1452,6 +1819,15 @@ GENERIC_RSS_PLUGIN = Plugin(
             settings_keys=("feed_url", "service", "category"),
         ),
         SetupStep(
+            kind="test_connection",
+            title="Verify the feed",
+            body_md=(
+                "We'll fetch the feed and show you the most recent "
+                "entries so you can confirm it's reachable and shaped "
+                "the way you expect."
+            ),
+        ),
+        SetupStep(
             kind="definition_picker",
             title="Where should we write these entries?",
             body_md=(
@@ -1487,13 +1863,43 @@ LETTERBOXD_WATCHED_SPEC: dict = {
 }
 
 
+def _extract_letterboxd_username(raw: str) -> str:
+    """Pull a Letterboxd username out of whatever the user pasted.
+
+    Accepts URL forms (`https://letterboxd.com/foo`, `letterboxd.com/foo/`,
+    `letterboxd.com/foo/films/diary/`), bare usernames (`foo`), and the
+    `@foo` shorthand. Strips trailing slashes and path segments so the RSS
+    fetcher gets just the username.
+
+    User feedback 2026-05-26: Goodreads had the same pain — wizard asked
+    for a numeric ID and got a URL pasted. Parsing it permissively here
+    saves the user the same dance.
+    """
+    import re
+    s = (raw or "").strip()
+    # URL shape: optional scheme, letterboxd.com, /username, optional path
+    m = re.search(r"letterboxd\.com/([A-Za-z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+    # Bare username — strip leading @ if present
+    bare = s.lstrip("@").rstrip("/")
+    if bare and "/" not in bare and " " not in bare:
+        return bare
+    raise RuntimeError(
+        f"letterboxd: couldn't find a username in {raw!r}. "
+        "Expected something like 'username' or "
+        "'https://letterboxd.com/username'."
+    )
+
+
 def _run_letterboxd(ctx: RunContext) -> None:
-    username = ctx.config.get("username")
-    if not username:
+    raw_username = ctx.config.get("username")
+    if not raw_username:
         raise RuntimeError(
             f"{ctx.plugin_id}: 'username' is not configured — "
             f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
         )
+    username = _extract_letterboxd_username(raw_username)
     max_entries: int | None = ctx.config.get("max_entries")
 
     # Ensure the "Watched" annotation definition is known before importing.
@@ -1517,6 +1923,7 @@ LETTERBOXD_PLUGIN = Plugin(
     name="Letterboxd film diary",
     kind="scheduled",
     run=_run_letterboxd,
+    health_check=letterboxd_health_check,
     description=(
         "Polls your public Letterboxd diary RSS feed every 12 hours. "
         "Each diary entry becomes a 'Watched' annotation in Fulcra. "
@@ -1529,11 +1936,12 @@ LETTERBOXD_PLUGIN = Plugin(
     required_settings=(
         Setting(
             key="username",
-            label="Letterboxd username",
+            label="Your Letterboxd profile",
             kind="text",
             help=(
-                "Your Letterboxd account name — the slug after "
-                "`letterboxd.com/` on your profile URL."
+                "Either your profile URL (paste from the browser — "
+                "e.g. `https://letterboxd.com/your-name`) or just the "
+                "username. We'll extract the right part."
             ),
         ),
     ),
@@ -1558,6 +1966,15 @@ LETTERBOXD_PLUGIN = Plugin(
                 "diary must be public for the RSS feed to work."
             ),
             settings_keys=("username",),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Verify your Letterboxd diary",
+            body_md=(
+                "We'll fetch your public diary RSS feed and show you "
+                "the most recent films so you can confirm we're looking "
+                "at the right profile."
+            ),
         ),
         SetupStep(
             kind="definition_picker",
@@ -1596,13 +2013,49 @@ GOODREADS_READ_SPEC: dict = {
 }
 
 
+def _extract_goodreads_user_id(raw: str) -> str:
+    """Extract the numeric Goodreads user ID from whatever the user pasted.
+
+    Accepts any of:
+      - `12345678`              — bare numeric ID
+      - `12345678-singularity`  — numeric ID with a Goodreads name slug
+      - `https://www.goodreads.com/user/show/12345678-singularity` — full URL
+      - `goodreads.com/user/show/12345678` — URL without scheme
+      - mixed whitespace, trailing query strings, etc.
+
+    Returns the bare numeric ID string. Raises RuntimeError if no numeric
+    ID can be found, so the user gets a clear "we couldn't parse that"
+    message instead of a silent 404 from the RSS fetch.
+
+    User feedback 2026-05-26: wizard required users to extract the numeric
+    ID from their profile URL by hand. Now they paste anything Goodreads-y
+    and we figure it out.
+    """
+    import re
+    s = (raw or "").strip()
+    # Try the URL shape first: /user/show/<digits>[-name]
+    m = re.search(r"/user/show/(\d+)", s)
+    if m:
+        return m.group(1)
+    # Then a bare ID at the start, optionally followed by -name
+    m = re.match(r"^(\d+)(?:-\S*)?$", s)
+    if m:
+        return m.group(1)
+    raise RuntimeError(
+        f"goodreads: couldn't find a numeric user ID in {raw!r}. "
+        "Expected something like '12345678' or "
+        "'https://www.goodreads.com/user/show/12345678-name'."
+    )
+
+
 def _run_goodreads(ctx: RunContext) -> None:
-    user_id = ctx.config.get("user_id")
-    if not user_id:
+    raw_user_id = ctx.config.get("user_id")
+    if not raw_user_id:
         raise RuntimeError(
             f"{ctx.plugin_id}: 'user_id' is not configured — "
             f"set it in [plugin_settings.{ctx.plugin_id}] in config.toml"
         )
+    user_id = _extract_goodreads_user_id(raw_user_id)
     max_entries: int | None = ctx.config.get("max_entries")
 
     # Ensure the "Read" annotation definition is known before importing.
@@ -1625,6 +2078,7 @@ GOODREADS_PLUGIN = Plugin(
     name="Goodreads read shelf",
     kind="scheduled",
     run=_run_goodreads,
+    health_check=goodreads_health_check,
     description=(
         "Polls your Goodreads 'read' shelf RSS feed every 12 hours. "
         "Anything you mark as read on Goodreads becomes a 'Read' "
@@ -1637,12 +2091,12 @@ GOODREADS_PLUGIN = Plugin(
     required_settings=(
         Setting(
             key="user_id",
-            label="Goodreads user ID",
+            label="Your Goodreads profile",
             kind="text",
             help=(
-                "The numeric ID from your Goodreads profile URL — "
-                "e.g. the `12345678` in "
-                "`goodreads.com/user/show/12345678-your-name`."
+                "Either your profile URL (paste it from the browser — "
+                "e.g. `https://www.goodreads.com/user/show/12345678-your-name`) "
+                "or just the numeric ID. We'll extract the right part."
             ),
         ),
     ),
@@ -1677,6 +2131,15 @@ GOODREADS_PLUGIN = Plugin(
                 "Goodreads profile URL."
             ),
             settings_keys=("user_id",),
+        ),
+        SetupStep(
+            kind="test_connection",
+            title="Verify your Goodreads shelf",
+            body_md=(
+                "We'll fetch your 'read' shelf RSS feed and show you "
+                "the most recent books so you can confirm we're looking "
+                "at the right profile."
+            ),
         ),
         SetupStep(
             kind="definition_picker",
@@ -1876,8 +2339,21 @@ APPLE_PODCASTS_PLUGIN = Plugin(
                 "from (or the bundled fulcra-collect.app once it exists)."
             ),
         ),
-        # TODO: add a test_connection step once APPLE_PODCASTS_PLUGIN has a
-        # health_check — today there isn't one, so we skip verification.
+        # Verify the DB is readable before letting the user advance. The
+        # wizard's generic test_connection renderer calls
+        # /api/plugin/apple-podcasts/health_check, which runs
+        # apple_podcasts_health_check (DB open + COUNT of played episodes)
+        # and gates Next on ok=True. Without this, a missing-FDA error
+        # only surfaces at the first scheduled run hours later.
+        SetupStep(
+            kind="test_connection",
+            title="Verify your Podcasts library",
+            body_md=(
+                "We'll open your Podcasts database read-only and count "
+                "played episodes. No data is sent to Fulcra yet — this "
+                "just confirms the file is readable."
+            ),
+        ),
         SetupStep(
             kind="definition_picker",
             title="Where should we write your podcast listens?",
@@ -1894,6 +2370,7 @@ APPLE_PODCASTS_PLUGIN = Plugin(
         ),
     ),
     permission_check=apple_podcasts_permission_check,
+    health_check=apple_podcasts_health_check,
 )
 
 
@@ -2040,7 +2517,7 @@ APPLE_PODCASTS_TIMEMACHINE_PLUGIN = Plugin(
 # ---------------------------------------------------------------------------
 
 def _run_generic_csv(ctx: RunContext) -> None:
-    """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened.
+    """Import an arbitrary CSV (IFTTT, Pipedream, manual export) as Watched/Listened/Read.
 
     All parameters are read from ctx.config.  Required keys: path, service,
     category.  Optional keys mirror the CLI flags for import generic-csv with
@@ -2348,8 +2825,48 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
             key="bearer-token",
             label="Webhook bearer token",
             help=(
-                "Only required when binding to a non-loopback host. Leave "
-                "empty for the default 127.0.0.1 setup."
+                "Required when Plex/Jellyfin runs on a different machine "
+                "than the daemon (host = 0.0.0.0). Plex doesn't send "
+                "Authorization headers, so the receiver also accepts the "
+                "token via `?token=...` on the webhook URL. Leave empty "
+                "for the loopback-only setup (host = 127.0.0.1)."
+            ),
+        ),
+    ),
+    required_settings=(
+        Setting(
+            key="host",
+            label="Bind address",
+            kind="text",
+            default="127.0.0.1",
+            help=(
+                "127.0.0.1 = same machine only (Plex/Jellyfin on this Mac). "
+                "0.0.0.0 = accept connections from other machines on your "
+                "network (requires the bearer token below)."
+            ),
+        ),
+        # Wizard-only navigation hint. _run_media_webhook ignores this; it
+        # exists purely so the conditional setup_steps below can branch on
+        # the user's topology choice. required=False because once setup is
+        # complete the daemon doesn't need it; we also default to "same"
+        # so the wizard preselects the most common option.
+        Setting(
+            key="setup_topology",
+            label="Where does Plex/Jellyfin run?",
+            kind="enum",
+            enum_values=("same", "lan"),
+            enum_labels=(
+                "On this same Mac",
+                "On a different machine on my network",
+            ),
+            default="same",
+            required=False,
+            help=(
+                "Choose 'same' if Plex/Jellyfin is on this Mac (loopback "
+                "is enough). Choose 'lan' if your media server is on "
+                "another box and needs to reach this Mac over the LAN — "
+                "we'll walk you through binding to 0.0.0.0 and setting a "
+                "bearer token."
             ),
         ),
     ),
@@ -2368,21 +2885,85 @@ MEDIA_WEBHOOK_PLUGIN = Plugin(
             kind="permission_request",
             title="Allow a local webhook server",
             body_md=(
-                "We'll bind a local HTTP server on `127.0.0.1:8765` so "
-                "Plex/Jellyfin can POST playback events to it. Nothing on "
-                "the outside network can reach it."
+                "We'll bind a local HTTP server on port 8765 (default "
+                "`127.0.0.1`, or `0.0.0.0` if you're configuring this "
+                "from a Plex/Jellyfin server on another machine). The "
+                "next step lets you pick which."
             ),
+        ),
+        SetupStep(
+            kind="input",
+            title="Where does Plex/Jellyfin run?",
+            body_md=(
+                "Pick **On this same Mac** if Plex or Jellyfin is "
+                "installed locally. Pick **On a different machine on my "
+                "network** if your media server runs on another box (a "
+                "NAS, a separate desktop, a home server) and will POST "
+                "events to this Mac over your LAN."
+            ),
+            settings_keys=("setup_topology",),
+        ),
+        SetupStep(
+            kind="input",
+            title="Bind address and bearer token",
+            body_md=(
+                "For LAN mode we bind to `0.0.0.0` so other machines on "
+                "your network can reach the receiver. A **bearer token** "
+                "is required — it's the only thing standing between "
+                "anyone on your LAN and your Fulcra account. Paste your "
+                "own random string (32+ characters recommended) or let "
+                "the field stay blank and generate one with a password "
+                "manager. **Save this token** — you'll paste it into the "
+                "webhook URL in the next step."
+            ),
+            settings_keys=("host", "bearer-token"),
+            condition={"setup_topology": ("lan",)},
         ),
         SetupStep(
             kind="external_action",
             title="Wire up your media server",
             body_md=(
-                "**Plex:** open **Settings -> Webhooks -> Add Webhook**, "
-                "enter `http://127.0.0.1:8765/webhook`, and click **Save**. "
-                "Plex Pass is required for this feature.\n\n"
+                "**Plex:** open the **Plex Web app while signed in as the "
+                "server's admin account** (this is the account that owns "
+                "the server, not just any account with access). Go to "
+                "**Settings -> the SERVER name (NOT 'Your Account') -> "
+                "Webhooks -> Add Webhook**, enter "
+                "`http://127.0.0.1:8765/webhook`, and click **Save**. "
+                "Webhooks are a server-side setting — they live under your "
+                "server's settings page, not your account's. **Plex Pass is "
+                "required for this feature.**\n\n"
                 "**Jellyfin:** open **Dashboard -> Plugins -> Webhook -> "
                 "Add Generic Destination**, enter the same URL, and save."
             ),
+            condition={"setup_topology": ("same",)},
+        ),
+        SetupStep(
+            kind="external_action",
+            title="Wire up your media server (cross-machine)",
+            body_md=(
+                "**You're using cross-machine mode**, so we need two "
+                "extra pieces:\n\n"
+                "1. Find this Mac's LAN IP — **System Settings -> "
+                "Wi-Fi/Network -> Details -> IP Address**. It's probably "
+                "`192.168.X.X` or `10.X.X.X`.\n"
+                "2. In Plex/Jellyfin, set the webhook URL to:\n\n"
+                "   `http://<this-mac-LAN-IP>:8765/webhook?token=<the-bearer-token-you-set-above>`\n\n"
+                "   Example: `http://192.168.1.42:8765/webhook?token=abc123...`\n\n"
+                "**Plex:** sign into the Plex Web app as your server's "
+                "**admin account** (the one that owns the server), then "
+                "**Settings -> the SERVER name (NOT 'Your Account') -> "
+                "Webhooks -> Add Webhook**. Webhooks are a server-side "
+                "feature — they live under your server's settings page, "
+                "not your account's. **Plex Pass is required.**\n\n"
+                "**Jellyfin:** Dashboard -> Plugins -> Webhook -> Add "
+                "Generic Destination.\n\n"
+                "The `?token=...` is how Plex authenticates to your "
+                "daemon — Plex doesn't natively send Authorization "
+                "headers. **Anyone on your LAN who knows this token can "
+                "post events to your Fulcra account**, so keep it secret; "
+                "rotate it via **Configure** if it leaks."
+            ),
+            condition={"setup_topology": ("lan",)},
         ),
         SetupStep(
             kind="definition_picker",
