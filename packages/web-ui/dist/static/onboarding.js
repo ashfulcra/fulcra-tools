@@ -54,7 +54,19 @@ function onboarding() {
     // --- pick_plugins state ---
     allPlugins: [],         // full list from /api/status
     categories: [],         // [{name, plugins: [{id, name, description, category, enabled}]}]
-    selectedIds: new Set(), // ids the user checked
+    selectedIds: new Set(), // ids the user checked (mutable; seeded from wasEnabledAtStart on load)
+    // Immutable snapshot of which plugins were already enabled when the
+    // picker last loaded. Used to (a) decide which rows render with a
+    // "Set up" pill + Reconfigure toggle and (b) skip the per-plugin
+    // wizard walk for already-enabled plugins the user didn't flip
+    // Reconfigure on. Refreshed only on _loadPlugins(), never on user
+    // clicks — that's the whole point.
+    wasEnabledAtStart: new Set(),
+    // Opt-in set: plugin ids the user has flipped Reconfigure ON for.
+    // Only plugins in wasEnabledAtStart can be in here; for new plugins
+    // there's nothing to reconfigure. Cleared when un-checking the row
+    // so toggling stays consistent.
+    reconfigureIds: new Set(),
     pickLoading: true,
     pickError: "",
 
@@ -207,6 +219,17 @@ function onboarding() {
         const status = await api("/api/status");
         this.allPlugins = status.plugins ?? [];
 
+        // Pre-check every plugin the daemon reports as enabled, and snapshot
+        // which ids were enabled at this moment so the configure walk can
+        // skip past them by default. wasEnabledAtStart is immutable for the
+        // rest of this trip; selectedIds is what the user mutates.
+        const enabledIds = this.allPlugins
+          .filter(p => p.enabled)
+          .map(p => p.id);
+        this.selectedIds = new Set(enabledIds);
+        this.wasEnabledAtStart = new Set(enabledIds);
+        this.reconfigureIds = new Set();
+
         // Group by category
         const catMap = {};
         for (const p of this.allPlugins) {
@@ -248,6 +271,14 @@ function onboarding() {
       const next = new Set(this.selectedIds);
       if (next.has(id)) {
         next.delete(id);
+        // Un-checking is canonical "not touching this trip" — drop any
+        // Reconfigure opt-in too so re-checking starts from the safe
+        // (skip) default.
+        if (this.reconfigureIds.has(id)) {
+          const nextRc = new Set(this.reconfigureIds);
+          nextRc.delete(id);
+          this.reconfigureIds = nextRc;
+        }
       } else {
         next.add(id);
       }
@@ -256,6 +287,31 @@ function onboarding() {
 
     isSelected(id) {
       return this.selectedIds.has(id);
+    },
+
+    // Flip the Reconfigure opt-in for a row. Only meaningful for plugins
+    // in wasEnabledAtStart; for a new plugin, calling this is a no-op
+    // because there's nothing to reconfigure.
+    toggleReconfigure(id) {
+      if (!this.wasEnabledAtStart.has(id)) return;
+      const next = new Set(this.reconfigureIds);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      this.reconfigureIds = next;
+    },
+
+    isReconfiguring(id) {
+      return this.reconfigureIds.has(id);
+    },
+
+    // Was this plugin already enabled when the picker first loaded?
+    // Used by the template to decide whether to render the "Set up" pill
+    // + Reconfigure toggle on the row.
+    wasEnabledOnLoad(id) {
+      return this.wasEnabledAtStart.has(id);
     },
 
     get selectedCount() {
