@@ -414,6 +414,12 @@ class Daemon:
                 "id": pid,
                 "name": plugin.name,
                 "kind": plugin.kind,
+                # SP3: surface per-plugin collect_mode so the menubar can
+                # split the popover/preferences into a "historical (one-shot
+                # imports)" group vs. a "live (continuously polled)" group
+                # and render a per-row chip in Preferences. Static field
+                # from the Plugin dataclass — no state lookup needed.
+                "collect_mode": plugin.collect_mode,
                 "description": plugin.description,
                 "category": plugin.category,
                 "enabled": pid in self.config.enabled,
