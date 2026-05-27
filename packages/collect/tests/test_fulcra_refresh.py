@@ -103,6 +103,9 @@ def test_refresh_calls_print_access_token_and_updates_keychain(
 def test_refresh_returns_none_when_cli_not_on_path(_in_memory_keyring, monkeypatch):
     """If `fulcra` isn't installed, return None and set the failed flag."""
     monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    # Also block the well-known-location fallback (~/.local/bin etc.) so the
+    # test is hermetic on machines where the CLI is actually installed.
+    monkeypatch.setattr(_creds_mod.os.path, "isfile", lambda p: False)
     # subprocess.run shouldn't even be reached — guard via a sentinel.
     monkeypatch.setattr(
         _creds_mod.subprocess, "run",
@@ -153,6 +156,7 @@ def test_refresh_returns_none_on_cli_timeout(_in_memory_keyring, monkeypatch):
 def test_is_refresh_failed_and_clear_round_trip(_in_memory_keyring, monkeypatch):
     """`clear_refresh_failed` flips the flag back to False."""
     monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_creds_mod.os.path, "isfile", lambda p: False)
     _creds_mod.refresh_fulcra_access_token()
     assert _creds_mod.is_refresh_failed() is True
 
@@ -373,6 +377,7 @@ def test_auth_status_reports_refresh_failed_true_after_failed_refresh(
 ):
     # Drive `_refresh_failed=True` by running a failing refresh.
     monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_creds_mod.os.path, "isfile", lambda p: False)
     assert _creds_mod.refresh_fulcra_access_token() is None
     assert _creds_mod.is_refresh_failed() is True
 
@@ -387,6 +392,7 @@ def test_auth_status_reports_refresh_failed_false_after_clear(
     collect_home, _in_memory_keyring, monkeypatch,
 ):
     monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_creds_mod.os.path, "isfile", lambda p: False)
     _creds_mod.refresh_fulcra_access_token()
     _creds_mod.clear_refresh_failed()
 
@@ -418,6 +424,7 @@ def test_paste_token_signin_clears_refresh_failed_flag(
     """POST /api/fulcra/auth/token sets refresh_failed -> False."""
     # Seed the flag so we can observe it being cleared.
     monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_creds_mod.os.path, "isfile", lambda p: False)
     _creds_mod.refresh_fulcra_access_token()
     assert _creds_mod.is_refresh_failed() is True
 
@@ -438,6 +445,7 @@ def test_cli_login_signin_clears_refresh_failed_flag(
     """POST /api/fulcra/auth/cli_login sets refresh_failed -> False."""
     # Seed the flag.
     monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_creds_mod.os.path, "isfile", lambda p: False)
     _creds_mod.refresh_fulcra_access_token()
     assert _creds_mod.is_refresh_failed() is True
 
@@ -470,3 +478,43 @@ def test_cli_login_signin_clears_refresh_failed_flag(
     assert r.status_code == 200, r.text
 
     assert _creds_mod.is_refresh_failed() is False
+
+
+def test_refresh_finds_fulcra_in_well_known_location_when_not_on_path(
+    monkeypatch, tmp_path,
+) -> None:
+    """When shutil.which returns None (launchd-restricted PATH), the
+    helper should find the CLI in well-known install locations like
+    ~/.local/bin. Closes the bug discovered in SP5 Task 4 where the
+    launchd-managed daemon's PATH excluded the CLI install dir."""
+    from fulcra_collect import credentials as _creds
+
+    # Create a fake fulcra binary in tmp_path
+    fake_cli = tmp_path / "fulcra"
+    fake_cli.write_text("#!/bin/sh\necho fake-token\n")
+    fake_cli.chmod(0o755)
+
+    # shutil.which returns None (CLI not on PATH)
+    monkeypatch.setattr(_creds.shutil, "which", lambda name: None)
+    # but _find_fulcra_cli should walk the candidates list — point
+    # the first candidate at our fake binary
+    monkeypatch.setattr(_creds.os.path, "expanduser",
+                        lambda p: str(fake_cli) if p == "~/.local/bin/fulcra" else p)
+
+    found = _creds._find_fulcra_cli()
+    assert found == str(fake_cli), f"Expected {fake_cli}, got {found}"
+
+
+def test_refresh_returns_none_when_cli_truly_missing(monkeypatch) -> None:
+    """When shutil.which AND all well-known locations come up empty,
+    _find_fulcra_cli returns None and refresh_fulcra_access_token
+    sets _refresh_failed=True."""
+    from fulcra_collect import credentials as _creds
+
+    monkeypatch.setattr(_creds.shutil, "which", lambda name: None)
+    monkeypatch.setattr(_creds.os.path, "isfile", lambda p: False)
+
+    _creds.clear_refresh_failed()
+    result = _creds.refresh_fulcra_access_token()
+    assert result is None
+    assert _creds.is_refresh_failed() is True
