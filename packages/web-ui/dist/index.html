@@ -323,8 +323,37 @@
                      window.FulcraStepComponents (see static/components/).
                      x-effect writes properties (not attributes) so the
                      component receives real step/ctx objects rather than
-                     their toString(). -->
-                <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data"></fulcra-step>
+                     their toString().
+
+                     The `void [healthChecking, ...]` list reads every
+                     Alpine-reactive property the components care about as
+                     deps, so x-effect re-fires on ANY ctx state change
+                     (not just current_step). $el.requestUpdate() then
+                     forces a Lit cycle, and FulcraStepBase's
+                     `hasChanged: () => true` (see _base.js) makes the
+                     reassignment of .step/.ctx count as a change even
+                     though the references are identity-equal (Alpine
+                     mutates ctx in place).
+
+                     Why an explicit identifier list instead of
+                     `Object.values($data)`: Alpine's x-effect evaluator
+                     wraps the expression in dep-tracking, but iteration
+                     helpers like Object.values, JSON.stringify, and
+                     spread `{...$data}` perform their property reads in
+                     native code that doesn't go through Alpine's
+                     property-access tracker, so the inner properties
+                     never register as deps. Bare identifiers in the
+                     expression DO get wrapped, so the explicit list works.
+                     Discovered 2026-05-27 when the test_connection
+                     spinner stayed on screen after healthChecking
+                     flipped to false even though `Object.values($data)`
+                     was supposedly tracking everything.
+
+                     Keep this list in sync with the set of ctx fields
+                     mutated by createWizard methods. Adding a new
+                     reactive field to a future component? Add it here
+                     too. -->
+                <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data; void [healthChecking, healthResult, healthError, dpLoading, dpError, dpDefinitions, dpOtherDefinitions, dpSelectedId, dpShowOther, dpForceNew, dpNewName, oauthStatus, uploadedFileName, uploadInFlight, uploadProgress, permissionResult, permissionChecking, current_permission_id, extensionConfirmed, pairStatus, pairFallbackToken, pairManuallyConfirmed, firstRunStatus, firstRunSummary, firstRunTimelineUrl, nextBlocked, stepError, body_html, input_fields, inputValues]; $el.requestUpdate?.()"></fulcra-step>
 
                 <!-- Step error -->
                 <template x-if="stepError">
@@ -501,10 +530,10 @@
             <!-- Lit dispatcher (refactor #68). Routes by step.kind into
                  the matching <fulcra-step-*> component registered in
                  window.FulcraStepComponents (see static/components/).
-                 x-effect writes properties (not attributes) so the
-                 component receives real step/ctx objects rather than
-                 their toString(). -->
-            <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data"></fulcra-step>
+                 See the equivalent block in the configure-phase render
+                 site (~line 327) for the full rationale on the
+                 `Object.values($data); $el.requestUpdate?.()` tail. -->
+            <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data; void [healthChecking, healthResult, healthError, dpLoading, dpError, dpDefinitions, dpOtherDefinitions, dpSelectedId, dpShowOther, dpForceNew, dpNewName, oauthStatus, uploadedFileName, uploadInFlight, uploadProgress, permissionResult, permissionChecking, current_permission_id, extensionConfirmed, pairStatus, pairFallbackToken, pairManuallyConfirmed, firstRunStatus, firstRunSummary, firstRunTimelineUrl, nextBlocked, stepError, body_html, input_fields, inputValues]; $el.requestUpdate?.()"></fulcra-step>
 
             <template x-if="stepError">
               <p class="text-red-600 text-sm" x-text="stepError"></p>
