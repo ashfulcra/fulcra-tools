@@ -24,8 +24,19 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
 
     @app.get("/api/fulcra/auth/status", dependencies=[Depends(require_token)])
     def fulcra_auth_status():
+        # ``refresh_failed`` (SP5 task 1) signals that the daemon tried to
+        # mint a fresh access token via ``fulcra auth print-access-token``
+        # and the CLI itself couldn't — typically because the CLI's
+        # refresh token has also expired or the user is signed out of the
+        # CLI. The web UI surfaces this as a "Reconnect to Fulcra" banner
+        # in Settings (SP5 task 3) so the user knows synchronous
+        # management calls (list/soft-delete annotation defs) will keep
+        # failing until they re-sign-in.
         from .. import credentials as _creds
-        return {"authenticated": _creds.has_user_secret("bearer-token")}
+        return {
+            "authenticated": _creds.has_user_secret("bearer-token"),
+            "refresh_failed": _creds.is_refresh_failed(),
+        }
 
     @app.post("/api/fulcra/auth/token", dependencies=[Depends(require_token)])
     def fulcra_auth_set(body: FulcraTokenBody):
@@ -60,6 +71,10 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             _log.exception("Fulcra token validation failed: %s", exc)
             raise HTTPException(502, f"Could not reach Fulcra: {type(exc).__name__}")
         _creds.set_user_secret("bearer-token", token)
+        # SP5 task 1: a successful interactive sign-in dismisses any
+        # prior "refresh exhausted" state so the Settings banner goes
+        # away the moment the user re-auths.
+        _creds.clear_refresh_failed()
         return {"ok": True}
 
     @app.delete("/api/fulcra/auth/token", dependencies=[Depends(require_token)])
@@ -199,4 +214,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             raise HTTPException(502, f"Could not reach Fulcra: {type(exc).__name__}")
 
         _creds.set_user_secret("bearer-token", token)
+        # SP5 task 1: clear any stale refresh-failed flag from before the
+        # user signed back in. See paste-token POST above for rationale.
+        _creds.clear_refresh_failed()
         return {"ok": True}
