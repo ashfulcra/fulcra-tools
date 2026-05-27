@@ -57,6 +57,10 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
     name.setTextColor_(colors.text() if snapshot.enabled else colors.text_tertiary())
     name.setLineBreakMode_(NSLineBreakByTruncatingTail)
     name.setFrame_(NSMakeRect(34, 22, 108, 18))  # ends at x=142
+    # Long names (e.g. "Apple Music Takeout") truncate visibly at 108pt
+    # since SP4 narrowed the name column to fit three buttons. Tooltip
+    # gives users a way to see the full string without opening Preferences.
+    name.setToolTip_(snapshot.name)
     view.addSubview_(name)
 
     pid = NSTextField.labelWithString_(snapshot.id)
@@ -64,6 +68,8 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
     pid.setTextColor_(colors.text_secondary())
     pid.setLineBreakMode_(NSLineBreakByTruncatingTail)
     pid.setFrame_(NSMakeRect(34, 6, 108, 14))  # ends at x=142
+    # Same rationale as the name tooltip — the id can also truncate at 108pt.
+    pid.setToolTip_(snapshot.id)
     view.addSubview_(pid)
 
     # Run-now visibility rules:
@@ -87,6 +93,14 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
     right_text.setTextColor_(colors.text_secondary())
     right_text.setAlignment_(2)  # right
     right_text.setFrame_(NSMakeRect(146, 28, 198, 12))  # ends at x=344, y=28..40
+    # The label's frame geometrically overlaps the Disable button by 2pt
+    # of y range (right_text y=28..40, button y=8..30). Today invisible
+    # because typical right_text strings ("never run", "5m ago") are short
+    # and right-aligned — the rendered glyphs stay well above the button.
+    # But a future _right_text expansion ("scheduled for 14:30 tomorrow",
+    # "3 errors in last run") would render glyphs under the Disable button.
+    # Truncate at the label's width before that happens.
+    right_text.setLineBreakMode_(NSLineBreakByTruncatingTail)
     view.addSubview_(right_text)
 
     # Disable button — mirrors the Preferences tab's enable-switch flow

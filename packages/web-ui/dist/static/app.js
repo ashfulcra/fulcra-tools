@@ -92,43 +92,78 @@ function app() {
           this.route = "onboarding";
         }
 
-        // URL-param routing. Menubar deep-links here via URLs like:
+        // URL-param routing with auth-aware stash. Menubar deep-links
+        // here via URLs like:
         //   /?route=docs                — opens the in-app docs view
         //   /?route=configure&plugin=X  — opens the wizard for plugin X
         //   /?route=settings            — opens the Settings page
-        // We consume the params and immediately clear them with
-        // history.replaceState so a reload doesn't loop back here.
-        // Added in SP4 (drift audit 2026-05-27) so the menubar
-        // popover's '?' button and per-row Configure can land users
-        // exactly where they need to be.
         //
-        // Guarded by signedIn — unauthenticated users still see the
-        // signin/onboarding flow first; once they've authed they can
-        // re-click the deep-link to land where they intended.
-        if (signedIn) {
-          const urlParams = new URLSearchParams(window.location.search);
-          const requestedRoute = urlParams.get("route");
-          if (requestedRoute) {
-            // Strip the param so a refresh doesn't re-trigger.
-            history.replaceState({}, "", window.location.pathname);
+        // Why the stash: the URL-param handler used to be gated by
+        // `if (signedIn)`, but the params got cleared by replaceState
+        // BEFORE auth completed, so an unauthed user clicking a deep-
+        // link landed on the default route post-signin instead of the
+        // intended destination. Now: read params from the URL on every
+        // boot, stash to sessionStorage if not yet signed in, and
+        // consume the stash on a subsequent signed-in boot(). Either
+        // way we clear the URL via replaceState so reloads don't replay
+        // (the stash is the only persistence layer).
+        //
+        // Stash key prefixed `fulcra:pending-route:` to avoid collision
+        // with any sessionStorage users in the future.
+        //
+        // Added in SP4 (drift audit 2026-05-27); stash behaviour landed
+        // as a SP4 follow-up.
+        const STASH_KEY = "fulcra:pending-route";
 
-            if (requestedRoute === "docs") {
-              // Default docs page; downstream tabs can navigate further.
-              const docPage = urlParams.get("page") || "how-do-i-get-my-data";
-              await this.goToDocs(docPage, "");
+        const urlParams = new URLSearchParams(window.location.search);
+        const liveRoute = urlParams.get("route");
+        if (liveRoute) {
+          // Stash the FULL query string so the stash replay has the
+          // same shape as a live URL-param read (and can be parsed by
+          // a fresh URLSearchParams).
+          try {
+            sessionStorage.setItem(STASH_KEY, window.location.search);
+          } catch (_) {
+            // sessionStorage can throw in private-browsing edge cases;
+            // best-effort fallback is to consume now or lose it.
+          }
+          history.replaceState({}, "", window.location.pathname);
+        }
+
+        // Pick the effective params: either the live ones, or any stash
+        // from a prior unauth visit. Stash is consumed on first read by
+        // any signed-in caller.
+        let effectiveParams = urlParams;
+        if (signedIn && !liveRoute) {
+          try {
+            const stashed = sessionStorage.getItem(STASH_KEY);
+            if (stashed) {
+              effectiveParams = new URLSearchParams(stashed);
+              sessionStorage.removeItem(STASH_KEY);
+            }
+          } catch (_) {
+            // ignore; effectiveParams stays as the live (empty) urlParams.
+          }
+        }
+
+        const requestedRoute = effectiveParams.get("route");
+        if (signedIn && requestedRoute) {
+          if (requestedRoute === "docs") {
+            // Default docs page; downstream tabs can navigate further.
+            const docPage = effectiveParams.get("page") || "how-do-i-get-my-data";
+            await this.goToDocs(docPage, "");
+            return;
+          }
+          if (requestedRoute === "configure") {
+            const pluginId = effectiveParams.get("plugin");
+            if (pluginId) {
+              await this.openSetupForPlugin(pluginId);
               return;
             }
-            if (requestedRoute === "configure") {
-              const pluginId = urlParams.get("plugin");
-              if (pluginId) {
-                await this.openSetupForPlugin(pluginId);
-                return;
-              }
-            }
-            if (requestedRoute === "settings") {
-              this.route = "settings";
-              return;
-            }
+          }
+          if (requestedRoute === "settings") {
+            this.route = "settings";
+            return;
           }
         }
       } catch (e) {
