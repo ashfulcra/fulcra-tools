@@ -443,7 +443,7 @@
                      for permissions like Full Disk Access. Replace with a
                      deep-link to the right Privacy pane plus a Verify
                      button that calls the backend's permission_check. -->
-                <template x-if="current_step.kind === 'permission_request'">
+                <template x-if="current_step.kind === 'permission_request' && !(window.FulcraStepComponents && window.FulcraStepComponents.permission_request)">
                   <div class="space-y-4">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
@@ -1179,7 +1179,7 @@
 
             <!-- permission_request (task #66) — see the configure-phase
                  copy above for the rationale. Same UI in both flows. -->
-            <template x-if="current_step.kind === 'permission_request'">
+            <template x-if="current_step.kind === 'permission_request' && !(window.FulcraStepComponents && window.FulcraStepComponents.permission_request)">
               <div class="space-y-4">
                 <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
 
