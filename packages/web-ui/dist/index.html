@@ -583,14 +583,21 @@
               </div>
               <div>
                 <h2 class="text-2xl font-semibold">You're all set!</h2>
-                <template x-if="!doneSummaryEmpty">
+                <template x-if="somethingActuallyChanged">
                   <p class="text-slate-600 text-sm mt-1">
                     Here's what changed this trip.
                   </p>
                 </template>
+                <template x-if="!somethingActuallyChanged && !doneSummaryEmpty">
+                  <p class="text-slate-600 text-sm mt-1">
+                    Nothing changed this trip — your existing plugins are still
+                    running. You can manage them anytime from the dashboard.
+                  </p>
+                </template>
                 <template x-if="doneSummaryEmpty">
                   <p class="text-slate-600 text-sm mt-1">
-                    No plugins changed this trip — your existing setup is unchanged.
+                    No plugins changed this trip — your existing setup is
+                    unchanged. You can manage plugins anytime from the dashboard.
                   </p>
                 </template>
               </div>
@@ -620,7 +627,7 @@
                   </div>
                 </template>
                 <template x-if="leftAloneCount > 0">
-                  <div class="flex items-center gap-3 px-4 py-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <div class="flex items-center gap-3 px-4 py-3 rounded-lg bg-slate-50 border border-slate-100">
                     <div class="text-slate-600 font-semibold text-lg"
                          x-text="leftAloneCount"></div>
                     <div class="text-sm text-slate-600">
