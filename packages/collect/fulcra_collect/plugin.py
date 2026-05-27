@@ -327,12 +327,31 @@ class RunContext:
             )
         from fulcra_common.definitions import resolve_definition_id
         client = self._fulcra_client_factory()
-        new_id = resolve_definition_id(
-            canonical_name=canonical_name,
-            expected_spec=expected_spec,
-            fulcra_client=client,
-            force_new=force_new,
-        )
+        # If the user supplied a custom name via the definition picker's
+        # "Create new" input, use it verbatim — find-or-create by exact
+        # match, no machine-id suffix. This overrides both the plugin's
+        # canonical_name and the suffix-on-force_new behavior, because
+        # the user explicitly typed what they want to see in Fulcra.
+        override = getattr(self.state, "override_definition_name", None)
+        if override:
+            new_id = resolve_definition_id(
+                canonical_name=override,
+                expected_spec=expected_spec,
+                fulcra_client=client,
+                force_new=False,
+            )
+            # One-shot: the override has done its job. Clear it so a
+            # later re-resolve (e.g. account switch) falls back to the
+            # plugin's canonical_name rather than silently re-using a
+            # name the user picked once weeks ago.
+            self.state.override_definition_name = None
+        else:
+            new_id = resolve_definition_id(
+                canonical_name=canonical_name,
+                expected_spec=expected_spec,
+                fulcra_client=client,
+                force_new=force_new,
+            )
         self.state.definition_id = new_id
         return new_id
 

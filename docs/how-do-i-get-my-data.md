@@ -31,10 +31,13 @@ worth a look when nothing else matches.
   every 6 hours. Reads the local Apple Podcasts SQLite database
   (`~/Library/Group Containers/*.podcasts*/Documents/MTLibrary.sqlite`)
   directly; the Podcasts app does not need to be open. Requires macOS
-  **Full Disk Access** for the terminal/app running the daemon. Caveat:
-  iCloud sync only keeps that DB fresh while macOS can run the Podcasts
-  extension in the background — if you quit the app for days the DB may
-  fall behind.
+  **Full Disk Access** for the terminal/app running the daemon. The
+  setup wizard's `test_connection` step opens the DB read-only and
+  reports the count of played episodes before you Run, so a missing-FDA
+  error surfaces immediately instead of at the first scheduled run.
+  Caveat: iCloud sync only keeps that DB fresh while macOS can run the
+  Podcasts extension in the background — if you quit the app for days
+  the DB may fall behind.
 - **One-shot historical (Time Machine recovery)** — plugin
   `apple-podcasts-timemachine`, manual. Walks every Time Machine
   snapshot on the mounted backup volume and pulls played-episode rows
@@ -216,9 +219,27 @@ worth a look when nothing else matches.
   you can hand-shape — IFTTT dumps, hand-crafted spreadsheets, exports
   from less-common services.
 
+## Cleaning up after experiments
+
+The dashboard's **Settings** page (header link) lists every annotation
+definition on your Fulcra account and lets you soft-delete any of
+them. Events already written under a deleted definition stay in
+Fulcra (no per-event delete primitive exists) but the definition no
+longer appears in pickers, and any plugin currently bound to it gets
+its cached `definition_id` cleared server-side so its next run
+resolves a fresh one rather than writing to a tombstone. Useful
+after experimenting with multiple plugins against the same canonical
+name and ending up with duplicate tracks.
+
+When picking an existing definition in the wizard's
+`definition_picker` step, the "+ Create new" path is editable — the
+name is pre-filled with the plugin's canonical name (e.g. "Watched",
+"Listened") but you can type any name; whatever you type is what
+shows up in Fulcra, with no machine-id suffix.
+
 ---
 
-**Last verified:** 2026-05-26 against the
+**Last verified:** 2026-05-26 (late) against the
 `fulcra_collect.plugins` entry points in
 `packages/{attention,dayone,media-helpers}/pyproject.toml` and the
 plugin definitions in `collect_plugin.py` / `collect_plugins.py`. If

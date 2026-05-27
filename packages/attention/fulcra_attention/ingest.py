@@ -128,7 +128,20 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
         sid_key = category or ""
 
     start_dt = _parse_iso(payload["start_time"])
+    end_dt = _parse_iso(payload["end_time"])
     sid = source_id(key=sid_key, start_time=start_dt)
+
+    # Compute the duration in seconds and surface it on the inner data
+    # payload (in addition to the recorded_at.{start_time,end_time}
+    # envelope wire.build_record sets). The Fulcra DurationAnnotation
+    # definition's measurement_spec declares value_type="duration" — some
+    # downstream renderers (notably the context.fulcradynamics.com
+    # timeline as of 2026-05-26, see task #30) read the duration off the
+    # data payload rather than deriving it from end-start, which causes
+    # events to render as "0 h 0 m total" with invisible markers. Adding
+    # `duration_seconds` here is defensive: harmless if the renderer
+    # already derives correctly, restorative if it doesn't.
+    duration_seconds = max(0, int((end_dt - start_dt).total_seconds()))
 
     data_inner: dict[str, Any] = {
         "note": note,
@@ -138,6 +151,7 @@ def build_attention_event(payload: dict, *, state: State) -> dict:
         "url": url,
         "og_description": og_description,
         "favicon_url": favicon_url,
+        "duration_seconds": duration_seconds,
         "parent_source_id": None,  # reserved for v2 highlights
         "external_ids": {
             "client": client,

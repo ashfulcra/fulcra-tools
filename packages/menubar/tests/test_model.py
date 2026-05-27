@@ -165,3 +165,44 @@ def test_in_flight_holds_until_last_run_advances():
     assert "lastfm" not in m.in_flight, (
         "in_flight should clear once last_run advances past the baseline"
     )
+
+
+# ---------------------------------------------------------------------------
+# Failure-tier counts (task #59) — distinguishes amber-tier (1-2 fails)
+# from red-tier (≥3 fails) so the menubar icon can paint two severities.
+# ---------------------------------------------------------------------------
+
+def _snapshot_with_failure_counts(*per_plugin_failures: int) -> dict:
+    plugins = []
+    for i, n in enumerate(per_plugin_failures):
+        plugins.append({
+            "id": f"p{i}", "name": f"Plugin {i}", "kind": "scheduled",
+            "enabled": True, "last_run": "2026-05-26T10:00:00+00:00",
+            "last_outcome": "error" if n > 0 else "done",
+            "last_error": "401" if n > 0 else None,
+            "consecutive_failures": n,
+        })
+    return {"ok": True, "plugins": plugins, "load_errors": {}}
+
+
+def test_failing_warning_count_is_one_to_two_failures():
+    m = StatusModel()
+    m.update_from_status(_snapshot_with_failure_counts(0, 1, 2, 3, 5))
+    assert m.failing_warning_count == 2  # the two with 1 and 2 failures
+    assert m.failing_critical_count == 2  # the two with 3 and 5
+
+
+def test_failing_counts_skip_disabled_plugins():
+    m = StatusModel()
+    snap = _snapshot_with_failure_counts(5)
+    snap["plugins"][0]["enabled"] = False
+    m.update_from_status(snap)
+    assert m.failing_warning_count == 0
+    assert m.failing_critical_count == 0
+
+
+def test_failing_counts_match_legacy_failing_count_total():
+    """The legacy failing_count == warning + critical; preserving back-compat."""
+    m = StatusModel()
+    m.update_from_status(_snapshot_with_failure_counts(0, 1, 1, 3, 4))
+    assert m.failing_count == m.failing_warning_count + m.failing_critical_count

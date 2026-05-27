@@ -276,6 +276,67 @@ def test_plugin_settings_put_unknown_plugin(collect_home):
     assert r.status_code == 404
 
 
+def test_settings_and_credentials_round_trip_for_reconfigure(collect_home, _in_memory_keyring):
+    """Regression for #48 — wizard pre-fill on re-configure.
+
+    The wizard fetches GET /settings and GET /credentials when it mounts so
+    that a returning user sees their existing settings pre-filled and gets a
+    "currently set — leave blank to keep" affordance for credentials.  This
+    test verifies the routes return the correct shapes that the frontend
+    destructuring relies on:
+
+      GET /settings  → flat {key: value} dict (same shape accepted by PUT)
+      GET /credentials → {ok: true, credentials: {key: "set"|"missing"}}
+    """
+    from fulcra_collect.plugin import Plugin, Setting, Credential
+    plugin = Plugin(
+        id="rss",
+        name="RSS",
+        kind="manual",
+        run=lambda c: None,
+        required_settings=(
+            Setting(key="feed_url", label="Feed URL", kind="url"),
+        ),
+        required_credentials=(
+            Credential(key="api_key", label="API Key", help=""),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={"rss": plugin})
+    client = _client(daemon)
+
+    # --- settings round-trip ---
+    # Before any PUT: GET returns an empty dict (plugin not yet configured).
+    r = client.get("/api/plugin/rss/settings")
+    assert r.status_code == 200
+    assert r.json() == {}
+
+    # PUT a setting value.
+    r = client.put("/api/plugin/rss/settings", json={"feed_url": "https://example.com/feed.xml"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    # GET returns the same flat dict the wizard will consume to pre-fill inputValues.
+    r = client.get("/api/plugin/rss/settings")
+    assert r.status_code == 200
+    assert r.json() == {"feed_url": "https://example.com/feed.xml"}
+
+    # --- credentials round-trip ---
+    # Before set: credential shows as "missing".
+    r = client.get("/api/plugin/rss/credentials")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["credentials"]["api_key"] == "missing"
+
+    # After set: credential shows as "set" — wizard marks _credPresent[key]=true.
+    r = client.put("/api/plugin/rss/credential/api_key", json={"secret": "tok3n"})
+    assert r.status_code == 200
+    r = client.get("/api/plugin/rss/credentials")
+    body = r.json()
+    assert body["ok"] is True
+    assert body["credentials"]["api_key"] == "set"
+
+
 # ---------------------------------------------------------------------------
 # Plugin enable / disable
 # ---------------------------------------------------------------------------
@@ -933,6 +994,52 @@ def test_definition_recent_returns_entries(collect_home, _in_memory_keyring, mon
     assert end_times[0] > end_times[1]
 
 
+def test_definition_recent_handles_null_metadata(collect_home, _in_memory_keyring, monkeypatch):
+    """Records with metadata=None must not raise AttributeError (bug #45).
+
+    The Fulcra API sometimes returns records where the ``metadata`` key is
+    present but its value is ``None`` rather than absent.  The old filter used
+    ``rec.get("metadata", {}).get("source")``, which evaluates to
+    ``None.get(...)`` when metadata is explicitly null — crashing with
+    AttributeError.  The fix is ``(rec.get("metadata") or {}).get("source")``.
+    """
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    def_id = "def-null-meta"
+    def_source = f"com.fulcradynamics.annotation.{def_id}"
+
+    fake_records = [
+        # metadata key present but value is None — triggered the bug
+        {"metadata": None, "source_id": "something-else"},
+        # normal match via source_id
+        {"metadata": None, "source_id": def_source},
+    ]
+
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return fake_records
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **kw): return FakeResponse()
+
+    monkeypatch.setattr("fulcra_collect.web.httpx", type("httpx", (), {"Client": FakeClient})())
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get(f"/api/definitions/{def_id}/recent?limit=5")
+    # Must not return 502 from an AttributeError crash
+    assert r.status_code == 200
+    entries = r.json()["entries"]
+    # The record matched by source_id should be returned
+    assert len(entries) == 1
+    assert entries[0]["source_id"] == def_source
+
+
 # ---------------------------------------------------------------------------
 # Phase E — bind / clear definition routes
 # ---------------------------------------------------------------------------
@@ -982,6 +1089,63 @@ def test_bind_definition_force_new_clears_id(collect_home):
     assert r.status_code == 200
     st2 = _state_mod.load("x")
     assert st2.definition_id is None
+    # No custom name supplied → override stays unset (resolver falls back
+    # to canonical_name + machine suffix).
+    assert st2.override_definition_name is None
+
+
+def test_bind_definition_force_new_with_custom_name_persists_override(collect_home):
+    """Task #47 regression: when the user types a custom name in the
+    "Create new" input, the daemon persists it on plugin state so the
+    next run's resolver uses it verbatim instead of canonical_name."""
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.post(
+        "/api/plugin/x/definition",
+        json={"force_new": True, "new_name": "My Custom Listened"},
+    )
+    assert r.status_code == 200
+    st = _state_mod.load("x")
+    assert st.definition_id is None
+    assert st.override_definition_name == "My Custom Listened"
+
+
+def test_bind_definition_force_new_blank_name_ignored(collect_home):
+    """A whitespace-only new_name must not pin a stupid override on state."""
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.post(
+        "/api/plugin/x/definition",
+        json={"force_new": True, "new_name": "   "},
+    )
+    assert r.status_code == 200
+    st = _state_mod.load("x")
+    assert st.override_definition_name is None
+
+
+def test_bind_definition_pick_existing_clears_pending_override(collect_home):
+    """If the user previously typed a custom name but then picks an
+    existing def instead, the override must be cleared so the next run
+    doesn't ignore the picked def in favor of a find-or-create by name."""
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    st = _state_mod.load("x")
+    st.override_definition_name = "stale-typed-name"
+    _state_mod.save(st)
+    daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
+    client = _client(daemon)
+    r = client.post("/api/plugin/x/definition", json={"definition_id": "picked-def"})
+    assert r.status_code == 200
+    st2 = _state_mod.load("x")
+    assert st2.definition_id == "picked-def"
+    assert st2.override_definition_name is None
 
 
 def test_clear_definition_unknown_plugin(collect_home):
@@ -1005,6 +1169,133 @@ def test_clear_definition_removes_id(collect_home):
     assert r.json()["ok"] is True
     st2 = _state_mod.load("x")
     assert st2.definition_id is None
+
+
+# ---------------------------------------------------------------------------
+# Task #42 — DELETE /api/definitions/{def_id} (soft-delete a Fulcra def
+# and clear any plugin state that was caching that def_id, so the next
+# run resolves a fresh one).
+# ---------------------------------------------------------------------------
+
+def _patch_fulcra_delete(monkeypatch, *, status_code: int):
+    """Patch fulcra_collect.web.httpx so DELETE returns the given status.
+
+    Mirrors the stub style used by test_definitions_route_returns_list so
+    the routes under test don't reach the real Fulcra API.
+    """
+    class _FakeResponse:
+        def __init__(self, code):
+            self.status_code = code
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import httpx as _h
+                req = _h.Request("DELETE", "http://test")
+                raise _h.HTTPStatusError(
+                    f"{self.status_code}",
+                    request=req,
+                    response=_h.Response(self.status_code, request=req),
+                )
+
+    class _FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def delete(self, path, **kw):  # noqa: ARG002
+            return _FakeResponse(status_code)
+
+    monkeypatch.setattr(
+        "fulcra_collect.web.httpx",
+        type("httpx", (), {"Client": _FakeClient})(),
+    )
+
+
+def test_delete_definition_requires_fulcra_auth(collect_home, _in_memory_keyring):
+    """Without a stored Fulcra bearer-token the route returns 401."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.delete("/api/definitions/def-x")
+    assert r.status_code == 401
+
+
+def test_delete_definition_happy_path_clears_bound_plugin_state(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """A 204 from Fulcra returns ok and clears the cached def on any
+    plugin that was bound to it."""
+    import fulcra_collect.credentials as _creds_mod
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_delete(monkeypatch, status_code=204)
+
+    # Plugin bound to the def we're about to delete.
+    plugin = Plugin(id="bound-plugin", name="Bound", kind="manual",
+                    run=lambda c: None)
+    st = _state_mod.load("bound-plugin")
+    st.definition_id = "def-to-delete"
+    _state_mod.save(st)
+
+    daemon = _build_test_daemon(collect_home, plugins={"bound-plugin": plugin})
+    client = _client(daemon)
+    r = client.delete("/api/definitions/def-to-delete")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert "bound-plugin" in body["cleared_plugins"]
+
+    # State must be cleared so the plugin's next run resolves a fresh def
+    # instead of trying to write to the now-tombstoned id.
+    st2 = _state_mod.load("bound-plugin")
+    assert st2.definition_id is None
+
+
+def test_delete_definition_returns_404_when_already_deleted(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """Fulcra responding 404 (already deleted / unknown id) must surface as 404."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_delete(monkeypatch, status_code=404)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.delete("/api/definitions/def-gone")
+    assert r.status_code == 404
+
+
+def test_delete_definition_leaves_other_plugins_state_alone(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """Only plugins bound to the deleted def are cleared — others are untouched."""
+    import fulcra_collect.credentials as _creds_mod
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_delete(monkeypatch, status_code=204)
+
+    p1 = Plugin(id="p-keeps", name="Keeps", kind="manual", run=lambda c: None)
+    p2 = Plugin(id="p-loses", name="Loses", kind="manual", run=lambda c: None)
+    st1 = _state_mod.load("p-keeps")
+    st1.definition_id = "def-Y"
+    _state_mod.save(st1)
+    st2 = _state_mod.load("p-loses")
+    st2.definition_id = "def-X"
+    _state_mod.save(st2)
+
+    daemon = _build_test_daemon(
+        collect_home, plugins={"p-keeps": p1, "p-loses": p2},
+    )
+    client = _client(daemon)
+    r = client.delete("/api/definitions/def-X")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cleared_plugins"] == ["p-loses"]
+
+    # p-loses's bound def is gone, p-keeps's untouched.
+    assert _state_mod.load("p-loses").definition_id is None
+    assert _state_mod.load("p-keeps").definition_id == "def-Y"
 
 
 # ---------------------------------------------------------------------------
@@ -1076,9 +1367,10 @@ def test_quick_record_definitions_unauthenticated_fulcra(
     assert body["definitions"] == []
 
 
-def test_quick_record_definitions_returns_moments(
+def test_quick_record_definitions_returns_all_types(
         collect_home, _in_memory_keyring, monkeypatch):
-    """Route returns Moment defs from the daemon's quick_record_list handler."""
+    """Route returns ALL non-deleted defs (Sprint B widened this from
+    Moment-only); menubar groups by annotation_type client-side."""
     import fulcra_collect.credentials as _creds_mod
     _creds_mod.set_user_secret("bearer-token", "valid-token")
 
@@ -1096,9 +1388,9 @@ def test_quick_record_definitions_returns_moments(
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    # Only moments are returned; duration filtered out
-    assert len(body["definitions"]) == 1
-    assert body["definitions"][0]["annotation_type"] == "moment"
+    # Both annotation types come back — duration is no longer filtered.
+    types = {d["annotation_type"] for d in body["definitions"]}
+    assert types == {"moment", "duration"}
 
 
 def test_record_annotation_requires_auth(collect_home):
@@ -1144,7 +1436,12 @@ def test_record_annotation_happy_path(
     r = client.post("/api/annotations",
                     json={"definition_id": "def-abcdef12", "comment": None})
     assert r.status_code == 200
-    assert r.json() == {"ok": True}
+    body = r.json()
+    assert body["ok"] is True
+    # Sprint B: source_id and name come back so the menubar can stash
+    # them in its "Recently recorded" list for undo.
+    assert "source_id" in body
+    assert body["name"] == "Test Moment"
     # Activity buffer has one success entry
     entries = daemon.activity.recent(limit=1)
     assert entries[0].ok is True
@@ -1184,6 +1481,64 @@ def test_record_annotation_missing_definition_id_rejected(
     # definition_id is a required field; omitting it gives a validation error
     r = client.post("/api/annotations", json={})
     assert r.status_code == 422
+
+
+def test_record_annotation_duration_round_trips(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Sprint B: POST /api/annotations with start_time + end_time writes
+    a Duration record through the daemon."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _fake_httpx_for_daemon(monkeypatch, get_data=[
+        {"id": "def-d1", "name": "Movie", "annotation_type": "duration",
+         "tags": [], "deleted_at": None,
+         "created_at": "2026-05-25T00:00:00Z"},
+    ])
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/annotations", json={
+        "definition_id": "def-d1",
+        "start_time": "2026-05-26T20:00:00Z",
+        "end_time": "2026-05-26T22:14:00Z",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert "source_id" in body
+
+
+def test_delete_annotation_requires_auth(collect_home):
+    """DELETE /api/annotations/{source_id} requires the web Bearer token."""
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    from fastapi.testclient import TestClient
+    c = TestClient(app)
+    r = c.delete("/api/annotations/src-x")
+    assert r.status_code == 401
+
+
+def test_delete_annotation_writes_tombstone(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """DELETE /api/annotations/{source_id} posts a sentinel annotation
+    so the user has a paper trail. Soft-delete only — see daemon
+    docstring."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _fake_httpx_for_daemon(monkeypatch, get_data=[])
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.delete(
+        "/api/annotations/"
+        "com.fulcradynamics.fulcra-collect.quick-record.abc123"
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["tombstone_source_id"].startswith(
+        "com.fulcradynamics.fulcra-collect.quick-record.undo."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1803,3 +2158,157 @@ def test_upload_happy_path_writes_file_and_updates_setting(collect_home):
     r2 = client.get(f"/api/plugin/{plugin.id}/settings")
     assert r2.status_code == 200
     assert r2.json()["path"] == str(target.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Task #51 — in-app docs viewer (GET /api/docs/{name})
+# ---------------------------------------------------------------------------
+
+def test_docs_route_returns_markdown_for_existing_doc(collect_home):
+    """The "Data sources" link in the dashboard header hits this route to
+    fetch docs/how-do-i-get-my-data.md and render it client-side via
+    marked. The doc lives in the repo (docs/), so a happy-path test only
+    needs to confirm the route locates it and returns its bytes as
+    text/markdown."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/docs/how-do-i-get-my-data")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/markdown")
+    # Spot-check the rendered content is the real doc (not an error page
+    # or a stub). The first heading should be present.
+    assert "# How do I get my data into Fulcra?" in r.text
+
+
+def test_docs_route_rejects_unknown_doc(collect_home):
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/docs/no-such-doc-exists")
+    assert r.status_code == 404
+
+
+def test_docs_route_rejects_path_traversal(collect_home):
+    """Defence-in-depth: the route's regex limits names to [A-Za-z0-9_-]+,
+    so any input containing ../ or a leading slash is a 400 before we
+    even resolve the path. FastAPI matches /api/docs/{name} against a
+    single path segment, so the literal "../etc/passwd" would 404 at
+    the routing layer — these tests pick inputs that DO hit the handler
+    so the regex check is what gates them."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    # Single-segment input that looks safe to FastAPI's router but our
+    # regex should reject.
+    r = client.get("/api/docs/foo.md")           # dot disallowed
+    assert r.status_code == 400
+    r = client.get("/api/docs/foo bar")          # space disallowed
+    assert r.status_code == 400
+    r = client.get("/api/docs/")                 # empty after trim
+    # FastAPI may 404 the empty-name route entirely or 400 it through
+    # the handler — accept either as long as it's not a 200.
+    assert r.status_code in (400, 404, 405)
+
+
+def test_docs_route_requires_auth(collect_home):
+    """Same auth shape as /api/activity etc. — Bearer token required."""
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    # New client without the Authorization header
+    client = TestClient(app)
+    r = client.get("/api/docs/how-do-i-get-my-data")
+    assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Task #64 — quick-record favorites HTTP routes
+# ---------------------------------------------------------------------------
+
+def test_quick_record_favorites_requires_auth(collect_home):
+    """Both GET and PUT on /api/quick-record/favorites require the web
+    Bearer token — same shape as every other /api/* route."""
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    c = TestClient(app)
+    assert c.get("/api/quick-record/favorites").status_code == 401
+    assert c.put(
+        "/api/quick-record/favorites", json={"favorites": []},
+    ).status_code == 401
+
+
+def test_quick_record_favorites_get_returns_empty_initially(collect_home):
+    """A fresh install has no favorites file → the GET succeeds with []."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/quick-record/favorites")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "favorites": []}
+
+
+def test_quick_record_favorites_put_then_get_round_trips(collect_home):
+    """PUT persists the list; the next GET reflects it."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.put(
+        "/api/quick-record/favorites",
+        json={"favorites": ["def-z", "def-a"]},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    r = client.get("/api/quick-record/favorites")
+    # Daemon returns favorites sorted for stability.
+    assert r.json() == {"ok": True, "favorites": ["def-a", "def-z"]}
+
+
+def test_quick_record_favorites_put_persists_to_file(collect_home):
+    """The PUT actually hits disk under the test's FULCRA_COLLECT_HOME —
+    proves the daemon isn't keeping the list in memory only."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    client.put(
+        "/api/quick-record/favorites",
+        json={"favorites": ["def-1"]},
+    )
+    from fulcra_collect import quick_record_favorites as _favs
+    assert _favs.load() == {"def-1"}
+
+
+def test_delete_definition_prunes_from_favorites(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Soft-deleting a def must also drop it from favorites — otherwise
+    the favorites file would accumulate orphan UUIDs the menubar would
+    keep trying to surface but Fulcra would no longer return."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    # Patch httpx INSIDE web.py (not daemon.py) — the delete route uses
+    # the web module's own httpx client factory, not the daemon's.
+    import fulcra_collect.web as web_mod
+
+    class _Resp204:
+        status_code = 204
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    class _WebClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def delete(self, *a, **kw): return _Resp204()
+
+    monkeypatch.setattr(web_mod, "httpx",
+                        type("httpx", (), {"Client": _WebClient,
+                                            "HTTPStatusError": Exception,
+                                            "ConnectError": Exception,
+                                            "ConnectTimeout": Exception,
+                                            "TimeoutException": Exception,
+                                            "HTTPError": Exception})())
+
+    from fulcra_collect import quick_record_favorites as _favs
+    _favs.save({"def-pinned", "def-other"})
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.delete("/api/definitions/def-pinned")
+    assert r.status_code == 200
+
+    # def-pinned was removed from favorites; def-other is untouched.
+    assert _favs.load() == {"def-other"}

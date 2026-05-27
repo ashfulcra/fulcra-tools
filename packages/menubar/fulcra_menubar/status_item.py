@@ -1,9 +1,14 @@
 """The menubar icon. Holds a reference to the NSStatusItem owned by
 rumps and applies overlay states driven by the StatusModel.
 
-Three overlays:
+Four overlays:
   - running pulse: a violet glow CALayer that fades in/out while the
     in-flight set is non-empty.
+  - timer-active overlay: a steady (non-pulsing) cyan glow CALayer that
+    shows while a quick-record Duration timer is running in the
+    popover. Stays visible AROUND the running pulse — they coexist;
+    layers stack rather than override. The timer is in-memory in the
+    popover (Sprint B 2026-05-26); a daemon restart kills it.
   - failure badge: a small red dot in the bottom-right corner while any
     enabled plugin has consecutive_failures > 0.
   - daemon-down: the base image at 40% alpha.
@@ -80,11 +85,24 @@ class StatusItemController:
         if self._base is not None:
             self._base.setSize_(_MENUBAR_ICON_SIZE)
             self._base.setTemplate_(True)
-            self._with_badge = _compose_image_with_badge(self._base, palette.ERROR)
-            self._with_badge.setSize_(_MENUBAR_ICON_SIZE)
+            # Two tiers of failure overlay — amber for 1-2 consecutive
+            # failures ("Failed, give it a beat"), red for >=3 ("Failing,
+            # look at this now"). Matches the dashboard pill mapping
+            # landed 2026-05-26 and the product-brainstorming gap that
+            # observed "any failure = red dot" was too noisy.
+            self._with_warning_badge = _compose_image_with_badge(self._base, palette.WARNING)
+            self._with_warning_badge.setSize_(_MENUBAR_ICON_SIZE)
+            self._with_critical_badge = _compose_image_with_badge(self._base, palette.ERROR)
+            self._with_critical_badge.setSize_(_MENUBAR_ICON_SIZE)
         else:
-            self._with_badge = None
+            self._with_warning_badge = None
+            self._with_critical_badge = None
         self._pulse_layer = None
+        # Timer-active overlay layer — separate from the run pulse so
+        # both can show simultaneously (run pulse = "an importer is
+        # working", timer overlay = "a quick-record timer is ticking").
+        self._timer_layer = None
+        self._timer_active = False
         self._apply()
         model.add_observer(on_main_thread(lambda _m: self._apply()))
 
@@ -108,12 +126,65 @@ class StatusItemController:
 
         btn.setAlphaValue_(1.0)
 
-        if self._model.failing_count > 0 and self._with_badge is not None:
-            btn.setImage_(self._with_badge)
+        # Red dot wins over amber when any plugin is at >=3 failures, even
+        # if other plugins are only at 1-2. The user needs to see the worst
+        # state first; the popover surfaces the per-plugin breakdown.
+        if (self._model.failing_critical_count > 0
+                and self._with_critical_badge is not None):
+            btn.setImage_(self._with_critical_badge)
+        elif (self._model.failing_warning_count > 0
+                and self._with_warning_badge is not None):
+            btn.setImage_(self._with_warning_badge)
         else:
             btn.setImage_(self._base)
 
         self._set_pulse(active=(state is OverallState.RUNNING))
+        # Reapply the timer overlay so a model-driven _apply() doesn't
+        # blow it away when the run pulse toggles.
+        self._apply_timer_overlay()
+
+    def set_timer_active(self, active: bool) -> None:
+        """Public API: toggle the cyan timer-active overlay on the
+        menubar icon. Called by the quick-record popover when a Duration
+        timer starts (active=True) or stops (active=False).
+
+        The overlay is intentionally separate from the run pulse so the
+        two states coexist: a violet pulse means an importer is working;
+        a steady cyan glow means a quick-record timer is ticking. If
+        both are true the user sees the violet pulse on top of the cyan
+        glow.
+
+        Timer state lives in the popover (in-memory), NOT in the model
+        — a daemon restart kills any in-flight timer.
+        """
+        self._timer_active = bool(active)
+        # _apply() will pick up the new state on the next observer tick,
+        # but also reflect immediately for snappy feedback.
+        self._apply_timer_overlay()
+
+    def _apply_timer_overlay(self) -> None:
+        btn = self._ns_button()
+        if btn is None:
+            return
+        btn.setWantsLayer_(True)
+        layer = btn.layer()
+        active = self._timer_active
+        if self._timer_layer is None and active:
+            self._timer_layer = CALayer.layer()
+            self._timer_layer.setFrame_(layer.bounds())
+            # Steady cyan glow — non-pulsing on purpose so it reads as
+            # "something is sustained" vs. the violet pulse's "something
+            # is happening RIGHT NOW".
+            self._timer_layer.setBackgroundColor_(
+                _hex_to_cgcolor(palette.ACCENT_CYAN, alpha=0.35)
+            )
+            self._timer_layer.setCornerRadius_(4.0)
+            # Insert beneath the pulse layer so the violet pulse (when
+            # it's also showing) appears on top.
+            layer.insertSublayer_atIndex_(self._timer_layer, 0)
+        elif self._timer_layer is not None and not active:
+            self._timer_layer.removeFromSuperlayer()
+            self._timer_layer = None
 
     def _set_pulse(self, *, active: bool) -> None:
         btn = self._ns_button()

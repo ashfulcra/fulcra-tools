@@ -87,10 +87,19 @@ function pillFor(plugin) {
   if (plugin.last_outcome === "done") {
     return { label: "Healthy", cls: "bg-emerald-100 text-emerald-800" };
   }
-  // Enabled but no successful run yet (never run, or last run failed but
-  // failure count < 3). Same label regardless of plugin kind — the
-  // metadata line below tells the user whether it's manual, scheduled,
-  // or continuous.
+  // "error" / "timeout" with consecutive_failures < 3 → still a real
+  // failure, just under the persistent-failure threshold. Surface it as
+  // a softer warning (not "Failing" red) so the user knows the most
+  // recent run was unsuccessful — the previous "Not run yet" label
+  // here was a lie that hid the most common case: a plugin that ran
+  // once, errored on a missing credential, and was waiting for the
+  // user to fix it. User feedback 2026-05-26: paired Attention but
+  // dashboard still said "Not run yet" because the diagnostic run
+  // before pairing left last_outcome="error".
+  if (plugin.last_outcome === "error" || plugin.last_outcome === "timeout") {
+    return { label: "Failed — run again", cls: "bg-amber-100 text-amber-800" };
+  }
+  // Enabled but never run.
   return { label: "Not run yet", cls: "bg-slate-100 text-slate-700" };
 }
 
@@ -247,6 +256,21 @@ function dashboard() {
         // Refresh status after run
         await this.reload();
       }
+    },
+
+    // Disable an enabled plugin. Confirms first, then calls the disable route
+    // and refreshes the dashboard so the row moves to the Disabled section.
+    async disablePlugin(plugin) {
+      const ok = window.confirm(
+        `Disable ${plugin.name}? It will stop running on its schedule. You can re-enable it from + Add plugin.`
+      );
+      if (!ok) return;
+      try {
+        await api(`/api/plugin/${plugin.id}/disable`, { method: "POST" });
+      } catch (e) {
+        console.warn("disable failed:", e);
+      }
+      await this.reload();
     },
 
     // Add-plugin: dispatch event to parent app to start the add-plugin flow

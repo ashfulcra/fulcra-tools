@@ -7,13 +7,25 @@ into a [Fulcra](https://fulcradynamics.com) account.
 
 | Package | What it is |
 |---|---|
-| [`packages/attention`](packages/attention) | Browsing-attention capture: a localhost Python relay + a Chrome MV3 extension. |
-| [`packages/media-helpers`](packages/media-helpers) | Imports watched/listened media (Trakt, Last.fm, …) into Fulcra as annotations. |
-| [`packages/csv-importer`](packages/csv-importer) | Generic CSV → Fulcra annotation importer (library + CLI). |
+| [`packages/collect`](packages/collect) | The Fulcra Collect daemon — local HTTP server on `127.0.0.1:9292` that hosts every plugin, runs them on schedule, and exposes the wizard + dashboard UI. The hub everything else plugs into. |
+| [`packages/web-ui`](packages/web-ui) | The wizard + dashboard + settings frontend served by the collect daemon. Vanilla Alpine.js, no build step. |
+| [`packages/menubar`](packages/menubar) | macOS menubar app for quick-recording Moment annotations and surfacing daemon status. |
+| [`packages/attention`](packages/attention) | Browsing-attention capture: a collect plugin + a Chrome MV3 extension that POSTs tab/idle events to the daemon. |
+| [`packages/media-helpers`](packages/media-helpers) | Collect plugins for watched/listened media — Trakt, Last.fm, Spotify takeouts, YouTube takeouts, Netflix, Apple Podcasts, Apple TV, Deezer, Letterboxd, Goodreads, generic RSS/CSV. |
+| [`packages/dayone`](packages/dayone) | Collect plugin for Day One journal entries (live SQLite read or one-shot export-zip upload). |
+| [`packages/fulcra-common`](packages/fulcra-common) | Shared Fulcra API client + the cross-plugin definition resolver. Pulled in by every other package. |
+| [`packages/csv-importer`](packages/csv-importer) | Standalone Generic CSV → Fulcra annotation importer (library + CLI). The same logic the `generic-csv` collect plugin uses. |
 
 Each package keeps its own README, build, tests, and language toolchain
 (Python and TypeScript both appear here). Start in the package directory
 you care about.
+
+## Where do I get data from?
+
+[**docs/how-do-i-get-my-data.md**](docs/how-do-i-get-my-data.md) is the
+lookup page: every supported source, every pathway (live / scheduled /
+one-shot historical), and which collect plugin handles it. Read this
+first if you're deciding what to wire up.
 
 ## History
 

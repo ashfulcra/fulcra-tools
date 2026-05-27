@@ -16,56 +16,40 @@
  */
 
 // ---------------------------------------------------------------------------
-// HTML entity escaper — prevents XSS from plugin-authored body_md content.
-// ---------------------------------------------------------------------------
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
-// ---------------------------------------------------------------------------
-// Tiny markdown renderer — handles bold, links, line-breaks, code spans.
-// Sufficient for the short, authored body_md strings we use in setup steps.
+// Markdown renderer — delegates to the `marked` library (loaded from CDN
+// in index.html). Replaces the former hand-rolled regex approach, which
+// could not handle fenced code blocks or other CommonMark constructs.
 //
-// Security: input is HTML-escaped first, then markdown transforms are applied
-// on the safe escaped text. Link URLs are allowlisted to http(s) only — any
-// other scheme (javascript:, data:, etc.) is rendered as plain text.
+// Security: marked's default renderer HTML-escapes content. We additionally
+// configure a link-sanitizer so only http(s) URLs become clickable anchors;
+// javascript: / data: / etc. are stripped to plain text.
 // ---------------------------------------------------------------------------
+
+(function _configureMarked() {
+  if (typeof marked === "undefined") return; // guard: CDN not loaded yet
+  const renderer = new marked.Renderer();
+  const _baseLink = renderer.link.bind(renderer);
+  renderer.link = function(href, title, text) {
+    // Reject non-http(s) schemes — they won't appear in plugin-authored copy
+    // but this closes the door on javascript: / data: injection.
+    if (href && !/^https?:\/\//i.test(href)) return text;
+    const out = _baseLink(href, title, text);
+    // Ensure external links open in a new tab with safe referrer policy.
+    return out.replace(/^<a /, '<a target="_blank" rel="noopener noreferrer" ');
+  };
+  marked.use({ renderer });
+})();
 
 function renderMd(text) {
   if (!text) return "";
-  // Escape HTML entities before any markdown processing so that raw HTML
-  // in plugin-authored body_md cannot inject tags or event handlers.
-  let s = escapeHtml(text);
-  return s
-    // Bold: **text** or __text__
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/__(.+?)__/g, "<strong>$1</strong>")
-    // Inline code: `text`
-    .replace(/`([^`]+)`/g, "<code class=\"bg-slate-100 text-slate-800 px-1 rounded text-sm\">$1</code>")
-    // Links: [text](url) — only http(s) URLs are linked; unsafe schemes
-    // (javascript:, data:, etc.) are rendered as plain text.
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, linkText, url) => {
-      if (!/^https?:\/\//i.test(url)) return linkText;
-      return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-violet-600 underline">${linkText}</a>`;
-    })
-    // Bare URLs (not already inside an href) — already https? validated by regex
-    .replace(/(?<!["\(=])https?:\/\/[^\s<)"]+/g, (url) =>
-      `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-violet-600 underline">${url}</a>`
-    )
-    // List items: lines starting with "- " or "* "
-    .replace(/^[\-\*] (.+)$/gm, "<li class=\"ml-4 list-disc\">$1</li>")
-    // Wrap consecutive <li> runs in a <ul>
-    .replace(/(<li[^>]*>.*<\/li>\n?)+/g, (block) => `<ul class="my-2 space-y-1">${block}</ul>`)
-    // Line breaks (double newline = paragraph break)
-    .replace(/\n\n/g, "</p><p class=\"mt-2\">")
-    // Single newlines
-    .replace(/\n/g, "<br>")
-    // Wrap everything
-    .replace(/^(.+)/, "<p class=\"mt-2\">$1")
-    .replace(/(.+)$/, "$1</p>");
+  if (typeof marked !== "undefined") {
+    return marked.parse(text);
+  }
+  // Fallback: marked CDN failed to load — return escaped plain text so the
+  // wizard step is still readable rather than blank.
+  return String(text).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +129,10 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     dpShowOther: false,       // whether the "Other annotations" section is expanded
     dpSelectedId: null,       // id of chosen definition, or null = create new
     dpForceNew: false,        // true when user chose "Create new instead"
+    // User-editable name for the "Create new" path. Pre-filled with the
+    // plugin's canonical_definition_name when dpForceNew flips on; sent
+    // to the daemon as `new_name` on submit. Empty = use canonical name.
+    dpNewName: "",
     // Permission check state (task #66) — backend verifies the OS permission
     // is actually granted, replacing the old "click Next and macOS will
     // prompt you" lie. permissionResult is {granted: bool, hint?: string}.
@@ -166,6 +154,33 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // unblocks Next. Kept separate from pairStatus so the fallback UI
     // can still show its instructions.
     pairManuallyConfirmed: false,
+    // Map of credential key → true for credentials already present in the
+    // keychain. Populated by _loadExisting() on wizard mount so that:
+    //   • the input renders a "(currently set — leave blank to keep)" placeholder
+    //   • _submitInputs skips overwriting with an empty string
+    _credPresent: {},
+
+    // First-run state on the wizard's "done" step. User feedback 2026-05-26:
+    // after completing setup, the user expected the plugin to actually run
+    // and report success before sending them to the dashboard. We auto-trigger
+    // Run-now on done-step entry for non-service plugins and poll status
+    // until the run completes (or 10s elapses).
+    //   "idle"    — service plugin, no auto-run, or run not started yet
+    //   "running" — POST fired, polling for completion
+    //   "done"    — last_outcome="done", surfaced as success
+    //   "error"   — last_outcome="error"/"timeout", surfaced as failure
+    //   "slow"    — 10s elapsed without completion, told user to check dashboard
+    firstRunStatus: "idle",
+    firstRunSummary: "",          // optional message from activity feed
+    firstRunPollTimer: null,
+    _firstRunPriorLastRun: null,  // ISO string of last_run before we triggered
+    // Timeline deep-link surfaced in the done-step success banner so the
+    // user has a one-click path from "I just configured this" to "I can
+    // see my data on the Fulcra timeline". Closes the value-loop gap
+    // flagged in the 2026-05-26 product-brainstorming pass (#58).
+    // Populated after the first run succeeds by reading the plugin's
+    // newly-resolved definition_id from /api/status.
+    firstRunTimelineUrl: "",
 
     // Alpine 3 calls init() automatically when the component is initialized.
     // We register a postMessage listener here so the OAuth callback tab can
@@ -181,13 +196,48 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         self.nextBlocked = false;
         self.oauthStatus = "Signed in successfully.";
       });
-      // Seed defaults for step 0 if it's an input step. Subsequent steps are
-      // seeded by _onStepEnter on next()/back()/skipStep(). Without this,
-      // setting/credential defaults declared in the plugin contract render in
-      // the UI (the input_fields getter falls back to def.default) but never
-      // make it into inputValues — so _submitInputs sees an empty model and
-      // throws "required" even though the user saw the default selected.
-      this._seedDefaults();
+      // Load existing settings/credentials from the daemon before seeding
+      // defaults, so that pre-filled values are not clobbered by defaults
+      // and _credPresent is ready before the first input step renders.
+      this._loadExisting().then(() => this._seedDefaults());
+    },
+
+    // Fetch existing per-plugin state from the daemon on wizard mount. Used
+    // when the user clicks "Configure" on an already-configured plugin so
+    // they see their current settings pre-filled and credentials show a
+    // "currently set" affordance instead of blank inputs.
+    //
+    // Two separate fetches:
+    //   GET /api/plugin/{id}/settings  → flat key→value dict, pre-fill inputValues
+    //   GET /api/plugin/{id}/credentials → {ok, credentials: {key: "set"|"missing"}}
+    //
+    // Both are best-effort: a 404 (plugin not yet configured / no credentials
+    // declared) is fine — we just leave inputValues empty and _credPresent {}.
+    async _loadExisting() {
+      // Settings — pre-fill non-secret fields so the user sees their current
+      // values when re-entering Configure.
+      try {
+        const settings = await api(`/api/plugin/${this.plugin_id}/settings`);
+        if (settings && typeof settings === "object") {
+          Object.assign(this.inputValues, settings);
+        }
+      } catch (e) {
+        // 404 = plugin not yet configured; any other error is non-fatal.
+        // Leave inputValues empty.
+      }
+      // Credentials — mark which keys are already set in the keychain.
+      // The response shape is: {ok: bool, credentials: {key: "set"|"missing"}}
+      try {
+        const resp = await api(`/api/plugin/${this.plugin_id}/credentials`);
+        const credMap = (resp && resp.credentials) ? resp.credentials : {};
+        this._credPresent = {};
+        for (const [key, status] of Object.entries(credMap)) {
+          if (status === "set") this._credPresent[key] = true;
+        }
+      } catch (e) {
+        // 404 or transport error — leave _credPresent empty.
+        this._credPresent = {};
+      }
     },
 
     // Seed inputValues with declared defaults for the current input step.
@@ -311,11 +361,19 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       }
 
       if (step.kind === "done") {
-        // Enable the plugin then call the completion callback
+        // Enable was already POSTed by _triggerFirstRun on step entry, but
+        // re-issue it in case the user reached this step via a service-kind
+        // plugin (where _triggerFirstRun was skipped). Enable is idempotent.
         try {
           await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
         } catch (e) {
           console.warn("enable failed:", e);
+        }
+        // Cancel any in-flight first-run poll so we don't leak a setTimeout
+        // across the route change to the dashboard.
+        if (this.firstRunPollTimer !== null) {
+          clearTimeout(this.firstRunPollTimer);
+          this.firstRunPollTimer = null;
         }
         on_complete();
         return;
@@ -350,6 +408,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this.dpShowOther = false;
         this.dpSelectedId = null;
         this.dpForceNew = false;
+        this.dpNewName = "";
         // Reset permission check transient state
         this.permissionResult = null;
         this.permissionChecking = false;
@@ -380,6 +439,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this.dpShowOther = false;
         this.dpSelectedId = null;
         this.dpForceNew = false;
+        this.dpNewName = "";
         // Reset permission check transient state
         this.permissionResult = null;
         this.permissionChecking = false;
@@ -500,6 +560,97 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this.nextBlocked = true;
         this._resetPairState();
       }
+      if (this.current_step.kind === "done") {
+        // Auto-trigger the first run when the user reaches the done step.
+        // This closes the loop that user feedback (2026-05-26) flagged:
+        // "this should have offered run for the first time and reported
+        // success when i finished onboarding". For service-kind plugins
+        // (Attention, Plex webhook) there's no scheduled run to trigger
+        // — the service IS the plugin — so we skip and let the dashboard
+        // show "Healthy" once the first event lands.
+        if (this.plugin_contract.kind !== "service") {
+          this._triggerFirstRun();
+        }
+      }
+    },
+
+    // ---------------------------------------------------------------------
+    // First-run trigger + polling (wizard done step)
+    // ---------------------------------------------------------------------
+
+    async _triggerFirstRun() {
+      // Capture the prior last_run so we can tell whether the run we kick
+      // off has completed (vs reading a stale state from a previous run).
+      try {
+        const status = await api("/api/status");
+        const me = (status.plugins || []).find(p => p.id === this.plugin_id);
+        this._firstRunPriorLastRun = me?.last_run || null;
+      } catch (_) {
+        this._firstRunPriorLastRun = null;
+      }
+      // Make sure the plugin is enabled before we trigger — otherwise the
+      // run is a no-op. The done branch in next() also enables, but that
+      // hasn't fired yet (we're on done-step ENTRY, not Finish click).
+      try {
+        await api(`/api/plugin/${this.plugin_id}/enable`, { method: "POST" });
+      } catch (_) {}
+      this.firstRunStatus = "running";
+      this.firstRunSummary = "";
+      try {
+        await api(`/api/plugin/${this.plugin_id}/run`, { method: "POST" });
+      } catch (e) {
+        this.firstRunStatus = "error";
+        this.firstRunSummary = e.message || "Couldn't start the run.";
+        return;
+      }
+      // Poll /api/status every 1s for up to 10s. The run is done when
+      // last_run advances past _firstRunPriorLastRun.
+      const deadline = Date.now() + 10_000;
+      const tick = async () => {
+        try {
+          const status = await api("/api/status");
+          const me = (status.plugins || []).find(p => p.id === this.plugin_id);
+          if (me && me.last_run && me.last_run !== this._firstRunPriorLastRun) {
+            if (me.last_outcome === "done") {
+              this.firstRunStatus = "done";
+              this.firstRunSummary = "First run succeeded.";
+              // Build the timeline deep-link if the run resolved a
+              // definition_id. URL pattern is the timeline's annotation
+              // filter + a 24h window around the run; the timeline accepts
+              // unknown params gracefully (worst case the user lands on
+              // an unfiltered timeline, still useful). Open in a new tab
+              // — keep the daemon UI accessible too.
+              if (me.definition_id) {
+                const now = new Date();
+                const dayAgo = new Date(now.getTime() - 24 * 3600_000);
+                const params = new URLSearchParams({
+                  annotation: me.definition_id,
+                  start: dayAgo.toISOString(),
+                  end: now.toISOString(),
+                });
+                this.firstRunTimelineUrl =
+                  `https://context.fulcradynamics.com/timeline?${params.toString()}`;
+              }
+            } else {
+              this.firstRunStatus = "error";
+              this.firstRunSummary = (
+                me.last_error || `Last run reported ${me.last_outcome || "error"}.`
+              );
+            }
+            return;  // stop polling
+          }
+        } catch (_) {
+          // Network blip — keep polling until deadline.
+        }
+        if (Date.now() < deadline) {
+          this.firstRunPollTimer = setTimeout(tick, 1000);
+        } else {
+          this.firstRunStatus = "slow";
+          this.firstRunSummary =
+            "Run is still in progress — check the dashboard's status badge for the outcome.";
+        }
+      };
+      this.firstRunPollTimer = setTimeout(tick, 1000);
     },
 
     // ---------------------------------------------------------------------
@@ -632,6 +783,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       this.dpShowOther = false;
       this.dpSelectedId = null;
       this.dpForceNew = false;
+      this.dpNewName = "";
 
       // The step hints which annotation_type is compatible (e.g. "duration").
       // We fetch ALL defs and partition client-side so the user can see and
@@ -706,6 +858,13 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       this.dpSelectedId = null;
       this.dpForceNew = true;
       this.nextBlocked = false;
+      // Pre-fill the name input with the plugin's canonical name on first
+      // click. Don't clobber a typed value if the user re-clicks the
+      // button (e.g. toggling off another selection).
+      if (!this.dpNewName) {
+        this.dpNewName = (this.plugin_contract
+                          && this.plugin_contract.canonical_definition_name) || "";
+      }
     },
 
     dpHumanDate(isoString) {
@@ -732,9 +891,12 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     async _submitDefinitionPick() {
       try {
         if (this.dpForceNew) {
+          const trimmedName = (this.dpNewName || "").trim();
+          const payload = { force_new: true };
+          if (trimmedName) payload.new_name = trimmedName;
           await api(`/api/plugin/${this.plugin_id}/definition`, {
             method: "POST",
-            body: JSON.stringify({ force_new: true }),
+            body: JSON.stringify(payload),
           });
         } else if (this.dpSelectedId) {
           await api(`/api/plugin/${this.plugin_id}/definition`, {
@@ -815,9 +977,17 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       const fields = this.input_fields;
       for (const f of fields) {
         const val = this.inputValues[f.key] ?? "";
-        if (!val && (this.settingsMap[f.key]?.required !== false)) {
-          this.stepError = `"${f.label}" is required.`;
-          return false;
+        if (!val) {
+          if (f._kind === "credential" && this._credPresent[f.key]) {
+            // Credential is already set in the keychain and the user left the
+            // field blank — interpret as "keep existing value". Skip the PUT so
+            // we don't overwrite a live secret with an empty string.
+            continue;
+          }
+          if (this.settingsMap[f.key]?.required !== false) {
+            this.stepError = `"${f.label}" is required.`;
+            return false;
+          }
         }
         try {
           if (f._kind === "credential") {

@@ -4,6 +4,8 @@ The goal is one tiny live test per plugin: configure → trigger one run → con
 
 **Status legend**: ✅ verified end-to-end this session • ⚠️ wizard walks but third-party API rejects (need real creds) • ❌ not yet attempted
 
+**Cleanup is now first-class:** any orphan / experimental def created during these live tests can be soft-deleted from the dashboard via **Settings → Annotation tracks**. Bound plugins get their `definition_id` cleared server-side so the next run resolves a fresh def rather than writing to a tombstone.
+
 ## Group A — needs nothing from you
 
 - ✅ **Generic RSS/Atom feed** — pointed at https://news.ycombinator.com/rss with category=`read`. Run-now fetched 30 entries → 23 landed in Fulcra under a new "Read" def (`ac4edb9e-…`). Activity feed shows `"Hackernews: 30 new annotations"`. End-to-end verified 2026-05-26.
@@ -23,7 +25,7 @@ The goal is one tiny live test per plugin: configure → trigger one run → con
 
 ## Group C — needs real apps/services on this machine
 
-- ❌ **Apple Podcasts (on-device)** — the live DB at `~/Library/Group Containers/group.com.apple.podcasts/Documents/MTLibrary.sqlite` needs Full Disk Access granted to whichever process runs the daemon. Today's terminal has FDA. Want me to do a synthetic read and just print episode counts (no annotations posted)?
+- ❌ **Apple Podcasts (on-device)** — the live DB at `~/Library/Group Containers/group.com.apple.podcasts/Documents/MTLibrary.sqlite` needs Full Disk Access granted to whichever process runs the daemon. Today's terminal has FDA. With task #49 landed the wizard now has a `test_connection` step that opens the DB read-only and reports the played-episode count before you Run — no need for a separate synthetic read.
 - ❌ **Apple Podcasts (Time Machine recovery)** — needs a Time Machine backup mounted. Skip unless you specifically want to exercise this.
 - ❌ **Day One journal** — pick the mode: `live_app` (needs FDA) or `export_file` (one-time import of a Day One JSON export ZIP). Both leak journal text into the test annotations. Probably best skipped unless you have a throwaway journal.
 - ❌ **Plex/Jellyfin webhook receiver** — needs a Plex/Jellyfin server you can point at the daemon's webhook URL.

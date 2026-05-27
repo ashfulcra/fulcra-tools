@@ -33,6 +33,7 @@ fulcra-collect = "fulcra_collect.cli:cli"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4,<8",
+    "pytest-mock>=3.12",
     "ruff>=0.5",
 ]
 

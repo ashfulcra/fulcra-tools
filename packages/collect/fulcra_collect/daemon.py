@@ -18,6 +18,7 @@ import httpx
 
 from . import activity as _activity
 from . import config as config_mod
+from . import db as _db
 from . import runner, state
 from .config import Config
 from .control import ControlServer
@@ -49,6 +50,26 @@ def _distribution_for_plugin(plugin_id: str) -> str | None:
         if getattr(candidate, "id", None) == plugin_id:
             return ep.dist.name if ep.dist else None
     return None
+
+
+def _parse_iso8601(s: str) -> datetime:
+    """Parse an ISO-8601 timestamp into a timezone-aware datetime.
+
+    Accepts both the trailing 'Z' shorthand (which datetime.fromisoformat
+    in 3.10 doesn't accept) and the explicit '+00:00' offset form. Raises
+    ValueError on garbage so callers can return a clean error.
+
+    Used by ``_record_annotation`` when the menubar sends start_time /
+    end_time strings for Duration records.
+    """
+    if not isinstance(s, str) or not s:
+        raise ValueError("empty timestamp")
+    normalised = s.replace("Z", "+00:00") if s.endswith("Z") else s
+    dt = datetime.fromisoformat(normalised)
+    if dt.tzinfo is None:
+        # Naive datetimes are ambiguous; refuse rather than guess UTC.
+        raise ValueError(f"timestamp {s!r} has no timezone")
+    return dt
 
 
 def is_online(*, timeout: float = 2.0) -> bool:
@@ -179,19 +200,24 @@ class Daemon:
         logger = logging.getLogger("fulcra_collect.daemon")
         logger.warning("Invalidating plugin caches: %s", reason)
         cleared: list[str] = []
-        # Per-plugin state files at state/<id>.json — clear definition_id.
-        state_dir = config_mod.config_dir() / "state"
-        if state_dir.exists():
-            for path in state_dir.glob("*.json"):
-                plugin_id = path.stem
+        # Per-plugin state rows in state.db — clear definition_id on any
+        # row that has one cached. Phase 1 of refactor #1 moved per-plugin
+        # state out of state/<id>.json into the unified SQLite db; the
+        # surface here stays the same (load → mutate → save) but the
+        # enumeration is a SELECT instead of a directory glob.
+        try:
+            conn = _db.open()
+            for plugin_id in _db.all_plugin_ids(conn):
                 try:
                     st = state.load(plugin_id)
                     if getattr(st, "definition_id", None) is not None:
                         st.definition_id = None
                         state.save(st)
-                        cleared.append(f"state/{plugin_id}.json")
+                        cleared.append(f"plugin_state[{plugin_id}]")
                 except Exception:
                     logger.exception("invalidate: failed for %s", plugin_id)
+        except Exception:
+            logger.exception("invalidate: failed to enumerate plugin_state")
         # Per-package state files (media, attention). Deferred import
         # tolerates either being absent.
         for label, module_name, attrs in (
@@ -270,6 +296,28 @@ class Daemon:
             summary=summary,
             ok=True,
         )
+        # Also refresh the per-plugin state so the dashboard's status pill
+        # reflects "the pipeline is healthy". The plugin's diagnostic run()
+        # is the only OTHER writer of these fields, and it can leave a stale
+        # "error" / "Failing" badge in place for hours after a single early
+        # failure (e.g. user paired the extension after a manual Run that
+        # failed because no token was set yet). Extension events arriving
+        # successfully ARE evidence the pipeline is working — surface that.
+        # User feedback 2026-05-26: dashboard said "Failing" while the
+        # activity feed showed events landing every minute.
+        try:
+            from . import state as _state_mod
+            from datetime import datetime, timezone
+            st = _state_mod.load("attention-relay")
+            st.record_finish(
+                outcome="done",
+                when=datetime.now(timezone.utc),
+                error=None,
+            )
+            _state_mod.save(st)
+        except Exception:
+            # Best-effort; never let a UI-state refresh break event ingest.
+            pass
         self._attention_activity_last_at = now_mono
         self._attention_activity_count = 0
         self._attention_activity_clients.clear()
@@ -304,6 +352,16 @@ class Daemon:
             return self._record_annotation(
                 request.get("definition_id", ""),
                 request.get("comment", None),
+                start_time=request.get("start_time"),
+                end_time=request.get("end_time"),
+            )
+        if cmd == "delete_annotation":
+            return self._delete_annotation(request.get("source_id", ""))
+        if cmd == "get_quick_record_favorites":
+            return self._get_quick_record_favorites()
+        if cmd == "set_quick_record_favorites":
+            return self._set_quick_record_favorites(
+                request.get("favorites", []),
             )
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
@@ -322,6 +380,12 @@ class Daemon:
                 "last_outcome": st.last_outcome,
                 "last_error": st.last_error,
                 "consecutive_failures": st.consecutive_failures,
+                # Surface the currently-bound Fulcra annotation definition id
+                # so the wizard's "View on Fulcra timeline" deep-link can
+                # filter to events of this plugin's track. Null until the
+                # plugin's first run resolves a def (or the user picks one
+                # via the definition_picker step).
+                "definition_id": st.definition_id,
                 "default_interval_s": (
                     int(plugin.default_interval.total_seconds())
                     if plugin.default_interval else None
@@ -334,7 +398,14 @@ class Daemon:
         """Build the version dict cached at construction for the
         control-socket 'version' handler. Plugins whose distribution
         can't be resolved are silently omitted; an unresolvable daemon
-        version falls back to 'unknown'."""
+        version falls back to 'unknown'.
+
+        Also includes ``daemon_pid`` — captured here at construction time
+        so the menubar can show "Running (PID 12345)" in its daemon
+        controls section without having to call /api/version every tick.
+        Since ``handle_request({"cmd": "version"})`` is answered by THIS
+        process, os.getpid() is authoritative."""
+        import os
         plugins: dict[str, str] = {}
         for pid in self.registry.plugins:
             dist = _distribution_for_plugin(pid)
@@ -348,7 +419,11 @@ class Daemon:
             daemon_version = _im.version("fulcra-collect")
         except _im.PackageNotFoundError:
             daemon_version = "unknown"
-        return {"daemon_version": daemon_version, "plugins": plugins}
+        return {
+            "daemon_version": daemon_version,
+            "plugins": plugins,
+            "daemon_pid": os.getpid(),
+        }
 
     def _credential_status(self, plugin_id: str) -> dict:
         plugin = self.registry.plugins.get(plugin_id)
@@ -413,11 +488,29 @@ class Daemon:
             return {"ok": False, "error": "keychain delete failed"}
 
     def _quick_record_list(self) -> dict:
-        """List Moment annotation definitions for the menubar popover's
-        quick-record surface. Calls Fulcra's annotation-defs endpoint;
-        filters to annotation_type == 'moment'; sorts by most-recent-use.
-        Caches for 60s in-memory."""
+        """List non-deleted annotation definitions for the menubar
+        popover's quick-record surface. Calls Fulcra's annotation-defs
+        endpoint; excludes soft-deleted; sorts by (pinned-first,
+        annotation_type, created_at desc). Caches for 60s in-memory.
+
+        Sprint B (2026-05-26) widened this from Moment-only to all
+        annotation types so users can record Durations / Watched /
+        Listened / Read events from the menubar too.
+
+        Task #64 (2026-05-26) added a ``pinned`` field per def and made
+        favorites sort to the top of each annotation_type group. When
+        the user has any favorites set, the legacy 40-entry cap is
+        relaxed to ``all pinned + up to 20 unpinned`` so the popover's
+        "show all" disclosure always has at least a useful unpinned
+        slice to display. When NO favorites are set (first-launch
+        state), the previous 40-cap behavior is preserved so existing
+        users see no regression.
+
+        The shape stays a flat array — the menubar groups client-side
+        by ``annotation_type`` for the section headers.
+        """
         from . import credentials as _creds
+        from . import quick_record_favorites as _favs
         cache_ttl = 60.0
         now = time.monotonic()
         cached = getattr(self, "_quick_record_cache", None)
@@ -443,32 +536,163 @@ class Daemon:
                 "error": "Fulcra didn't respond. Check your internet, then try again.",
                 "definitions": [],
             }
-        # Filter to moments, exclude soft-deleted
-        moments = [d for d in all_defs
-                   if d.get("annotation_type") == "moment"
-                   and not d.get("deleted_at")]
-        # Sort by created_at descending as a v1 proxy for "recently used"
-        # (proper sort by recent annotation event timestamp is v1.5)
-        moments.sort(key=lambda d: d.get("created_at", ""), reverse=True)
-        # Limit to top 20 so popover doesn't get long
-        moments = moments[:20]
-        self._quick_record_cache = {"at": now, "defs": moments}
-        return {"ok": True, "definitions": moments}
+        # Drop soft-deleted defs but keep ALL annotation types.
+        live = [d for d in all_defs if not d.get("deleted_at")]
+        # Group ordering: moments first, then durations, then anything else
+        # alphabetically; within each group, most-recently-created first.
+        # This mirrors how the popover lays out section headers so the
+        # daemon's order is already correct without re-sorting client-side.
+        _GROUP_ORDER = {"moment": 0, "duration": 1}
+        live.sort(key=lambda d: (
+            _GROUP_ORDER.get(d.get("annotation_type", ""), 2),
+            d.get("annotation_type", ""),
+            # Negate via reverse-string trick on created_at: sort desc by
+            # using a tuple where the second element is the negated
+            # lexicographic order — but Python doesn't negate strings, so
+            # we use the trick of sorting by created_at desc separately
+            # via a stable two-pass.
+        ))
+        # Stable sort preserves the group ordering above; then within
+        # each group sort pinned-first, then by created_at desc. Apply
+        # group-by, sort, flatten. Annotate each def with a ``pinned``
+        # boolean so the menubar can render the star state without re-
+        # consulting the favorites file.
+        favorites = _favs.load()
+        from itertools import groupby
+        flattened: list[dict] = []
+        for _, group in groupby(live, key=lambda d: (
+            _GROUP_ORDER.get(d.get("annotation_type", ""), 2),
+            d.get("annotation_type", ""),
+        )):
+            group_list = list(group)
+            for entry in group_list:
+                entry["pinned"] = entry.get("id") in favorites
+            # Two-key sort: pinned (True first) then created_at desc.
+            # Python sorts True > False so we negate via ``not pinned``.
+            group_list.sort(
+                key=lambda d: (not d.get("pinned", False),
+                               # reverse via prepending NUL bytes is uglier
+                               # than a separate reverse sort — fall back
+                               # to a stable two-pass:
+                               ""),
+            )
+            # Within each (pinned-bucket), sort by created_at desc. We
+            # do this by splitting the group then re-concatenating, so
+            # pinned defs are ordered most-recent-first AMONG pinned
+            # and unpinned defs are ordered most-recent-first AMONG
+            # unpinned — exactly what the spec asks for.
+            pinned_part = [d for d in group_list if d.get("pinned")]
+            unpinned_part = [d for d in group_list if not d.get("pinned")]
+            pinned_part.sort(key=lambda d: d.get("created_at", ""),
+                              reverse=True)
+            unpinned_part.sort(key=lambda d: d.get("created_at", ""),
+                                reverse=True)
+            flattened.extend(pinned_part + unpinned_part)
+        # Cap behavior:
+        #   - No favorites set → 40-entry cap (legacy first-launch shape).
+        #   - Favorites set → keep ALL pinned + at most 20 unpinned so
+        #     the "show all" disclosure has something meaningful to
+        #     surface but the popover doesn't grow unbounded on accounts
+        #     with hundreds of defs. Preserve the existing flattened
+        #     order (which already has pinned-first WITHIN each group)
+        #     by walking the list once and dropping unpinned entries
+        #     past index 20.
+        if favorites:
+            kept: list[dict] = []
+            unpinned_kept = 0
+            for d in flattened:
+                if d.get("pinned"):
+                    kept.append(d)
+                elif unpinned_kept < 20:
+                    kept.append(d)
+                    unpinned_kept += 1
+            flattened = kept
+        else:
+            flattened = flattened[:40]
+        self._quick_record_cache = {"at": now, "defs": flattened}
+        return {"ok": True, "definitions": flattened}
 
-    def _record_annotation(self, definition_id: str, comment: str | None) -> dict:
-        """Write one Moment annotation immediately to Fulcra. Used by the
+    # ---- favorites dispatch -------------------------------------------
+
+    def _get_quick_record_favorites(self) -> dict:
+        """Return the user's saved favorite def_ids. Always succeeds —
+        absence is just an empty list."""
+        from . import quick_record_favorites as _favs
+        return {"ok": True, "favorites": sorted(_favs.load())}
+
+    def _set_quick_record_favorites(self, favorites) -> dict:
+        """Replace the favorites list and invalidate the quick-record
+        cache so the very next list call surfaces the new ordering.
+
+        Defensive on the input shape — anything non-stringy in the
+        list is dropped silently so a malformed client doesn't poison
+        the file.
+        """
+        from . import quick_record_favorites as _favs
+        if not isinstance(favorites, list):
+            return {"ok": False, "error": "favorites must be a list of def ids"}
+        cleaned = {x for x in favorites if isinstance(x, str) and x}
+        try:
+            _favs.save(cleaned)
+        except OSError as exc:
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "set_quick_record_favorites: save failed",
+            )
+            return {"ok": False, "error": f"could not persist favorites: {exc}"}
+        # Bust the cached list so the next _quick_record_list re-sorts
+        # against the freshly-written favorites. Without this, the
+        # menubar would keep showing the old order for up to 60s.
+        self._quick_record_cache = None
+        return {"ok": True}
+
+    def _record_annotation(self, definition_id: str, comment: str | None,
+                           start_time: str | None = None,
+                           end_time: str | None = None) -> dict:
+        """Write one annotation immediately to Fulcra. Used by the
         menubar's quick-record buttons and the web UI's /api/annotations
-        endpoint. Records timestamp=now.
+        endpoint.
 
-        Uses the same /ingest/v1/record/batch + CloudEvents wire format as
-        every plugin importer (see fulcra_common.wire). Until 2026-05-25
-        this method POSTed to a dead /data/v0/annotations URL with the
-        wrong payload shape and got a silent 404 every time."""
+        Modes:
+
+        - Moment (default): pass neither ``start_time`` nor ``end_time``;
+          the daemon writes a MomentAnnotation at now.
+
+        - Duration: pass BOTH ``start_time`` and ``end_time`` as
+          ISO-8601 UTC strings; the daemon writes a DurationAnnotation
+          with ``recorded_at = {start_time, end_time}`` and a
+          ``duration_seconds`` field in the data payload. Sprint B
+          (2026-05-26) added this so the menubar can record finished
+          movies / listening sessions / reading sessions inline.
+
+        Uses the same /ingest/v1/record/batch + CloudEvents wire format
+        as every plugin importer (see fulcra_common.wire). Per-call
+        source_id (uuid) — duplicate clicks intentionally produce
+        duplicate events; that's the menubar button's whole job.
+        """
         import uuid
         from fulcra_common import wire
         from . import credentials as _creds
         if not definition_id:
             return {"ok": False, "error": "definition_id required"}
+        # Partial duration spec is a caller bug — surface clearly rather
+        # than silently fall back to Moment.
+        if (start_time is None) != (end_time is None):
+            return {
+                "ok": False,
+                "error": "start_time and end_time must both be set or both be omitted",
+            }
+        # Validate the duration range upfront — surface clear errors
+        # before we waste a network round-trip on the def lookup.
+        parsed_start: datetime | None = None
+        parsed_end: datetime | None = None
+        if start_time is not None and end_time is not None:
+            try:
+                parsed_start = _parse_iso8601(start_time)
+                parsed_end = _parse_iso8601(end_time)
+            except ValueError as exc:
+                return {"ok": False, "error": f"invalid timestamp: {exc}"}
+            if parsed_end <= parsed_start:
+                return {"ok": False, "error": "end_time must be after start_time"}
         token = _creds.get_user_secret("bearer-token")
         if not token:
             return {"ok": False, "error": "Fulcra not authenticated"}
@@ -497,18 +721,36 @@ class Daemon:
                     "error": f"unknown definition id {definition_id!r}"}
 
         now = datetime.now(timezone.utc)
-        record = wire.build_record(
-            data_type=wire.MOMENT_ANNOTATION,
-            start_time=now,
-            data={"comment": comment or ""},
-            # Per-call UUID — duplicate clicks should produce duplicate
-            # moments rather than dedup, since "I want to record this NOW"
-            # is the menubar button's whole job.
-            source_id=(f"com.fulcradynamics.fulcra-collect.quick-record."
-                       f"{uuid.uuid4()}"),
-            tags=def_dict.get("tags") or [],
-            definition_id=definition_id,
+        source_id = (
+            f"com.fulcradynamics.fulcra-collect.quick-record.{uuid.uuid4()}"
         )
+        if parsed_start is not None and parsed_end is not None:
+            # Duration record. ISO strings were already validated above.
+            start_dt = parsed_start
+            end_dt = parsed_end
+            duration_seconds = (end_dt - start_dt).total_seconds()
+            data_payload = {
+                "comment": comment or "",
+                "duration_seconds": duration_seconds,
+            }
+            record = wire.build_record(
+                data_type=wire.DURATION_ANNOTATION,
+                start_time=start_dt,
+                end_time=end_dt,
+                data=data_payload,
+                source_id=source_id,
+                tags=def_dict.get("tags") or [],
+                definition_id=definition_id,
+            )
+        else:
+            record = wire.build_record(
+                data_type=wire.MOMENT_ANNOTATION,
+                start_time=now,
+                data={"comment": comment or ""},
+                source_id=source_id,
+                tags=def_dict.get("tags") or [],
+                definition_id=definition_id,
+            )
         body = wire.encode_batch([record])
         try:
             with httpx.Client(timeout=10.0, follow_redirects=True) as client:
@@ -539,7 +781,89 @@ class Daemon:
         self.activity.add(plugin_id="quick-record",
                           summary=f"Recorded \"{name}\"",
                           ok=True)
-        return {"ok": True}
+        # Return the source_id so the caller (menubar) can stash it in
+        # the "Recently recorded" list and reference it later if the
+        # user clicks Undo. We don't return a fabricated event_id because
+        # Fulcra's ingest endpoint doesn't echo one — source_id is the
+        # only handle the user side has for this event.
+        return {"ok": True, "source_id": source_id, "name": name}
+
+    def _delete_annotation(self, source_id: str) -> dict:
+        """Write a "deleted" sentinel annotation referencing ``source_id``.
+
+        IMPORTANT: this is a SOFT marker, not a hard delete. Fulcra's
+        backend offers no per-event delete primitive (verified
+        2026-05-26 via packages/media-helpers/scripts/probe_soft_delete_3.py
+        — the matrix shows 405 / 404 across every {GET, POST, PUT,
+        PATCH, DELETE} attempt on /data/v1alpha1/event/...). The
+        original record stays in the user's timeline indefinitely.
+
+        What we DO write is a separate annotation tagged with the
+        original source_id in its data payload — a "tombstone" that the
+        Fulcra UI may or may not surface as a strikethrough on the
+        original. The menubar uses this purely as a paper trail so the
+        user can see (in the activity buffer) that an undo happened. The
+        menubar ALSO greys out the row in its in-memory "Recently
+        recorded" list so the user doesn't keep clicking Undo.
+
+        If the user is paying attention to their Fulcra timeline, they
+        will still see the original event. The menubar's UI calls this
+        out in the Undo button's tooltip.
+        """
+        import uuid
+        from fulcra_common import wire
+        from . import credentials as _creds
+        if not source_id:
+            return {"ok": False, "error": "source_id required"}
+        token = _creds.get_user_secret("bearer-token")
+        if not token:
+            return {"ok": False, "error": "Fulcra not authenticated"}
+
+        now = datetime.now(timezone.utc)
+        tombstone_source_id = (
+            f"com.fulcradynamics.fulcra-collect.quick-record.undo."
+            f"{uuid.uuid4()}"
+        )
+        record = wire.build_record(
+            data_type=wire.MOMENT_ANNOTATION,
+            start_time=now,
+            data={
+                "comment": "[deleted via Fulcra Collect menubar undo]",
+                "superseded_by": "deleted",
+                "supersedes_source_id": source_id,
+            },
+            source_id=tombstone_source_id,
+            tags=[],
+            definition_id=None,
+        )
+        body = wire.encode_batch([record])
+        try:
+            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                r = client.post(
+                    "https://api.fulcradynamics.com/ingest/v1/record/batch",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "content-type": "application/x-jsonl",
+                    },
+                    content=body,
+                )
+                r.raise_for_status()
+        except Exception as exc:
+            logging.getLogger("fulcra_collect.daemon").exception(
+                "_delete_annotation(%s): Fulcra API request failed", source_id
+            )
+            self.activity.add(plugin_id="quick-record",
+                              summary=f"undo failed: {exc}", ok=False)
+            return {
+                "ok": False,
+                "error": "Fulcra didn't accept the undo request. Check your internet, then try again.",
+            }
+        self.activity.add(
+            plugin_id="quick-record",
+            summary=f"Undid recording (tombstone for {source_id[:12]}…)",
+            ok=True,
+        )
+        return {"ok": True, "tombstone_source_id": tombstone_source_id}
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
@@ -603,6 +927,20 @@ class Daemon:
         tick loop or the control socket."""
         from .supervisor import ServiceSupervisor
 
+        # Open the unified state db before anything else touches state —
+        # this runs schema migrations (including the one-shot import of
+        # legacy state/<id>.json files into the plugin_state table) so
+        # the very first state.load() call below sees a populated db.
+        # Idempotent: a subsequent open() in this thread is a cache hit.
+        try:
+            _db.open()
+        except Exception:
+            logging.getLogger("fulcra_collect").exception(
+                "state.db open/migrate failed; the daemon cannot run "
+                "without a working state store",
+            )
+            raise
+
         server = ControlServer(_control_socket_path(), self.handle_request)
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -615,6 +953,20 @@ class Daemon:
         except Exception:
             logging.getLogger("fulcra_collect").exception(
                 "web UI failed to start; the daemon will keep running without it",
+            )
+
+        # Best-effort launch of the macOS menubar app so the user gets a
+        # status icon without needing a separate command. Non-fatal —
+        # see menubar_launcher.try_launch_menubar docstring.
+        try:
+            from . import menubar_launcher
+            menubar_launcher.try_launch_menubar()
+        except Exception:
+            # try_launch_menubar already swallows its own errors; this
+            # outer guard is for the import itself in case the module
+            # fails to load on a weird platform.
+            logging.getLogger("fulcra_collect").exception(
+                "menubar auto-launch hook crashed (non-fatal)",
             )
 
         supervisor = ServiceSupervisor()

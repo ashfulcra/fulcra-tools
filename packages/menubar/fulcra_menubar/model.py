@@ -115,6 +115,26 @@ class StatusModel:
     def failing_count(self) -> int:
         return sum(1 for p in self.plugins if p.enabled and p.consecutive_failures > 0)
 
+    @property
+    def failing_critical_count(self) -> int:
+        """Plugins with >=3 consecutive failures — the "Failing" pill on the
+        dashboard and the threshold the notifications layer fires on.
+        Surfaced separately from failing_warning_count so the menubar
+        icon can paint two tiers (amber = "Failed, give it a beat" /
+        red = "Failing, needs attention") matching the dashboard pill
+        mapping landed 2026-05-26.
+        """
+        return sum(1 for p in self.plugins
+                   if p.enabled and p.consecutive_failures >= 3)
+
+    @property
+    def failing_warning_count(self) -> int:
+        """Plugins with 1-2 consecutive failures — the dashboard's amber
+        "Failed — run again" pill. Distinguishes a transient hiccup from
+        a persistent failure the user needs to look at."""
+        return sum(1 for p in self.plugins
+                   if p.enabled and 0 < p.consecutive_failures < 3)
+
     def _reconcile_in_flight(self) -> None:
         """A plugin id leaves in_flight once its snapshot's last_run
         has advanced past the value we captured at mark_in_flight time.
