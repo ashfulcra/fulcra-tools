@@ -8,6 +8,7 @@ from AppKit import (  # type: ignore[import-not-found]
     NSButton, NSColor, NSImage, NSTextField, NSView, NSMakeRect,
 )
 
+from .._daemon_url import daemon_url
 from .._dispatch import on_main_thread
 from ..model import OverallState, StatusModel
 from .._objc_targets import attach as _attach
@@ -97,8 +98,11 @@ def make_header(
         # URL-param handler added in SP4 task 1). subprocess open is the
         # standard macOS default-browser opener; check=False because a
         # failure to launch the browser shouldn't crash the menubar.
+        # daemon_url() respects the user's [daemon] web_port override
+        # (vs. the prior hardcoded 9292 that silently broke for users
+        # who picked a different port).
         subprocess.run(
-            ["open", "http://127.0.0.1:9292/?route=docs"],
+            ["open", daemon_url("/?route=docs")],
             check=False,
         )
 

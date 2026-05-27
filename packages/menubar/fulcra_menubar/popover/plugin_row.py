@@ -9,7 +9,7 @@ Column boundaries (no-overlap):
   right_text: x=146, w=198 → ends at x=344  (right-aligned, y=28)
   Disable:   x=148, w=60,  y=8, h=22 → ends at x=208  (only when snap.enabled)
   Configure: x=212, w=72,  y=8, h=22 → ends at x=284  (always shown)
-  Run now:   x=288, w=58,  y=8, h=22 → ends at x=346  (when has_button)
+  Run now:   x=288, w=58,  y=8, h=22 → ends at x=346  (when has_run_now)
 
 SP4 task 3 (drift audit 2026-05-27) added the Configure + Disable buttons
 to mirror the dashboard's {Run now, Configure, Disable} action set. The
@@ -31,6 +31,7 @@ from AppKit import (  # type: ignore[import-not-found]
 
 from fulcra_collect import config as _config
 
+from .._daemon_url import daemon_url
 from ..daemon_client import DaemonClient
 from ..model import PluginSnapshot, StatusModel
 from .._objc_targets import attach as _attach
@@ -122,7 +123,11 @@ def make_row(snapshot: PluginSnapshot, *, client: DaemonClient,
     configure_btn.setBezelStyle_(NSBezelStyleRounded)
 
     def _on_configure(_sender, plugin_id=snapshot.id):
-        url = f"http://127.0.0.1:9292/?route=configure&plugin={plugin_id}"
+        # daemon_url() reads the daemon's well-known web-url file so this
+        # respects a custom [daemon] web_port (vs. the prior hardcoded
+        # 9292 that silently broke the Configure deep-link for users on
+        # non-default ports).
+        url = daemon_url(f"/?route=configure&plugin={plugin_id}")
         subprocess.run(["open", url], check=False)
 
     _attach(configure_btn, _on_configure)
