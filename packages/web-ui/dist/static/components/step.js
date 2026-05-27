@@ -19,9 +19,10 @@ class FulcraStep extends FulcraStepBase {
   render() {
     if (!this.step) return nothing;
     const tag = window.FulcraStepComponents[this.step.kind];
-    // No component registered for this kind yet — render nothing so the
-    // existing Alpine inline <template> takes over. This is the Phase 2
-    // incremental-migration hinge.
+    // No component registered for this kind — render nothing. This is the
+    // forward-compat safety net for the case where a new SetupStep kind
+    // ships from the daemon to an older web-ui build that hasn't grown a
+    // component for it yet.
     if (!tag) return nothing;
     // Lit's tagged-template expects a static tag name, not a dynamic one.
     // Build the child element imperatively and let Lit's child rendering
