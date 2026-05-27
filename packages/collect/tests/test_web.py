@@ -83,31 +83,9 @@ def test_token_file_has_0600_permissions(collect_home, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# In-memory keyring fixture (prevents touching the real OS keychain)
+# In-memory keyring fixture — moved to conftest.py so daemon-method tests
+# (e.g. test_daemon_delete_definition.py) can share it without duplication.
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def _in_memory_keyring(monkeypatch):
-    """Replace keyring backend with a simple dict so tests are hermetic."""
-    store: dict[tuple[str, str], str] = {}
-
-    def _set(service, key, value):
-        store[(service, key)] = value
-
-    def _get(service, key):
-        return store.get((service, key))
-
-    def _delete(service, key):
-        import keyring.errors
-        if (service, key) not in store:
-            raise keyring.errors.PasswordDeleteError("not found")
-        del store[(service, key)]
-
-    import fulcra_collect.credentials as _creds_mod
-    monkeypatch.setattr(_creds_mod.keyring, "set_password", _set)
-    monkeypatch.setattr(_creds_mod.keyring, "get_password", _get)
-    monkeypatch.setattr(_creds_mod.keyring, "delete_password", _delete)
-    return store
 
 
 # ---------------------------------------------------------------------------

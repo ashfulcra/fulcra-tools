@@ -225,117 +225,43 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
     def delete_definition_route(def_id: str):
         """Soft-delete a Fulcra annotation definition (task #42).
 
-        Returns 200 with {"ok": True} on success, 404 if the def doesn't
-        exist (or was already soft-deleted server-side). Events written
-        under the def remain in Fulcra but the def no longer appears in
-        the definitions list and any plugin caching it gets its cached
-        definition_id cleared so the next run resolves a fresh one
-        instead of trying to write to a dangling reference.
+        HTTP shim over :meth:`Daemon._delete_definition` — the business
+        logic moved to ``daemon.py`` in SP2 task 1 so the menubar can
+        call the same code path via UDS. Returns the same shape as
+        before; translates ``{"ok": False, "error": ...}`` returns back
+        into ``HTTPException`` so the HTTP API contract is unchanged.
+
+        The route still performs the 401 check upfront (rather than
+        relying on the daemon method's "not signed in" return) so the
+        HTTP surface keeps returning 401 with the original
+        ``HTTPException`` message for callers that depend on it. The
+        daemon method's identical "not signed in" return is reserved
+        for UDS callers (menubar) that bypass HTTP auth entirely.
         """
-        from .. import web as _web  # late import — tests monkeypatch web.httpx
-
-        _log = logging.getLogger("fulcra_collect.web")
-        fulcra_token = fulcra_token_or_401()
-        # Talk to Fulcra via httpx the same way /api/definitions does —
-        # the BaseFulcraClient.soft_delete_definition primitive expects
-        # its own auth path, and we want to share error-handling +
-        # connection setup with the existing list/recent routes.
-        try:
-            with fulcra_http_client(fulcra_token) as client:
-                r = client.delete(f"/user/v1alpha1/annotation/{def_id}")
-                if r.status_code == 404:
-                    raise HTTPException(
-                        404,
-                        "Definition not found — it may have already been deleted.",
-                    )
-                if r.status_code != 204:
-                    r.raise_for_status()
-        except HTTPException:
-            raise
-        except _web.httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            _log.warning("delete_definition(%s): Fulcra returned %s", def_id, status)
-            if status in (401, 403):
-                raise HTTPException(
-                    401,
-                    "Fulcra rejected the request — your sign-in may have expired. "
-                    "Re-run sign-in from the wizard or paste a fresh token.",
-                ) from exc
-            if 500 <= status < 600:
-                raise HTTPException(
-                    502,
-                    f"Fulcra returned {status}. Try again in a moment.",
-                ) from exc
-            raise HTTPException(
-                502,
-                f"Fulcra returned an unexpected {status}.",
-            ) from exc
-        except (_web.httpx.ConnectError, _web.httpx.ConnectTimeout) as exc:
-            _log.warning("delete_definition(%s): connect failed: %r", def_id, exc)
-            raise HTTPException(
-                502,
-                "Couldn't reach Fulcra. Check your internet, then try again.",
-            ) from exc
-        except _web.httpx.TimeoutException as exc:
-            _log.warning("delete_definition(%s): timed out: %r", def_id, exc)
-            raise HTTPException(
-                504,
-                "Fulcra took too long to respond. Try again in a moment.",
-            ) from exc
-        except Exception as exc:
-            _log.exception("delete_definition(%s): unexpected failure", def_id)
-            raise HTTPException(
-                502,
-                f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
-                "Check the daemon log for details.",
-            ) from exc
-
-        # Clear the cached definition_id on any plugin that was bound to
-        # the deleted def. Without this the next run would try to write
-        # to a tombstoned def and either silently fail or re-create a new
-        # def on the side (depending on the plugin's error path).
-        from .. import state as _state_mod
-        cleared: list[str] = []
-        for p in daemon.registry.plugins.values():
-            try:
-                st = _state_mod.load(p.id)
-            except Exception:
-                # Per-plugin state corruption shouldn't abort the delete.
-                continue
-            if getattr(st, "definition_id", None) == def_id:
-                st.definition_id = None
-                _state_mod.save(st)
-                cleared.append(p.id)
-        if cleared:
-            _log.info(
-                "delete_definition(%s): cleared cached definition_id on %d plugin(s): %s",
-                def_id, len(cleared), ", ".join(cleared),
-            )
-        # Also drop this def from quick-record favorites if it was pinned.
-        # Without this the favorites file would accumulate orphan UUIDs
-        # the menubar would keep trying to surface but Fulcra would no
-        # longer return. Best-effort: a favorites I/O failure shouldn't
-        # roll back the (successful) Fulcra-side delete.
-        try:
-            from .. import quick_record_favorites as _favs
-            current = _favs.load()
-            if def_id in current:
-                current.discard(def_id)
-                _favs.save(current)
-                # Bust the daemon's quick-record cache so the next list
-                # call doesn't briefly resurrect the deleted def with a
-                # stale ``pinned`` flag.
-                daemon._quick_record_cache = None
-                _log.info(
-                    "delete_definition(%s): removed from quick-record favorites",
-                    def_id,
-                )
-        except Exception:
-            _log.exception(
-                "delete_definition(%s): could not prune favorites; non-fatal",
-                def_id,
-            )
-        return {"ok": True, "cleared_plugins": cleared}
+        # Reuse the existing 401 path so the HTTP response carries the
+        # original "set a bearer token first" wording. The daemon method
+        # also re-checks the token (it can't trust the caller) — extra
+        # work in the success path, but cheap and keeps both surfaces
+        # self-contained.
+        fulcra_token_or_401()
+        result = daemon._delete_definition(def_id)
+        if result.get("ok"):
+            return result
+        # Translate UDS error returns back into HTTPException for the
+        # HTTP surface. The daemon returns a machine-readable `code`
+        # field alongside `error` so the mapping is stable across
+        # daemon-message wording tweaks (the previous string-sniff
+        # implementation coupled HTTP status to error-text content).
+        err = result.get("error", "delete failed")
+        code = result.get("code", "upstream_error")
+        status_map = {
+            "bad_request": 400,
+            "unauthorized": 401,
+            "not_found": 404,
+            "timeout": 504,
+            "upstream_error": 502,
+        }
+        raise HTTPException(status_map.get(code, 502), err)
 
     @app.delete("/api/plugin/{plugin_id}/definition", dependencies=[Depends(require_token)])
     def clear_definition(plugin_id: str):
