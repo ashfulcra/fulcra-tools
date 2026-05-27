@@ -108,17 +108,20 @@ right entry point.
 
 URLs emitted today:
 
-- `http://127.0.0.1:9292/?route=docs` — `popover/header.py`, the "?"
-  button next to the status pill.
-- `http://127.0.0.1:9292/?route=configure&plugin=<id>` —
-  `popover/plugin_row.py`, the per-row Configure button.
+- `/?route=docs` — `popover/header.py`, the "?" button next to the
+  status pill.
+- `/?route=configure&plugin=<id>` — `popover/plugin_row.py`, the per-row
+  Configure button.
 
-The host and port are currently hardcoded to `127.0.0.1:9292` — that
-matches the daemon's default `[daemon] web_port` config. If the user
-has overridden the port a deep-link will land on the wrong URL; the
-follow-up is to thread a `_daemon_url` helper through these two call
-sites that reads the configured port. Until that lands, treat the
-hardcoded URL as a known papercut for non-default deployments.
+Both call sites construct the full URL via `daemon_url(path)` from
+`fulcra_menubar/_daemon_url.py`. That helper reads the daemon's
+well-known `~/.config/fulcra-collect/web-url` file (written by the
+daemon at startup; respects the user's `[daemon] web_port` override)
+and falls back to `http://127.0.0.1:<configured-port>` if the file
+is unreadable. So custom-port deployments work end-to-end. If you
+add a new deep-link emission site here, route it through `daemon_url`
+rather than hardcoding the URL — otherwise the port-override path
+silently breaks.
 
 The consumer side lives in `packages/web-ui/dist/static/app.js`'s
 `boot()` handler — see that package's README ("URL-param deep-links")
