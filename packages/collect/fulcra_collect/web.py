@@ -58,6 +58,128 @@ def _web_token_path() -> Path:
     return _config.config_dir() / "web-token"
 
 
+# ---------------------------------------------------------------------------
+# Refresh-aware Fulcra HTTP client (SP5 task 1 / 2)
+# ---------------------------------------------------------------------------
+#
+# ``_RetryingClient`` lives at module scope (rather than nested inside
+# :func:`fulcra_http_client`'s closure) so that
+# :meth:`fulcra_collect.daemon.Daemon._delete_definition` — which is reached
+# via the local UDS socket, not through the FastAPI routing layer — can
+# import + instantiate the same wrapper. Both call sites need identical
+# refresh-on-401 behaviour; lifting the class avoids duplicating the retry
+# plumbing in daemon.py.
+#
+# The wrapper deliberately reaches httpx via ``fulcra_collect.web.httpx``
+# (the module-level attribute imported above), NOT via a captured ``httpx``
+# at class-definition time. A number of tests monkeypatch
+# ``fulcra_collect.web.httpx`` to substitute a fake HTTP client; reading
+# the attribute lazily inside ``__init__`` is what makes the patch win for
+# both the route side and the daemon side.
+
+class _RetryingClient:
+    """httpx.Client wrapper that refreshes-and-retries on 401.
+
+    Forwards GET/POST/PUT/DELETE/PATCH/HEAD through a wrapping shim that,
+    on a 401 response, invokes
+    :func:`fulcra_collect.credentials.refresh_fulcra_access_token` to get
+    a fresh access token from the CLI's refresh-token store, swaps the
+    ``Authorization`` header on the inner client, and retries the same
+    request once. If the retry also fails (refresh helper returned None),
+    the original 401 response is returned and the credentials module's
+    ``_refresh_failed`` flag is already set so the web UI can show a
+    Reconnect banner via ``/api/fulcra/auth/status``.
+
+    Every other attribute (``headers``, ``close``, the context-manager
+    protocol, etc.) passes through to the inner client unchanged so
+    existing callers see no behaviour difference.
+
+    Constructor takes a ``user_agent`` so the route side
+    (``fulcra-collect/web-ui``) and the daemon side
+    (``fulcra-collect/daemon``) keep their distinct identifiers — useful
+    for log triage when something goes wrong upstream.
+    """
+
+    # Wrapped HTTP-verb methods. httpx.Client.request() and .stream() are
+    # DELIBERATELY NOT in this set — current Fulcra-API call sites only use
+    # the named-verb shortcuts, and adding generic .request() interception
+    # would require parsing the method out of the *args (since it's the
+    # first positional arg, not a method name on the client). If a future
+    # caller needs request()/stream() with refresh-on-401, add to the
+    # whitelist below AND extend _wrap to handle the method-in-args shape.
+    _METHODS = ("get", "post", "put", "delete", "patch", "head")
+
+    def __init__(
+        self,
+        token: str,
+        *,
+        user_agent: str = "fulcra-collect/web-ui",
+    ) -> None:
+        from fulcra_common import DEFAULT_BASE_URL
+        # Reach httpx via this module's attribute so tests that monkeypatch
+        # ``fulcra_collect.web.httpx`` get their stub used — see the module
+        # comment above. Local import keeps the lookup lazy.
+        import fulcra_collect.web as _self
+
+        self._inner = _self.httpx.Client(
+            base_url=DEFAULT_BASE_URL,
+            timeout=15.0,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": user_agent,
+            },
+            follow_redirects=True,
+        )
+
+    # --- context-manager protocol ----------------------------------
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+    def close(self) -> None:
+        self._inner.close()
+
+    # --- 401-retry plumbing ---------------------------------------
+    def _retry_with_fresh_token(self, method: str, *args, **kwargs):
+        """Refresh via CLI, swap auth header, retry the request once.
+
+        Returns the retry response, or ``None`` if the refresh helper
+        itself failed (CLI missing, exhausted, etc.) — in that case the
+        caller returns the original 401 and the process-level
+        ``_refresh_failed`` flag is already set.
+        """
+        from . import credentials as _creds
+
+        fresh = _creds.refresh_fulcra_access_token()
+        if not fresh:
+            return None
+        self._inner.headers["Authorization"] = f"Bearer {fresh}"
+        return getattr(self._inner, method)(*args, **kwargs)
+
+    def _wrap(self, method: str):
+        def wrapped(*args, **kwargs):
+            response = getattr(self._inner, method)(*args, **kwargs)
+            if response.status_code == 401:
+                retry_resp = self._retry_with_fresh_token(
+                    method, *args, **kwargs,
+                )
+                if retry_resp is not None:
+                    return retry_resp
+            return response
+
+        return wrapped
+
+    def __getattr__(self, name: str):
+        # Forward GET/POST/PUT/DELETE/etc. — these are the call sites that
+        # need 401-retry. Other attributes (e.g. ``.headers``) pass through
+        # to the inner client directly.
+        if name in self._METHODS:
+            return self._wrap(name)
+        return getattr(self._inner, name)
+
+
 def _web_url_path() -> Path:
     return _config.config_dir() / "web-url"
 
@@ -152,113 +274,22 @@ def build_app(daemon) -> FastAPI:
         return token_val
 
     def fulcra_http_client(fulcra_token: str):
-        """Return an httpx.Client-like pre-configured to talk to the Fulcra API.
+        """Return a refresh-aware httpx.Client-like pre-configured for Fulcra.
 
-        Wraps the standard ``httpx.Client`` so that on a 401 response, the
-        client transparently invokes
+        Thin factory; the real wrapper lives at module scope as
+        :class:`_RetryingClient` so the daemon's UDS-side soft-delete path
+        (``Daemon._delete_definition``) can construct the same kind of
+        client without duplicating the retry plumbing — see SP5 task 2.
+
+        On a 401 the wrapper invokes
         :func:`fulcra_collect.credentials.refresh_fulcra_access_token` to
-        get a fresh access token from the fulcra CLI's refresh-token
-        store, updates the ``Authorization`` header on the inner client,
-        and retries the same request once. If the retry also fails
-        (because the CLI's refresh token has ALSO expired or the tenant
-        revoked access), the original 401 response is returned to the
-        caller — and the credentials module's ``_refresh_failed`` flag is
-        already set so ``/api/fulcra/auth/status`` will surface it and
-        the web UI can show a Reconnect banner (SP5 task 3).
-
-        Goes through this module's ``httpx`` attribute so tests that
-        monkeypatch ``fulcra_collect.web.httpx`` see their stub used.
-
-        Why not just call ``refresh_fulcra_access_token`` at the call
-        site: every Fulcra-management code path would have to remember
-        to do it, and we'd duplicate the retry boilerplate. Wrapping at
-        the client level keeps callers identical to before and lets the
-        retry logic live in one place.
+        mint a fresh access token via the ``fulcra`` CLI's refresh-token
+        store, swaps the Authorization header, and retries once. If the
+        retry also fails the original 401 is returned and the credentials
+        module's ``_refresh_failed`` flag is set so the web UI can show
+        a Reconnect banner via ``/api/fulcra/auth/status`` (SP5 task 3).
         """
-        from fulcra_common import DEFAULT_BASE_URL
-        # Read httpx off the module each time so a monkeypatch applied
-        # after build_app() returned still wins for the next request.
-        from . import credentials as _creds
-        import fulcra_collect.web as _self
-
-        class _RetryingClient:
-            """httpx.Client wrapper that refreshes-and-retries on 401.
-
-            Forwards GET/POST/PUT/DELETE/PATCH/HEAD through a wrapping
-            shim that retries once after calling
-            ``refresh_fulcra_access_token``. Every other attribute
-            (``headers``, ``close``, the context-manager protocol, etc.)
-            passes through to the inner client unchanged so existing
-            callers see no behaviour difference.
-            """
-
-            # Wrapped HTTP-verb methods. httpx.Client.request() and .stream() are
-            # DELIBERATELY NOT in this set — current Fulcra-API call sites only use
-            # the named-verb shortcuts, and adding generic .request() interception
-            # would require parsing the method out of the *args (since it's the
-            # first positional arg, not a method name on the client). If a future
-            # caller needs request()/stream() with refresh-on-401, add to the
-            # whitelist below AND extend _wrap to handle the method-in-args shape.
-            _METHODS = ("get", "post", "put", "delete", "patch", "head")
-
-            def __init__(self, token: str) -> None:
-                self._inner = _self.httpx.Client(
-                    base_url=DEFAULT_BASE_URL,
-                    timeout=15.0,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "User-Agent": "fulcra-collect/web-ui",
-                    },
-                    follow_redirects=True,
-                )
-
-            # --- context-manager protocol ----------------------------------
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return self._inner.__exit__(*exc)
-
-            def close(self) -> None:
-                self._inner.close()
-
-            # --- 401-retry plumbing ---------------------------------------
-            def _retry_with_fresh_token(self, method: str, *args, **kwargs):
-                """Refresh via CLI, swap auth header, retry the request once.
-
-                Returns the retry response, or ``None`` if the refresh
-                helper itself failed (CLI missing, exhausted, etc.) — in
-                that case the caller returns the original 401 and the
-                process-level ``_refresh_failed`` flag is already set.
-                """
-                fresh = _creds.refresh_fulcra_access_token()
-                if not fresh:
-                    return None
-                self._inner.headers["Authorization"] = f"Bearer {fresh}"
-                return getattr(self._inner, method)(*args, **kwargs)
-
-            def _wrap(self, method: str):
-                def wrapped(*args, **kwargs):
-                    response = getattr(self._inner, method)(*args, **kwargs)
-                    if response.status_code == 401:
-                        retry_resp = self._retry_with_fresh_token(
-                            method, *args, **kwargs,
-                        )
-                        if retry_resp is not None:
-                            return retry_resp
-                    return response
-
-                return wrapped
-
-            def __getattr__(self, name: str):
-                # Forward GET/POST/PUT/DELETE/etc. — these are the call
-                # sites that need 401-retry. Other attributes (e.g.
-                # ``.headers``) pass through to the inner client directly.
-                if name in self._METHODS:
-                    return self._wrap(name)
-                return getattr(self._inner, name)
-
-        return _RetryingClient(fulcra_token)
+        return _RetryingClient(fulcra_token, user_agent="fulcra-collect/web-ui")
 
     ctx = RouteContext(
         daemon=daemon,

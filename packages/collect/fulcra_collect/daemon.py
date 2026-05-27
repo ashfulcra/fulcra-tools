@@ -952,19 +952,21 @@ class Daemon:
         if not fulcra_token:
             return {"ok": False, "code": "unauthorized", "error": "not signed in to Fulcra"}
 
-        # Build an httpx client identical to ``web.fulcra_http_client`` —
-        # reaching httpx through ``_web.httpx`` so monkeypatches at that
-        # site override the client used here.
-        from fulcra_common import DEFAULT_BASE_URL
+        # Use the same refresh-aware wrapper the FastAPI routes use, so a
+        # soft-delete from the menubar's Annotations tab or the popover
+        # "…" menu (both arrive via the local UDS) also benefits from the
+        # automatic refresh-on-401 introduced in SP5 task 1. The wrapper
+        # class lives at module scope in ``web.py``; reaching it via
+        # ``_web._RetryingClient`` means tests that monkeypatch
+        # ``fulcra_collect.web.httpx`` continue to intercept the inner
+        # ``httpx.Client(...)`` call without modification.
+        #
+        # Distinct User-Agent kept (``fulcra-collect/daemon`` vs the
+        # route's ``fulcra-collect/web-ui``) so upstream log triage can
+        # tell the two surfaces apart.
         try:
-            with _web.httpx.Client(
-                base_url=DEFAULT_BASE_URL,
-                timeout=15.0,
-                headers={
-                    "Authorization": f"Bearer {fulcra_token}",
-                    "User-Agent": "fulcra-collect/daemon",
-                },
-                follow_redirects=True,
+            with _web._RetryingClient(
+                fulcra_token, user_agent="fulcra-collect/daemon",
             ) as client:
                 r = client.delete(f"/user/v1alpha1/annotation/{def_id}")
                 if r.status_code == 404:
