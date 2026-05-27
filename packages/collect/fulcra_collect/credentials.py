@@ -7,6 +7,7 @@ other keychain item.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from threading import Lock
@@ -110,6 +111,44 @@ _refresh_lock = Lock()
 _refresh_failed = False
 
 
+def _find_fulcra_cli() -> str | None:
+    """Find the fulcra CLI binary.
+
+    The launchd-managed daemon runs with a restricted PATH
+    (`/usr/bin:/bin:/usr/sbin:/sbin`) that excludes the most common
+    install locations for user-installed Python CLIs. Check PATH first
+    (the common case for terminal-launched daemons + manual installs),
+    then fall back to well-known locations.
+
+    Discovered 2026-05-27: the launchd plist has no PATH override, so
+    `shutil.which('fulcra')` returns None and auth-refresh-on-401
+    silently fails even when the CLI is installed and working. The
+    user sees the Reconnect banner immediately on a 401 with no way
+    to know the daemon just can't find the CLI binary.
+
+    Returns the absolute path to the CLI if found, None if not.
+    """
+    found = shutil.which("fulcra")
+    if found:
+        return found
+
+    # Well-known locations the launchd-default PATH misses. Order
+    # matters: ~/.local/bin first (uv tool install), then
+    # /opt/homebrew/bin (Apple Silicon brew), then /usr/local/bin
+    # (Intel brew + general). All paths are static; we don't try to
+    # introspect $HOME for portability across machines that might
+    # have unusual home-dir layouts.
+    candidates = [
+        os.path.expanduser("~/.local/bin/fulcra"),
+        "/opt/homebrew/bin/fulcra",
+        "/usr/local/bin/fulcra",
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def refresh_fulcra_access_token() -> str | None:
     """Re-invoke ``fulcra auth print-access-token`` and store the result.
 
@@ -141,9 +180,13 @@ def refresh_fulcra_access_token() -> str | None:
     """
     global _refresh_failed
     with _refresh_lock:
-        cli_path = shutil.which("fulcra")
+        cli_path = _find_fulcra_cli()
         if not cli_path:
-            _log.warning("refresh_fulcra_access_token: fulcra CLI not on PATH")
+            _log.warning(
+                "refresh_fulcra_access_token: fulcra CLI not found on PATH or "
+                "in any well-known location (~/.local/bin, /opt/homebrew/bin, "
+                "/usr/local/bin)."
+            )
             _refresh_failed = True
             return None
         try:
