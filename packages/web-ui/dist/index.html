@@ -778,6 +778,36 @@
         </div>
 
         <!-- ──────────────────────────────────────────────────────────── -->
+        <!-- Fulcra reconnect banner (SP5 task 3).                        -->
+        <!-- Renders only when the daemon's auth-status endpoint reports  -->
+        <!-- refresh_failed=true (i.e. a token refresh blew up and the    -->
+        <!-- user's Fulcra session needs re-establishing). Plugins with   -->
+        <!-- their own credentials keep working in the background; only   -->
+        <!-- Fulcra-API management actions (def listing, soft-delete)     -->
+        <!-- are gated on a fresh sign-in.                                -->
+        <!-- ──────────────────────────────────────────────────────────── -->
+        <template x-if="fulcraAuthStatus.refresh_failed">
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+            <div class="text-sm text-amber-900">
+              <span class="font-semibold">Your Fulcra sign-in expired.</span>
+              Some management actions (listing annotation tracks,
+              soft-deleting) will fail until you reconnect. Plugins
+              with their own credentials (Trakt, Last.fm, etc.) will
+              keep ingesting events.
+            </div>
+            <div class="flex items-center gap-3">
+              <button @click="reconnectToFulcra()"
+                      :disabled="reconnectInFlight"
+                      class="px-4 py-2 rounded bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 text-sm">
+                <span x-text="reconnectInFlight ? 'Reconnecting…' : 'Reconnect to Fulcra'"></span>
+              </button>
+              <span x-show="reconnectError" x-text="reconnectError"
+                    class="text-sm text-red-700"></span>
+            </div>
+          </div>
+        </template>
+
+        <!-- ──────────────────────────────────────────────────────────── -->
         <!-- Quick-record favorites (task #64).                           -->
         <!-- Per-machine. The menubar's pin toggle and this list share   -->
         <!-- the same daemon endpoints; opening this page after pinning  -->
