@@ -36,10 +36,30 @@ import { LitElement, html, nothing } from "https://cdn.jsdelivr.net/gh/lit/dist@
 
 export { html, nothing };
 
+// Force-update hook for the ctx / step properties.
+//
+// Why: Alpine mutates the wizard data object IN PLACE — when health
+// check returns, it sets ctx.healthChecking = false on the SAME object
+// reference the component already has. Lit's default hasChanged() does
+// `oldValue === newValue` so the assignment looks like a no-op and no
+// re-render fires; the component stays stuck on the previous frame
+// (spinner-stuck-on test_connection, etc.). Returning true from
+// hasChanged makes every assignment count as a change, so each x-effect
+// re-fire (driven by `Object.values($data)` in the dispatcher tag)
+// produces a re-render that reads the current ctx state.
+//
+// Cost: one extra render per Alpine tick, which is well within budget
+// for our small components (and matches what Alpine itself does for
+// in-place data updates). x-effect drives those ticks via the explicit
+// `void [healthChecking, ...]` identifier list on the dispatcher tag
+// in index.html — see that file's comment for the rationale on why
+// Object.values($data) wasn't enough.
+const FORCE_UPDATE = { type: Object, hasChanged: () => true };
+
 export class FulcraStepBase extends LitElement {
   static properties = {
-    step: { type: Object },
-    ctx:  { type: Object },
+    step: FORCE_UPDATE,
+    ctx:  FORCE_UPDATE,
   };
 
   // Light DOM — see comment block above. Do not remove without rewriting
