@@ -1,0 +1,104 @@
+// packages/web-ui/dist/static/components/step-extension_pair.js
+//
+// kind="extension_pair" — one-click pairing handshake with a browser
+// extension. Four-state state machine driven by ctx.pairStatus:
+//   idle      → "Pair extension" button → ctx.startExtensionPair()
+//   pairing   → violet pulse badge ("Pairing…")
+//   success   → green check ("Paired")
+//   fallback  → manual paste UI (extension didn't respond within ~3s);
+//               shows the bearer token, a Copy button, then "I pasted it"
+//               which calls ctx.confirmManualPair(). After confirmation
+//               (ctx.pairManuallyConfirmed) the green "Click Continue
+//               below" hint replaces the button.
+//
+// Mirrors index.html ~line 762 (onboarding) and ~line 1450 (dashboard).
+// Note: site B's manual-confirmed message says "Click Next below" while
+// site A's says "Click Continue below" — both render sites are about to
+// converge through this component, so I'm keeping site A's wording
+// since it appears in both the onboarding and the configure flow now
+// (the Next button is labelled differently per-context anyway).
+import { FulcraStepBase, html, nothing } from "./_base.js";
+import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/directives/unsafe-html.js";
+
+class FulcraStepExtensionPair extends FulcraStepBase {
+  render() {
+    const c = this.ctx;
+    const bodyHtml = c?.body_html || "";
+    const status = c?.pairStatus || "idle";
+    return html`
+      <div class="space-y-4">
+        <div class="prose prose-sm text-slate-700 max-w-none">
+          ${unsafeHTML(bodyHtml)}
+        </div>
+        ${this._renderStatus(status, c)}
+      </div>
+    `;
+  }
+
+  _renderStatus(status, c) {
+    if (status === "idle") {
+      return html`
+        <button @click=${() => c.startExtensionPair()}
+                class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+          Pair extension
+        </button>
+      `;
+    }
+    if (status === "pairing") {
+      return html`
+        <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-violet-100 text-violet-700 text-sm font-medium animate-pulse">
+          <svg class="w-4 h-4 animate-spin" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" stroke-opacity="0.25"/>
+            <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          Pairing…
+        </div>
+      `;
+    }
+    if (status === "success") {
+      return html`
+        <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-100 text-green-700 text-sm font-medium">
+          <svg class="w-4 h-4" viewBox="0 0 16 16" fill="none">
+            <path d="M3 8l3.5 3.5L13 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Paired
+        </div>
+      `;
+    }
+    if (status === "fallback") {
+      return html`
+        <div class="rounded border border-amber-300 bg-amber-50 p-4 space-y-3">
+          <div class="text-sm text-amber-900 font-medium">
+            The extension didn't respond. You can finish setup manually:
+          </div>
+          <ol class="text-sm text-amber-900 list-decimal list-inside space-y-1">
+            <li>Copy the token below.</li>
+            <li>Open the extension's Options page (right-click the toolbar icon → <strong>Options</strong>).</li>
+            <li>Paste it into the <strong>Bearer token</strong> field and click <strong>Save</strong>.</li>
+            <li>Return here and click <strong>I pasted it</strong>.</li>
+          </ol>
+          <div class="flex items-center gap-2">
+            <code class="flex-1 bg-white border border-amber-200 px-2 py-1 rounded text-xs font-mono text-slate-800 break-all">${c.pairFallbackToken}</code>
+            <button @click=${() => c.copyPairToken()}
+                    class="px-3 py-1.5 rounded bg-amber-600 text-white text-xs font-medium hover:bg-amber-700">
+              Copy
+            </button>
+          </div>
+          ${!c.pairManuallyConfirmed
+            ? html`
+                <button @click=${() => c.confirmManualPair()}
+                        class="px-4 py-2 rounded bg-violet-600 text-white text-sm font-medium hover:bg-violet-700">
+                  I pasted it
+                </button>`
+            : html`
+                <div class="text-sm text-green-700 font-medium">
+                  Click Continue below.
+                </div>`}
+        </div>
+      `;
+    }
+    return nothing;
+  }
+}
+customElements.define("fulcra-step-extension_pair", FulcraStepExtensionPair);
+window.FulcraStepComponents.extension_pair = "fulcra-step-extension_pair";
