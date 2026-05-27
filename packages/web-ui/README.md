@@ -37,6 +37,43 @@ To live-edit: just save files in `dist/`. Reload the browser.
 - All HTTP routes documented in
   `docs/superpowers/specs/2026-05-24-fulcra-collect-web-ui-design.md`.
 
+## URL-param deep-links
+
+The boot path in `dist/static/app.js` (`app.boot()`, around lines 95-133)
+consumes a `?route=...` query param on first load so external launchers
+can land the user on a specific screen rather than the dashboard
+default. The handler was added in SP4 (2026-05-27) to back the
+menubar's "?" docs button and per-plugin Configure button — both open
+URLs of this shape via `subprocess.run(["open", ...])` — but nothing
+restricts the contract to that producer; any external link (a docs
+page, a notification, a future CLI) can deep-link the same way.
+
+Supported routes:
+
+| URL                              | Lands on |
+|----------------------------------|----------|
+| `/?route=docs`                   | In-app docs, default page (`how-do-i-get-my-data`) |
+| `/?route=docs&page=NAME`         | In-app docs, specific page slug |
+| `/?route=configure&plugin=ID`    | The wizard for plugin `ID` (same flow as the dashboard's Configure button) |
+| `/?route=settings`               | Settings page |
+
+The handler is **gated by `signedIn`**. Unauthenticated users hit the
+onboarding/signin flow first and the param is cleared before auth
+completes — meaning a fresh-install user clicking a deep-link will
+sign in and then land on the dashboard, not the requested route. This
+is a known limitation; revisit if/when there's a real-world need for
+deferred deep-link resolution.
+
+After consumption the handler calls
+`history.replaceState({}, "", window.location.pathname)` to strip the
+query string so a reload doesn't re-trigger the route. The wizard /
+docs / settings flows then run as if the user had navigated to them
+from the dashboard.
+
+The producer side lives in `packages/menubar/` — see that package's
+README ("Deep-linking into the web UI") for the URLs the menubar emits
+today. If you change the contract here, update both.
+
 ## Setup-step component model
 
 The wizard renders one of N kinds of setup step (`intro`, `input`,

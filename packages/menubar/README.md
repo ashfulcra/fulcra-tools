@@ -96,6 +96,37 @@ The daemon owns all plugin logic, scheduling, supervision, watermarks,
 and credentials. This app is a thin client; it reads daemon state and
 issues control-socket commands.
 
+## Deep-linking into the web UI
+
+The popover's header "?" button and per-row Configure button both open
+the daemon's web UI at a `?route=...` URL using
+`subprocess.run(["open", url], check=False)` — the standard macOS
+default-browser opener. Added in SP4 (drift audit 2026-05-27) so
+common follow-ups (read the docs, finish configuring a plugin) don't
+require the user to context-switch to the dashboard and hunt for the
+right entry point.
+
+URLs emitted today:
+
+- `http://127.0.0.1:9292/?route=docs` — `popover/header.py`, the "?"
+  button next to the status pill.
+- `http://127.0.0.1:9292/?route=configure&plugin=<id>` —
+  `popover/plugin_row.py`, the per-row Configure button.
+
+The host and port are currently hardcoded to `127.0.0.1:9292` — that
+matches the daemon's default `[daemon] web_port` config. If the user
+has overridden the port a deep-link will land on the wrong URL; the
+follow-up is to thread a `_daemon_url` helper through these two call
+sites that reads the configured port. Until that lands, treat the
+hardcoded URL as a known papercut for non-default deployments.
+
+The consumer side lives in `packages/web-ui/dist/static/app.js`'s
+`boot()` handler — see that package's README ("URL-param deep-links")
+for the full list of supported routes and the auth-gate caveat (the
+web UI must be signed in for the deep-link to land on the requested
+route; unauth users see signin first and lose the param). If you add
+a new deep-link here, update the contract there too.
+
 ## Path to Swift
 
 Per the spec, this Python build is the UX laboratory. Once the
