@@ -91,6 +91,46 @@ function app() {
         } else {
           this.route = "onboarding";
         }
+
+        // URL-param routing. Menubar deep-links here via URLs like:
+        //   /?route=docs                — opens the in-app docs view
+        //   /?route=configure&plugin=X  — opens the wizard for plugin X
+        //   /?route=settings            — opens the Settings page
+        // We consume the params and immediately clear them with
+        // history.replaceState so a reload doesn't loop back here.
+        // Added in SP4 (drift audit 2026-05-27) so the menubar
+        // popover's '?' button and per-row Configure can land users
+        // exactly where they need to be.
+        //
+        // Guarded by signedIn — unauthenticated users still see the
+        // signin/onboarding flow first; once they've authed they can
+        // re-click the deep-link to land where they intended.
+        if (signedIn) {
+          const urlParams = new URLSearchParams(window.location.search);
+          const requestedRoute = urlParams.get("route");
+          if (requestedRoute) {
+            // Strip the param so a refresh doesn't re-trigger.
+            history.replaceState({}, "", window.location.pathname);
+
+            if (requestedRoute === "docs") {
+              // Default docs page; downstream tabs can navigate further.
+              const docPage = urlParams.get("page") || "how-do-i-get-my-data";
+              await this.goToDocs(docPage, "");
+              return;
+            }
+            if (requestedRoute === "configure") {
+              const pluginId = urlParams.get("plugin");
+              if (pluginId) {
+                await this.openSetupForPlugin(pluginId);
+                return;
+              }
+            }
+            if (requestedRoute === "settings") {
+              this.route = "settings";
+              return;
+            }
+          }
+        }
       } catch (e) {
         this.route = "error";
         this.errorMessage = e.message;
