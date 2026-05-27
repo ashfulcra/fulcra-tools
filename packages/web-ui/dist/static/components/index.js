@@ -13,9 +13,8 @@
 //   2. write packages/web-ui/dist/static/components/step-<kind>.js
 //   3. add the import line below
 import "./step.js";          // the <fulcra-step> dispatcher
-import "./step-intro.js";    // first ported component (Phase 1)
-// Phase 2 will add:
-// import "./step-external_action.js";
+import "./step-intro.js";              // Phase 1
+import "./step-external_action.js";    // Phase 2
 // import "./step-input.js";
 // import "./step-oauth.js";
 // import "./step-file_upload.js";
