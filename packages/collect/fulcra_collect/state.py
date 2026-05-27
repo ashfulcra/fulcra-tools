@@ -1,24 +1,25 @@
 """Per-plugin persisted state — last run, last outcome, failure count,
-and the plugin's own watermark string. One JSON file per plugin under
-the hub state directory. This is the snapshot the CLI and the UI read.
+the plugin's own watermark string, and the cached Fulcra definition id.
+
+Phase 1 of refactor #1 (task #67) moved the backing store from one JSON
+file per plugin (under ``~/.config/fulcra-collect/state/<id>.json``) to a
+single SQLite database at ``~/.config/fulcra-collect/state.db``. The
+public surface is unchanged: ``PluginState``, ``load(plugin_id)`` and
+``save(state)`` still behave the same way. The atomic-write tempfile
+idiom is gone — WAL-mode SQLite gives us safe concurrent writes for
+free, including across worker subprocesses.
+
+A one-shot import in ``db.py:_migration_002_import_plugin_state_json``
+moves any pre-existing JSON files into the table on first daemon boot
+and renames them to ``*.json.migrated`` so we can recover them by hand
+during the soak period.
 """
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 
-from .config import config_dir
-
-
-def _state_dir() -> Path:
-    d = config_dir() / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    d.chmod(0o700)
-    return d
+from . import db
 
 
 @dataclass
@@ -29,7 +30,12 @@ class PluginState:
     last_error: str | None = None
     consecutive_failures: int = 0
     watermark: str | None = None         # ISO string, plugin-defined
-    definition_id: str | None = None      # adopted-by-resolver Fulcra def id
+    definition_id: str | None = None     # adopted-by-resolver Fulcra def id
+    # When set, the next resolve will use this exact name (verbatim, no
+    # machine-id suffix) instead of the plugin's canonical_definition_name.
+    # Set by the web UI's definition picker when the user types a custom
+    # name for "Create new"; cleared once the resolver has used it.
+    override_definition_name: str | None = None
 
     def record_finish(self, *, outcome: str, when: datetime,
                        error: str | None = None) -> None:
@@ -45,45 +51,47 @@ class PluginState:
 
 
 def load(plugin_id: str) -> PluginState:
-    path = _state_dir() / f"{plugin_id}.json"
-    if not path.exists():
+    """Read this plugin's row out of the unified state db. A missing
+    row (the plugin has never run) returns a fresh PluginState — same
+    semantics as the legacy "file doesn't exist" branch."""
+    conn = db.open()
+    row = db.fetch_plugin_state(conn, plugin_id)
+    if row is None:
         return PluginState(plugin_id=plugin_id)
+    last_run_str = row["last_run"]
+    last_run: datetime | None
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        lr = doc.get("last_run")
-        return PluginState(
-            plugin_id=plugin_id,
-            last_run=datetime.fromisoformat(lr) if lr else None,
-            last_outcome=doc.get("last_outcome"),
-            last_error=doc.get("last_error"),
-            consecutive_failures=doc.get("consecutive_failures", 0),
-            watermark=doc.get("watermark"),
-            definition_id=doc.get("definition_id"),   # backwards compat: missing → None
-        )
-    except (json.JSONDecodeError, OSError, ValueError):
-        # A torn / corrupt / unreadable file must not crash the daemon
-        # loop — fall back to a fresh state for this plugin.
-        return PluginState(plugin_id=plugin_id)
+        last_run = datetime.fromisoformat(last_run_str) if last_run_str else None
+    except (TypeError, ValueError):
+        # A row with a malformed timestamp shouldn't crash the daemon
+        # loop. Mirrors the corrupt-file fallback the JSON loader used
+        # to provide.
+        last_run = None
+    return PluginState(
+        plugin_id=plugin_id,
+        last_run=last_run,
+        last_outcome=row["last_outcome"],
+        last_error=row["last_error"],
+        consecutive_failures=int(row["consecutive_failures"] or 0),
+        watermark=row["watermark"],
+        definition_id=row["definition_id"],
+        override_definition_name=row["override_definition_name"],
+    )
 
 
 def save(st: PluginState) -> None:
-    """Atomically persist `st`. The JSON is written to a uniquely-named
-    temp file in the same directory, then `os.replace`d into place — a
-    concurrent reader never sees a half-written file."""
-    doc = asdict(st)
-    doc["last_run"] = st.last_run.isoformat() if st.last_run else None
-    d = _state_dir()
-    path = d / f"{st.plugin_id}.json"
-    payload = json.dumps(doc, indent=2, sort_keys=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{st.plugin_id}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(payload)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Persist ``st`` via an INSERT OR REPLACE. WAL mode makes this
+    safe under concurrent writers (the daemon main process + N worker
+    subprocesses), so no tempfile-and-rename dance is needed."""
+    conn = db.open()
+    db.upsert_plugin_state(
+        conn,
+        plugin_id=st.plugin_id,
+        last_run=st.last_run.isoformat() if st.last_run else None,
+        last_outcome=st.last_outcome,
+        last_error=st.last_error,
+        consecutive_failures=st.consecutive_failures,
+        watermark=st.watermark,
+        definition_id=st.definition_id,
+        override_definition_name=st.override_definition_name,
+    )
