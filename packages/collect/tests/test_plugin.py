@@ -96,6 +96,50 @@ def test_valid_plugins_of_each_kind():
     assert man.kind == "manual"
 
 
+def test_attention_is_the_only_manual_live_continuous_plugin() -> None:
+    """Lock in the SP3 Task 1 invariant: the kind->collect_mode mapping
+    is straightforward (manual->historical, scheduled->live_polled,
+    service->live_continuous) EXCEPT for the Attention extension which
+    is kind='manual' + collect_mode='live_continuous' because the
+    data flow is push-based via the browser extension (run() is a
+    no-op status check).
+
+    If a future plugin author copies Attention's pattern without
+    realising it's a special case, this test fails — forcing them
+    to either justify a second case in the registry or fix their
+    plugin's metadata.
+
+    Originally a SP3 final-review minor that landed as a follow-up.
+    """
+    from fulcra_collect.registry import discover
+
+    DEFAULT_KIND_TO_MODE = {
+        "manual": "historical",
+        "scheduled": "live_polled",
+        "service": "live_continuous",
+    }
+    KNOWN_DEVIATIONS = {
+        "attention-relay": ("manual", "live_continuous"),
+    }
+
+    result = discover()
+    deviations: dict[str, tuple[str, str]] = {}
+    for p in result.plugins.values():
+        expected_mode = DEFAULT_KIND_TO_MODE.get(p.kind)
+        if expected_mode is None:
+            # Unknown kind — that's the existing PluginKind validation's
+            # job to catch, not ours.
+            continue
+        if p.collect_mode != expected_mode:
+            deviations[p.id] = (p.kind, p.collect_mode)
+
+    assert deviations == KNOWN_DEVIATIONS, (
+        f"Unexpected kind->collect_mode deviations: {deviations}. "
+        f"Expected only {KNOWN_DEVIATIONS}. Either fix the plugin's "
+        f"metadata or update KNOWN_DEVIATIONS with the justification."
+    )
+
+
 def test_permission_and_credential_are_simple_records():
     p = Permission(id="full-disk-access", explanation="needed to read the DB")
     c = Credential(key="lastfm-api-key", label="Last.fm API key",
