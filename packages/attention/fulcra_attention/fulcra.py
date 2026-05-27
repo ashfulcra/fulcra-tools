@@ -1,9 +1,14 @@
 """Fulcra API client for fulcra-attention.
 
 A thin layer over `fulcra_common.BaseFulcraClient`: it adds the Attention
-DurationAnnotation definition handling, the three-axis tag vocabulary
-(machine / category / identity), and the attention-specific ingest_batch.
-Auth, the httpx client, tag lookup, and soft-delete come from the base.
+DurationAnnotation definition handling and the three-axis tag vocabulary
+(machine / category / identity). Auth, the httpx client, tag lookup, and
+soft-delete come from the base.
+
+Ingest goes through `fulcra_common.ingest.IngestPipeline` (refactor #69)
+— this class no longer carries its own `ingest_batch`. The daemon's
+`/api/extension/attention` route wraps a `FulcraClient` instance in an
+`IngestPipeline` and calls `ingest_one(DurationEvent)` to post.
 """
 from __future__ import annotations
 
@@ -196,23 +201,3 @@ class FulcraClient(BaseFulcraClient):
         """Create / look up the `machine:<hostname>` tag. Called by `setup`."""
         return self.ensure_tag(build_tag_name("machine", hostname), state)
 
-    def ingest_batch(self, events: list[dict]) -> None:
-        """POST a JSONL batch of already-built events to /ingest/v1/record/batch.
-
-        Each event must be a dict with `specversion`, `data`, `metadata` keys
-        (the wire format documented in the spec). Source-id idempotency is the
-        caller's responsibility — building the deterministic source-id lives
-        in ingest.py.
-        """
-        if not events:
-            return
-        body = wire.encode_batch(events)
-        r = self._client().post(
-            "/ingest/v1/record/batch",
-            content=body,
-            headers={
-                **self._authed_headers(),
-                "content-type": "application/x-jsonl",
-            },
-        )
-        r.raise_for_status()
