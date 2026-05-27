@@ -851,16 +851,39 @@
         </div>
 
         <!-- ──────────────────────────────────────────────────────────── -->
-        <!-- Fulcra reconnect banner (SP5 task 3).                        -->
-        <!-- Renders only when the daemon's auth-status endpoint reports  -->
-        <!-- refresh_failed=true (i.e. a token refresh blew up and the    -->
-        <!-- user's Fulcra session needs re-establishing). Plugins with   -->
-        <!-- their own credentials keep working in the background; only   -->
-        <!-- Fulcra-API management actions (def listing, soft-delete)     -->
-        <!-- are gated on a fresh sign-in.                                -->
+        <!-- Fulcra account panel (SP5 task 3 + QA #3 follow-up).         -->
+        <!-- Always-visible panel so the user can re-auth (switch         -->
+        <!-- accounts, force-refresh) at any time, not only when a token  -->
+        <!-- refresh has already failed. Two visual modes:                -->
+        <!--                                                              -->
+        <!--   - Default (authenticated, no refresh failure): neutral     -->
+        <!--     slate panel with a quiet "Reconnect to Fulcra" button.   -->
+        <!--                                                              -->
+        <!--   - refresh_failed=true: same panel, amber chrome + the      -->
+        <!--     loud "Your Fulcra sign-in expired" explanation that      -->
+        <!--     used to live in a separate conditional banner. Single    -->
+        <!--     button covers both paths so the user never sees two      -->
+        <!--     "Reconnect" controls.                                    -->
+        <!--                                                              -->
+        <!-- Plugins with their own credentials (Trakt, Last.fm, etc.)    -->
+        <!-- keep ingesting events regardless; only Fulcra-API management -->
+        <!-- actions (def listing, soft-delete) are gated on a fresh      -->
+        <!-- sign-in.                                                     -->
         <!-- ──────────────────────────────────────────────────────────── -->
-        <template x-if="fulcraAuthStatus.refresh_failed">
-          <div class="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+        <div class="rounded-lg border p-4 space-y-3"
+             :class="fulcraAuthStatus.refresh_failed
+                       ? 'border-amber-200 bg-amber-50'
+                       : 'border-slate-200 bg-white'">
+          <div class="flex items-baseline justify-between gap-3">
+            <h3 class="text-base font-semibold">Fulcra account</h3>
+            <template x-if="!fulcraAuthStatus.refresh_failed">
+              <span class="text-xs text-emerald-700 font-medium">Connected</span>
+            </template>
+            <template x-if="fulcraAuthStatus.refresh_failed">
+              <span class="text-xs text-amber-800 font-medium">Sign-in expired</span>
+            </template>
+          </div>
+          <template x-if="fulcraAuthStatus.refresh_failed">
             <div class="text-sm text-amber-900">
               <span class="font-semibold">Your Fulcra sign-in expired.</span>
               Some management actions (listing annotation tracks,
@@ -868,17 +891,27 @@
               with their own credentials (Trakt, Last.fm, etc.) will
               keep ingesting events.
             </div>
-            <div class="flex items-center gap-3">
-              <button @click="reconnectToFulcra()"
-                      :disabled="reconnectInFlight"
-                      class="px-4 py-2 rounded bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50 text-sm">
-                <span x-text="reconnectInFlight ? 'Reconnecting…' : 'Reconnect to Fulcra'"></span>
-              </button>
-              <span x-show="reconnectError" x-text="reconnectError"
-                    class="text-sm text-red-700"></span>
-            </div>
+          </template>
+          <template x-if="!fulcraAuthStatus.refresh_failed">
+            <p class="text-xs text-slate-500 max-w-2xl">
+              The daemon refreshes your Fulcra token automatically. Reconnect here
+              if you want to sign in as a different account or force a fresh
+              token mint.
+            </p>
+          </template>
+          <div class="flex items-center gap-3">
+            <button @click="reconnectToFulcra()"
+                    :disabled="reconnectInFlight"
+                    class="px-4 py-2 rounded font-medium disabled:opacity-50 text-sm"
+                    :class="fulcraAuthStatus.refresh_failed
+                              ? 'bg-amber-600 text-white hover:bg-amber-700'
+                              : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'">
+              <span x-text="reconnectInFlight ? 'Reconnecting…' : 'Reconnect to Fulcra'"></span>
+            </button>
+            <span x-show="reconnectError" x-text="reconnectError"
+                  class="text-sm text-red-700"></span>
           </div>
-        </template>
+        </div>
 
         <!-- ──────────────────────────────────────────────────────────── -->
         <!-- Quick-record favorites (task #64).                           -->
