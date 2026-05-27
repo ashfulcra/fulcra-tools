@@ -109,9 +109,9 @@ def test_lastfm_listened_spec_shape():
 def test_run_fetches_normalizes_imports_and_advances_watermark(monkeypatch):
     calls = {}
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
                         lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
                         lambda raw: ["event-1"])
 
     class FakeResult:
@@ -126,11 +126,11 @@ def test_run_fetches_normalizes_imports_and_advances_watermark(monkeypatch):
             calls["imported"] = list(events)
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
                         lambda: FakeClient())
-    monkeypatch.setattr("fulcra_media.collect_plugins.newest_event_iso",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
                         lambda events: "2026-05-22T12:00:00Z")
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("lastfm")
@@ -182,9 +182,9 @@ def test_run_forwards_username_and_api_key_to_the_importer(monkeypatch):
         captured["creds"] = creds
         return []  # no scrobbles, nothing else to do
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
                         fake_fetch)
-    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
                         lambda raw: [])
 
     class FakeResult:
@@ -198,9 +198,9 @@ def test_run_forwards_username_and_api_key_to_the_importer(monkeypatch):
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
                         lambda: FakeClient())
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("lastfm")
@@ -222,9 +222,9 @@ def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
     watermark there means the re-fetched window grows without bound any
     time the user goes quiet — this asserts the freeze is gone.
     """
-    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
                         lambda creds, since, max_pages: [{"raw": 1}])
-    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
                         lambda raw: ["event-1"])
 
     class AllDupResult:
@@ -238,11 +238,11 @@ def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
         def run_import(self, events, state, check_only=False):
             return AllDupResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
                         lambda: FakeClient())
-    monkeypatch.setattr("fulcra_media.collect_plugins.newest_event_iso",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
                         lambda events: "2026-05-22T12:00:00Z")
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("lastfm")
@@ -274,14 +274,14 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped(monkeypatch
     empty_media_state = _make_empty_media_state()
     saved_states: list[MediaState] = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_save",
                         lambda state, path=None: saved_states.append(state))
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
                         lambda creds, since, max_pages: [])
-    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
                         lambda raw: [])
 
     class FakeResult:
@@ -295,7 +295,7 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped(monkeypatch
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
                         lambda: FakeClient())
 
     # Resolver fake: list_definitions returns nothing → create_definition called
@@ -348,11 +348,11 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped(monkeypatch
 def test_run_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
     """When listened_definition_id is already in the media state (bootstrap
     has been run), the resolver must NOT be called — no network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
                         lambda path: _make_bootstrapped_media_state())
-    monkeypatch.setattr("fulcra_media.collect_plugins.fetch_recent_tracks",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
                         lambda creds, since, max_pages: [])
-    monkeypatch.setattr("fulcra_media.collect_plugins.normalize_history",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
                         lambda raw: [])
 
     class FakeResult:
@@ -366,7 +366,7 @@ def test_run_does_not_call_resolver_when_definition_already_bootstrapped(monkeyp
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -443,15 +443,15 @@ def test_netflix_plugin_run(monkeypatch, tmp_path):
     fake_csv.write_text("Title,Date\n")
 
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.netflix_importer.parse_auto",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.netflix_importer.parse_auto",
                         lambda path: ["ev-netflix"])
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.FulcraClient",
                         lambda: fake_client)
     # R8: _run_netflix now reads media state; pre-populate so the resolver
     # guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.netflix._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("netflix", {"path": str(fake_csv)})
@@ -468,7 +468,7 @@ def test_netflix_plugin_raises_without_path(monkeypatch):
     # state.json containing a cached watched_definition_id. After the
     # 2026-05-26 state-clear that file is empty, exposing the env
     # dependency.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.netflix._state_load",
                         lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("netflix", {})
     with pytest.raises(RuntimeError, match="path"):
@@ -507,16 +507,16 @@ def test_netflix_uses_resolver_when_watched_definition_not_bootstrapped(
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.netflix._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.netflix._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     fake_csv = tmp_path / "viewing.csv"
     fake_csv.write_text("Title,Date\n")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.netflix_importer.parse_auto",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.netflix_importer.parse_auto",
                         lambda path: [])
 
     class FakeResult:
@@ -530,7 +530,7 @@ def test_netflix_uses_resolver_when_watched_definition_not_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -577,14 +577,14 @@ def test_netflix_does_not_call_resolver_when_definition_already_bootstrapped(
 ):
     """When watched_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.netflix._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     fake_csv = tmp_path / "viewing.csv"
     fake_csv.write_text("Title,Date\n")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.netflix_importer.parse_auto",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.netflix_importer.parse_auto",
                         lambda path: [])
 
     class FakeResult:
@@ -598,7 +598,7 @@ def test_netflix_does_not_call_resolver_when_definition_already_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.netflix.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -638,15 +638,15 @@ def test_spotify_extended_plugin_run(monkeypatch, tmp_path):
     fake_zip.write_bytes(b"PK")
 
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_importer.parse_extended_zip",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.spotify_importer.parse_extended_zip",
                         lambda path: ["ev-spotify"])
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.FulcraClient",
                         lambda: fake_client)
     # R7: _run_spotify_extended now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("spotify-extended", {"path": str(fake_zip)})
@@ -657,7 +657,7 @@ def test_spotify_extended_plugin_run(monkeypatch, tmp_path):
 
 
 def test_spotify_extended_plugin_raises_without_path(monkeypatch):
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended._state_load",
                         lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("spotify-extended", {})
     with pytest.raises(RuntimeError, match="path"):
@@ -695,16 +695,16 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped_spotify_ext
     empty_media_state = _make_empty_media_state()
     saved_states: list[MediaState] = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     fake_zip = tmp_path / "spotify.zip"
     fake_zip.write_bytes(b"PK")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_importer.parse_extended_zip",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.spotify_importer.parse_extended_zip",
                         lambda path: [])
 
     class FakeResult:
@@ -718,7 +718,7 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped_spotify_ext
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.FulcraClient",
                         lambda: FakeClient())
 
     # Resolver fake: list_definitions returns nothing → create_definition called
@@ -767,14 +767,14 @@ def test_run_does_not_call_resolver_when_definition_already_bootstrapped_spotify
     """When listened_definition_id is already in the media state (bootstrap or
     a prior resolver run has populated it), the resolver must NOT be called —
     no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     fake_zip = tmp_path / "spotify.zip"
     fake_zip.write_bytes(b"PK")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_importer.parse_extended_zip",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.spotify_importer.parse_extended_zip",
                         lambda path: [])
 
     class FakeResult:
@@ -788,7 +788,7 @@ def test_run_does_not_call_resolver_when_definition_already_bootstrapped_spotify
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_extended.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -828,15 +828,15 @@ def test_youtube_plugin_run(monkeypatch, tmp_path):
     fake_json.write_text("[]")
 
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.youtube_importer.parse_takeout_json",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.youtube_importer.parse_takeout_json",
                         lambda path: ["ev-youtube"])
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.FulcraClient",
                         lambda: fake_client)
     # R8: _run_youtube now reads media state; pre-populate so the resolver
     # guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.youtube._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("youtube", {"path": str(fake_json)})
@@ -847,7 +847,7 @@ def test_youtube_plugin_run(monkeypatch, tmp_path):
 
 
 def test_youtube_plugin_raises_without_path(monkeypatch):
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.youtube._state_load",
                         lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("youtube", {})
     with pytest.raises(RuntimeError, match="path"):
@@ -883,16 +883,16 @@ def test_youtube_uses_resolver_when_watched_definition_not_bootstrapped(
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.youtube._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.youtube._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     fake_json = tmp_path / "watch-history.json"
     fake_json.write_text("[]")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.youtube_importer.parse_takeout_json",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.youtube_importer.parse_takeout_json",
                         lambda path: [])
 
     class FakeResult:
@@ -906,7 +906,7 @@ def test_youtube_uses_resolver_when_watched_definition_not_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -948,14 +948,14 @@ def test_youtube_does_not_call_resolver_when_definition_already_bootstrapped(
 ):
     """When watched_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.youtube._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     fake_json = tmp_path / "watch-history.json"
     fake_json.write_text("[]")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.youtube_importer.parse_takeout_json",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.youtube_importer.parse_takeout_json",
                         lambda path: [])
 
     class FakeResult:
@@ -969,7 +969,7 @@ def test_youtube_does_not_call_resolver_when_definition_already_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.youtube.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -1009,15 +1009,15 @@ def test_spotify_ifttt_plugin_run(monkeypatch, tmp_path):
     fake_zip.write_bytes(b"PK")
 
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_ifttt_importer.parse_ifttt_zip",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.spotify_ifttt_importer.parse_ifttt_zip",
                         lambda path, tz: ["ev-ifttt"])
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.FulcraClient",
                         lambda: fake_client)
     # BR7: _run_spotify_ifttt now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("spotify-ifttt", {"path": str(fake_zip), "tz": "America/New_York"})
@@ -1035,17 +1035,17 @@ def test_spotify_ifttt_plugin_defaults_tz_to_utc(monkeypatch, tmp_path):
 
     received_tz = {}
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.library.resolve",
                         lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.spotify_ifttt_importer.parse_ifttt_zip",
+        "fulcra_media.plugins.spotify_ifttt.spotify_ifttt_importer.parse_ifttt_zip",
         lambda path, tz: (received_tz.update({"tz": tz}) or []),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.FulcraClient",
                         lambda: fake_client)
     # BR7: _run_spotify_ifttt now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("spotify-ifttt", {"path": str(fake_zip)})
@@ -1055,7 +1055,7 @@ def test_spotify_ifttt_plugin_defaults_tz_to_utc(monkeypatch, tmp_path):
 
 
 def test_spotify_ifttt_plugin_raises_without_path(monkeypatch):
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt._state_load",
                         lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("spotify-ifttt", {})
     with pytest.raises(RuntimeError, match="path"):
@@ -1094,16 +1094,16 @@ def test_spotify_ifttt_uses_resolver_when_listened_definition_not_bootstrapped(
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     fake_zip = tmp_path / "ifttt.zip"
     fake_zip.write_bytes(b"PK")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_ifttt_importer.parse_ifttt_zip",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.spotify_ifttt_importer.parse_ifttt_zip",
                         lambda path, tz: [])
 
     class FakeResult:
@@ -1117,7 +1117,7 @@ def test_spotify_ifttt_uses_resolver_when_listened_definition_not_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -1159,14 +1159,14 @@ def test_spotify_ifttt_does_not_call_resolver_when_definition_already_bootstrapp
 ):
     """When listened_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     fake_zip = tmp_path / "ifttt.zip"
     fake_zip.write_bytes(b"PK")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.spotify_ifttt_importer.parse_ifttt_zip",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.spotify_ifttt_importer.parse_ifttt_zip",
                         lambda path, tz: [])
 
     class FakeResult:
@@ -1180,7 +1180,7 @@ def test_spotify_ifttt_does_not_call_resolver_when_definition_already_bootstrapp
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -1220,17 +1220,17 @@ def test_apple_takeout_plugin_run_with_csv_file(monkeypatch, tmp_path):
     fake_csv.write_text("header\n")
 
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.library.resolve",
                         lambda p: Path(p))
     # _run_apple_takeout now delegates to the importer's parse_any (which
     # handles file/dir/zip/nested-zip itself); patch that entry point.
-    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.apple_takeout_importer.parse_any",
                         lambda path, *, since=None, until=None: ["ev-apple"])
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.FulcraClient",
                         lambda: fake_client)
     # R8: _run_apple_takeout now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("apple-takeout", {"path": str(fake_csv)})
@@ -1249,17 +1249,17 @@ def test_apple_takeout_plugin_run_with_directory(monkeypatch, tmp_path):
 
     fake_client = _FakeClient()
     parsed_paths = []
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.library.resolve",
                         lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+        "fulcra_media.plugins.apple_takeout.apple_takeout_importer.parse_any",
         lambda path, *, since=None, until=None: (
             parsed_paths.append(path) or ["ev-apple-dir"]
         ),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.FulcraClient",
                         lambda: fake_client)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("apple-takeout", {"path": str(tmp_path)})
@@ -1275,9 +1275,9 @@ def test_apple_takeout_plugin_raises_when_no_csv_in_dir(monkeypatch, tmp_path):
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("apple-takeout", {"path": str(empty_dir)})
@@ -1287,7 +1287,7 @@ def test_apple_takeout_plugin_raises_when_no_csv_in_dir(monkeypatch, tmp_path):
 
 
 def test_apple_takeout_plugin_raises_without_path(monkeypatch):
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_load",
                         lambda path: _make_bootstrapped_media_state())
     ctx, _ = _make_ctx("apple-takeout", {})
     with pytest.raises(RuntimeError, match="path"):
@@ -1323,16 +1323,16 @@ def test_apple_takeout_uses_resolver_when_watched_definition_not_bootstrapped(
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     fake_csv = tmp_path / "Playback Activity.csv"
     fake_csv.write_text("header\n")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.apple_takeout_importer.parse_any",
                         lambda path, *, since=None, until=None: [])
 
     class FakeResult:
@@ -1346,7 +1346,7 @@ def test_apple_takeout_uses_resolver_when_watched_definition_not_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -1388,14 +1388,14 @@ def test_apple_takeout_does_not_call_resolver_when_definition_already_bootstrapp
 ):
     """When watched_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     fake_csv = tmp_path / "Playback Activity.csv"
     fake_csv.write_text("header\n")
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.library.resolve",
                         lambda p: Path(p))
-    monkeypatch.setattr("fulcra_media.collect_plugins.apple_takeout_importer.parse_any",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.apple_takeout_importer.parse_any",
                         lambda path, *, since=None, until=None: [])
 
     class FakeResult:
@@ -1409,7 +1409,7 @@ def test_apple_takeout_does_not_call_resolver_when_definition_already_bootstrapp
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -1465,17 +1465,17 @@ def test_generic_rss_plugin_run_imports_and_advances_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        "fulcra_media.plugins.generic_rss.rss_importer.normalize_feed",
         lambda feed_url, service, category: iter([ev]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.generic_rss.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # BR11: _run_generic_rss now reads media state; pre-populate so the resolver
     # guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx(
@@ -1496,16 +1496,16 @@ def test_generic_rss_plugin_filters_by_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        "fulcra_media.plugins.generic_rss.rss_importer.normalize_feed",
         lambda feed_url, service, category: iter([old_ev, new_ev]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.generic_rss.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # BR11: pre-populate state so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx(
@@ -1526,16 +1526,16 @@ def test_generic_rss_plugin_max_entries(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        "fulcra_media.plugins.generic_rss.rss_importer.normalize_feed",
         lambda feed_url, service, category: iter(events),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.generic_rss.newest_event_iso",
         lambda evs: "2026-05-22T10:00:00+00:00",
     )
     # BR11: pre-populate state so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
@@ -1561,14 +1561,14 @@ def test_generic_rss_plugin_newest_first_feed_keeps_oldest_block(monkeypatch):
     fake_client = _FakeClient()
     # Newest-first ordering, as many real RSS feeds emit.
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        "fulcra_media.plugins.generic_rss.rss_importer.normalize_feed",
         lambda feed_url, service, category: iter([newest, middle, oldest]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient", lambda: fake_client)
     # Don't stub newest_event_iso — let the real one run on what we actually imported,
     # so the watermark assertion below proves we advanced to a *safe* timestamp.
     # BR11: pre-populate state so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx(
@@ -1619,16 +1619,16 @@ def test_generic_rss_uses_resolver_for_watched_category(monkeypatch):
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_save",
                         lambda state, path=None: saved_states.append(state))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        "fulcra_media.plugins.generic_rss.rss_importer.normalize_feed",
         lambda feed_url, service, category: iter([]),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.generic_rss.newest_event_iso",
         lambda events: None,
     )
 
@@ -1643,7 +1643,7 @@ def test_generic_rss_uses_resolver_for_watched_category(monkeypatch):
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -1685,16 +1685,16 @@ def test_generic_rss_uses_resolver_for_listened_category(monkeypatch):
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_save",
                         lambda state, path=None: saved_states.append(state))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        "fulcra_media.plugins.generic_rss.rss_importer.normalize_feed",
         lambda feed_url, service, category: iter([]),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.generic_rss.newest_event_iso",
         lambda events: None,
     )
 
@@ -1709,7 +1709,7 @@ def test_generic_rss_uses_resolver_for_listened_category(monkeypatch):
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -1748,14 +1748,14 @@ def test_generic_rss_uses_resolver_for_listened_category(monkeypatch):
 def test_generic_rss_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
     """When the target definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss._state_load",
                         lambda path: _make_bootstrapped_media_state())
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.rss_importer.normalize_feed",
+        "fulcra_media.plugins.generic_rss.rss_importer.normalize_feed",
         lambda feed_url, service, category: iter([]),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.generic_rss.newest_event_iso",
         lambda events: None,
     )
 
@@ -1770,7 +1770,7 @@ def test_generic_rss_does_not_call_resolver_when_definition_already_bootstrapped
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -1811,17 +1811,17 @@ def test_letterboxd_plugin_run_imports_and_advances_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.lb_importer.fetch_diary",
+        "fulcra_media.plugins.letterboxd.lb_importer.fetch_diary",
         lambda username: iter([ev]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.letterboxd.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # R8: _run_letterboxd now reads media state; pre-populate so the resolver
     # guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("letterboxd", {"username": "johndoe"})
@@ -1838,15 +1838,15 @@ def test_letterboxd_plugin_filters_by_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.lb_importer.fetch_diary",
+        "fulcra_media.plugins.letterboxd.lb_importer.fetch_diary",
         lambda username: iter([old_ev, new_ev]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.letterboxd.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("letterboxd", {"username": "johndoe"})
@@ -1889,17 +1889,17 @@ def test_letterboxd_uses_resolver_when_watched_definition_not_bootstrapped(monke
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.lb_importer.fetch_diary",
+        "fulcra_media.plugins.letterboxd.lb_importer.fetch_diary",
         lambda username: iter([]),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.letterboxd.newest_event_iso",
         lambda events: None,
     )
 
@@ -1914,7 +1914,7 @@ def test_letterboxd_uses_resolver_when_watched_definition_not_bootstrapped(monke
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -1954,14 +1954,14 @@ def test_letterboxd_uses_resolver_when_watched_definition_not_bootstrapped(monke
 def test_letterboxd_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
     """When watched_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd._state_load",
                         lambda path: _make_bootstrapped_media_state())
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.lb_importer.fetch_diary",
+        "fulcra_media.plugins.letterboxd.lb_importer.fetch_diary",
         lambda username: iter([]),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.letterboxd.newest_event_iso",
         lambda events: None,
     )
 
@@ -1976,7 +1976,7 @@ def test_letterboxd_does_not_call_resolver_when_definition_already_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.letterboxd.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -2017,17 +2017,17 @@ def test_goodreads_plugin_run_imports_and_advances_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        "fulcra_media.plugins.goodreads.gr_importer.fetch_diary",
         lambda user_id: iter([ev]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.goodreads.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.goodreads.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # BR10: _run_goodreads now reads media state; pre-populate so the resolver
     # guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.goodreads._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("goodreads", {"user_id": "12345"})
@@ -2044,16 +2044,16 @@ def test_goodreads_plugin_filters_by_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        "fulcra_media.plugins.goodreads.gr_importer.fetch_diary",
         lambda user_id: iter([old_ev, new_ev]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.goodreads.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.goodreads.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # BR10: pre-populate state so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.goodreads._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("goodreads", {"user_id": "12345"})
@@ -2096,17 +2096,17 @@ def test_goodreads_uses_resolver_when_read_definition_not_bootstrapped(monkeypat
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.goodreads._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.goodreads._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        "fulcra_media.plugins.goodreads.gr_importer.fetch_diary",
         lambda user_id: iter([]),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.goodreads.newest_event_iso",
         lambda events: None,
     )
 
@@ -2121,7 +2121,7 @@ def test_goodreads_uses_resolver_when_read_definition_not_bootstrapped(monkeypat
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.goodreads.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -2161,14 +2161,14 @@ def test_goodreads_uses_resolver_when_read_definition_not_bootstrapped(monkeypat
 def test_goodreads_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
     """When read_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.goodreads._state_load",
                         lambda path: _make_bootstrapped_media_state())
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.gr_importer.fetch_diary",
+        "fulcra_media.plugins.goodreads.gr_importer.fetch_diary",
         lambda user_id: iter([]),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.goodreads.newest_event_iso",
         lambda events: None,
     )
 
@@ -2183,7 +2183,7 @@ def test_goodreads_does_not_call_resolver_when_definition_already_bootstrapped(m
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.goodreads.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -2230,21 +2230,21 @@ def test_deezer_plugin_run_imports_and_advances_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        "fulcra_media.plugins.deezer.deezer_importer.fetch_history",
         fake_fetch,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        "fulcra_media.plugins.deezer.deezer_importer.normalize_history",
         lambda raw: ["ev-deezer"],
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.deezer.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.deezer.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # BR6: _run_deezer now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.deezer._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("deezer", {})
@@ -2274,17 +2274,17 @@ def test_deezer_plugin_rewinds_watermark_by_one_hour(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        "fulcra_media.plugins.deezer.deezer_importer.fetch_history",
         fake_fetch,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        "fulcra_media.plugins.deezer.deezer_importer.normalize_history",
         lambda raw: [],
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.deezer.FulcraClient", lambda: fake_client)
     # BR6: _run_deezer now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.deezer._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("deezer", {})
@@ -2340,17 +2340,17 @@ def test_deezer_uses_resolver_when_listened_definition_not_bootstrapped(monkeypa
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.deezer._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.deezer._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        "fulcra_media.plugins.deezer.deezer_importer.fetch_history",
         lambda creds, since, max_pages: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        "fulcra_media.plugins.deezer.deezer_importer.normalize_history",
         lambda raw: [],
     )
 
@@ -2365,7 +2365,7 @@ def test_deezer_uses_resolver_when_listened_definition_not_bootstrapped(monkeypa
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.deezer.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -2409,15 +2409,15 @@ def test_deezer_uses_resolver_when_listened_definition_not_bootstrapped(monkeypa
 def test_deezer_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
     """When listened_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.deezer._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.fetch_history",
+        "fulcra_media.plugins.deezer.deezer_importer.fetch_history",
         lambda creds, since, max_pages: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.deezer_importer.normalize_history",
+        "fulcra_media.plugins.deezer.deezer_importer.normalize_history",
         lambda raw: [],
     )
 
@@ -2432,7 +2432,7 @@ def test_deezer_does_not_call_resolver_when_definition_already_bootstrapped(monk
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.deezer.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -2485,34 +2485,34 @@ def test_trakt_plugin_run_imports_and_advances_watermark(monkeypatch):
     fake_client = _FakeClient()
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history",
         lambda: [{"id": 1, "type": "movie", "watched_at": "2026-05-22T10:00:00.000Z"}],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: ["ev-trakt"],
     )
     # Stub out cluster and twin helpers — no clusters, no twins.
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apply_cluster_policy",
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
         lambda events, policy: events,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.find_low_conf_twins",
+        "fulcra_media.plugins.trakt.find_low_conf_twins",
         lambda events, extra_pool: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
         lambda: [],
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.trakt.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # R8: _run_trakt now reads media state; pre-populate so the resolver
     # guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("trakt", {})
@@ -2526,11 +2526,11 @@ def test_trakt_plugin_run_imports_and_advances_watermark(monkeypatch):
 def test_trakt_plugin_raises_when_clusters_is_ask(monkeypatch):
     """clusters='ask' is interactive and must raise RuntimeError in headless mode."""
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: [],
     )
 
@@ -2542,11 +2542,11 @@ def test_trakt_plugin_raises_when_clusters_is_ask(monkeypatch):
 def test_trakt_plugin_raises_when_twin_policy_is_ask(monkeypatch):
     """twin_policy='ask' is interactive and must raise RuntimeError in headless mode."""
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: [],
     )
 
@@ -2566,28 +2566,28 @@ def test_trakt_plugin_drops_clusters_when_policy_is_drop(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: ["ev"],
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.apply_cluster_policy", fake_apply)
+    monkeypatch.setattr("fulcra_media.plugins.trakt.apply_cluster_policy", fake_apply)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.find_low_conf_twins",
+        "fulcra_media.plugins.trakt.find_low_conf_twins",
         lambda events, extra_pool: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
         lambda: [],
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.trakt.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("trakt", {"clusters": "drop"})
@@ -2625,35 +2625,35 @@ def test_trakt_plugin_auto_discards_twins_when_policy_is_auto_discard(monkeypatc
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: [low],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apply_cluster_policy",
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
         lambda events, policy: events,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.find_low_conf_twins",
+        "fulcra_media.plugins.trakt.find_low_conf_twins",
         lambda events, extra_pool: [(low, high)],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
         lambda: [high],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apply_twin_decisions",
+        "fulcra_media.plugins.trakt.apply_twin_decisions",
         fake_apply_twin,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.trakt.newest_event_iso",
         lambda events: None,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("trakt", {"twin_policy": "auto-discard"})
@@ -2690,33 +2690,33 @@ def test_trakt_uses_resolver_when_watched_definition_not_bootstrapped(monkeypatc
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apply_cluster_policy",
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
         lambda events, policy: events,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.find_low_conf_twins",
+        "fulcra_media.plugins.trakt.find_low_conf_twins",
         lambda events, extra_pool: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.trakt.newest_event_iso",
         lambda events: None,
     )
 
@@ -2731,7 +2731,7 @@ def test_trakt_uses_resolver_when_watched_definition_not_bootstrapped(monkeypatc
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -2771,30 +2771,30 @@ def test_trakt_uses_resolver_when_watched_definition_not_bootstrapped(monkeypatc
 def test_trakt_does_not_call_resolver_when_definition_already_bootstrapped(monkeypatch):
     """When watched_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
                         lambda path: _make_bootstrapped_media_state())
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apply_cluster_policy",
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
         lambda events, policy: events,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.find_low_conf_twins",
+        "fulcra_media.plugins.trakt.find_low_conf_twins",
         lambda events, extra_pool: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.trakt.newest_event_iso",
         lambda events: None,
     )
 
@@ -2809,7 +2809,7 @@ def test_trakt_does_not_call_resolver_when_definition_already_bootstrapped(monke
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -2854,17 +2854,17 @@ def test_apple_podcasts_plugin_run_imports_and_advances_watermark(monkeypatch):
 
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts.ap.parse_db",
         lambda db_path: iter([ev]),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient", lambda: fake_client)
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.apple_podcasts.newest_event_iso",
         lambda events: "2026-05-22T10:00:00+00:00",
     )
     # BR8: _run_apple_podcasts now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("apple-podcasts", {})
@@ -2883,13 +2883,13 @@ def test_apple_podcasts_plugin_uses_config_db_path(monkeypatch, tmp_path):
     received_paths = []
     fake_client = _FakeClient()
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts.ap.parse_db",
         lambda db_path: (received_paths.append(db_path) or iter([])),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient", lambda: fake_client)
     # BR8: _run_apple_podcasts now reads media state; pre-populate so the
     # resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx("apple-podcasts", {"db_path": str(custom_db)})
@@ -2906,7 +2906,7 @@ def test_apple_podcasts_plugin_snapshot_error_becomes_runtime_error(monkeypatch)
         raise SnapshotError("stalled")
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts.ap.parse_db",
         _raise_snapshot_error,
     )
 
@@ -2947,13 +2947,13 @@ def test_apple_podcasts_uses_resolver_when_listened_definition_not_bootstrapped(
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts.ap.parse_db",
         lambda db_path: iter([]),
     )
 
@@ -2968,7 +2968,7 @@ def test_apple_podcasts_uses_resolver_when_listened_definition_not_bootstrapped(
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -3010,11 +3010,11 @@ def test_apple_podcasts_does_not_call_resolver_when_definition_already_bootstrap
 ):
     """When listened_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts.ap.parse_db",
         lambda db_path: iter([]),
     )
 
@@ -3029,7 +3029,7 @@ def test_apple_podcasts_does_not_call_resolver_when_definition_already_bootstrap
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -3079,17 +3079,17 @@ def test_apple_podcasts_timemachine_plugin_run_imports_all_snapshots(monkeypatch
         return iter([ev1] if path == snap1 else [ev2])
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.find_timemachine_snapshots",
         lambda: [snap1, snap2],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.parse_db",
         fake_parse_db,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine.FulcraClient", lambda: fake_client)
     # BR9: _run_apple_podcasts_timemachine now reads media state; pre-populate
     # so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, st = _make_ctx("apple-podcasts-timemachine", {})
@@ -3122,17 +3122,17 @@ def test_apple_podcasts_timemachine_plugin_skips_erroring_snapshots(monkeypatch,
         return iter([ev1])
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.find_timemachine_snapshots",
         lambda: [snap1, snap2],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.parse_db",
         fake_parse_db,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine.FulcraClient", lambda: fake_client)
     # BR9: _run_apple_podcasts_timemachine now reads media state; pre-populate
     # so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     st = PluginState("apple-podcasts-timemachine")
@@ -3152,10 +3152,10 @@ def test_apple_podcasts_timemachine_plugin_skips_erroring_snapshots(monkeypatch,
 
 def test_apple_podcasts_timemachine_plugin_raises_when_no_snapshots(monkeypatch):
     """When find_timemachine_snapshots returns empty, raise RuntimeError."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine._state_load",
                         lambda path: _make_bootstrapped_media_state())
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.find_timemachine_snapshots",
         lambda: [],
     )
 
@@ -3196,18 +3196,18 @@ def test_apple_podcasts_timemachine_uses_resolver_when_listened_definition_not_b
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine._state_save",
                         lambda state, path=None: saved_states.append(state))
 
     snap = tmp_path / "snap.sqlite"
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.find_timemachine_snapshots",
         lambda: [snap],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.parse_db",
         lambda db_path: iter([]),
     )
 
@@ -3222,7 +3222,7 @@ def test_apple_podcasts_timemachine_uses_resolver_when_listened_definition_not_b
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -3264,16 +3264,16 @@ def test_apple_podcasts_timemachine_does_not_call_resolver_when_definition_alrea
 ):
     """When listened_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip."""
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     snap = tmp_path / "snap.sqlite"
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.find_timemachine_snapshots",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.find_timemachine_snapshots",
         lambda: [snap],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.ap.parse_db",
+        "fulcra_media.plugins.apple_podcasts_timemachine.ap.parse_db",
         lambda db_path: iter([]),
     )
 
@@ -3288,7 +3288,7 @@ def test_apple_podcasts_timemachine_does_not_call_resolver_when_definition_alrea
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -3358,14 +3358,14 @@ def test_media_webhook_plugin_run_starts_and_serves(monkeypatch):
         return _FakeServer()
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.media_webhook._state_load",
         lambda path: _FakeState(),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        "fulcra_media.plugins.media_webhook.webhook_receiver.make_server",
         fake_make_server,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+    monkeypatch.setattr("fulcra_media.plugins.media_webhook.FulcraClient", lambda: object())
 
     ctx, _ = _make_ctx("media-webhook", {"host": "127.0.0.1", "port": "8765"})
     MEDIA_WEBHOOK_PLUGIN.run(ctx)
@@ -3389,14 +3389,14 @@ def test_media_webhook_plugin_run_uses_defaults(monkeypatch):
         return type("S", (), {"serve_forever": lambda self: None})()
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.media_webhook._state_load",
         lambda path: _FakeState(),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        "fulcra_media.plugins.media_webhook.webhook_receiver.make_server",
         fake_make_server,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+    monkeypatch.setattr("fulcra_media.plugins.media_webhook.FulcraClient", lambda: object())
 
     ctx, _ = _make_ctx("media-webhook", {})
     MEDIA_WEBHOOK_PLUGIN.run(ctx)
@@ -3411,10 +3411,10 @@ def test_media_webhook_plugin_non_loopback_without_token_raises(monkeypatch):
         watched_definition_id = "def-uuid-123"
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.media_webhook._state_load",
         lambda path: _FakeState(),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+    monkeypatch.setattr("fulcra_media.plugins.media_webhook.FulcraClient", lambda: object())
 
     ctx, _ = _make_ctx("media-webhook", {"host": "0.0.0.0"})
     with pytest.raises(RuntimeError, match="non-loopback"):
@@ -3448,11 +3448,11 @@ def test_run_uses_resolver_when_watched_definition_not_bootstrapped(monkeypatch)
     saved_states: list = []
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.media_webhook._state_load",
         lambda path: empty_media_state,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_save",
+        "fulcra_media.plugins.media_webhook._state_save",
         lambda state, path=None: saved_states.append(state),
     )
 
@@ -3461,10 +3461,10 @@ def test_run_uses_resolver_when_watched_definition_not_bootstrapped(monkeypatch)
             pass  # don't actually run the loop
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        "fulcra_media.plugins.media_webhook.webhook_receiver.make_server",
         lambda *, host, port, state, client, bearer_token, log_stream: _FakeServer(),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+    monkeypatch.setattr("fulcra_media.plugins.media_webhook.FulcraClient", lambda: object())
 
     class _FakeDefinitionClient:
         def __init__(self):
@@ -3509,7 +3509,7 @@ def test_run_skips_resolver_when_watched_definition_already_bootstrapped(monkeyp
     """When watched_definition_id is already in the media state, the resolver
     must NOT be called — no unnecessary network trip on supervisor restart."""
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.media_webhook._state_load",
         lambda path: _make_bootstrapped_media_state(),
     )
 
@@ -3518,10 +3518,10 @@ def test_run_skips_resolver_when_watched_definition_already_bootstrapped(monkeyp
             pass
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        "fulcra_media.plugins.media_webhook.webhook_receiver.make_server",
         lambda *, host, port, state, client, bearer_token, log_stream: _FakeServer(),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+    monkeypatch.setattr("fulcra_media.plugins.media_webhook.FulcraClient", lambda: object())
 
     resolver_calls: list = []
 
@@ -3634,14 +3634,14 @@ def test_media_webhook_plugin_run_accepts_non_loopback_with_token(monkeypatch):
         return _FakeServer()
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.media_webhook._state_load",
         lambda path: _FakeState(),
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.webhook_receiver.make_server",
+        "fulcra_media.plugins.media_webhook.webhook_receiver.make_server",
         fake_make_server,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: object())
+    monkeypatch.setattr("fulcra_media.plugins.media_webhook.FulcraClient", lambda: object())
 
     ctx, _ = _make_ctx("media-webhook", {"host": "0.0.0.0", "port": "8765"})
     ctx.credentials["bearer-token"] = "s" * 32
@@ -3680,15 +3680,15 @@ def test_generic_csv_plugin_run_imports_with_column_map_and_service_category(
         return iter(["ev-csv"])
 
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.library.resolve", lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.parse_media_csv",
+        "fulcra_media.plugins.generic_csv.parse_media_csv",
         fake_parse,
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient", lambda: fake_client)
     # BR12: _run_generic_csv now reads media state; pre-populate so the resolver
     # guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
@@ -3744,16 +3744,16 @@ def test_generic_csv_plugin_fingerprint_none_maps_to_none(monkeypatch, tmp_path)
 
     received = {}
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.library.resolve", lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.parse_media_csv",
+        "fulcra_media.plugins.generic_csv.parse_media_csv",
         lambda path, *, service, category, column_map, tz, confidence, fingerprint_kind: (
             received.update({"fingerprint_kind": fingerprint_kind}) or iter([])
         ),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient", lambda: fake_client)
     # BR12: pre-populate state so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
@@ -3772,16 +3772,16 @@ def test_generic_csv_plugin_fingerprint_auto_maps_to_fp_auto(monkeypatch, tmp_pa
 
     received = {}
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.library.resolve", lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.parse_media_csv",
+        "fulcra_media.plugins.generic_csv.parse_media_csv",
         lambda path, *, service, category, column_map, tz, confidence, fingerprint_kind: (
             received.update({"fingerprint_kind": fingerprint_kind}) or iter([])
         ),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient", lambda: fake_client)
     # BR12: pre-populate state so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
@@ -3800,16 +3800,16 @@ def test_generic_csv_plugin_fingerprint_explicit_passes_through(monkeypatch, tmp
 
     received = {}
     fake_client = _FakeClient()
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.library.resolve", lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.parse_media_csv",
+        "fulcra_media.plugins.generic_csv.parse_media_csv",
         lambda path, *, service, category, column_map, tz, confidence, fingerprint_kind: (
             received.update({"fingerprint_kind": fingerprint_kind}) or iter([])
         ),
     )
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient", lambda: fake_client)
     # BR12: pre-populate state so the resolver guard exits without a network call.
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_load",
                         lambda path: _make_bootstrapped_media_state())
 
     ctx, _ = _make_ctx(
@@ -3840,13 +3840,13 @@ def test_generic_csv_uses_resolver_for_watched_category(monkeypatch, tmp_path):
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_save",
                         lambda state, path=None: saved_states.append(state))
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.library.resolve", lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.parse_media_csv",
+        "fulcra_media.plugins.generic_csv.parse_media_csv",
         lambda *a, **kw: iter([]),
     )
 
@@ -3861,7 +3861,7 @@ def test_generic_csv_uses_resolver_for_watched_category(monkeypatch, tmp_path):
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -3906,13 +3906,13 @@ def test_generic_csv_uses_resolver_for_listened_category(monkeypatch, tmp_path):
     empty_media_state = _make_empty_media_state()
     saved_states: list = []
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_load",
                         lambda path: empty_media_state)
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_save",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_save",
                         lambda state, path=None: saved_states.append(state))
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.library.resolve", lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.parse_media_csv",
+        "fulcra_media.plugins.generic_csv.parse_media_csv",
         lambda *a, **kw: iter([]),
     )
 
@@ -3927,7 +3927,7 @@ def test_generic_csv_uses_resolver_for_listened_category(monkeypatch, tmp_path):
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient",
                         lambda: FakeClient())
 
     class _FakeDefinitionClient:
@@ -3971,11 +3971,11 @@ def test_generic_csv_does_not_call_resolver_when_definition_already_bootstrapped
     fake_csv = tmp_path / "data.csv"
     fake_csv.write_text("timestamp,title,artist,id\n")
 
-    monkeypatch.setattr("fulcra_media.collect_plugins._state_load",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv._state_load",
                         lambda path: _make_bootstrapped_media_state())
-    monkeypatch.setattr("fulcra_media.collect_plugins.library.resolve", lambda p: Path(p))
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.library.resolve", lambda p: Path(p))
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.parse_media_csv",
+        "fulcra_media.plugins.generic_csv.parse_media_csv",
         lambda *a, **kw: iter([]),
     )
 
@@ -3990,7 +3990,7 @@ def test_generic_csv_does_not_call_resolver_when_definition_already_bootstrapped
         def run_import(self, events, state, check_only=False):
             return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient",
+    monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient",
                         lambda: FakeClient())
 
     resolver_calls: list = []
@@ -4032,31 +4032,31 @@ def test_run_trakt_uses_keychain_oauth_credentials_when_available(monkeypatch):
         return iter([])
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.fetch_history_with_headers",
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history_with_headers",
         fake_fetch_with_headers,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.trakt_importer.normalize_history",
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
         lambda items, cluster_threshold: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.apply_cluster_policy",
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
         lambda events, policy: events,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.find_low_conf_twins",
+        "fulcra_media.plugins.trakt.find_low_conf_twins",
         lambda events, extra_pool: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.twin_cache.load_for_twin_lookup",
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
         lambda: [],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.trakt.newest_event_iso",
         lambda events: None,
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.trakt._state_load",
         lambda path: _make_bootstrapped_media_state(),
     )
 
@@ -4069,7 +4069,7 @@ def test_run_trakt_uses_keychain_oauth_credentials_when_available(monkeypatch):
         def ensure_tag(self, name, state): pass
         def run_import(self, events, state, check_only=False): return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: FakeClient())
+    monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient", lambda: FakeClient())
 
     st = PluginState("trakt")
     ctx = RunContext(
@@ -4101,11 +4101,11 @@ def test_lastfm_emits_annotation_event_on_successful_writes(monkeypatch):
     emitted: list[dict] = []
 
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.fetch_recent_tracks",
+        "fulcra_media.plugins.lastfm.fetch_recent_tracks",
         lambda creds, since, max_pages: [{"raw": 1}],
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.normalize_history",
+        "fulcra_media.plugins.lastfm.normalize_history",
         lambda raw: ["event-1"],
     )
 
@@ -4118,13 +4118,13 @@ def test_lastfm_emits_annotation_event_on_successful_writes(monkeypatch):
         def ensure_tag(self, name, state): pass
         def run_import(self, events, state, check_only=False): return FakeResult()
 
-    monkeypatch.setattr("fulcra_media.collect_plugins.FulcraClient", lambda: FakeClient())
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient", lambda: FakeClient())
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins.newest_event_iso",
+        "fulcra_media.plugins.lastfm.newest_event_iso",
         lambda events: "2026-05-22T12:00:00Z",
     )
     monkeypatch.setattr(
-        "fulcra_media.collect_plugins._state_load",
+        "fulcra_media.plugins.lastfm._state_load",
         lambda path: _make_bootstrapped_media_state(),
     )
 
