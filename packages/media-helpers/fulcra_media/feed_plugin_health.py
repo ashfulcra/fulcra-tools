@@ -38,9 +38,9 @@ def letterboxd_health_check(ctx) -> HealthResult:
 
     Uses the same username extraction the run path uses
     (_extract_letterboxd_username) — imported lazily to avoid a circular
-    import (collect_plugins imports us; we'd otherwise import it back).
+    import (the plugin module imports us; we'd otherwise import it back).
     """
-    from .collect_plugins import _extract_letterboxd_username
+    from .plugins.letterboxd import _extract_letterboxd_username
 
     raw = (ctx.config.get("username") or "").strip()
     if not raw:
@@ -64,7 +64,7 @@ def goodreads_health_check(ctx) -> HealthResult:
     (_extract_goodreads_user_id) — lazy import for the same circular
     reason as letterboxd above.
     """
-    from .collect_plugins import _extract_goodreads_user_id
+    from .plugins.goodreads import _extract_goodreads_user_id
 
     raw = (ctx.config.get("user_id") or "").strip()
     if not raw:
