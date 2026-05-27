@@ -16,7 +16,7 @@ import "./step.js";          // the <fulcra-step> dispatcher
 import "./step-intro.js";              // Phase 1
 import "./step-external_action.js";    // Phase 2
 import "./step-input.js";               // Phase 2
-// import "./step-oauth.js";
+import "./step-oauth.js";               // Phase 2
 // import "./step-file_upload.js";
 // import "./step-permission_request.js";
 // import "./step-browser_extension.js";

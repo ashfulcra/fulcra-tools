@@ -744,7 +744,7 @@
                 </template>
 
                 <!-- ---- oauth ---- -->
-                <template x-if="current_step.kind === 'oauth'">
+                <template x-if="current_step.kind === 'oauth' && !(window.FulcraStepComponents && window.FulcraStepComponents.oauth)">
                   <div class="space-y-3">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
@@ -1431,7 +1431,7 @@
             </template>
 
             <!-- oauth -->
-            <template x-if="current_step.kind === 'oauth'">
+            <template x-if="current_step.kind === 'oauth' && !(window.FulcraStepComponents && window.FulcraStepComponents.oauth)">
               <div class="space-y-3">
                 <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
                 <button @click="startOAuth()"
