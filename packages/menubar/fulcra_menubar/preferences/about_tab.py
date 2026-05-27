@@ -1,12 +1,15 @@
 """About tab — versions, paths, Open Logs, Launch-at-login.
 
-Layout (top → bottom in screen space, i.e. high-y → low-y in AppKit coords):
+Layout (top → bottom in screen space, i.e. high-y → low-y in AppKit coords).
+Numeric y-coordinates are intentionally omitted — they are all derived from
+the ``ACTION_Y`` baseline inside ``make_about_tab`` and drift if cited here.
 
-  ┌─ Action row (y≈400) ──────────────────────────────────────────────────┐
+  ┌─ Action row ──────────────────────────────────────────────────────────┐
   │  [Open Activity Logs]   Launch at login  [switch]                     │
   │                         Open Fulcra Collect automatically…            │
   └───────────────────────────────────────────────────────────────────────┘
-  ┌─ Identity block (y≈330–370) ─────────────────────────────────────────┐
+  ┌─ Separator (thin rule, 24pt below the caption) ───────────────────────┐
+  ├─ Identity block ──────────────────────────────────────────────────────┤
   │  App version       x.y.z                                              │
   │  Daemon version    x.y.z                                              │
   │  Config            ~/.config/fulcra-collect/config.toml               │
@@ -96,7 +99,7 @@ def make_about_tab(*, client: DaemonClient):
     _attach(launch_switch, on_launch_change)
     view.addSubview_(launch_switch)
 
-    # Caption 18pt below the action row — explains the toggle.
+    # Caption 16pt below the action row — explains the toggle.
     launch_caption = NSTextField.labelWithString_(
         "Open Fulcra Collect automatically when you log in to your Mac."
     )
