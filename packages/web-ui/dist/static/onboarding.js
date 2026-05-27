@@ -10,9 +10,19 @@
  *                        (when fulcra CLI is unavailable, or user clicks
  *                        "Use a token instead"): paste-token via POST
  *                        /api/fulcra/auth/token.
- *   2  pick_plugins    — grouped plugin checkboxes from GET /api/status
- *   3  configure       — walks each picked plugin's setup_steps via createWizard()
- *   4  done            — summary, links to dashboard
+ *   2  collect_modes   — static explanation of historical-vs-live capture
+ *                        with four worked combo examples (music, TV,
+ *                        podcasts, Apple movies), an Attention callout,
+ *                        and a closing encouragement to write your own
+ *                        plugin. No API calls, no per-plugin state.
+ *   3  pick_plugins    — grouped plugin checkboxes from GET /api/status.
+ *                        _loadPlugins() fires async during collect_modes
+ *                        so the list is ready by the time the user
+ *                        advances; the existing pickLoading flag handles
+ *                        the unlikely race where the user clicks Next
+ *                        before the request returns.
+ *   4  configure       — walks each picked plugin's setup_steps via createWizard()
+ *   5  done            — summary, links to dashboard
  *
  * Usage (in index.html):
  *   <section x-data="onboarding()" x-init="boot()">
@@ -24,7 +34,7 @@
 
 function onboarding() {
   return {
-    // Current high-level phase: welcome | signin | pick_plugins | configure | done
+    // Current high-level phase: welcome | signin | collect_modes | pick_plugins | configure | done
     phase: "welcome",
 
     // --- signin state ---
@@ -124,8 +134,12 @@ function onboarding() {
           body: JSON.stringify({}),
         });
         if (result.ok) {
-          this.phase = "pick_plugins";
-          await this._loadPlugins();
+          // Hand off to the static explainer screen; load plugins in the
+          // background so the pick_plugins list is ready by the time the
+          // user advances. pickLoading covers the race if they're faster
+          // than the API.
+          this.phase = "collect_modes";
+          this._loadPlugins();  // intentionally not awaited
         } else {
           this.signinError = result.error || "Sign-in didn't complete. Please try again.";
         }
@@ -151,8 +165,9 @@ function onboarding() {
           body: JSON.stringify({ token: tok }),
         });
         if (result.ok) {
-          this.phase = "pick_plugins";
-          await this._loadPlugins();
+          // Same flow as signinViaCli — explainer then pick.
+          this.phase = "collect_modes";
+          this._loadPlugins();  // intentionally not awaited
         } else {
           this.signinError = result.error || "Token not accepted. Please try again.";
         }
@@ -161,6 +176,28 @@ function onboarding() {
       } finally {
         this.signinLoading = false;
       }
+    },
+
+    // collect_modes → pick_plugins (Next button on the static explainer screen).
+    goToPickPlugins() {
+      this.phase = "pick_plugins";
+      // _loadPlugins() was fired during signin success; only re-load
+      // if it never completed or it errored out. pickLoading flips to
+      // false in _loadPlugins's finally block, so the in-flight guard
+      // is safe; the (no plugins) || (had an error) check catches the
+      // two cases where it's worth retrying.
+      if (this.pickLoading) {
+        // already in flight from signin handler; nothing to do
+        return;
+      }
+      if (this.allPlugins.length === 0 || this.pickError) {
+        this._loadPlugins();
+      }
+    },
+
+    // collect_modes → signin (Back button on the static explainer screen).
+    backToSignin() {
+      this.phase = "signin";
     },
 
     async _loadPlugins() {
