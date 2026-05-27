@@ -18,7 +18,7 @@ import "./step-external_action.js";    // Phase 2
 import "./step-input.js";               // Phase 2
 import "./step-oauth.js";               // Phase 2
 import "./step-file_upload.js";         // Phase 2
-// import "./step-permission_request.js";
+import "./step-permission_request.js";  // Phase 2
 // import "./step-browser_extension.js";
 // import "./step-extension_pair.js";
 // import "./step-test_connection.js";
