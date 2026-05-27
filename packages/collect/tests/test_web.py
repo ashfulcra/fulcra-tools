@@ -136,6 +136,7 @@ def test_credentials_known_plugin(collect_home, _in_memory_keyring):
         id="svc",
         name="Service",
         kind="manual",
+        collect_mode="historical",
         run=lambda c: None,
         required_credentials=(
             Credential(key="api_key", label="API Key", help=""),
@@ -156,6 +157,7 @@ def test_set_and_delete_credential(collect_home, _in_memory_keyring):
         id="svc",
         name="Service",
         kind="manual",
+        collect_mode="historical",
         run=lambda c: None,
         required_credentials=(
             Credential(key="api_key", label="API Key", help=""),
@@ -197,7 +199,7 @@ def test_get_settings_unknown_plugin(collect_home):
 def test_get_settings_empty_initially(collect_home):
     from fulcra_collect.plugin import Plugin, Setting
     plugin = Plugin(
-        id="rss", name="RSS", kind="manual", run=lambda c: None,
+        id="rss", name="RSS", kind="manual", collect_mode="historical", run=lambda c: None,
         required_settings=(
             Setting(key="feed_url", label="Feed URL", kind="url"),
         ),
@@ -213,6 +215,7 @@ def test_plugin_settings_put_validates_against_required_settings(collect_home):
     from fulcra_collect.plugin import Plugin, Setting
     plugin = Plugin(
         id="rss", name="RSS", kind="scheduled",
+        collect_mode="live_polled",
         run=lambda c: None,
         default_interval=datetime.timedelta(hours=1),
         required_settings=(
@@ -271,6 +274,7 @@ def test_settings_and_credentials_round_trip_for_reconfigure(collect_home, _in_m
         id="rss",
         name="RSS",
         kind="manual",
+        collect_mode="historical",
         run=lambda c: None,
         required_settings=(
             Setting(key="feed_url", label="Feed URL", kind="url"),
@@ -328,7 +332,7 @@ def test_enable_disable_unknown_plugin(collect_home):
 
 def test_enable_then_disable(collect_home):
     from fulcra_collect.plugin import Plugin
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
 
@@ -361,6 +365,7 @@ def test_plugin_contract_returns_full_shape(collect_home):
     from fulcra_collect.plugin import Plugin, Setting, Credential, SetupStep, Permission
     plugin = Plugin(
         id="example", name="Example", kind="scheduled",
+        collect_mode="live_polled",
         run=lambda c: None,
         description="Imports example data.",
         category="other",
@@ -399,7 +404,7 @@ def test_plugin_contract_returns_full_shape(collect_home):
 
 def test_plugin_contract_no_interval_when_manual(collect_home):
     from fulcra_collect.plugin import Plugin
-    plugin = Plugin(id="m", name="M", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="m", name="M", kind="manual", collect_mode="historical", run=lambda c: None)
     daemon = _build_test_daemon(collect_home, plugins={"m": plugin})
     client = _client(daemon)
     r = client.get("/api/plugin/m/contract")
@@ -410,7 +415,7 @@ def test_plugin_contract_no_interval_when_manual(collect_home):
 def test_plugin_contract_health_check_available(collect_home):
     from fulcra_collect.plugin import Plugin, HealthResult
     plugin = Plugin(
-        id="h", name="H", kind="manual", run=lambda c: None,
+        id="h", name="H", kind="manual", collect_mode="historical", run=lambda c: None,
         health_check=lambda ctx: HealthResult(ok=True, summary="ok"),
     )
     daemon = _build_test_daemon(collect_home, plugins={"h": plugin})
@@ -422,7 +427,7 @@ def test_plugin_contract_health_check_available(collect_home):
 def test_plugin_contract_enum_setting_values(collect_home):
     from fulcra_collect.plugin import Plugin, Setting
     plugin = Plugin(
-        id="e", name="E", kind="manual", run=lambda c: None,
+        id="e", name="E", kind="manual", collect_mode="historical", run=lambda c: None,
         required_settings=(
             Setting(key="mode", label="Mode", kind="enum",
                     enum_values=("a", "b", "c"), required=False),
@@ -447,7 +452,7 @@ def test_plugin_contract_enum_labels_round_trip(collect_home):
     """
     from fulcra_collect.plugin import Plugin, Setting
     plugin = Plugin(
-        id="e2", name="E2", kind="manual", run=lambda c: None,
+        id="e2", name="E2", kind="manual", collect_mode="historical", run=lambda c: None,
         required_settings=(
             Setting(
                 key="mode", label="Mode", kind="enum",
@@ -470,7 +475,7 @@ def test_plugin_contract_setup_step_condition_round_trip(collect_home):
     serialize as null so the frontend can branch deterministically."""
     from fulcra_collect.plugin import Plugin, SetupStep
     plugin = Plugin(
-        id="cond", name="Cond", kind="manual", run=lambda c: None,
+        id="cond", name="Cond", kind="manual", collect_mode="historical", run=lambda c: None,
         setup_steps=(
             SetupStep(kind="intro", title="Intro"),
             SetupStep(kind="file_upload", title="Upload",
@@ -501,7 +506,7 @@ def test_plugin_health_check_unknown(collect_home):
 
 def test_plugin_health_check_when_not_declared(collect_home):
     from fulcra_collect.plugin import Plugin
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
     r = client.post("/api/plugin/x/health_check")
@@ -516,7 +521,7 @@ def test_plugin_health_check_returns_result(collect_home):
         return HealthResult(ok=True, summary="all good",
                             preview=[{"title": "Song A"}])
 
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None,
                     health_check=check)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
@@ -534,7 +539,7 @@ def test_plugin_health_check_catches_exceptions(collect_home):
     def bad_check(ctx):
         raise RuntimeError("service unreachable")
 
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None,
                     health_check=bad_check)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
@@ -684,7 +689,7 @@ def test_new_routes_require_auth(collect_home):
 
 def test_oauth_start_requires_oauth_handler(collect_home):
     from fulcra_collect.plugin import Plugin
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     # plugin has no oauth_handler
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
@@ -694,7 +699,7 @@ def test_oauth_start_requires_oauth_handler(collect_home):
 
 def test_oauth_start_returns_state_and_challenge(collect_home):
     from fulcra_collect.plugin import Plugin
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None,
                     oauth_handler=lambda **kw: {"access_token": "abc"})
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     # Simulate the URL being available on the daemon (normally set by serve())
@@ -714,7 +719,7 @@ def test_oauth_callback_invokes_handler_and_stores_tokens(collect_home, _in_memo
         calls.append({"plugin_id": plugin_id, "code": code})
         return {"access_token": "token-A", "refresh_token": "token-R"}
 
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None,
                     oauth_handler=fake_handler)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     # Simulate the URL being available on the daemon (normally set by serve())
@@ -731,7 +736,7 @@ def test_oauth_callback_invokes_handler_and_stores_tokens(collect_home, _in_memo
 
 def test_oauth_callback_rejects_invalid_state(collect_home):
     from fulcra_collect.plugin import Plugin
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None,
                     oauth_handler=lambda **kw: {"access_token": "abc"})
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
@@ -748,7 +753,7 @@ def test_oauth_callback_handles_handler_exception_gracefully(collect_home, _in_m
     def boom(*, plugin_id, code, code_verifier, redirect_uri):
         raise RuntimeError("Trakt rejected the code: invalid_grant")
 
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None,
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None,
                     oauth_handler=boom)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     daemon._web_url = "http://127.0.0.1:9999"
@@ -1032,7 +1037,7 @@ def test_bind_definition_unknown_plugin(collect_home):
 
 def test_bind_definition_missing_body_fields(collect_home):
     from fulcra_collect.plugin import Plugin
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
     # Body has neither definition_id nor force_new
@@ -1043,7 +1048,7 @@ def test_bind_definition_missing_body_fields(collect_home):
 def test_bind_definition_stores_id(collect_home):
     from fulcra_collect.plugin import Plugin
     from fulcra_collect import state as _state_mod
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
     r = client.post("/api/plugin/x/definition", json={"definition_id": "def-uuid-123"})
@@ -1056,7 +1061,7 @@ def test_bind_definition_stores_id(collect_home):
 def test_bind_definition_force_new_clears_id(collect_home):
     from fulcra_collect.plugin import Plugin
     from fulcra_collect import state as _state_mod
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     # Pre-load state with an existing definition_id
     st = _state_mod.load("x")
     st.definition_id = "old-def-id"
@@ -1078,7 +1083,7 @@ def test_bind_definition_force_new_with_custom_name_persists_override(collect_ho
     next run's resolver uses it verbatim instead of canonical_name."""
     from fulcra_collect.plugin import Plugin
     from fulcra_collect import state as _state_mod
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
     r = client.post(
@@ -1095,7 +1100,7 @@ def test_bind_definition_force_new_blank_name_ignored(collect_home):
     """A whitespace-only new_name must not pin a stupid override on state."""
     from fulcra_collect.plugin import Plugin
     from fulcra_collect import state as _state_mod
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     daemon = _build_test_daemon(collect_home, plugins={"x": plugin})
     client = _client(daemon)
     r = client.post(
@@ -1113,7 +1118,7 @@ def test_bind_definition_pick_existing_clears_pending_override(collect_home):
     doesn't ignore the picked def in favor of a find-or-create by name."""
     from fulcra_collect.plugin import Plugin
     from fulcra_collect import state as _state_mod
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     st = _state_mod.load("x")
     st.override_definition_name = "stale-typed-name"
     _state_mod.save(st)
@@ -1136,7 +1141,7 @@ def test_clear_definition_unknown_plugin(collect_home):
 def test_clear_definition_removes_id(collect_home):
     from fulcra_collect.plugin import Plugin
     from fulcra_collect import state as _state_mod
-    plugin = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    plugin = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     st = _state_mod.load("x")
     st.definition_id = "some-def"
     _state_mod.save(st)
@@ -1209,6 +1214,7 @@ def test_delete_definition_happy_path_clears_bound_plugin_state(
 
     # Plugin bound to the def we're about to delete.
     plugin = Plugin(id="bound-plugin", name="Bound", kind="manual",
+                    collect_mode="historical",
                     run=lambda c: None)
     st = _state_mod.load("bound-plugin")
     st.definition_id = "def-to-delete"
@@ -1253,8 +1259,8 @@ def test_delete_definition_leaves_other_plugins_state_alone(
     _creds_mod.set_user_secret("bearer-token", "valid-token")
     _patch_fulcra_delete(monkeypatch, status_code=204)
 
-    p1 = Plugin(id="p-keeps", name="Keeps", kind="manual", run=lambda c: None)
-    p2 = Plugin(id="p-loses", name="Loses", kind="manual", run=lambda c: None)
+    p1 = Plugin(id="p-keeps", name="Keeps", kind="manual", collect_mode="historical", run=lambda c: None)
+    p2 = Plugin(id="p-loses", name="Loses", kind="manual", collect_mode="historical", run=lambda c: None)
     st1 = _state_mod.load("p-keeps")
     st1.definition_id = "def-Y"
     _state_mod.save(st1)
@@ -2086,6 +2092,7 @@ def _upload_plugin(setting_kind: str = "path"):
         id="netflix-test",
         name="Netflix Test",
         kind="manual",
+        collect_mode="historical",
         run=lambda c: None,
         required_settings=(
             Setting(key="path", label="Takeout path", kind=setting_kind),

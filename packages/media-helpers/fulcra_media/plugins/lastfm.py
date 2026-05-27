@@ -75,6 +75,7 @@ PLUGIN = Plugin(
     id="lastfm",
     name="Last.fm scrobbles",
     kind="scheduled",
+    collect_mode="live_polled",
     run=_run_lastfm,
     description=(
         "Captures your music listening history via Last.fm — the universal "

@@ -76,6 +76,7 @@ PLUGIN = Plugin(
     id="generic-rss",
     name="Generic RSS/Atom feed",
     kind="scheduled",
+    collect_mode="live_polled",
     run=_run_generic_rss,
     health_check=generic_rss_health_check,
     description=(

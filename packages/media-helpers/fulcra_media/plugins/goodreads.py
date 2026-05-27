@@ -96,6 +96,7 @@ PLUGIN = Plugin(
     id="goodreads",
     name="Goodreads read shelf",
     kind="scheduled",
+    collect_mode="live_polled",
     run=_run_goodreads,
     health_check=goodreads_health_check,
     description=(

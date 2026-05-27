@@ -118,6 +118,7 @@ PLUGIN = Plugin(
     id="dayone",
     name="Day One journal",
     kind="scheduled",
+    collect_mode="live_polled",
     run=run,
     description=(
         "Imports your Day One journal entries as Journal annotations. Pick "

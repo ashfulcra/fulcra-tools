@@ -16,25 +16,81 @@ def _noop(ctx) -> None:
 
 def test_scheduled_plugin_requires_default_interval():
     with pytest.raises(ValueError, match="default_interval"):
-        Plugin(id="x", name="X", kind="scheduled", run=_noop)
+        Plugin(id="x", name="X", kind="scheduled", collect_mode="live_polled", run=_noop)
 
 
 def test_non_scheduled_plugin_rejects_default_interval():
     with pytest.raises(ValueError, match="default_interval"):
-        Plugin(id="x", name="X", kind="manual", run=_noop,
+        Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=_noop,
                default_interval=timedelta(hours=1))
 
 
 def test_unknown_kind_rejected():
     with pytest.raises(ValueError, match="kind"):
-        Plugin(id="x", name="X", kind="weekly", run=_noop)
+        Plugin(id="x", name="X", kind="weekly", collect_mode="historical",
+               run=_noop)
+
+
+# ---------------------------------------------------------------------------
+# collect_mode field (SP3 task 1)
+#
+# Required, no default — every plugin declares one. The mapping isn't
+# derivable from `kind` because the Attention extension's kind="manual"
+# but functionally collect_mode="live_continuous". Forcing per-plugin
+# explicit values surfaces the distinction at the metadata level so the
+# menubar popover regroup and Preferences chip can read it directly.
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_requires_collect_mode():
+    """Every plugin must declare collect_mode — historical / live_polled /
+    live_continuous. Constructing a Plugin without it must raise TypeError
+    (the dataclass-level 'missing required argument' contract), not
+    ValueError — i.e. it's a structural, not a semantic, error."""
+    with pytest.raises(TypeError):
+        Plugin(
+            id="test",
+            name="Test",
+            kind="manual",
+            # collect_mode intentionally omitted — this is the assertion.
+            run=lambda ctx: None,
+        )
+
+
+def test_plugin_rejects_unknown_collect_mode():
+    """collect_mode must be one of the three known values; anything else
+    is a programmer error and __post_init__ raises ValueError with a
+    message that names the field (so a stray typo in a plugin module
+    surfaces clearly at import time)."""
+    with pytest.raises(ValueError, match="unknown collect_mode"):
+        Plugin(
+            id="test",
+            name="Test",
+            kind="manual",
+            collect_mode="bogus",
+            run=lambda ctx: None,
+        )
+
+
+def test_plugin_accepts_known_collect_modes():
+    """All three documented values construct cleanly and round-trip
+    through the dataclass attribute."""
+    for mode in ("historical", "live_polled", "live_continuous"):
+        p = Plugin(
+            id=f"test-{mode}",
+            name="Test",
+            kind="manual",
+            collect_mode=mode,
+            run=lambda ctx: None,
+        )
+        assert p.collect_mode == mode
 
 
 def test_valid_plugins_of_each_kind():
-    svc = Plugin(id="relay", name="Relay", kind="service", run=_noop)
-    sch = Plugin(id="lastfm", name="Last.fm", kind="scheduled", run=_noop,
+    svc = Plugin(id="relay", name="Relay", kind="service", collect_mode="live_continuous", run=_noop)
+    sch = Plugin(id="lastfm", name="Last.fm", kind="scheduled", collect_mode="live_polled", run=_noop,
                  default_interval=timedelta(hours=1))
-    man = Plugin(id="dayone", name="Day One", kind="manual", run=_noop)
+    man = Plugin(id="dayone", name="Day One", kind="manual", collect_mode="historical", run=_noop)
     assert svc.kind == "service"
     assert sch.default_interval == timedelta(hours=1)
     assert man.kind == "manual"
@@ -49,8 +105,8 @@ def test_permission_and_credential_are_simple_records():
 
 
 def test_requires_network_defaults_true_and_is_overridable():
-    online = Plugin(id="x", name="X", kind="manual", run=_noop)
-    offline_ok = Plugin(id="y", name="Y", kind="manual", run=_noop,
+    online = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=_noop)
+    offline_ok = Plugin(id="y", name="Y", kind="manual", collect_mode="historical", run=_noop,
                         requires_network=False)
     assert online.requires_network is True
     assert offline_ok.requires_network is False
@@ -167,7 +223,7 @@ def test_resolved_definition_id_uses_cache_on_second_call():
 def test_canonical_definition_name_is_optional_on_plugin():
     # Plugins without a canonical name (e.g. dayone moments) must
     # still construct cleanly.
-    p = Plugin(id="dayone", name="Day One", kind="manual", run=_noop)
+    p = Plugin(id="dayone", name="Day One", kind="manual", collect_mode="historical", run=_noop)
     assert p.canonical_definition_name is None
 
 
@@ -190,7 +246,7 @@ def test_setting_enum_kind_with_values():
 
 def test_plugin_required_settings_default_empty():
     from fulcra_collect.plugin import Plugin
-    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    p = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     assert p.required_settings == ()
 
 
@@ -222,7 +278,7 @@ def test_setup_step_condition_accepted():
 
 def test_plugin_setup_steps_default_empty():
     from fulcra_collect.plugin import Plugin
-    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    p = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     assert p.setup_steps == ()
 
 
@@ -242,13 +298,14 @@ def test_health_result_default_empty_preview():
 
 def test_plugin_health_check_optional():
     from fulcra_collect.plugin import Plugin
-    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    p = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     assert p.health_check is None
 
 
 def test_canonical_definition_name_persists_when_set():
     p = Plugin(
         id="lastfm", name="Last.fm", kind="manual",
+        collect_mode="historical",
         run=_noop,
         canonical_definition_name="lastfm-listens",
     )

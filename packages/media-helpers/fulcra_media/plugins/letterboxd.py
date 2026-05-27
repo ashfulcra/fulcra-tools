@@ -90,6 +90,7 @@ PLUGIN = Plugin(
     id="letterboxd",
     name="Letterboxd film diary",
     kind="scheduled",
+    collect_mode="live_polled",
     run=_run_letterboxd,
     health_check=letterboxd_health_check,
     description=(

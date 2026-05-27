@@ -77,6 +77,7 @@ PLUGIN = Plugin(
     id="media-webhook",
     name="Plex/Jellyfin webhook receiver",
     kind="service",
+    collect_mode="live_continuous",
     run=_run_media_webhook,
     description=(
         "Captures what you watch on Plex or Jellyfin by running a tiny "

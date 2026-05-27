@@ -73,6 +73,7 @@ PLUGIN = Plugin(
     id="apple-takeout",
     name="Apple TV playback (takeout)",
     kind="manual",
+    collect_mode="historical",
     run=_run_apple_takeout,
     health_check=apple_takeout_health_check,
     description=(
