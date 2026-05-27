@@ -590,7 +590,7 @@
                 </template>
 
                 <!-- ---- definition_picker ---- Phase E ---- -->
-                <template x-if="current_step.kind === 'definition_picker'">
+                <template x-if="current_step.kind === 'definition_picker' && !(window.FulcraStepComponents && window.FulcraStepComponents.definition_picker)">
                   <div class="space-y-4">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
@@ -1278,7 +1278,7 @@
             </template>
 
             <!-- definition_picker -->
-            <template x-if="current_step.kind === 'definition_picker'">
+            <template x-if="current_step.kind === 'definition_picker' && !(window.FulcraStepComponents && window.FulcraStepComponents.definition_picker)">
               <div class="space-y-4">
                 <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
 

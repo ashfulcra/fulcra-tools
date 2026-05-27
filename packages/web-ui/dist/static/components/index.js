@@ -22,5 +22,5 @@ import "./step-permission_request.js";  // Phase 2
 import "./step-browser_extension.js";   // Phase 2
 import "./step-extension_pair.js";      // Phase 2
 import "./step-test_connection.js";     // Phase 2
-// import "./step-definition_picker.js";
+import "./step-definition_picker.js";   // Phase 2
 // import "./step-done.js";
