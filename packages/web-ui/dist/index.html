@@ -342,7 +342,7 @@
                 </template>
 
                 <!-- ---- input ---- -->
-                <template x-if="current_step.kind === 'input'">
+                <template x-if="current_step.kind === 'input' && !(window.FulcraStepComponents && window.FulcraStepComponents.input)">
                   <div class="space-y-4">
                     <template x-for="field in input_fields" :key="field.key">
                       <div>
@@ -1097,7 +1097,7 @@
             </template>
 
             <!-- input -->
-            <template x-if="current_step.kind === 'input'">
+            <template x-if="current_step.kind === 'input' && !(window.FulcraStepComponents && window.FulcraStepComponents.input)">
               <div class="space-y-4">
                 <template x-for="field in input_fields" :key="field.key">
                   <div>
