@@ -843,7 +843,7 @@ class Daemon:
         out in the Undo button's tooltip.
         """
         import uuid
-        from fulcra_common import wire
+        from fulcra_common.ingest import IngestPipeline, MomentEvent
         from . import credentials as _creds
         if not source_id:
             return {"ok": False, "error": "source_id required"}
@@ -856,33 +856,26 @@ class Daemon:
             f"com.fulcradynamics.fulcra-collect.quick-record.undo."
             f"{uuid.uuid4()}"
         )
-        record = wire.build_record(
-            data_type=wire.MOMENT_ANNOTATION,
-            start_time=now,
-            data={
-                "comment": "[deleted via Fulcra Collect menubar undo]",
-                "superseded_by": "deleted",
-                "supersedes_source_id": source_id,
-            },
-            source_id=tombstone_source_id,
-            tags=[],
+        # Tombstone has no annotation definition attached — Fulcra
+        # accepts the event and the tombstone is identifiable purely via
+        # its source_id prefix + the supersedes_source_id pointer.
+        tombstone = MomentEvent(
             definition_id=None,
+            source_id=tombstone_source_id,
+            tags=(),
+            comment="[deleted via Fulcra Collect menubar undo]",
+            superseded_by="deleted",
+            supersedes_source_id=source_id,
+            ts=now,
         )
-        body = wire.encode_batch([record])
         try:
-            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
-                r = client.post(
-                    "https://api.fulcradynamics.com/ingest/v1/record/batch",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "content-type": "application/x-jsonl",
-                    },
-                    content=body,
-                )
-                r.raise_for_status()
+            IngestPipeline(
+                client=_QuickRecordClient(token=token),
+            ).ingest_one(tombstone)
         except Exception as exc:
             logging.getLogger("fulcra_collect.daemon").exception(
-                "_delete_annotation(%s): Fulcra API request failed", source_id
+                "_delete_annotation(%s): Fulcra API request failed",
+                source_id,
             )
             self.activity.add(plugin_id="quick-record",
                               summary=f"undo failed: {exc}", ok=False)
