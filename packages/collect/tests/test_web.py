@@ -1654,15 +1654,28 @@ def test_extension_attention_happy_path_calls_ingest(
         "fulcra_attention.state.save", lambda *a, **kw: None,
     )
 
-    # Capture ingest_batch calls without hitting the real Fulcra API.
+    # Capture ingest calls without hitting the real Fulcra API. Refactor
+    # #69 moved attention's POST through IngestPipeline, so we patch the
+    # pipeline that the extension route imports. Each `ingest_one` call
+    # appends the typed event (so tests can still assert "one event was
+    # posted" without depending on the wire-format dict).
     ingest_calls: list[list] = []
+
+    class _FakeIngestPipeline:
+        def __init__(self, client=None): pass
+        def ingest_one(self, event):
+            ingest_calls.append([event])
+        def ingest_batch(self, events):
+            ingest_calls.append(list(events))
+
+    monkeypatch.setattr(
+        "fulcra_collect.routes.extension.IngestPipeline", _FakeIngestPipeline,
+    )
 
     class _FakeFulcraClient:
         def __init__(self, *a, **kw): pass
         def ensure_tag(self, name, state): return "tag-stub"
         def definition_exists(self, def_id): return True
-        def ingest_batch(self, events):
-            ingest_calls.append(events)
 
     monkeypatch.setattr(
         "fulcra_attention.fulcra.FulcraClient", _FakeFulcraClient,
@@ -1711,9 +1724,15 @@ def test_extension_attention_throttles_activity_feed_entries(
         def __init__(self, *a, **kw): pass
         def ensure_tag(self, name, state): return "tag-stub"
         def definition_exists(self, def_id): return True
+    class _NoopPipeline:
+        def __init__(self, client=None): pass
+        def ingest_one(self, event): pass
         def ingest_batch(self, events): pass
     monkeypatch.setattr("fulcra_attention.fulcra.FulcraClient",
                         _FakeFulcraClient)
+    monkeypatch.setattr(
+        "fulcra_collect.routes.extension.IngestPipeline", _NoopPipeline,
+    )
 
     daemon = _build_test_daemon(collect_home)
     app = build_app(daemon)
@@ -1810,10 +1829,18 @@ def test_extension_attention_recovers_from_orphan_definition(
             state.attention_definition_id = "fresh-def-on-account-B"
             state.tag_ids.setdefault("attention", "fresh-attention-tag")
             state.tag_ids.setdefault("web", "fresh-web-tag")
+
+    class _CapturingPipeline:
+        def __init__(self, client=None): pass
+        def ingest_one(self, event):
+            ingest_calls.append([event])
         def ingest_batch(self, events):
-            ingest_calls.append(events)
+            ingest_calls.append(list(events))
     monkeypatch.setattr("fulcra_attention.fulcra.FulcraClient",
                         _FakeFulcraClient)
+    monkeypatch.setattr(
+        "fulcra_collect.routes.extension.IngestPipeline", _CapturingPipeline,
+    )
 
     daemon = _build_test_daemon(collect_home)
     app = build_app(daemon)
@@ -1875,9 +1902,15 @@ def test_extension_attention_validates_def_only_once_per_window(
         def definition_exists(self, def_id):
             exists_calls.append(def_id)
             return True
+    class _NoopPipeline:
+        def __init__(self, client=None): pass
+        def ingest_one(self, event): pass
         def ingest_batch(self, events): pass
     monkeypatch.setattr("fulcra_attention.fulcra.FulcraClient",
                         _FakeFulcraClient)
+    monkeypatch.setattr(
+        "fulcra_collect.routes.extension.IngestPipeline", _NoopPipeline,
+    )
 
     daemon = _build_test_daemon(collect_home)
     # Inject a per-POST clock — see the throttle test for the same pattern.
@@ -1949,9 +1982,15 @@ def test_extension_attention_falls_back_to_per_plugin_state(
             state.tag_ids.setdefault("attention", "tag-attention")
             state.tag_ids.setdefault("web", "tag-web")
         def definition_exists(self, def_id): return True
+    class _NoopPipeline:
+        def __init__(self, client=None): pass
+        def ingest_one(self, event): pass
         def ingest_batch(self, events): pass
     monkeypatch.setattr("fulcra_attention.fulcra.FulcraClient",
                         _FakeFulcraClient)
+    monkeypatch.setattr(
+        "fulcra_collect.routes.extension.IngestPipeline", _NoopPipeline,
+    )
 
     daemon = _build_test_daemon(collect_home)
     app = build_app(daemon)
