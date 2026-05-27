@@ -11,11 +11,11 @@ Pick up where we left off. This file is the briefing for the next Claude session
 ## State at handoff
 
 - **Branch:** `session/2026-05-26-account-switch-fixes-and-qa`, working tree CLEAN.
-- **HEAD:** `563c5ea`. **54 commits ahead of `origin/session/...`** — nothing pushed yet this session. User reviews before push.
+- **HEAD:** `781dd4f`. **58 commits ahead of `origin/session/...`** — nothing pushed yet this session. User reviews before push.
 - **54 commits** since `1a310f6` (the prior session's end). Tracked work spans 5 sub-projects: refactor #68 + refactor #69 (merged from worktrees early in the session), the new `collect_modes` onboarding screen (web UI), and four menubar sub-projects (SP1–SP4) plus follow-up commits.
-- **Tests:** **1451 pass, 1 skipped** across the workspace (collect 367, common 67, media-helpers 653, attention 131, dayone 43, menubar 106, csv-importer 73, + the new ingest pipeline tests + the new contract/route tests). The previously-known SQLite-WAL-init flake (`test_concurrent_writes_from_two_threads_do_not_lose_data`) is now stable — fixed in commit `37d417e`.
-- **Daemon:** running, launchd-managed at PID **34006** on `127.0.0.1:9292`. Loaded code reflects HEAD `563c5ea`.
-- **Menubar:** running at PID **34021** (I started it; record at `~/.claude/projects/.../memory/project_fulcra_menubar_running.md`). Loaded code reflects HEAD `563c5ea`.
+- **Tests:** **1452 pass, 1 skipped** across the workspace (collect 368, common 67, media-helpers 653, attention 131, dayone 43, menubar 106, csv-importer 73, + the new ingest pipeline tests + the new contract/route tests). The previously-known SQLite-WAL-init flake (`test_concurrent_writes_from_two_threads_do_not_lose_data`) is now stable — fixed in commit `37d417e`.
+- **Daemon:** running, launchd-managed at PID **34006** on `127.0.0.1:9292`. Loaded code reflects HEAD `781dd4f`.
+- **Menubar:** running at PID **34021** (I started it; record at `~/.claude/projects/.../memory/project_fulcra_menubar_running.md`). Loaded code reflects HEAD `781dd4f`.
 - **Browser:** Arc paired via the claude-in-chrome MCP, on the tab opened to the wizard.
 
 ## What landed this session
@@ -110,13 +110,16 @@ Daemon (PID 34006) + menubar (PID 34021) are both running. The user pinned the m
 - **SP4 docs + Configure/Disable:** Popover header "?" icon (between title and pill) opens docs in browser; each enabled plugin row shows `[Disable] [Configure] [Run now]`; each disabled row shows `[Configure]` only; deep-link URLs work end-to-end.
 - **Web UI testing plan** Phases A–F (the user's original testing pass when SP1+SP2+SP3+SP4 hadn't been started yet) — including the `collect_modes` onboarding screen walkthrough and the cleanup-and-retry full onboarding (Test 4 from that plan).
 
-### Open follow-ups flagged by reviewers (non-blocking, file-and-forget unless they surface in practice)
+### Open follow-ups — most landed at end of session
 
-- **SP3 audit-style test** asserting Attention is the only `kind="manual"` + `live_continuous` plugin in the registry — would catch future drift if someone copies Attention's pattern without thinking.
-- **SP4 deep-link auth-stash** — when an unauth user clicks `?route=configure&plugin=lastfm`, the params get cleared by `replaceState` before signin completes, so they land on the default route post-signin rather than their original destination. Acceptable v1; nicer fix is to stash in `sessionStorage`.
-- **SP4 long plugin names truncate at 108pt** in the popover row — "Apple Music Takeout" / "Apple Music takeout" (~19 chars) won't fit. Worth a real-data eyeball; mitigations are tooltips or tighter button gaps.
-- **SP4 `right_text` / Disable button geometric overlap** at y=28..30 — currently invisible because the typical right_text strings are short and right-aligned, but fragile to future changes.
-- **SP1 follow-ups M1+M2:** empty-description plugins still allocate 32pt of phantom row height in the Plugins tab; latent humanize_caption / Run-button overlap at the impossible-in-practice "scheduled + empty desc + zero credentials" case. Pre-existing, not regressions.
+After the user asked "do all followups", four of the five reviewer-flagged minor items got addressed in three small commits at the end of the session:
+
+- **SP3 Attention drift audit test** (commit `8e66c36`) — `test_attention_is_the_only_manual_live_continuous_plugin` walks the real production registry and asserts `attention-relay` is the sole deviation from the default `kind→collect_mode` mapping. A future plugin author copying Attention's pattern would now break this test rather than silently misroute their plugin in the popover.
+- **SP4 deep-link auth-stash + popover row visual polish** (commit `bc5d893`) — three fixes bundled: (1) URL-param handler stashes the query string in `sessionStorage` when unauth so post-signin lands on the deep-link destination instead of the default route; (2) `right_text` label gets `NSLineBreakByTruncatingTail` as defensive measure against future expansion overrunning the Disable button below it; (3) `setToolTip_` on truncated plugin name + id labels so hover reveals the full string when the 108pt column truncates (mitigates the "Apple Music Takeout" visibility concern).
+- **SP1 empty-description phantom-row fix** (commit `781dd4f`) — `_compute_desc_height` now returns `0.0` for empty descriptions instead of 32.0. Rows drop from `112+24*N` to `80+24*N` pt for no-description plugins; rows with descriptions are unaffected.
+
+Still open (intentional):
+- **SP1 latent humanize_caption / Run-button overlap** at the impossible-in-practice "scheduled + empty desc + zero credentials" case. Pre-existing, hidden by every real plugin having credentials.
 
 ### What's NOT in scope but worth knowing
 
@@ -130,7 +133,7 @@ You are picking up a fulcra-tools session. Read /Users/Scanning/Developer/fulcra
 
 Working directory: /Users/Scanning/Developer/fulcra-tools.
 
-Branch: session/2026-05-26-account-switch-fixes-and-qa. All work is committed; nothing pushed yet. HEAD is 563c5ea. 54 commits ahead of origin. Working tree clean. Run `git log --oneline 1a310f6..HEAD` for the full set. 1451 tests pass across the workspace, 1 expected skip (Netflix takeout absent on this machine).
+Branch: session/2026-05-26-account-switch-fixes-and-qa. All work is committed; nothing pushed yet. HEAD is 781dd4f. 58 commits ahead of origin. Working tree clean. Run `git log --oneline 1a310f6..HEAD` for the full set. 1452 tests pass across the workspace, 1 expected skip (Netflix takeout absent on this machine).
 
 Daemon is launchd-managed at PID 34006 on 127.0.0.1:9292 (kickstart via `launchctl kickstart -k gui/$(id -u)/com.fulcra.collect` to pick up code changes). The menubar app is running at PID 34021 — I started it; the record at /Users/Scanning/.claude/projects/-Users-Scanning-Developer-fulcra-tools/memory/project_fulcra_menubar_running.md has the kill recipe. Both processes are on the latest code.
 
@@ -145,7 +148,7 @@ Most-likely next direction (ASK before assuming):
 The branch hasn't been merged into `main`. When the user is ready to merge, they'll choose between squash-merge (one commit per sub-project) or merge-as-is (preserve the 54-commit narrative). Each commit message already tells a self-contained story, so either is reasonable.
 ```
 
-## Key files (current state at HEAD `563c5ea`)
+## Key files (current state at HEAD `781dd4f`)
 
 ### Web UI
 
