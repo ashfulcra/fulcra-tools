@@ -76,6 +76,7 @@ PLUGIN = Plugin(
     id="apple-podcasts-timemachine",
     name="Apple Podcasts (Time Machine recovery)",
     kind="manual",
+    collect_mode="historical",
     run=_run_apple_podcasts_timemachine,
     description=(
         "One-shot recovery: walks every Time Machine backup on the "

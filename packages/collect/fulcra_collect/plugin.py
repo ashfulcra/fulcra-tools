@@ -16,6 +16,16 @@ from typing import Literal
 PluginKind = Literal["service", "scheduled", "manual"]
 _KINDS = ("service", "scheduled", "manual")
 
+CollectMode = Literal["historical", "live_polled", "live_continuous"]
+_COLLECT_MODES = ("historical", "live_polled", "live_continuous")
+"""User-facing 'historical vs live' framing for SP3. NOT derivable from
+``PluginKind`` — the Attention extension's kind="manual" but functionally
+collect_mode="live_continuous" because the data flow is push-based via
+the browser extension. Per-plugin explicit declarations surface this at
+the metadata level so the menubar popover, Preferences chip, and any
+future web-UI consumer can all read the same source of truth. See
+docs/plans/2026-05-27-sp3-historical-live-framing-execution.md."""
+
 
 @dataclass(frozen=True)
 class Permission:
@@ -151,6 +161,14 @@ class Plugin:
       "scheduled" — run(ctx) does one import pass; fired on default_interval.
       "manual"    — run(ctx) does one import pass; fired only on request.
 
+    collect_mode (required, no default):
+      "historical"      — one-shot import; the plugin does not update
+                          afterwards (takeouts, user-provided files).
+      "live_polled"     — captures new events on a polling schedule.
+      "live_continuous" — captures events as they happen (webhook
+                          receivers, browser-extension pushes).
+      NOT derivable from ``kind`` — see the ``CollectMode`` docstring.
+
     requires_network: when True (the default), the daemon skips this
     plugin's scheduled dispatch while the machine is offline — deferring
     it rather than running it into a guaranteed failure.
@@ -163,6 +181,22 @@ class Plugin:
     id: str
     name: str
     kind: PluginKind
+    collect_mode: CollectMode
+    """Per-plugin tag for the user-facing 'historical vs live' framing the
+    web UI's collect_modes onboarding screen introduced. Three values:
+
+      "historical"      — one-shot import; the plugin doesn't update
+                          afterwards (takeouts, user-provided files).
+      "live_polled"     — captures new events on a polling schedule.
+      "live_continuous" — captures events as they happen (webhook
+                          receivers, browser-extension pushes).
+
+    NOT derivable from `kind` — the Attention extension's kind="manual"
+    but functionally collect_mode="live_continuous" because the data
+    flow is push-based via the extension. Forcing per-plugin explicit
+    values surfaces this distinction at the metadata level. See SP3
+    in the 2026-05-27 menubar drift audit for the full mapping table.
+    """
     run: Callable[["RunContext"], None]
     description: str = ""
     default_interval: timedelta | None = None
@@ -210,6 +244,11 @@ class Plugin:
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
             raise ValueError(f"unknown kind {self.kind!r}; expected one of {_KINDS}")
+        if self.collect_mode not in _COLLECT_MODES:
+            raise ValueError(
+                f"unknown collect_mode {self.collect_mode!r}; "
+                f"expected one of {_COLLECT_MODES}"
+            )
         if self.kind == "scheduled" and self.default_interval is None:
             raise ValueError("scheduled plugin requires a default_interval")
         if self.kind != "scheduled" and self.default_interval is not None:

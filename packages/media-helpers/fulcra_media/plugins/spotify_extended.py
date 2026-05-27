@@ -46,6 +46,7 @@ PLUGIN = Plugin(
     id="spotify-extended",
     name="Spotify Extended Streaming History",
     kind="manual",
+    collect_mode="historical",
     run=_run_spotify_extended,
     description=(
         "Imports the Spotify Extended Streaming History GDPR export — a "

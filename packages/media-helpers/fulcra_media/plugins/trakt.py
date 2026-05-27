@@ -164,6 +164,7 @@ PLUGIN = Plugin(
     id="trakt",
     name="Trakt watch history",
     kind="scheduled",
+    collect_mode="live_polled",
     run=_run_trakt,
     description=(
         "Records your TV and movie watch history from Trakt.tv — which "

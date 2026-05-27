@@ -12,9 +12,11 @@ from fulcra_collect.registry import RegistryResult
 def _registry() -> RegistryResult:
     r = RegistryResult()
     r.plugins["lastfm"] = Plugin(id="lastfm", name="Last.fm", kind="scheduled",
+                                 collect_mode="live_polled",
                                  run=lambda c: None,
                                  default_interval=__import__("datetime").timedelta(hours=1))
     r.plugins["dayone"] = Plugin(id="dayone", name="Day One", kind="manual",
+                                 collect_mode="historical",
                                  run=lambda c: None)
     r.errors["brokenplugin"] = "ImportError: bad"
     return r
@@ -55,11 +57,13 @@ def test_status_includes_description(collect_home: Path):
     r = RegistryResult()
     r.plugins["lastfm"] = Plugin(
         id="lastfm", name="Last.fm", kind="scheduled",
+        collect_mode="live_polled",
         run=lambda c: None,
         description="Imports your Last.fm scrobble history.",
         default_interval=__import__("datetime").timedelta(hours=1),
     )
     r.plugins["dayone"] = Plugin(id="dayone", name="Day One", kind="manual",
+                                 collect_mode="historical",
                                  run=lambda c: None)
     d = Daemon(registry=r, config=Config())
     reply = d.handle_request({"cmd": "status"})
@@ -190,6 +194,7 @@ def test_status_includes_category(collect_home, monkeypatch):
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(id="lastfm", name="Last.fm", kind="scheduled",
+                    collect_mode="live_polled",
                     run=lambda c: None,
                     default_interval=__import__("datetime").timedelta(hours=1),
                     category="audio")
@@ -207,7 +212,7 @@ def test_version_handler_returns_daemon_and_plugin_versions(collect_home: Path, 
 
     def fake_run(ctx): pass
 
-    plugin = Plugin(id="lastfm", name="Last.fm", kind="manual", run=fake_run)
+    plugin = Plugin(id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=fake_run)
     registry = RegistryResult(plugins={"lastfm": plugin})
 
     def fake_version(dist_name):
@@ -239,6 +244,7 @@ def test_credential_status_reports_set_and_missing(collect_home: Path, monkeypat
         id="lastfm",
         name="Last.fm",
         kind="manual",
+        collect_mode="historical",
         run=lambda ctx: None,
         required_credentials=(
             Credential(key="session_key", label="Session key", help=""),
@@ -280,7 +286,7 @@ def test_credential_status_empty_credentials_returns_empty_dict(collect_home: Pa
     from fulcra_collect.plugin import Plugin
     from fulcra_collect.registry import RegistryResult
 
-    plugin = Plugin(id="noop", name="Noop", kind="manual", run=lambda ctx: None)
+    plugin = Plugin(id="noop", name="Noop", kind="manual", collect_mode="historical", run=lambda ctx: None)
     registry = RegistryResult(plugins={"noop": plugin})
     d = daemon_mod.Daemon(registry=registry, config=daemon_mod.Config())
     reply = d.handle_request({"cmd": "credential_status", "plugin": "noop"})
@@ -293,7 +299,7 @@ def test_set_credential_writes_to_keyring(collect_home: Path, monkeypatch):
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(
-        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=lambda c: None,
         required_credentials=(Credential(key="session_key", label="", help=""),),
     )
     registry = RegistryResult(plugins={"lastfm": plugin})
@@ -320,7 +326,7 @@ def test_delete_credential_calls_keyring(collect_home: Path, monkeypatch):
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(
-        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=lambda c: None,
         required_credentials=(Credential(key="session_key", label="", help=""),),
     )
     registry = RegistryResult(plugins={"lastfm": plugin})
@@ -360,7 +366,7 @@ def test_set_credential_rejects_unknown_key(collect_home: Path):
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(
-        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=lambda c: None,
         required_credentials=(Credential(key="session_key", label="", help=""),),
     )
     registry = RegistryResult(plugins={"lastfm": plugin})
@@ -394,7 +400,7 @@ def test_delete_credential_rejects_unknown_key(collect_home: Path):
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(
-        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=lambda c: None,
         required_credentials=(Credential(key="session_key", label="", help=""),),
     )
     registry = RegistryResult(plugins={"lastfm": plugin})
@@ -419,7 +425,7 @@ def test_set_credential_does_not_leak_keyring_exception_message(
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(
-        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=lambda c: None,
         required_credentials=(Credential(key="session_key", label="", help=""),),
     )
     registry = RegistryResult(plugins={"lastfm": plugin})
@@ -447,7 +453,7 @@ def test_delete_credential_does_not_leak_keyring_exception_message(
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(
-        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=lambda c: None,
         required_credentials=(Credential(key="session_key", label="", help=""),),
     )
     registry = RegistryResult(plugins={"lastfm": plugin})
@@ -474,7 +480,7 @@ def test_credential_status_does_not_leak_keyring_exception_message(
     from fulcra_collect.registry import RegistryResult
 
     plugin = Plugin(
-        id="lastfm", name="Last.fm", kind="manual", run=lambda c: None,
+        id="lastfm", name="Last.fm", kind="manual", collect_mode="historical", run=lambda c: None,
         required_credentials=(Credential(key="session_key", label="", help=""),),
     )
     registry = RegistryResult(plugins={"lastfm": plugin})

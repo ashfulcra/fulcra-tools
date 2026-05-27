@@ -17,7 +17,8 @@ class FakeEntry:
 
 
 def _plugin(pid):
-    return Plugin(id=pid, name=pid, kind="manual", run=lambda ctx: None)
+    return Plugin(id=pid, name=pid, kind="manual",
+                  collect_mode="historical", run=lambda ctx: None)
 
 
 def test_load_plugins_collects_valid_plugins():

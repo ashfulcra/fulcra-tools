@@ -139,6 +139,7 @@ PLUGIN = Plugin(
     id="generic-csv",
     name="Generic media CSV",
     kind="manual",
+    collect_mode="historical",
     run=_run_generic_csv,
     description=(
         "Imports any CSV of media events — IFTTT exports, Pipedream "

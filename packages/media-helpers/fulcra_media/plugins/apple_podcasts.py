@@ -132,6 +132,7 @@ PLUGIN = Plugin(
     id="apple-podcasts",
     name="Apple Podcasts (on-device)",
     kind="scheduled",
+    collect_mode="live_polled",
     run=_run_apple_podcasts,
     description=(
         "Captures podcast episodes you finish on your Mac by reading the "

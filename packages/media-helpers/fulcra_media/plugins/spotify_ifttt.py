@@ -51,6 +51,7 @@ PLUGIN = Plugin(
     id="spotify-ifttt",
     name="Spotify IFTTT/GDrive backfill",
     kind="manual",
+    collect_mode="historical",
     run=_run_spotify_ifttt,
     default_interval=None,
     canonical_definition_name="Listened",

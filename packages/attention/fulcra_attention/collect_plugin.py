@@ -128,7 +128,15 @@ def run(ctx: RunContext) -> None:
 PLUGIN = Plugin(
     id="attention-relay",
     name="Attention",
+    # kind="manual" but collect_mode="live_continuous" — see SP3 mapping
+    # table. The run() callable is a no-op status check; the actual data
+    # flow is push-based from the browser extension to the daemon's
+    # webhook endpoint, which is functionally live_continuous despite the
+    # technical "manual" kind. This is the only plugin where collect_mode
+    # is NOT derivable from kind, and the explicit per-plugin declaration
+    # exists precisely so cases like this can be modelled correctly.
     kind="manual",
+    collect_mode="live_continuous",
     run=run,
     description=(
         "Receives browser activity from the Fulcra Attention extension "

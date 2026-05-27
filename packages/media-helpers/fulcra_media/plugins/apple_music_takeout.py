@@ -66,6 +66,7 @@ PLUGIN = Plugin(
     id="apple-music-takeout",
     name="Apple Music listens (takeout)",
     kind="manual",
+    collect_mode="historical",
     run=_run_apple_music_takeout,
     health_check=apple_music_takeout_health_check,
     description=(

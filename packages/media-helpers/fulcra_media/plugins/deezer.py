@@ -69,6 +69,7 @@ PLUGIN = Plugin(
     id="deezer",
     name="Deezer listening history",
     kind="scheduled",
+    collect_mode="live_polled",
     run=_run_deezer,
     description=(
         "Polls your Deezer listening history every 2 hours and records "

@@ -43,6 +43,7 @@ PLUGIN = Plugin(
     id="netflix",
     name="Netflix viewing history",
     kind="manual",
+    collect_mode="historical",
     run=_run_netflix,
     description=(
         "Imports a Netflix viewing-history CSV. Manual — download "

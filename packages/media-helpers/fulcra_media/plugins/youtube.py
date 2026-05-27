@@ -43,6 +43,7 @@ PLUGIN = Plugin(
     id="youtube",
     name="YouTube watch history",
     kind="manual",
+    collect_mode="historical",
     run=_run_youtube,
     description=(
         "Imports a YouTube `watch-history.json` from Google Takeout. "
