@@ -209,6 +209,155 @@
           </div>
         </template>
 
+        <!-- Phase: collect_modes — static explainer screen between signin
+             and pick_plugins. Single-screen content; no API calls. See
+             docs/plans/2026-05-27-onboarding-collect-modes-screen.md for
+             the source spec. -->
+        <template x-if="phase === 'collect_modes'">
+          <div class="space-y-6">
+            <div>
+              <h2 class="text-2xl font-semibold mb-2">How to gather and update your data with Fulcra Collect</h2>
+              <div class="space-y-3 text-slate-600 text-sm">
+                <p>
+                  Some plugins import a one-time export — your
+                  <span class="font-medium text-slate-800">historical</span>
+                  data. Others capture new events as they happen — your
+                  <span class="font-medium text-slate-800">live</span>
+                  data. They're safe to mix: when sources overlap, Fulcra
+                  deduplicates them so you don't get double counts.
+                </p>
+                <p>
+                  Here are some examples of how historical and live sources
+                  fit together.
+                </p>
+              </div>
+            </div>
+
+            <!-- 2×2 combo grid. md: breakpoint flips to two columns;
+                 below that it stacks vertically. -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <!-- Music -->
+              <div class="border border-slate-200 rounded-lg p-4 space-y-2">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl" aria-hidden="true">🎵</span>
+                  <span class="font-semibold text-sm">Music</span>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Live</div>
+                  <div class="text-slate-700">Last.fm — scrobbles every play, going forward</div>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Historical</div>
+                  <div class="text-slate-700">Apple Music takeout — years of past listens from your account export</div>
+                </div>
+                <div class="text-xs text-emerald-700 font-medium pt-1">
+                  → one unified <span class="font-semibold">Listened</span> track
+                </div>
+              </div>
+
+              <!-- TV & Movies -->
+              <div class="border border-slate-200 rounded-lg p-4 space-y-2">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl" aria-hidden="true">🎬</span>
+                  <span class="font-semibold text-sm">TV &amp; Movies</span>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Live</div>
+                  <div class="text-slate-700">Trakt — scrobbles new watches in real time</div>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Historical</div>
+                  <div class="text-slate-700">Netflix takeout — your full Netflix watch history</div>
+                </div>
+                <div class="text-xs text-emerald-700 font-medium pt-1">
+                  → one unified <span class="font-semibold">Watched</span> track
+                </div>
+              </div>
+
+              <!-- Podcasts -->
+              <div class="border border-slate-200 rounded-lg p-4 space-y-2">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl" aria-hidden="true">🎙️</span>
+                  <span class="font-semibold text-sm">Podcasts</span>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Live</div>
+                  <div class="text-slate-700">Apple Podcasts (on-device) — polls the local Podcasts database every 6 hours</div>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Historical</div>
+                  <div class="text-slate-700">Apple Podcasts (Time Machine recovery) — pulls episodes from older Time Machine snapshots of the same database</div>
+                </div>
+                <div class="text-xs text-emerald-700 font-medium pt-1">
+                  → one unified <span class="font-semibold">Listened</span> track
+                </div>
+              </div>
+
+              <!-- Movies via Apple -->
+              <div class="border border-slate-200 rounded-lg p-4 space-y-2">
+                <div class="flex items-center gap-2">
+                  <span class="text-xl" aria-hidden="true">🍿</span>
+                  <span class="font-semibold text-sm">Movies via Apple</span>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Live</div>
+                  <div class="text-slate-700">Trakt — scrobbles new watches in real time</div>
+                </div>
+                <div class="text-xs">
+                  <div class="text-slate-400 uppercase tracking-wider">Historical</div>
+                  <div class="text-slate-700">Apple takeout — your iTunes / Apple TV purchase and rental history</div>
+                </div>
+                <div class="text-xs text-emerald-700 font-medium pt-1">
+                  → one unified <span class="font-semibold">Watched</span> track
+                </div>
+              </div>
+            </div>
+
+            <!-- Attention callout — its model is genuinely different from
+                 the four pair-shaped categories above, so it gets its
+                 own distinct visual treatment. -->
+            <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              <span class="font-semibold">🌐 A special case: Attention.</span>
+              The Fulcra Attention browser extension captures live tab
+              activity as you browse — and can backfill from your
+              existing browser history when you install it. You can
+              pair the same Attention track from multiple browsers
+              across multiple machines (Arc, Chrome, work laptop,
+              home), and every paired instance feeds the same unified
+              track.
+            </div>
+
+            <!-- Closing encouragement: extensibility. -->
+            <div class="text-sm text-slate-600 space-y-2">
+              <p>
+                <span class="font-semibold text-slate-800">Don't see what you need?</span>
+                Fulcra Collect is open and extensible — every plugin we
+                ship implements a documented contract. You can write
+                your own plugin to capture whatever data matters to your
+                future self, whether that's something we haven't built
+                yet or something only you have.
+              </p>
+              <p class="text-xs text-slate-500">
+                These are just examples — every plugin works on its own
+                too, and most categories have additional sources we
+                didn't show here.
+              </p>
+            </div>
+
+            <!-- Navigation. Matches the existing onboarding back/next pattern. -->
+            <div class="flex gap-3 pt-2">
+              <button @click="goToPickPlugins()"
+                      class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
+                Next
+              </button>
+              <button @click="backToSignin()"
+                      class="px-4 py-2 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 text-sm">
+                Back
+              </button>
+            </div>
+          </div>
+        </template>
+
         <!-- Phase: pick_plugins -->
         <template x-if="phase === 'pick_plugins'">
           <div class="space-y-6">
