@@ -29,11 +29,19 @@ from ..theme import colors, typography
 def _compute_desc_height(text: str, width: float, font, cap: float = 80.0) -> float:
     """Measure the rendered height of a word-wrapped description label.
 
+    Returns 0.0 when text is empty so the row doesn't reserve phantom
+    space for a description that's never drawn. Returns the actual
+    rendered height (capped at `cap`) otherwise, with a 32pt floor to
+    avoid rows where one-line descriptions look unbalanced next to
+    multi-line ones.
+
     Why: the description block used to be a hardcoded 32pt — anything
     past 2 lines was silently clipped. Computing the real height lets
     the row grow to fit (capped so a runaway description doesn't
-    swallow the whole tab). See SP1 L2 in the 2026-05-27 menubar
-    drift audit.
+    swallow the whole tab), and dropping to 0 for empty text means
+    no-description plugins don't reserve phantom space they don't use.
+    See SP1 L2 in the 2026-05-27 menubar drift audit; the empty-text
+    return-0 case is a SP1 task-3 reviewer follow-up.
 
     Args:
         text: the description string.
@@ -45,7 +53,7 @@ def _compute_desc_height(text: str, width: float, font, cap: float = 80.0) -> fl
              actual plugin descriptions).
     """
     if not text:
-        return 32.0
+        return 0.0
     attrs = {NSFontAttributeName: font}
     ns_text = NSString.stringWithString_(text)
     bound = ns_text.boundingRectWithSize_options_attributes_(
