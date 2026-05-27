@@ -30,7 +30,6 @@ import logging
 from typing import Any
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSAlert,
     NSBezelStyleRounded,
     NSButton,
     NSLineBreakByTruncatingMiddle,
@@ -42,17 +41,12 @@ from AppKit import (  # type: ignore[import-not-found]
     NSMakeRect,
 )
 
+from .._definition_delete import show_delete_alert
 from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
 from ..theme import colors, typography
 
 _log = logging.getLogger("fulcra_menubar.preferences.annotations")
-
-# NSAlertFirstButtonReturn is the int constant 1000 in AppKit; PyObjC
-# doesn't always re-export it through ``from AppKit import …`` cleanly
-# (depends on framework binding version), so define it locally to keep
-# the dependency surface tight.
-_NSAlertFirstButtonReturn = 1000
 
 _TAB_W = 640.0
 _TAB_H = 440.0
@@ -247,64 +241,42 @@ def _make_def_row(
     del_btn.setBezelStyle_(NSBezelStyleRounded)
 
     def on_delete(_sender):
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_(f'Delete "{name}"?')
-        alert.setInformativeText_(
-            "This removes the track from your pickers. Events already "
-            "written under this track stay on your Fulcra timeline."
-        )
-        alert.addButtonWithTitle_("Delete")
-        alert.addButtonWithTitle_("Cancel")
-        response = alert.runModal()
-        if response != _NSAlertFirstButtonReturn:
-            return
-        try:
-            result = client.delete_definition(def_id)
-        except Exception as exc:
-            _log.warning("delete_definition raised: %s", exc)
-            result = {"ok": False, "error": str(exc)}
-        if not result.get("ok"):
-            err_alert = NSAlert.alloc().init()
-            err_alert.setMessageText_("Could not delete")
-            err_alert.setInformativeText_(
-                result.get("error", "Unknown daemon error.")
-            )
-            err_alert.addButtonWithTitle_("OK")
-            err_alert.runModal()
-            return
-        # Success — remove the row AND shift every row below it up so
-        # the list doesn't leave a 56pt visual hole. The inner content
-        # view's height doesn't shrink, which is fine: the trailing
-        # whitespace lives at the BOTTOM of the scrollable region where
-        # it reads as expected slack, not a gap mid-list.
-        #
-        # AppKit coordinate note: rows are laid out top-down by
-        # decreasing y (see the `y -= _ROW_H` loop in
-        # make_annotations_tab). So rows VISUALLY below the deleted row
-        # have LOWER y values, and closing the gap means shifting them
-        # UP — which in unflipped Cocoa coords means ADDING _ROW_H to
-        # their y origin.
-        _log.info(
-            "delete_definition succeeded for %s (cleared_plugins=%s)",
-            def_id,
-            result.get("cleared_plugins"),
-        )
-        parent = row.superview()
-        my_y = row.frame().origin.y
-        row.removeFromSuperview()
-        if parent is not None:
-            for sibling in list(parent.subviews()):
-                sib_frame = sibling.frame()
-                if sib_frame.origin.y < my_y:
-                    # NSView frames are mutable but the Cocoa idiom is
-                    # to setFrame_ with a fresh NSRect.
-                    new_frame = NSMakeRect(
-                        sib_frame.origin.x,
-                        sib_frame.origin.y + _ROW_H,
-                        sib_frame.size.width,
-                        sib_frame.size.height,
-                    )
-                    sibling.setFrame_(new_frame)
+        # Confirmation + delete_definition + error alert all live in the
+        # shared _definition_delete.show_delete_alert helper (single
+        # source of truth across this tab and the popover quick-record
+        # '…' menu). The success-side row reflow is tab-specific so it
+        # stays here, wrapped in the on_done closure.
+        def _on_deleted():
+            # Remove the row AND shift every row below it up so the list
+            # doesn't leave a 56pt visual hole. The inner content view's
+            # height doesn't shrink, which is fine: the trailing
+            # whitespace lives at the BOTTOM of the scrollable region
+            # where it reads as expected slack, not a gap mid-list.
+            #
+            # AppKit coordinate note: rows are laid out top-down by
+            # decreasing y (see the `y -= _ROW_H` loop in
+            # make_annotations_tab). So rows VISUALLY below the deleted
+            # row have LOWER y values, and closing the gap means
+            # shifting them UP — which in unflipped Cocoa coords means
+            # ADDING _ROW_H to their y origin.
+            parent = row.superview()
+            my_y = row.frame().origin.y
+            row.removeFromSuperview()
+            if parent is not None:
+                for sibling in list(parent.subviews()):
+                    sib_frame = sibling.frame()
+                    if sib_frame.origin.y < my_y:
+                        # NSView frames are mutable but the Cocoa idiom
+                        # is to setFrame_ with a fresh NSRect.
+                        new_frame = NSMakeRect(
+                            sib_frame.origin.x,
+                            sib_frame.origin.y + _ROW_H,
+                            sib_frame.size.width,
+                            sib_frame.size.height,
+                        )
+                        sibling.setFrame_(new_frame)
+
+        show_delete_alert(def_id, name, client, on_done=_on_deleted)
 
     _attach(del_btn, on_delete)
     row.addSubview_(del_btn)

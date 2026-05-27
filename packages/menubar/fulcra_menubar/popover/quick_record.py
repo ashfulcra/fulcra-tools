@@ -28,11 +28,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSAlert, NSApp, NSButton, NSBezelStyleRounded, NSColor,
+    NSApp, NSButton, NSBezelStyleRounded, NSColor,
     NSMenu, NSMenuItem, NSScrollView,
     NSTextField, NSView, NSMakeRect,
 )
 
+from .._definition_delete import show_delete_alert
 from .._humanize import parse_duration_seconds
 from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
@@ -61,61 +62,6 @@ def _group_label(annotation_type: str) -> str:
                              (annotation_type or "Other").title())
 
 
-# NSAlertFirstButtonReturn is the int constant 1000 in AppKit; PyObjC
-# doesn't always re-export it through ``from AppKit import …`` cleanly
-# (depends on framework binding version), so define it locally — same
-# pattern the Annotations Preferences tab uses (SP2 task 3).
-_NSAlertFirstButtonReturn = 1000
-
-
-def _show_delete_alert(def_id: str, def_name: str,
-                       client: DaemonClient,
-                       on_done: Callable[[], None]) -> None:
-    """Show an NSAlert confirming soft-delete, then call delete_definition.
-
-    Shared between ``_make_moment_row`` and ``_make_duration_row``'s '…'
-    menus (SP2 task 4). Behaviour mirrors the Annotations Preferences
-    tab's Delete button (SP2 task 3) so users see one consistent
-    confirmation copy regardless of where they triggered the delete.
-
-    Per user Q4 from the SP2 brainstorm: simple NSAlert confirmation,
-    no two-step. The soft-delete is reversible server-side via the web
-    Settings page (writes a tombstone, not a hard delete) — the alert
-    copy makes that explicit.
-
-    Args:
-        def_id: UUID of the definition to delete.
-        def_name: human-readable name, used in the alert title.
-        client: DaemonClient instance — the menubar's UDS bridge.
-        on_done: callable invoked exactly once after a successful
-            delete. Callers typically use it to remove the row from
-            the popover view and/or trigger a rebuild.
-    """
-    alert = NSAlert.alloc().init()
-    alert.setMessageText_(f'Delete "{def_name}"?')
-    alert.setInformativeText_(
-        "This removes the track from your pickers. Events already "
-        "written under this track stay on your Fulcra timeline."
-    )
-    alert.addButtonWithTitle_("Delete")
-    alert.addButtonWithTitle_("Cancel")
-    response = alert.runModal()
-    if response != _NSAlertFirstButtonReturn:
-        return
-    try:
-        result = client.delete_definition(def_id)
-    except Exception as exc:  # pragma: no cover — UDS transport rare path
-        result = {"ok": False, "error": str(exc)}
-    if not result.get("ok"):
-        err = NSAlert.alloc().init()
-        err.setMessageText_("Could not delete")
-        err.setInformativeText_(result.get("error", "Unknown daemon error."))
-        err.addButtonWithTitle_("OK")
-        err.runModal()
-        return
-    on_done()
-
-
 def _attach_more_menu(more_btn: NSButton,
                       def_id: str, def_name: str,
                       client: DaemonClient,
@@ -126,7 +72,7 @@ def _attach_more_menu(more_btn: NSButton,
     the menu shape exactly — adding a second item (e.g. "Edit name") in
     the future is a one-line change in one place. The on_after_delete
     callback typically removes the row from its superview and asks the
-    popover to rebuild; we run it inside the _show_delete_alert path so
+    popover to rebuild; we run it inside the show_delete_alert path so
     a cancelled or failed delete leaves the row untouched.
     """
     def _on_more(sender):
@@ -137,8 +83,8 @@ def _attach_more_menu(more_btn: NSButton,
         )
 
         def _delete_handler(_):
-            _show_delete_alert(def_id, def_name, client,
-                               on_done=on_after_delete)
+            show_delete_alert(def_id, def_name, client,
+                              on_done=on_after_delete)
         _attach(item, _delete_handler)
         menu.addItem_(item)
         # popUpContextMenu_withEvent_forView_ requires a current NSEvent;
