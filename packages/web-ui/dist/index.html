@@ -399,7 +399,7 @@
                 </template>
 
                 <!-- ---- file_upload ---- -->
-                <template x-if="current_step.kind === 'file_upload'">
+                <template x-if="current_step.kind === 'file_upload' && !(window.FulcraStepComponents && window.FulcraStepComponents.file_upload)">
                   <div class="space-y-4">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
@@ -1149,7 +1149,7 @@
             </template>
 
             <!-- file_upload -->
-            <template x-if="current_step.kind === 'file_upload'">
+            <template x-if="current_step.kind === 'file_upload' && !(window.FulcraStepComponents && window.FulcraStepComponents.file_upload)">
               <div class="space-y-4">
                 <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
                 <div class="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:border-violet-400 transition-colors">
