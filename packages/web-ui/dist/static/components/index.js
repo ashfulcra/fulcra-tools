@@ -12,15 +12,15 @@
 //      packages/collect/fulcra_collect/plugin.py
 //   2. write packages/web-ui/dist/static/components/step-<kind>.js
 //   3. add the import line below
-import "./step.js";          // the <fulcra-step> dispatcher
-import "./step-intro.js";              // Phase 1
-import "./step-external_action.js";    // Phase 2
-import "./step-input.js";               // Phase 2
-import "./step-oauth.js";               // Phase 2
-import "./step-file_upload.js";         // Phase 2
-import "./step-permission_request.js";  // Phase 2
-import "./step-browser_extension.js";   // Phase 2
-import "./step-extension_pair.js";      // Phase 2
-import "./step-test_connection.js";     // Phase 2
-import "./step-definition_picker.js";   // Phase 2
-import "./step-done.js";                // Phase 2
+import "./step.js";                      // the <fulcra-step> dispatcher
+import "./step-intro.js";
+import "./step-external_action.js";
+import "./step-input.js";
+import "./step-oauth.js";
+import "./step-file_upload.js";
+import "./step-permission_request.js";
+import "./step-browser_extension.js";
+import "./step-extension_pair.js";
+import "./step-test_connection.js";
+import "./step-definition_picker.js";
+import "./step-done.js";

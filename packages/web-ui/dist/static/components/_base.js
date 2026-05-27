@@ -48,9 +48,10 @@ export class FulcraStepBase extends LitElement {
 }
 
 // Registry — components push themselves onto this so <fulcra-step> can
-// route by step.kind. We do registration this way (instead of a static
-// import map) to keep Phase 2 incremental: a kind without a registered
-// component is simply not rendered by the dispatcher, and the existing
-// Alpine inline template handles it. When all 11 are registered we delete
-// the inline templates in Phase 3.
+// route by step.kind without a static import map. To add a new kind:
+// extend the Python SetupStep Literal, write step-<kind>.js, and add an
+// import line to components/index.js so the file runs at startup. The
+// dispatcher returns nothing for unregistered kinds — useful as a
+// safety net when a new step kind ships from the daemon to an older
+// web-ui build.
 window.FulcraStepComponents = window.FulcraStepComponents || {};
