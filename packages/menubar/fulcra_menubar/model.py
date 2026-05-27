@@ -33,6 +33,15 @@ class PluginSnapshot:
     consecutive_failures: int
     default_interval_s: int | None = None
     description: str = ""
+    # SP3 (task 1+2+3): the user-facing framing for "is this stream live or
+    # historical?" — distinct from `kind` (service/scheduled/manual), which
+    # is the technical taxonomy retained for Preferences scheduling affordances.
+    # Typed as plain `str` rather than the collect package's `CollectMode`
+    # Literal so the menubar avoids a hard dependency on collect's contract
+    # types — the value is opaque except where the popover regroups on it.
+    # Defaults to "historical" so older daemon replies (pre-SP3 task 2) that
+    # don't carry the field degrade safely instead of raising.
+    collect_mode: str = "historical"
 
     @classmethod
     def from_dict(cls, d: dict) -> "PluginSnapshot":
@@ -45,6 +54,7 @@ class PluginSnapshot:
             consecutive_failures=d.get("consecutive_failures", 0),
             default_interval_s=d.get("default_interval_s"),
             description=d.get("description", ""),
+            collect_mode=d.get("collect_mode", "historical"),
         )
 
 
