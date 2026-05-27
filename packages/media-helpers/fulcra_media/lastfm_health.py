@@ -12,6 +12,8 @@ generic test_connection renderer drives both.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import httpx
 
 from fulcra_collect.plugin import HealthResult
@@ -98,10 +100,26 @@ def lastfm_health_check(ctx) -> HealthResult:
                         if isinstance(artist_field, dict) else str(artist_field)
                     ) or "?"
                     title = t.get("name") or "?"
-                    when = ((t.get("date") or {}).get("uts") or "")
+                    # Last.fm's API returns date as `{uts: "<unix-seconds>"}`.
+                    # The wizard's test_connection Lit component formats
+                    # `watched_at` via `new Date(...).toLocaleString()`, which
+                    # only parses ISO-8601 strings — feeding it the raw
+                    # "1700000000" gets "Invalid Date" rendered. Convert to
+                    # ISO here so every health helper's preview shape stays
+                    # uniform (apple_podcasts, deezer, rss, takeout all
+                    # emit isoformat()). Bail to empty string on garbage.
+                    uts = (t.get("date") or {}).get("uts")
+                    watched_at = ""
+                    if uts:
+                        try:
+                            watched_at = datetime.fromtimestamp(
+                                int(uts), tz=timezone.utc,
+                            ).isoformat()
+                        except (TypeError, ValueError, OverflowError):
+                            watched_at = ""
                     preview.append({
                         "title": f"{artist} — {title}",
-                        "watched_at": str(when),
+                        "watched_at": watched_at,
                     })
                 return HealthResult(
                     ok=True,

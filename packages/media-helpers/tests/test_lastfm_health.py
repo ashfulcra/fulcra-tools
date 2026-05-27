@@ -110,6 +110,13 @@ def test_happy_path_returns_summary_and_preview(monkeypatch):
     assert "alice" in result.summary
     assert "2 recent" in result.summary
     assert result.preview[0]["title"] == "Radiohead — Lucky"
+    # watched_at must be ISO 8601 so the wizard's test_connection
+    # Lit component (`new Date(entry.watched_at).toLocaleString(...)`)
+    # can format it. Storing the raw UTS string ("1700000000") makes
+    # the JS Date constructor return "Invalid Date" — the QA finding
+    # this fix addresses. 1700000000 → 2023-11-14T22:13:20+00:00.
+    assert result.preview[0]["watched_at"] == "2023-11-14T22:13:20+00:00"
+    assert result.preview[1]["watched_at"] == "2023-11-14T21:56:40+00:00"
     # We send the credentials we got — no leakage of unrelated fields.
     url, params = fake.calls[0]
     assert url == "https://ws.audioscrobbler.com/2.0/"
