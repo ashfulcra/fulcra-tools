@@ -18,7 +18,7 @@
 // since it appears in both the onboarding and the configure flow now
 // (the Next button is labelled differently per-context anyway).
 import { FulcraStepBase, html, nothing } from "./_base.js";
-import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/directives/unsafe-html.js";
+import { unsafeHTML } from "https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js";
 
 class FulcraStepExtensionPair extends FulcraStepBase {
   render() {

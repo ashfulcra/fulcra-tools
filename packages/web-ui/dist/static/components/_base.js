@@ -22,14 +22,17 @@
 // Components do NOT mutate ctx; they call its methods. State lives in
 // createWizard()'s closure exactly as today.
 //
-// SRI policy for Lit directive subpaths (unsafe-html, etc.):
-// Lit's main index.js is SRI-pinned at the script tag in index.html. The
-// directive submodules (e.g. directives/unsafe-html.js) load as same-origin
-// modules off the same versioned jsdelivr package — they ride the SRI
-// integrity of the root package import rather than each carrying their
-// own hash. If we ever drop CDN for a build step, both pinning policies
-// collapse into the bundled-output hash.
-import { LitElement, html, nothing } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/index.js";
+// SRI + Lit URL choice:
+// We use `cdn.jsdelivr.net/gh/lit/dist@VER/all/lit-all.min.js` — the Lit
+// team's pre-bundled CDN file — rather than `npm/lit@VER/index.js`, which
+// uses bare module specifiers (`@lit/reactive-element`) that browsers
+// can't resolve without an importmap. lit-all is one bundled file
+// containing LitElement, html, nothing, AND every directive
+// (`unsafeHTML`, etc.) as top-level exports. One SRI-pinned URL covers
+// everything; no separate hashes per directive subpath.
+// Discovered 2026-05-27: the npm/lit@VER/index.js URL silently 404'd
+// every component because of the bare-specifier resolution failure.
+import { LitElement, html, nothing } from "https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js";
 
 export { html, nothing };
 

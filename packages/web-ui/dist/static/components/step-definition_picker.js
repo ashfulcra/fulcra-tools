@@ -29,7 +29,7 @@
 // Mirrors site A (index.html ~line 593) AND replaces site B (~line 1281)
 // — Phase 3 deletes both inline blocks.
 import { FulcraStepBase, html, nothing } from "./_base.js";
-import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/directives/unsafe-html.js";
+import { unsafeHTML } from "https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js";
 
 class FulcraStepDefinitionPicker extends FulcraStepBase {
   render() {

@@ -5,7 +5,7 @@
 // developer console"). Mirrors index.html ~line 301 (onboarding) and
 // ~line 1052 (dashboard Configure).
 import { FulcraStepBase, html, nothing } from "./_base.js";
-import { unsafeHTML } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/directives/unsafe-html.js";
+import { unsafeHTML } from "https://cdn.jsdelivr.net/gh/lit/dist@3.2.1/all/lit-all.min.js";
 
 class FulcraStepExternalAction extends FulcraStepBase {
   render() {
