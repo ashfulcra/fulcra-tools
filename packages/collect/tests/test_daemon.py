@@ -32,6 +32,19 @@ def test_status_lists_every_plugin_with_enabled_flag(collect_home: Path):
     assert by_id["lastfm"]["kind"] == "scheduled"
 
 
+def test_status_includes_collect_mode(collect_home: Path):
+    """SP3 task 2: status reply must propagate each plugin's collect_mode
+    ('historical' vs. 'live_polled') so the menubar can group the popover
+    and render a per-row chip in Preferences. Both the HTTP /api/status
+    route and the UDS `status` command share this code path via
+    Daemon._status()."""
+    d = Daemon(registry=_registry(), config=Config())
+    reply = d.handle_request({"cmd": "status"})
+    by_id = {p["id"]: p for p in reply["plugins"]}
+    assert by_id["lastfm"]["collect_mode"] == "live_polled"
+    assert by_id["dayone"]["collect_mode"] == "historical"
+
+
 def test_status_reports_registry_load_errors(collect_home: Path):
     d = Daemon(registry=_registry(), config=Config())
     reply = d.handle_request({"cmd": "status"})
