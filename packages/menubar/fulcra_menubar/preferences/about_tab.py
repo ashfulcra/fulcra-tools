@@ -107,8 +107,11 @@ def make_about_tab(*, client: DaemonClient):
 
     # ------------------------------------------------------------------
     # Thin separator line (via a plain view) between action row and identity.
+    # Sits 24pt below the caption (which is at ACTION_Y - 16). The doubled
+    # gap (was 12pt) closes the "About tab is crammed" finding from the
+    # 2026-05-27 menubar drift audit.
     # ------------------------------------------------------------------
-    sep = NSView.alloc().initWithFrame_(NSMakeRect(16, ACTION_Y - 28, _TAB_W - 32, 1))
+    sep = NSView.alloc().initWithFrame_(NSMakeRect(16, ACTION_Y - 40, _TAB_W - 32, 1))
     sep.setWantsLayer_(True)
     sep.layer().setBackgroundColor_(colors.text_secondary().colorWithAlphaComponent_(0.2).CGColor())
     view.addSubview_(sep)
@@ -129,18 +132,18 @@ def make_about_tab(*, client: DaemonClient):
         v.setFrame_(NSMakeRect(160, y, _TAB_W - 176, 16))
         view.addSubview_(v)
 
-    _info_row("App version", app_version,     ACTION_Y - 56)
-    _info_row("Daemon version", daemon_version, ACTION_Y - 76)
-    _info_row("Config",        str(_config.config_dir() / "config.toml"), ACTION_Y - 96)
-    _info_row("State directory", str(_config.config_dir() / "state"),    ACTION_Y - 116)
+    _info_row("App version", app_version,     ACTION_Y - 80)
+    _info_row("Daemon version", daemon_version, ACTION_Y - 100)
+    _info_row("Config",        str(_config.config_dir() / "config.toml"), ACTION_Y - 120)
+    _info_row("State directory", str(_config.config_dir() / "state"),    ACTION_Y - 140)
 
     # ------------------------------------------------------------------
     # Plugin-versions list — wrapped in an NSScrollView so it never
     # overflows into the action row above it or the window chrome below.
     # ------------------------------------------------------------------
-    SCROLL_TOP = ACTION_Y - 140   # top of the scroll area (y of its frame)
-    SCROLL_H   = SCROLL_TOP       # fill remaining space down to y=0
-    SCROLL_Y   = 0                # bottom of the scroll area
+    SCROLL_TOP = ACTION_Y - 164   # 24pt below the last identity row (was -140 pre-spacing-fix).
+    SCROLL_H   = SCROLL_TOP       # fill remaining space down to y=0.
+    SCROLL_Y   = 0                # bottom of the scroll area.
 
     scroll = NSScrollView.alloc().initWithFrame_(
         NSMakeRect(0, SCROLL_Y, _TAB_W, SCROLL_H)
