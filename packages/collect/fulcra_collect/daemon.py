@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from fulcra_common import BaseFulcraClient
+
 from . import activity as _activity
 from . import config as config_mod
 from . import db as _db
@@ -70,6 +72,43 @@ def _parse_iso8601(s: str) -> datetime:
         # Naive datetimes are ambiguous; refuse rather than guess UTC.
         raise ValueError(f"timestamp {s!r} has no timezone")
     return dt
+
+
+class _QuickRecordClient(BaseFulcraClient):
+    """BaseFulcraClient subclass for the daemon's quick-record + tombstone
+    POSTs. Preserves the legacy site's 10s timeout (vs BaseFulcraClient's
+    default 30s) and short-circuits the `fulcra` CLI shell-out — the
+    daemon already manages the user's bearer token via the user-level
+    keychain, so we override get_token() to return it directly.
+
+    Introduced in refactor #69 so that `_record_annotation` and
+    `_delete_annotation` can share a single ingest path
+    (IngestPipeline.ingest_one) instead of each maintaining its own
+    inline httpx.Client + wire.build_record + wire.encode_batch block.
+    """
+    USER_AGENT = "fulcra-collect/0.1"
+    FOLLOW_REDIRECTS = True
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._token = token
+
+    def get_token(self) -> str:
+        return self._token
+
+    def _client(self) -> httpx.Client:
+        # Override BaseFulcraClient._client to use the 10s timeout the
+        # legacy menubar POST site has always used. Slow Fulcra responses
+        # would otherwise block the menubar UI for 30s.
+        if self._http is None:
+            self._http = httpx.Client(
+                base_url=self.base_url,
+                transport=self._transport,
+                timeout=10.0,
+                headers={"User-Agent": self.USER_AGENT},
+                follow_redirects=self.FOLLOW_REDIRECTS,
+            )
+        return self._http
 
 
 def is_online(*, timeout: float = 2.0) -> bool:
@@ -670,7 +709,9 @@ class Daemon:
         duplicate events; that's the menubar button's whole job.
         """
         import uuid
-        from fulcra_common import wire
+        from fulcra_common.ingest import (
+            DurationEvent, IngestableEvent, IngestPipeline, MomentEvent,
+        )
         from . import credentials as _creds
         if not definition_id:
             return {"ok": False, "error": "definition_id required"}
@@ -724,48 +765,39 @@ class Daemon:
         source_id = (
             f"com.fulcradynamics.fulcra-collect.quick-record.{uuid.uuid4()}"
         )
+        tags = tuple(def_dict.get("tags") or [])
         if parsed_start is not None and parsed_end is not None:
             # Duration record. ISO strings were already validated above.
-            start_dt = parsed_start
-            end_dt = parsed_end
-            duration_seconds = (end_dt - start_dt).total_seconds()
-            data_payload = {
-                "comment": comment or "",
-                "duration_seconds": duration_seconds,
-            }
-            record = wire.build_record(
-                data_type=wire.DURATION_ANNOTATION,
-                start_time=start_dt,
-                end_time=end_dt,
-                data=data_payload,
-                source_id=source_id,
-                tags=def_dict.get("tags") or [],
+            # Refactor #69 normalization: the legacy site emitted
+            # duration_seconds as a FLOAT (.total_seconds() returns
+            # float). The pipeline emits it as an int. Float→int on a
+            # whole-second duration is observably identical to every
+            # Fulcra consumer, but the bytes differ — called out in the
+            # refactor-#69 commits.
+            event: IngestableEvent = DurationEvent(
                 definition_id=definition_id,
+                source_id=source_id,
+                tags=tags,
+                comment=comment or "",
+                start=parsed_start,
+                end=parsed_end,
             )
         else:
-            record = wire.build_record(
-                data_type=wire.MOMENT_ANNOTATION,
-                start_time=now,
-                data={"comment": comment or ""},
-                source_id=source_id,
-                tags=def_dict.get("tags") or [],
+            event = MomentEvent(
                 definition_id=definition_id,
+                source_id=source_id,
+                tags=tags,
+                comment=comment or "",
+                ts=now,
             )
-        body = wire.encode_batch([record])
         try:
-            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
-                r = client.post(
-                    "https://api.fulcradynamics.com/ingest/v1/record/batch",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "content-type": "application/x-jsonl",
-                    },
-                    content=body,
-                )
-                r.raise_for_status()
+            IngestPipeline(
+                client=_QuickRecordClient(token=token),
+            ).ingest_one(event)
         except Exception as exc:
             logging.getLogger("fulcra_collect.daemon").exception(
-                "_record_annotation(%s): Fulcra API request failed", definition_id
+                "_record_annotation(%s): Fulcra API request failed",
+                definition_id,
             )
             # Record the failed attempt in the activity buffer so the user
             # sees something happened
