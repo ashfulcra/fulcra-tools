@@ -720,12 +720,13 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
     assert reply["name"] == "Test Moment"
 
     # Exactly one POST went out, to the live ingest endpoint with JSONL.
+    # Post-refactor #69: the URL is relative because the
+    # _QuickRecordClient (BaseFulcraClient subclass) sets base_url on the
+    # httpx.Client. The fake records `url` as-passed.
     post_reqs = [r for r in fake_client.requests if r["method"] == "POST"]
     assert len(post_reqs) == 1
     post = post_reqs[0]
-    assert post["url"] == (
-        "https://api.fulcradynamics.com/ingest/v1/record/batch"
-    )
+    assert post["url"] == "/ingest/v1/record/batch"
     assert post["headers"]["content-type"] == "application/x-jsonl"
     assert post["headers"]["Authorization"] == "Bearer tok"
 
