@@ -318,6 +318,19 @@ function onboarding() {
       return this.selectedIds.size;
     },
 
+    // Button copy varies by intent so the user knows what clicking it does:
+    //   - nothing selected → "Skip for now" (same as before)
+    //   - everything pre-checked, no Reconfigure → "Continue" (nothing to walk)
+    //   - some plugins to walk → "Set up N plugin(s)" (same as before)
+    get primaryActionLabel() {
+      if (this.selectedIds.size === 0) return "Skip for now";
+      const walkCount = [...this.selectedIds].filter(id =>
+        !this.wasEnabledAtStart.has(id) || this.reconfigureIds.has(id)
+      ).length;
+      if (walkCount === 0) return "Continue";
+      return `Set up ${walkCount} plugin${walkCount !== 1 ? "s" : ""}`;
+    },
+
     async startConfigure() {
       if (this.selectedIds.size === 0) {
         // User picked nothing — go straight to done

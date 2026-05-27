@@ -364,7 +364,10 @@
             <div>
               <h2 class="text-2xl font-semibold mb-2">Pick what to collect</h2>
               <p class="text-slate-600 text-sm">
-                Choose the services you want to record. You can add more later.
+                Choose the services you want to record. Plugins already set up
+                are pre-checked — un-check to skip them this trip, or flip
+                <span class="font-medium">Reconfigure</span> on a row to walk
+                through its settings again.
               </p>
             </div>
 
@@ -384,20 +387,39 @@
                         x-text="cat.name"></h3>
                     <div class="space-y-1 border border-slate-200 rounded-lg overflow-hidden">
                       <template x-for="p in cat.plugins" :key="p.id">
-                        <label class="flex items-start gap-3 px-4 py-3 hover:bg-slate-50 cursor-pointer border-b border-slate-100 last:border-0">
-                          <input type="checkbox"
-                                 :checked="isSelected(p.id)"
-                                 @change="togglePlugin(p.id)"
-                                 class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500">
-                          <div class="flex-1 min-w-0">
-                            <div class="font-medium text-sm" x-text="p.name"></div>
-                            <div class="text-xs text-slate-500 mt-0.5"
-                                 x-text="p.description || ''"></div>
-                          </div>
-                          <template x-if="p.enabled">
-                            <span class="text-xs text-violet-600 font-medium shrink-0 mt-0.5">enabled</span>
+                        <div class="border-b border-slate-100 last:border-0">
+                          <label class="flex items-start gap-3 px-4 py-3 hover:bg-slate-50 cursor-pointer">
+                            <input type="checkbox"
+                                   :checked="isSelected(p.id)"
+                                   @change="togglePlugin(p.id)"
+                                   class="mt-0.5 h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500">
+                            <div class="flex-1 min-w-0">
+                              <div class="font-medium text-sm flex items-center gap-2">
+                                <span x-text="p.name"></span>
+                                <template x-if="wasEnabledOnLoad(p.id)">
+                                  <span class="text-[10px] uppercase tracking-wide bg-emerald-50 text-emerald-700 border border-emerald-200 rounded px-1.5 py-0.5 font-medium">Set up</span>
+                                </template>
+                              </div>
+                              <div class="text-xs text-slate-500 mt-0.5"
+                                   x-text="p.description || ''"></div>
+                            </div>
+                          </label>
+                          <!-- Reconfigure toggle: only for already-enabled
+                               plugins that are still checked. Hidden when
+                               un-checked (un-check = "not touching this
+                               trip"; Reconfigure would be meaningless). -->
+                          <template x-if="wasEnabledOnLoad(p.id) && isSelected(p.id)">
+                            <div class="pl-11 pr-4 pb-3 -mt-1">
+                              <label class="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                                <input type="checkbox"
+                                       :checked="isReconfiguring(p.id)"
+                                       @change="toggleReconfigure(p.id)"
+                                       class="h-3.5 w-3.5 rounded border-slate-300 text-violet-600 focus:ring-violet-500">
+                                <span>Reconfigure — walk through this plugin's setup again</span>
+                              </label>
+                            </div>
                           </template>
-                        </label>
+                        </div>
                       </template>
                     </div>
                   </div>
@@ -406,7 +428,7 @@
                 <div class="flex items-center gap-3 pt-2">
                   <button @click="startConfigure()"
                           class="px-6 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
-                    <span x-text="selectedCount > 0 ? `Set up ${selectedCount} plugin${selectedCount !== 1 ? 's' : ''}` : 'Skip for now'"></span>
+                    <span x-text="primaryActionLabel"></span>
                   </button>
                   <span class="text-sm text-slate-500"
                         x-show="selectedCount > 0"
