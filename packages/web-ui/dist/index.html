@@ -830,7 +830,7 @@
                 </template>
 
                 <!-- ---- done ---- -->
-                <template x-if="current_step.kind === 'done'">
+                <template x-if="current_step.kind === 'done' && !(window.FulcraStepComponents && window.FulcraStepComponents.done)">
                   <div class="space-y-4">
                     <div class="flex items-center gap-3 text-green-700">
                       <svg class="w-10 h-10" viewBox="0 0 40 40" fill="none">
@@ -1513,7 +1513,7 @@
             </template>
 
             <!-- done -->
-            <template x-if="current_step.kind === 'done'">
+            <template x-if="current_step.kind === 'done' && !(window.FulcraStepComponents && window.FulcraStepComponents.done)">
               <div class="space-y-4">
                 <div class="font-semibold text-lg text-green-700" x-text="current_step.title"></div>
                 <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
