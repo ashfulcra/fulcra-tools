@@ -583,11 +583,54 @@
               </div>
               <div>
                 <h2 class="text-2xl font-semibold">You're all set!</h2>
-                <p class="text-slate-600 text-sm mt-1"
-                   x-text="enabledCount > 0 ? `You enabled ${enabledCount} plugin${enabledCount !== 1 ? 's' : ''}.` : 'You can enable plugins any time from the dashboard.'">
-                </p>
+                <template x-if="!doneSummaryEmpty">
+                  <p class="text-slate-600 text-sm mt-1">
+                    Here's what changed this trip.
+                  </p>
+                </template>
+                <template x-if="doneSummaryEmpty">
+                  <p class="text-slate-600 text-sm mt-1">
+                    No plugins changed this trip — your existing setup is unchanged.
+                  </p>
+                </template>
               </div>
             </div>
+
+            <!-- Three-bucket summary. Each row only renders if its count > 0
+                 so a re-run with nothing reconfigured doesn't show empty
+                 zeros. The empty-state copy above handles the all-zero case. -->
+            <template x-if="!doneSummaryEmpty">
+              <div class="space-y-2">
+                <template x-if="newlyEnabledCount > 0">
+                  <div class="flex items-center gap-3 px-4 py-3 rounded-lg bg-violet-50 border border-violet-100">
+                    <div class="text-violet-700 font-semibold text-lg"
+                         x-text="newlyEnabledCount"></div>
+                    <div class="text-sm text-slate-700">
+                      Newly set up — these plugins started collecting data.
+                    </div>
+                  </div>
+                </template>
+                <template x-if="reconfiguredCount > 0">
+                  <div class="flex items-center gap-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-100">
+                    <div class="text-amber-700 font-semibold text-lg"
+                         x-text="reconfiguredCount"></div>
+                    <div class="text-sm text-slate-700">
+                      Reconfigured — settings or credentials updated.
+                    </div>
+                  </div>
+                </template>
+                <template x-if="leftAloneCount > 0">
+                  <div class="flex items-center gap-3 px-4 py-3 rounded-lg bg-slate-50 border border-slate-200">
+                    <div class="text-slate-600 font-semibold text-lg"
+                         x-text="leftAloneCount"></div>
+                    <div class="text-sm text-slate-600">
+                      Already set up, left alone — they keep running with
+                      their existing config.
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
 
             <p class="text-slate-600 text-sm">
               Fulcra Collect is now running in the background. Enabled plugins will

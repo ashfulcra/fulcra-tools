@@ -339,6 +339,15 @@ function onboarding() {
       return `Set up ${walkCount} plugin${walkCount !== 1 ? "s" : ""}`;
     },
 
+    // True when every bucket is zero — i.e. the user un-checked everything
+    // and walked nothing. We swap to a friendlier "your setup is unchanged"
+    // message instead of showing three "0" rows.
+    get doneSummaryEmpty() {
+      return this.newlyEnabledCount === 0
+        && this.reconfiguredCount === 0
+        && this.leftAloneCount === 0;
+    },
+
     async startConfigure() {
       if (this.selectedIds.size === 0) {
         // User picked nothing — go straight to done with all-zero buckets.
