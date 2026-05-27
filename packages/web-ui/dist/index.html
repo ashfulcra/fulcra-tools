@@ -365,9 +365,10 @@
               <h2 class="text-2xl font-semibold mb-2">Pick what to collect</h2>
               <p class="text-slate-600 text-sm">
                 Choose the services you want to record. Plugins already set up
-                are pre-checked — un-check to skip them this trip, or flip
-                <span class="font-medium">Reconfigure</span> on a row to walk
-                through its settings again.
+                are pre-checked — un-check to leave them out of this wizard
+                run (they stay enabled, you just skip re-walking their setup),
+                or flip <span class="font-medium">Reconfigure</span> on a row
+                to walk through its settings again.
               </p>
             </div>
 
@@ -387,8 +388,8 @@
                         x-text="cat.name"></h3>
                     <div class="space-y-1 border border-slate-200 rounded-lg overflow-hidden">
                       <template x-for="p in cat.plugins" :key="p.id">
-                        <div class="border-b border-slate-100 last:border-0">
-                          <label class="flex items-start gap-3 px-4 py-3 hover:bg-slate-50 cursor-pointer">
+                        <div class="border-b border-slate-100 last:border-0 hover:bg-slate-50">
+                          <label class="flex items-start gap-3 px-4 py-3 cursor-pointer">
                             <input type="checkbox"
                                    :checked="isSelected(p.id)"
                                    @change="togglePlugin(p.id)"
