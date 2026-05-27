@@ -484,7 +484,7 @@
                 </template>
 
                 <!-- ---- browser_extension ---- -->
-                <template x-if="current_step.kind === 'browser_extension'">
+                <template x-if="current_step.kind === 'browser_extension' && !(window.FulcraStepComponents && window.FulcraStepComponents.browser_extension)">
                   <div class="space-y-4">
                     <div class="prose prose-sm text-slate-700 max-w-none"
                          x-html="body_html"></div>
@@ -1219,7 +1219,7 @@
             </template>
 
             <!-- browser_extension -->
-            <template x-if="current_step.kind === 'browser_extension'">
+            <template x-if="current_step.kind === 'browser_extension' && !(window.FulcraStepComponents && window.FulcraStepComponents.browser_extension)">
               <div class="space-y-4">
                 <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
                 <template x-if="current_step.extension_url">
