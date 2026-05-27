@@ -1,6 +1,7 @@
 """The popover header: title + status pill + optional gear (preferences) button."""
 from __future__ import annotations
 
+import subprocess
 from typing import Callable, Optional
 
 from AppKit import (  # type: ignore[import-not-found]
@@ -41,18 +42,25 @@ def make_header(
     """
     view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, 56))
 
+    # Title shrunk from w=220 to w=180 to make room for the "?" docs button
+    # at x=200. "Fulcra Collect" at typography.title() (16pt) measures ~115pt,
+    # so 180pt has comfortable headroom.
     title = NSTextField.labelWithString_("Fulcra Collect")
     title.setFont_(typography.title())
     title.setTextColor_(colors.text())
-    title.setFrame_(NSMakeRect(16, 28, 220, 22))
+    title.setFrame_(NSMakeRect(16, 28, 180, 22))
 
     subtitle = NSTextField.labelWithString_("")
     subtitle.setFont_(typography.small())
     subtitle.setTextColor_(colors.text_secondary())
     subtitle.setFrame_(NSMakeRect(16, 8, 280, 16))
 
-    # Status pill ends at x=320 (trimmed from original x=344) to leave room for
-    # the gear button at x=330.
+    # Status pill kept at width=100 (ends at x=320). The "?" docs button used
+    # to sit at x=305 and overlapped the pill's right ~15pt — causing wide
+    # pill strings like "●  Daemon stopped" or "●  9 failing" to render their
+    # last 1-2 glyphs under the button. Fix: move the docs button to x=200
+    # (between title and pill) instead of shrinking the pill, which would
+    # truncate "Daemon stopped" outright at this font size.
     pill = NSTextField.labelWithString_("")
     pill.setFont_(typography.small())
     pill.setAlignment_(2)  # right-aligned
@@ -61,6 +69,41 @@ def make_header(
     view.addSubview_(title)
     view.addSubview_(subtitle)
     view.addSubview_(pill)
+
+    # "?" docs button — opens the daemon's in-app docs page in the system
+    # browser. Added in SP4 (drift audit 2026-05-27) so users can reach the
+    # data-sources docs without context-switching to the dashboard.
+    # Layout: title(16..196) ___ ?(200..220) pill(220..320) ___ gear(330..350).
+    # Originally placed at x=305 (between pill and gear) but that overlapped
+    # the pill's right edge by 15pt and clipped wide status text. Moved to
+    # x=200 — between the (shortened) title and the pill — which preserves
+    # both pill capacity and the gear's corner position. Style mirrors the
+    # gear: NSBezelStyleInline (11) borderless + SF Symbol "questionmark.circle"
+    # so the pair reads as a matched set of unobtrusive header icons.
+    docs_btn = NSButton.alloc().initWithFrame_(NSMakeRect(200, 30, 20, 20))
+    docs_btn.setBezelStyle_(11)
+    docs_btn.setBordered_(False)
+    docs_image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+        "questionmark.circle", "Open docs"
+    )
+    if docs_image is not None:
+        docs_btn.setImage_(docs_image)
+    else:
+        docs_btn.setTitle_("?")  # fallback for older macOS without SF Symbols
+    docs_btn.setToolTip_("Open docs in browser")
+
+    def _open_docs(_sender):
+        # The daemon serves the in-app docs view at /?route=docs (the
+        # URL-param handler added in SP4 task 1). subprocess open is the
+        # standard macOS default-browser opener; check=False because a
+        # failure to launch the browser shouldn't crash the menubar.
+        subprocess.run(
+            ["open", "http://127.0.0.1:9292/?route=docs"],
+            check=False,
+        )
+
+    _attach(docs_btn, _open_docs)
+    view.addSubview_(docs_btn)
 
     if on_preferences is not None:
         gear_btn = NSButton.alloc().initWithFrame_(NSMakeRect(330, 30, 20, 20))
