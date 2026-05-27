@@ -348,6 +348,15 @@ function onboarding() {
         && this.leftAloneCount === 0;
     },
 
+    // True when the user actually made a change this trip — set up a new
+    // plugin or reconfigured an existing one. "Already set up, left alone"
+    // doesn't count: those plugins stayed exactly where they were. Drives
+    // the done-screen heading so we don't claim "Here's what changed"
+    // when nothing did.
+    get somethingActuallyChanged() {
+      return this.newlyEnabledCount > 0 || this.reconfiguredCount > 0;
+    },
+
     async startConfigure() {
       if (this.selectedIds.size === 0) {
         // User picked nothing — go straight to done with all-zero buckets.
