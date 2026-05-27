@@ -402,6 +402,8 @@ class Daemon:
             return self._set_quick_record_favorites(
                 request.get("favorites", []),
             )
+        if cmd == "delete_definition":
+            return self._delete_definition(request.get("def_id", ""))
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
     def _status(self) -> dict:
@@ -889,6 +891,177 @@ class Daemon:
             ok=True,
         )
         return {"ok": True, "tombstone_source_id": tombstone_source_id}
+
+    def _delete_definition(self, def_id: str) -> dict:
+        """Soft-delete an annotation definition via Fulcra, then clean up
+        locally — clear any plugin state bound to it, prune from favorites,
+        bust the quick-record cache.
+
+        Single business-logic site shared by the HTTP route
+        (``routes/definitions.py:delete_definition_route`` — now a thin
+        wrapper that translates the structured error returns below back
+        into ``HTTPException``) and the UDS command branch in
+        :meth:`handle_request` (which the menubar's
+        ``DaemonClient.delete_definition`` reaches via the local socket).
+
+        Behaviour preserved from the pre-SP2 HTTP-only implementation:
+
+        - DELETE to ``/user/v1alpha1/annotation/{def_id}``; treat 204 as
+          success and 404 as already-deleted (still surfaced as an error
+          so the caller knows the request is a no-op).
+        - On success, walk every registered plugin's state and clear
+          ``definition_id`` on any that pointed at the deleted def. Without
+          this the next run of those plugins would either silently fail or
+          re-create a side-def on Fulcra.
+        - Also prune the def from quick-record favorites if it was pinned,
+          and bust the in-memory quick-record cache so the next
+          ``_quick_record_list`` call doesn't briefly resurrect it.
+        - Failure modes that the HTTP route used to raise ``HTTPException``
+          for (404, 401, 5xx, network, timeout) are translated to
+          ``{"ok": False, "error": "..."}`` returns with the SAME
+          human-readable messages. The HTTP route translates back to
+          ``HTTPException`` to preserve its API contract.
+
+        Args:
+            def_id: the annotation definition UUID to soft-delete.
+
+        Returns:
+            ``{"ok": True, "cleared_plugins": [plugin_ids]}`` on success.
+            ``{"ok": False, "error": message}`` on any failure mode.
+        """
+        from . import credentials as _creds
+        from . import state as _state_mod
+        # Late import — tests monkeypatch ``fulcra_collect.web.httpx``
+        # to substitute a fake HTTP client. Reaching httpx via the
+        # ``web`` module attribute (rather than the top-level ``httpx``
+        # imported at this module's load time) is what makes the same
+        # patching site work for both the HTTP route AND this method.
+        from . import web as _web
+
+        _log = logging.getLogger("fulcra_collect.daemon")
+        if not def_id:
+            return {"ok": False, "code": "bad_request", "error": "def_id is required"}
+
+        fulcra_token = _creds.get_user_secret("bearer-token")
+        if not fulcra_token:
+            return {"ok": False, "code": "unauthorized", "error": "not signed in to Fulcra"}
+
+        # Build an httpx client identical to ``web.fulcra_http_client`` —
+        # reaching httpx through ``_web.httpx`` so monkeypatches at that
+        # site override the client used here.
+        from fulcra_common import DEFAULT_BASE_URL
+        try:
+            with _web.httpx.Client(
+                base_url=DEFAULT_BASE_URL,
+                timeout=15.0,
+                headers={
+                    "Authorization": f"Bearer {fulcra_token}",
+                    "User-Agent": "fulcra-collect/daemon",
+                },
+                follow_redirects=True,
+            ) as client:
+                r = client.delete(f"/user/v1alpha1/annotation/{def_id}")
+                if r.status_code == 404:
+                    return {
+                        "ok": False,
+                        "code": "not_found",
+                        "error": "Definition not found — it may have already been deleted.",
+                    }
+                if r.status_code != 204:
+                    r.raise_for_status()
+        except _web.httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            _log.warning("delete_definition(%s): Fulcra returned %s", def_id, status)
+            if status in (401, 403):
+                return {
+                    "ok": False,
+                    "code": "unauthorized",
+                    "error": (
+                        "Fulcra rejected the request — your sign-in may have expired. "
+                        "Re-run sign-in from the wizard or paste a fresh token."
+                    ),
+                }
+            if 500 <= status < 600:
+                return {
+                    "ok": False,
+                    "code": "upstream_error",
+                    "error": f"Fulcra returned {status}. Try again in a moment.",
+                }
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": f"Fulcra returned an unexpected {status}.",
+            }
+        except (_web.httpx.ConnectError, _web.httpx.ConnectTimeout) as exc:
+            _log.warning("delete_definition(%s): connect failed: %r", def_id, exc)
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": "Couldn't reach Fulcra. Check your internet, then try again.",
+            }
+        except _web.httpx.TimeoutException as exc:
+            _log.warning("delete_definition(%s): timed out: %r", def_id, exc)
+            return {
+                "ok": False,
+                "code": "timeout",
+                "error": "Fulcra took too long to respond. Try again in a moment.",
+            }
+        except Exception as exc:
+            _log.exception("delete_definition(%s): unexpected failure", def_id)
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": (
+                    f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
+                    "Check the daemon log for details."
+                ),
+            }
+
+        # Clear the cached definition_id on any plugin that was bound to
+        # the deleted def. Without this the next run would try to write
+        # to a tombstoned def and either silently fail or re-create a new
+        # def on the side (depending on the plugin's error path).
+        cleared: list[str] = []
+        for p in self.registry.plugins.values():
+            try:
+                st = _state_mod.load(p.id)
+            except Exception:
+                # Per-plugin state corruption shouldn't abort the delete.
+                continue
+            if getattr(st, "definition_id", None) == def_id:
+                st.definition_id = None
+                _state_mod.save(st)
+                cleared.append(p.id)
+        if cleared:
+            _log.info(
+                "delete_definition(%s): cleared cached definition_id on %d plugin(s): %s",
+                def_id, len(cleared), ", ".join(cleared),
+            )
+        # Also drop this def from quick-record favorites if it was pinned.
+        # Without this the favorites file would accumulate orphan UUIDs
+        # the menubar would keep trying to surface but Fulcra would no
+        # longer return. Best-effort: a favorites I/O failure shouldn't
+        # roll back the (successful) Fulcra-side delete.
+        try:
+            from . import quick_record_favorites as _favs
+            current = _favs.load()
+            if def_id in current:
+                current.discard(def_id)
+                _favs.save(current)
+                # Bust the daemon's quick-record cache so the next list
+                # call doesn't briefly resurrect the deleted def with a
+                # stale ``pinned`` flag.
+                self._quick_record_cache = None
+                _log.info(
+                    "delete_definition(%s): removed from quick-record favorites",
+                    def_id,
+                )
+        except Exception:
+            _log.exception(
+                "delete_definition(%s): could not prune favorites; non-fatal",
+                def_id,
+            )
+        return {"ok": True, "cleared_plugins": cleared}
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:
