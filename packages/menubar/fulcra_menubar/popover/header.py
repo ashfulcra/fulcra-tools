@@ -85,13 +85,25 @@ def make_header(
             text = f"{model.failing_count} failing"
         pill.setStringValue_("●  " + text)
         pill.setTextColor_(_color(color_hex))
+        # Count by `collect_mode` so the header summary speaks the same
+        # language as the popover body, which now groups plugins into
+        # Live (continuous) / Live (polled) / Historical (one-shot). The
+        # old kind-based wording ("N scheduled · M services · X manual")
+        # was leftover SP3 drift — see SP3 final review I1 (2026-05-27).
         n = len(model.plugins)
-        scheduled = sum(1 for p in model.plugins if p.kind == "scheduled")
-        services = sum(1 for p in model.plugins if p.kind == "service")
-        manual = sum(1 for p in model.plugins if p.kind == "manual")
-        subtitle.setStringValue_(
-            f"{n} plugins · {scheduled} scheduled · {services} services · {manual} manual"
-        )
+        continuous = sum(1 for p in model.plugins if p.collect_mode == "live_continuous")
+        polled = sum(1 for p in model.plugins if p.collect_mode == "live_polled")
+        historical = sum(1 for p in model.plugins if p.collect_mode == "historical")
+        # Empty buckets are skipped so the user doesn't see e.g. "0 polled"
+        # when they have no polled plugins enabled.
+        parts = [f"{n} plugins"]
+        if continuous:
+            parts.append(f"{continuous} live")
+        if polled:
+            parts.append(f"{polled} polled")
+        if historical:
+            parts.append(f"{historical} one-shot")
+        subtitle.setStringValue_(" · ".join(parts))
 
     refresh()
     model.add_observer(on_main_thread(refresh))
