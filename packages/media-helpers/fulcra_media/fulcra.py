@@ -77,59 +77,40 @@ class FulcraClient(BaseFulcraClient):
     def ingest_batch(
         self, events: list["NormalizedEvent"], state: "State"
     ) -> None:
+        """Post a batch of NormalizedEvents to Fulcra.
+
+        Thin wrapper over `IngestPipeline.ingest_batch`: this method maps
+        the importer-side `NormalizedEvent` (which knows about
+        watched/listened/read categories and per-service tag ids) onto
+        the pipeline-side `DurationEvent`, and delegates the wire
+        construction + POST. The legacy inline `wire.build_record +
+        encode_batch + httpx.post` block is gone; the `duration_seconds`
+        defensive-field injection lives once in the pipeline now.
+        """
         if not events:
             return
-        records: list[dict] = []
+        from fulcra_common.ingest import IngestPipeline
+        pipeline = IngestPipeline(client=self)
+
         category_to_def = {
             "watched":  state.watched_definition_id,
             "listened": state.listened_definition_id,
             "read":     state.read_definition_id,
         }
+        ingestable = []
         for ev in events:
             def_id = category_to_def.get(ev.category)
             if def_id is None:
                 raise RuntimeError(
-                    f"missing {ev.category} definition id in state; run bootstrap first"
+                    f"missing {ev.category} definition id in state; "
+                    "run bootstrap first",
                 )
-            # Compute duration_seconds defensively — see task #30 and the
-            # matching comment in fulcra_attention/ingest.py. The timeline
-            # renderer reads the duration off the data payload, not from
-            # recorded_at.{start_time,end_time} — without this field, all
-            # Watched/Listened/Read events render as "0 h 0 m total" with
-            # invisible markers despite being queryable via the data API.
-            duration_seconds = max(
-                0, int((ev.end_time - ev.start_time).total_seconds())
-            )
-            data_inner = {
-                "note": ev.note,
-                "title": ev.title,
-                "service": ev.service,
-                "timestamp_confidence": ev.timestamp_confidence,
-                "duration_seconds": duration_seconds,
-                "external_ids": ev.external_ids,
-            }
             service_tag = state.tag_ids.get(ev.service)
-            tags = [service_tag] if service_tag else []
-            records.append(wire.build_record(
-                data_type=wire.DURATION_ANNOTATION,
-                start_time=ev.start_time,
-                end_time=ev.end_time,
-                data=data_inner,
-                source_id=ev.deterministic_id,
-                tags=tags,
-                definition_id=def_id,
-                extra_source_ids=getattr(ev, "extra_source_ids", ()),
-            ))
-        body = wire.encode_batch(records)
-        r = self._client().post(
-            "/ingest/v1/record/batch",
-            content=body,
-            headers={
-                **self._authed_headers(),
-                "content-type": "application/x-jsonl",
-            },
-        )
-        r.raise_for_status()
+            tag_ids = (service_tag,) if service_tag else ()
+            ingestable.append(
+                ev.to_duration_event(definition_id=def_id, tags=tag_ids),
+            )
+        pipeline.ingest_batch(ingestable)
 
     def run_import(
         self,

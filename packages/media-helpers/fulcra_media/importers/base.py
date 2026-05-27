@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from fulcra_common.ingest import DurationEvent
 
 VALID_CATEGORIES = {"watched", "listened", "activity", "read"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
@@ -37,6 +40,27 @@ class NormalizedEvent:
             raise ValueError(f"invalid timestamp_confidence {self.timestamp_confidence!r}")
         if self.start_time.tzinfo is None or self.end_time.tzinfo is None:
             raise ValueError("start_time and end_time must be timezone-aware")
+
+    def to_duration_event(
+        self, *, definition_id: str, tags: Sequence[str] = (),
+    ) -> DurationEvent:
+        """Produce the pipeline-side typed event from this importer-side
+        intermediate. Used by FulcraClient.ingest_batch — the importer keeps
+        its own NormalizedEvent shape, but the wire-construction goes
+        through IngestPipeline."""
+        return DurationEvent(
+            definition_id=definition_id,
+            source_id=self.deterministic_id,
+            extra_source_ids=tuple(self.extra_source_ids),
+            tags=tuple(tags),
+            external_ids=dict(self.external_ids),
+            note=self.note,
+            title=self.title,
+            service=self.service,
+            timestamp_confidence=self.timestamp_confidence,
+            start=self.start_time,
+            end=self.end_time,
+        )
 
 
 _SLUG_KEEP_RE = re.compile(r"[^a-z0-9\- ]+")
