@@ -197,7 +197,29 @@ def build_app(daemon) -> FastAPI:
 
     static_dir = _frontend_dir() / "static"
     if static_dir.exists():
-        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        # StaticFiles defaults: ETag + last-modified, no Cache-Control.
+        # Chrome serves the cached body on conditional GETs even when
+        # the disk file changes, so frontend edits silently don't reach
+        # an already-open tab until a hard reload. Wrap the mount in a
+        # tiny ASGI middleware that forces revalidation. The 304 path
+        # still works — browsers honour ETag with Cache-Control: no-cache,
+        # they just always make the round-trip.
+        _static_app = StaticFiles(directory=str(static_dir))
+
+        async def _no_cache_static(scope, receive, send):
+            async def _send_with_no_cache(message):
+                if message["type"] == "http.response.start":
+                    headers = list(message.get("headers", []))
+                    headers = [
+                        (k, v) for (k, v) in headers
+                        if k.lower() != b"cache-control"
+                    ]
+                    headers.append((b"cache-control", b"no-cache"))
+                    message = {**message, "headers": headers}
+                await send(message)
+            await _static_app(scope, receive, _send_with_no_cache)
+
+        app.mount("/static", _no_cache_static, name="static")
 
     # ------------------------------------------------------------------
     # Register the per-area route modules.
