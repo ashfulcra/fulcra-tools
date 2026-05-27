@@ -55,14 +55,71 @@ function settings() {
     // clicks two checkboxes faster than the network round-trip.
     favoritesSaving: false,
 
+    // Fulcra auth status (SP5 task 3). The daemon's worker.py flips
+    // `refresh_failed=True` as soon as a token refresh blows up; we read
+    // that on mount and surface a "Reconnect to Fulcra" banner at the
+    // top of this page so the user has a one-click path to recovery
+    // without dropping to the CLI. Default to authenticated=true so we
+    // don't flash a misleading banner during the initial fetch.
+    fulcraAuthStatus: { authenticated: true, refresh_failed: false },
+    reconnectInFlight: false,
+    reconnectError: "",
+
     async boot() {
-      // Load defs first because the favorites count display reads from
-      // both arrays. Errors in either are surfaced separately so a
+      // Auth status first (cheap) so the banner can render immediately
+      // even if /api/definitions is slow or — more likely when
+      // refresh_failed is true — fails outright. Defs + favorites run in
+      // parallel after; errors in either are surfaced separately so a
       // favorites-fetch failure doesn't hide the soft-delete UI.
+      await this._loadAuthStatus();
       await Promise.all([
         this._loadDefs(),
         this._loadFavorites(),
       ]);
+    },
+
+    async _loadAuthStatus() {
+      try {
+        const status = await api("/api/fulcra/auth/status");
+        this.fulcraAuthStatus = status;
+      } catch (e) {
+        // Network/daemon error — leave the default (authenticated=true)
+        // so we don't flash a misleading banner on a transient failure.
+        // The user will see the real /api/definitions error below if
+        // the daemon is genuinely down.
+      }
+    },
+
+    async reconnectToFulcra() {
+      // Driven by the amber banner that appears when
+      // fulcraAuthStatus.refresh_failed === true. Posts to the daemon's
+      // cli_login endpoint, which shells out to `fulcra login` and
+      // re-reads the credentials file on success. On a successful
+      // reconnect we refresh status + reload the data that the banner
+      // was hiding (defs + favorites) so the page lights back up
+      // without a manual page refresh.
+      this.reconnectError = "";
+      this.reconnectInFlight = true;
+      try {
+        const result = await api("/api/fulcra/auth/cli_login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        if (!result || result.ok === false) {
+          this.reconnectError = (result && result.error) || "Sign-in didn't complete.";
+        } else {
+          await this._loadAuthStatus();
+          await Promise.all([
+            this._loadDefs(),
+            this._loadFavorites(),
+          ]);
+        }
+      } catch (e) {
+        this.reconnectError = e.message || "Reconnect failed.";
+      } finally {
+        this.reconnectInFlight = false;
+      }
     },
 
     async _loadDefs() {
