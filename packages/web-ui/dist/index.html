@@ -21,6 +21,23 @@
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"
           integrity="sha384-l8f0VcPi/M1iHPv8egOnY/15TDwqgbOR1anMIJWvU6nLRgZVLTLSaNqi/TOoT5Fh"
           crossorigin="anonymous"></script>
+  <!-- Lit 3 — web-components base used by the setup_step renderer
+       (refactor #68). Pinned + SRI'd exactly like marked + alpine.
+       Note: Lit ships as an ES module, so type="module" (not classic) —
+       this differs from marked/alpine, which are classic scripts.
+       Upgrade dance: bump version, recompute the hash with
+         curl -s https://cdn.jsdelivr.net/npm/lit@<new>/index.js \
+           | openssl dgst -sha384 -binary | openssl base64 -A
+       and update both src and integrity below. -->
+  <script type="module"
+          src="https://cdn.jsdelivr.net/npm/lit@3.2.1/index.js"
+          integrity="sha384-IZzW+Sfdx55gIfvWXINdnp5aNwUifd4IB0ROrRyipc+QWqXXpJhcbmT2+7tx9CCN"
+          crossorigin="anonymous"></script>
+  <!-- Setup-step web-component bundle (refactor #68). Module script so it
+       resolves AFTER the Lit module above. Order matters: components must
+       be registered as custom elements before <fulcra-step> appears in
+       the DOM. Loaded before wizard.js / page scripts as a result. -->
+  <script type="module" src="/static/components/index.js"></script>
 </head>
 <body class="bg-white text-slate-900 min-h-screen"
       x-data="app()"
@@ -291,8 +308,16 @@
                   <h2 class="text-xl font-semibold" x-text="current_step.title"></h2>
                 </template>
 
+                <!-- Lit dispatcher (refactor #68 — Phase 1). Renders
+                     whichever kind has a registered <fulcra-step-*>
+                     component; falls through to the legacy inline
+                     templates below for kinds not yet ported. The
+                     x-effect writes properties (not attributes) so the
+                     component receives real objects. -->
+                <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data"></fulcra-step>
+
                 <!-- ---- intro ---- -->
-                <template x-if="current_step.kind === 'intro'">
+                <template x-if="current_step.kind === 'intro' && !(window.FulcraStepComponents && window.FulcraStepComponents.intro)">
                   <div class="prose prose-sm text-slate-700 max-w-none"
                        x-html="body_html"></div>
                 </template>
@@ -1043,8 +1068,16 @@
               <h2 class="text-xl font-semibold" x-text="current_step.title"></h2>
             </template>
 
+            <!-- Lit dispatcher (refactor #68 — Phase 1). Renders
+                 whichever kind has a registered <fulcra-step-*>
+                 component; falls through to the legacy inline
+                 templates below for kinds not yet ported. The
+                 x-effect writes properties (not attributes) so the
+                 component receives real objects. -->
+            <fulcra-step x-effect="$el.step = current_step; $el.ctx = $data"></fulcra-step>
+
             <!-- intro -->
-            <template x-if="current_step.kind === 'intro'">
+            <template x-if="current_step.kind === 'intro' && !(window.FulcraStepComponents && window.FulcraStepComponents.intro)">
               <div class="prose prose-sm text-slate-700 max-w-none" x-html="body_html"></div>
             </template>
 
