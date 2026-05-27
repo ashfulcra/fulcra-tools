@@ -64,6 +64,14 @@ class FulcraClient(BaseFulcraClient):
             data_inner["value"] = ev.value
         if ev.tag:
             data_inner["tag"] = ev.tag
+        # For duration-typed events, also surface duration_seconds on the
+        # data payload — see task #30 / fulcra_attention/ingest.py for the
+        # rationale (timeline renderer reads it off data, not off the
+        # recorded_at envelope, so events otherwise show as 0 h 0 m).
+        if ev.annotation_type == DURATION and ev.end_time is not None:
+            duration = int((ev.end_time - ev.start_time).total_seconds())
+            if duration > 0:
+                data_inner["duration_seconds"] = duration
         data_inner.update(ev.data_fields)
         if ev.external_ids:
             data_inner["external_ids"] = ev.external_ids

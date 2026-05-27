@@ -91,11 +91,21 @@ class FulcraClient(BaseFulcraClient):
                 raise RuntimeError(
                     f"missing {ev.category} definition id in state; run bootstrap first"
                 )
+            # Compute duration_seconds defensively — see task #30 and the
+            # matching comment in fulcra_attention/ingest.py. The timeline
+            # renderer reads the duration off the data payload, not from
+            # recorded_at.{start_time,end_time} — without this field, all
+            # Watched/Listened/Read events render as "0 h 0 m total" with
+            # invisible markers despite being queryable via the data API.
+            duration_seconds = max(
+                0, int((ev.end_time - ev.start_time).total_seconds())
+            )
             data_inner = {
                 "note": ev.note,
                 "title": ev.title,
                 "service": ev.service,
                 "timestamp_confidence": ev.timestamp_confidence,
+                "duration_seconds": duration_seconds,
                 "external_ids": ev.external_ids,
             }
             service_tag = state.tag_ids.get(ev.service)
@@ -108,6 +118,7 @@ class FulcraClient(BaseFulcraClient):
                 source_id=ev.deterministic_id,
                 tags=tags,
                 definition_id=def_id,
+                extra_source_ids=getattr(ev, "extra_source_ids", ()),
             ))
         body = wire.encode_batch(records)
         r = self._client().post(

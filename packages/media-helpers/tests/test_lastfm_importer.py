@@ -99,15 +99,28 @@ def test_normalize_history_handles_empty_list():
 
 
 def test_normalize_track_same_track_different_times_distinct_ids():
-    """Phoenix '1901' appears in both pages at different timestamps → distinct ids."""
-    page1 = _load("lastfm_recent_tracks_page1.json")  # nowplaying entry
+    """Phoenix '1901' appears in both pages at different timestamps → distinct ids.
+
+    Originally this test loaded page1 + page2 to compare two normalisations
+    of the same track at different ts, but page1's '1901' entry is a
+    `nowplaying` row that normalize_track correctly returns None for —
+    leaving only one normalisation to assert against. Test now does what
+    the name says: builds a synthetic second row with the same track at a
+    different timestamp and asserts the deterministic ids differ.
+    """
     page2 = _load("lastfm_recent_tracks_page2.json")
-    # Find the real (timestamped) '1901' in page 2
     p1901 = next(t for t in page2["recenttracks"]["track"] if t["name"] == "1901")
     ev = normalize_track(p1901)
-    # Compare against page1 nowplaying (returns None) so the only distinct ts matters
     assert ev is not None
     assert ev.start_time == datetime.fromtimestamp(1715896800, tz=timezone.utc)
+
+    # Synthetic second row, same track, 1 hour later → different id.
+    p1901_later = dict(p1901)
+    p1901_later["date"] = dict(p1901["date"])
+    p1901_later["date"]["uts"] = str(int(p1901["date"]["uts"]) + 3600)
+    ev_later = normalize_track(p1901_later)
+    assert ev_later is not None
+    assert ev_later.deterministic_id != ev.deterministic_id
 
 
 # ---------- fetch_recent_tracks ----------

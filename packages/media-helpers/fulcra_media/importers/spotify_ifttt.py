@@ -35,6 +35,8 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from fulcra_common.cross_source_fingerprint import listened_fingerprint
+
 from .base import NormalizedEvent, content_fingerprint
 
 # "November 4, 2022 at 03:53PM"
@@ -128,6 +130,7 @@ def parse_ifttt_zip(
                 continue
             note = f"{artist} – {track}"
             fp = content_fingerprint("music", artist=artist, track=track)
+            cross = listened_fingerprint(timestamp=ts, artist=artist, track=track)
             seen[key] = NormalizedEvent(
                 importer="spotify-ifttt",
                 service="spotify",
@@ -147,6 +150,7 @@ def parse_ifttt_zip(
                     "point_in_time": True,
                     "source_applet": "ifttt-gdrive",
                 },
+                extra_source_ids=(cross,) if cross else (),
             )
 
     for _, event in sorted(seen.items(), key=lambda kv: kv[1].start_time):

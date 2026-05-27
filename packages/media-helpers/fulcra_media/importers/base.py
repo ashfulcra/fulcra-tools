@@ -22,6 +22,13 @@ class NormalizedEvent:
     deterministic_id: str    # full source string e.g. "com.fulcra.media.netflix.<sha16>"
     timestamp_confidence: str
     external_ids: dict = field(default_factory=dict)
+    # Extra source-ids appended to the Fulcra event's metadata.source array
+    # ALONGSIDE deterministic_id. Used for cross-source dedup fingerprints
+    # (com.fulcra.content.<kind>.v1.<hash>) so two importers that captured
+    # the same listen/watch dedup against each other without losing the
+    # per-plugin source_id that's how we trace "where did this come from".
+    # Tuple (not list) so the dataclass stays hashable-equivalent for tests.
+    extra_source_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.category not in VALID_CATEGORIES:
