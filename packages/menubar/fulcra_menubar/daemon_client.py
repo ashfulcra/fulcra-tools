@@ -136,3 +136,20 @@ class DaemonClient:
         the user.
         """
         return self._send({"cmd": "delete_annotation", "source_id": source_id})
+
+    def delete_definition(self, def_id: str) -> dict:
+        """Soft-delete an annotation definition.
+
+        Wraps the daemon's UDS command introduced in SP2 task 1.
+        Returns the daemon's reply dict — {"ok": True, "cleared_plugins":
+        [...]} on success, {"ok": False, "code": "...", "error": "..."}
+        on any failure mode. The `code` field is one of
+        "bad_request"/"unauthorized"/"not_found"/"timeout"/"upstream_error"
+        so callers can branch on it rather than parse the error text.
+        Caller is responsible for surfacing the error to the user
+        (e.g., NSAlert) and not retrying the same UUID.
+
+        Args:
+            def_id: the annotation definition UUID.
+        """
+        return self._send({"cmd": "delete_definition", "def_id": def_id})
