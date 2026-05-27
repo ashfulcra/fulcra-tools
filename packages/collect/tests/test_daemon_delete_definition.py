@@ -146,3 +146,104 @@ def test_delete_definition_uds_command_fulcra_404(
     assert response.get("ok") is False
     assert response.get("code") == "not_found"
     assert "not found" in response.get("error", "").lower()
+
+
+def test_delete_definition_refresh_on_401(
+    collect_home, _in_memory_keyring, monkeypatch,
+) -> None:
+    """First call returns 401; daemon refreshes via CLI helper, retries, succeeds.
+
+    The UDS-side soft-delete (SP2 task 1, used by the menubar Annotations
+    tab and popover "…" menu) was previously building its own
+    ``httpx.Client`` directly and so bypassed the refresh-on-401 wrapper
+    added in SP5 task 1. SP5 task 2 routes it through the shared
+    ``_RetryingClient`` so the soft-delete benefits from the same
+    transparent refresh. This test wires up a fake httpx whose first
+    DELETE returns 401 and whose second DELETE returns 204, mocks
+    ``refresh_fulcra_access_token`` to mint a new token, and asserts
+    the daemon ends up returning ``ok=True`` — i.e. the user never sees
+    the 401, the refresh-and-retry happened transparently.
+    """
+    import fulcra_collect.credentials as _creds_mod
+    import fulcra_collect.web as web_mod
+    from fulcra_collect.daemon import Config, Daemon
+    from fulcra_collect.registry import RegistryResult
+
+    _creds_mod.set_user_secret("bearer-token", "stale-token")
+
+    # Track the sequence of statuses to hand back; first 401, then 204.
+    statuses = [401, 204]
+    # Track the Authorization header observed on each call so we can
+    # assert the retry used the refreshed token (not the stale one).
+    seen_auth_headers: list[str] = []
+
+    class _FakeResponse:
+        def __init__(self, code: int) -> None:
+            self.status_code = code
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                import httpx as _h
+                req = _h.Request("DELETE", "http://test")
+                raise _h.HTTPStatusError(
+                    f"{self.status_code}",
+                    request=req,
+                    response=_h.Response(self.status_code, request=req),
+                )
+
+    class _FakeClient:
+        def __init__(self, **kw) -> None:
+            # Capture initial headers so the wrapper can mutate them
+            # exactly as the real httpx.Client.headers dict allows.
+            self.headers = dict(kw.get("headers", {}))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a) -> None:  # noqa: ARG002
+            pass
+
+        def delete(self, path, **kw):  # noqa: ARG002
+            seen_auth_headers.append(self.headers.get("Authorization", ""))
+            return _FakeResponse(statuses.pop(0))
+
+    import httpx as _real_httpx
+    monkeypatch.setattr(
+        web_mod, "httpx",
+        type("httpx", (), {
+            "Client": _FakeClient,
+            "HTTPStatusError": _real_httpx.HTTPStatusError,
+            "ConnectError": _real_httpx.ConnectError,
+            "ConnectTimeout": _real_httpx.ConnectTimeout,
+            "TimeoutException": _real_httpx.TimeoutException,
+            "HTTPError": _real_httpx.HTTPError,
+        })(),
+    )
+
+    # Stub the CLI-refresh helper: pretend the CLI minted a fresh token.
+    refresh_calls = {"n": 0}
+
+    def _fake_refresh() -> str:
+        refresh_calls["n"] += 1
+        _creds_mod.set_user_secret("bearer-token", "fresh-token")
+        return "fresh-token"
+
+    monkeypatch.setattr(
+        _creds_mod, "refresh_fulcra_access_token", _fake_refresh,
+    )
+
+    daemon = Daemon(registry=RegistryResult(plugins={}), config=Config())
+    response = daemon.handle_request({
+        "cmd": "delete_definition",
+        "def_id": "needs-refresh-uuid",
+    })
+
+    # The user-visible outcome: success, no 401 surfaced. The refresh
+    # happened transparently underneath.
+    assert response.get("ok") is True, response
+    assert refresh_calls["n"] == 1
+    # First request used the stale token, retry used the fresh one.
+    assert seen_auth_headers == [
+        "Bearer stale-token",
+        "Bearer fresh-token",
+    ]
