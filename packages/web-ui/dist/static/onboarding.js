@@ -77,7 +77,15 @@ function onboarding() {
     currentContract: null,  // the contract for the active plugin
 
     // --- done state ---
-    enabledCount: 0,
+    // The walk-completion counters drive the three-bucket summary on the
+    // done screen so the user can see what actually changed this trip.
+    // 'newly enabled' = walked-to-completion plugins NOT in wasEnabledAtStart.
+    // 'reconfigured'  = walked-to-completion plugins IN wasEnabledAtStart
+    //                   (only possible via the Reconfigure opt-in).
+    // 'left alone'    = pre-checked plugins skipped at startConfigure time.
+    newlyEnabledCount: 0,
+    reconfiguredCount: 0,
+    leftAloneCount: 0,
 
     async boot() {
       // Check whether app() requested a specific entry phase. app.addPlugin()
@@ -333,22 +341,50 @@ function onboarding() {
 
     async startConfigure() {
       if (this.selectedIds.size === 0) {
-        // User picked nothing — go straight to done
-        this.enabledCount = 0;
+        // User picked nothing — go straight to done with all-zero buckets.
+        this.newlyEnabledCount = 0;
+        this.reconfiguredCount = 0;
+        this.leftAloneCount = 0;
         this.phase = "done";
         return;
       }
 
-      // Fetch contracts for all selected plugins
-      const ids = [...this.selectedIds];
+      // Partition selectedIds into "needs the wizard" and "leave alone."
+      // A plugin only enters the walk if it's new OR the user flipped
+      // Reconfigure on for it. Everything else is in wasEnabledAtStart
+      // and stays enabled with its existing config untouched.
+      const toWalk = [];
+      let skipCount = 0;
+      for (const id of this.selectedIds) {
+        if (this.wasEnabledAtStart.has(id) && !this.reconfigureIds.has(id)) {
+          skipCount += 1;
+        } else {
+          toWalk.push(id);
+        }
+      }
+      this.leftAloneCount = skipCount;
+      this.newlyEnabledCount = 0;
+      this.reconfiguredCount = 0;
+
+      if (toWalk.length === 0) {
+        // Nothing to walk — pre-checks with no Reconfigure flips. Go
+        // straight to the done summary so the user sees the
+        // "left alone" count and understands nothing changed.
+        this.phase = "done";
+        return;
+      }
+
+      // Fetch contracts for the walk-needing plugins only. Skipping the
+      // /contract fetch for left-alone plugins isn't just an optimization:
+      // a stale contract endpoint shouldn't break a re-run that doesn't
+      // touch that plugin.
       const contracts = [];
-      for (const id of ids) {
+      for (const id of toWalk) {
         try {
           const contract = await api(`/api/plugin/${id}/contract`);
           contracts.push(contract);
         } catch (e) {
           console.warn(`Could not fetch contract for ${id}:`, e);
-          // Still include a minimal stub so we can enable it
           const stub = this.allPlugins.find(p => p.id === id) || { id, name: id };
           contracts.push({ id, name: stub.name, setup_steps: [], required_settings: [], required_credentials: [] });
         }
@@ -356,7 +392,6 @@ function onboarding() {
 
       this.pluginsToSetup = contracts;
       this.currentSetupIndex = 0;
-      this.enabledCount = 0;
       this._enterCurrentPlugin();
       this.phase = "configure";
     },
@@ -398,12 +433,20 @@ function onboarding() {
     },
 
     async _onPluginComplete() {
-      this.enabledCount += 1;
+      // Bucket the just-completed plugin: was it new (newly set up) or
+      // already-enabled-with-Reconfigure-on (reconfigured)? The
+      // wasEnabledAtStart snapshot is the source of truth.
+      const id = this.currentContract?.id;
+      if (id && this.wasEnabledAtStart.has(id)) {
+        this.reconfiguredCount += 1;
+      } else {
+        this.newlyEnabledCount += 1;
+      }
       this._advancePluginOrFinish();
     },
 
     _onPluginSkipped() {
-      // Plugin abandoned without enable — don't bump enabledCount.
+      // Plugin abandoned without enable — don't bump any completion counter.
       this._advancePluginOrFinish();
     },
 
