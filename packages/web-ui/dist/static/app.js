@@ -101,7 +101,9 @@ function app() {
     // "Run setup wizard" link in the dashboard header — gives users a way
     // back in if they bailed out mid-flow.
     // Clears the window flag so onboarding.boot() runs its full logic:
-    // welcome → signin (if needed) → pick_plugins.
+    // welcome → signin → collect_modes → pick_plugins. (boot() skips
+    // collect_modes when the daemon already has a stored token, since
+    // that user has already seen the explainer at least once.)
     runOnboarding() {
       this.setupPluginId = null;
       this.setupContract = null;
