@@ -15,7 +15,9 @@ from daytona import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ASSETS = REPO_ROOT / "assets"
 HERMES_HOME = "/root/.hermes"
-PATH_ENV = "/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Node lives in /root/.hermes/node/bin — required on PATH so the dashboard can
+# build its web UI at first launch (otherwise: "npm is not available").
+PATH_ENV = "/root/.local/bin:/root/.hermes/node/bin:/usr/local/bin:/usr/bin:/bin"
 
 HERMES_INSTALL = (
     "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh "
@@ -46,6 +48,12 @@ def build_image_commands() -> list[str]:
         SKILL_CLONE,
         # Pre-set OpenRouter provider + model (the API key is injected at spawn, not here).
         "hermes config set model.provider openrouter && hermes config set model.default anthropic/claude-sonnet-4.5",
+        # Bypass the in-chat dangerous-command approval prompt. Without this the
+        # agent pops a "[HIGH] approval required" prompt for things like the uv
+        # installer (curl | sh) mid-onboarding — confusing friction for a guest.
+        # `approvals.mode=yolo` is the dashboard's own setting (ask/yolo/deny). The
+        # sandbox is ephemeral + isolated, so auto-approving is acceptable here.
+        "hermes config set approvals.mode yolo",
         # NOTE: we do NOT prebuild the dashboard web bundle here. `npm run build`
         # needs dev deps (tsc) the pip install doesn't provide; `hermes dashboard`
         # builds the bundle itself on first launch (~15s, covered by start-chat.sh's
