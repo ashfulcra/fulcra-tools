@@ -8,6 +8,11 @@
 # thus the backgrounded dashboard) alive.
 set -euo pipefail
 
+# Ensure uv and the Hermes-bundled Node are on PATH — the dashboard shells out to
+# npm to build its web UI on first launch, and this script runs in a non-login
+# shell that wouldn't otherwise have them.
+export PATH="/root/.local/bin:/root/.hermes/node/bin:${PATH}"
+
 # Apply the runtime model choice if provided (key is injected separately into ~/.hermes/.env).
 if [ -n "${OPENROUTER_MODEL:-}" ]; then
 	hermes config set model.default "${OPENROUTER_MODEL}" || true
