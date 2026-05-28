@@ -6,3 +6,15 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .superpowers/
+.claude/
+
+# AI / planning working artifacts — kept locally, never committed.
+# These are the brainstorm specs, subagent execution plans, and
+# session resume/QA scratch the team uses while building, not part of
+# the product. Product + human docs (docs/TESTING.md,
+# docs/how-do-i-get-my-data.md) stay tracked.
+/SESSION_HANDOFF.md
+/docs/E2E_STATUS.md
+/docs/plans/
+/docs/superpowers/
+packages/*/docs/superpowers/

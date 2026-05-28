@@ -9,6 +9,11 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from fulcra_common.cross_source_fingerprint import (
+    listened_fingerprint,
+    podcast_fingerprint,
+)
+
 from .base import NormalizedEvent, content_fingerprint
 
 MIN_MS_PLAYED = 30000
@@ -44,6 +49,7 @@ def _process(entry: dict) -> Iterator[NormalizedEvent]:
     track_uri = entry.get("spotify_track_uri")
     episode_uri = entry.get("spotify_episode_uri")
 
+    cross: str | None
     if track_uri:
         artist = entry.get("master_metadata_album_artist_name") or ""
         track = entry.get("master_metadata_track_name") or ""
@@ -54,6 +60,11 @@ def _process(entry: dict) -> Iterator[NormalizedEvent]:
         fp = content_fingerprint("music", artist=artist, track=track)
         det = _det_id(ts, track_uri)
         kind = "music"
+        # Use the listen-start time (Spotify's `ts` is when the play ENDED;
+        # the importer derives `start` by subtracting ms_played). Other
+        # services typically report play-start, so bucketing on `start`
+        # gives the best cross-source match.
+        cross = listened_fingerprint(timestamp=start, artist=artist, track=track)
     elif episode_uri:
         show = entry.get("episode_show_name") or ""
         ep_name = entry.get("episode_name") or ""
@@ -64,6 +75,7 @@ def _process(entry: dict) -> Iterator[NormalizedEvent]:
         fp = content_fingerprint("podcast", show=show, title=ep_name)
         det = _det_id(ts, episode_uri)
         kind = "podcast"
+        cross = podcast_fingerprint(timestamp=start, show=show, episode=ep_name)
     else:
         return
 
@@ -85,4 +97,5 @@ def _process(entry: dict) -> Iterator[NormalizedEvent]:
             "episode_uri": episode_uri,
             "content_fingerprint": fp,
         },
+        extra_source_ids=(cross,) if cross else (),
     )

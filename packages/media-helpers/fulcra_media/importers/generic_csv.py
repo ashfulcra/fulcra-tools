@@ -18,15 +18,18 @@ from fulcra_csv import ColumnMap, parse_csv
 
 from .base import NormalizedEvent, content_fingerprint
 
-VALID_CATEGORIES = {"watched", "listened"}
+VALID_CATEGORIES = {"watched", "listened", "read"}
 
 # When a row has both subtitle (e.g. artist) and title (e.g. track), build
 # a music fingerprint. Without subtitle, fall back to a "movie" fingerprint
 # (which is just "<kind>:<slug>" — the consumer can still group across
 # sources). Callers can override by passing fingerprint_kind explicitly.
+# For "read", default to "book" — title is the book title, subtitle is the
+# author (mapped to the "artist" column by default, same as for music).
 _DEFAULT_FP_KIND = {
     "watched": "movie",
     "listened": "music",
+    "read": "book",
 }
 
 
@@ -46,7 +49,7 @@ def parse_media_csv(
     """Parse a CSV and yield NormalizedEvents.
 
     service: the service tag (e.g. "spotify", "netflix", "youtube")
-    category: "watched" or "listened"
+    category: "watched", "listened", or "read"
     column_map: column mapping; defaults to literal column names ('timestamp',
         'title', 'artist' as subtitle, 'id' as source_id)
     tz: timezone for naive timestamps
@@ -96,6 +99,12 @@ def parse_media_csv(
                 )
         elif fp_kind == "movie" and ev.title:
             external_ids["content_fingerprint"] = content_fingerprint("movie", title=ev.title)
+        elif fp_kind == "book" and ev.title:
+            fp_kwargs: dict = {"title": ev.title}
+            author = external_ids.get("artist")
+            if author:
+                fp_kwargs["author"] = author
+            external_ids["content_fingerprint"] = content_fingerprint("book", **fp_kwargs)
 
         yield NormalizedEvent(
             importer="generic-csv",

@@ -65,3 +65,43 @@ def test_save_preserves_comments(collect_home: Path):
     assert "# this is a comment" in raw, (
         "tomlkit round-trip should preserve the hand-written comment"
     )
+
+
+# ---------------------------------------------------------------------------
+# Daemon-wide settings: web_port
+# ---------------------------------------------------------------------------
+
+def test_default_web_port_is_9292(collect_home: Path):
+    """Empty config → web_port defaults to 9292 (the stable daemon port)."""
+    cfg = config.load()
+    assert cfg.web_port == 9292
+
+
+def test_web_port_override_via_daemon_table(collect_home: Path):
+    """A user-set `[daemon] web_port = N` in config.toml is honored on load."""
+    toml_path = config.config_dir() / "config.toml"
+    toml_path.write_text(
+        "[daemon]\nweb_port = 9595\n",
+        encoding="utf-8",
+    )
+    cfg = config.load()
+    assert cfg.web_port == 9595
+
+
+def test_web_port_round_trip(collect_home: Path):
+    """save → load preserves a non-default web_port."""
+    cfg = config.load()
+    cfg.web_port = 9999
+    config.save(cfg)
+    assert config.load().web_port == 9999
+
+
+def test_default_web_port_not_persisted(collect_home: Path):
+    """Saving the default port should not write a `[daemon]` table — keeps
+    the default config minimal and means the value is read from the
+    code's default constant."""
+    cfg = config.load()
+    config.save(cfg)
+    toml_path = config.config_dir() / "config.toml"
+    raw = toml_path.read_text(encoding="utf-8")
+    assert "[daemon]" not in raw and "web_port" not in raw

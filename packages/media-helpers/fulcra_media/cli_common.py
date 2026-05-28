@@ -11,6 +11,7 @@ import json
 import re
 import sys
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 import click
@@ -86,12 +87,11 @@ def import_result_to_dict(
 
 def resolve_or_emit(
     importer_name: str, path: str, *, json_mode: bool,
-) -> "Path | None":
+) -> Path | None:
     """Wrap library.resolve so missing files become a structured envelope.
 
     Returns the resolved Path on success; emits + returns None on failure.
     """
-    from pathlib import Path
     from . import library
     try:
         return Path(library.resolve(path))

@@ -12,6 +12,8 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from fulcra_common.cross_source_fingerprint import podcast_fingerprint
+
 from .base import NormalizedEvent, content_fingerprint
 
 DEFAULT_DB_PATH = Path(os.path.expanduser(
@@ -118,6 +120,12 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
             dur_seconds = max(int(duration_s or 1), 1)
             start = end - timedelta(seconds=dur_seconds)
             fp = content_fingerprint("podcast", show=show_title or "", title=ep_title or "")
+            # Apple Podcasts' ZLASTDATEPLAYED is when the episode FINISHED.
+            # `end` is that exact moment; bucket on `end` for the cross-
+            # source fingerprint since Spotify also reports play-end time.
+            cross = podcast_fingerprint(
+                timestamp=end, show=show_title or "", episode=ep_title or "",
+            )
             yield NormalizedEvent(
                 importer="apple-podcasts",
                 service="apple-podcasts",
@@ -137,6 +145,7 @@ def parse_db(db_path: Path) -> Iterator[NormalizedEvent]:
                     "content_fingerprint": fp,
                     "raw_mac_last_played": mac_last,
                 },
+                extra_source_ids=(cross,) if cross else (),
             )
     finally:
         if conn is not None:

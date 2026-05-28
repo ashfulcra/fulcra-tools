@@ -70,6 +70,39 @@ def test_build_record_without_definition_id_has_only_the_source_id():
     assert rec["metadata"]["source"] == ["s"]
 
 
+def test_build_record_appends_extra_source_ids_before_definition_source():
+    # Cross-source dedup fingerprints land in metadata.source ALONGSIDE
+    # the per-plugin source_id. Order: source_id, then extras, then the
+    # definition-source. Fulcra dedupes on any source-id match, so two
+    # importers emitting the same fingerprint dedupe against each other.
+    rec = build_record(
+        data_type="DurationAnnotation",
+        start_time=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
+        end_time=datetime(2026, 5, 22, 12, 5, 0, tzinfo=UTC),
+        data={}, source_id="src-1", tags=[],
+        definition_id="def-1",
+        extra_source_ids=("com.fulcra.content.listened.v1.abc123",),
+    )
+    assert rec["metadata"]["source"] == [
+        "src-1",
+        "com.fulcra.content.listened.v1.abc123",
+        "com.fulcradynamics.annotation.def-1",
+    ]
+
+
+def test_build_record_dedupes_extra_source_ids():
+    # Defensive: an importer accidentally listing source_id twice (or
+    # repeating an extra) shouldn't bloat the source array.
+    rec = build_record(
+        data_type="DurationAnnotation",
+        start_time=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
+        end_time=datetime(2026, 5, 22, 12, 5, 0, tzinfo=UTC),
+        data={}, source_id="src-1", tags=[],
+        extra_source_ids=("src-1", "fp-1", "fp-1", "", "fp-2"),
+    )
+    assert rec["metadata"]["source"] == ["src-1", "fp-1", "fp-2"]
+
+
 def test_encode_batch_joins_records_with_newlines():
     a = build_record(data_type="DurationAnnotation",
                      start_time=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),

@@ -121,6 +121,7 @@ def normalize_entry(
     feed_url: str = "",
     extract_fingerprint: Callable[[Any], str | None] | None = None,
     extra_external_ids: Callable[[Any], dict[str, Any]] | None = None,
+    extract_extra_source_ids: Callable[[Any, Any], tuple[str, ...]] | None = None,
 ) -> NormalizedEvent | None:
     """Convert one feedparser entry to a NormalizedEvent.
 
@@ -143,6 +144,11 @@ def normalize_entry(
             string. Result is stored in external_ids["content_fingerprint"].
         extra_external_ids: optional callback (entry) -> dict of additional
             external_ids to merge in (e.g. Letterboxd's rewatch flag).
+        extract_extra_source_ids: optional callback (entry, start_dt) ->
+            tuple of cross-source fingerprint source-ids to attach. Lets a
+            wrapping importer (e.g. Letterboxd) compute a category-level
+            fingerprint and have it flow into the Fulcra event's source[]
+            array alongside the per-importer source_id.
     """
     start = _entry_datetime(entry)
     if start is None:
@@ -191,6 +197,13 @@ def normalize_entry(
         # Caller can stash the raw summary via extra_external_ids if needed.
         pass
 
+    extras: tuple[str, ...] = ()
+    if extract_extra_source_ids is not None:
+        try:
+            extras = tuple(extract_extra_source_ids(entry, start) or ())
+        except Exception:
+            extras = ()
+
     return NormalizedEvent(
         importer=importer_name,
         service=service,
@@ -202,6 +215,7 @@ def normalize_entry(
         deterministic_id=_det_id(importer_name, feed_url, identity, published_iso),
         timestamp_confidence="high",
         external_ids=external,
+        extra_source_ids=extras,
     )
 
 
@@ -214,6 +228,7 @@ def normalize_feed(
     importer_name: str = "generic-rss",
     extract_fingerprint: Callable[[Any], str | None] | None = None,
     extra_external_ids: Callable[[Any], dict[str, Any]] | None = None,
+    extract_extra_source_ids: Callable[[Any, Any], tuple[str, ...]] | None = None,
 ) -> Iterator[NormalizedEvent]:
     """Fetch + normalize every entry in the feed.
 
@@ -231,6 +246,7 @@ def normalize_feed(
             feed_url=feed_url,
             extract_fingerprint=extract_fingerprint,
             extra_external_ids=extra_external_ids,
+            extract_extra_source_ids=extract_extra_source_ids,
         )
         if ev is not None:
             yield ev

@@ -15,6 +15,11 @@ from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+from fulcra_common.cross_source_fingerprint import (
+    watched_movie_fingerprint,
+    watched_tv_fingerprint,
+)
+
 from .base import NormalizedEvent, _slugify, content_fingerprint
 
 
@@ -245,6 +250,24 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
             is_episode = note != title or any(marker in raw_title for marker in _EPISODE_MARKERS)
             fp = _fingerprint_from_joined_title(raw_title, is_episode=is_episode)
 
+            # Cross-source fingerprint: movies dedup on (time, title);
+            # TV needs (time, show, S, E) so we only emit when both numeric
+            # season and episode are extractable from the joined title.
+            cross: str | None
+            if is_episode:
+                season_match = _SEASON_NUM_RE.search(raw_title)
+                episode_match = _EPISODE_NUM_RE.search(raw_title)
+                if season_match and episode_match:
+                    cross = watched_tv_fingerprint(
+                        timestamp=start, show=title,
+                        season=int(season_match.group(1)),
+                        episode=int(episode_match.group(1)),
+                    )
+                else:
+                    cross = None
+            else:
+                cross = watched_movie_fingerprint(timestamp=start, title=title)
+
             yield NormalizedEvent(
                 importer="netflix-rich",
                 service="netflix",
@@ -262,6 +285,7 @@ def parse_rich(csv_path: Path) -> Iterator[NormalizedEvent]:
                     "bookmark": (row.get("Bookmark") or "").strip(),
                     "content_fingerprint": fp,
                 },
+                extra_source_ids=(cross,) if cross else (),
             )
 
 

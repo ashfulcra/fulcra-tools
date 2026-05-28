@@ -40,6 +40,15 @@ class FulcraMenubarApp(rumps.App):
             self.model, self.client,
             on_preferences=self._open_prefs,
             on_quit=self._quit,
+            # The daemon-controls bar surfaces launchctl / SMAppService
+            # errors via this callback — wired directly to the macOS
+            # notification poster so the user sees the actual launchctl
+            # message ("Operation not permitted", "service already loaded",
+            # etc.) instead of a silent failure.
+            notify=self._post_notification,
+            # Threaded so the quick-record popover can toggle the cyan
+            # timer overlay on the menubar icon (Sprint B 2026-05-26).
+            status_item=self.status_item,
         )
         self.poller = PollingScheduler(on_tick=self._poll_once)
         self.poller.set_popover_open(False)

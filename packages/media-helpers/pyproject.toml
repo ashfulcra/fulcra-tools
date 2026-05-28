@@ -27,20 +27,25 @@ dependencies = [
 fulcra-media = "fulcra_media.cli:cli"
 
 [project.entry-points."fulcra_collect.plugins"]
-lastfm = "fulcra_media.collect_plugins:LASTFM_PLUGIN"
-deezer = "fulcra_media.collect_plugins:DEEZER_PLUGIN"
-trakt = "fulcra_media.collect_plugins:TRAKT_PLUGIN"
-netflix = "fulcra_media.collect_plugins:NETFLIX_PLUGIN"
-spotify-extended = "fulcra_media.collect_plugins:SPOTIFY_EXTENDED_PLUGIN"
-youtube = "fulcra_media.collect_plugins:YOUTUBE_PLUGIN"
-apple-takeout = "fulcra_media.collect_plugins:APPLE_TAKEOUT_PLUGIN"
-generic-rss = "fulcra_media.collect_plugins:GENERIC_RSS_PLUGIN"
-letterboxd = "fulcra_media.collect_plugins:LETTERBOXD_PLUGIN"
-goodreads = "fulcra_media.collect_plugins:GOODREADS_PLUGIN"
-apple-podcasts = "fulcra_media.collect_plugins:APPLE_PODCASTS_PLUGIN"
-apple-podcasts-timemachine = "fulcra_media.collect_plugins:APPLE_PODCASTS_TIMEMACHINE_PLUGIN"
-generic-csv = "fulcra_media.collect_plugins:GENERIC_CSV_PLUGIN"
-media-webhook = "fulcra_media.collect_plugins:MEDIA_WEBHOOK_PLUGIN"
+# Each plugin lives in its own module under fulcra_media.plugins.<id> and
+# exposes a single PLUGIN constant — same convention as fulcra-attention
+# and fulcra-dayone. spotify-ifttt is intentionally absent (one-time backfill
+# tool, kept importable but not registered for the menubar/dashboard).
+lastfm = "fulcra_media.plugins.lastfm:PLUGIN"
+deezer = "fulcra_media.plugins.deezer:PLUGIN"
+trakt = "fulcra_media.plugins.trakt:PLUGIN"
+netflix = "fulcra_media.plugins.netflix:PLUGIN"
+spotify-extended = "fulcra_media.plugins.spotify_extended:PLUGIN"
+youtube = "fulcra_media.plugins.youtube:PLUGIN"
+apple-takeout = "fulcra_media.plugins.apple_takeout:PLUGIN"
+apple-music-takeout = "fulcra_media.plugins.apple_music_takeout:PLUGIN"
+generic-rss = "fulcra_media.plugins.generic_rss:PLUGIN"
+letterboxd = "fulcra_media.plugins.letterboxd:PLUGIN"
+goodreads = "fulcra_media.plugins.goodreads:PLUGIN"
+apple-podcasts = "fulcra_media.plugins.apple_podcasts:PLUGIN"
+apple-podcasts-timemachine = "fulcra_media.plugins.apple_podcasts_timemachine:PLUGIN"
+generic-csv = "fulcra_media.plugins.generic_csv:PLUGIN"
+media-webhook = "fulcra_media.plugins.media_webhook:PLUGIN"
 
 [tool.uv.sources]
 # Resolve the sibling packages from the workspace, not PyPI.

@@ -52,9 +52,63 @@ class FulcraClient(BaseFulcraClient):
             tid = tag_id_for.get(name)
             if tid and tid not in tag_ids:
                 tag_ids.append(tid)
-        # Only include fields that are actually populated. When targeting a
-        # built-in Fulcra type (e.g. BodyMass), the schema may not have a
-        # `note` field — emitting empties pollutes downstream consumers.
+
+        if (
+            ev.annotation_type == DURATION
+            and ev.end_time is not None
+            and (data_type is None or data_type == "DurationAnnotation")
+        ):
+            # Route duration CSV rows through IngestPipeline (refactor
+            # #69) so they share the wire-format construction with every
+            # other importer. GenericEvent carries free-form
+            # `data_fields`, a `value` echo, and a `tag` echo that the
+            # legacy site emits at TOP-LEVEL `data.*`. The pipeline does
+            # not model those importer-specific axes, so we merge them
+            # into the built record's data payload as a post-build step
+            # — keeps the pipeline clean of csv-importer-specific keys
+            # while preserving the wire shape.
+            from fulcra_common.ingest import DurationEvent, IngestPipeline
+            external = dict(ev.external_ids) if ev.external_ids else {}
+            duration_event = DurationEvent(
+                definition_id=definition_id,
+                source_id=ev.source_id,
+                tags=tuple(tag_ids),
+                external_ids=external,
+                note=ev.note or None,
+                title=ev.title or None,
+                start=ev.start_time,
+                end=ev.end_time,
+            )
+            rec = IngestPipeline(client=None).build_record(duration_event)
+            # GenericEvent's `value`, `tag` echo, and free-form
+            # `data_fields` are CSV-importer-specific top-level data
+            # keys. Merge into the built record's data payload so the
+            # wire shape matches today's output byte-for-byte.
+            import json
+            payload = json.loads(rec["data"])
+            if ev.value is not None and "value" not in payload:
+                payload["value"] = ev.value
+            if ev.tag and "tag" not in payload:
+                payload["tag"] = ev.tag
+            for k, v in ev.data_fields.items():
+                payload.setdefault(k, v)
+            # Minor behaviour change vs the legacy site: the legacy site
+            # only emitted `duration_seconds` when duration > 0; the
+            # pipeline always emits it (including 0) for any DurationEvent.
+            # `data.duration_seconds=0` is observably the same value to
+            # every Fulcra consumer, so we accept this tiny shape change.
+            # Re-serialize with sorted keys so the wire bytes stay
+            # canonical (matches wire.build_record's json.dumps shape).
+            rec["data"] = json.dumps(payload, sort_keys=True)
+            return rec
+
+        # Instant events stay on the legacy path. The pipeline only
+        # models Moment / Duration; csv-importer's `InstantAnnotation`
+        # is a distinct data_type on the wire, and routing it through
+        # MomentEvent would silently change the data_type string
+        # (InstantAnnotation → MomentAnnotation). Keep the legacy build
+        # for instants — deliberate, not laziness. See refactor #69
+        # cutover #3 commit for the discussion.
         data_inner: dict = {}
         if ev.note:
             data_inner["note"] = ev.note
@@ -71,7 +125,7 @@ class FulcraClient(BaseFulcraClient):
         return wire.build_record(
             data_type=data_type or _default_data_type(ev.annotation_type),
             start_time=ev.start_time,
-            end_time=ev.end_time if ev.annotation_type == DURATION else None,
+            end_time=None,
             data=data_inner,
             source_id=ev.source_id,
             tags=tag_ids,

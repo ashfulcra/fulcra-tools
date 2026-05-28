@@ -9,18 +9,21 @@ import { loadOutbox, saveOutbox, loadSettings } from "./storage";
 import type { AttentionEvent, OutboxEntry } from "./types";
 
 export const OUTBOX_CAP = 5000;
-export const RELAY_URL = "http://127.0.0.1:8771/attention";
+// The daemon's extension-events endpoint. Default port matches
+// fulcra_collect.config.Config.web_port. Same payload + Authorization:
+// Bearer scheme as the now-removed standalone relay.
+export const EXTENSION_ENDPOINT_URL = "http://127.0.0.1:9292/api/extension/attention";
 
 /**
  * Surface the most recent ingest issue so the popup + toolbar icon
  * can show it. The popup reads this key; the SW's
  * refreshToolbarIcon() also reads it to flip the icon to "error".
  *
- *   { kind: "unauthorized" } — relay rejected the bearer token. User
- *     needs to repaste the token (e.g. after running `setup` again).
+ *   { kind: "unauthorized" } — daemon rejected the bearer token. User
+ *     needs to re-pair the extension from the daemon's wizard.
  *   { kind: "unreachable" }  — repeated network failures. Most likely
- *     the relay daemon isn't running, or the bearer mismatch case
- *     mis-classified before we recognised 401.
+ *     the daemon isn't running, or a bearer mismatch was mis-classified
+ *     before we recognised 401.
  *   null — clear (most-recent POST was a 200).
  */
 export interface IngestError {
@@ -94,7 +97,7 @@ export async function flushOutbox(): Promise<void> {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const resp = await fetch(RELAY_URL, {
+      const resp = await fetch(EXTENSION_ENDPOINT_URL, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${settings.bearerToken}`,

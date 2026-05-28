@@ -53,14 +53,33 @@ class _FulcraDefinitionAdapter:
         ]
 
     def create_definition(self, *, name: str, **spec) -> dict:
-        """POST a new annotation definition and return the response body."""
+        """POST a new annotation definition and return the response body.
+
+        Fulcra's create endpoint rejects bodies missing either `tags` or
+        `description` (HTTP 422 with `{detail: [..., loc: ["body",
+        "duration", "description"], type: "missing"}]`) even though every
+        plugin's SPEC dict treats both as optional. The wire-helper paths
+        (duration_definition_payload, moment_definition_payload) always
+        include them; the resolver's generic path didn't, so a stale-
+        cache re-resolution that bottomed out in create_definition
+        would 422 instead of recover. Default both when the SPEC
+        doesn't supply them.
+        """
+        body = {"name": name, "tags": [], "description": "", **spec}
         r = self._c._client().post(
             "/user/v1alpha1/annotation",
-            json={"name": name, **spec},
+            json=body,
             headers=self._c._authed_headers(),
         )
         r.raise_for_status()
         return r.json()
+
+    def definition_exists(self, def_id: str) -> bool:
+        """Pass-through to BaseFulcraClient.definition_exists. Exposed on
+        the adapter so RunContext can validate cached def ids without
+        importing HTTP machinery directly. Returns True on network
+        failure (be conservative — don't churn re-resolutions on flakes)."""
+        return self._c.definition_exists(def_id)
 
 
 def _make_fulcra_definition_client() -> _FulcraDefinitionAdapter:

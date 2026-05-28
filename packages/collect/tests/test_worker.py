@@ -19,7 +19,7 @@ def _run_capturing(plugin: Plugin, collect_home: Path) -> list[dict]:
 
 
 def test_worker_emits_a_done_result_for_a_successful_run(collect_home: Path):
-    plugin = Plugin(id="ok", name="OK", kind="manual", run=lambda ctx: None)
+    plugin = Plugin(id="ok", name="OK", kind="manual", collect_mode="historical", run=lambda ctx: None)
     events = _run_capturing(plugin, collect_home)
     assert events[-1] == {"type": "result", "outcome": "done",
                           "error": None, "watermark": None,
@@ -29,7 +29,7 @@ def test_worker_emits_a_done_result_for_a_successful_run(collect_home: Path):
 def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):
     def run(ctx):
         ctx.state.watermark = "2026-05-22T12:00:00Z"
-    plugin = Plugin(id="wm", name="WM", kind="manual", run=run)
+    plugin = Plugin(id="wm", name="WM", kind="manual", collect_mode="historical", run=run)
     events = _run_capturing(plugin, collect_home)
     assert events[-1]["watermark"] == "2026-05-22T12:00:00Z"
 
@@ -40,7 +40,7 @@ def test_worker_carries_the_definition_id_set_by_the_plugin(collect_home: Path):
     watermark round-trip test above."""
     def run(ctx):
         ctx.state.definition_id = "def-xyz789"
-    plugin = Plugin(id="defid", name="DefId", kind="manual", run=run)
+    plugin = Plugin(id="defid", name="DefId", kind="manual", collect_mode="historical", run=run)
     events = _run_capturing(plugin, collect_home)
     assert events[-1]["definition_id"] == "def-xyz789"
 
@@ -52,7 +52,7 @@ def test_worker_carries_definition_id_on_error_path(collect_home: Path):
     def run(ctx):
         ctx.state.definition_id = "def-partial"
         raise RuntimeError("plugin crashed after resolving")
-    plugin = Plugin(id="defid-err", name="DefId-Err", kind="manual", run=run)
+    plugin = Plugin(id="defid-err", name="DefId-Err", kind="manual", collect_mode="historical", run=run)
     events = _run_capturing(plugin, collect_home)
     assert events[-1]["outcome"] == "error"
     assert events[-1]["definition_id"] == "def-partial"
@@ -62,7 +62,7 @@ def test_worker_forwards_progress_events(collect_home: Path):
     def run(ctx):
         ctx.progress(done=1, total=3)
         ctx.progress(done=3, total=3)
-    plugin = Plugin(id="p", name="P", kind="manual", run=run)
+    plugin = Plugin(id="p", name="P", kind="manual", collect_mode="historical", run=run)
     events = _run_capturing(plugin, collect_home)
     progress = [e for e in events if e["type"] == "progress"]
     assert progress == [
@@ -75,7 +75,7 @@ def test_worker_forwards_progress_events(collect_home: Path):
 def test_worker_emits_an_error_result_when_run_raises(collect_home: Path):
     def run(ctx):
         raise RuntimeError("kaboom")
-    plugin = Plugin(id="bad", name="Bad", kind="manual", run=run)
+    plugin = Plugin(id="bad", name="Bad", kind="manual", collect_mode="historical", run=run)
     events = _run_capturing(plugin, collect_home)
     assert events[-1]["type"] == "result"
     assert events[-1]["outcome"] == "error"
@@ -126,7 +126,7 @@ def test_worker_error_result_scrubs_a_secret_in_the_exception(collect_home: Path
     """M1: a secret raised in a plugin exception never reaches the event."""
     def run(ctx):
         raise RuntimeError("auth failed for https://api.x/v1?token=TOPSECRET")
-    plugin = Plugin(id="leaky", name="Leaky", kind="manual", run=run)
+    plugin = Plugin(id="leaky", name="Leaky", kind="manual", collect_mode="historical", run=run)
     events = _run_capturing(plugin, collect_home)
     assert events[-1]["outcome"] == "error"
     assert "TOPSECRET" not in events[-1]["error"]
@@ -157,7 +157,7 @@ def test_worker_isolates_plugin_stdout_from_event_stream(
         print("hello from a noisy library")
         ctx.state.watermark = "2026-05-22T12:00:00Z"
 
-    plugin = Plugin(id="noisy", name="Noisy", kind="manual", run=run)
+    plugin = Plugin(id="noisy", name="Noisy", kind="manual", collect_mode="historical", run=run)
     # Re-bind sys.stdout to a buffer and pass it as `out` — same identity, as
     # in worker.main(). The whole point is that a stray print() (which writes
     # to whatever sys.stdout currently is) must not land on `out`.
@@ -179,6 +179,7 @@ def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: P
     from fulcra_collect.plugin import Credential
     ran = []
     plugin = Plugin(id="needs-key", name="Needs Key", kind="manual",
+                    collect_mode="historical",
                     run=lambda ctx: ran.append(True),
                     required_credentials=(Credential(key="api-key", label="K", help="h"),))
     events = _run_capturing(plugin, collect_home)
@@ -203,7 +204,7 @@ def test_worker_passes_non_none_factory_to_run_context(collect_home: Path):
         received.append(ctx._fulcra_client_factory)
 
     plugin = Plugin(id="factory-check", name="Factory Check",
-                    kind="manual", run=run)
+                    kind="manual", collect_mode="historical", run=run)
     _run_capturing(plugin, collect_home)
     assert len(received) == 1
     factory = received[0]
@@ -223,7 +224,7 @@ def test_worker_factory_returns_object_with_resolver_interface(collect_home: Pat
         received.append(ctx._fulcra_client_factory)
 
     plugin = Plugin(id="factory-iface", name="Factory Iface",
-                    kind="manual", run=run)
+                    kind="manual", collect_mode="historical", run=run)
     _run_capturing(plugin, collect_home)
     factory = received[0]
     client = factory()
@@ -293,3 +294,35 @@ def test_fulcra_definition_adapter_create_definition_posts_body(monkeypatch):
     assert result == {"id": "new-def-99"}
     assert posted[0]["name"] == "attention"
     assert posted[0]["annotation_type"] == "duration"
+    # Defaults injected because Fulcra rejects bodies missing either field
+    # (HTTP 422). Discovered the hard way when task #13's stale-def
+    # re-resolution path tried to create a "Listened" def with the bare
+    # LASTFM_LISTENED_SPEC and Fulcra returned `loc: [body, duration,
+    # description], type: missing`.
+    assert posted[0]["tags"] == []
+    assert posted[0]["description"] == ""
+
+
+def test_fulcra_definition_adapter_create_definition_lets_spec_override_defaults(monkeypatch):
+    """The defaults must not clobber values the spec actually supplies —
+    e.g. attention's duration_definition_payload always includes
+    description + tags, those need to survive."""
+    import httpx
+    from fulcra_collect.worker import _FulcraDefinitionAdapter
+    from fulcra_common import BaseFulcraClient
+
+    posted: list[dict] = []
+    def handler(r: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(r.content))
+        return httpx.Response(200, json={"id": "new-def-100"})
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    base = BaseFulcraClient(transport=httpx.MockTransport(handler))
+    adapter = _FulcraDefinitionAdapter(base)
+    adapter.create_definition(
+        name="attention",
+        description="What the user paid attention to.",
+        tags=["tag-a", "tag-b"],
+        annotation_type="duration",
+    )
+    assert posted[0]["description"] == "What the user paid attention to."
+    assert posted[0]["tags"] == ["tag-a", "tag-b"]
