@@ -18,6 +18,23 @@ if [ -n "${OPENROUTER_MODEL:-}" ]; then
 	hermes config set model.default "${OPENROUTER_MODEL}" || true
 fi
 
+# Fetch the latest onboarding skill at boot, so skill updates on GitHub propagate
+# to new sandboxes WITHOUT rebuilding the image. The image still bakes a copy,
+# which stays in place as a fallback if this fetch fails (GitHub down, bad branch,
+# missing subpath). Repo/subpath are overridable via env for swapping the skill.
+SKILL_REPO="${FULCRA_SKILL_REPO:-https://github.com/fulcradynamics/agent-skills}"
+SKILL_SUBPATH="${FULCRA_SKILL_SUBPATH:-skills/fulcra-onboarding}"
+if git clone --depth 1 "${SKILL_REPO}" /tmp/agent-skills >/tmp/skill-fetch.log 2>&1 \
+	&& [ -d "/tmp/agent-skills/${SKILL_SUBPATH}" ]; then
+	mkdir -p /root/.hermes/skills/fulcra
+	rm -rf /root/.hermes/skills/fulcra/fulcra-onboarding
+	cp -r "/tmp/agent-skills/${SKILL_SUBPATH}" /root/.hermes/skills/fulcra/fulcra-onboarding
+	echo "skill: fetched latest from ${SKILL_REPO}/${SKILL_SUBPATH}"
+else
+	echo "skill: boot fetch failed; using the copy baked into the image" >&2
+fi
+rm -rf /tmp/agent-skills 2>/dev/null || true
+
 # Start the dashboard, localhost-only, in the background.
 HERMES_DASHBOARD_TUI=1 nohup hermes dashboard \
 	--host 127.0.0.1 --port 9119 --no-open --insecure \
