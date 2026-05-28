@@ -2,14 +2,67 @@
 run, health_check, check_permission, upload."""
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 
 from .. import config as _config
 from ._deps import RouteContext, SecretBody
+
+
+# URL-kind settings (e.g. generic-rss `feed_url`) are user-typed strings
+# that the daemon's plugins later fetch via httpx with redirects on. A
+# raw `file://`, `gopher://`, or `http://169.254.169.254/...` would
+# happily land in plugin code. The user owns the daemon, so this is
+# self-SSRF in the strict threat model — but a malicious browser tab
+# that's slipped past CSRF (which it shouldn't, given Bearer-auth) could
+# in principle set the URL. Cheap belt-and-braces: reject anything but
+# http/https schemes and reject private-range / link-local / loopback
+# hosts at write time.
+_ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+def _validate_url_setting(key: str, value: object) -> None:
+    """Raise HTTPException(400) if `value` is not an http(s) URL pointing
+    to a public host. Called only for settings whose `kind == "url"`."""
+    if not isinstance(value, str) or not value:
+        raise HTTPException(400, f"setting {key!r}: must be a non-empty URL string")
+    try:
+        parts = urlsplit(value)
+    except ValueError as exc:
+        raise HTTPException(400, f"setting {key!r}: malformed URL ({exc})") from exc
+    if parts.scheme not in _ALLOWED_URL_SCHEMES:
+        raise HTTPException(
+            400,
+            f"setting {key!r}: scheme {parts.scheme!r} not allowed "
+            f"(must be one of {_ALLOWED_URL_SCHEMES})",
+        )
+    host = parts.hostname or ""
+    if not host:
+        raise HTTPException(400, f"setting {key!r}: URL missing host")
+    # Reject loopback, link-local, and RFC1918 private hosts at write
+    # time. Hosts that look like IPs but parse cleanly get inspected;
+    # bare hostnames pass through (we can't resolve here without
+    # blocking, and resolution-on-read is the plugin's job).
+    try:
+        ip = ipaddress.ip_address(host)
+        if (ip.is_loopback or ip.is_link_local
+                or ip.is_private or ip.is_reserved
+                or ip.is_multicast):
+            raise HTTPException(
+                400,
+                f"setting {key!r}: host {host!r} is not a public address",
+            )
+    except ValueError:
+        # Not an IP literal — bare hostname, allowed. DNS-based SSRF
+        # remains a residual risk if the user types e.g. "localtest.me"
+        # but that's the user shooting themselves in the foot, not an
+        # attack surface.
+        pass
 
 
 # Cap for /api/plugin/{id}/upload — generous because some takeouts (e.g.
@@ -77,11 +130,15 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         unknown = [k for k in body if k not in declared]
         if unknown:
             raise HTTPException(400, f"unknown setting keys: {unknown}")
-        # Validate enum values for enum-kind settings
+        # Validate enum values for enum-kind settings + URL scheme/host
+        # for url-kind settings. Enum gates user picks from a list;
+        # URL gates self-SSRF — see _validate_url_setting above.
         for k, v in body.items():
             s = declared[k]
             if s.kind == "enum" and s.enum_values and v not in s.enum_values:
                 raise HTTPException(400, f"setting {k!r}: value {v!r} not in {s.enum_values}")
+            if s.kind == "url":
+                _validate_url_setting(k, v)
         # Persist
         cfg = _config.load()
         if plugin_id not in cfg.plugin_settings:
