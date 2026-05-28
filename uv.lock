@@ -14,15 +14,6 @@ members = [
 ]
 
 [[package]]
-name = "altgraph"
-version = "0.17.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7e/f8/97fdf103f38fed6792a1601dbc16cc8aac56e7459a9fff08c812d8ae177a/altgraph-0.17.5.tar.gz", hash = "sha256:c87b395dd12fabde9c99573a9749d67da8d29ef9de0125c7f536699b4a9bc9e7", size = 48428, upload-time = "2025-11-21T20:35:50.583Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/ba/000a1996d4308bc65120167c21241a3b205464a2e0b58deda26ae8ac21d1/altgraph-0.17.5-py2.py3-none-any.whl", hash = "sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597", size = 21228, upload-time = "2025-11-21T20:35:49.444Z" },
-]
-
-[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -235,7 +226,6 @@ version = "0.1.0"
 source = { editable = "packages/attention" }
 dependencies = [
     { name = "click" },
-    { name = "fulcra-api" },
     { name = "fulcra-collect" },
     { name = "fulcra-common" },
     { name = "httpx" },
@@ -247,11 +237,14 @@ dev = [
     { name = "pytest-mock" },
     { name = "ruff" },
 ]
+fulcra-cli = [
+    { name = "fulcra-api" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
-    { name = "fulcra-api", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
     { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "httpx", specifier = ">=0.27" },
@@ -259,7 +252,7 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
 name = "fulcra-collect"
@@ -328,7 +321,6 @@ source = { editable = "packages/csv-importer" }
 dependencies = [
     { name = "click" },
     { name = "dateparser" },
-    { name = "fulcra-api" },
     { name = "fulcra-common" },
     { name = "httpx" },
 ]
@@ -338,18 +330,21 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+fulcra-cli = [
+    { name = "fulcra-api" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "dateparser", specifier = ">=1.2" },
-    { name = "fulcra-api", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
 name = "fulcra-dayone"
@@ -389,7 +384,6 @@ dependencies = [
     { name = "click" },
     { name = "dateparser" },
     { name = "feedparser" },
-    { name = "fulcra-api" },
     { name = "fulcra-collect" },
     { name = "fulcra-common" },
     { name = "fulcra-csv-importer" },
@@ -403,13 +397,16 @@ dev = [
     { name = "pytest-mock" },
     { name = "ruff" },
 ]
+fulcra-cli = [
+    { name = "fulcra-api" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "dateparser", specifier = ">=1.2" },
     { name = "feedparser", specifier = ">=6.0" },
-    { name = "fulcra-api", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
     { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "fulcra-csv-importer", editable = "packages/csv-importer" },
@@ -419,7 +416,7 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
 name = "fulcra-menubar"
@@ -431,9 +428,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-build = [
-    { name = "py2app" },
-]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -450,7 +444,6 @@ macos = [
 [package.metadata]
 requires-dist = [
     { name = "fulcra-collect", editable = "packages/collect" },
-    { name = "py2app", marker = "extra == 'build'", specifier = ">=0.28" },
     { name = "pyobjc-core", marker = "extra == 'macos'", specifier = ">=10" },
     { name = "pyobjc-framework-cocoa", marker = "extra == 'macos'", specifier = ">=10" },
     { name = "pyobjc-framework-quartz", marker = "extra == 'macos'", specifier = ">=10" },
@@ -461,7 +454,7 @@ requires-dist = [
     { name = "rumps", marker = "extra == 'macos'", specifier = ">=0.4" },
     { name = "tomlkit", specifier = ">=0.12" },
 ]
-provides-extras = ["macos", "dev", "build"]
+provides-extras = ["macos", "dev"]
 
 [[package]]
 name = "h11"
@@ -604,31 +597,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/43/4b/674af6ef2f97d56f0ab5153bf0bfa28ccb6c3ed4d1babf4305449668807b/keyring-25.7.0.tar.gz", hash = "sha256:fe01bd85eb3f8fb3dd0405defdeac9a5b4f6f0439edbb3149577f244a2e8245b", size = 63516, upload-time = "2025-11-16T16:26:09.482Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/db/e655086b7f3a705df045bf0933bdd9c2f79bb3c97bfef1384598bb79a217/keyring-25.7.0-py3-none-any.whl", hash = "sha256:be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f", size = 39160, upload-time = "2025-11-16T16:26:08.402Z" },
-]
-
-[[package]]
-name = "macholib"
-version = "1.16.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "altgraph" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/10/2f/97589876ea967487978071c9042518d28b958d87b17dceb7cdc1d881f963/macholib-1.16.4.tar.gz", hash = "sha256:f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362", size = 59427, upload-time = "2025-11-22T08:28:38.373Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c7/d1/a9f36f8ecdf0fb7c9b1e78c8d7af12b8c8754e74851ac7b94a8305540fc7/macholib-1.16.4-py2.py3-none-any.whl", hash = "sha256:da1a3fa8266e30f0ce7e97c6a54eefaae8edd1e5f86f3eb8b95457cae90265ea", size = 38117, upload-time = "2025-11-22T08:28:36.939Z" },
-]
-
-[[package]]
-name = "modulegraph"
-version = "0.19.7"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "altgraph" },
-    { name = "setuptools" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/20/fa/c471f46fa1696309b806d6c663d599525925a5c13cf1371a02587a265109/modulegraph-0.19.7.tar.gz", hash = "sha256:9ad8a81148ba1d90ade66617a153786f7d7cf6a88de83ee28e251183122c2a57", size = 88618, upload-time = "2025-11-22T08:22:43.858Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f1/c1/3eff0be83439f0408866eaacd4106c9d19b762cba66bcf0d0a523a6f6620/modulegraph-0.19.7-py2.py3-none-any.whl", hash = "sha256:139f89042c9912777ba4bbf1d5496591c6ad780110ea3082c11e8737cf82cacc", size = 35151, upload-time = "2025-11-22T08:22:42.239Z" },
 ]
 
 [[package]]
@@ -776,21 +744,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
-]
-
-[[package]]
-name = "py2app"
-version = "0.28.10"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "altgraph" },
-    { name = "macholib" },
-    { name = "modulegraph" },
-    { name = "packaging" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/93/82/79a2aaaf86c44c6018edce1a028cf821acec4c3ca63e2b5781f16822c99f/py2app-0.28.10.tar.gz", hash = "sha256:fd38f4a0083d4d1e91ea336eaef678b99d9e1b95ac6302315cad22fa5e859cb1", size = 1143601, upload-time = "2026-02-13T20:50:02.289Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/be/d8/a04a88b182613370a262f674929f0e284ea04e1803f2d38fc5639fbec2d7/py2app-0.28.10-py3-none-any.whl", hash = "sha256:bdb0cd2cbfa5160b5b11b8d612f6eb92d484a0282801e85b159f1930cd834714", size = 837349, upload-time = "2026-02-13T20:49:59.98Z" },
 ]
 
 [[package]]
@@ -1265,15 +1218,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl", hash = "sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137", size = 15554, upload-time = "2025-11-23T19:02:51.545Z" },
-]
-
-[[package]]
-name = "setuptools"
-version = "82.0.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/4f/db/cfac1baf10650ab4d1c111714410d2fbb77ac5a616db26775db562c8fab2/setuptools-82.0.1.tar.gz", hash = "sha256:7d872682c5d01cfde07da7bccc7b65469d3dca203318515ada1de5eda35efbf9", size = 1152316, upload-time = "2026-03-09T12:47:17.221Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9d/76/f789f7a86709c6b087c5a2f52f911838cad707cc613162401badc665acfe/setuptools-82.0.1-py3-none-any.whl", hash = "sha256:a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb", size = 1006223, upload-time = "2026-03-09T12:47:15.026Z" },
 ]
 
 [[package]]

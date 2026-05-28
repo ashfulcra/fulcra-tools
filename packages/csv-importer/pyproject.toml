@@ -13,8 +13,6 @@ dependencies = [
     "dateparser>=1.2",
     # Shared Fulcra API client (sibling package in this monorepo).
     "fulcra-common",
-    # Optional but expected: fulcra-api CLI for `fulcra auth print-access-token`.
-    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
 ]
 
 [tool.uv.sources]
@@ -24,6 +22,12 @@ fulcra-common = { workspace = true }
 fulcra-csv = "fulcra_csv.cli:cli"
 
 [project.optional-dependencies]
+# Optional `fulcra` CLI — never imported as a library; installed separately
+# via `uv tool install fulcra-api`. Out of base deps so it doesn't drag
+# pyarrow into installs / the bundled app.
+fulcra-cli = [
+    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+]
 dev = [
     "pytest>=7.4,<8",
     "ruff>=0.5",
