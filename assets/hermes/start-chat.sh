@@ -2,9 +2,10 @@
 # Boot the guest-facing chat for one sandbox.
 # WHY this shape: the Hermes dashboard is the guest UI, but it must be bound to
 # 127.0.0.1 and fronted by Caddy (which 403s the admin/key endpoints). --insecure
-# is required for the chat PTY session to go live; --tui exposes the Chat tab;
-# --skip-build uses the web bundle prebuilt into the image. Caddy runs in the
-# foreground to keep this process (and thus the backgrounded dashboard) alive.
+# is required for the chat PTY session to go live; --tui exposes the Chat tab.
+# The dashboard builds its web bundle on first launch (~15s); the health-poll
+# below waits for it. Caddy runs in the foreground to keep this process (and
+# thus the backgrounded dashboard) alive.
 set -euo pipefail
 
 # Apply the runtime model choice if provided (key is injected separately into ~/.hermes/.env).
@@ -14,7 +15,7 @@ fi
 
 # Start the dashboard, localhost-only, in the background.
 HERMES_DASHBOARD_TUI=1 nohup hermes dashboard \
-	--host 127.0.0.1 --port 9119 --no-open --insecure --skip-build \
+	--host 127.0.0.1 --port 9119 --no-open --insecure \
 	> /tmp/dash.log 2>&1 &
 
 # Wait until the dashboard answers before fronting it with Caddy.
