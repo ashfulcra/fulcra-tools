@@ -55,3 +55,35 @@ def test_missing_z_primarykey_raises_a_schema_error(tmp_path: Path):
 def test_missing_database_file_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         read_local_db(tmp_path / "nope.sqlite")
+
+
+def test_snapshot_permission_denied_gives_actionable_fda_message(
+    tmp_path: Path, monkeypatch
+):
+    """When the daemon process lacks Full Disk Access, both the `cp -c`
+    clone and the shutil.copy2 fallback hit EPERM on the TCC-protected
+    Day One container. The user should see an actionable "grant Full
+    Disk Access" message — matching the apple-podcasts pattern — not a
+    raw `PermissionError: [Errno 1] Operation not permitted` traceback.
+    """
+    import shutil as _sh
+    import subprocess as _sp
+
+    from fulcra_dayone.readers import local_db as _ldb
+
+    db = tmp_path / "DayOne.sqlite"
+    build_dayone_db(db)
+
+    # cp -c exits non-zero (what happens under a TCC denial)...
+    def _cp_fails(*args, **kwargs):
+        raise _sp.CalledProcessError(1, ["cp", "-c"])
+
+    # ...and the copy2 fallback hits the real EPERM.
+    def _copy2_eperm(*args, **kwargs):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(_ldb.subprocess, "run", _cp_fails)
+    monkeypatch.setattr(_ldb.shutil, "copy2", _copy2_eperm)
+
+    with pytest.raises(PermissionError, match="Full Disk Access"):
+        read_local_db(db)

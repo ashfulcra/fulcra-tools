@@ -37,6 +37,21 @@ def _safe_ident(name: str) -> str:
 _CORE_DATA_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 _DB_GLOB = "Library/Group Containers/*.dayoneapp2/Data/Documents/DayOne.sqlite"
 _SCHEMA_ERROR = "Day One database schema not recognized — use the JSON export instead"
+# Shown when the process can't read the Day One container — almost always
+# because the daemon's executable hasn't been granted Full Disk Access.
+# Matches the apple-podcasts wording so the two on-device plugins give the
+# user the same recovery instruction. Raised in place of the raw
+# `PermissionError: [Errno 1] Operation not permitted` traceback, which
+# told the user nothing about what to do.
+_FDA_ERROR = (
+    "Can't read your Day One database. Grant Full Disk Access to the "
+    "process running fulcra-collect in System Settings -> Privacy & "
+    "Security -> Full Disk Access. If you already granted it and still "
+    "see this, restart the daemon — macOS captures a process's Full "
+    "Disk Access status at launch, so a daemon started before the grant "
+    "keeps getting denied until it's restarted. (Or switch this plugin "
+    "to the one-time JSON-export mode, which doesn't need access.)"
+)
 
 
 def find_database() -> Path:
@@ -52,14 +67,35 @@ def find_database() -> Path:
 
 def _snapshot(db: Path) -> Path:
     """Copy the DB to a temp file (APFS clone when possible) so the live
-    database is never opened directly."""
+    database is never opened directly.
+
+    Two failure modes are handled deliberately:
+
+    - **No Full Disk Access.** The Day One container is TCC-protected;
+      without FDA both the ``cp -c`` clone and the ``shutil.copy2``
+      fallback raise EPERM. We translate that into ``_FDA_ERROR`` so the
+      user gets a recovery instruction instead of a raw
+      ``PermissionError: [Errno 1]`` traceback.
+    - **A hung copy.** The first time a sandboxed/launchd process touches
+      the protected path, macOS can block the syscall (a TCC prompt that
+      never resolves in a headless context) — which previously let the
+      run sit until the worker's 900s wall-clock timeout. ``cp`` gets a
+      bounded ``timeout`` so it can never eat that whole budget; a
+      ``TimeoutExpired`` falls through to the copy2 path, and if that
+      also stalls/EPERMs we surface ``_FDA_ERROR`` fast.
+    """
     dest = Path(tempfile.mkdtemp()) / "dayone-snapshot.sqlite"
     try:
         subprocess.run(
             ["cp", "-c", str(db), str(dest)], check=True, capture_output=True,
+            timeout=30,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        shutil.copy2(db, dest)
+    except (subprocess.CalledProcessError, FileNotFoundError,
+            subprocess.TimeoutExpired):
+        try:
+            shutil.copy2(db, dest)
+        except PermissionError as exc:
+            raise PermissionError(_FDA_ERROR) from exc
     return dest
 
 
