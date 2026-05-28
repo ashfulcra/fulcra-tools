@@ -43,3 +43,13 @@ addopts = "-ra --strict-markers"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fulcra_collect"]
+
+# Ride the web-UI SPA + the in-app docs page INTO the wheel as package data,
+# so a frozen app (Briefcase/py2app/pip) finds them relative to the installed
+# fulcra_collect package — no dependence on the bundler's data-file handling
+# or on the dev workspace layout. _resources.py reads these when frozen; in a
+# dev checkout it reads the live workspace copies instead (so edits show up).
+# Paths are relative to this pyproject (packages/collect/).
+[tool.hatch.build.targets.wheel.force-include]
+"../web-ui/dist" = "fulcra_collect/_bundled/web-ui/dist"
+"../../docs/how-do-i-get-my-data.md" = "fulcra_collect/_bundled/docs/how-do-i-get-my-data.md"

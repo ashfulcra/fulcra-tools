@@ -25,9 +25,6 @@ dev = [
     "pytest>=7.4,<8",
     "ruff>=0.5",
 ]
-build = [
-    "py2app>=0.28",
-]
 
 [tool.uv.sources]
 fulcra-collect = { workspace = true }
@@ -41,3 +38,52 @@ addopts = "-ra --strict-markers"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fulcra_menubar"]
+
+# ---------------------------------------------------------------------------
+# Briefcase packaging (replaces py2app). Run from packages/menubar/:
+#   uvx briefcase create macOS
+#   uvx briefcase build macOS
+#   uvx briefcase run macOS
+# Workspace packages are listed as local paths in `requires` because pip
+# (which Briefcase uses) doesn't understand uv's [tool.uv.sources] workspace
+# table — listing every local package by path lets pip satisfy the
+# inter-package name deps from those paths instead of hitting PyPI.
+# ---------------------------------------------------------------------------
+[tool.briefcase]
+project_name = "Fulcra Collect"
+bundle = "com.fulcradynamics"
+version = "0.1.0"
+author = "Fulcra Dynamics"
+author_email = "support@fulcradynamics.com"
+
+[tool.briefcase.app.fulcra-menubar]
+formal_name = "Fulcra Collect"
+license = "LicenseRef-Proprietary"   # private Fulcra product; change if you adopt an OSS license
+description = "Local daemon + menubar that collects your personal data into Fulcra."
+long_description = "Fulcra Collect runs a local daemon hosting every data-collection plugin, with a menubar UI and a web dashboard/wizard."
+icon = "fulcra_menubar/assets/menubar-icon"
+sources = ["fulcra_menubar"]
+requires = [
+    # Workspace packages by NAME, resolved from the prebuilt wheelhouse via
+    # PIP_FIND_LINKS (set when running briefcase). Names (not paths) let pip
+    # satisfy the inter-package deps (collect -> fulcra-common, the plugins ->
+    # fulcra-collect) from the wheelhouse rather than PyPI.
+    "fulcra-common",
+    "fulcra-collect",
+    "fulcra-media-helpers",
+    "fulcra-dayone",
+    "fulcra-attention",
+    "fulcra-csv-importer",
+    "tomlkit>=0.12",
+    # macOS GUI stack.
+    "rumps>=0.4",
+    "pyobjc-core>=10",
+    "pyobjc-framework-Cocoa>=10",
+    "pyobjc-framework-UserNotifications>=10",
+    "pyobjc-framework-ServiceManagement>=10",
+    "pyobjc-framework-Quartz>=10",
+]
+
+[tool.briefcase.app.fulcra-menubar.macOS]
+universal_build = false
+info."LSUIElement" = true   # menubar app — no dock icon
