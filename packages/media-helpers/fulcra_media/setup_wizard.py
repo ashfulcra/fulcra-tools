@@ -84,7 +84,6 @@ def _explain_choice(entry: ServiceEntry, echo) -> None:
     if not entry.available:
         echo(f"\n  '{entry.label}' isn't implemented yet — but the pathway is researched.")
         echo(f"  Pathway: {entry.pathway}")
-        echo("  See docs/superpowers/research/2026-05-17-media-service-pathways.md")
         return
     echo(f"\n  Setting up {entry.label} ({entry.pathway} pathway)\n")
     if entry.wizard:

@@ -17,9 +17,37 @@ Why PKCE with Trakt?
 """
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 import httpx
 
+TRAKT_AUTHORIZE_ENDPOINT = "https://trakt.tv/oauth/authorize"
 TRAKT_TOKEN_ENDPOINT = "https://api.trakt.tv/oauth/token"
+
+
+def trakt_authorize_url(
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+) -> str:
+    """Build the authorize URL the wizard opens in a new tab.
+
+    Called from the daemon's `/api/oauth/trakt/start` route to give the
+    wizard a single click-to-authorize link. The user signs in to Trakt
+    in the new tab, approves the app, and Trakt redirects back to
+    ``redirect_uri`` with ``code`` and ``state`` query parameters; the
+    daemon's ``/api/oauth/trakt/callback`` handles those.
+    """
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    return f"{TRAKT_AUTHORIZE_ENDPOINT}?{urlencode(params)}"
 
 
 def trakt_oauth_handler(

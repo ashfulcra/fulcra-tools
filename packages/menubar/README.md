@@ -1,8 +1,7 @@
 # fulcra-menubar
 
 macOS menubar UI for `fulcra-collect`. Python + PyObjC + rumps v1; a
-Swift rewrite follows once the UX is locked (see
-`docs/superpowers/specs/2026-05-22-fulcra-collect-menubar-design.md`).
+Swift rewrite follows once the UX is locked.
 
 > **First time here?** See [docs/TESTING.md](../../docs/TESTING.md) for
 > the end-to-end walkthrough: install, start the daemon, paste your
@@ -95,6 +94,40 @@ Two layers:
 The daemon owns all plugin logic, scheduling, supervision, watermarks,
 and credentials. This app is a thin client; it reads daemon state and
 issues control-socket commands.
+
+## Deep-linking into the web UI
+
+The popover's header "?" button and per-row Configure button both open
+the daemon's web UI at a `?route=...` URL using
+`subprocess.run(["open", url], check=False)` — the standard macOS
+default-browser opener. Added in SP4 (drift audit 2026-05-27) so
+common follow-ups (read the docs, finish configuring a plugin) don't
+require the user to context-switch to the dashboard and hunt for the
+right entry point.
+
+URLs emitted today:
+
+- `/?route=docs` — `popover/header.py`, the "?" button next to the
+  status pill.
+- `/?route=configure&plugin=<id>` — `popover/plugin_row.py`, the per-row
+  Configure button.
+
+Both call sites construct the full URL via `daemon_url(path)` from
+`fulcra_menubar/_daemon_url.py`. That helper reads the daemon's
+well-known `~/.config/fulcra-collect/web-url` file (written by the
+daemon at startup; respects the user's `[daemon] web_port` override)
+and falls back to `http://127.0.0.1:<configured-port>` if the file
+is unreadable. So custom-port deployments work end-to-end. If you
+add a new deep-link emission site here, route it through `daemon_url`
+rather than hardcoding the URL — otherwise the port-override path
+silently breaks.
+
+The consumer side lives in `packages/web-ui/dist/static/app.js`'s
+`boot()` handler — see that package's README ("URL-param deep-links")
+for the full list of supported routes and the auth-gate caveat (the
+web UI must be signed in for the deep-link to land on the requested
+route; unauth users see signin first and lose the param). If you add
+a new deep-link here, update the contract there too.
 
 ## Path to Swift
 

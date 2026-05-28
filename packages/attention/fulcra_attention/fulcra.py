@@ -1,9 +1,14 @@
 """Fulcra API client for fulcra-attention.
 
 A thin layer over `fulcra_common.BaseFulcraClient`: it adds the Attention
-DurationAnnotation definition handling, the three-axis tag vocabulary
-(machine / category / identity), and the attention-specific ingest_batch.
-Auth, the httpx client, tag lookup, and soft-delete come from the base.
+DurationAnnotation definition handling and the three-axis tag vocabulary
+(machine / category / identity). Auth, the httpx client, tag lookup, and
+soft-delete come from the base.
+
+Ingest goes through `fulcra_common.ingest.IngestPipeline` (refactor #69)
+— this class no longer carries its own `ingest_batch`. The daemon's
+`/api/extension/attention` route wraps a `FulcraClient` instance in an
+`IngestPipeline` and calls `ingest_one(DurationEvent)` to post.
 """
 from __future__ import annotations
 
@@ -142,6 +147,38 @@ class FulcraClient(BaseFulcraClient):
         r.raise_for_status()
         return [d for d in r.json() if d.get("name") == "Attention"]
 
+    def definition_exists(self, def_id: str) -> bool:
+        """Return True iff `def_id` is a live (non-deleted) definition on
+        the current Fulcra account.
+
+        Used by /api/extension/attention to detect a stale
+        attention_state.attention_definition_id — e.g. after the daemon
+        re-auths to a different Fulcra account, the cached def id points
+        at a def in the previous account. Without this check, Fulcra
+        happily ingests events with a source_id whose def doesn't exist,
+        and those events are invisible in the timeline.
+
+        Implementation: listing all defs and scanning is the safest path
+        because Fulcra's `GET /user/v1alpha1/annotation/{id}` returns the
+        def regardless of deleted_at (we'd still need to inspect the
+        body). One round trip for both checks.
+        """
+        try:
+            r = self._client().get(
+                "/user/v1alpha1/annotation",
+                headers=self._authed_headers(),
+            )
+            r.raise_for_status()
+            for d in r.json():
+                if d.get("id") == def_id and not d.get("deleted_at"):
+                    return True
+            return False
+        except Exception:
+            # Network/API failure — be conservative and assume the def
+            # still exists so we don't keep re-resolving on every flake.
+            # The validation cache will retry on its normal TTL.
+            return True
+
     def _find_attention_definition(self) -> str | None:
         """Return the id of the live "Attention" duration definition.
 
@@ -164,23 +201,3 @@ class FulcraClient(BaseFulcraClient):
         """Create / look up the `machine:<hostname>` tag. Called by `setup`."""
         return self.ensure_tag(build_tag_name("machine", hostname), state)
 
-    def ingest_batch(self, events: list[dict]) -> None:
-        """POST a JSONL batch of already-built events to /ingest/v1/record/batch.
-
-        Each event must be a dict with `specversion`, `data`, `metadata` keys
-        (the wire format documented in the spec). Source-id idempotency is the
-        caller's responsibility — building the deterministic source-id lives
-        in ingest.py.
-        """
-        if not events:
-            return
-        body = wire.encode_batch(events)
-        r = self._client().post(
-            "/ingest/v1/record/batch",
-            content=body,
-            headers={
-                **self._authed_headers(),
-                "content-type": "application/x-jsonl",
-            },
-        )
-        r.raise_for_status()

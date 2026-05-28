@@ -16,28 +16,128 @@ def _noop(ctx) -> None:
 
 def test_scheduled_plugin_requires_default_interval():
     with pytest.raises(ValueError, match="default_interval"):
-        Plugin(id="x", name="X", kind="scheduled", run=_noop)
+        Plugin(id="x", name="X", kind="scheduled", collect_mode="live_polled", run=_noop)
 
 
 def test_non_scheduled_plugin_rejects_default_interval():
     with pytest.raises(ValueError, match="default_interval"):
-        Plugin(id="x", name="X", kind="manual", run=_noop,
+        Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=_noop,
                default_interval=timedelta(hours=1))
 
 
 def test_unknown_kind_rejected():
     with pytest.raises(ValueError, match="kind"):
-        Plugin(id="x", name="X", kind="weekly", run=_noop)
+        Plugin(id="x", name="X", kind="weekly", collect_mode="historical",
+               run=_noop)
+
+
+# ---------------------------------------------------------------------------
+# collect_mode field (SP3 task 1)
+#
+# Required, no default — every plugin declares one. The mapping isn't
+# derivable from `kind` because the Attention extension's kind="manual"
+# but functionally collect_mode="live_continuous". Forcing per-plugin
+# explicit values surfaces the distinction at the metadata level so the
+# menubar popover regroup and Preferences chip can read it directly.
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_requires_collect_mode():
+    """Every plugin must declare collect_mode — historical / live_polled /
+    live_continuous. Constructing a Plugin without it must raise TypeError
+    (the dataclass-level 'missing required argument' contract), not
+    ValueError — i.e. it's a structural, not a semantic, error."""
+    with pytest.raises(TypeError):
+        Plugin(
+            id="test",
+            name="Test",
+            kind="manual",
+            # collect_mode intentionally omitted — this is the assertion.
+            run=lambda ctx: None,
+        )
+
+
+def test_plugin_rejects_unknown_collect_mode():
+    """collect_mode must be one of the three known values; anything else
+    is a programmer error and __post_init__ raises ValueError with a
+    message that names the field (so a stray typo in a plugin module
+    surfaces clearly at import time)."""
+    with pytest.raises(ValueError, match="unknown collect_mode"):
+        Plugin(
+            id="test",
+            name="Test",
+            kind="manual",
+            collect_mode="bogus",
+            run=lambda ctx: None,
+        )
+
+
+def test_plugin_accepts_known_collect_modes():
+    """All three documented values construct cleanly and round-trip
+    through the dataclass attribute."""
+    for mode in ("historical", "live_polled", "live_continuous"):
+        p = Plugin(
+            id=f"test-{mode}",
+            name="Test",
+            kind="manual",
+            collect_mode=mode,
+            run=lambda ctx: None,
+        )
+        assert p.collect_mode == mode
 
 
 def test_valid_plugins_of_each_kind():
-    svc = Plugin(id="relay", name="Relay", kind="service", run=_noop)
-    sch = Plugin(id="lastfm", name="Last.fm", kind="scheduled", run=_noop,
+    svc = Plugin(id="relay", name="Relay", kind="service", collect_mode="live_continuous", run=_noop)
+    sch = Plugin(id="lastfm", name="Last.fm", kind="scheduled", collect_mode="live_polled", run=_noop,
                  default_interval=timedelta(hours=1))
-    man = Plugin(id="dayone", name="Day One", kind="manual", run=_noop)
+    man = Plugin(id="dayone", name="Day One", kind="manual", collect_mode="historical", run=_noop)
     assert svc.kind == "service"
     assert sch.default_interval == timedelta(hours=1)
     assert man.kind == "manual"
+
+
+def test_attention_is_the_only_manual_live_continuous_plugin() -> None:
+    """Lock in the SP3 Task 1 invariant: the kind->collect_mode mapping
+    is straightforward (manual->historical, scheduled->live_polled,
+    service->live_continuous) EXCEPT for the Attention extension which
+    is kind='manual' + collect_mode='live_continuous' because the
+    data flow is push-based via the browser extension (run() is a
+    no-op status check).
+
+    If a future plugin author copies Attention's pattern without
+    realising it's a special case, this test fails — forcing them
+    to either justify a second case in the registry or fix their
+    plugin's metadata.
+
+    Originally a SP3 final-review minor that landed as a follow-up.
+    """
+    from fulcra_collect.registry import discover
+
+    DEFAULT_KIND_TO_MODE = {
+        "manual": "historical",
+        "scheduled": "live_polled",
+        "service": "live_continuous",
+    }
+    KNOWN_DEVIATIONS = {
+        "attention-relay": ("manual", "live_continuous"),
+    }
+
+    result = discover()
+    deviations: dict[str, tuple[str, str]] = {}
+    for p in result.plugins.values():
+        expected_mode = DEFAULT_KIND_TO_MODE.get(p.kind)
+        if expected_mode is None:
+            # Unknown kind — that's the existing PluginKind validation's
+            # job to catch, not ours.
+            continue
+        if p.collect_mode != expected_mode:
+            deviations[p.id] = (p.kind, p.collect_mode)
+
+    assert deviations == KNOWN_DEVIATIONS, (
+        f"Unexpected kind->collect_mode deviations: {deviations}. "
+        f"Expected only {KNOWN_DEVIATIONS}. Either fix the plugin's "
+        f"metadata or update KNOWN_DEVIATIONS with the justification."
+    )
 
 
 def test_permission_and_credential_are_simple_records():
@@ -49,8 +149,8 @@ def test_permission_and_credential_are_simple_records():
 
 
 def test_requires_network_defaults_true_and_is_overridable():
-    online = Plugin(id="x", name="X", kind="manual", run=_noop)
-    offline_ok = Plugin(id="y", name="Y", kind="manual", run=_noop,
+    online = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=_noop)
+    offline_ok = Plugin(id="y", name="Y", kind="manual", collect_mode="historical", run=_noop,
                         requires_network=False)
     assert online.requires_network is True
     assert offline_ok.requires_network is False
@@ -102,6 +202,57 @@ def test_resolved_definition_id_calls_resolver_when_state_empty():
     assert client.create_calls == 1
 
 
+def test_resolved_definition_id_uses_override_name_verbatim():
+    """Task #47: when state.override_definition_name is set, the resolver
+    is called with that exact name (no machine-id suffix) and the
+    override is cleared after use."""
+    state = PluginState(plugin_id="lastfm",
+                        override_definition_name="My Custom Listened")
+    client = _FakeClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="Listened",
+                                     force_new=True)
+    assert out == "def-fresh"
+    # The fake's create_definition records the name on the returned dict.
+    # _FakeClient takes the list path first (returns []) then creates with
+    # exactly the override name — NOT canonical_name + suffix.
+    assert client.list_calls == 1
+    assert client.create_calls == 1
+    # Override is one-shot: cleared so a later re-resolve (e.g. account
+    # switch) doesn't silently reuse a name the user picked once.
+    assert state.override_definition_name is None
+    assert state.definition_id == "def-fresh"
+
+
+def test_resolved_definition_id_override_adopts_existing_def():
+    """If a def with the override name already exists on the account,
+    the resolver adopts it instead of creating a duplicate."""
+    state = PluginState(plugin_id="lastfm",
+                        override_definition_name="Already Here")
+
+    class _ExistingClient:
+        def __init__(self):
+            self.created = []
+        def list_definitions(self, *, name):
+            if name == "Already Here":
+                return [{"id": "existing-def", "name": name,
+                         "annotation_type": "moment"}]
+            return []
+        def create_definition(self, *, name, **spec):
+            self.created.append(name)
+            return {"id": "fresh", "name": name, **spec}
+
+    client = _ExistingClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="Listened",
+                                     force_new=True)
+    assert out == "existing-def"
+    assert client.created == []  # adopted, not created
+    assert state.override_definition_name is None
+
+
 def test_resolved_definition_id_uses_cache_on_second_call():
     state = PluginState(plugin_id="lastfm", definition_id="cached-id")
     client = _FakeClient()
@@ -116,7 +267,7 @@ def test_resolved_definition_id_uses_cache_on_second_call():
 def test_canonical_definition_name_is_optional_on_plugin():
     # Plugins without a canonical name (e.g. dayone moments) must
     # still construct cleanly.
-    p = Plugin(id="dayone", name="Day One", kind="manual", run=_noop)
+    p = Plugin(id="dayone", name="Day One", kind="manual", collect_mode="historical", run=_noop)
     assert p.canonical_definition_name is None
 
 
@@ -139,7 +290,7 @@ def test_setting_enum_kind_with_values():
 
 def test_plugin_required_settings_default_empty():
     from fulcra_collect.plugin import Plugin
-    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    p = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     assert p.required_settings == ()
 
 
@@ -156,9 +307,22 @@ def test_setup_step_input_kind_with_settings_keys():
     assert s.settings_keys == ("api_key",)
 
 
+def test_setup_step_condition_defaults_to_none():
+    from fulcra_collect.plugin import SetupStep
+    s = SetupStep(kind="intro", title="Unconditional")
+    assert s.condition is None
+
+
+def test_setup_step_condition_accepted():
+    from fulcra_collect.plugin import SetupStep
+    s = SetupStep(kind="file_upload", title="Upload export",
+                  condition={"mode": ("export_file",)})
+    assert s.condition == {"mode": ("export_file",)}
+
+
 def test_plugin_setup_steps_default_empty():
     from fulcra_collect.plugin import Plugin
-    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    p = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     assert p.setup_steps == ()
 
 
@@ -178,17 +342,206 @@ def test_health_result_default_empty_preview():
 
 def test_plugin_health_check_optional():
     from fulcra_collect.plugin import Plugin
-    p = Plugin(id="x", name="X", kind="manual", run=lambda c: None)
+    p = Plugin(id="x", name="X", kind="manual", collect_mode="historical", run=lambda c: None)
     assert p.health_check is None
 
 
 def test_canonical_definition_name_persists_when_set():
     p = Plugin(
         id="lastfm", name="Last.fm", kind="manual",
+        collect_mode="historical",
         run=_noop,
         canonical_definition_name="lastfm-listens",
     )
     assert p.canonical_definition_name == "lastfm-listens"
+
+
+class _FakeClientWithValidation(_FakeClient):
+    """Fake that also exposes definition_exists, mirroring the worker's
+    real _FulcraDefinitionAdapter. Used to exercise the stale-cache
+    re-resolution path."""
+    def __init__(self, live_ids: set[str] | None = None):
+        super().__init__()
+        self.live_ids = live_ids or set()
+        self.exists_calls: list[str] = []
+    def definition_exists(self, def_id):
+        self.exists_calls.append(def_id)
+        return def_id in self.live_ids
+
+
+def test_resolved_definition_id_re_resolves_when_cached_def_is_stale():
+    """Regression for task #13. When the cached state.definition_id no
+    longer exists on the current Fulcra account (the daemon got
+    re-authed to a different account, or the def was deleted), the
+    choke point detects it, clears the cache, and re-resolves — without
+    this every plugin's run silently keeps writing to an orphan def id
+    that the timeline can't render."""
+    state = PluginState(plugin_id="lastfm", definition_id="orphan-from-A")
+    # The fake says no defs are live → orphan-from-A is stale.
+    client = _FakeClientWithValidation(live_ids=set())
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert client.exists_calls == ["orphan-from-A"]
+    # Resolver was invoked (list + create) — cache was bypassed.
+    assert client.list_calls == 1
+    assert client.create_calls == 1
+    assert out == "def-fresh"
+    assert state.definition_id == "def-fresh"
+
+
+def test_resolved_definition_id_keeps_cache_when_def_still_live():
+    """Inverse of the stale case: if definition_exists confirms the
+    cached id is live, we return it without invoking the resolver."""
+    state = PluginState(plugin_id="lastfm", definition_id="still-here")
+    client = _FakeClientWithValidation(live_ids={"still-here"})
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "still-here"
+    assert client.exists_calls == ["still-here"]
+    # Resolver NOT called — list_calls + create_calls untouched.
+    assert client.list_calls == 0
+    assert client.create_calls == 0
+
+
+def test_resolved_definition_id_trusts_cache_when_validation_errors():
+    """A flaky network must not trigger spurious re-resolutions — that
+    would create duplicate defs on every transient. definition_exists
+    raising is treated as 'assume live'."""
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id")
+
+    class _FlakyClient(_FakeClient):
+        def definition_exists(self, def_id):
+            raise RuntimeError("network down")
+    client = _FlakyClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "cached-id"
+    assert client.list_calls == 0
+
+
+def test_ensure_definition_returns_cached_when_live():
+    """The per-package helper: cached value is validated and returned
+    as-is. Per-plugin state.definition_id is also synced so the next
+    resolved_definition_id call is fast."""
+    state = PluginState(plugin_id="lastfm")  # per-plugin cache empty
+    client = _FakeClientWithValidation(live_ids={"per-package-cached"})
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached="per-package-cached",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "per-package-cached"
+    assert state.definition_id == "per-package-cached"
+    assert client.create_calls == 0
+
+
+def test_ensure_definition_re_resolves_when_cached_is_stale():
+    """A stale per-package cached id triggers re-resolution, the new id
+    is returned, and per-plugin state is updated."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())  # nothing live
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached="orphan-from-A",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "def-fresh"
+    assert state.definition_id == "def-fresh"
+    assert client.create_calls == 1
+
+
+def test_ensure_definition_emits_recovery_annotation_on_stale_re_resolve():
+    """Activity-feed parity with the attention route: when a stale cache
+    triggers re-resolution, the user gets a one-line dashboard entry
+    explaining why their data now points at a different def. Mirrors
+    the surface added in task #12 for the extension path; task #17
+    extends it to the worker path."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm", config={}, credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+        _fulcra_client_factory=lambda: client,
+    )
+    out = ctx.ensure_definition(
+        cached="orphan-from-A",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "def-fresh"
+    annotations = [e for e in emitted if e.get("type") == "annotation"]
+    assert len(annotations) == 1
+    assert "re-resolved" in annotations[0]["summary"]
+    assert "Listened" in annotations[0]["summary"]
+    assert "orphan-f" in annotations[0]["summary"]
+    assert annotations[0]["ok"] is True
+
+
+def test_ensure_definition_does_not_emit_when_cache_is_fresh():
+    """No noise on the happy path — the recovery surface only fires
+    when something actually recovered."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids={"all-good"})
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm", config={}, credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+        _fulcra_client_factory=lambda: client,
+    )
+    ctx.ensure_definition(
+        cached="all-good",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    annotations = [e for e in emitted if e.get("type") == "annotation"]
+    assert annotations == []
+
+
+def test_ensure_definition_does_not_emit_when_cache_was_empty():
+    """First-run resolves (no prior cache) aren't 're-resolutions' — the
+    user wasn't expecting a different def, so don't crowd the feed."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())
+    emitted: list[dict] = []
+    ctx = RunContext(
+        plugin_id="lastfm", config={}, credentials={},
+        state=state,
+        log=logging.getLogger("test"),
+        _emit=emitted.append,
+        _fulcra_client_factory=lambda: client,
+    )
+    ctx.ensure_definition(
+        cached=None,
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    annotations = [e for e in emitted if e.get("type") == "annotation"]
+    assert annotations == []
+
+
+def test_ensure_definition_creates_when_cached_is_none():
+    """No prior per-package cache → falls straight through to resolver."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClientWithValidation(live_ids=set())
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached=None,
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "def-fresh"
+    # No validation call needed — there was no cached id to check.
+    assert client.exists_calls == []
 
 
 def test_resolved_definition_id_raises_when_factory_not_set():

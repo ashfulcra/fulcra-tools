@@ -12,7 +12,8 @@ T0 = datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc)
 
 
 def _scheduled(pid, hours):
-    return Plugin(id=pid, name=pid, kind="scheduled", run=lambda ctx: None,
+    return Plugin(id=pid, name=pid, kind="scheduled",
+                  collect_mode="live_polled", run=lambda ctx: None,
                   default_interval=timedelta(hours=hours))
 
 
@@ -52,8 +53,10 @@ def test_interval_override_is_respected():
 
 def test_manual_and_service_plugins_are_never_scheduled():
     plugins = {
-        "dayone": Plugin(id="dayone", name="d", kind="manual", run=lambda c: None),
-        "relay": Plugin(id="relay", name="r", kind="service", run=lambda c: None),
+        "dayone": Plugin(id="dayone", name="d", kind="manual",
+                         collect_mode="historical", run=lambda c: None),
+        "relay": Plugin(id="relay", name="r", kind="service",
+                        collect_mode="live_continuous", run=lambda c: None),
     }
     cfg = Config(enabled={"dayone", "relay"})
     assert due_plugins(plugins, cfg, states={}, now=T0) == []
@@ -75,6 +78,7 @@ def test_offline_excludes_network_requiring_plugins():
 
 def test_offline_still_runs_plugins_that_do_not_need_network():
     podcasts = Plugin(id="podcasts", name="Podcasts", kind="scheduled",
+                      collect_mode="live_polled",
                       run=lambda c: None, default_interval=timedelta(hours=1),
                       requires_network=False)
     cfg = Config(enabled={"podcasts"})

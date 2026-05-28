@@ -102,6 +102,49 @@ def test_set_and_delete_credential(fake_daemon):
     ]
 
 
+def test_record_annotation_moment_omits_optional_fields(fake_daemon):
+    """Bare record_annotation call (no comment, no time window) sends
+    only the definition_id — keeps the wire request minimal."""
+    sock_path, replies, seen = fake_daemon
+    replies.append({"ok": True, "source_id": "src-1", "name": "Coffee"})
+    client = DaemonClient(socket_path=sock_path)
+    out = client.record_annotation("def-abc")
+    assert out["ok"] is True
+    assert seen == [{"cmd": "record_annotation", "definition_id": "def-abc"}]
+
+
+def test_record_annotation_duration_sends_window(fake_daemon):
+    """Passing start_time + end_time forwards them to the daemon so it
+    can write a Duration record (Sprint B 2026-05-26)."""
+    sock_path, replies, seen = fake_daemon
+    replies.append({"ok": True, "source_id": "src-2", "name": "Movie"})
+    client = DaemonClient(socket_path=sock_path)
+    out = client.record_annotation(
+        "def-d1", comment="great film",
+        start_time="2026-05-26T20:00:00Z",
+        end_time="2026-05-26T22:00:00Z",
+    )
+    assert out["ok"] is True
+    assert seen == [{
+        "cmd": "record_annotation", "definition_id": "def-d1",
+        "comment": "great film",
+        "start_time": "2026-05-26T20:00:00Z",
+        "end_time": "2026-05-26T22:00:00Z",
+    }]
+
+
+def test_delete_annotation_sends_source_id(fake_daemon):
+    """delete_annotation forwards source_id and surfaces the tombstone
+    source_id the daemon writes."""
+    sock_path, replies, seen = fake_daemon
+    replies.append({"ok": True, "tombstone_source_id": "tomb-1"})
+    client = DaemonClient(socket_path=sock_path)
+    out = client.delete_annotation("src-1")
+    assert out["ok"] is True
+    assert out["tombstone_source_id"] == "tomb-1"
+    assert seen == [{"cmd": "delete_annotation", "source_id": "src-1"}]
+
+
 def test_socket_missing_raises_daemon_unavailable(tmp_path):
     client = DaemonClient(socket_path=tmp_path / "does-not-exist.sock")
     with pytest.raises(DaemonUnavailable):
@@ -150,3 +193,31 @@ def test_hung_daemon_raises_daemon_unavailable():
         stop.set()
         t.join(timeout=2.0)
         server.close()
+
+
+def test_get_quick_record_favorites_command_shape(fake_daemon):
+    """The DaemonClient.get_quick_record_favorites method serializes
+    exactly the command the daemon dispatcher matches on — kept hermetic
+    against the canned reply queue so a typo would be a test failure
+    rather than a silent menubar bug."""
+    sock_path, replies, seen = fake_daemon
+    replies.append({"ok": True, "favorites": ["def-a", "def-b"]})
+    client = DaemonClient(socket_path=sock_path)
+    out = client.get_quick_record_favorites()
+    assert out == {"ok": True, "favorites": ["def-a", "def-b"]}
+    assert seen == [{"cmd": "get_quick_record_favorites"}]
+
+
+def test_set_quick_record_favorites_command_shape(fake_daemon):
+    """Mirror test for the setter — the daemon expects a "favorites"
+    list field, and the client method forces it to be a list (so a
+    caller passing a set / tuple still wires up correctly)."""
+    sock_path, replies, seen = fake_daemon
+    replies.append({"ok": True})
+    client = DaemonClient(socket_path=sock_path)
+    out = client.set_quick_record_favorites(["def-1", "def-2"])
+    assert out == {"ok": True}
+    assert seen == [{
+        "cmd": "set_quick_record_favorites",
+        "favorites": ["def-1", "def-2"],
+    }]

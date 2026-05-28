@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Pair Fulcra Attention extension</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-white text-slate-900 min-h-screen">
+  <main class="max-w-md mx-auto p-8 space-y-6">
+    <!-- Same logo + product header as index.html so a user landing on this
+         page via a direct/extension deep link still feels like they're inside
+         Fulcra Collect, not a stray standalone page. -->
+    <header class="flex items-center gap-3 mb-2">
+      <img src="/static/logo.svg" alt="Fulcra" class="w-8 h-8">
+      <h1 class="text-2xl font-semibold tracking-tight">Fulcra Collect</h1>
+    </header>
+    <h2 class="text-xl font-semibold">Pair Fulcra Attention extension</h2>
+    <p class="text-sm text-slate-600">
+      Click below. If the extension is installed in this browser, it'll receive a
+      token from the daemon and store it in <code>chrome.storage.local</code>.
+    </p>
+
+    <div id="status"
+         class="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+      Idle — click Pair to start.
+    </div>
+
+    <div class="flex gap-3">
+      <button id="pairBtn"
+              class="px-5 py-2.5 rounded bg-violet-600 text-white font-medium hover:bg-violet-700">
+        Pair extension
+      </button>
+      <a href="/" class="px-3 py-2.5 text-sm text-slate-500 hover:text-slate-700 underline self-center">
+        Back to app
+      </a>
+    </div>
+
+    <div id="fallback" class="hidden space-y-3 pt-4 border-t border-slate-200">
+      <p class="text-sm text-slate-700">
+        No ack from the extension within 3 s. Either it's not installed, or
+        its content script didn't run on this page (try a hard refresh).
+        You can paste the token manually into the extension's Options page:
+      </p>
+      <code id="fallbackToken"
+            class="block bg-slate-100 text-slate-800 p-3 rounded text-xs break-all"></code>
+    </div>
+  </main>
+
+  <script>
+    function readCookie(name) {
+      const m = document.cookie.split('; ').find(r => r.startsWith(name + '='));
+      return m ? m.split('=')[1] : null;
+    }
+
+    function setStatus(text, tone) {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      const tones = {
+        idle:    'border-slate-200 bg-slate-50 text-slate-700',
+        pending: 'border-violet-200 bg-violet-50 text-violet-700',
+        ok:      'border-emerald-200 bg-emerald-50 text-emerald-700',
+        err:     'border-red-200 bg-red-50 text-red-700',
+      };
+      el.className = 'rounded border p-3 text-sm ' + (tones[tone] || tones.idle);
+    }
+
+    document.getElementById('pairBtn').addEventListener('click', async () => {
+      setStatus('Requesting token from daemon…', 'pending');
+      const token = readCookie('fulcra_token');
+      if (!token) {
+        setStatus('No fulcra_token cookie — open the app at / first.', 'err');
+        return;
+      }
+      let pair;
+      try {
+        const resp = await fetch('/api/plugin/attention-relay/pair', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (!resp.ok) {
+          setStatus('Daemon returned ' + resp.status + ': ' + (await resp.text()), 'err');
+          return;
+        }
+        pair = await resp.json();
+      } catch (e) {
+        setStatus('Could not reach daemon: ' + e.message, 'err');
+        return;
+      }
+
+      setStatus('Sending pair message to extension…', 'pending');
+      const fallbackEl = document.getElementById('fallback');
+      const fallbackTokenEl = document.getElementById('fallbackToken');
+
+      // One-shot listener for the ack.
+      let ackHandler = null;
+      let timer = null;
+
+      ackHandler = (e) => {
+        if (e.origin !== window.location.origin) return;
+        if (!e.data || e.data.type !== 'fulcra-attention-pair-ack') return;
+        if (e.data.ok) {
+          setStatus('✓ Paired — the extension stored the token.', 'ok');
+        } else {
+          setStatus('Extension responded but reported failure.', 'err');
+        }
+        window.removeEventListener('message', ackHandler);
+        if (timer) clearTimeout(timer);
+      };
+      window.addEventListener('message', ackHandler);
+
+      timer = setTimeout(() => {
+        window.removeEventListener('message', ackHandler);
+        setStatus('No ack within 3 s. Falling back to manual paste.', 'err');
+        fallbackTokenEl.textContent = pair.token;
+        fallbackEl.classList.remove('hidden');
+      }, 3000);
+
+      window.postMessage(
+        { type: 'fulcra-attention-pair', token: pair.token, daemonUrl: pair.daemon_url },
+        window.location.origin,
+      );
+    });
+  </script>
+</body>
+</html>

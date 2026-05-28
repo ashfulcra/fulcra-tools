@@ -1,0 +1,26 @@
+// packages/web-ui/dist/static/components/index.js
+//
+// Single entry point for the setup_step component bundle. Loaded as a
+// module from index.html *after* lit and *before* the wizard.js / page
+// scripts that mount the wizard. Order matters because:
+//   - Lit must be loaded (the module already imports it).
+//   - Components must be registered as custom elements before the first
+//     <fulcra-step> appears in the DOM.
+//
+// Adding a new step kind = three steps:
+//   1. extend the Python SetupStep Literal in
+//      packages/collect/fulcra_collect/plugin.py
+//   2. write packages/web-ui/dist/static/components/step-<kind>.js
+//   3. add the import line below
+import "./step.js";                      // the <fulcra-step> dispatcher
+import "./step-intro.js";
+import "./step-external_action.js";
+import "./step-input.js";
+import "./step-oauth.js";
+import "./step-file_upload.js";
+import "./step-permission_request.js";
+import "./step-browser_extension.js";
+import "./step-extension_pair.js";
+import "./step-test_connection.js";
+import "./step-definition_picker.js";
+import "./step-done.js";

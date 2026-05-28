@@ -1,7 +1,12 @@
 """The Preferences window — NSWindowController hosting an NSTabView.
 
-Tabs: Plugins, Notifications, About. Each tab is a separate NSView
-factory in its own module; this file just wires them up.
+Tabs: Plugins, Annotations, Notifications, About. Each tab is a separate
+NSView factory in its own module; this file just wires them up.
+
+The Annotations tab (added in SP2, drift audit 2026-05-27) sits between
+Plugins and Notifications so the user's mental flow reads "set up your
+sources (Plugins) → manage what you're tracking (Annotations) → control
+how the app talks to you (Notifications) → app metadata (About)".
 
 Use ``make_preferences_controller(...)`` (module-level function) rather than
 ``PreferencesController.create(...)`` — PyObjC's NSObject subclass transform
@@ -58,15 +63,18 @@ def make_preferences_controller(
     tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, HEIGHT - 22))
 
     from .plugins_tab import make_plugins_tab
+    from .annotations_tab import make_annotations_tab
     from .notifications_tab import make_notifications_tab
     from .about_tab import make_about_tab
 
     plugins_view = make_plugins_tab(model=model, client=client)
+    annotations_view = make_annotations_tab(client=client)
     notifs_view = make_notifications_tab(centre=centre)
     about_view = make_about_tab(client=client)
 
     for label, view in (
         ("Plugins", plugins_view),
+        ("Annotations", annotations_view),
         ("Notifications", notifs_view),
         ("About", about_view),
     ):

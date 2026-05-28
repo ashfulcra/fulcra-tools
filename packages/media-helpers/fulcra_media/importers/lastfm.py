@@ -27,6 +27,8 @@ from typing import Any
 
 import httpx
 
+from fulcra_common.cross_source_fingerprint import listened_fingerprint
+
 from .base import NormalizedEvent, content_fingerprint
 
 CREDS_PATH = Path(os.path.expanduser("~/.config/fulcra-media/lastfm.json"))
@@ -105,6 +107,9 @@ def normalize_track(track: dict) -> NormalizedEvent | None:
     if url:
         external["url"] = url
 
+    cross = listened_fingerprint(timestamp=start, artist=artist, track=name)
+    extra_source_ids: tuple[str, ...] = (cross,) if cross else ()
+
     return NormalizedEvent(
         importer="lastfm",
         service="lastfm",
@@ -116,6 +121,7 @@ def normalize_track(track: dict) -> NormalizedEvent | None:
         deterministic_id=_det_id(artist, name, uts),
         timestamp_confidence="high",
         external_ids=external,
+        extra_source_ids=extra_source_ids,
     )
 
 

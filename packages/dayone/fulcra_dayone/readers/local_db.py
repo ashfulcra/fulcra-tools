@@ -1,6 +1,7 @@
 """Read Day One's local Core Data SQLite database into DayOneEntry[]."""
 from __future__ import annotations
 
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -10,6 +11,27 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..entry import DayOneEntry
+
+# Whitelist for SQLite identifiers we interpolate into queries. Day One's
+# schema-discovery code finds the entry/tag join table by name and column;
+# both come from the on-disk database via sqlite_master / PRAGMA, never
+# from HTTP input. If an attacker has write access to the user's Day One
+# container they have far worse options — but we still enforce a strict
+# `[A-Z_0-9]+` shape so a malformed table name (e.g. one containing
+# whitespace, quotes, or semicolons) is rejected before it can land in
+# an f-string SQL query.
+_DAYONE_IDENT_RE = re.compile(r"^[A-Z_0-9]+$")
+
+
+def _safe_ident(name: str) -> str:
+    """Validate `name` matches the Day One schema identifier shape.
+    Raises ValueError if not — caller turns that into the SCHEMA_ERROR
+    surface so the user sees a clear message instead of a SQL error."""
+    if not _DAYONE_IDENT_RE.match(name):
+        raise ValueError(
+            f"Day One schema identifier rejected (got {name!r})"
+        )
+    return name
 
 # Core Data stores timestamps as float seconds since 2001-01-01 UTC.
 _CORE_DATA_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
@@ -59,9 +81,16 @@ def _find_tag_join(conn: sqlite3.Connection, entry_ent: int) -> tuple[str, str, 
         "AND name LIKE 'Z\\_%TAGS' ESCAPE '\\'"
     ).fetchall()
     for (table,) in rows:
+        # `table` came from sqlite_master so SQLite already validated it
+        # as a real table name, but we still strict-check against
+        # _DAYONE_IDENT_RE before letting it land in an f-string. A
+        # malformed table name (whitespace, quote, semicolon) raises
+        # ValueError; SCHEMA_ERROR surface translates that for the user.
+        _safe_ident(table)
         cols = [c[1] for c in conn.execute(f"PRAGMA table_info('{table}')")]
         if entry_col in cols and len(cols) == 2:
             tag_col = cols[0] if cols[1] == entry_col else cols[1]
+            _safe_ident(tag_col)
             return table, entry_col, tag_col
     raise ValueError(f"{_SCHEMA_ERROR} (no entry/tag join table)")
 

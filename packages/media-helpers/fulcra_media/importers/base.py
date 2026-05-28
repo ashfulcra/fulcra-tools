@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from fulcra_common.ingest import DurationEvent
 
 VALID_CATEGORIES = {"watched", "listened", "activity", "read"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
@@ -22,6 +25,13 @@ class NormalizedEvent:
     deterministic_id: str    # full source string e.g. "com.fulcra.media.netflix.<sha16>"
     timestamp_confidence: str
     external_ids: dict = field(default_factory=dict)
+    # Extra source-ids appended to the Fulcra event's metadata.source array
+    # ALONGSIDE deterministic_id. Used for cross-source dedup fingerprints
+    # (com.fulcra.content.<kind>.v1.<hash>) so two importers that captured
+    # the same listen/watch dedup against each other without losing the
+    # per-plugin source_id that's how we trace "where did this come from".
+    # Tuple (not list) so the dataclass stays hashable-equivalent for tests.
+    extra_source_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.category not in VALID_CATEGORIES:
@@ -30,6 +40,27 @@ class NormalizedEvent:
             raise ValueError(f"invalid timestamp_confidence {self.timestamp_confidence!r}")
         if self.start_time.tzinfo is None or self.end_time.tzinfo is None:
             raise ValueError("start_time and end_time must be timezone-aware")
+
+    def to_duration_event(
+        self, *, definition_id: str, tags: Sequence[str] = (),
+    ) -> DurationEvent:
+        """Produce the pipeline-side typed event from this importer-side
+        intermediate. Used by FulcraClient.ingest_batch — the importer keeps
+        its own NormalizedEvent shape, but the wire-construction goes
+        through IngestPipeline."""
+        return DurationEvent(
+            definition_id=definition_id,
+            source_id=self.deterministic_id,
+            extra_source_ids=tuple(self.extra_source_ids),
+            tags=tuple(tags),
+            external_ids=dict(self.external_ids),
+            note=self.note,
+            title=self.title,
+            service=self.service,
+            timestamp_confidence=self.timestamp_confidence,
+            start=self.start_time,
+            end=self.end_time,
+        )
 
 
 _SLUG_KEEP_RE = re.compile(r"[^a-z0-9\- ]+")

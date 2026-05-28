@@ -16,6 +16,15 @@ from typing import Literal
 PluginKind = Literal["service", "scheduled", "manual"]
 _KINDS = ("service", "scheduled", "manual")
 
+CollectMode = Literal["historical", "live_polled", "live_continuous"]
+_COLLECT_MODES = ("historical", "live_polled", "live_continuous")
+"""User-facing 'historical vs live' framing for SP3. NOT derivable from
+``PluginKind`` — the Attention extension's kind="manual" but functionally
+collect_mode="live_continuous" because the data flow is push-based via
+the browser extension. Per-plugin explicit declarations surface this at
+the metadata level so the menubar popover, Preferences chip, and any
+future web-UI consumer can all read the same source of truth."""
+
 
 @dataclass(frozen=True)
 class Permission:
@@ -58,6 +67,14 @@ class Setting:
     ]
     help: str = ""
     enum_values: tuple[str, ...] | None = None
+    # Optional human-readable labels for each enum_values entry — one per
+    # value, positionally. When omitted, the wizard renders the raw enum
+    # value as the label (used to be the only option, which left users
+    # staring at `live_app` / `export_file` in production UI). Length must
+    # match enum_values; the dataclass doesn't enforce it but the contract
+    # serializer round-trips both and the renderer falls back to the value
+    # when labels are missing or short.
+    enum_labels: tuple[str, ...] | None = None
     default: object = None
     required: bool = True
     placeholder: str = ""
@@ -80,6 +97,13 @@ class SetupStep:
       permission_request — prompt the user to grant an OS permission
       browser_extension  — prompt the user to install a browser extension;
                            show extension_url as an install link
+      extension_pair     — one-click pairing handshake with the installed
+                           Fulcra Attention browser extension. The wizard
+                           generates a fresh extension-token via the daemon,
+                           postMessages it to the page, and waits for an
+                           ack from the extension's content script. Falls
+                           back to a copy-paste manual paste if no ack
+                           arrives within 3 seconds.
       test_connection    — invoke Plugin.health_check and show the result
       definition_picker  — let the user choose (or confirm) a Fulcra annotation
                            definition for this plugin
@@ -87,8 +111,8 @@ class SetupStep:
     """
     kind: Literal[
         "intro", "external_action", "input", "oauth", "file_upload",
-        "permission_request", "browser_extension", "test_connection",
-        "definition_picker", "done",
+        "permission_request", "browser_extension", "extension_pair",
+        "test_connection", "definition_picker", "done",
     ]
     title: str
     body_md: str = ""
@@ -100,6 +124,14 @@ class SetupStep:
     by (e.g. "duration", "moment"). Emitted in the plugin contract so the
     wizard can pass ?annotation_type=... to /api/definitions. Empty string
     means no filter (wizard defaults to "duration")."""
+    condition: dict[str, tuple[str, ...]] | None = None
+    """Optional display condition: maps setting keys to tuples of acceptable
+    values. When set, the wizard shows this step only when *all* keys match —
+    i.e. inputValues[key] is in the acceptable-values tuple for every key in
+    the dict. Steps that do not satisfy their condition are auto-skipped in
+    both the Next and Back directions. If a key hasn't been filled yet
+    (inputValues[key] is undefined), the condition is NOT satisfied — the
+    step is skipped. Unconditional steps (condition=None) are always shown."""
 
 
 @dataclass
@@ -128,6 +160,14 @@ class Plugin:
       "scheduled" — run(ctx) does one import pass; fired on default_interval.
       "manual"    — run(ctx) does one import pass; fired only on request.
 
+    collect_mode (required, no default):
+      "historical"      — one-shot import; the plugin does not update
+                          afterwards (takeouts, user-provided files).
+      "live_polled"     — captures new events on a polling schedule.
+      "live_continuous" — captures events as they happen (webhook
+                          receivers, browser-extension pushes).
+      NOT derivable from ``kind`` — see the ``CollectMode`` docstring.
+
     requires_network: when True (the default), the daemon skips this
     plugin's scheduled dispatch while the machine is offline — deferring
     it rather than running it into a guaranteed failure.
@@ -140,6 +180,22 @@ class Plugin:
     id: str
     name: str
     kind: PluginKind
+    collect_mode: CollectMode
+    """Per-plugin tag for the user-facing 'historical vs live' framing the
+    web UI's collect_modes onboarding screen introduced. Three values:
+
+      "historical"      — one-shot import; the plugin doesn't update
+                          afterwards (takeouts, user-provided files).
+      "live_polled"     — captures new events on a polling schedule.
+      "live_continuous" — captures events as they happen (webhook
+                          receivers, browser-extension pushes).
+
+    NOT derivable from `kind` — the Attention extension's kind="manual"
+    but functionally collect_mode="live_continuous" because the data
+    flow is push-based via the extension. Forcing per-plugin explicit
+    values surfaces this distinction at the metadata level. See SP3
+    in the 2026-05-27 menubar drift audit for the full mapping table.
+    """
     run: Callable[["RunContext"], None]
     description: str = ""
     default_interval: timedelta | None = None
@@ -149,6 +205,14 @@ class Plugin:
     required_settings: tuple[Setting, ...] = ()
     setup_steps: tuple[SetupStep, ...] = ()
     health_check: Callable[["RunContext"], "HealthResult"] | None = None
+    permission_check: Callable[["RunContext"], dict] | None = None
+    """Optional callable that verifies an OS-level permission is actually
+    granted (e.g. Full Disk Access). Returns
+    {"granted": bool, "hint": str | None}. The wizard's permission_request
+    step uses this so it can show "verified" instead of the misleading
+    "macOS will prompt when you click Next" (which is false for FDA — there
+    is no dialog; the user must add the binary in System Settings).
+    """
     oauth_handler: Callable[..., dict[str, str]] | None = None
     """Optional OAuth handler called by the daemon's callback route.
 
@@ -173,12 +237,17 @@ class Plugin:
     wizard can drive the entire flow without knowing the provider's
     endpoint or client_id.
     """
-    category: Literal["music", "video", "books", "journal", "activity", "other"] = "other"
+    category: Literal["audio", "video", "books", "journal", "activity", "other"] = "other"
     canonical_definition_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
             raise ValueError(f"unknown kind {self.kind!r}; expected one of {_KINDS}")
+        if self.collect_mode not in _COLLECT_MODES:
+            raise ValueError(
+                f"unknown collect_mode {self.collect_mode!r}; "
+                f"expected one of {_COLLECT_MODES}"
+            )
         if self.kind == "scheduled" and self.default_interval is None:
             raise ValueError("scheduled plugin requires a default_interval")
         if self.kind != "scheduled" and self.default_interval is not None:
@@ -258,10 +327,37 @@ class RunContext:
         worker supplies this factory so `plugin.py` never has to know
         how to construct an HTTP client or handle auth directly. Plugins
         that do not call this method can leave the factory unset.
+
+        Stale-cache guard: when `state.definition_id` is set, validate
+        that the def still exists on the *current* Fulcra account before
+        returning it. After a daemon re-auth to a different account, the
+        cached id points at a def that doesn't exist here — ingest
+        accepts events keyed to it silently and they end up orphaned in
+        the timeline. On a stale hit we clear the cache and fall through
+        to the resolver. Implementation requires the factory to provide
+        a client whose `definition_exists(def_id)` is implemented (the
+        worker's `_FulcraDefinitionAdapter`); a fake client without
+        that method skips validation, which is fine for tests that
+        don't exercise the stale path.
         """
         cached = getattr(self.state, "definition_id", None)
         if cached and not force_new:
-            return cached
+            client = (self._fulcra_client_factory()
+                      if self._fulcra_client_factory is not None else None)
+            still_present = True
+            if client is not None and hasattr(client, "definition_exists"):
+                try:
+                    still_present = client.definition_exists(cached)
+                except Exception:
+                    # Network/adapter failure — be conservative and trust
+                    # the cache. The next run will retry the check.
+                    still_present = True
+            if still_present:
+                return cached
+            # Stale: clear and re-resolve. Caller's state mutation is
+            # picked up by the runner at run end (state.definition_id
+            # is part of the result envelope).
+            self.state.definition_id = None
         if self._fulcra_client_factory is None:
             raise RuntimeError(
                 "RunContext has no _fulcra_client_factory — the runner must "
@@ -269,11 +365,102 @@ class RunContext:
             )
         from fulcra_common.definitions import resolve_definition_id
         client = self._fulcra_client_factory()
-        new_id = resolve_definition_id(
-            canonical_name=canonical_name,
-            expected_spec=expected_spec,
-            fulcra_client=client,
-            force_new=force_new,
-        )
+        # If the user supplied a custom name via the definition picker's
+        # "Create new" input, use it verbatim — find-or-create by exact
+        # match, no machine-id suffix. This overrides both the plugin's
+        # canonical_name and the suffix-on-force_new behavior, because
+        # the user explicitly typed what they want to see in Fulcra.
+        override = getattr(self.state, "override_definition_name", None)
+        if override:
+            new_id = resolve_definition_id(
+                canonical_name=override,
+                expected_spec=expected_spec,
+                fulcra_client=client,
+                force_new=False,
+            )
+            # One-shot: the override has done its job. Clear it so a
+            # later re-resolve (e.g. account switch) falls back to the
+            # plugin's canonical_name rather than silently re-using a
+            # name the user picked once weeks ago.
+            self.state.override_definition_name = None
+        else:
+            new_id = resolve_definition_id(
+                canonical_name=canonical_name,
+                expected_spec=expected_spec,
+                fulcra_client=client,
+                force_new=force_new,
+            )
         self.state.definition_id = new_id
+        return new_id
+
+    def ensure_definition(
+        self,
+        *,
+        cached: str | None,
+        expected_spec: dict,
+        canonical_name: str,
+    ) -> str:
+        """Return a guaranteed-fresh definition id for callers that
+        maintain their own per-package cache (alongside the per-plugin
+        ``state.definition_id``).
+
+        Pattern: media-helpers has a ``state.json`` with fields like
+        ``listened_definition_id`` shared across Last.fm + Deezer +
+        Spotify because they all write to the same canonical "Listened"
+        def. Without this helper, each plugin's run does
+        ``if not media_state.listened_definition_id: resolve`` — which
+        trusts the per-package cache blindly across account switches.
+
+        With this helper, callers pass their cached value in. If it's
+        still live on the current account, we return it as-is (cheap
+        round trip, cached). If it's stale or unset, we re-resolve and
+        the caller writes the fresh id back to both per-package state
+        and (via ``resolved_definition_id``) per-plugin state.
+
+        On stale-cache re-resolution, also emits an annotation event so
+        the dashboard activity feed surfaces a one-line note — mirrors
+        the attention extension route's recovery surface and keeps the
+        user informed when their data suddenly attaches to a different
+        def after a daemon re-auth.
+        """
+        if cached:
+            client = (self._fulcra_client_factory()
+                      if self._fulcra_client_factory is not None else None)
+            if client is not None and hasattr(client, "definition_exists"):
+                try:
+                    if client.definition_exists(cached):
+                        # Keep the per-plugin cache in sync — important
+                        # so future ``resolved_definition_id`` calls hit
+                        # without another round trip.
+                        if getattr(self.state, "definition_id", None) != cached:
+                            self.state.definition_id = cached
+                        return cached
+                except Exception:
+                    if getattr(self.state, "definition_id", None) != cached:
+                        self.state.definition_id = cached
+                    return cached
+            else:
+                # No validator available; trust the cache.
+                if getattr(self.state, "definition_id", None) != cached:
+                    self.state.definition_id = cached
+                return cached
+        # Stale or unset: re-resolve. resolved_definition_id will write
+        # the new id to per-plugin state; the caller is responsible for
+        # writing it to per-package state too.
+        had_stale_cache = bool(cached)
+        self.state.definition_id = None
+        new_id = self.resolved_definition_id(
+            expected_spec, canonical_name=canonical_name,
+        )
+        if had_stale_cache and new_id != cached:
+            # Surface the auto-recovery in the dashboard. ok=True
+            # because the recovery itself succeeded — the user just
+            # benefits from knowing why their data is now attached to
+            # a different def.
+            self.annotation(
+                f"Definition \"{canonical_name}\" re-resolved: "
+                f"previous {cached[:8]}… not present on this Fulcra "
+                f"account; now {new_id[:8]}…",
+                ok=True,
+            )
         return new_id

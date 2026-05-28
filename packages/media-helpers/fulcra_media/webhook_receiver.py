@@ -50,6 +50,12 @@ from .state import State
 PLEX_INGESTED_EVENTS = {"media.scrobble"}
 # Jellyfin's plugin emits the same shape with different event names.
 JELLYFIN_INGESTED_EVENTS = {"PlaybackStop"}
+# Hard cap on webhook request body. Plex's largest scrobble payloads
+# are ~16 KB (multipart with the rich metadata block); Jellyfin's
+# `PlaybackStop` is ~2 KB JSON. 1 MB is well above any legitimate
+# payload and prevents a single malicious request with an inflated
+# `Content-Length` from exhausting memory via `self.rfile.read(N)`.
+MAX_BODY_BYTES = 1 * 1024 * 1024
 # Threshold (fraction of runtime) for treating a Jellyfin PlaybackStop as
 # a genuine view; otherwise the user bailed early and we drop the event.
 JELLYFIN_VIEW_THRESHOLD = 0.75
@@ -401,6 +407,19 @@ class WebhookHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             self._send_json(400, {"ok": False, "error": "bad content-length"})
+            return
+        # Reject oversized requests BEFORE reading them. Without this cap a
+        # caller can send `Content-Length: 2147483648` and force a 2 GB
+        # `rfile.read`, exhausting the plugin's memory. The auth gate is
+        # in front of us, but Plex/Jellyfin auth tokens get exposed to
+        # the media server itself — a compromise there shouldn't take the
+        # daemon out.
+        if length > MAX_BODY_BYTES:
+            self._send_json(
+                413,
+                {"ok": False, "error": "payload too large",
+                 "limit": MAX_BODY_BYTES},
+            )
             return
         body = self.rfile.read(length) if length > 0 else b""
         content_type = self.headers.get("Content-Type") or ""
