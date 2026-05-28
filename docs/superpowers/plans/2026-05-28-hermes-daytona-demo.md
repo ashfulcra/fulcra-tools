@@ -19,6 +19,17 @@
 
 ---
 
+## ⚠️ SUPERSEDING NOTE (post-spike, authoritative)
+
+The Task 1 spike is complete and validated live. **`docs/superpowers/findings/2026-05-28-spike-findings.md` is the authoritative recipe and supersedes specific details below** wherever they differ. Key changes the spike locked in:
+
+- **Guest surface = the Hermes dashboard locked down by a Caddy reverse proxy** (NOT ttyd, NOT socat). The dashboard runs `HERMES_DASHBOARD_TUI=1 hermes dashboard --host 127.0.0.1 --port 9119 --no-open --insecure --skip-build`; Caddy on `:8080` proxies it with `Host`/`Origin` rewritten to localhost and 403s the dangerous `/api/*` endpoints. Exact Caddyfile is in the findings doc.
+- **Image adds:** `git build-essential python3-dev libffi-dev procps`, the **caddy** static binary, a **prebuild of the dashboard web** (`cd /usr/local/lib/hermes-agent/web && npm run build`) so runtime uses `--skip-build`, and the onboarding skill **copied** in via `git clone … && cp` into `/root/.hermes/skills/fulcra/fulcra-onboarding` (NOT `hermes skills install`).
+- **Assets:** ship a `Caddyfile` and a `start-chat.sh` (launch dashboard backgrounded + caddy foreground) instead of `start-dashboard.sh`/socat. `AGENTS.md` includes the reliable auth-capture command `timeout 12 uv tool run fulcra-api auth login 2>&1 || true`.
+- **Preview URL:** use `sb.create_signed_preview_url(8080, ttl)`.
+- **Pinned SDK facts:** `d.list()` is a generator; `sb.id`; `auto_stop_interval` in minutes; secrets via `env=` on `process.exec`; run servers as async session commands (no `nohup &`).
+- **Residual risk:** the agent can be asked to print its own `~/.hermes/.env`; use a disposable, low-cap OpenRouter key for real demos.
+
 ## File Structure
 
 ```
