@@ -66,8 +66,12 @@ the choice is legible to a future reader:
 ## Agent framework (context, already made)
 
 Hermes Agent (Nous Research). Chosen by the user. Runs on **OpenRouter**
-(one shared key for all sandboxes). Guest-facing surface is the **Hermes
-web dashboard / chat**, exposed via a signed Daytona preview URL.
+(one shared key for all sandboxes), using a **strong model** for reliable
+agentic skill-following and shell use. The exact model id is a config var
+(`OPENROUTER_MODEL`), defaulting to a strong current Claude model on
+OpenRouter so it can be swapped without rebuilding. Guest-facing surface
+is the **Hermes web dashboard / chat**, exposed via a signed Daytona
+preview URL.
 
 ## How Fulcra auth works (verified)
 
@@ -106,9 +110,10 @@ Contents:
   a **configurable reference** (`FULCRA_ONBOARDING_SKILL_REF`, default =
   the GitHub path above) so the skill can be swapped later **without
   rebuilding the snapshot**.
-- Hermes configured to **auto-start the onboarding flow on first load**:
-  on press-play the agent immediately begins setup, runs
-  `fulcra-api auth login`, and relays the URL + code into chat.
+- Hermes configured to **auto-launch the onboarding skill on first load**.
+  The skill itself greets the guest (we do not add a separate agent
+  greeting), then runs `fulcra-api auth login` and relays the auth URL +
+  device code into chat.
 
 The snapshot contains **no secrets** (no OpenRouter key, no Fulcra token).
 
@@ -121,8 +126,8 @@ The snapshot contains **no secrets** (no OpenRouter key, no Fulcra token).
 ### 3. Per-user launch flow (Daytona SDK scripts)
 
 - **`spawn.py <label>`** — creates an isolated sandbox from the snapshot,
-  sets `OPENROUTER_API_KEY`, sets a sensible `auto_stop_interval` for a
-  demo session, starts the Hermes web dashboard, and prints a **signed
+  sets `OPENROUTER_API_KEY`, sets `auto_stop_interval` to **30 minutes
+  idle**, starts the Hermes web dashboard, and prints a **signed
   preview URL** for the operator to hand to that guest.
 - **`teardown.py <id>`** — stops and deletes a sandbox.
 - **Operator runbook** — how to invite N people, what to send them, how to
