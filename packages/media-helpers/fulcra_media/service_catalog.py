@@ -1,6 +1,5 @@
 """Data-driven catalog of media services + their integration pathways.
 
-Sourced from research at docs/superpowers/research/2026-05-17-media-service-pathways.md.
 The `fulcra-media setup` wizard reads this catalog to drive its interactive
 picker — new services entered here automatically appear in setup.
 

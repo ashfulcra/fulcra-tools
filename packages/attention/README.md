@@ -36,8 +36,6 @@ Three-tier privacy posture (Tier 1 always-on, Tiers 2 + 3 user-driven from the e
 | **2 — Categorize** | Replace URL/title with category slug (e.g. `banking`) | Empty by default |
 | **3 — Ignore** | Drop event entirely | Empty by default |
 
-Design docs live at `docs/superpowers/specs/2026-05-18-fulcra-attention-v1-design.md` (mirrored from the sibling `FulcraMediaHelpers` repo).
-
 ## Multi-machine + multi-identity
 
 Each machine runs its own daemon, with its own extension pair token. The extension's user-managed ignore list propagates across Chrome profiles via Chrome sync (`chrome.storage.sync`).

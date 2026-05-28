@@ -23,8 +23,7 @@ _COLLECT_MODES = ("historical", "live_polled", "live_continuous")
 collect_mode="live_continuous" because the data flow is push-based via
 the browser extension. Per-plugin explicit declarations surface this at
 the metadata level so the menubar popover, Preferences chip, and any
-future web-UI consumer can all read the same source of truth. See
-docs/plans/2026-05-27-sp3-historical-live-framing-execution.md."""
+future web-UI consumer can all read the same source of truth."""
 
 
 @dataclass(frozen=True)

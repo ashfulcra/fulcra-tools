@@ -6,9 +6,6 @@ construction, and the single POST + retry policy. Importers build typed
 `IngestableEvent`s (one of `MomentEvent` / `DurationEvent`) and hand them to
 `IngestPipeline.ingest_batch`; the pipeline does the rest.
 
-See docs/plans/2026-05-26-refactor-3-execution.md for the scoping
-discussion that led to this module.
-
 Design note on the dedicated-field shape:
     The legacy ad-hoc sites each emitted a slightly different `data_inner`
     shape. Some fields (note, title, service, timestamp_confidence,

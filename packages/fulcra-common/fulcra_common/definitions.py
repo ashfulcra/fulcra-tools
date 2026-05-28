@@ -3,8 +3,7 @@ plugin.
 
 Multi-machine coherence works by adopting an existing Fulcra annotation
 definition with the same canonical name across machines, instead of
-each machine creating its own duplicate. See
-`docs/superpowers/specs/2026-05-23-fulcra-common-definition-resolver-design.md`.
+each machine creating its own duplicate.
 """
 from __future__ import annotations
 

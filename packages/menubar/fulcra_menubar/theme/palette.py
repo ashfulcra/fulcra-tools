@@ -3,9 +3,7 @@
 This module imports nothing macOS-specific. The PyObjC factories that
 turn these into NSColor objects live in theme.colors. The hex values
 are sampled from the brand reference materials and tuned to read on
-white per the spec — see
-`docs/superpowers/specs/2026-05-22-fulcra-collect-menubar-design.md`
-section "Visual design".
+white.
 """
 from __future__ import annotations
 

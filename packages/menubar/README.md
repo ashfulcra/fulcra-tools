@@ -1,8 +1,7 @@
 # fulcra-menubar
 
 macOS menubar UI for `fulcra-collect`. Python + PyObjC + rumps v1; a
-Swift rewrite follows once the UX is locked (see
-`docs/superpowers/specs/2026-05-22-fulcra-collect-menubar-design.md`).
+Swift rewrite follows once the UX is locked.
 
 > **First time here?** See [docs/TESTING.md](../../docs/TESTING.md) for
 > the end-to-end walkthrough: install, start the daemon, paste your

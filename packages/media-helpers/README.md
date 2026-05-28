@@ -115,11 +115,6 @@ uv run pytest                  # 415 tests as of this writing
 uv run fulcra-media --help
 ```
 
-Architecture docs:
-- `docs/superpowers/specs/2026-05-16-fulcra-media-helpers-design.md` — design
-- `docs/superpowers/research/2026-05-17-media-service-pathways.md` — landscape of media services
-- `docs/superpowers/plans/` — feature plans
-
 ## Status
 
 - 415 unit tests passing
