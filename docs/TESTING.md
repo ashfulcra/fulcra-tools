@@ -27,7 +27,7 @@ uv run pytest packages/ -q
 ## Step 1 — Clone and install
 
 ```bash
-git clone https://github.com/fulcradynamics/fulcra-tools.git
+git clone https://github.com/ashfulcra/fulcra-tools.git
 cd fulcra-tools
 uv sync
 ```
