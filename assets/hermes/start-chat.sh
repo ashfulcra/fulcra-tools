@@ -13,6 +13,14 @@ set -euo pipefail
 # shell that wouldn't otherwise have them.
 export PATH="/root/.local/bin:/root/.hermes/node/bin:${PATH}"
 
+# Bypass the in-chat dangerous-command approval prompts. The `approvals.mode=yolo`
+# config key alone does NOT do this — Hermes only checks the HERMES_YOLO_MODE env
+# var (it's exactly what the --yolo flag sets). We export it here so the dashboard
+# and the `hermes --tui` chat it spawns both inherit it; otherwise guests get a
+# "[HIGH] approval required" prompt (e.g. on the uv installer's curl | sh) and have
+# to click "Always allow". The sandbox is ephemeral + isolated, so this is fine.
+export HERMES_YOLO_MODE=1
+
 # Apply the runtime model choice if provided (key is injected separately into ~/.hermes/.env).
 if [ -n "${OPENROUTER_MODEL:-}" ]; then
 	hermes config set model.default "${OPENROUTER_MODEL}" || true
