@@ -3,6 +3,14 @@
 Live de-risking spike (Task 1). All run against the real Daytona account +
 OpenRouter key. Spike sandbox and `fhd-spike` snapshot were torn down after.
 
+## UPDATE (decision): guest surface = locked-down dashboard (validated)
+
+After this spike, the user chose to keep the prettier **Hermes dashboard** and
+lock it down with a reverse proxy rather than use ttyd. I validated that it
+works (see "Dashboard lockdown" section at the bottom). The ttyd notes below
+remain as the simpler fallback, but the **chosen and validated approach is the
+Caddy-fronted dashboard**.
+
 ## TL;DR — it works, with two design changes from the approved spec
 
 The full guest flow was validated end-to-end in a browser: a guest opens a
@@ -132,3 +140,79 @@ code, then poll `uv tool run fulcra-api user-info` until it succeeds.
   AGENTS.md gains the reliable auth-capture command.
 - Spawn (Task 6): inject `OPENROUTER_API_KEY` into `~/.hermes/.env`, start
   `start-chat.sh`, return `create_signed_preview_url(8080, ttl)`.
+
+---
+
+## Dashboard lockdown (CHOSEN approach — validated end-to-end)
+
+Goal: keep the Hermes web dashboard's nicer Chat UI but prevent guests from
+reading/changing our OpenRouter key or running admin actions. Achieved with a
+Caddy reverse proxy that default-proxies the SPA + chat but 403s the dangerous
+`/api/*` endpoints. **Validated:** sent "Reply with exactly one word: working"
+in the browser → agent replied "working", MODEL shows "live".
+
+### Run recipe (per sandbox)
+
+1. Dashboard, localhost-only, chat enabled, gate-bypassed:
+   `HERMES_DASHBOARD_TUI=1 hermes dashboard --host 127.0.0.1 --port 9119 --no-open --insecure`
+   - `--insecure` is REQUIRED: without it the chat shows "[session ended]" /
+     "events feed disconnected" and MODEL stays "closed". With it (and still
+     bound to 127.0.0.1, only reachable via the proxy) the PTY chat goes live.
+   - `HERMES_DASHBOARD_TUI=1` (or `--tui`) is REQUIRED to expose the Chat tab.
+   - First launch runs a ~15s vite build into `web_dist`; prebuild during image
+     build (`cd /usr/local/lib/hermes-agent/web && npm run build`) then use
+     `--skip-build` for instant per-sandbox starts.
+2. Caddy on :8080 → 127.0.0.1:9119, denylist + Host/Origin rewrite (Caddyfile):
+
+   ```
+   :8080 {
+       @blocked {
+           path /api/env /api/env/* /api/config /api/config/* /api/cron /api/cron/* \
+                /api/providers /api/providers/* /api/dashboard/agent-plugins/* \
+                /api/profiles /api/profiles/* /api/skills/toggle /api/model/set \
+                /api/gateway/* /api/hermes/* /api/logs /api/logs/*
+       }
+       handle @blocked { respond "This demo only exposes the chat." 403 }
+       handle {
+           reverse_proxy 127.0.0.1:9119 {
+               header_up Host 127.0.0.1:9119
+               header_up Origin http://127.0.0.1:9119
+           }
+       }
+   }
+   ```
+3. `sb.create_signed_preview_url(8080, ttl)` → hand the URL to the guest.
+
+### Verified endpoint behavior through Caddy
+
+- `/chat`, `/keys`, `/` (SPA routes) → 200 (serve index.html; SPA routing works)
+- `/api/status`, `/api/model/info` → 200 (chat needs these)
+- `/api/env`, `POST /api/env/reveal`, `/api/config`, `/api/cron/jobs`,
+  `POST /api/model/set`, `POST /api/gateway/restart`,
+  `POST /api/dashboard/agent-plugins/install` → **403** (sealed)
+- In the browser: KEYS tab renders blank (its `/api/env` is 403); CHAT works.
+- `/api/auth/me` returns 401 even on direct localhost — that's the normal
+  "no OAuth identity" state, NOT a blocker; the PTY chat works anyway with
+  `--insecure`.
+
+### IMPORTANT residual risk (applies to ANY chat-with-shell-agent surface)
+
+The guest is talking to an agent that has a terminal tool and the OpenRouter key
+in its environment / `~/.hermes/.env`. A guest could simply ask the agent to
+print `~/.hermes/.env` or `echo $OPENROUTER_API_KEY` and the agent may comply.
+Locking the dashboard KEYS tab does NOT prevent this (and neither would ttyd).
+**Mitigation (required for the demo):** use a dedicated, low-credit-cap,
+disposable OpenRouter key, and rotate it after demos. Optionally add an agent
+instruction to refuse to reveal secrets, but treat that as soft defense only.
+
+### Net effect on the plan (supersedes the ttyd plan above)
+
+- Image (Task 4): also install **caddy** (static binary, validated v2.11.3) and
+  **prebuild the dashboard web** (`npm run build`) so runtime uses `--skip-build`.
+- Assets (Task 3): ship a **Caddyfile** (above) and a **start-chat.sh** that
+  launches the dashboard (`--insecure --tui --skip-build`, localhost) and caddy
+  (foreground), instead of ttyd/socat.
+- Spawn (Task 6): inject `OPENROUTER_API_KEY` into `~/.hermes/.env`, run
+  start-chat.sh, return `create_signed_preview_url(8080, ttl)`.
+- Snapshot `fhd-dash-spike` (hermes+caddy+fulcra-api+skill baked) was kept for
+  reuse; the real build target is `fhd-hermes-demo`.
