@@ -878,6 +878,35 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.dpForceNew = true;
           this.nextBlocked = false;
         }
+        // QA finding #2 — on a Reconfigure walk (SP6) the user expects
+        // the picker to already know which definition this plugin is
+        // currently bound to. Without pre-selection they have to
+        // remember which one they picked weeks ago. /api/status carries
+        // the per-plugin definition_id; if it matches a def we just
+        // loaded (in either bucket), pre-select it. Failure is silent —
+        // worst case the user picks again, same as before this fix.
+        try {
+          const status = await api("/api/status");
+          const me = (status.plugins || []).find(p => p.id === this.plugin_id);
+          const currentDefId = me?.definition_id;
+          if (currentDefId) {
+            const inMain = this.dpDefinitions.some(d => d.id === currentDefId);
+            const inOther = this.dpOtherDefinitions.some(d => d.id === currentDefId);
+            if (inMain || inOther) {
+              this.dpSelectedId = currentDefId;
+              this.nextBlocked = false;
+              if (inOther && !this.dpShowOther) {
+                // The current binding lives in the other-type bucket
+                // (rare — would mean the user picked a non-canonical
+                // annotation_type last time). Open the bucket so the
+                // selection is visible without an extra click.
+                this.dpShowOther = true;
+              }
+            }
+          }
+        } catch (e) {
+          // Non-fatal: leave dpSelectedId as null, same as pre-fix.
+        }
       } catch (e) {
         this.dpError = e.message;
       } finally {
