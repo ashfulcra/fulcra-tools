@@ -46,8 +46,10 @@ def build_image_commands() -> list[str]:
         SKILL_CLONE,
         # Pre-set OpenRouter provider + model (the API key is injected at spawn, not here).
         "hermes config set model.provider openrouter && hermes config set model.default anthropic/claude-sonnet-4.5",
-        # Prebuild the dashboard web bundle so runtime can use --skip-build (fast spawn).
-        "cd /usr/local/lib/hermes-agent/web && npm run build",
+        # NOTE: we do NOT prebuild the dashboard web bundle here. `npm run build`
+        # needs dev deps (tsc) the pip install doesn't provide; `hermes dashboard`
+        # builds the bundle itself on first launch (~15s, covered by start-chat.sh's
+        # health-poll). So start-chat.sh deliberately does NOT pass --skip-build.
         # Staging dir for our assets.
         "mkdir -p /opt/fhd",
     ]

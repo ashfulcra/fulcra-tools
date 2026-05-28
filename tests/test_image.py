@@ -8,7 +8,6 @@ def test_image_installs_required_stack():
     assert "--skip-browser --skip-setup" in joined
     assert "caddy" in joined
     assert "agent-skills/skills/fulcra-onboarding" in joined
-    assert "npm run build" in joined
     assert "git" in joined and "procps" in joined
 
 def test_image_presets_openrouter():
