@@ -34,8 +34,6 @@ To live-edit: just save files in `dist/`. Reload the browser.
 - Step rendering itself lives in Lit web components under
   `dist/static/components/` — see [Setup-step component model](#setup-step-component-model)
   below.
-- All HTTP routes documented in
-  `docs/superpowers/specs/2026-05-24-fulcra-collect-web-ui-design.md`.
 
 ## URL-param deep-links
 

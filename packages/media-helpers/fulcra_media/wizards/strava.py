@@ -77,9 +77,7 @@ Strava setup
   Advanced (out of scope for this CLI):
   - Strava supports webhook subscriptions for real-time push when activities
     are created/updated. Wiring a webhook receiver into Fulcra would replace
-    polling entirely; that path is documented in
-    docs/superpowers/research/2026-05-17-media-service-pathways.md
-    but not yet implemented here.
+    polling entirely, but that path is not yet implemented here.
 """
 
 
