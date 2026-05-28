@@ -95,13 +95,22 @@ uv run python -m fhd.teardown --all      # delete every guest sandbox
   before the app. It's removable org-wide in Daytona settings
   (`daytona.io/docs/en/preview-and-authentication`) for a cleaner demo.
 
-## Swapping the onboarding skill
+## The onboarding skill (fetched on boot)
 
-The skill is copied into the image from
-`github.com/fulcradynamics/agent-skills` (path `skills/fulcra-onboarding`). To
-change it, edit the clone/copy step in `src/fhd/image.py` and rebuild the
-snapshot. The agent is told to run it on first message via
-`assets/hermes/SOUL.md` and `assets/hermes/AGENTS.md`.
+Each sandbox **pulls the latest `fulcra-onboarding` skill from GitHub at
+startup** (`assets/hermes/start-chat.sh`), so updating the skill on
+`github.com/fulcradynamics/agent-skills` propagates to every newly spawned
+sandbox **with no rebuild**. The image also bakes a copy, which is used as a
+fallback if the boot-time fetch fails (GitHub unreachable, bad branch, etc.).
+
+- Source is overridable per spawn via env: `FULCRA_SKILL_REPO` (default
+  `https://github.com/fulcradynamics/agent-skills`) and `FULCRA_SKILL_SUBPATH`
+  (default `skills/fulcra-onboarding`).
+- A bad commit on the skill's default branch *will* reach live demos — that's the
+  trade-off of fetch-on-boot. If you need to freeze a known-good version, point
+  `FULCRA_SKILL_REPO` at a fork/tag or switch back to baking a pinned copy.
+- The agent is told to run the skill on the first message via
+  `assets/hermes/SOUL.md` and `assets/hermes/AGENTS.md`.
 
 ## Layout
 
