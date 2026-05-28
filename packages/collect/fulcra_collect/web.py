@@ -42,16 +42,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
 from . import config as _config
-# Re-export Pydantic body models from their new home for any out-of-tree
-# callers that imported them from web.py directly.
-from .routes._deps import (  # noqa: F401
-    DefinitionBindBody,
-    FulcraTokenBody,
-    QuickRecordFavoritesBody,
-    RecordAnnotationBody,
-    RouteContext,
-    SecretBody,
-)
+# RouteContext is used directly below in build_app(); the Pydantic body
+# models (DefinitionBindBody, FulcraTokenBody, etc.) used to be re-exported
+# here for back-compat but had no remaining importers — route modules
+# import them straight from `routes._deps`. Test code that monkeypatches
+# RouteContext for refresh-flow assertions targets `_deps.RouteContext`
+# and this `web.RouteContext`; keep the import so both stay live.
+from .routes._deps import RouteContext
 
 
 def _web_token_path() -> Path:
@@ -293,7 +290,6 @@ def build_app(daemon) -> FastAPI:
 
     ctx = RouteContext(
         daemon=daemon,
-        token=token,
         require_token=require_token,
         require_plugin=require_plugin,
         fulcra_token_or_401=fulcra_token_or_401,

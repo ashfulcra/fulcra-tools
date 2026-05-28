@@ -68,7 +68,6 @@ class RouteContext:
     locals.
     """
     daemon: "Daemon"
-    token: str  # the web's bearer token (used by the require_token closure)
     require_token: Callable[..., None]
     require_plugin: Callable[[str], None]
     fulcra_token_or_401: Callable[[], str]
