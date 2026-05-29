@@ -76,7 +76,7 @@ def _in_memory_keyring(monkeypatch):
     return store
 
 # The shared fake-httpx seam (FakeHttpxClient / install_fake_httpx) lives in
-# the sibling module ``_fake_httpx.py``, NOT here: a bare ``from conftest
-# import ...`` resolves ambiguously across the monorepo's per-package
+# the sibling module ``collect_test_helpers.py``, NOT here: a bare ``from
+# conftest import ...`` resolves ambiguously across the monorepo's per-package
 # conftest files and broke the whole-repo test run. test_daemon.py and
-# test_web.py import it from there.
+# test_web.py import it from there (the dir is on the root pytest pythonpath).
