@@ -125,9 +125,11 @@ src/fhd/
 assets/
   hermes/             # SOUL.md, AGENTS.md, start-chat.sh (dashboard + Caddy boot)
   caddy/Caddyfile     # the lockdown reverse proxy
-docs/superpowers/     # spec, plan, and the live-spike findings
+docs/ARCHITECTURE.md  # how it works + the non-obvious design decisions
 ```
 
-See `docs/superpowers/findings/2026-05-28-spike-findings.md` for the validated
-recipe and the gotchas discovered while building this (dashboard auth, the
-skill-install scanner, node PATH, the approval gate).
+**Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** for how it works end to
+end and *why* — the dashboard lockdown, the `HERMES_YOLO_MODE` approval bypass,
+fetch-on-boot skills, the node-PATH and web-build gotchas, and the security/cost
+model. `docs/superpowers/` (if present) holds the original spec, plan, and
+live-spike findings.
