@@ -56,7 +56,7 @@ class PopoverRoot:
         model: StatusModel,
         client,
         *,
-        on_preferences: Optional[Callable[[], None]] = None,
+        on_preferences: Optional[Callable[[str | None], None]] = None,
         on_quit: Optional[Callable[[], None]] = None,
         notify: Optional[Callable[[str, str], None]] = None,
         status_item: Optional[object] = None,

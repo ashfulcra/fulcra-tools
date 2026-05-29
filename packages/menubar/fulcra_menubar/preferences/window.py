@@ -29,6 +29,24 @@ from ..notifications import NotificationCentre
 WIDTH = 640.0
 HEIGHT = 480.0
 
+# Tab name -> NSTabView index, in the exact order tabs are added below.
+# Used by the "open Preferences to Annotations" deep link from the popover.
+_TAB_INDEX = {"plugins": 0, "annotations": 1, "notifications": 2, "about": 3}
+
+
+def tab_index(name: str | None) -> int | None:
+    """Return the NSTabView index for a tab name, or None for unknown/None.
+
+    The map is anchored to the add-order in ``make_preferences_controller``
+    (Plugins=0, Annotations=1, Notifications=2, About=3).  Callers that need
+    to jump straight to a specific tab (e.g. the popover's 'Choose tracks to
+    pin…' CTA) use this rather than hard-coding a raw integer so a future
+    re-order only requires updating ``_TAB_INDEX`` and this function.
+    """
+    if name is None:
+        return None
+    return _TAB_INDEX.get(name)
+
 
 class PreferencesController(NSWindowController):
     """NSWindowController subclass for the Preferences window.
@@ -38,6 +56,18 @@ class PreferencesController(NSWindowController):
     looked up via the ObjC runtime.  Construction helpers live at module scope
     instead (see ``make_preferences_controller``).
     """
+
+    def select_tab(self, name):
+        """Select the tab with the given name (no-op for unknown/None).
+
+        The ``_tabs`` attribute is set by ``make_preferences_controller``
+        after the NSTabView is fully configured.  The ``getattr`` guard is
+        defensive — if somehow select_tab is called before ``_tabs`` is
+        attached (shouldn't happen in practice) the call silently does nothing.
+        """
+        idx = tab_index(name)
+        if idx is not None and getattr(self, "_tabs", None) is not None:
+            self._tabs.selectTabViewItemAtIndex_(idx)
 
 
 def make_preferences_controller(
@@ -86,4 +116,5 @@ def make_preferences_controller(
     window.contentView().addSubview_(tabs)
 
     controller = PreferencesController.alloc().initWithWindow_(window)
+    controller._tabs = tabs  # plain attribute; used by select_tab
     return controller

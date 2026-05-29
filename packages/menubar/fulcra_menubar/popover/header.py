@@ -27,7 +27,7 @@ _STATE_LABEL = {
 def make_header(
     model: StatusModel,
     *,
-    on_preferences: Optional[Callable[[], None]] = None,
+    on_preferences: Optional[Callable[[str | None], None]] = None,
 ) -> NSView:
     """Build the popover header view.
 
