@@ -71,6 +71,23 @@ def make_header(
     view.addSubview_(subtitle)
     view.addSubview_(pill)
 
+    # The pill is a plain label; overlay a transparent button at the same
+    # frame so the whole "● N failing" area is clickable and opens the web
+    # dashboard (which lists every plugin + health — where you go to deal
+    # with failing collectors). Clickable in all states; opening the
+    # dashboard is always reasonable. daemon_url honours the [daemon]
+    # web_port override.
+    pill_btn = NSButton.alloc().initWithFrame_(NSMakeRect(220, 28, 100, 22))
+    pill_btn.setTitle_("")
+    pill_btn.setBordered_(False)
+    pill_btn.setTransparent_(True)  # invisible; pill label shows through
+    pill_btn.setToolTip_("Open the dashboard")
+
+    def _open_dashboard(_sender):
+        subprocess.run(["open", daemon_url("/")], check=False)
+    _attach(pill_btn, _open_dashboard)
+    view.addSubview_(pill_btn)
+
     # "?" docs button — opens the daemon's in-app docs page in the system
     # browser. Added in SP4 (drift audit 2026-05-27) so users can reach the
     # data-sources docs without context-switching to the dashboard.
