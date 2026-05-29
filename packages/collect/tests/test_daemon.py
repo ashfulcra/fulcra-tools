@@ -556,6 +556,50 @@ def _make_fake_client_factory(client_obj):
     return _Cls
 
 
+def _install_fake_httpx(monkeypatch, client_obj):
+    """Substitute ``client_obj`` for ``httpx.Client`` on BOTH the daemon and
+    the web module seams, with non-``Client`` attributes falling through to
+    the real ``httpx``.
+
+    Why both seams: the Fulcra-touching daemon methods (``_quick_record_list``,
+    ``_record_annotation``, ``_delete_definition``) route their requests
+    through ``web._RetryingClient`` (SP5's refresh-on-401 wrapper), which
+    resolves ``httpx`` via ``fulcra_collect.web.httpx`` — NOT the daemon's own
+    top-level ``httpx`` import. A test that patched only ``daemon.httpx`` left
+    ``web.httpx`` pointing at the real library: with credentials mocked to a
+    dummy token the inner client 401'd, ``_RetryingClient`` refreshed via the
+    live ``fulcra`` CLI, and the retry returned the developer's REAL account
+    definitions. That broke data-specific assertions AND silently exercised
+    the production API from the unit suite. Patching both seams keeps the fake
+    in force wherever the call routes.
+
+    Why fall-through: ``_delete_definition`` catches ``_web.httpx.HTTPStatusError``
+    / ``ConnectError`` / ``ConnectTimeout`` / ``TimeoutException``. Those except
+    clauses evaluate the attribute on the patched module, so the fake must
+    expose the real exception classes or the handler itself raises
+    ``AttributeError``.
+    """
+    import httpx as _real_httpx
+    import fulcra_collect.daemon as daemon_mod
+    import fulcra_collect.web as web_mod
+
+    factory = _make_fake_client_factory(client_obj)
+
+    class _FakeHttpx:
+        # A class assigned as a class attribute is not a descriptor, so
+        # ``fake.Client`` returns the factory class itself (no method binding)
+        # — exactly what ``httpx.Client(...)`` call sites expect.
+        Client = factory
+
+        def __getattr__(self, name):
+            return getattr(_real_httpx, name)
+
+    fake = _FakeHttpx()
+    monkeypatch.setattr(daemon_mod, "httpx", fake)
+    monkeypatch.setattr(web_mod, "httpx", fake)
+    return fake
+
+
 def test_quick_record_list_returns_empty_when_unauthenticated(collect_home, monkeypatch):
     """quick_record_list returns ok=False with empty list when no bearer token."""
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: None)
@@ -570,8 +614,6 @@ def test_quick_record_list_happy_path(collect_home, monkeypatch):
     """quick_record_list returns ALL non-deleted defs (Sprint B widened
     this from Moment-only); excludes soft-deleted; caps at 40; sorted with
     moments first, then durations, then anything else."""
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     defs = [
@@ -588,8 +630,7 @@ def test_quick_record_list_happy_path(collect_home, monkeypatch):
     ]
 
     fake_client = _FakeHttpxClient(get_data=defs)
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (), {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -612,8 +653,6 @@ def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatc
     """Sprint B: a mixed payload with moment + duration + other types
     must all come back so the menubar can render them in grouped sections.
     """
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
 
@@ -626,9 +665,7 @@ def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatc
          "deleted_at": None, "created_at": "2026-05-10T00:00:00Z"},
     ]
     fake_client = _FakeHttpxClient(get_data=defs)
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -640,16 +677,13 @@ def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatc
 
 def test_quick_record_list_caches_result(collect_home, monkeypatch):
     """Second call within 60s returns cached result without hitting the API."""
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     fake_client = _FakeHttpxClient(get_data=[
         {"id": "m1", "name": "Coffee", "annotation_type": "moment",
          "deleted_at": None, "created_at": "2026-05-01T00:00:00Z"},
     ])
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (), {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     r1 = d._quick_record_list()
@@ -665,8 +699,6 @@ def test_quick_record_list_caches_result(collect_home, monkeypatch):
 
 def test_quick_record_list_api_error_returns_graceful_response(collect_home, monkeypatch):
     """quick_record_list returns ok=False with empty list on API failure."""
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     class _ErrorClient:
@@ -674,8 +706,7 @@ def test_quick_record_list_api_error_returns_graceful_response(collect_home, mon
         def __exit__(self, *a): pass
         def get(self, *a, **kw): raise RuntimeError("network failure")
 
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (), {"Client": lambda timeout=None: _ErrorClient()})())
+    _install_fake_httpx(monkeypatch, _ErrorClient())
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -709,8 +740,6 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
     URL, the JSONL content-type, and that the def's tags propagate into
     the wire record's metadata.
     """
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     # The GET to /user/v1alpha1/annotation returns one matching def so the
@@ -725,8 +754,7 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
             "created_at": "2026-05-25T00:00:00Z",
         },
     ])
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (), {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-abcdef12", "hello from the test")
@@ -778,14 +806,11 @@ def test_record_annotation_rejects_unknown_definition_id(collect_home, monkeypat
     POSTing anything to Fulcra — much friendlier than a silent 404 or a
     foreign-key error from the ingest endpoint.
     """
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     # GET returns an empty def list — the lookup will miss.
     fake_client = _FakeHttpxClient(get_data=[])
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (), {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-nonexistent", None)
@@ -799,8 +824,6 @@ def test_record_annotation_rejects_unknown_definition_id(collect_home, monkeypat
 
 def test_record_annotation_api_error_surfaces_activity_failure(collect_home, monkeypatch):
     """record_annotation records a failure entry in the activity buffer on API error."""
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     class _GetOkPostErrorClient:
@@ -820,8 +843,7 @@ def test_record_annotation_api_error_surfaces_activity_failure(collect_home, mon
             raise RuntimeError("connection refused")
 
     fake_client = _GetOkPostErrorClient()
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (), {"Client": lambda *a, **kw: fake_client})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-xyz", None)
@@ -845,8 +867,6 @@ def test_record_annotation_duration_writes_duration_record(
     duration_seconds in the data payload.
     """
     import json
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
 
@@ -855,9 +875,7 @@ def test_record_annotation_duration_writes_duration_record(
          "annotation_type": "duration", "tags": ["t-movie"],
          "created_at": "2026-05-25T00:00:00Z"},
     ])
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation(
@@ -895,8 +913,6 @@ def test_record_annotation_moment_fallback_when_no_times(
     is preserved — the daemon writes a MomentAnnotation with a scalar
     recorded_at."""
     import json
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
     fake_client = _FakeHttpxClient(get_data=[
@@ -904,9 +920,7 @@ def test_record_annotation_moment_fallback_when_no_times(
          "annotation_type": "moment", "tags": [],
          "created_at": "2026-05-25T00:00:00Z"},
     ])
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-mom1", None)
@@ -956,14 +970,10 @@ def test_delete_annotation_writes_tombstone(collect_home, monkeypatch):
     primitive); the original record stays on the user's timeline.
     """
     import json
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
     fake_client = _FakeHttpxClient(get_data=[])
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d.handle_request({
@@ -1113,7 +1123,6 @@ def test_quick_record_list_pinned_defs_sort_first(collect_home, monkeypatch):
     """When favorites are set, pinned defs come first within each
     annotation_type group AND each def gets a ``pinned: bool`` field
     so the menubar can colour the star icon without a second lookup."""
-    import fulcra_collect.daemon as daemon_mod
     from fulcra_collect import quick_record_favorites as _favs
 
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
@@ -1132,9 +1141,7 @@ def test_quick_record_list_pinned_defs_sort_first(collect_home, monkeypatch):
          "deleted_at": None, "created_at": "2026-04-30T00:00:00Z"},
     ]
     fake_client = _FakeHttpxClient(get_data=defs)
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     # Pin one moment and one duration. Within the moment group, m-3 has
     # the OLDEST created_at — proves favorites override the recency sort.
@@ -1162,8 +1169,6 @@ def test_quick_record_list_no_favorites_keeps_legacy_40_cap(
     so users who never touched the pin UI see the same surface they
     always did. (The cap is the only behavior that diverges between
     "no favorites" and "any favorites" states.)"""
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
 
@@ -1174,9 +1179,7 @@ def test_quick_record_list_no_favorites_keeps_legacy_40_cap(
         for i in range(60)
     ]
     fake_client = _FakeHttpxClient(get_data=defs)
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -1193,7 +1196,6 @@ def test_quick_record_list_with_favorites_keeps_all_pinned_plus_20(
     """When favorites ARE set, ALL pinned defs come through (even past
     40) plus up to 20 unpinned — the "show all" disclosure footer in
     the popover needs both halves."""
-    import fulcra_collect.daemon as daemon_mod
     from fulcra_collect import quick_record_favorites as _favs
 
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
@@ -1215,9 +1217,7 @@ def test_quick_record_list_with_favorites_keeps_all_pinned_plus_20(
                      "created_at": f"2026-04-{(i % 28) + 1:02d}T00:00:00Z"})
 
     fake_client = _FakeHttpxClient(get_data=defs)
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     _favs.save({f"p-{i}" for i in range(5)})
 
@@ -1261,8 +1261,6 @@ def test_set_quick_record_favorites_invalidates_cache(
     quick-record cache so the next _quick_record_list call re-sorts
     against the freshly-written favorites file — without this, the
     menubar would keep showing the old order for up to 60s."""
-    import fulcra_collect.daemon as daemon_mod
-
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
 
@@ -1273,9 +1271,7 @@ def test_set_quick_record_favorites_invalidates_cache(
          "deleted_at": None, "created_at": "2026-05-20T00:00:00Z"},
     ]
     fake_client = _FakeHttpxClient(get_data=defs)
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (),
-                             {"Client": _make_fake_client_factory(fake_client)})())
+    _install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
 
