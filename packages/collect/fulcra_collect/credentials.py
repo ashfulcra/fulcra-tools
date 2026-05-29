@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from threading import Lock
 
 import keyring
@@ -18,6 +19,55 @@ import keyring.errors
 _SERVICE_PREFIX = "fulcra-collect"
 
 _log = logging.getLogger("fulcra_collect.credentials")
+
+# How long to wait on a single keychain read before treating the item as
+# absent. The happy-path read returns in well under a millisecond; this only
+# fires when the read is blocked (see _keyring_get).
+_KEYCHAIN_READ_TIMEOUT_S = 3.0
+
+
+def _keyring_get(service: str, account: str,
+                 *, timeout: float = _KEYCHAIN_READ_TIMEOUT_S) -> str | None:
+    """Read a keychain item without ever blocking the caller indefinitely.
+
+    macOS Security.framework reads block on an ACL-confirmation dialog
+    ("<app> wants to use a key in your keychain") whenever the accessing
+    binary's identity no longer matches the item's ACL — which happens after
+    a reinstall or a re-signed bundle. The daemon's control server is
+    single-threaded, so ONE blocked read wedges every request (status,
+    quick-record, credential checks) and the menubar shows "daemon not
+    reachable". Run the read on a worker thread and give up after ``timeout``,
+    returning None so the daemon degrades to "not authenticated" (the SP5
+    Reconnect banner already covers that state) instead of hanging.
+
+    The abandoned worker stays parked on the OS call until the dialog is
+    dismissed — a bounded one-thread-per-timeout leak, far better than a dead
+    daemon. A keychain that isn't prompting returns near-instantly, so the
+    timeout never fires on the happy path.
+    """
+    result: dict = {}
+
+    def _run() -> None:
+        try:
+            result["value"] = keyring.get_password(service, account)
+        except Exception as exc:  # noqa: BLE001 — re-raised on the caller thread
+            result["error"] = exc
+
+    t = threading.Thread(target=_run, daemon=True, name="keyring-read")
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        _log.warning(
+            "keyring read for %s/%s timed out after %.1fs — treating the item "
+            "as absent. The keychain is most likely waiting on an unanswered "
+            "access-confirmation prompt; re-sign-in (or click 'Always Allow' "
+            "on the prompt) to restore access.",
+            service, account, timeout,
+        )
+        return None
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 def _service(plugin_id: str) -> str:
@@ -29,7 +79,7 @@ def set_secret(plugin_id: str, key: str, value: str) -> None:
 
 
 def get_secret(plugin_id: str, key: str) -> str | None:
-    return keyring.get_password(_service(plugin_id), key)
+    return _keyring_get(_service(plugin_id), key)
 
 
 def delete_secret(plugin_id: str, key: str) -> None:
@@ -63,7 +113,7 @@ def set_user_secret(key: str, value: str) -> None:
 
 
 def get_user_secret(key: str) -> str | None:
-    return keyring.get_password(_USER_SERVICE, key)
+    return _keyring_get(_USER_SERVICE, key)
 
 
 def has_user_secret(key: str) -> bool:
