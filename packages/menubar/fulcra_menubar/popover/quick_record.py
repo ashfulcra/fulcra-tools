@@ -28,12 +28,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSApp, NSButton, NSBezelStyleRounded, NSColor,
-    NSMenu, NSMenuItem, NSScrollView,
+    NSButton, NSBezelStyleRounded, NSColor,
+    NSScrollView,
     NSTextField, NSView, NSMakeRect,
 )
 
-from .._definition_delete import show_delete_alert
 from .._humanize import parse_duration_seconds
 from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
@@ -85,40 +84,6 @@ def quick_record_view_state(all_defs: list[dict]) -> tuple[list[dict], str]:
     if not pinned:
         return [], "none_pinned"
     return pinned, "list"
-
-
-def _attach_more_menu(more_btn: NSButton,
-                      def_id: str, def_name: str,
-                      client: DaemonClient,
-                      on_after_delete: Callable[[], None]) -> None:
-    """Wire a "…" button to pop up an NSMenu with "Delete this track…".
-
-    Factored out of _make_moment_row / _make_duration_row so both share
-    the menu shape exactly — adding a second item (e.g. "Edit name") in
-    the future is a one-line change in one place. The on_after_delete
-    callback typically removes the row from its superview and asks the
-    popover to rebuild; we run it inside the show_delete_alert path so
-    a cancelled or failed delete leaves the row untouched.
-    """
-    def _on_more(sender):
-        menu = NSMenu.alloc().init()
-        # Empty action+keyEq makes the item inert until we _attach to it.
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Delete this track…", None, "",
-        )
-
-        def _delete_handler(_):
-            show_delete_alert(def_id, def_name, client,
-                              on_done=on_after_delete)
-        _attach(item, _delete_handler)
-        menu.addItem_(item)
-        # popUpContextMenu_withEvent_forView_ requires a current NSEvent;
-        # NSApp.currentEvent() is the click event that fired the action.
-        NSMenu.popUpContextMenu_withEvent_forView_(
-            menu, NSApp.currentEvent(), sender,
-        )
-
-    _attach(more_btn, _on_more)
 
 
 def make_quick_record_view(
@@ -434,8 +399,6 @@ def make_quick_record_view(
                     on_record_inline=_record_inline_duration,
                     on_toggle_favorite=lambda did, pinned, _ad=all_defs:
                         _toggle_favorite(did, pinned, _ad),
-                    client=client,
-                    on_after_delete=lambda: rebuild_ref["fn"](),
                 )
                 row.setFrame_(NSMakeRect(0, y, width, DURATION_ROW_H))
                 content.addSubview_(row)
@@ -446,8 +409,6 @@ def make_quick_record_view(
                     on_record=_record_moment,
                     on_toggle_favorite=lambda did, pinned, _ad=all_defs:
                         _toggle_favorite(did, pinned, _ad),
-                    client=client,
-                    on_after_delete=lambda: rebuild_ref["fn"](),
                 )
                 row.setFrame_(NSMakeRect(0, y, width, MOMENT_ROW_H))
                 content.addSubview_(row)
@@ -609,23 +570,14 @@ def _make_moment_row(
     *,
     on_record: Callable[[str, str, str], None],
     on_toggle_favorite: Callable[[str, bool], None] | None = None,
-    client: DaemonClient | None = None,
-    on_after_delete: Callable[[], None] | None = None,
 ) -> NSView:
-    """One Moment row: star + name + comment input + Record button + "…".
+    """One Moment row: star + name + comment input + Record button.
 
     The star button is rendered on the LEFT before the name. Empty
     star (☆) when not pinned → click adds to favorites; filled star
     (★) when pinned → click removes. Pinned rows also get a faint
     violet tint background so the pin state is visible at a glance
     without parsing the icon.
-
-    The trailing "…" button (SP2 task 4) opens a per-row NSMenu whose
-    only current item is "Delete this track…" — the one-off path for
-    "I made this by accident" without leaving the popover for
-    Preferences. ``client`` + ``on_after_delete`` are both required
-    for the "…" to be rendered; if either is None we omit it (which
-    keeps this builder testable without an AppKit-attached daemon).
     """
     row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
     row.setWantsLayer_(True)
@@ -642,22 +594,16 @@ def _make_moment_row(
     def_id = definition.get("id", "")
     def_name = definition.get("name", "(unnamed)")
 
-    # Layout: star + name on the left, then comment field, "…" menu,
-    # then Record button.
-    #
-    # COMMENT_W was 140 pre-SP2; we shrank it 44pt to make room for the
-    # new "…" per-row menu (SP2 task 4) without colliding with Record.
+    # Layout: star + name on the left, then comment field, then Record button.
     # With width=360 the slots end up as:
     #   star      12 .. 34   (22pt)
     #   name      38 .. 130  (92pt)
-    #   comment   138 .. 234 (96pt)  ← was 138..278, lost 44pt to "…"
-    #   "…"       242 .. 262 (20pt)  ← 8pt gap to comment, 10pt to Record
-    #   Record    272 .. 348 (76pt)  ← unchanged
+    #   comment   138 .. 278 (140pt)
+    #   Record    288 .. 348 (60pt, gap 10pt)
     STAR_W = 22.0
     NAME_W = 92.0
-    COMMENT_W = 96.0
+    COMMENT_W = 140.0
     BUTTON_W = 76.0
-    MORE_W = 20.0
 
     star_btn = _make_star_button(
         pinned=pinned, height=height,
@@ -699,23 +645,6 @@ def _make_moment_row(
 
     _attach(btn, _on_click)
     row.addSubview_(btn)
-
-    # "…" per-row menu (SP2 task 4) — gateway to row-level actions
-    # (currently only "Delete this track…"; can grow). Gives users the
-    # one-off "I made this by accident" path without leaving the popover.
-    # Sits between the comment field and the Record button: 8pt gap to
-    # comment on the left, 10pt to Record on the right.
-    if client is not None and on_after_delete is not None and def_id:
-        more_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(width - BUTTON_W - 12 - 10 - MORE_W,
-                       (height - 22) / 2, MORE_W, 22)
-        )
-        more_btn.setTitle_("…")
-        more_btn.setBezelStyle_(NSBezelStyleRounded)
-        more_btn.setToolTip_("More actions for this annotation")
-        _attach_more_menu(more_btn, def_id, def_name,
-                          client, on_after_delete)
-        row.addSubview_(more_btn)
     return row
 
 
@@ -729,24 +658,15 @@ def _make_duration_row(
     on_stop_timer: Callable[[str, str], None],
     on_record_inline: Callable[[str, str, str, str], None],
     on_toggle_favorite: Callable[[str, bool], None] | None = None,
-    client: DaemonClient | None = None,
-    on_after_delete: Callable[[], None] | None = None,
 ) -> NSView:
     """One Duration row: name + comment + (inline duration field + Record)
-    + Start/Stop timer button, plus a trailing "…" menu on the header line.
+    + Start/Stop timer button.
 
     Both record patterns coexist — the user can either type "90m" and
     click Record OR start a timer that ends with Stop. If a timer is
     running for this def, the inline duration controls are still
     rendered (the user is free to abandon the timer by recording inline),
     and the Start button changes to Stop.
-
-    The "…" button (SP2 task 4) lives on the row's first/header line at
-    the far right — that line has plenty of slack while the controls
-    line is tight enough that adding a fourth button there would have
-    broken the SP1 L1 Record↔Timer 24pt gap. ``client`` +
-    ``on_after_delete`` are both required to render "…"; if either is
-    None we omit it (keeps the builder testable without AppKit).
     """
     row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
     row.setWantsLayer_(True)
@@ -764,18 +684,9 @@ def _make_duration_row(
     def_name = definition.get("name", "(unnamed)")
 
     # Line 1: star + name label spanning most of the width, with the
-    # timer-state hint on the right if a timer is running, and the new
-    # "…" per-row menu at the far right (SP2 task 4).
-    #
-    # Pre-SP2 the timer-hint reached x = width - 12 (168pt wide starting
-    # at width - 180). SP2 shrinks the hint to 140pt so it ends at
-    # width - 40, leaving a 16pt gap before the "…" slot at x = width -
-    # 24. Same shrink applied to the name_label's reserved trailing
-    # space (was `width - 200`; now `width - 228` to keep the same gap
-    # to the hint and clear of "…").
+    # timer-state hint on the right if a timer is running.
     name_y = height - 24
     STAR_W = 22.0
-    MORE_W = 20.0  # "…" button width (height-line placement, SP2 task 4)
     star_btn = _make_star_button(
         pinned=pinned, height=22.0,
         on_click=lambda: (on_toggle_favorite(def_id, pinned)
@@ -801,18 +712,6 @@ def _make_duration_row(
         ))
         hint.setFrame_(NSMakeRect(width - 180, name_y, 140, 18))
         row.addSubview_(hint)
-
-    # "…" per-row menu, far right of the first line — see helper docstring.
-    if client is not None and on_after_delete is not None and def_id:
-        more_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(width - MORE_W - 4, name_y - 2, MORE_W, 22)
-        )
-        more_btn.setTitle_("…")
-        more_btn.setBezelStyle_(NSBezelStyleRounded)
-        more_btn.setToolTip_("More actions for this annotation")
-        _attach_more_menu(more_btn, def_id, def_name,
-                          client, on_after_delete)
-        row.addSubview_(more_btn)
 
     # Line 2: comment field, inline-duration field, Record-inline button,
     # Start/Stop timer button.
