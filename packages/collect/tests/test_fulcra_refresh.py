@@ -505,6 +505,54 @@ def test_refresh_finds_fulcra_in_well_known_location_when_not_on_path(
     assert found == str(fake_cli), f"Expected {fake_cli}, got {found}"
 
 
+def test_cli_status_uses_find_fulcra_cli_fallback_when_not_on_path(
+    collect_home, _in_memory_keyring, monkeypatch,
+) -> None:
+    """The browser-sign-in probe must resolve the CLI via
+    ``credentials._find_fulcra_cli`` (which checks ~/.local/bin etc.), not
+    bare ``shutil.which``. The launchd-managed daemon runs with a restricted
+    PATH that excludes ~/.local/bin, so a bare ``which`` reports the CLI
+    missing — blocking sign-in with "The fulcra CLI is not on PATH" — even
+    when it is installed. This mirrors the refresh-path fix and closes the
+    same gap on the sign-in path.
+    """
+    import os
+    FAKE = "/fake/.local/bin/fulcra"
+    _real_isfile, _real_access, _real_expand = (
+        os.path.isfile, os.access, os.path.expanduser,
+    )
+
+    # Simulate launchd's restricted PATH: which() can't see fulcra...
+    monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    # ...but it IS installed at ~/.local/bin, which _find_fulcra_cli checks.
+    monkeypatch.setattr(
+        _creds_mod.os.path, "expanduser",
+        lambda p: FAKE if p == "~/.local/bin/fulcra" else _real_expand(p),
+    )
+    monkeypatch.setattr(
+        _creds_mod.os.path, "isfile",
+        lambda p: True if p == FAKE else _real_isfile(p),
+    )
+    monkeypatch.setattr(
+        _creds_mod.os, "access",
+        lambda p, mode: True if p == FAKE else _real_access(p, mode),
+    )
+
+    # The probe execs `<cli> auth print-access-token`; intercept so we don't
+    # try to run the (nonexistent) fake path.
+    def _fake_run(args, capture_output, text, timeout):  # noqa: ARG001
+        assert args[0] == FAKE, f"probe should use the resolved CLI, got {args!r}"
+        return subprocess.CompletedProcess(args, 0, stdout="tok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    daemon = _build_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get("/api/fulcra/auth/cli_status")
+    assert r.status_code == 200
+    assert r.json()["available"] is True
+
+
 def test_refresh_returns_none_when_cli_truly_missing(monkeypatch) -> None:
     """When shutil.which AND all well-known locations come up empty,
     _find_fulcra_cli returns None and refresh_fulcra_access_token

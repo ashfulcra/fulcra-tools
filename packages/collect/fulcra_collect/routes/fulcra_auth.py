@@ -97,10 +97,13 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
 
     @app.get("/api/fulcra/auth/cli_status", dependencies=[Depends(require_token)])
     def fulcra_auth_cli_status():
-        import shutil
         import subprocess
+        from .. import credentials as _creds
 
-        cli_path = shutil.which("fulcra")
+        # Resolve via _find_fulcra_cli (not bare shutil.which): the launchd
+        # daemon's PATH excludes ~/.local/bin where `uv tool install` puts the
+        # CLI, so which() alone reports it missing even when installed.
+        cli_path = _creds._find_fulcra_cli()
         if not cli_path:
             return {"available": False, "signed_in": False,
                     "error": "The fulcra CLI is not on PATH."}
@@ -117,14 +120,14 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
 
     @app.post("/api/fulcra/auth/cli_login", dependencies=[Depends(require_token)])
     def fulcra_auth_cli_login():
-        import shutil
         import subprocess
         from .. import credentials as _creds
         from .. import web as _web  # late import so tests can monkeypatch web.httpx
 
         _log = logging.getLogger("fulcra_collect.web")
 
-        cli_path = shutil.which("fulcra")
+        # Resolve via _find_fulcra_cli (not bare shutil.which) — see cli_status.
+        cli_path = _creds._find_fulcra_cli()
         if not cli_path:
             raise HTTPException(
                 424,
