@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from collect_test_helpers import FakeHttpxClient, FakeHttpxResponse, install_fake_httpx
 from fulcra_collect.config import Config
 from fulcra_collect.daemon import Daemon
 from fulcra_collect.plugin import Plugin
@@ -537,89 +538,10 @@ def test_credential_status_does_not_leak_keyring_exception_message(
 
 # ---------------------------------------------------------------------------
 # Phase G — quick_record_list + record_annotation commands
+#
+# The fake-httpx seam (FakeHttpxClient / FakeHttpxResponse / install_fake_httpx)
+# is shared with test_web.py and lives in conftest.py.
 # ---------------------------------------------------------------------------
-
-class _FakeHttpxResponse:
-    status_code = 200
-    def raise_for_status(self): pass
-    def json(self): return self._data
-
-    def __init__(self, data):
-        self._data = data
-
-
-class _FakeHttpxClient:
-    """httpx.Client stub that records calls and returns preset responses."""
-    def __init__(self, *, get_data=None, post_status=200):
-        self._get_data = get_data or []
-        self._post_status = post_status
-        self.requests: list[dict] = []
-
-    def __enter__(self): return self
-    def __exit__(self, *a): pass
-
-    def get(self, url, **kw):
-        self.requests.append({"method": "GET", "url": url, **kw})
-        resp = _FakeHttpxResponse(self._get_data)
-        return resp
-
-    def post(self, url, **kw):
-        self.requests.append({"method": "POST", "url": url, **kw})
-        resp = _FakeHttpxResponse({"ok": True})
-        resp.status_code = self._post_status
-        return resp
-
-
-def _make_fake_client_factory(client_obj):
-    """Return a class whose constructor always returns client_obj."""
-    class _Cls:
-        def __new__(cls, **kw):
-            return client_obj
-    return _Cls
-
-
-def _install_fake_httpx(monkeypatch, client_obj):
-    """Substitute ``client_obj`` for ``httpx.Client`` on BOTH the daemon and
-    the web module seams, with non-``Client`` attributes falling through to
-    the real ``httpx``.
-
-    Why both seams: the Fulcra-touching daemon methods (``_quick_record_list``,
-    ``_record_annotation``, ``_delete_definition``) route their requests
-    through ``web._RetryingClient`` (SP5's refresh-on-401 wrapper), which
-    resolves ``httpx`` via ``fulcra_collect.web.httpx`` — NOT the daemon's own
-    top-level ``httpx`` import. A test that patched only ``daemon.httpx`` left
-    ``web.httpx`` pointing at the real library: with credentials mocked to a
-    dummy token the inner client 401'd, ``_RetryingClient`` refreshed via the
-    live ``fulcra`` CLI, and the retry returned the developer's REAL account
-    definitions. That broke data-specific assertions AND silently exercised
-    the production API from the unit suite. Patching both seams keeps the fake
-    in force wherever the call routes.
-
-    Why fall-through: ``_delete_definition`` catches ``_web.httpx.HTTPStatusError``
-    / ``ConnectError`` / ``ConnectTimeout`` / ``TimeoutException``. Those except
-    clauses evaluate the attribute on the patched module, so the fake must
-    expose the real exception classes or the handler itself raises
-    ``AttributeError``.
-    """
-    import httpx as _real_httpx
-    import fulcra_collect.daemon as daemon_mod
-    import fulcra_collect.web as web_mod
-
-    factory = _make_fake_client_factory(client_obj)
-
-    class _FakeHttpx:
-        # A class assigned as a class attribute is not a descriptor, so
-        # ``fake.Client`` returns the factory class itself (no method binding)
-        # — exactly what ``httpx.Client(...)`` call sites expect.
-        Client = factory
-
-        def __getattr__(self, name):
-            return getattr(_real_httpx, name)
-
-    fake = _FakeHttpx()
-    monkeypatch.setattr(daemon_mod, "httpx", fake)
-    monkeypatch.setattr(web_mod, "httpx", fake)
-    return fake
 
 
 def test_quick_record_list_returns_empty_when_unauthenticated(collect_home, monkeypatch):
@@ -651,8 +573,8 @@ def test_quick_record_list_happy_path(collect_home, monkeypatch):
          "deleted_at": "2026-01-01T00:00:00Z", "created_at": "2026-04-01T00:00:00Z"},
     ]
 
-    fake_client = _FakeHttpxClient(get_data=defs)
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=defs)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -686,8 +608,8 @@ def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatc
         {"id": "w-1", "name": "Book", "annotation_type": "read",
          "deleted_at": None, "created_at": "2026-05-10T00:00:00Z"},
     ]
-    fake_client = _FakeHttpxClient(get_data=defs)
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=defs)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -701,11 +623,11 @@ def test_quick_record_list_caches_result(collect_home, monkeypatch):
     """Second call within 60s returns cached result without hitting the API."""
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
-    fake_client = _FakeHttpxClient(get_data=[
+    fake_client = FakeHttpxClient(get_data=[
         {"id": "m1", "name": "Coffee", "annotation_type": "moment",
          "deleted_at": None, "created_at": "2026-05-01T00:00:00Z"},
     ])
-    _install_fake_httpx(monkeypatch, fake_client)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     r1 = d._quick_record_list()
@@ -728,7 +650,7 @@ def test_quick_record_list_api_error_returns_graceful_response(collect_home, mon
         def __exit__(self, *a): pass
         def get(self, *a, **kw): raise RuntimeError("network failure")
 
-    _install_fake_httpx(monkeypatch, _ErrorClient())
+    install_fake_httpx(monkeypatch, _ErrorClient())
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -767,7 +689,7 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
     # The GET to /user/v1alpha1/annotation returns one matching def so the
     # cache warm step inside _record_annotation finds it. We need real
     # tags + id so build_record has data to splice into the wire record.
-    fake_client = _FakeHttpxClient(get_data=[
+    fake_client = FakeHttpxClient(get_data=[
         {
             "id": "def-abcdef12",
             "name": "Test Moment",
@@ -776,7 +698,7 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
             "created_at": "2026-05-25T00:00:00Z",
         },
     ])
-    _install_fake_httpx(monkeypatch, fake_client)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-abcdef12", "hello from the test")
@@ -831,8 +753,8 @@ def test_record_annotation_rejects_unknown_definition_id(collect_home, monkeypat
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     # GET returns an empty def list — the lookup will miss.
-    fake_client = _FakeHttpxClient(get_data=[])
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=[])
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-nonexistent", None)
@@ -857,7 +779,7 @@ def test_record_annotation_api_error_surfaces_activity_failure(collect_home, mon
         def __exit__(self, *a): pass
         def get(self, url, **kw):
             self.requests.append({"method": "GET", "url": url, **kw})
-            return _FakeHttpxResponse([
+            return FakeHttpxResponse([
                 {"id": "def-xyz", "name": "X", "annotation_type": "moment",
                  "tags": [], "created_at": "2026-05-25T00:00:00Z"},
             ])
@@ -865,7 +787,7 @@ def test_record_annotation_api_error_surfaces_activity_failure(collect_home, mon
             raise RuntimeError("connection refused")
 
     fake_client = _GetOkPostErrorClient()
-    _install_fake_httpx(monkeypatch, fake_client)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-xyz", None)
@@ -892,12 +814,12 @@ def test_record_annotation_duration_writes_duration_record(
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
 
-    fake_client = _FakeHttpxClient(get_data=[
+    fake_client = FakeHttpxClient(get_data=[
         {"id": "def-dur1", "name": "Movie",
          "annotation_type": "duration", "tags": ["t-movie"],
          "created_at": "2026-05-25T00:00:00Z"},
     ])
-    _install_fake_httpx(monkeypatch, fake_client)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation(
@@ -937,12 +859,12 @@ def test_record_annotation_moment_fallback_when_no_times(
     import json
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
-    fake_client = _FakeHttpxClient(get_data=[
+    fake_client = FakeHttpxClient(get_data=[
         {"id": "def-mom1", "name": "Coffee",
          "annotation_type": "moment", "tags": [],
          "created_at": "2026-05-25T00:00:00Z"},
     ])
-    _install_fake_httpx(monkeypatch, fake_client)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._record_annotation("def-mom1", None)
@@ -994,8 +916,8 @@ def test_delete_annotation_writes_tombstone(collect_home, monkeypatch):
     import json
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
-    fake_client = _FakeHttpxClient(get_data=[])
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=[])
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d.handle_request({
@@ -1176,8 +1098,8 @@ def test_quick_record_list_pinned_defs_sort_first(collect_home, monkeypatch):
         {"id": "dur-2", "name": "Workout", "annotation_type": "duration",
          "deleted_at": None, "created_at": "2026-04-30T00:00:00Z"},
     ]
-    fake_client = _FakeHttpxClient(get_data=defs)
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=defs)
+    install_fake_httpx(monkeypatch, fake_client)
 
     # Pin one moment and one duration. Within the moment group, m-3 has
     # the OLDEST created_at — proves favorites override the recency sort.
@@ -1214,8 +1136,8 @@ def test_quick_record_list_no_favorites_keeps_legacy_40_cap(
          "deleted_at": None, "created_at": f"2026-05-{(i % 28) + 1:02d}T00:00:00Z"}
         for i in range(60)
     ]
-    fake_client = _FakeHttpxClient(get_data=defs)
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=defs)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
     reply = d._quick_record_list()
@@ -1252,8 +1174,8 @@ def test_quick_record_list_with_favorites_keeps_all_pinned_plus_20(
                      "deleted_at": None,
                      "created_at": f"2026-04-{(i % 28) + 1:02d}T00:00:00Z"})
 
-    fake_client = _FakeHttpxClient(get_data=defs)
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=defs)
+    install_fake_httpx(monkeypatch, fake_client)
 
     _favs.save({f"p-{i}" for i in range(5)})
 
@@ -1306,8 +1228,8 @@ def test_set_quick_record_favorites_invalidates_cache(
         {"id": "m-new", "name": "Newer", "annotation_type": "moment",
          "deleted_at": None, "created_at": "2026-05-20T00:00:00Z"},
     ]
-    fake_client = _FakeHttpxClient(get_data=defs)
-    _install_fake_httpx(monkeypatch, fake_client)
+    fake_client = FakeHttpxClient(get_data=defs)
+    install_fake_httpx(monkeypatch, fake_client)
 
     d = Daemon(registry=_registry(), config=Config())
 
