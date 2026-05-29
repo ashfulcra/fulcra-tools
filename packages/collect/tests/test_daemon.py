@@ -22,6 +22,28 @@ def _registry() -> RegistryResult:
     return r
 
 
+def test_construction_never_reads_the_keychain(collect_home: Path, monkeypatch):
+    """Daemon.__init__ must not read the OS keychain.
+
+    On macOS a keychain read can block indefinitely on an ACL-confirmation
+    dialog (e.g. after the daemon binary's identity changes, or under a
+    launchd/remote session where the dialog can't be answered). When the
+    account-fingerprint pre-flight ran that read in __init__, a single
+    blocked keychain access wedged the daemon before it bound its control
+    socket — the menubar then showed "daemon not reachable" with no
+    recourse. The pre-flight now runs in serve() on a background thread
+    AFTER the sockets are up; construction must stay keychain-free.
+    """
+    import fulcra_collect.credentials as creds
+
+    def _boom(key):  # any keychain read during construction is the bug
+        raise AssertionError(f"keychain read during Daemon construction: {key!r}")
+
+    monkeypatch.setattr(creds, "get_user_secret", _boom)
+    # Must not raise — i.e. construction touches no keychain item.
+    Daemon(registry=_registry(), config=Config())
+
+
 def test_status_lists_every_plugin_with_enabled_flag(collect_home: Path):
     d = Daemon(registry=_registry(), config=Config(enabled={"lastfm"}))
     reply = d.handle_request({"cmd": "status"})
@@ -1033,6 +1055,10 @@ def test_fingerprint_preflight_writes_initial_fingerprint(collect_home, monkeypa
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok-first-boot" if key == "bearer-token" else None)
     d = Daemon(registry=_registry(), config=Config())
+    # The pre-flight now runs in serve() on a background thread (not in
+    # __init__, which must stay keychain-free); call it directly to exercise
+    # the behaviour under test.
+    d._check_account_fingerprint()
     fp_path = collect_home / "auth-fingerprint"
     assert fp_path.exists()
     # No invalidation activity entry — first boot is the baseline.
@@ -1057,11 +1083,13 @@ def test_fingerprint_preflight_skips_on_unchanged_token(collect_home, monkeypatc
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "stable-tok" if key == "bearer-token" else None)
     # First boot writes the fingerprint.
-    Daemon(registry=_registry(), config=Config())
+    d1 = Daemon(registry=_registry(), config=Config())
+    d1._check_account_fingerprint()
     fp_path = collect_home / "auth-fingerprint"
     first_fp = fp_path.read_text()
     # Second boot with the same token.
     d2 = Daemon(registry=_registry(), config=Config())
+    d2._check_account_fingerprint()
     assert fp_path.read_text() == first_fp
     assert [e for e in d2.activity.recent() if e.plugin_id == "daemon"] == []
 
@@ -1077,13 +1105,15 @@ def test_fingerprint_preflight_invalidates_on_token_change(collect_home, monkeyp
     # with a cached def_id (mimicking a plugin having run on account A).
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok-account-A" if key == "bearer-token" else None)
-    Daemon(registry=_registry(), config=Config())
+    d1 = Daemon(registry=_registry(), config=Config())
+    d1._check_account_fingerprint()
     st = state_mod.PluginState(plugin_id="lastfm", definition_id="def-from-A")
     state_mod.save(st)
     # Boot 2: different token → invalidation should happen.
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok-account-B" if key == "bearer-token" else None)
     d2 = Daemon(registry=_registry(), config=Config())
+    d2._check_account_fingerprint()
     # The cached def_id was cleared.
     reloaded = state_mod.load("lastfm")
     assert reloaded.definition_id is None
@@ -1107,10 +1137,16 @@ def test_fingerprint_preflight_resets_attention_def_validation_cache(
     up to _attention_validation_interval_s after the switch."""
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok-1" if key == "bearer-token" else None)
-    Daemon(registry=_registry(), config=Config())
+    d1 = Daemon(registry=_registry(), config=Config())
+    d1._check_account_fingerprint()
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok-2" if key == "bearer-token" else None)
     d2 = Daemon(registry=_registry(), config=Config())
+    # Seed the in-process cache so we can prove the pre-flight resets it on
+    # the account switch (construction no longer runs the pre-flight).
+    d2._attention_def_validated_id = "stale-from-account-1"
+    d2._attention_def_validated_at = 1.0
+    d2._check_account_fingerprint()
     assert d2._attention_def_validated_id is None
     assert d2._attention_def_validated_at == float("-inf")
 
