@@ -566,12 +566,22 @@ class Daemon:
         token = _creds.get_user_secret("bearer-token")
         if not token:
             return {"ok": False, "error": "Fulcra not authenticated", "definitions": []}
+        # Use the SP5 refresh-aware wrapper, exactly like _delete_definition.
+        # This was the ONE Fulcra-touching path still on a raw httpx client
+        # with no refresh-on-401 — and it's typically the FIRST thing to hit
+        # an expired token (the menubar polls status, then the user opens
+        # "what to log", before any refresh-capable path has run). So when
+        # the access token had expired it 401'd and surfaced "Fulcra didn't
+        # respond" instead of minting a fresh token via the `fulcra` CLI and
+        # retrying — even though /api/definitions etc. recovered fine. Late
+        # import so tests that monkeypatch ``fulcra_collect.web.httpx`` still
+        # intercept the inner client (same reason as _delete_definition).
+        from . import web as _web
         try:
-            with httpx.Client(timeout=10.0) as client:
-                r = client.get(
-                    "https://api.fulcradynamics.com/user/v1alpha1/annotation",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
+            with _web._RetryingClient(
+                token, user_agent="fulcra-collect/daemon",
+            ) as client:
+                r = client.get("/user/v1alpha1/annotation")
                 r.raise_for_status()
                 all_defs = r.json()
         except Exception:

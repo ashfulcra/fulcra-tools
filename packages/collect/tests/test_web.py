@@ -1325,8 +1325,25 @@ def _fake_httpx_for_daemon(monkeypatch, *, get_data=None, post_exc=None):
                 raise post_exc
             return _FakeResp({"ok": True})
 
-    monkeypatch.setattr(daemon_mod, "httpx",
-                        type("httpx", (), {"Client": _WrappedClient})())
+    # Fake httpx whose .Client is our stub but every other attribute
+    # (exception classes, etc.) falls through to the real module — so
+    # _RetryingClient, which references httpx beyond .Client, keeps working.
+    import httpx as _real_httpx
+
+    class _FakeHttpx:
+        Client = _WrappedClient
+
+        def __getattr__(self, name):
+            return getattr(_real_httpx, name)
+
+    fake_httpx = _FakeHttpx()
+    monkeypatch.setattr(daemon_mod, "httpx", fake_httpx)
+    # _quick_record_list and _delete_definition route Fulcra calls through
+    # fulcra_collect.web._RetryingClient, whose inner client is built via
+    # fulcra_collect.web.httpx — patch that seam too so the warm-cache GET
+    # the record/undo paths depend on is intercepted.
+    import fulcra_collect.web as web_mod
+    monkeypatch.setattr(web_mod, "httpx", fake_httpx)
 
 
 def test_quick_record_definitions_requires_auth(collect_home):
