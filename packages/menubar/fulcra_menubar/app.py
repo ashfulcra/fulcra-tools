@@ -147,39 +147,17 @@ class FulcraMenubarApp(rumps.App):
     # ── Notifications ─────────────────────────────────────────────────────────
 
     def _request_notification_authorization(self) -> None:
-        try:
-            from UserNotifications import (  # type: ignore[import-not-found]
-                UNAuthorizationOptionAlert, UNAuthorizationOptionSound,
-                UNUserNotificationCenter,
-            )
-        except ImportError:
-            return
-        centre = UNUserNotificationCenter.currentNotificationCenter()
-        opts = UNAuthorizationOptionAlert | UNAuthorizationOptionSound
-
-        def handler(granted, err):
-            if err is not None:
-                logger.warning("UN authorization error: %s", err)
-        centre.requestAuthorizationWithOptions_completionHandler_(opts, handler)
+        # Delegated to _notify_macos, which skips the framework when the
+        # process has no app-bundle identifier. Calling
+        # UNUserNotificationCenter.currentNotificationCenter() unbundled
+        # raises an uncatchable NSException that aborts the process, so the
+        # guard must live *before* the call (try/except cannot recover it).
+        from ._notify_macos import request_authorization
+        request_authorization()
 
     def _post_notification(self, title: str, body: str) -> None:
-        try:
-            from UserNotifications import (  # type: ignore[import-not-found]
-                UNMutableNotificationContent, UNNotificationRequest,
-                UNUserNotificationCenter,
-            )
-        except ImportError:
-            print(f"[notify] {title}: {body}")
-            return
-        import uuid
-        content = UNMutableNotificationContent.alloc().init()
-        content.setTitle_(title)
-        content.setBody_(body)
-        request = UNNotificationRequest.requestWithIdentifier_content_trigger_(
-            str(uuid.uuid4()), content, None,
-        )
-        UNUserNotificationCenter.currentNotificationCenter() \
-            .addNotificationRequest_withCompletionHandler_(request, None)
+        from ._notify_macos import post_notification
+        post_notification(title, body)
 
     # ── Sleep / wake observers ────────────────────────────────────────────────
 
