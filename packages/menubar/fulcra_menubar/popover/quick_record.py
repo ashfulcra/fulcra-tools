@@ -62,6 +62,31 @@ def _group_label(annotation_type: str) -> str:
                              (annotation_type or "Other").title())
 
 
+def quick_record_view_state(all_defs: list[dict]) -> tuple[list[dict], str]:
+    """Decide what the quick-record popover body shows.
+
+    The popover is a CURATED surface — it lists only the tracks the user
+    pinned (in Preferences -> Annotations), never the full account. Returns
+    ``(defs_to_render, state)`` where state is one of:
+
+      - ``"list"``        -> defs_to_render = the pinned defs (non-empty)
+      - ``"none_pinned"`` -> the account has defs but none are pinned; the
+                             body shows a "Choose tracks to pin..." CTA
+      - ``"no_defs"``     -> the account has no (non-deleted) defs at all; the
+                             body points the user to create one on the web
+
+    Pure: no I/O, no AppKit — unit-tested in test_quick_record_view_state.py.
+    ``all_defs`` is the daemon's quick_record_list payload, each def carrying
+    a ``pinned`` bool.
+    """
+    if not all_defs:
+        return [], "no_defs"
+    pinned = [d for d in all_defs if d.get("pinned")]
+    if not pinned:
+        return [], "none_pinned"
+    return pinned, "list"
+
+
 def _attach_more_menu(more_btn: NSButton,
                       def_id: str, def_name: str,
                       client: DaemonClient,
