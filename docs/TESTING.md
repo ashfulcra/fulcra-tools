@@ -45,6 +45,18 @@ uv run fulcra-collect --help
 You should see the CLI help text. If you see `command not found`, make
 sure `.venv/bin` is on your PATH or always prefix commands with `uv run`.
 
+### Keeping in sync with the repo
+
+When you want to pull newer code into your checkout, run:
+
+```bash
+bash scripts/update.sh
+```
+
+It fast-forwards `git pull`, re-runs `uv sync --all-packages`, then restarts
+the launchd daemon (if installed) and the menubar app (if running) so they
+pick up the new code. Pieces you aren't using are skipped with a note.
+
 ---
 
 ## Step 2 — Start the daemon
@@ -83,8 +95,17 @@ Leave this terminal open. Open a second terminal for the remaining steps.
 To install as a persistent background service (starts on login):
 
 ```bash
-uv run fulcra-collect install
-uv run fulcra-collect start
+uv run fulcra-collect install                                        # writes the launchd agent
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fulcra.collect.plist  # load + start it now
+```
+
+`install` only writes the launchd agent file — it doesn't start it. The
+`bootstrap` line loads it into your user session so it runs immediately
+(and on every login thereafter). To restart it later — e.g. after pulling
+new code — kickstart it:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.fulcra.collect
 ```
 
 ---
@@ -293,8 +314,9 @@ again.
 
 **Wizard shows "Could not connect to the daemon"**
 Run `uv run fulcra-collect status` in a terminal. If the daemon isn't
-running, start it with `uv run fulcra-collect daemon` (or
-`uv run fulcra-collect start` if you installed it as a service).
+running, start it in the foreground with `uv run fulcra-collect daemon`,
+or — if you installed it as a launchd service — restart that with
+`launchctl kickstart -k gui/$(id -u)/com.fulcra.collect`.
 
 **Menubar icon not visible after starting the menubar app**
 The menubar app is separate from the daemon. Run it with:
