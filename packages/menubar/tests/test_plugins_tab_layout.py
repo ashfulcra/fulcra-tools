@@ -44,29 +44,36 @@ _CASES = [
 
 @pytest.mark.parametrize("scheduled,desc_h,n", _CASES)
 def test_row_height_clears_both_stacks(scheduled, desc_h, n):
-    """The row must be tall enough that the bottom stack never overlaps the
-    top stack — i.e. (height - top_stack) leaves at least the gap above the
-    bottom stack."""
+    """When a bottom stack exists (credentials, or a scheduled Run-now slot),
+    the row clears both stacks plus the gap. When there is NO bottom stack
+    (manual/service plugin, no credentials), the content is top-anchored and
+    the row adds only the small bottom margin — no reserved slot, no gap."""
     height = _plugin_row_height(
         scheduled=scheduled, desc_h=desc_h, n_credentials=n
     )
     top = _top_stack(scheduled=scheduled, desc_h=desc_h)
-    bottom = _bottom_stack(scheduled=scheduled, n_credentials=n)
-    # The top stack's lowest edge sits at (height - top); the bottom stack's
-    # highest edge sits at `bottom`. They must not cross, with the gap spare.
-    assert height - top >= bottom
-    assert height - top - bottom == pytest.approx(_ROW_STACK_GAP)
+    has_bottom_stack = bool(n) or scheduled
+    if has_bottom_stack:
+        bottom = _bottom_stack(scheduled=scheduled, n_credentials=n)
+        assert height - top >= bottom
+        assert height - top - bottom == pytest.approx(_ROW_STACK_GAP)
+    else:
+        # Top-anchored only: just a small bottom margin beneath the desc.
+        assert height - top == pytest.approx(_ROW_BOTTOM_MARGIN)
 
 
 def test_non_scheduled_no_cred_row_is_compact():
-    """A manual/service plugin with no credentials should NOT reserve the
-    scheduled-only interval block — that phantom gap was the original bug."""
+    """A manual/service plugin with no credentials reserves only a small bottom
+    margin below its description — no credential/Run-now slot, no stack gap.
+    This is the fix for the loose Plugins-tab spacing (big gaps between rows)."""
     manual = _plugin_row_height(scheduled=False, desc_h=32.0, n_credentials=0)
+    # Exactly name band + description + the small bottom margin. Nothing else.
+    assert manual == _ROW_NAME_H + 32.0 + _ROW_BOTTOM_MARGIN
+    # And a scheduled row is taller by the interval block + Run-now slot + gap,
+    # minus the bottom margin the manual row already includes.
     scheduled = _plugin_row_height(scheduled=True, desc_h=32.0, n_credentials=0)
-    # The scheduled row is taller by exactly the interval block plus the
-    # difference between the Run-now slot and the bare bottom margin.
-    assert scheduled - manual == _ROW_INTERVAL_BLOCK + (
-        _ROW_CRED_BASE - _ROW_BOTTOM_MARGIN
+    assert scheduled - manual == (
+        _ROW_INTERVAL_BLOCK + _ROW_CRED_BASE + _ROW_STACK_GAP - _ROW_BOTTOM_MARGIN
     )
 
 
