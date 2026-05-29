@@ -6,6 +6,20 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_user_secret_cache():
+    """Drop the in-process user-secret cache around every test.
+
+    credentials.get_user_secret caches user secrets (the bearer token) in
+    module state that outlives a single test. Without this, a token cached by
+    one test would leak into the next (which expects a fresh, empty keychain),
+    causing order-dependent failures."""
+    from fulcra_collect import credentials as _creds
+    _creds._clear_caches()
+    yield
+    _creds._clear_caches()
+
+
 @pytest.fixture
 def collect_home(tmp_path: Path, monkeypatch) -> Path:
     """Point the hub's config directory at a temp dir for the test.
