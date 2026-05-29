@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 
 import pytest
+from collect_test_helpers import install_fake_httpx
 from fastapi.testclient import TestClient
 
 from fulcra_collect import config as _config
@@ -1284,66 +1285,10 @@ def test_delete_definition_leaves_other_plugins_state_alone(
 
 # ---------------------------------------------------------------------------
 # Phase G — quick-record HTTP routes
+#
+# The fake-httpx seam (install_fake_httpx, with its get_data / post_exc
+# convenience) is shared with test_daemon.py and lives in conftest.py.
 # ---------------------------------------------------------------------------
-
-def _fake_httpx_for_daemon(monkeypatch, *, get_data=None, post_exc=None):
-    """Patch httpx inside fulcra_collect.daemon so daemon methods don't
-    hit the real network."""
-    import fulcra_collect.daemon as daemon_mod
-
-    get_data = get_data or []
-
-    class _FakeResp:
-        status_code = 200
-        def raise_for_status(self): pass
-        def json(self): return self._data
-        def __init__(self, data): self._data = data
-
-    class _FakeClient:
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-        def get(self, *a, **kw): return _FakeResp(get_data)
-        def post(self, *a, **kw):
-            if post_exc:
-                raise post_exc
-            return _FakeResp({"ok": True})
-
-
-    class _FakeClientFactory:
-        def __init__(self, **kw): pass
-        def __enter__(self): return _FakeClient()
-        def __exit__(self, *a): pass
-
-    # We need to wrap in a class so both context-manager forms work
-    class _WrappedClient:
-        def __init__(self, **kw): pass
-        def __enter__(self): return self
-        def __exit__(self, *a): pass
-        def get(self, *a, **kw): return _FakeResp(get_data)
-        def post(self, *a, **kw):
-            if post_exc:
-                raise post_exc
-            return _FakeResp({"ok": True})
-
-    # Fake httpx whose .Client is our stub but every other attribute
-    # (exception classes, etc.) falls through to the real module — so
-    # _RetryingClient, which references httpx beyond .Client, keeps working.
-    import httpx as _real_httpx
-
-    class _FakeHttpx:
-        Client = _WrappedClient
-
-        def __getattr__(self, name):
-            return getattr(_real_httpx, name)
-
-    fake_httpx = _FakeHttpx()
-    monkeypatch.setattr(daemon_mod, "httpx", fake_httpx)
-    # _quick_record_list and _delete_definition route Fulcra calls through
-    # fulcra_collect.web._RetryingClient, whose inner client is built via
-    # fulcra_collect.web.httpx — patch that seam too so the warm-cache GET
-    # the record/undo paths depend on is intercepted.
-    import fulcra_collect.web as web_mod
-    monkeypatch.setattr(web_mod, "httpx", fake_httpx)
 
 
 def test_quick_record_definitions_requires_auth(collect_home):
@@ -1381,7 +1326,7 @@ def test_quick_record_definitions_returns_all_types(
         {"id": "dur1", "name": "Work", "annotation_type": "duration",
          "deleted_at": None, "created_at": "2026-05-09T00:00:00Z"},
     ]
-    _fake_httpx_for_daemon(monkeypatch, get_data=fake_defs)
+    install_fake_httpx(monkeypatch, get_data=fake_defs)
 
     daemon = _build_test_daemon(collect_home)
     client = _client(daemon)
@@ -1426,7 +1371,7 @@ def test_record_annotation_happy_path(
     """
     import fulcra_collect.credentials as _creds_mod
     _creds_mod.set_user_secret("bearer-token", "valid-token")
-    _fake_httpx_for_daemon(monkeypatch, get_data=[
+    install_fake_httpx(monkeypatch, get_data=[
         {"id": "def-abcdef12", "name": "Test Moment",
          "annotation_type": "moment", "tags": ["t-1"],
          "created_at": "2026-05-25T00:00:00Z", "deleted_at": None},
@@ -1456,7 +1401,7 @@ def test_record_annotation_api_failure_returns_error(
     _creds_mod.set_user_secret("bearer-token", "valid-token")
     # Cache-warm GET succeeds (returns a matching def) so the test reaches
     # the POST path; the POST raises and we assert on that error surface.
-    _fake_httpx_for_daemon(monkeypatch,
+    install_fake_httpx(monkeypatch,
                             get_data=[{"id": "def-xyz", "name": "X",
                                        "annotation_type": "moment",
                                        "tags": [], "deleted_at": None,
@@ -1490,7 +1435,7 @@ def test_record_annotation_duration_round_trips(
     a Duration record through the daemon."""
     import fulcra_collect.credentials as _creds_mod
     _creds_mod.set_user_secret("bearer-token", "valid-token")
-    _fake_httpx_for_daemon(monkeypatch, get_data=[
+    install_fake_httpx(monkeypatch, get_data=[
         {"id": "def-d1", "name": "Movie", "annotation_type": "duration",
          "tags": [], "deleted_at": None,
          "created_at": "2026-05-25T00:00:00Z"},
@@ -1526,7 +1471,7 @@ def test_delete_annotation_writes_tombstone(
     docstring."""
     import fulcra_collect.credentials as _creds_mod
     _creds_mod.set_user_secret("bearer-token", "valid-token")
-    _fake_httpx_for_daemon(monkeypatch, get_data=[])
+    install_fake_httpx(monkeypatch, get_data=[])
 
     daemon = _build_test_daemon(collect_home)
     client = _client(daemon)

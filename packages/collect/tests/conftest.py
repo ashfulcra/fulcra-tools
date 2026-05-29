@@ -74,3 +74,9 @@ def _in_memory_keyring(monkeypatch):
     monkeypatch.setattr(_creds_mod.keyring, "get_password", _get)
     monkeypatch.setattr(_creds_mod.keyring, "delete_password", _delete)
     return store
+
+# The shared fake-httpx seam (FakeHttpxClient / install_fake_httpx) lives in
+# the sibling module ``_fake_httpx.py``, NOT here: a bare ``from conftest
+# import ...`` resolves ambiguously across the monorepo's per-package
+# conftest files and broke the whole-repo test run. test_daemon.py and
+# test_web.py import it from there.
