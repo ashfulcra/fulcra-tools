@@ -77,28 +77,35 @@ _ROW_NAME_H = 28          # name label band at the top of the row
 _ROW_INTERVAL_BLOCK = 50  # scheduled-only "Every [n] minutes" field + ≈caption
 _ROW_CRED_BASE = 40       # first credential's y (bottom margin 16 + Run-now slot 24)
 _ROW_CRED_STEP = 24       # each additional credential row
-_ROW_BOTTOM_MARGIN = 16   # bare bottom margin when there's nothing below the desc
-_ROW_STACK_GAP = 8        # minimum gap between the top and bottom stacks
+_ROW_BOTTOM_MARGIN = 6    # bare bottom padding when nothing is drawn below the desc
+_ROW_STACK_GAP = 8        # gap between the top and bottom stacks (only when both exist)
 
 
 def _plugin_row_height(*, scheduled: bool, desc_h: float, n_credentials: int) -> float:
-    """Pixel height for one Plugins-tab row, sized to clear both stacks.
+    """Pixel height for one Plugins-tab row.
 
-    Top stack (placed via ``height - N``, grows downward): the name band,
-    the wrapped description, and — for scheduled plugins only — the interval
-    block. Bottom stack (placed at fixed ``y``, grows upward): the credential
-    rows (which start at ``y = _ROW_CRED_BASE`` and add ``_ROW_CRED_STEP``
-    each), or the scheduled Run-now button, or just the bottom margin. The
-    height is the two stacks plus ``_ROW_STACK_GAP`` so they never collide.
+    Top stack (placed via ``height - N``, grows downward): the name band, the
+    wrapped description, and — for scheduled plugins only — the interval block.
+
+    Bottom stack (placed at fixed ``y``, grows upward) exists ONLY when the
+    plugin has credential rows or is scheduled (the Run-now-at-bottom button).
+    When a bottom stack exists, the row clears both stacks plus ``_ROW_STACK_GAP``
+    so they never collide.
+
+    When there is NO bottom stack — the common case: manual / historical /
+    file-based plugins with no credentials, whose only controls (Run-now or the
+    Enable switch) sit up on the name row — the content is entirely top-anchored,
+    so the row needs only a small ``_ROW_BOTTOM_MARGIN`` beneath the description.
+    Previously every such row still reserved the full credential/Run-now slot
+    plus the stack gap (~24pt of dead space), which is what made the Plugins tab
+    look loosely spaced with big gaps between rows.
     """
     top_h = _ROW_NAME_H + desc_h + (_ROW_INTERVAL_BLOCK if scheduled else 0)
     if n_credentials:
-        bottom_h = _ROW_CRED_BASE + _ROW_CRED_STEP * n_credentials
-    elif scheduled:
-        bottom_h = _ROW_CRED_BASE       # Run-now slot
-    else:
-        bottom_h = _ROW_BOTTOM_MARGIN
-    return top_h + bottom_h + _ROW_STACK_GAP
+        return top_h + _ROW_CRED_BASE + _ROW_CRED_STEP * n_credentials + _ROW_STACK_GAP
+    if scheduled:
+        return top_h + _ROW_CRED_BASE + _ROW_STACK_GAP   # Run-now-at-bottom slot
+    return top_h + _ROW_BOTTOM_MARGIN
 
 
 class _FlippedView(NSView):  # type: ignore[misc]
