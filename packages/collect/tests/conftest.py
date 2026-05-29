@@ -6,6 +6,20 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_user_secret_cache():
+    """Drop the in-process user-secret cache around every test.
+
+    credentials.get_user_secret caches user secrets (the bearer token) in
+    module state that outlives a single test. Without this, a token cached by
+    one test would leak into the next (which expects a fresh, empty keychain),
+    causing order-dependent failures."""
+    from fulcra_collect import credentials as _creds
+    _creds._clear_caches()
+    yield
+    _creds._clear_caches()
+
+
 @pytest.fixture
 def collect_home(tmp_path: Path, monkeypatch) -> Path:
     """Point the hub's config directory at a temp dir for the test.
@@ -60,3 +74,9 @@ def _in_memory_keyring(monkeypatch):
     monkeypatch.setattr(_creds_mod.keyring, "get_password", _get)
     monkeypatch.setattr(_creds_mod.keyring, "delete_password", _delete)
     return store
+
+# The shared fake-httpx seam (FakeHttpxClient / install_fake_httpx) lives in
+# the sibling module ``collect_test_helpers.py``, NOT here: a bare ``from
+# conftest import ...`` resolves ambiguously across the monorepo's per-package
+# conftest files and broke the whole-repo test run. test_daemon.py and
+# test_web.py import it from there (the dir is on the root pytest pythonpath).

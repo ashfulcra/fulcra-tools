@@ -28,12 +28,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSApp, NSButton, NSBezelStyleRounded, NSColor,
-    NSMenu, NSMenuItem, NSScrollView,
+    NSButton, NSBezelStyleRounded, NSColor,
+    NSScrollView,
     NSTextField, NSView, NSMakeRect,
 )
 
-from .._definition_delete import show_delete_alert
 from .._humanize import parse_duration_seconds
 from .._objc_targets import attach as _attach
 from ..daemon_client import DaemonClient
@@ -62,38 +61,29 @@ def _group_label(annotation_type: str) -> str:
                              (annotation_type or "Other").title())
 
 
-def _attach_more_menu(more_btn: NSButton,
-                      def_id: str, def_name: str,
-                      client: DaemonClient,
-                      on_after_delete: Callable[[], None]) -> None:
-    """Wire a "…" button to pop up an NSMenu with "Delete this track…".
+def quick_record_view_state(all_defs: list[dict]) -> tuple[list[dict], str]:
+    """Decide what the quick-record popover body shows.
 
-    Factored out of _make_moment_row / _make_duration_row so both share
-    the menu shape exactly — adding a second item (e.g. "Edit name") in
-    the future is a one-line change in one place. The on_after_delete
-    callback typically removes the row from its superview and asks the
-    popover to rebuild; we run it inside the show_delete_alert path so
-    a cancelled or failed delete leaves the row untouched.
+    The popover is a CURATED surface — it lists only the tracks the user
+    pinned (in Preferences -> Annotations), never the full account. Returns
+    ``(defs_to_render, state)`` where state is one of:
+
+      - ``"list"``        -> defs_to_render = the pinned defs (non-empty)
+      - ``"none_pinned"`` -> the account has defs but none are pinned; the
+                             body shows a "Choose tracks to pin..." CTA
+      - ``"no_defs"``     -> the account has no (non-deleted) defs at all; the
+                             body points the user to create one on the web
+
+    Pure: no I/O, no AppKit — unit-tested in test_quick_record_view_state.py.
+    ``all_defs`` is the daemon's quick_record_list payload, each def carrying
+    a ``pinned`` bool.
     """
-    def _on_more(sender):
-        menu = NSMenu.alloc().init()
-        # Empty action+keyEq makes the item inert until we _attach to it.
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Delete this track…", None, "",
-        )
-
-        def _delete_handler(_):
-            show_delete_alert(def_id, def_name, client,
-                              on_done=on_after_delete)
-        _attach(item, _delete_handler)
-        menu.addItem_(item)
-        # popUpContextMenu_withEvent_forView_ requires a current NSEvent;
-        # NSApp.currentEvent() is the click event that fired the action.
-        NSMenu.popUpContextMenu_withEvent_forView_(
-            menu, NSApp.currentEvent(), sender,
-        )
-
-    _attach(more_btn, _on_more)
+    if not all_defs:
+        return [], "no_defs"
+    pinned = [d for d in all_defs if d.get("pinned")]
+    if not pinned:
+        return [], "none_pinned"
+    return pinned, "list"
 
 
 def make_quick_record_view(
@@ -106,7 +96,7 @@ def make_quick_record_view(
     active_timers: dict[str, dict] | None = None,
     recent: list[dict] | None = None,
     on_timer_changed: Callable[[], None] | None = None,
-    favorites_view_state: dict | None = None,
+    on_preferences: Callable[[str | None], None] | None = None,
 ) -> NSView:
     """Build the quick-record primary view.
 
@@ -136,20 +126,15 @@ def make_quick_record_view(
     on_timer_changed:
         Called whenever the timer dict is mutated. The root uses this
         to toggle the cyan menubar overlay.
-    favorites_view_state:
-        Shared dict carrying the popover-scoped favorites UI state —
-        currently just ``{"expanded": bool}`` for the "Show all
-        annotations" disclosure. Owned by PopoverRoot so a tap on the
-        disclosure persists across rebuilds within one popover session;
-        intentionally NOT persisted across popover open/close cycles
-        (per task #64 spec — first interaction defaults to collapsed).
+    on_preferences:
+        Optional callback invoked with a tab name (e.g. ``"annotations"``)
+        when the user taps the "Choose tracks to pin…" CTA in the empty
+        state. Opens the Preferences window to the specified tab.
     """
     if active_timers is None:
         active_timers = {}
     if recent is None:
         recent = []
-    if favorites_view_state is None:
-        favorites_view_state = {"expanded": False}
 
     HEIGHT = float(height)
     HEADER_H = 40.0
@@ -312,15 +297,6 @@ def make_quick_record_view(
             return
         rebuild_ref["fn"]()
 
-    def _toggle_expanded() -> None:
-        """The "Show all annotations" disclosure footer flips this; the
-        rebuild below filters to favorites-only when ``expanded`` is
-        False and any favorites exist."""
-        favorites_view_state["expanded"] = not favorites_view_state.get(
-            "expanded", False,
-        )
-        rebuild_ref["fn"]()
-
     def _undo(source_id: str) -> None:
         try:
             reply = client.delete_annotation(source_id)
@@ -356,39 +332,23 @@ def make_quick_record_view(
             return
 
         all_defs = reply.get("definitions", [])
-        if not all_defs:
-            empty = NSTextField.labelWithString_(
-                "No annotation definitions yet. Create one at "
-                "fulcra-dynamics.com to see it here."
-            )
-            empty.setFont_(typography.small())
-            empty.setTextColor_(colors.text_secondary())
-            empty.setLineBreakMode_(0)  # NSLineBreakByWordWrapping
-            empty.setFrame_(NSMakeRect(16, 4, width - 32, 40))
-            content.addSubview_(empty)
-            content.setFrame_(NSMakeRect(0, 0, width, 48))
-            return
+        defs, view_state = quick_record_view_state(all_defs)
 
-        # Favorites filter (task #64): if the user has ANY favorites
-        # pinned AND the disclosure isn't expanded, show only the
-        # pinned defs. The "Show all annotations" footer flips the
-        # disclosure. With zero favorites we fall through to the legacy
-        # all-defs view so the popover doesn't go suddenly empty for
-        # first-time users.
-        pinned_count = sum(1 for d in all_defs if d.get("pinned"))
-        expanded = bool(favorites_view_state.get("expanded", False))
-        if pinned_count > 0 and not expanded:
-            defs = [d for d in all_defs if d.get("pinned")]
-            hidden_count = len(all_defs) - len(defs)
-        else:
-            defs = all_defs
-            hidden_count = 0
+        if view_state == "no_defs":
+            _add_empty_message(
+                content, width,
+                "No annotation tracks yet. Create one at fulcradynamics.com "
+                "and it'll show up here.",
+            )
+            return
+        if view_state == "none_pinned":
+            _add_pin_cta(content, width, on_preferences)
+            return
 
         SECTION_H = 22.0
         MOMENT_ROW_H = 44.0
-        DURATION_ROW_H = 84.0  # two-line layout: name + comment, plus duration controls
+        DURATION_ROW_H = 84.0
         y = 0.0
-
         last_group: str | None = None
         for d in defs:
             atype = (d.get("annotation_type") or "").lower()
@@ -399,7 +359,6 @@ def make_quick_record_view(
                 content.addSubview_(header_view)
                 y += SECTION_H
                 last_group = atype
-
             if atype == "duration":
                 row = _make_duration_row(
                     d, width, DURATION_ROW_H,
@@ -409,8 +368,6 @@ def make_quick_record_view(
                     on_record_inline=_record_inline_duration,
                     on_toggle_favorite=lambda did, pinned, _ad=all_defs:
                         _toggle_favorite(did, pinned, _ad),
-                    client=client,
-                    on_after_delete=lambda: rebuild_ref["fn"](),
                 )
                 row.setFrame_(NSMakeRect(0, y, width, DURATION_ROW_H))
                 content.addSubview_(row)
@@ -421,28 +378,10 @@ def make_quick_record_view(
                     on_record=_record_moment,
                     on_toggle_favorite=lambda did, pinned, _ad=all_defs:
                         _toggle_favorite(did, pinned, _ad),
-                    client=client,
-                    on_after_delete=lambda: rebuild_ref["fn"](),
                 )
                 row.setFrame_(NSMakeRect(0, y, width, MOMENT_ROW_H))
                 content.addSubview_(row)
                 y += MOMENT_ROW_H
-
-        # ── "Show all / show favorites only" disclosure footer ──────────
-        # Only render when favorites are set (otherwise there's nothing
-        # to disclose — we're already showing all defs). The label flips
-        # between "Show all" (collapsed) and "Show favorites only"
-        # (expanded) so a user who expanded once can collapse back.
-        if pinned_count > 0:
-            disclosure = _make_disclosure_row(
-                width, 28.0,
-                expanded=expanded,
-                hidden_count=hidden_count if not expanded else 0,
-                on_toggle=_toggle_expanded,
-            )
-            disclosure.setFrame_(NSMakeRect(0, y, width, 28.0))
-            content.addSubview_(disclosure)
-            y += 28.0
 
         # ── "Recently recorded" footer section ─────────────────────────
         if recent:
@@ -525,34 +464,43 @@ def _make_star_button(*, pinned: bool, height: float,
     return btn
 
 
-def _make_disclosure_row(width: float, height: float, *,
-                          expanded: bool, hidden_count: int,
-                          on_toggle: Callable[[], None]) -> NSView:
-    """The "Show all annotations (N more)" / "Show favorites only"
-    footer that appears beneath the rows when the user has any
-    favorites pinned.
 
-    Collapsed state: button label is "Show all annotations (N more)"
-    where N is the number of unpinned defs hidden by the filter.
-    Expanded state: button label is "Show favorites only" so the
-    user can hide the long tail again without closing the popover.
-    """
-    view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-    view.setWantsLayer_(True)
-    view.layer().setBackgroundColor_(colors.bg().CGColor())
+# ── Empty-state renderers ─────────────────────────────────────────────────────
 
-    if expanded:
-        label = "Show favorites only"
-    else:
-        label = f"Show all annotations ({hidden_count} more) ▾"
+def _add_empty_message(content, width: float, text: str) -> None:
+    """Render a single wrapped, secondary-text message in the popover body
+    (used for the 'no tracks on the account' state)."""
+    label = NSTextField.labelWithString_(text)
+    label.setFont_(typography.small())
+    label.setTextColor_(colors.text_secondary())
+    label.setLineBreakMode_(0)  # NSLineBreakByWordWrapping
+    label.setFrame_(NSMakeRect(16, 4, width - 32, 40))
+    content.addSubview_(label)
+    content.setFrame_(NSMakeRect(0, 0, width, 48))
 
-    btn = NSButton.alloc().initWithFrame_(NSMakeRect(16, 2, width - 32, height - 4))
-    btn.setTitle_(label)
-    btn.setBordered_(False)
-    btn.setFont_(typography.small())
-    _attach(btn, lambda _s: on_toggle())
-    view.addSubview_(btn)
-    return view
+
+def _add_pin_cta(content, width: float, on_preferences) -> None:
+    """Render the 'nothing pinned yet' empty state: a short prompt plus a
+    'Choose tracks to pin…' button that opens Preferences -> Annotations."""
+    msg = NSTextField.labelWithString_(
+        "No tracks pinned yet. Pin the ones you want to log from here."
+    )
+    msg.setFont_(typography.small())
+    msg.setTextColor_(colors.text_secondary())
+    msg.setLineBreakMode_(0)
+    msg.setFrame_(NSMakeRect(16, 44, width - 32, 36))
+    content.addSubview_(msg)
+
+    btn = NSButton.alloc().initWithFrame_(NSMakeRect(16, 10, 200, 28))
+    btn.setTitle_("Choose tracks to pin…")
+    btn.setBezelStyle_(NSBezelStyleRounded)
+
+    def _open(_sender):
+        if on_preferences is not None:
+            on_preferences("annotations")
+    _attach(btn, _open)
+    content.addSubview_(btn)
+    content.setFrame_(NSMakeRect(0, 0, width, 88))
 
 
 # ── Row factories ────────────────────────────────────────────────────────────
@@ -584,23 +532,14 @@ def _make_moment_row(
     *,
     on_record: Callable[[str, str, str], None],
     on_toggle_favorite: Callable[[str, bool], None] | None = None,
-    client: DaemonClient | None = None,
-    on_after_delete: Callable[[], None] | None = None,
 ) -> NSView:
-    """One Moment row: star + name + comment input + Record button + "…".
+    """One Moment row: star + name + comment input + Record button.
 
     The star button is rendered on the LEFT before the name. Empty
     star (☆) when not pinned → click adds to favorites; filled star
     (★) when pinned → click removes. Pinned rows also get a faint
     violet tint background so the pin state is visible at a glance
     without parsing the icon.
-
-    The trailing "…" button (SP2 task 4) opens a per-row NSMenu whose
-    only current item is "Delete this track…" — the one-off path for
-    "I made this by accident" without leaving the popover for
-    Preferences. ``client`` + ``on_after_delete`` are both required
-    for the "…" to be rendered; if either is None we omit it (which
-    keeps this builder testable without an AppKit-attached daemon).
     """
     row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
     row.setWantsLayer_(True)
@@ -617,22 +556,18 @@ def _make_moment_row(
     def_id = definition.get("id", "")
     def_name = definition.get("name", "(unnamed)")
 
-    # Layout: star + name on the left, then comment field, "…" menu,
-    # then Record button.
-    #
-    # COMMENT_W was 140 pre-SP2; we shrank it 44pt to make room for the
-    # new "…" per-row menu (SP2 task 4) without colliding with Record.
+    # Layout: star + name on the left, then comment field, then Record button.
     # With width=360 the slots end up as:
     #   star      12 .. 34   (22pt)
     #   name      38 .. 130  (92pt)
-    #   comment   138 .. 234 (96pt)  ← was 138..278, lost 44pt to "…"
-    #   "…"       242 .. 262 (20pt)  ← 8pt gap to comment, 10pt to Record
-    #   Record    272 .. 348 (76pt)  ← unchanged
+    #   comment  138 .. 272  (134pt)  — right edge flush to Record's left edge
+    #   Record   272 .. 348  (76pt, gap 0pt — tight but not overlapping)
+    # COMMENT_W = Record_left - comment_x = (width - BUTTON_W - 12) - (12 + STAR_W + 4 + NAME_W + 8)
+    #           = (360 - 76 - 12) - (12 + 22 + 4 + 92 + 8) = 272 - 138 = 134
     STAR_W = 22.0
     NAME_W = 92.0
-    COMMENT_W = 96.0
+    COMMENT_W = 134.0
     BUTTON_W = 76.0
-    MORE_W = 20.0
 
     star_btn = _make_star_button(
         pinned=pinned, height=height,
@@ -674,23 +609,6 @@ def _make_moment_row(
 
     _attach(btn, _on_click)
     row.addSubview_(btn)
-
-    # "…" per-row menu (SP2 task 4) — gateway to row-level actions
-    # (currently only "Delete this track…"; can grow). Gives users the
-    # one-off "I made this by accident" path without leaving the popover.
-    # Sits between the comment field and the Record button: 8pt gap to
-    # comment on the left, 10pt to Record on the right.
-    if client is not None and on_after_delete is not None and def_id:
-        more_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(width - BUTTON_W - 12 - 10 - MORE_W,
-                       (height - 22) / 2, MORE_W, 22)
-        )
-        more_btn.setTitle_("…")
-        more_btn.setBezelStyle_(NSBezelStyleRounded)
-        more_btn.setToolTip_("More actions for this annotation")
-        _attach_more_menu(more_btn, def_id, def_name,
-                          client, on_after_delete)
-        row.addSubview_(more_btn)
     return row
 
 
@@ -704,24 +622,15 @@ def _make_duration_row(
     on_stop_timer: Callable[[str, str], None],
     on_record_inline: Callable[[str, str, str, str], None],
     on_toggle_favorite: Callable[[str, bool], None] | None = None,
-    client: DaemonClient | None = None,
-    on_after_delete: Callable[[], None] | None = None,
 ) -> NSView:
     """One Duration row: name + comment + (inline duration field + Record)
-    + Start/Stop timer button, plus a trailing "…" menu on the header line.
+    + Start/Stop timer button.
 
     Both record patterns coexist — the user can either type "90m" and
     click Record OR start a timer that ends with Stop. If a timer is
     running for this def, the inline duration controls are still
     rendered (the user is free to abandon the timer by recording inline),
     and the Start button changes to Stop.
-
-    The "…" button (SP2 task 4) lives on the row's first/header line at
-    the far right — that line has plenty of slack while the controls
-    line is tight enough that adding a fourth button there would have
-    broken the SP1 L1 Record↔Timer 24pt gap. ``client`` +
-    ``on_after_delete`` are both required to render "…"; if either is
-    None we omit it (keeps the builder testable without AppKit).
     """
     row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
     row.setWantsLayer_(True)
@@ -739,18 +648,9 @@ def _make_duration_row(
     def_name = definition.get("name", "(unnamed)")
 
     # Line 1: star + name label spanning most of the width, with the
-    # timer-state hint on the right if a timer is running, and the new
-    # "…" per-row menu at the far right (SP2 task 4).
-    #
-    # Pre-SP2 the timer-hint reached x = width - 12 (168pt wide starting
-    # at width - 180). SP2 shrinks the hint to 140pt so it ends at
-    # width - 40, leaving a 16pt gap before the "…" slot at x = width -
-    # 24. Same shrink applied to the name_label's reserved trailing
-    # space (was `width - 200`; now `width - 228` to keep the same gap
-    # to the hint and clear of "…").
+    # timer-state hint on the right if a timer is running.
     name_y = height - 24
     STAR_W = 22.0
-    MORE_W = 20.0  # "…" button width (height-line placement, SP2 task 4)
     star_btn = _make_star_button(
         pinned=pinned, height=22.0,
         on_click=lambda: (on_toggle_favorite(def_id, pinned)
@@ -764,7 +664,7 @@ def _make_duration_row(
     name_label.setTextColor_(colors.text())
     name_label.setLineBreakMode_(4)
     name_label.setFrame_(NSMakeRect(12 + STAR_W + 4, name_y,
-                                     width - 228 - STAR_W - 4, 18))
+                                     width - 200 - STAR_W - 4, 18))
     row.addSubview_(name_label)
 
     if timer is not None:
@@ -776,18 +676,6 @@ def _make_duration_row(
         ))
         hint.setFrame_(NSMakeRect(width - 180, name_y, 140, 18))
         row.addSubview_(hint)
-
-    # "…" per-row menu, far right of the first line — see helper docstring.
-    if client is not None and on_after_delete is not None and def_id:
-        more_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(width - MORE_W - 4, name_y - 2, MORE_W, 22)
-        )
-        more_btn.setTitle_("…")
-        more_btn.setBezelStyle_(NSBezelStyleRounded)
-        more_btn.setToolTip_("More actions for this annotation")
-        _attach_more_menu(more_btn, def_id, def_name,
-                          client, on_after_delete)
-        row.addSubview_(more_btn)
 
     # Line 2: comment field, inline-duration field, Record-inline button,
     # Start/Stop timer button.

@@ -5,9 +5,11 @@ non-Plugin, or collides on id is excluded and recorded — never fatal.
 """
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 
+from ._bundled_plugins import BUNDLED_PLUGINS
 from .plugin import Plugin
 
 ENTRY_POINT_GROUP = "fulcra_collect.plugins"
@@ -17,6 +19,19 @@ ENTRY_POINT_GROUP = "fulcra_collect.plugins"
 class RegistryResult:
     plugins: dict[str, Plugin] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)  # entry name -> message
+
+
+@dataclass(frozen=True)
+class _ManifestEntry:
+    """Adapts a (id, "module:attr") manifest row to the .name/.load()
+    shape ``load_plugins`` already consumes, so the frozen path reuses
+    the exact same resolution + error handling as the entry-point path."""
+    name: str
+    target: str
+
+    def load(self):
+        module_path, _, attr = self.target.partition(":")
+        return getattr(importlib.import_module(module_path), attr)
 
 
 def load_plugins(entries) -> RegistryResult:
@@ -41,5 +56,17 @@ def load_plugins(entries) -> RegistryResult:
 
 
 def discover() -> RegistryResult:
-    """Discover plugins from the real entry-point group."""
-    return load_plugins(entry_points(group=ENTRY_POINT_GROUP))
+    """Discover plugins from the entry-point group, falling back to the
+    static manifest when that's empty.
+
+    Editable/dev installs expose the entry points normally. A py2app
+    freeze drops the .dist-info metadata, so entry_points() comes back
+    empty there — and we import the known plugins from BUNDLED_PLUGINS
+    instead."""
+    eps = list(entry_points(group=ENTRY_POINT_GROUP))
+    if eps:
+        return load_plugins(eps)
+    return load_plugins(
+        _ManifestEntry(name=pid, target=target)
+        for pid, target in BUNDLED_PLUGINS
+    )

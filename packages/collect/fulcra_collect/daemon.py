@@ -174,20 +174,19 @@ class Daemon:
         self._attention_def_validated_id: str | None = None
         self._attention_validation_interval_s: float = 300.0
 
-        # Account-switch pre-flight: invalidate cached def_ids + tag_ids
-        # across all plugin state when the bearer-token's account has
-        # changed since the daemon last booted. Lazy per-call recovery
-        # already exists for the attention route and per-plugin runs,
-        # but doing it eagerly at startup saves the user from seeing
-        # "Run failed: <orphan 422>" on their first dashboard open.
-        try:
-            self._check_account_fingerprint()
-        except Exception:
-            # Pre-flight failures must NOT block daemon startup. The
-            # lazy recovery paths still work as a fallback.
-            logging.getLogger("fulcra_collect.daemon").exception(
-                "account-fingerprint pre-flight failed"
-            )
+        # NOTE: the account-switch pre-flight (_check_account_fingerprint)
+        # is deliberately NOT run here. It reads the bearer token from the
+        # OS keychain, and on macOS that read can block indefinitely on a
+        # keychain-ACL confirmation dialog (e.g. after the daemon binary's
+        # signing identity changes, or under a launchd/remote session where
+        # the dialog can't be answered). Doing it in __init__ — before the
+        # daemon binds its control socket — meant a single blocked keychain
+        # read bricked the whole daemon: no control socket, no web UI, the
+        # menubar showing "daemon not reachable" with no recourse but a
+        # restart. The pre-flight is a cache-warming nicety, never a
+        # correctness requirement (lazy per-call recovery is the real
+        # safety net), so serve() runs it on a background thread AFTER the
+        # sockets are up. Construction must stay keychain-free.
 
     # ---- account-switch pre-flight -------------------------------------
 
@@ -566,12 +565,22 @@ class Daemon:
         token = _creds.get_user_secret("bearer-token")
         if not token:
             return {"ok": False, "error": "Fulcra not authenticated", "definitions": []}
+        # Use the SP5 refresh-aware wrapper, exactly like _delete_definition.
+        # This was the ONE Fulcra-touching path still on a raw httpx client
+        # with no refresh-on-401 — and it's typically the FIRST thing to hit
+        # an expired token (the menubar polls status, then the user opens
+        # "what to log", before any refresh-capable path has run). So when
+        # the access token had expired it 401'd and surfaced "Fulcra didn't
+        # respond" instead of minting a fresh token via the `fulcra` CLI and
+        # retrying — even though /api/definitions etc. recovered fine. Late
+        # import so tests that monkeypatch ``fulcra_collect.web.httpx`` still
+        # intercept the inner client (same reason as _delete_definition).
+        from . import web as _web
         try:
-            with httpx.Client(timeout=10.0) as client:
-                r = client.get(
-                    "https://api.fulcradynamics.com/user/v1alpha1/annotation",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
+            with _web._RetryingClient(
+                token, user_agent="fulcra-collect/daemon",
+            ) as client:
+                r = client.get("/user/v1alpha1/annotation")
                 r.raise_for_status()
                 all_defs = r.json()
         except Exception:
@@ -1149,6 +1158,22 @@ class Daemon:
 
         server = ControlServer(_control_socket_path(), self.handle_request)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        # Account-switch pre-flight: invalidate cached def_ids + tag_ids
+        # across all plugin state when the bearer-token's account changed
+        # since the daemon last booted, so the user doesn't see orphaned
+        # "Run failed: <422>" on their first dashboard open. Run on a
+        # background thread AFTER the control socket is bound (above): it
+        # reads the keychain, which on macOS can block on an ACL prompt,
+        # and that must never delay reachability. See the note in __init__.
+        def _fingerprint_preflight() -> None:
+            try:
+                self._check_account_fingerprint()
+            except Exception:
+                logging.getLogger("fulcra_collect.daemon").exception(
+                    "account-fingerprint pre-flight failed"
+                )
+        threading.Thread(target=_fingerprint_preflight, daemon=True).start()
 
         # Start the HTTP server alongside the UDS control server
         try:

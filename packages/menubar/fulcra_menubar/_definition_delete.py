@@ -40,6 +40,22 @@ _NSAlertFirstButtonReturn = 1000
 
 _log = logging.getLogger("fulcra_menubar.delete_definition")
 
+# Shared soft-delete copy. Kept as module constants so the menubar alert
+# below and the web Settings confirm (settings.js) state the same thing —
+# soft-delete removes the track from every picker, keeps already-written
+# events on the timeline, and is NOT reliably reversible. The web copy is
+# replicated by hand in settings.js (no shared JS module); keep the two in
+# sync if either changes.
+DELETE_TRACK_BODY = (
+    "This removes it from your pickers everywhere — the menubar and the "
+    "web app. Events already written under this track stay on your Fulcra "
+    "timeline, but the track itself may not be recoverable."
+)
+
+
+def delete_track_title(def_name: str) -> str:
+    return f'Delete the entire "{def_name}" track?'
+
 
 def show_delete_alert(def_id: str, def_name: str,
                       client: DaemonClient,
@@ -71,12 +87,9 @@ def show_delete_alert(def_id: str, def_name: str,
             delete so the caller can refresh its list / row state.
     """
     alert = NSAlert.alloc().init()
-    alert.setMessageText_(f'Delete "{def_name}"?')
-    alert.setInformativeText_(
-        "This removes the track from your pickers. Events already "
-        "written under this track stay on your Fulcra timeline."
-    )
-    alert.addButtonWithTitle_("Delete")
+    alert.setMessageText_(delete_track_title(def_name))
+    alert.setInformativeText_(DELETE_TRACK_BODY)
+    alert.addButtonWithTitle_("Delete track")
     alert.addButtonWithTitle_("Cancel")
     response = alert.runModal()
     if response != _NSAlertFirstButtonReturn:

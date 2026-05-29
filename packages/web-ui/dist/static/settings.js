@@ -211,11 +211,10 @@ function settings() {
     async deleteDef(def) {
       if (this.deletingIds.has(def.id)) return;
       const ok = window.confirm(
-        `Soft-delete '${def.name}'?\n\n` +
-        "Events recorded under this definition stay in Fulcra, but the " +
-        "definition will no longer appear in pickers and any plugin " +
-        "currently using it will resolve a fresh one on its next run.\n\n" +
-        "This cannot be undone from this UI."
+        `Delete the entire '${def.name}' track?\n\n` +
+        "This removes it from your pickers everywhere — the menubar and the " +
+        "web app. Events already written under this track stay on your Fulcra " +
+        "timeline, but the track itself may not be recoverable."
       );
       if (!ok) return;
 

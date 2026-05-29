@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import socket
 import tempfile
@@ -19,6 +20,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 Handler = Callable[[dict], dict]
+
+_log = logging.getLogger("fulcra_collect.control")
 
 # macOS hard-caps AF_UNIX paths at 104 bytes; Linux allows 108.
 _MAX_SOCK_PATH = 104
@@ -111,8 +114,20 @@ class ControlServer:
                 conn, _ = self._sock.accept()
             except socket.timeout:
                 continue
+            # Defense in depth: a single misbehaving peer (slow, malformed,
+            # or one that hangs up mid-exchange) must NEVER kill the accept
+            # loop. If it did, the listening socket would be orphaned and
+            # every later client would get ECONNREFUSED — surfacing in the
+            # menubar as "daemon not reachable" until the daemon restarts.
+            # So swallow + log any per-connection error and keep serving.
             with conn:
-                self._serve_one(conn)
+                try:
+                    self._serve_one(conn)
+                except Exception:  # noqa: BLE001 — one bad peer can't down the server
+                    _log.warning(
+                        "control: dropping a connection after an unexpected error",
+                        exc_info=True,
+                    )
         self._sock.close()
         for p in (self._path, bind_path):
             if p.exists() or p.is_symlink():
@@ -128,7 +143,14 @@ class ControlServer:
             reply = self._handler(request)
         except Exception as exc:  # noqa: BLE001 — a bad request must not kill the server
             reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        conn.sendall(json.dumps(reply).encode() + b"\n")
+        try:
+            conn.sendall(json.dumps(reply).encode() + b"\n")
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # The client hung up before reading the reply (e.g. the menubar's
+            # request timed out and it closed the socket). There's nothing to
+            # send to and nothing to recover — just drop this peer. Letting
+            # this propagate used to crash the whole accept loop.
+            _log.debug("control: peer closed before reply could be sent")
 
     def shutdown(self) -> None:
         self._stop.set()
