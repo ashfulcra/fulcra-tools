@@ -96,7 +96,7 @@ def make_quick_record_view(
     active_timers: dict[str, dict] | None = None,
     recent: list[dict] | None = None,
     on_timer_changed: Callable[[], None] | None = None,
-    favorites_view_state: dict | None = None,
+    on_preferences: Callable[[str | None], None] | None = None,
 ) -> NSView:
     """Build the quick-record primary view.
 
@@ -126,20 +126,15 @@ def make_quick_record_view(
     on_timer_changed:
         Called whenever the timer dict is mutated. The root uses this
         to toggle the cyan menubar overlay.
-    favorites_view_state:
-        Shared dict carrying the popover-scoped favorites UI state —
-        currently just ``{"expanded": bool}`` for the "Show all
-        annotations" disclosure. Owned by PopoverRoot so a tap on the
-        disclosure persists across rebuilds within one popover session;
-        intentionally NOT persisted across popover open/close cycles
-        (per task #64 spec — first interaction defaults to collapsed).
+    on_preferences:
+        Optional callback invoked with a tab name (e.g. ``"annotations"``)
+        when the user taps the "Choose tracks to pin…" CTA in the empty
+        state. Opens the Preferences window to the specified tab.
     """
     if active_timers is None:
         active_timers = {}
     if recent is None:
         recent = []
-    if favorites_view_state is None:
-        favorites_view_state = {"expanded": False}
 
     HEIGHT = float(height)
     HEADER_H = 40.0
@@ -302,15 +297,6 @@ def make_quick_record_view(
             return
         rebuild_ref["fn"]()
 
-    def _toggle_expanded() -> None:
-        """The "Show all annotations" disclosure footer flips this; the
-        rebuild below filters to favorites-only when ``expanded`` is
-        False and any favorites exist."""
-        favorites_view_state["expanded"] = not favorites_view_state.get(
-            "expanded", False,
-        )
-        rebuild_ref["fn"]()
-
     def _undo(source_id: str) -> None:
         try:
             reply = client.delete_annotation(source_id)
@@ -346,39 +332,23 @@ def make_quick_record_view(
             return
 
         all_defs = reply.get("definitions", [])
-        if not all_defs:
-            empty = NSTextField.labelWithString_(
-                "No annotation definitions yet. Create one at "
-                "fulcra-dynamics.com to see it here."
-            )
-            empty.setFont_(typography.small())
-            empty.setTextColor_(colors.text_secondary())
-            empty.setLineBreakMode_(0)  # NSLineBreakByWordWrapping
-            empty.setFrame_(NSMakeRect(16, 4, width - 32, 40))
-            content.addSubview_(empty)
-            content.setFrame_(NSMakeRect(0, 0, width, 48))
-            return
+        defs, view_state = quick_record_view_state(all_defs)
 
-        # Favorites filter (task #64): if the user has ANY favorites
-        # pinned AND the disclosure isn't expanded, show only the
-        # pinned defs. The "Show all annotations" footer flips the
-        # disclosure. With zero favorites we fall through to the legacy
-        # all-defs view so the popover doesn't go suddenly empty for
-        # first-time users.
-        pinned_count = sum(1 for d in all_defs if d.get("pinned"))
-        expanded = bool(favorites_view_state.get("expanded", False))
-        if pinned_count > 0 and not expanded:
-            defs = [d for d in all_defs if d.get("pinned")]
-            hidden_count = len(all_defs) - len(defs)
-        else:
-            defs = all_defs
-            hidden_count = 0
+        if view_state == "no_defs":
+            _add_empty_message(
+                content, width,
+                "No annotation tracks yet. Create one at fulcradynamics.com "
+                "and it'll show up here.",
+            )
+            return
+        if view_state == "none_pinned":
+            _add_pin_cta(content, width, on_preferences)
+            return
 
         SECTION_H = 22.0
         MOMENT_ROW_H = 44.0
-        DURATION_ROW_H = 84.0  # two-line layout: name + comment, plus duration controls
+        DURATION_ROW_H = 84.0
         y = 0.0
-
         last_group: str | None = None
         for d in defs:
             atype = (d.get("annotation_type") or "").lower()
@@ -389,7 +359,6 @@ def make_quick_record_view(
                 content.addSubview_(header_view)
                 y += SECTION_H
                 last_group = atype
-
             if atype == "duration":
                 row = _make_duration_row(
                     d, width, DURATION_ROW_H,
@@ -413,22 +382,6 @@ def make_quick_record_view(
                 row.setFrame_(NSMakeRect(0, y, width, MOMENT_ROW_H))
                 content.addSubview_(row)
                 y += MOMENT_ROW_H
-
-        # ── "Show all / show favorites only" disclosure footer ──────────
-        # Only render when favorites are set (otherwise there's nothing
-        # to disclose — we're already showing all defs). The label flips
-        # between "Show all" (collapsed) and "Show favorites only"
-        # (expanded) so a user who expanded once can collapse back.
-        if pinned_count > 0:
-            disclosure = _make_disclosure_row(
-                width, 28.0,
-                expanded=expanded,
-                hidden_count=hidden_count if not expanded else 0,
-                on_toggle=_toggle_expanded,
-            )
-            disclosure.setFrame_(NSMakeRect(0, y, width, 28.0))
-            content.addSubview_(disclosure)
-            y += 28.0
 
         # ── "Recently recorded" footer section ─────────────────────────
         if recent:
@@ -511,34 +464,43 @@ def _make_star_button(*, pinned: bool, height: float,
     return btn
 
 
-def _make_disclosure_row(width: float, height: float, *,
-                          expanded: bool, hidden_count: int,
-                          on_toggle: Callable[[], None]) -> NSView:
-    """The "Show all annotations (N more)" / "Show favorites only"
-    footer that appears beneath the rows when the user has any
-    favorites pinned.
 
-    Collapsed state: button label is "Show all annotations (N more)"
-    where N is the number of unpinned defs hidden by the filter.
-    Expanded state: button label is "Show favorites only" so the
-    user can hide the long tail again without closing the popover.
-    """
-    view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-    view.setWantsLayer_(True)
-    view.layer().setBackgroundColor_(colors.bg().CGColor())
+# ── Empty-state renderers ─────────────────────────────────────────────────────
 
-    if expanded:
-        label = "Show favorites only"
-    else:
-        label = f"Show all annotations ({hidden_count} more) ▾"
+def _add_empty_message(content, width: float, text: str) -> None:
+    """Render a single wrapped, secondary-text message in the popover body
+    (used for the 'no tracks on the account' state)."""
+    label = NSTextField.labelWithString_(text)
+    label.setFont_(typography.small())
+    label.setTextColor_(colors.text_secondary())
+    label.setLineBreakMode_(0)  # NSLineBreakByWordWrapping
+    label.setFrame_(NSMakeRect(16, 4, width - 32, 40))
+    content.addSubview_(label)
+    content.setFrame_(NSMakeRect(0, 0, width, 48))
 
-    btn = NSButton.alloc().initWithFrame_(NSMakeRect(16, 2, width - 32, height - 4))
-    btn.setTitle_(label)
-    btn.setBordered_(False)
-    btn.setFont_(typography.small())
-    _attach(btn, lambda _s: on_toggle())
-    view.addSubview_(btn)
-    return view
+
+def _add_pin_cta(content, width: float, on_preferences) -> None:
+    """Render the 'nothing pinned yet' empty state: a short prompt plus a
+    'Choose tracks to pin…' button that opens Preferences -> Annotations."""
+    msg = NSTextField.labelWithString_(
+        "No tracks pinned yet. Pin the ones you want to log from here."
+    )
+    msg.setFont_(typography.small())
+    msg.setTextColor_(colors.text_secondary())
+    msg.setLineBreakMode_(0)
+    msg.setFrame_(NSMakeRect(16, 44, width - 32, 36))
+    content.addSubview_(msg)
+
+    btn = NSButton.alloc().initWithFrame_(NSMakeRect(16, 10, 200, 28))
+    btn.setTitle_("Choose tracks to pin…")
+    btn.setBezelStyle_(NSBezelStyleRounded)
+
+    def _open(_sender):
+        if on_preferences is not None:
+            on_preferences("annotations")
+    _attach(btn, _open)
+    content.addSubview_(btn)
+    content.setFrame_(NSMakeRect(0, 0, width, 88))
 
 
 # ── Row factories ────────────────────────────────────────────────────────────
