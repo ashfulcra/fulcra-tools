@@ -52,6 +52,46 @@ def test_delete_removes_the_secret():
     assert credentials.get_secret("lastfm", "api-key") is None
 
 
+def test_keyring_read_that_blocks_times_out_to_none(monkeypatch):
+    """A keychain read that blocks (macOS ACL-confirmation prompt) must NOT
+    hang the caller forever — it degrades to None after the timeout. The
+    daemon's control loop is single-threaded, so a forever-blocked read would
+    otherwise wedge every request and surface as 'daemon not reachable'.
+    """
+    import threading
+    import time
+
+    from fulcra_collect import credentials
+
+    blocking = threading.Event()  # never set → get_password blocks
+
+    def _blocking_get(service, account):
+        blocking.wait(timeout=5.0)  # simulate the unanswered keychain prompt
+        return "should-never-be-returned"
+
+    monkeypatch.setattr(keyring, "get_password", _blocking_get)
+
+    start = time.monotonic()
+    value = credentials._keyring_get("svc", "acct", timeout=0.3)
+    elapsed = time.monotonic() - start
+
+    assert value is None
+    assert elapsed < 2.0  # returned promptly, didn't wait out the 5s block
+
+
+def test_keyring_read_propagates_real_errors(monkeypatch):
+    """A genuine backend error (not a timeout) is re-raised on the caller
+    thread rather than silently swallowed as a missing item."""
+    from fulcra_collect import credentials
+
+    def _boom(service, account):
+        raise RuntimeError("keychain exploded")
+
+    monkeypatch.setattr(keyring, "get_password", _boom)
+    with pytest.raises(RuntimeError, match="keychain exploded"):
+        credentials._keyring_get("svc", "acct", timeout=1.0)
+
+
 def test_secrets_are_namespaced_per_plugin():
     from fulcra_collect import credentials
     credentials.set_secret("lastfm", "token", "A")
