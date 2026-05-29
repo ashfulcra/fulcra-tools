@@ -48,12 +48,9 @@ def build_image_commands() -> list[str]:
         SKILL_CLONE,
         # Pre-set OpenRouter provider + model (the API key is injected at spawn, not here).
         "hermes config set model.provider openrouter && hermes config set model.default anthropic/claude-sonnet-4.5",
-        # Bypass the in-chat dangerous-command approval prompt. Without this the
-        # agent pops a "[HIGH] approval required" prompt for things like the uv
-        # installer (curl | sh) mid-onboarding — confusing friction for a guest.
-        # `approvals.mode=yolo` is the dashboard's own setting (ask/yolo/deny). The
-        # sandbox is ephemeral + isolated, so auto-approving is acceptable here.
-        "hermes config set approvals.mode yolo",
+        # NOTE: the dangerous-command approval prompt is bypassed at runtime via the
+        # HERMES_YOLO_MODE=1 env var exported in start-chat.sh — NOT via a config key.
+        # (The config `approvals.mode` setting is not wired to the approval logic.)
         # NOTE: we do NOT prebuild the dashboard web bundle here. `npm run build`
         # needs dev deps (tsc) the pip install doesn't provide; `hermes dashboard`
         # builds the bundle itself on first launch (~15s, covered by start-chat.sh's
