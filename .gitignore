@@ -2,6 +2,8 @@
 .env
 .env.*
 *.env
+# ...but DO track the placeholder template:
+!.env.example
 secrets/
 *.pem
 *-token*

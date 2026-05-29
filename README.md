@@ -2,43 +2,47 @@
 
 Operator tooling for the **Fulcra "press play" demo**: give a small, hand-picked
 set of people their own isolated, ephemeral [Hermes](https://hermes-agent.nousresearch.com)
-agent on [Daytona](https://www.daytona.io) that onboards them into their *own*
-Fulcra account.
+agent on [Daytona](https://www.daytona.io) that onboards each of them into their
+*own* Fulcra account.
 
-## The thesis
+> **The thesis: the agent is ephemeral; the memory is permanent via Fulcra.** A
+> guest opens a link, lands in a Hermes chat, and the agent walks them through
+> creating (or signing into) their own Fulcra account. Everything the agent learns
+> persists in *their* Fulcra account and outlives the throwaway sandbox.
 
-**The agent is ephemeral; the memory is permanent via Fulcra.** A guest opens a
-link, lands in a Hermes chat, and the agent walks them through creating (or
-signing into) their own Fulcra account. Everything the agent learns about them
-persists in *their* Fulcra account and outlives the throwaway sandbox.
-
-- Each guest gets their **own** isolated sandbox (not a shared agent).
-- **Fulcra (you) pays** for the compute; guests need no Daytona/OpenRouter
-  account — they only create a Fulcra account, which is the point.
+- Each guest gets their **own** isolated sandbox — not a shared agent.
+- **You pay** for the compute; guests need no Daytona/OpenRouter account. They only
+  create a Fulcra account, which is the whole point.
 - Self-serve, pay-per-use, **no Fulcra credentials anywhere in this repo** — the
   guest authenticates via Fulcra's device-code browser flow.
 
-## How it works
+---
 
-1. A reusable Daytona **snapshot** (`fhd-hermes-demo`) bakes: `uv` + the Fulcra
-   CLI (`fulcra-api`), Hermes (configured for OpenRouter), the
-   [`fulcra-onboarding`](https://github.com/fulcradynamics/agent-skills) skill,
-   and Caddy.
-2. `spawn.py` creates one **private** sandbox per guest, injects the OpenRouter
-   key into `~/.hermes/.env`, starts the chat, and returns a **signed Daytona
-   preview URL**.
-3. The guest opens the URL → the **Hermes dashboard chat**, locked down by a
-   Caddy reverse proxy so guests can use the chat but cannot reach the
-   admin/key/config endpoints.
-4. The agent runs the onboarding skill: greet → "what do you want to track?" →
-   `fulcra-api auth login` (device-code) → it shows the guest an auth URL + code
-   to complete in their own browser.
-5. Sandboxes **auto-stop after 30 minutes idle**; tear them down when done.
+## Quickstart
+
+```bash
+# 0. one-time setup
+uv sync                              # installs deps + the fhd-* commands
+cp .env.example .env                 # then fill in your keys (see Prerequisites)
+
+# 1. build the agent image once (~3 min)
+uv run fhd-build
+
+# 2. one link per guest — send them the printed URL
+uv run fhd-spawn alice
+uv run fhd-spawn bob
+
+# 3. clean up when you're done
+uv run fhd-teardown --all
+```
+
+That's the whole loop. Spawn shortly before a demo (sandboxes auto-stop after
+30 min idle), and the first chat load takes ~15–20s while the dashboard builds.
 
 ## Prerequisites
 
 - Python 3.12 and [`uv`](https://docs.astral.sh/uv/).
-- A `.env` file in the repo root (gitignored) with:
+- A `.env` file in the repo root (gitignored — never committed) with:
 
   ```
   DAYTONA_API_KEY=dtn_...
@@ -46,71 +50,101 @@ persists in *their* Fulcra account and outlives the throwaway sandbox.
   OPENROUTER_MODEL=anthropic/claude-sonnet-4.5   # optional; this is the default
   ```
 
-- Install deps: `uv venv && uv pip install -e '.[dev]'` (or `uv sync`).
+- `uv sync` installs the dependencies and the `fhd-build` / `fhd-spawn` /
+  `fhd-teardown` commands. (You can also run them as `uv run python -m fhd.<name>`.)
 
-> ⚠️ **Use a disposable, low-credit-cap OpenRouter key for real demos.** The
-> guest is talking to an agent with a shell, so a determined guest could ask it
-> to print its own environment. Locking the dashboard does not change that.
-> Rotate the key after demos.
+> ⚠️ **Use a disposable, low-credit-cap OpenRouter key for real demos.** The guest
+> is talking to an agent with a shell, so a determined guest could ask it to print
+> its own environment. Locking the dashboard does not change that — see
+> [Security](#security-model-demo-grade). Rotate the key after a demo round.
 
-## Usage
+## What the guest experiences
 
-Build the snapshot once (and after any image change — a few minutes):
+1. They open the link you sent and click **"I Understand, Continue"** on Daytona's
+   one-time preview warning.
+2. A clean Hermes chat loads. They type anything (e.g. "hi").
+3. The agent greets them, asks what they'd like to track, then runs the Fulcra
+   login — it shows an **authorization URL + code** to open in *their own* browser,
+   where they create or sign into their Fulcra account.
+4. From there the agent helps them set things up; whatever it captures lives in
+   their Fulcra account after the sandbox is gone.
+
+No accounts to make except Fulcra, no approval prompts, nothing to install.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `uv run fhd-build` | Build/register the reusable `fhd-hermes-demo` Daytona snapshot. Run once, and again after any image/asset change. Idempotent (deletes + rebuilds a same-named snapshot). |
+| `uv run fhd-spawn <label>` | Spawn one private sandbox for a guest and print a signed "press play" URL. |
+| `uv run fhd-teardown --list` | List every live guest sandbox. |
+| `uv run fhd-teardown --delete <id>` | Delete one sandbox. |
+| `uv run fhd-teardown --all` | Delete all guest sandboxes (stops billing). |
+
+## Running several demos at once
+
+Each `fhd-spawn` is fully independent — separate sandbox, separate agent, separate
+Fulcra account — all sharing the one OpenRouter key. Just spawn one per person:
 
 ```bash
-uv run python -m fhd.build_snapshot
+for name in alice bob carol; do uv run fhd-spawn "$name"; done
 ```
 
-Spawn one sandbox per guest and send them the printed link:
-
-```bash
-uv run python -m fhd.spawn alice
-# -> PRESS PLAY (send this link): https://8080-<token>.daytonaproxy01.net
-```
-
-The chat takes ~15–20s to come up on first load (the dashboard builds its web
-UI). Spawn shortly before the demo, since sandboxes auto-stop after 30 min idle.
-
-List / tear down:
-
-```bash
-uv run python -m fhd.teardown --list
-uv run python -m fhd.teardown --delete <sandbox-id>
-uv run python -m fhd.teardown --all      # delete every guest sandbox
-```
+They run concurrently with no interference. The only shared limit is OpenRouter's
+per-key rate limit: fine for a handful of simultaneous chats; if you expect dozens
+at once, bump your OpenRouter tier or split across keys.
 
 ## Security model (demo-grade)
 
 - **Access:** the signed preview URL carries its own token and the sandbox is
-  `public=False`, so only someone with the link gets in. Control = "only
-  invitees get the link" + ephemerality. There is **no per-user login**; this is
-  intended for a small, trusted invite list, not public distribution.
-- **Dashboard lockdown:** Caddy (`assets/caddy/Caddyfile`) proxies the SPA and
-  chat but returns 403 for the secret/admin/exec endpoints (`/api/env`,
-  `/api/env/reveal`, `/api/config`, `/api/cron`, `/api/providers`,
-  `/api/dashboard/agent-plugins/*`, `/api/model/set`, `/api/gateway/*`,
-  `/api/hermes/*`, `/api/logs`, …). The dashboard binds `127.0.0.1` only and is
-  reachable solely through Caddy.
-- **First-visit interstitial:** Daytona shows a one-click "Preview URL Warning"
-  before the app. It's removable org-wide in Daytona settings
-  (`daytona.io/docs/en/preview-and-authentication`) for a cleaner demo.
+  `public=False`, so only someone with the link gets in. Control is "only invitees
+  get the link" + ephemerality (30-min idle auto-stop). There is **no per-user
+  login** — this is for a small, trusted invite list, not public distribution.
+- **Dashboard lockdown:** the Hermes dashboard is an admin console (its `KEYS` tab
+  can reveal/edit the OpenRouter key). It binds `127.0.0.1` only and is fronted by
+  Caddy (`assets/caddy/Caddyfile`), which proxies the chat but returns **403** for
+  every secret/admin/exec endpoint (`/api/env`, `/api/env/reveal`, `/api/config`,
+  `/api/cron`, `/api/providers`, `/api/dashboard/agent-plugins/*`,
+  `/api/model/set`, `/api/gateway/*`, `/api/hermes/*`, `/api/logs`, …).
+- **Residual risk:** the agent has a shell, so a guest could ask it to print its
+  own `~/.hermes/.env`. The dashboard lockdown doesn't stop that (nothing would,
+  short of removing the shell). Mitigation = the disposable, capped key above.
+
+## Cost (Daytona)
+
+Default sandbox is 1 vCPU / 1 GiB / 3 GiB disk. Worst case — a tab pinned open for
+a full 24h — is **≈ $1.60/sandbox/day**; if it idle-stops at 30 min it's a few
+cents. Stopped sandboxes keep a little disk until deleted, so run
+`fhd-teardown --all` to truly zero it out. Everything draws from Daytona's $200
+free credit first.
 
 ## The onboarding skill (fetched on boot)
 
-Each sandbox **pulls the latest `fulcra-onboarding` skill from GitHub at
-startup** (`assets/hermes/start-chat.sh`), so updating the skill on
-`github.com/fulcradynamics/agent-skills` propagates to every newly spawned
-sandbox **with no rebuild**. The image also bakes a copy, which is used as a
-fallback if the boot-time fetch fails (GitHub unreachable, bad branch, etc.).
+Each sandbox **pulls the latest `fulcra-onboarding` skill from GitHub at startup**
+(`assets/hermes/start-chat.sh`), so updating it on
+[`fulcradynamics/agent-skills`](https://github.com/fulcradynamics/agent-skills)
+reaches every newly spawned sandbox **with no rebuild**. The image also bakes a
+copy, used as a fallback if the boot fetch fails.
 
-- Source is overridable per spawn via env: `FULCRA_SKILL_REPO` (default
-  `https://github.com/fulcradynamics/agent-skills`) and `FULCRA_SKILL_SUBPATH`
-  (default `skills/fulcra-onboarding`).
-- A bad commit on the skill's default branch *will* reach live demos — that's the
-  trade-off of fetch-on-boot. If you need to freeze a known-good version, point
-  `FULCRA_SKILL_REPO` at a fork/tag or switch back to baking a pinned copy.
-- The agent is told to run the skill on the first message via
-  `assets/hermes/SOUL.md` and `assets/hermes/AGENTS.md`.
+- Overridable per spawn via env: `FULCRA_SKILL_REPO` and `FULCRA_SKILL_SUBPATH`.
+- Trade-off: a bad commit on the skill's default branch reaches new demos
+  immediately. To freeze a known-good version, point `FULCRA_SKILL_REPO` at a
+  fork/tag.
+
+## Troubleshooting
+
+- **The chat is blank / "connecting" for a while.** First load builds the
+  dashboard's web UI (~15–20s). Give it time; reload if needed.
+- **A guest hits a "[HIGH] approval required" prompt.** Their sandbox predates the
+  `HERMES_YOLO_MODE` fix — re-`fhd-spawn` them from the current snapshot.
+- **`fhd-build` says the snapshot already exists.** It shouldn't (build is
+  idempotent), but if a build was interrupted, just run `fhd-build` again — it
+  deletes the stale snapshot and rebuilds.
+- **`ModuleNotFoundError: fhd`.** Run `uv sync` (installs the package), or prefix
+  commands with `PYTHONPATH=src`.
+- **Onboarding stalls right after login.** The agent polls `fulcra-api user-info`;
+  make sure the guest actually completed the browser login and tell the agent
+  "done".
 
 ## Layout
 
@@ -128,8 +162,6 @@ assets/
 docs/ARCHITECTURE.md  # how it works + the non-obvious design decisions
 ```
 
-**Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** for how it works end to
-end and *why* — the dashboard lockdown, the `HERMES_YOLO_MODE` approval bypass,
-fetch-on-boot skills, the node-PATH and web-build gotchas, and the security/cost
-model. `docs/superpowers/` (if present) holds the original spec, plan, and
-live-spike findings.
+**For how it all works and *why* — the dashboard lockdown, the `HERMES_YOLO_MODE`
+approval bypass, fetch-on-boot skills, the node-PATH and web-build gotchas, and the
+security/cost model — read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).**
