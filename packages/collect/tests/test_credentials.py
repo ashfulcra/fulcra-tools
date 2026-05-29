@@ -52,6 +52,88 @@ def test_delete_removes_the_secret():
     assert credentials.get_secret("lastfm", "api-key") is None
 
 
+def test_keyring_read_that_blocks_times_out(monkeypatch):
+    """A keychain read that blocks (macOS ACL-confirmation prompt) must NOT
+    hang the caller forever — _keyring_get raises TimeoutError after the
+    timeout. The daemon's control loop is single-threaded, so a forever-
+    blocked read would otherwise wedge every request and surface as 'daemon
+    not reachable'.
+    """
+    import threading
+    import time
+
+    from fulcra_collect import credentials
+
+    blocking = threading.Event()  # never set → get_password blocks
+
+    def _blocking_get(service, account):
+        blocking.wait(timeout=5.0)  # simulate the unanswered keychain prompt
+        return "should-never-be-returned"
+
+    monkeypatch.setattr(keyring, "get_password", _blocking_get)
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        credentials._keyring_get("svc", "acct", timeout=0.3)
+    elapsed = time.monotonic() - start
+    assert elapsed < 2.0  # gave up promptly, didn't wait out the 5s block
+
+
+def test_get_user_secret_returns_none_on_blocked_read_without_caching(monkeypatch):
+    """A blocked keychain read degrades get_user_secret to None and must NOT
+    cache that transient failure — a later read (once the prompt clears) must
+    retry rather than return a stale 'absent'."""
+    import threading
+
+    from fulcra_collect import credentials
+
+    blocking = threading.Event()
+
+    def _blocking_get(service, account):
+        blocking.wait(timeout=5.0)
+        return "real-token"
+
+    monkeypatch.setattr(keyring, "get_password", _blocking_get)
+    monkeypatch.setattr(credentials, "_KEYCHAIN_READ_TIMEOUT_S", 0.3)
+    assert credentials.get_user_secret("bearer-token") is None
+    # Transient failure wasn't cached: the prompt "clears", reads succeed.
+    blocking.set()
+    monkeypatch.setattr(keyring, "get_password", lambda s, a: "real-token")
+    assert credentials.get_user_secret("bearer-token") == "real-token"
+
+
+def test_get_user_secret_caches_after_first_read(monkeypatch):
+    """The bearer token is read on nearly every daemon operation; caching it
+    means ONE keychain read per process (one macOS prompt) instead of ten.
+    """
+    from fulcra_collect import credentials
+
+    calls = {"n": 0}
+
+    def _counting_get(service, account):
+        calls["n"] += 1
+        return "tok"
+
+    monkeypatch.setattr(keyring, "get_password", _counting_get)
+    assert credentials.get_user_secret("bearer-token") == "tok"
+    assert credentials.get_user_secret("bearer-token") == "tok"
+    assert credentials.get_user_secret("bearer-token") == "tok"
+    assert calls["n"] == 1  # only the first call hit the keychain
+
+
+def test_keyring_read_propagates_real_errors(monkeypatch):
+    """A genuine backend error (not a timeout) is re-raised on the caller
+    thread rather than silently swallowed as a missing item."""
+    from fulcra_collect import credentials
+
+    def _boom(service, account):
+        raise RuntimeError("keychain exploded")
+
+    monkeypatch.setattr(keyring, "get_password", _boom)
+    with pytest.raises(RuntimeError, match="keychain exploded"):
+        credentials._keyring_get("svc", "acct", timeout=1.0)
+
+
 def test_secrets_are_namespaced_per_plugin():
     from fulcra_collect import credentials
     credentials.set_secret("lastfm", "token", "A")

@@ -65,6 +65,49 @@ def _compute_desc_height(text: str, width: float, font, cap: float = 80.0) -> fl
     return min(max(needed, 32.0), cap)
 
 
+# --- plugin-row geometry ------------------------------------------------
+# A row stacks content from BOTH ends, so its height must clear the sum of
+# the two stacks, not a flat additive total. These constants name the pieces
+# so _plugin_row_height and _make_plugin_row's placement code stay in sync —
+# the original bug was a height formula that drifted from where the row
+# actually drew its subviews (it reserved a phantom interval block under
+# every row, then once that was gated on kind, under-sized any row WITH
+# credentials because the credential block grows up from the bottom).
+_ROW_NAME_H = 28          # name label band at the top of the row
+_ROW_INTERVAL_BLOCK = 50  # scheduled-only "Every [n] minutes" field + ≈caption
+_ROW_CRED_BASE = 40       # first credential's y (bottom margin 16 + Run-now slot 24)
+_ROW_CRED_STEP = 24       # each additional credential row
+_ROW_BOTTOM_MARGIN = 6    # bare bottom padding when nothing is drawn below the desc
+_ROW_STACK_GAP = 8        # gap between the top and bottom stacks (only when both exist)
+
+
+def _plugin_row_height(*, scheduled: bool, desc_h: float, n_credentials: int) -> float:
+    """Pixel height for one Plugins-tab row.
+
+    Top stack (placed via ``height - N``, grows downward): the name band, the
+    wrapped description, and — for scheduled plugins only — the interval block.
+
+    Bottom stack (placed at fixed ``y``, grows upward) exists ONLY when the
+    plugin has credential rows or is scheduled (the Run-now-at-bottom button).
+    When a bottom stack exists, the row clears both stacks plus ``_ROW_STACK_GAP``
+    so they never collide.
+
+    When there is NO bottom stack — the common case: manual / historical /
+    file-based plugins with no credentials, whose only controls (Run-now or the
+    Enable switch) sit up on the name row — the content is entirely top-anchored,
+    so the row needs only a small ``_ROW_BOTTOM_MARGIN`` beneath the description.
+    Previously every such row still reserved the full credential/Run-now slot
+    plus the stack gap (~24pt of dead space), which is what made the Plugins tab
+    look loosely spaced with big gaps between rows.
+    """
+    top_h = _ROW_NAME_H + desc_h + (_ROW_INTERVAL_BLOCK if scheduled else 0)
+    if n_credentials:
+        return top_h + _ROW_CRED_BASE + _ROW_CRED_STEP * n_credentials + _ROW_STACK_GAP
+    if scheduled:
+        return top_h + _ROW_CRED_BASE + _ROW_STACK_GAP   # Run-now-at-bottom slot
+    return top_h + _ROW_BOTTOM_MARGIN
+
+
 class _FlippedView(NSView):  # type: ignore[misc]
     """NSView with a top-left origin (y=0 at top). Used as the Plugins-tab
     scroll-view document view so the first sorted plugin renders at the
@@ -155,16 +198,22 @@ def make_plugins_tab(*, model: StatusModel, client: DaemonClient) -> NSView:
         for snap in ordered:
             credentials = cred_map.get(snap.id, {})
             # Description block grows to fit — capped at 80pt so a runaway
-            # description can't swallow the whole tab. The 4 fixed regions
-            # of the row are: 28 name + desc_h + 28 interval-or-pad + 24
-            # run btn, plus 24pt per credential. See SP1 L2 in the
-            # 2026-05-27 menubar drift audit.
+            # description can't swallow the whole tab.
             desc_h = _compute_desc_height(
                 snap.description or "",
                 width - 120,
                 typography.small(),
             )
-            row_height = 28 + desc_h + 28 + 24 + 24 * len(credentials)
+            # Size the row to clear both stacks — see _plugin_row_height and
+            # the _ROW_* geometry constants. ONLY scheduled plugins draw the
+            # interval block + bottom Run-now; manual/service rows put their
+            # action up on the name row, so reserving that space under them
+            # was the reported Preferences-layout mess.
+            row_height = _plugin_row_height(
+                scheduled=snap.kind == "scheduled",
+                desc_h=desc_h,
+                n_credentials=len(credentials),
+            )
             row = _make_plugin_row(snap, width, row_height, desc_h=desc_h,
                                    credentials=credentials,
                                    client=client, model=model)

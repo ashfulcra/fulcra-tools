@@ -13,10 +13,6 @@ dependencies = [
     "dateparser>=1.2",
     "openpyxl>=3.1",
     "feedparser>=6.0",
-    # The fulcra-api CLI must provide both `fulcra auth print-access-token`
-    # (add-cli branch) and `fulcra file download` (file-commands branch).
-    # Pin to a branch/tag that includes both, or vendor a merged fork.
-    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
     # Sibling packages in this monorepo.
     "fulcra-common",
     "fulcra-csv-importer",  # the shared CSV → annotation parser
@@ -54,6 +50,14 @@ fulcra-csv-importer = { workspace = true }
 fulcra-collect = { workspace = true }
 
 [project.optional-dependencies]
+# The `fulcra` CLI (auth print-access-token / file download). OPTIONAL on
+# purpose: nothing here imports fulcra_api as a library — the daemon shells
+# out to the `fulcra` binary, which users install separately
+# (`uv tool install fulcra-api`, per docs/TESTING.md). Kept out of base deps
+# so it doesn't drag pyarrow (~100 MB) into every install or the bundled app.
+fulcra-cli = [
+    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+]
 dev = [
     # fulcra-api currently pins pytest<8 in its runtime deps, so we must
     # stay compatible with that constraint until upstream loosens it.

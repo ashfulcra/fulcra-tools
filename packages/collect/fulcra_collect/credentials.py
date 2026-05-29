@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from threading import Lock
 
 import keyring
@@ -18,6 +19,57 @@ import keyring.errors
 _SERVICE_PREFIX = "fulcra-collect"
 
 _log = logging.getLogger("fulcra_collect.credentials")
+
+# How long to wait on a single keychain read before treating the item as
+# absent. The happy-path read returns in well under a millisecond; this only
+# fires when the read is blocked (see _keyring_get).
+_KEYCHAIN_READ_TIMEOUT_S = 3.0
+
+
+def _keyring_get(service: str, account: str,
+                 *, timeout: float = _KEYCHAIN_READ_TIMEOUT_S) -> str | None:
+    """Read a keychain item without ever blocking the caller indefinitely.
+
+    macOS Security.framework reads block on an ACL-confirmation dialog
+    ("<app> wants to use a key in your keychain") whenever the accessing
+    binary's identity no longer matches the item's ACL — which happens after
+    a reinstall or a re-signed bundle. The daemon's control server is
+    single-threaded, so ONE blocked read wedges every request (status,
+    quick-record, credential checks) and the menubar shows "daemon not
+    reachable". Run the read on a worker thread and give up after ``timeout``,
+    returning None so the daemon degrades to "not authenticated" (the SP5
+    Reconnect banner already covers that state) instead of hanging.
+
+    The abandoned worker stays parked on the OS call until the dialog is
+    dismissed — a bounded one-thread-per-timeout leak, far better than a dead
+    daemon. A keychain that isn't prompting returns near-instantly, so the
+    timeout never fires on the happy path.
+    """
+    result: dict = {}
+
+    def _run() -> None:
+        try:
+            result["value"] = keyring.get_password(service, account)
+        except Exception as exc:  # noqa: BLE001 — re-raised on the caller thread
+            result["error"] = exc
+
+    t = threading.Thread(target=_run, daemon=True, name="keyring-read")
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        _log.warning(
+            "keyring read for %s/%s timed out after %.1fs — treating the item "
+            "as absent. The keychain is most likely waiting on an unanswered "
+            "access-confirmation prompt; click 'Always Allow' on the prompt "
+            "(NOT 'Allow', which only grants once) or re-sign-in.",
+            service, account, timeout,
+        )
+        # Raise rather than return None so callers can distinguish a transient
+        # block (don't cache it) from a genuinely-absent item (safe to cache).
+        raise TimeoutError(f"keyring read for {service}/{account} timed out")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 def _service(plugin_id: str) -> str:
@@ -29,7 +81,10 @@ def set_secret(plugin_id: str, key: str, value: str) -> None:
 
 
 def get_secret(plugin_id: str, key: str) -> str | None:
-    return keyring.get_password(_service(plugin_id), key)
+    try:
+        return _keyring_get(_service(plugin_id), key)
+    except TimeoutError:
+        return None
 
 
 def delete_secret(plugin_id: str, key: str) -> None:
@@ -54,16 +109,49 @@ def has_secret(plugin_id: str, key: str) -> bool:
 
 _USER_SERVICE = "fulcra-collect:user"
 
+# In-process cache of user-level secrets (chiefly the Fulcra bearer token).
+# The token is read on nearly every daemon operation — the popover list, each
+# record, every scheduled plugin run, the tick loop — from 8+ call sites. On
+# macOS each keychain read can trigger a separate "Allow / Always Allow"
+# prompt; without caching, a freshly-restarted daemon whose binary isn't yet
+# in the item's ACL prompts the user over and over (observed: ten times in a
+# row). Caching collapses that to ONE read per daemon lifetime. This process
+# is the only writer of user secrets (the daemon's web routes + refresh path),
+# so the cache can't drift behind an external writer; set/delete keep it in
+# sync, and a stale token still self-heals via refresh-on-401.
+_user_secret_cache: dict[str, str | None] = {}
+_user_secret_cache_lock = Lock()
+
+
+def _clear_caches() -> None:
+    """Drop all cached user secrets. For tests (so a token cached by one test
+    can't leak into the next) and for a hard re-read after external changes."""
+    with _user_secret_cache_lock:
+        _user_secret_cache.clear()
+
 
 def set_user_secret(key: str, value: str) -> None:
     """Store a user-level (not plugin-specific) secret in the OS keychain.
     Used for the shared Fulcra bearer token and any other user-account-
     level credential."""
     keyring.set_password(_USER_SERVICE, key, value)
+    with _user_secret_cache_lock:
+        _user_secret_cache[key] = value
 
 
 def get_user_secret(key: str) -> str | None:
-    return keyring.get_password(_USER_SERVICE, key)
+    with _user_secret_cache_lock:
+        if key in _user_secret_cache:
+            return _user_secret_cache[key]
+    try:
+        value = _keyring_get(_USER_SERVICE, key)
+    except TimeoutError:
+        # Keychain is blocked on an ACL prompt — transient. Degrade to absent
+        # but DON'T cache, so the next call retries once the prompt clears.
+        return None
+    with _user_secret_cache_lock:
+        _user_secret_cache[key] = value
+    return value
 
 
 def has_user_secret(key: str) -> bool:
@@ -77,6 +165,8 @@ def delete_user_secret(key: str) -> None:
         keyring.delete_password(_USER_SERVICE, key)
     except keyring.errors.PasswordDeleteError:
         pass
+    with _user_secret_cache_lock:
+        _user_secret_cache.pop(key, None)
 
 
 # ---------------------------------------------------------------------------

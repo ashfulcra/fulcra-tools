@@ -114,13 +114,25 @@ class FulcraMenubarApp(rumps.App):
 
     # ── Preferences ──────────────────────────────────────────────────────────
 
-    def _open_prefs(self) -> None:
-        """Open the Preferences window (lazily created on first use)."""
+    def _open_prefs(self, tab: str | None = None) -> None:
+        """Open Preferences (lazily created); optionally select a tab by name.
+
+        Parameters
+        ----------
+        tab:
+            A tab name accepted by ``tab_index()`` (e.g. ``"annotations"``).
+            When provided the controller calls ``select_tab`` before bringing
+            the window forward so the user lands directly on the desired tab.
+            None (the default) leaves the tab at whatever was last selected —
+            this preserves the gear-button's existing no-op behaviour.
+        """
         from .preferences.window import make_preferences_controller
         if self._prefs_controller is None:
             self._prefs_controller = make_preferences_controller(
                 model=self.model, client=self.client, centre=self.notifications,
             )
+        if tab is not None:
+            self._prefs_controller.select_tab(tab)
         self._prefs_controller.window().makeKeyAndOrderFront_(None)
         from AppKit import NSApp  # type: ignore[import-not-found]
         NSApp.activateIgnoringOtherApps_(True)

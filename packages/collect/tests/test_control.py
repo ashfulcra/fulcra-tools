@@ -54,6 +54,51 @@ def test_handler_exception_becomes_an_error_reply(tmp_path: Path):
         t.join(timeout=2.0)
 
 
+def test_server_survives_a_client_that_hangs_up_before_the_reply(tmp_path: Path):
+    """A client that disconnects after sending its request but before reading
+    the reply makes ``conn.sendall`` raise BrokenPipeError. That must NOT kill
+    the accept loop — otherwise one ill-timed menubar hang-up orphans the
+    control socket and every later request gets ECONNREFUSED ("daemon not
+    reachable"). The server must drop that peer and keep serving.
+    """
+    sock = tmp_path / "control.sock"
+    in_handler = threading.Event()
+    release = threading.Event()
+
+    def handler(req: dict) -> dict:
+        # Block inside the handler so the test can deterministically close the
+        # client BEFORE the server writes the reply, guaranteeing the sendall
+        # hits a dead peer.
+        in_handler.set()
+        release.wait(timeout=2.0)
+        return {"ok": True, "echo": req}
+
+    server = ControlServer(sock, handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        server.wait_ready(timeout=2.0)
+
+        # First client: send a request, wait until the server is in the
+        # handler, then hang up before the reply is written.
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # Connect via the resolved path so the long-tmp_path symlink fallback
+        # (AF_UNIX caps paths at 104 bytes) is honoured, same as send_request.
+        c.connect(os.path.realpath(sock))
+        c.sendall(b'{"cmd": "first"}\n')
+        assert in_handler.wait(timeout=2.0)
+        c.close()
+        release.set()  # handler returns → sendall now targets the closed peer
+
+        # The accept loop must still be alive and able to serve a fresh client.
+        reply = send_request(sock, {"cmd": "second"}, timeout=2.0)
+        assert reply == {"ok": True, "echo": {"cmd": "second"}}
+        assert t.is_alive()
+    finally:
+        server.shutdown()
+        t.join(timeout=2.0)
+
+
 def test_send_request_to_a_dead_socket_raises(tmp_path: Path):
     with pytest.raises(ConnectionError):
         send_request(tmp_path / "nonexistent.sock", {"cmd": "status"})

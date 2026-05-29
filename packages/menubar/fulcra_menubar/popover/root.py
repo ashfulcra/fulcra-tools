@@ -56,7 +56,7 @@ class PopoverRoot:
         model: StatusModel,
         client,
         *,
-        on_preferences: Optional[Callable[[], None]] = None,
+        on_preferences: Optional[Callable[[str | None], None]] = None,
         on_quit: Optional[Callable[[], None]] = None,
         notify: Optional[Callable[[str, str], None]] = None,
         status_item: Optional[object] = None,
@@ -99,12 +99,6 @@ class PopoverRoot:
         # are recent enough that losing them is acceptable.
         self._active_timers: dict[str, dict] = {}
         self._recent: list[dict] = []
-        # Popover-scoped favorites UI state (task #64). Currently just
-        # carries the "Show all annotations" disclosure expansion flag.
-        # Intentionally NOT persisted across popover open/close cycles
-        # so the next opening defaults back to "favorites only" — that's
-        # the point of the favorites surface, after all.
-        self._favorites_view_state: dict = {"expanded": False}
         self._popover = NSPopover.alloc().init()
         # NSPopoverBehaviorTransient = 1
         self._popover.setBehavior_(1)
@@ -163,7 +157,7 @@ class PopoverRoot:
             active_timers=self._active_timers,
             recent=self._recent,
             on_timer_changed=self._on_timer_changed,
-            favorites_view_state=self._favorites_view_state,
+            on_preferences=on_preferences,
         )
         quick_record_view.setFrame_(NSMakeRect(0, 0, WIDTH, body_height))
         self._quick_record_view = quick_record_view
@@ -355,10 +349,6 @@ class PopoverRoot:
             # Reset to quick-record view on each open so the popover
             # always starts on the primary surface after closing.
             self._show_quick_record()
-            # Reset the favorites disclosure to collapsed each time the
-            # popover opens — task #64 spec: first interaction defaults
-            # to "show favorites only" when any are pinned.
-            self._favorites_view_state["expanded"] = False
             # Refresh daemon-controls state so the user always sees the
             # current PID / Running-or-Stopped pill the moment the
             # popover opens (the lifecycle layer is gesture-driven, not

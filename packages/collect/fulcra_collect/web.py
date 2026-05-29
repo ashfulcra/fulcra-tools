@@ -42,6 +42,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
 from . import config as _config
+from ._resources import docs_dir as _resources_docs_dir
+from ._resources import frontend_dir as _resources_frontend_dir
 # RouteContext is used directly below in build_app(); the Pydantic body
 # models (DefinitionBindBody, FulcraTokenBody, etc.) used to be re-exported
 # here for back-compat but had no remaining importers — route modules
@@ -207,17 +209,14 @@ def _ensure_token() -> str:
 
 
 def _frontend_dir() -> Path:
-    # packages/collect/fulcra_collect/web.py → packages/web-ui/dist/
-    here = Path(__file__).resolve()
-    workspace_root = here.parents[3]
-    return workspace_root / "packages" / "web-ui" / "dist"
+    # Dev: <workspace>/packages/web-ui/dist. Frozen: <Resources>/web-ui/dist.
+    # _resources owns the branch so this stays a thin alias.
+    return _resources_frontend_dir()
 
 
 def _docs_dir() -> Path:
-    # packages/collect/fulcra_collect/web.py → repo-root/docs/
-    here = Path(__file__).resolve()
-    workspace_root = here.parents[3]
-    return workspace_root / "docs"
+    # Dev: <workspace>/docs. Frozen: <Resources>/docs.
+    return _resources_docs_dir()
 
 
 # ---------------------------------------------------------------------------
