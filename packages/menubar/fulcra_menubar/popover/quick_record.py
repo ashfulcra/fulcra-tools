@@ -560,11 +560,13 @@ def _make_moment_row(
     # With width=360 the slots end up as:
     #   star      12 .. 34   (22pt)
     #   name      38 .. 130  (92pt)
-    #   comment   138 .. 278 (140pt)
-    #   Record    288 .. 348 (60pt, gap 10pt)
+    #   comment  138 .. 272  (134pt)  — right edge flush to Record's left edge
+    #   Record   272 .. 348  (76pt, gap 0pt — tight but not overlapping)
+    # COMMENT_W = Record_left - comment_x = (width - BUTTON_W - 12) - (12 + STAR_W + 4 + NAME_W + 8)
+    #           = (360 - 76 - 12) - (12 + 22 + 4 + 92 + 8) = 272 - 138 = 134
     STAR_W = 22.0
     NAME_W = 92.0
-    COMMENT_W = 140.0
+    COMMENT_W = 134.0
     BUTTON_W = 76.0
 
     star_btn = _make_star_button(
@@ -662,7 +664,7 @@ def _make_duration_row(
     name_label.setTextColor_(colors.text())
     name_label.setLineBreakMode_(4)
     name_label.setFrame_(NSMakeRect(12 + STAR_W + 4, name_y,
-                                     width - 228 - STAR_W - 4, 18))
+                                     width - 200 - STAR_W - 4, 18))
     row.addSubview_(name_label)
 
     if timer is not None:
