@@ -116,6 +116,29 @@ org-wide in Daytona settings.
   surface. **Mitigation: use a disposable, low-credit-cap OpenRouter key for
   demos and rotate it after.**
 
+## Network egress is tier-gated (Daytona) — required for the data path
+
+⚠️ **The Fulcra data path only works on a Daytona account at Tier 3+.** Daytona
+applies a [tier-based egress policy](https://www.daytona.io/docs/en/network-limits/):
+
+- **Tiers 1–2:** sandbox egress is locked to a default allowlist of "essential
+  services" — package registries (PyPI/NPM), Git (GitHub/GitLab), container
+  registries, CDNs, and AI/ML APIs. So OpenRouter (model), auth0 (Fulcra login),
+  PyPI and GitHub (uv + skill fetch) all work — but **`api.fulcradynamics.com` is
+  not on the list and gets a TLS reset.** This is *not* overridable per sandbox
+  (`update_network_settings` returns "Network access is restricted and cannot be
+  overridden at the sandbox level").
+- **Tiers 3–4:** full internet access with configurable network settings.
+
+Consequence: on a low tier the agent **logs in fine but every Fulcra data call
+fails**, because login uses auth0 (allowed) and data uses `api.fulcradynamics.com`
+(blocked). Symptom is `Connection reset by peer` on the TLS ClientHello; a curl to
+`https://openrouter.ai` succeeds from the same sandbox, which proves it's an
+allowlist, not a total block. Fix = move the Daytona account to Tier 3+ (dashboard
+or support@daytona.io). Once there, egress is open; if you want to be explicit you
+can pass `network_allow_list` (comma-separated IPv4 CIDRs) via
+`CreateSandboxFromSnapshotParams` in `spawn.py`.
+
 ## Cost (Daytona)
 
 Default sandbox is 1 vCPU / 1 GiB / 3 GiB disk. Rates: vCPU $0.0504/h, RAM
