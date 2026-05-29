@@ -52,6 +52,13 @@ That's the whole loop. Spawn shortly before a demo (sandboxes auto-stop after
 
 - `uv sync` installs the dependencies and the `fhd-build` / `fhd-spawn` /
   `fhd-teardown` commands. (You can also run them as `uv run python -m fhd.<name>`.)
+- **A Daytona account on Tier 3+.** ⚠️ This is required for the Fulcra *data*
+  path. Tiers 1–2 restrict sandbox egress to a default allowlist (PyPI, GitHub,
+  CDNs, AI APIs) and **block `api.fulcradynamics.com`** — so login works but
+  every Fulcra data call gets a TLS reset, and it can't be overridden per
+  sandbox. Tier 3+ grants full/configurable egress. See
+  [Daytona network limits](https://www.daytona.io/docs/en/network-limits/);
+  bump your tier in the Daytona dashboard or via support@daytona.io.
 
 > ⚠️ **Use a disposable, low-credit-cap OpenRouter key for real demos.** The guest
 > is talking to an agent with a shell, so a determined guest could ask it to print
@@ -145,6 +152,13 @@ copy, used as a fallback if the boot fetch fails.
 - **Onboarding stalls right after login.** The agent polls `fulcra-api user-info`;
   make sure the guest actually completed the browser login and tell the agent
   "done".
+- **Login works but Fulcra data calls fail ("Connection reset by peer" / TLS
+  reset).** This is the Daytona **network tier** limit, not a bug: Tiers 1–2
+  block `api.fulcradynamics.com`. Confirm with
+  `curl https://api.fulcradynamics.com` inside a sandbox (it'll reset on a low
+  tier while `curl https://openrouter.ai` succeeds). Fix = move the Daytona
+  account to **Tier 3+** (see Prerequisites). The agent may misdiagnose this as
+  "all HTTPS blocked" — it isn't; only non-allowlisted domains are.
 
 ## Layout
 
