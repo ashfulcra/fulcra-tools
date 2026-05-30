@@ -43,12 +43,22 @@ else
 fi
 rm -rf /tmp/agent-skills 2>/dev/null || true
 
-# Override the onboarding skill's prerequisite reference. The upstream file tells
-# the agent to install uv with `curl … | sh`, which our image already did at build
-# time — so without this, the agent wastes a turn (and approval-gate friction in
-# some setups) re-installing uv. We replace it with a clear "already done" notice
-# so the agent skips straight to onboarding. Idempotent; runs every boot.
+# Override the onboarding skill's prereq instructions so the agent doesn't waste
+# a turn (or pop a confirmation pop-up) re-installing what the image already has.
+# We patch TWO places — both are needed:
+#
+#   1. SKILL.md step 1 itself says "verify and install uv if necessary, asking
+#      the user for confirmation." Reading just the prereq reference file isn't
+#      enough — the agent reads SKILL.md, asks the user "shall I install?", they
+#      say yes, and it installs anyway. So we sed-replace that bullet inline.
+#   2. The prereq reference file (which the agent reads when following SKILL.md)
+#      is replaced with a clear "already satisfied — DO NOT install" notice.
+#
+# Both are idempotent and run every boot.
 SKILL_DIR="/root/.hermes/skills/fulcra/fulcra-onboarding"
+if [ -f "${SKILL_DIR}/SKILL.md" ]; then
+	sed -i 's|.*verify and install `uv`.*|   - **SKIPPED** — `uv` and the Fulcra CLI are PREINSTALLED in this image. Do NOT install and do NOT ask the user for confirmation. Proceed directly to step 2.|' "${SKILL_DIR}/SKILL.md"
+fi
 if [ -d "${SKILL_DIR}/references" ]; then
 	cat > "${SKILL_DIR}/references/fulcra-onboarding-prerequisites.md" <<'PREREQ'
 # Prerequisites — already satisfied in this environment
@@ -56,8 +66,8 @@ if [ -d "${SKILL_DIR}/references" ]; then
 `uv` is preinstalled at `/root/.local/bin/uv` (on PATH).
 The Fulcra CLI is preinstalled via `uv tool install fulcra-api`.
 
-**DO NOT run any installer.** This prerequisite step is complete; proceed to
-the next step in the skill.
+**DO NOT run any installer and DO NOT ask the user for confirmation.** This
+prerequisite step is complete; proceed to the next step in the skill.
 PREREQ
 fi
 
