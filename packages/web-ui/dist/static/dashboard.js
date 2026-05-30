@@ -63,6 +63,17 @@ function humanizeRelativeTime(isoString) {
   return `Last run: ${timeAgo(isoString)}`;
 }
 
+// Calendar date (no time) for the "Run on <date>" badge on run-on-demand
+// plugins — e.g. "May 28, 2026". Falls back to the raw string if unparseable.
+function shortDate(isoString) {
+  try {
+    return new Date(isoString).toLocaleDateString(undefined,
+      { year: "numeric", month: "short", day: "numeric" });
+  } catch (e) {
+    return isoString;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Per-plugin status pill — richer than v1's Enabled/Disabled
 // ---------------------------------------------------------------------------
@@ -75,7 +86,15 @@ function pillFor(plugin) {
   // hadn't run yet looked like a different kind from one that had — same
   // plugin, different badge for time-of-day reasons. See user feedback
   // 2026-05-26.
-  if (!plugin.enabled) {
+  // "Disabled" only means something for plugins the daemon auto-runs
+  // (scheduled / service): it's the off state of the polling toggle. Manual /
+  // run-on-demand plugins (takeouts) are NEVER "enabled" in that sense, so
+  // labelling them "Disabled" is misleading — a takeout you've already
+  // imported once should read "Run on <date>", not look switched-off. So the
+  // Disabled badge is gated to non-manual plugins; manual ones fall through to
+  // their real run status below.
+  const isManual = plugin.kind === "manual";
+  if (!isManual && !plugin.enabled) {
     return { label: "Disabled", cls: "bg-slate-100 text-slate-500" };
   }
   if ((plugin.consecutive_failures || 0) >= 3) {
@@ -85,6 +104,12 @@ function pillFor(plugin) {
     return { label: "Running", cls: "bg-violet-100 text-violet-800" };
   }
   if (plugin.last_outcome === "done") {
+    // A manual plugin that has run successfully shows WHEN it ran, per user
+    // request — "Run on May 28, 2026" rather than the generic "Healthy".
+    if (isManual && plugin.last_run) {
+      return { label: `Run on ${shortDate(plugin.last_run)}`,
+               cls: "bg-emerald-100 text-emerald-800" };
+    }
     return { label: "Healthy", cls: "bg-emerald-100 text-emerald-800" };
   }
   // "error" / "timeout" with consecutive_failures < 3 → still a real
