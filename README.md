@@ -37,7 +37,7 @@ uv run fhd-teardown --all
 ```
 
 That's the whole loop. Spawn shortly before a demo (sandboxes auto-stop after
-30 min idle), and the first chat load takes ~15–20s while the dashboard builds.
+4 hours idle), and the first chat load takes ~15–20s while the dashboard builds.
 
 ## Prerequisites
 
@@ -105,7 +105,7 @@ at once, bump your OpenRouter tier or split across keys.
 
 - **Access:** the signed preview URL carries its own token and the sandbox is
   `public=False`, so only someone with the link gets in. Control is "only invitees
-  get the link" + ephemerality (30-min idle auto-stop). There is **no per-user
+  get the link" + ephemerality (4-hour idle auto-stop). There is **no per-user
   login** — this is for a small, trusted invite list, not public distribution.
 - **Dashboard lockdown:** the Hermes dashboard is an admin console (its `KEYS` tab
   can reveal/edit the OpenRouter key). It binds `127.0.0.1` only and is fronted by
@@ -120,7 +120,7 @@ at once, bump your OpenRouter tier or split across keys.
 ## Cost (Daytona)
 
 Default sandbox is 1 vCPU / 1 GiB / 3 GiB disk. Worst case — a tab pinned open for
-a full 24h — is **≈ $1.60/sandbox/day**; if it idle-stops at 30 min it's a few
+a full 24h — is **≈ $1.60/sandbox/day**; if it idle-stops at the 4-hour mark it's about a quarter
 cents. Stopped sandboxes keep a little disk until deleted, so run
 `fhd-teardown --all` to truly zero it out. Everything draws from Daytona's $200
 free credit first.
