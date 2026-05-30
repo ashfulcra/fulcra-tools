@@ -43,6 +43,24 @@ else
 fi
 rm -rf /tmp/agent-skills 2>/dev/null || true
 
+# Override the onboarding skill's prerequisite reference. The upstream file tells
+# the agent to install uv with `curl … | sh`, which our image already did at build
+# time — so without this, the agent wastes a turn (and approval-gate friction in
+# some setups) re-installing uv. We replace it with a clear "already done" notice
+# so the agent skips straight to onboarding. Idempotent; runs every boot.
+SKILL_DIR="/root/.hermes/skills/fulcra/fulcra-onboarding"
+if [ -d "${SKILL_DIR}/references" ]; then
+	cat > "${SKILL_DIR}/references/fulcra-onboarding-prerequisites.md" <<'PREREQ'
+# Prerequisites — already satisfied in this environment
+
+`uv` is preinstalled at `/root/.local/bin/uv` (on PATH).
+The Fulcra CLI is preinstalled via `uv tool install fulcra-api`.
+
+**DO NOT run any installer.** This prerequisite step is complete; proceed to
+the next step in the skill.
+PREREQ
+fi
+
 # Start the dashboard, localhost-only, in the background.
 HERMES_DASHBOARD_TUI=1 nohup hermes dashboard \
 	--host 127.0.0.1 --port 9119 --no-open --insecure \
