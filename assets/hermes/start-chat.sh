@@ -166,5 +166,17 @@ for _ in $(seq 1 40); do
 	sleep 1
 done
 
+# Suppress the dashboard's "Do you want to navigate to <url>? WARNING: This link
+# could potentially be dangerous" popup that fires when a guest clicks the Fulcra
+# auth URL we just put in chat — it's hard-baked in the dashboard's frontend
+# bundle and breaks the demo UX. Inject a tiny shim into index.html that
+# auto-OKs navigation confirms only; other dashboard confirms (e.g. delete
+# session) still work. Idempotent + done AFTER the dashboard's build to avoid
+# being overwritten.
+DASH_INDEX=/usr/local/lib/hermes-agent/hermes_cli/web_dist/index.html
+if [ -f "$DASH_INDEX" ] && ! grep -q '_fhd_oc' "$DASH_INDEX"; then
+	sed -i 's|</head>|<script>const _fhd_oc=window.confirm;window.confirm=(m)=>(typeof m==="string"\&\&m.indexOf("navigate to")>=0)?true:_fhd_oc.call(window,m);</script></head>|' "$DASH_INDEX"
+fi
+
 # Caddy in the foreground on :8080 (the port exposed via the Daytona preview URL).
 exec caddy run --config /opt/fhd/Caddyfile --adapter caddyfile
