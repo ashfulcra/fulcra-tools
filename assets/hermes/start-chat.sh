@@ -69,6 +69,88 @@ The Fulcra CLI is preinstalled via `uv tool install fulcra-api`.
 **DO NOT run any installer and DO NOT ask the user for confirmation.** This
 prerequisite step is complete; proceed to the next step in the skill.
 PREREQ
+
+	# Override the discovery reference. The upstream version's main workflow tells
+	# the agent to run a bare `fulcra-api auth login`, which is a hanging command —
+	# the agent then can't extract the URL from the running process and the user
+	# never sees the login link. The right pattern is in a "Pitfalls" footnote that
+	# the agent ignores. We replace it with a focused auth procedure that runs the
+	# command in foreground with a short timeout, guaranteeing the URL is captured
+	# and surfaced to the user. Intent-discovery brainstorming preserved.
+	cat > "${SKILL_DIR}/references/fulcra-onboarding-discovery.md" <<'DISCOVERY'
+---
+name: fulcra-onboarding-discovery
+description: "Handles intent discovery and authentication for new Fulcra users."
+---
+
+# Fulcra Onboarding: Discovery
+
+**Tone Reminder:** High energy, concise, emoji-friendly. Punchy messages; no walls of text.
+
+## 1. Intent discovery (pre-auth)
+
+Before any auth, seed a quick brainstorm with 2-3 concrete examples of what
+Fulcra can track. Personalize if you have memory of this user; otherwise pick
+from these defaults: ☕ coffee intake, 📚 books read, 🏃 fitness/steps, 💼
+deep work hours, 😴 sleep quality. Ask the user which of those (or something
+else of their own) excites them. If they're vague ("just trying it out"),
+pick one for them and keep moving.
+
+## 2. Authentication — RUN EXACTLY THIS PROCEDURE
+
+Do **not** improvise the commands in this section. Do **not** ask the user
+for permission before checking auth — just run it.
+
+**Step 2a — check current auth:**
+
+    fulcra-api user-info
+
+If it exits 0 and returns JSON, the user is authenticated → skip to step 3.
+If it exits non-zero, continue to 2b.
+
+**Step 2b — generate the login link. Run EXACTLY this command (the timeout +
+2>&1 are required — they make the command print the URL and code to stdout
+and return, instead of hanging in the background where the agent can't see
+the output):**
+
+    timeout 12 fulcra-api auth login 2>&1 || true
+
+The output will contain two pieces you MUST relay to the user immediately,
+verbatim, in chat:
+  - an authorization URL (e.g. `https://fulcra.us.auth0.com/activate?user_code=XXXX-YYYY`)
+  - a user code (e.g. `XXXX-YYYY`)
+
+Present them like:
+
+> 🔐 Open this URL in your browser to sign in / create your Fulcra account:
+> **<URL>**
+>
+> Confirm the code on that page matches: **<CODE>**
+>
+> Once you've finished, just say "done" and we'll continue. 🚀
+
+DO NOT run a bare `fulcra-api auth login` (no timeout / no 2>&1). DO NOT run
+it as a background process. DO NOT poll a process ID for output. The single
+foreground `timeout 12 … 2>&1` call above is the only correct invocation.
+
+**Step 2c — wait for the user to confirm they finished**, then verify:
+
+    fulcra-api user-info
+
+Repeat with a short pause between calls if needed; do not loop more than a
+few times. Once it succeeds, continue.
+
+## 3. Proactive suggestions (post-auth)
+
+Now that they're authenticated, suggest 2-3 concrete annotation types they
+could start tracking tied to the intent they shared in step 1. Keep momentum;
+move quickly toward the "wow" of writing/reading a first annotation.
+
+## Handoff
+
+Once authenticated AND a small set of annotations identified, hand back to
+the main `fulcra-onboarding` flow for data modeling.
+DISCOVERY
 fi
 
 # Start the dashboard, localhost-only, in the background.
