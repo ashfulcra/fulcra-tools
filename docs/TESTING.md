@@ -7,8 +7,13 @@ wizard — end to end.
 For contributors adding code, run the automated test suite instead:
 
 ```
+uv sync --all-packages --all-extras   # installs pytest (the `dev` extra) + PyObjC
 uv run pytest packages/ -q
 ```
+
+A bare `uv sync` does NOT install the test tooling — pytest lives in each
+package's `dev` extra — so `uv run pytest` would fail with
+`Failed to spawn: pytest`. Use `--all-extras` for a full dev setup.
 
 ---
 
@@ -29,12 +34,14 @@ uv run pytest packages/ -q
 ```bash
 git clone https://github.com/ashfulcra/fulcra-tools.git
 cd fulcra-tools
-uv sync
+uv sync --all-packages --all-extras
 ```
 
-`uv sync` resolves all workspace packages (collect, media-helpers, etc.)
-and installs them into a local `.venv`. This takes 30–60 seconds on first
-run; subsequent syncs are fast.
+`uv sync --all-packages --all-extras` resolves all workspace packages
+(collect, menubar, media-helpers, etc.) and installs them into a local
+`.venv`, including the `macos` extra (PyObjC/rumps — the menu-bar can't
+import without it) and the `dev` extra (pytest). A bare `uv sync` omits
+both. This takes 30–60 seconds on first run; subsequent syncs are fast.
 
 Verify the install:
 
