@@ -13,6 +13,17 @@ set -euo pipefail
 # shell that wouldn't otherwise have them.
 export PATH="/root/.local/bin:/root/.hermes/node/bin:${PATH}"
 
+# Symlink the Fulcra CLI into /usr/bin so it's discoverable from ANY shell,
+# including the stripped-PATH subshells Hermes's terminal tool spawns (those
+# don't inherit /root/.local/bin and otherwise make the agent think the CLI
+# isn't installed). uv tool installs to /root/.local/bin as root, hence the
+# source path. Idempotent: ln -sf overwrites if the link already exists.
+for _bin in fulcra fulcra-api; do
+	if [ -x "/root/.local/bin/${_bin}" ]; then
+		ln -sf "/root/.local/bin/${_bin}" "/usr/bin/${_bin}"
+	fi
+done
+
 # Bypass the in-chat dangerous-command approval prompts. The `approvals.mode=yolo`
 # config key alone does NOT do this — Hermes only checks the HERMES_YOLO_MODE env
 # var (it's exactly what the --yolo flag sets). We export it here so the dashboard
