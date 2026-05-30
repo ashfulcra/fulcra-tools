@@ -107,16 +107,27 @@ pick one for them and keep moving.
 
 ## 2. Authentication — RUN EXACTLY THIS PROCEDURE
 
-Do **not** improvise the commands or the presentation in this section. The
-device-flow login needs to keep polling auth0 in the background for the full
-~10 minutes the code is valid — a foreground `timeout` would terminate that
-polling and the user's sign-in would never reach disk. The procedure below
-runs the login in the background and reads the URL + code from a log file
-on disk, which IS reliably readable while the process keeps running.
+**Correctness notes for every shell command in this section** (these prevent
+the most common agent improvisations that break this flow):
+
+- **Always invoke the CLI as `uv tool run fulcra-api …`.** Don't use bare
+  `fulcra-api` — your runtime's spawned subshells may not have it on PATH
+  even when installed. Don't use `which fulcra-api` — it returns empty in
+  that case and will mislead you into thinking the CLI isn't installed.
+  `uv tool run fulcra-api` always works once `uv` is available (which step 1
+  already verified).
+- **Run each shell snippet as a single foreground string** in your standard
+  terminal/exec tool. Do NOT route through a separate background-process /
+  spawn tool whose stdout you poll — stdout from a still-running child is
+  not reliably readable in most agent runtimes; that's why the login-launch
+  line writes to a log file on disk for you to `cat`.
+- The device-flow login needs to keep polling auth0 for the ~10 min the
+  code is valid. A foreground `timeout` would terminate that polling and
+  the user's eventual sign-in would never reach disk.
 
 **Step 2a — check current auth (no consent needed):**
 
-    fulcra-api user-info
+    uv tool run fulcra-api user-info
 
 If it exits 0 and returns JSON, the user is already authenticated → skip to
 step 3. If it exits non-zero, continue to 2b.
@@ -124,7 +135,7 @@ step 3. If it exits non-zero, continue to 2b.
 **Step 2b — start the login in the background and capture the URL + code
 from its log file. Run EXACTLY this single line:**
 
-    rm -f /tmp/fulcra-auth.log && nohup fulcra-api auth login > /tmp/fulcra-auth.log 2>&1 & for i in $(seq 1 10); do grep -q 'activate?user_code=' /tmp/fulcra-auth.log 2>/dev/null && break; sleep 1; done; cat /tmp/fulcra-auth.log
+    rm -f /tmp/fulcra-auth.log && nohup uv tool run fulcra-api auth login > /tmp/fulcra-auth.log 2>&1 & for i in $(seq 1 10); do grep -q 'activate?user_code=' /tmp/fulcra-auth.log 2>/dev/null && break; sleep 1; done; cat /tmp/fulcra-auth.log
 
 The output (from `cat /tmp/fulcra-auth.log`) contains:
   - an authorization URL (e.g. `https://fulcra.us.auth0.com/activate?user_code=XXXX-YYYY`)
@@ -133,7 +144,9 @@ The output (from `cat /tmp/fulcra-auth.log`) contains:
 Extract them and present to the user using EXACTLY this template. Render the
 URL wrapped in **backticks** (inline code) — do **NOT** format it as a
 markdown link `[text](url)`; the user must see the literal URL string so
-they can verify the code matches and (if needed) copy/paste the URL.
+they can verify the code matches and (if needed) copy/paste the URL. (Note:
+the URL has the device code as a query parameter, so the auth0 page
+pre-fills the code — the user just clicks Confirm and signs in.)
 
 > 🔐 Open this URL in your browser to sign in or create your Fulcra account:
 >
@@ -143,18 +156,23 @@ they can verify the code matches and (if needed) copy/paste the URL.
 >
 > Reply "done" when you've finished signing in.
 
-The `fulcra-api auth login` process started above is STILL RUNNING in the
-background, polling auth0 for the user to complete the flow. **Do NOT kill it.
-Do NOT start another one.** It will write credentials to disk and exit on its
-own when the user finishes.
+The `uv tool run fulcra-api auth login` process started above is STILL
+RUNNING in the background, polling auth0 for the user to complete the flow.
+**Do NOT kill it. Do NOT start another one.** It will write credentials to
+disk and exit on its own when the user finishes.
+
+**Do NOT preemptively run `user-info` while waiting** — it will return 401
+until the user actually completes the browser flow, and a premature check
+followed by "401 means failure, let me restart" reasoning will invalidate
+the user's current code. Wait for the user's explicit "done".
 
 **Step 2c — when the user says "done", verify by running:**
 
-    fulcra-api user-info
+    uv tool run fulcra-api user-info
 
 If it returns 0 with JSON → continue to step 3.
 If it returns 401, the background poll hasn't received the token yet. Wait
-3 seconds and retry `fulcra-api user-info`. Repeat up to 3 times.
+3 seconds and retry `uv tool run fulcra-api user-info`. Repeat up to 3 times.
 
 **Do NOT start a new `auth login`** — there is already one running in the
 background. Starting a new one creates a new code and invalidates the user's
