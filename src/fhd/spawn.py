@@ -20,11 +20,23 @@ from fhd.snapshot_params import build_spawn_kwargs
 DASHBOARD_PORT = 8080
 PREVIEW_TTL_SECONDS = 3600  # link valid 1h; sandbox auto-stops after 30m idle anyway
 
+# Until the upstream fulcradynamics/agent-skills PR merges, pin sandboxes to the
+# PR branch so they get the fixed skill (silent pre-flight + reliable
+# device-flow auth). Once the PR merges, change this back to "main" (the boot
+# script's overrides are self-disabling, so either value is safe — main once
+# merged just removes one needless network hop).
+SKILL_BRANCH = "fix/preconfigured-env-and-reliable-auth"
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Spawn a guest Hermes sandbox")
     ap.add_argument("label", help="A label for this guest, e.g. 'alice'")
     ap.add_argument("--snapshot", default="fhd-hermes-demo")
+    ap.add_argument(
+        "--skill-branch",
+        default=SKILL_BRANCH,
+        help="Branch of fulcradynamics/agent-skills to fetch at boot (default: %(default)s)",
+    )
     args = ap.parse_args()
 
     s = load_settings()
@@ -37,7 +49,10 @@ def main() -> None:
     )
 
     kwargs = build_spawn_kwargs(
-        snapshot=args.snapshot, openrouter_model=s.openrouter_model, label=args.label
+        snapshot=args.snapshot,
+        openrouter_model=s.openrouter_model,
+        label=args.label,
+        skill_branch=args.skill_branch,
     )
     print(f"Spawning sandbox for guest '{args.label}' ...")
     sb = d.create(CreateSandboxFromSnapshotParams(**kwargs), timeout=300)

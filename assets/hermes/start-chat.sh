@@ -26,40 +26,43 @@ if [ -n "${OPENROUTER_MODEL:-}" ]; then
 	hermes config set model.default "${OPENROUTER_MODEL}" || true
 fi
 
-# Fetch the latest onboarding skill at boot, so skill updates on GitHub propagate
-# to new sandboxes WITHOUT rebuilding the image. The image still bakes a copy,
-# which stays in place as a fallback if this fetch fails (GitHub down, bad branch,
-# missing subpath). Repo/subpath are overridable via env for swapping the skill.
+# Fetch the onboarding skill at boot, so skill updates on GitHub propagate to
+# new sandboxes WITHOUT rebuilding the image. The image bakes a copy as a
+# fallback if this fetch fails (GitHub down, bad branch, missing subpath). All
+# three knobs are env-overridable per spawn:
+#   FULCRA_SKILL_REPO     — repo URL              (default: fulcradynamics/agent-skills)
+#   FULCRA_SKILL_BRANCH   — ref to clone          (default: main)
+#   FULCRA_SKILL_SUBPATH  — subdir holding skill  (default: skills/fulcra-onboarding)
 SKILL_REPO="${FULCRA_SKILL_REPO:-https://github.com/fulcradynamics/agent-skills}"
+SKILL_BRANCH="${FULCRA_SKILL_BRANCH:-main}"
 SKILL_SUBPATH="${FULCRA_SKILL_SUBPATH:-skills/fulcra-onboarding}"
-if git clone --depth 1 "${SKILL_REPO}" /tmp/agent-skills >/tmp/skill-fetch.log 2>&1 \
+if git clone --depth 1 --branch "${SKILL_BRANCH}" "${SKILL_REPO}" /tmp/agent-skills >/tmp/skill-fetch.log 2>&1 \
 	&& [ -d "/tmp/agent-skills/${SKILL_SUBPATH}" ]; then
 	mkdir -p /root/.hermes/skills/fulcra
 	rm -rf /root/.hermes/skills/fulcra/fulcra-onboarding
 	cp -r "/tmp/agent-skills/${SKILL_SUBPATH}" /root/.hermes/skills/fulcra/fulcra-onboarding
-	echo "skill: fetched latest from ${SKILL_REPO}/${SKILL_SUBPATH}"
+	echo "skill: fetched ${SKILL_REPO}@${SKILL_BRANCH}/${SKILL_SUBPATH}"
 else
 	echo "skill: boot fetch failed; using the copy baked into the image" >&2
 fi
 rm -rf /tmp/agent-skills 2>/dev/null || true
 
-# Override the onboarding skill's prereq instructions so the agent doesn't waste
-# a turn (or pop a confirmation pop-up) re-installing what the image already has.
-# We patch TWO places — both are needed:
-#
-#   1. SKILL.md step 1 itself says "verify and install uv if necessary, asking
-#      the user for confirmation." Reading just the prereq reference file isn't
-#      enough — the agent reads SKILL.md, asks the user "shall I install?", they
-#      say yes, and it installs anyway. So we sed-replace that bullet inline.
-#   2. The prereq reference file (which the agent reads when following SKILL.md)
-#      is replaced with a clear "already satisfied — DO NOT install" notice.
-#
-# Both are idempotent and run every boot.
+# Legacy-skill compatibility overrides. These were originally added to patch
+# three bugs in the upstream fulcra-onboarding skill (SKILL.md asking the user
+# to install uv, the prereq doc pushing curl|sh install, the discovery doc
+# telling the agent to run a hanging bare auth-login). The upstream fix is in
+# PR fulcradynamics/agent-skills#fix/preconfigured-env-and-reliable-auth.
+# Until that PR merges (and even after, for sandboxes that fall back to a stale
+# baked copy), these overrides are SELF-DISABLING: each `grep -q` matches only
+# the OLD buggy text. Once the PR ships, the patterns no longer match and the
+# overrides become true no-ops — no need to remove them.
 SKILL_DIR="/root/.hermes/skills/fulcra/fulcra-onboarding"
-if [ -f "${SKILL_DIR}/SKILL.md" ]; then
+if [ -f "${SKILL_DIR}/SKILL.md" ] \
+	&& grep -q "verify and install \`uv\` if necessary, asking the user" "${SKILL_DIR}/SKILL.md"; then
 	sed -i 's|.*verify and install `uv`.*|   - **SKIPPED** — `uv` and the Fulcra CLI are PREINSTALLED in this image. Do NOT install and do NOT ask the user for confirmation. Proceed directly to step 2.|' "${SKILL_DIR}/SKILL.md"
 fi
-if [ -d "${SKILL_DIR}/references" ]; then
+if [ -f "${SKILL_DIR}/references/fulcra-onboarding-prerequisites.md" ] \
+	&& grep -q "curl -LsSf https://astral.sh/uv/install.sh" "${SKILL_DIR}/references/fulcra-onboarding-prerequisites.md"; then
 	cat > "${SKILL_DIR}/references/fulcra-onboarding-prerequisites.md" <<'PREREQ'
 # Prerequisites — already satisfied in this environment
 
@@ -69,14 +72,9 @@ The Fulcra CLI is preinstalled via `uv tool install fulcra-api`.
 **DO NOT run any installer and DO NOT ask the user for confirmation.** This
 prerequisite step is complete; proceed to the next step in the skill.
 PREREQ
-
-	# Override the discovery reference. The upstream version's main workflow tells
-	# the agent to run a bare `fulcra-api auth login`, which is a hanging command —
-	# the agent then can't extract the URL from the running process and the user
-	# never sees the login link. The right pattern is in a "Pitfalls" footnote that
-	# the agent ignores. We replace it with a focused auth procedure that runs the
-	# command in foreground with a short timeout, guaranteeing the URL is captured
-	# and surfaced to the user. Intent-discovery brainstorming preserved.
+fi
+if [ -f "${SKILL_DIR}/references/fulcra-onboarding-discovery.md" ] \
+	&& grep -q "ask for their permission.*check their Fulcra authentication" "${SKILL_DIR}/references/fulcra-onboarding-discovery.md"; then
 	cat > "${SKILL_DIR}/references/fulcra-onboarding-discovery.md" <<'DISCOVERY'
 ---
 name: fulcra-onboarding-discovery
