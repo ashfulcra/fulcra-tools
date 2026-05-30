@@ -32,7 +32,7 @@ guest ── URL ──▶ Caddy :8080 ──▶ dashboard chat (PTY → hermes 
                  (403s admin/key endpoints; proxies SPA + chat)
 agent ── fulcra-api auth login (device code) ──▶ guest logs in in their own browser
 agent ── fulcra-api ... ──▶ the guest's own Fulcra account (read/write memory)
-[30 min idle] ─▶ sandbox auto-stops    [fhd-teardown] ─▶ deleted
+[4h idle] ─▶ sandbox auto-stops    [fhd-teardown] ─▶ deleted
 ```
 
 - **The snapshot (`fhd-hermes-demo`)** is a reusable Daytona image built once from
@@ -107,7 +107,7 @@ org-wide in Daytona settings.
 
 ## Security model (demo-grade)
 
-- **Access** = "only invitees get the signed link" + ephemerality (30-min idle
+- **Access** = "only invitees get the signed link" + ephemerality (4-hour idle
   auto-stop). There is **no per-user login**; this is for a small, trusted invite
   list, not public distribution.
 - **Residual risk (important):** the guest is talking to an agent with a shell, so
@@ -143,7 +143,7 @@ can pass `network_allow_list` (comma-separated IPv4 CIDRs) via
 
 Default sandbox is 1 vCPU / 1 GiB / 3 GiB disk. Rates: vCPU $0.0504/h, RAM
 $0.0162/h, disk under the 5 GB free tier. Worst case (a tab pinned open for a full
-24h) ≈ **$1.60/sandbox/day**; if it idle-stops at 30 min, it's a few cents. All
+24h) ≈ **$1.60/sandbox/day**; if it idle-stops at the 4-hour mark, ≈ $0.27. All
 drawn from Daytona's $200 free credit first. `fhd-teardown --all` zeroes it out.
 
 ## Files

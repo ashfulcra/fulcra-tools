@@ -2,7 +2,8 @@
 unit-testable without touching the network."""
 from __future__ import annotations
 
-AUTO_STOP_MINUTES = 30
+AUTO_STOP_MINUTES = 240  # 4 hours — gives guests a comfortable window to click
+                         # the link without it dying under them.
 
 
 def build_spawn_kwargs(

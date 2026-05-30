@@ -9,7 +9,7 @@ def test_build_spawn_kwargs_shape():
         skill_branch="my-branch",
     )
     assert kw["snapshot"] == "fhd-hermes-demo"
-    assert kw["auto_stop_interval"] == 30
+    assert kw["auto_stop_interval"] == 240
     assert kw["public"] is False
     assert kw["env_vars"]["OPENROUTER_MODEL"] == "anthropic/claude-sonnet-4.5"
     assert kw["env_vars"]["FULCRA_SKILL_BRANCH"] == "my-branch"

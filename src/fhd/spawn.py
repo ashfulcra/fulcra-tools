@@ -18,7 +18,8 @@ from fhd.config import load_settings
 from fhd.snapshot_params import build_spawn_kwargs
 
 DASHBOARD_PORT = 8080
-PREVIEW_TTL_SECONDS = 3600  # link valid 1h; sandbox auto-stops after 30m idle anyway
+PREVIEW_TTL_SECONDS = 4 * 60 * 60  # 4h, matches AUTO_STOP_MINUTES so the link
+                                   # doesn't expire before the sandbox does.
 
 # Until the upstream fulcradynamics/agent-skills PR merges, pin sandboxes to the
 # PR branch so they get the fixed skill (silent pre-flight + reliable
