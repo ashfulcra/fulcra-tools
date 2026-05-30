@@ -10,7 +10,8 @@ directly.
 from __future__ import annotations
 
 from AppKit import (  # type: ignore[import-not-found]
-    NSButton, NSBezelStyleRounded, NSFontAttributeName, NSLineBreakByWordWrapping,
+    NSButton, NSBezelStyleRounded, NSFontAttributeName,
+    NSLineBreakByTruncatingTail, NSLineBreakByWordWrapping,
     NSScrollView, NSSecureTextField, NSStringDrawingUsesLineFragmentOrigin,
     NSSwitch, NSTextField, NSView, NSMakeRect, NSMakeSize,
 )
@@ -280,26 +281,29 @@ def _make_plugin_row(snap: PluginSnapshot, width: float, height: float,
                      client: DaemonClient, model: StatusModel) -> NSView:
     row = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
 
-    name = NSTextField.labelWithString_(f"{snap.name}  ({snap.id})")
-    name.setFont_(typography.body())
-    name.setTextColor_(colors.text())
-    name.setFrame_(NSMakeRect(16, height - 28, width - 200, 18))
-    row.addSubview_(name)
-
-    # collect_mode chip — sits to the left of the Run-now button or
-    # Enable switch on the name row. Augments the kind label (which
-    # stays as part of the row's behaviour — kind drives the toggle vs
-    # button affordance below) per user Q2 on the SP3 plan.
+    # collect_mode chip — sits to the left of the Run-now button / Enable
+    # switch on the name row. Build it FIRST so we know its width: the name
+    # label below is sized + truncated to end before the chip, otherwise a
+    # long plugin name (e.g. "Apple Podcasts (Time Machine recovery) (…)") or
+    # a wide chip ("Live (continuous)") overruns into the chip / Run-now
+    # button on the right. The control column starts at width-80 (where the
+    # switch / Run-now button begins); the chip sits 8pt to its left.
     chip = _make_collect_mode_chip(snap.collect_mode)
-    chip_frame = chip.frame()
-    chip_w = chip_frame.size.width
-    chip_h = chip_frame.size.height
-    # Right-edge of the name row's control column is width-80 (where the
-    # switch / Run-now button starts). Park the chip 8pt to the left of
-    # that, vertically centred on the name baseline.
+    chip_w = chip.frame().size.width
+    chip_h = chip.frame().size.height
     chip_x = width - 80 - chip_w - 8
     chip_y = height - 28 + (18 - chip_h) / 2.0
     chip.setFrame_(NSMakeRect(chip_x, chip_y, chip_w, chip_h))
+
+    # Name fills from the left margin to 8pt before the chip, and truncates
+    # with an ellipsis so it can never paint over the chip or button.
+    name = NSTextField.labelWithString_(f"{snap.name}  ({snap.id})")
+    name.setFont_(typography.body())
+    name.setTextColor_(colors.text())
+    name.setLineBreakMode_(NSLineBreakByTruncatingTail)
+    name_w = max(chip_x - 16 - 8, 80.0)
+    name.setFrame_(NSMakeRect(16, height - 28, name_w, 18))
+    row.addSubview_(name)
     row.addSubview_(chip)
 
     # Description label — 12pt secondary text, word-wrapped. Height is
