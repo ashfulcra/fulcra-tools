@@ -5,7 +5,13 @@ from __future__ import annotations
 AUTO_STOP_MINUTES = 30
 
 
-def build_spawn_kwargs(*, snapshot: str, openrouter_model: str, label: str) -> dict:
+def build_spawn_kwargs(
+    *,
+    snapshot: str,
+    openrouter_model: str,
+    label: str,
+    skill_branch: str = "main",
+) -> dict:
     """Kwargs for CreateSandboxFromSnapshotParams.
 
     Notes:
@@ -14,10 +20,17 @@ def build_spawn_kwargs(*, snapshot: str, openrouter_model: str, label: str) -> d
       `echo $OPENROUTER_API_KEY` (the model id is fine to expose).
     - public=False: only the signed preview URL (which carries its own token) can
       reach the sandbox; the predictable non-signed URL will not.
+    - `skill_branch` becomes FULCRA_SKILL_BRANCH in the sandbox env so start-chat.sh
+      knows which ref of fulcradynamics/agent-skills to clone at boot. Defaults to
+      `main`; spawn.py pins it to a pending PR branch when one is in flight so
+      sandboxes pick up the PR-version skill until it merges.
     """
     return {
         "snapshot": snapshot,
-        "env_vars": {"OPENROUTER_MODEL": openrouter_model},
+        "env_vars": {
+            "OPENROUTER_MODEL": openrouter_model,
+            "FULCRA_SKILL_BRANCH": skill_branch,
+        },
         "auto_stop_interval": AUTO_STOP_MINUTES,
         "public": False,
         "labels": {"fhd": "guest", "guest": label},
