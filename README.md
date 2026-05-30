@@ -3,6 +3,12 @@
 Monorepo for the Fulcra helper tools — the things that get personal data
 into a [Fulcra](https://fulcradynamics.com) account.
 
+> **Working in this repo with an AI agent (Claude, Codex, Cursor, …)?**
+> Read [`AGENTS.md`](AGENTS.md) first. It documents the non-obvious
+> environmental requirements — the required `uv` extras, the launchd daemon,
+> and the PATH/keychain gotchas — that otherwise cost time to rediscover on
+> first run.
+
 ## Packages
 
 | Package | What it is |
