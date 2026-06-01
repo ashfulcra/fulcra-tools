@@ -155,8 +155,8 @@ export function Wizard() {
       setStep("done");
     } catch (e) {
       // Surface the error so the user knows why nothing advanced —
-      // most likely the relay is unreachable or the bearer token
-      // is missing/wrong. Events stay in the outbox and will retry
+      // most likely the Fulcra Collect daemon is unreachable or the bearer
+      // token is missing/wrong. Events stay in the outbox and will retry
       // on the next chrome.alarms tick, so this isn't data loss.
       setIngestError((e as Error).message ?? String(e));
     } finally {
@@ -275,7 +275,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
         This setup takes a couple of minutes:
       </p>
       <ol>
-        <li>Paste your relay's bearer token (from <code>~/.config/fulcra-attention/relay.json</code>)</li>
+        <li>Paste the bearer token from Fulcra Collect (<em>Attention → Pair extension</em>)</li>
         <li>Scan your recent browser history</li>
         <li>Pick sites and categories to exclude (banking, healthcare, etc.)</li>
         <li>Optionally back-fill the kept history into Fulcra</li>
@@ -300,10 +300,11 @@ function TokenStep(props: {
 }) {
   return (
     <>
-      <h2>Connect to your relay</h2>
+      <h2>Connect to Fulcra Collect</h2>
       <p>
-        The relay runs on this machine at <code>http://127.0.0.1:8771</code>.
-        Paste the bearer token from <code>~/.config/fulcra-attention/relay.json</code>:
+        Events go to the Fulcra Collect daemon running on this machine at{" "}
+        <code>http://127.0.0.1:9292/api/extension/attention</code>. Paste the
+        bearer token Collect issued when you paired the extension:
       </p>
       <input
         type="password"
@@ -313,15 +314,11 @@ function TokenStep(props: {
         style={{ width: "100%", boxSizing: "border-box" }}
       />
       <p className="muted">
-        Don't have one yet? Print it with:
-        <br />
-        <code>cat ~/.config/fulcra-attention/relay.json</code>
-        <br />
-        — the <code>bearer_token</code> field is what you want. If that file
-        doesn't exist, run setup first (from inside the fulcra-attention
-        venv):
-        <br />
-        <code>.venv/bin/fulcra-attention setup</code>
+        Don't have one yet? Open the Fulcra Collect app, go to the{" "}
+        <strong>Attention</strong> plugin, and click{" "}
+        <strong>Pair extension</strong>. Collect issues a bearer token and
+        shows it for you to paste here. Re-running that step re-issues the
+        token if you ever need a fresh one.
       </p>
       <div className="action-row">
         <div className="spacer" />
@@ -707,11 +704,12 @@ function IngestStep(props: {
           <strong>Backfill failed.</strong> {props.error}
           <br />
           <span style={{ color: "var(--fa-muted)" }}>
-            Most likely cause: relay isn't reachable on{" "}
-            <code>127.0.0.1:8771</code>, or the bearer token in settings
-            doesn't match the one in <code>relay.json</code>. Queued events
-            stay in the outbox and will retry automatically — you can finish
-            the wizard and check the popup's Recent stream later.
+            Most likely cause: the Fulcra Collect daemon isn't reachable on{" "}
+            <code>127.0.0.1:9292</code>, or the bearer token in settings
+            doesn't match the one Collect issued when you paired the extension
+            (<em>Attention → Pair extension</em>). Queued events stay in the
+            outbox and will retry automatically — you can finish the wizard and
+            check the popup's Recent stream later.
           </span>
         </div>
       )}
@@ -747,7 +745,7 @@ function DoneStep({ ingestComplete }: { ingestComplete: boolean }) {
         </p>
         {ingestComplete && (
           <p style={{ margin: "10px 0 0" }}>
-            ✓ Back-filled history queued for relay. The outbox will drain in the background.
+            ✓ Back-filled history queued for Fulcra Collect. The outbox will drain in the background.
           </p>
         )}
       </div>

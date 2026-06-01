@@ -36,10 +36,26 @@ class Permission:
 
 @dataclass(frozen=True)
 class Credential:
-    """A secret a plugin needs. Stored in the OS keychain by the hub."""
+    """A secret a plugin needs. Stored in the OS keychain by the hub.
+
+    `user_level` selects WHICH keychain service the secret lives in:
+      - False (default): plugin-scoped, service "fulcra-collect:<plugin_id>",
+        accessed via credentials.set_secret / get_secret / has_secret. This
+        is the normal case — per-plugin API keys etc.
+      - True: account-scoped, service "fulcra-collect:user", accessed via
+        credentials.set_user_secret / get_user_secret / has_user_secret. Use
+        this for secrets shared across the account rather than owned by one
+        plugin. The attention-relay `extension-token` is the canonical
+        example: it's written by the extension-pair route and read by the
+        ingest route + the plugin's own preflight, all via the *user* store.
+
+    The credential-status endpoint and any code that probes presence MUST
+    consult the same scope the plugin actually reads, or it reports a working
+    secret as "missing" (the attention-relay false-"missing" bug)."""
     key: str
     label: str
     help: str
+    user_level: bool = False
 
 
 @dataclass(frozen=True)

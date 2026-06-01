@@ -1,10 +1,17 @@
 """click CLI entry point.
 
-NOTE: the standalone HTTP relay (port 8771) has been removed; browser
-extension events now go to the fulcra-collect daemon's
-`/api/extension/attention` endpoint on its stable port. This CLI keeps
-the bootstrap / setup / status / defs / adopt / reset commands for
-multi-machine wrangling, but no longer runs a relay process of its own.
+Browser-extension events are ingested by the fulcra-collect daemon's
+`POST /api/extension/attention` endpoint; this CLI does not run any
+listener of its own. It exists for headless / scriptable / multi-machine
+management of the Attention setup that the daemon's onboarding wizard
+otherwise drives interactively:
+
+- bootstrap — create the Attention definition + tags (idempotent)
+- setup     — tag this machine's events with `machine:<host>`
+- status    — print this machine's cached state.json
+- defs      — list every Attention definition on the account
+- adopt     — point this machine at an existing definition id
+- reset     — soft-delete the definition + clear local state
 """
 from __future__ import annotations
 
@@ -39,10 +46,10 @@ def bootstrap() -> None:
 )
 def setup(hostname: str | None) -> None:
     """Per-machine setup: registers a `machine:<host>` tag so events
-    can be filtered by machine. No longer installs a launchd/systemd
-    unit (the daemon owns the HTTP listener now); no longer manages a
-    bearer token (set the extension-token via the Fulcra Collect web UI
-    instead).
+    can be filtered by machine at query time. This is the only thing
+    `setup` does — the fulcra-collect daemon owns the ingest endpoint,
+    and the extension-token is paired via the Fulcra Collect onboarding
+    wizard (Preferences -> Plugins -> Attention), not here.
     """
     s = state_mod.load(state_mod.DEFAULT_PATH)
     if not s.attention_definition_id:

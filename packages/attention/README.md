@@ -83,7 +83,7 @@ Architecture references (in the sibling repo):
 
 - **Plan A (this repo):** Python backend complete. 102 tests passing.
 - Chrome extension: shipped, lives under [chrome/](chrome/). Foreground-only attention, AFK detection, pause control, onboarding wizard, right-click context menu, branded UI.
-- **v2:** Direct-to-cloud via Auth0 OAuth (extension drops the relay dependency); needs the dedicated Auth0 app provisioned per the spec above.
+- **v2:** Direct-to-cloud via Auth0 OAuth (extension posts straight to Fulcra instead of through the local daemon); needs the dedicated Auth0 app provisioned per the spec above.
 
 ## License
 

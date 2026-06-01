@@ -702,7 +702,7 @@ export async function refreshToolbarIcon(): Promise<void> {
     await chrome.action.setTitle({
       title: state === "active" ? "Fulcra Attention"
            : state === "paused" ? "Fulcra Attention — paused"
-           : "Fulcra Attention — error (relay unreachable?)",
+           : "Fulcra Attention — error (Fulcra Collect unreachable?)",
     });
   } catch {
     // setIcon throws if a variant file is missing. Fall back to the
