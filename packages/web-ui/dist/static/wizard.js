@@ -739,6 +739,10 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     async startExtensionPair() {
+      // Defensive: clear any prior listener/timer/fallback flags before starting
+      // a new pairing attempt so a re-entry can never orphan a previous listener
+      // or timeout handle. (Resets pairStatus to "idle"; immediately re-set below.)
+      this._resetPairState();
       this.stepError = "";
       this.pairTimedOut = false;
       this.pairStatus = "pairing";

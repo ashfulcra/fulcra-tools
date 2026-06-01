@@ -512,6 +512,14 @@ class Daemon:
         return None
 
     def _set_credential(self, plugin_id: str, key: str, secret: str) -> dict:
+        # NOTE: This generic credential-write path operates on the plugin-scoped
+        # store only and does NOT honor Credential.user_level (unlike
+        # _credential_status, which reads from the user-level store when the flag
+        # is set). The sole current user_level credential (attention-relay's
+        # extension-token) is written/read exclusively via routes/extension.py,
+        # so this asymmetry is currently harmless. A future user_level credential
+        # that needs the generic PUT/DELETE routes would require the same
+        # user_level store routing to be added here (and in _delete_credential).
         err = self._check_credential_key(plugin_id, key)
         if err is not None:
             return err
@@ -528,6 +536,11 @@ class Daemon:
             return {"ok": False, "error": "keychain write failed"}
 
     def _delete_credential(self, plugin_id: str, key: str) -> dict:
+        # NOTE: Like _set_credential, this generic credential-delete path operates
+        # on the plugin-scoped store only and does NOT honor Credential.user_level.
+        # See _set_credential for the full rationale; a future user_level
+        # credential needing the generic PUT/DELETE routes would require
+        # user_level store routing here too.
         err = self._check_credential_key(plugin_id, key)
         if err is not None:
             return err
