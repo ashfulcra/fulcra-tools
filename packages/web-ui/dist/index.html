@@ -71,15 +71,36 @@
       <div class="text-slate-500 animate-pulse">Loading…</div>
     </template>
 
-    <!-- Error connecting to daemon -->
+    <!-- Error: either daemon unreachable (connect) or a stale session
+         token (auth). The auth path offers Reload — which re-hits `/` and
+         makes the daemon re-issue the fulcra_token cookie — because the
+         Retry button only re-runs boot() with the same dead token. -->
     <template x-if="route === 'error'">
       <div class="border border-red-200 bg-red-50 text-red-800 p-4 rounded-lg">
-        <strong>Could not connect to the daemon.</strong>
-        <p x-text="errorMessage" class="text-sm mt-1"></p>
-        <button @click="boot()"
-                class="mt-3 px-4 py-2 bg-red-700 text-white rounded text-sm hover:bg-red-800">
-          Retry
-        </button>
+        <template x-if="errorKind === 'auth'">
+          <div>
+            <strong>Your session has expired.</strong>
+            <p class="text-sm mt-1">
+              Reload to re-establish a secure session with the Fulcra Collect
+              daemon, then continue where you left off.
+            </p>
+            <p x-text="errorMessage" class="text-xs mt-1 text-red-600"></p>
+            <button @click="window.location.reload()"
+                    class="mt-3 px-4 py-2 bg-red-700 text-white rounded text-sm hover:bg-red-800">
+              Reload
+            </button>
+          </div>
+        </template>
+        <template x-if="errorKind !== 'auth'">
+          <div>
+            <strong>Could not connect to the daemon.</strong>
+            <p x-text="errorMessage" class="text-sm mt-1"></p>
+            <button @click="boot()"
+                    class="mt-3 px-4 py-2 bg-red-700 text-white rounded text-sm hover:bg-red-800">
+              Retry
+            </button>
+          </div>
+        </template>
       </div>
     </template>
 
