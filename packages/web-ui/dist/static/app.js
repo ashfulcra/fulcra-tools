@@ -25,21 +25,35 @@
  *                  the client renders it with marked.
  */
 
-const TOKEN = document.cookie
-  .split("; ")
-  .find(r => r.startsWith("fulcra_token="))
-  ?.split("=")[1];
+// Read the daemon's bearer token from the `fulcra_token` cookie on EVERY
+// call rather than caching it at module-parse time. The daemon re-issues
+// this cookie on every load of `/` (web.py), so a tab whose cookie was
+// missing or stale at first paint recovers the moment the cookie is
+// refreshed. The old module-level constant captured the value once, so
+// the error screen's Retry (which only re-runs boot(), not a reload)
+// could never pick up a corrected token — every Retry re-sent the same
+// stale value and 401'd again.
+//
+// slice() past the name (not split("=")[1]) so a token containing "="
+// survives intact — the daemon's urlsafe token has none today, but the
+// header must not silently truncate if that ever changes.
+function readToken() {
+  const match = document.cookie
+    .split("; ")
+    .find(r => r.startsWith("fulcra_token="));
+  return match ? match.slice("fulcra_token=".length) : undefined;
+}
 
 // Exposed for wizard.js's _submitFileUpload, which uses XHR (not fetch) so it
 // can surface upload-progress events for multi-GB takeouts. Keeping the token
 // resolution in one place avoids the two helpers drifting apart.
 function apiToken() {
-  return TOKEN;
+  return readToken();
 }
 
 async function api(path, opts = {}) {
   const headers = {
-    Authorization: `Bearer ${TOKEN}`,
+    Authorization: `Bearer ${readToken()}`,
     ...((opts.headers) ?? {}),
   };
   // Only set Content-Type to JSON if we have a body and it is not FormData
@@ -58,7 +72,12 @@ async function api(path, opts = {}) {
     } catch (_) {
       // non-JSON body — fall through to status line
     }
-    throw new Error(detail || `${res.status} ${res.statusText}`);
+    // Attach the HTTP status so callers can distinguish an auth failure
+    // (401 — stale/missing cookie token) from a genuine connectivity or
+    // server error. boot() branches on this to pick the right recovery UI.
+    const err = new Error(detail || `${res.status} ${res.statusText}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }
@@ -67,6 +86,9 @@ function app() {
   return {
     route: "loading",
     errorMessage: "",
+    // "connect" (daemon unreachable / 5xx) or "auth" (401 — stale cookie
+    // token). Drives which recovery the error panel shows. See boot().
+    errorKind: "connect",
 
     // ID of the plugin currently being configured via the per-plugin setup
     // wizard. Set when the dashboard's Configure button is clicked; the
@@ -77,6 +99,11 @@ function app() {
     setupWizard: null,
 
     async boot() {
+      // Reset error state on every entry (Retry/Reload re-invoke boot())
+      // so a prior failure's kind/message can't linger if this run takes
+      // a different path.
+      this.errorMessage = "";
+      this.errorKind = "connect";
       try {
         const [status, authStatus] = await Promise.all([
           api("/api/status"),
@@ -169,6 +196,11 @@ function app() {
       } catch (e) {
         this.route = "error";
         this.errorMessage = e.message;
+        // A 401 isn't a connectivity failure — it's a stale/missing
+        // web-token cookie. Flag it so the error panel offers a Reload
+        // (which re-hits `/` and re-issues the cookie) instead of a
+        // Retry that would re-run boot() with the same dead token.
+        this.errorKind = e && e.status === 401 ? "auth" : "connect";
       }
     },
 
@@ -231,7 +263,7 @@ function app() {
       this.route = "docs";
       try {
         const res = await fetch(`/api/docs/${encodeURIComponent(name)}`, {
-          headers: { Authorization: `Bearer ${TOKEN}` },
+          headers: { Authorization: `Bearer ${readToken()}` },
         });
         if (!res.ok) {
           let detail = "";
