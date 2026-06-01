@@ -48,8 +48,7 @@ export function Banner() {
       <div className="banner banner-error">
         <strong>Reconnect.</strong> Fulcra Collect rejected your bearer token.
         Re-pair from the Collect app (<em>Attention → Pair extension</em>) to
-        re-issue a token, or paste the current one from that pairing step into
-        the field below and click Save.
+        get a fresh token, then paste it into the field below and click Save.
       </div>
     );
   }
