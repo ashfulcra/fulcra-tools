@@ -74,9 +74,12 @@ def main() -> None:
     )
 
     preview = sb.create_signed_preview_url(DASHBOARD_PORT, PREVIEW_TTL_SECONDS)
+    # Append /chat so guests land directly on the chat tab; the dashboard's
+    # default route is /sessions ("no sessions yet" landing), not the chat.
+    guest_url = preview.url.rstrip("/") + "/chat"
     print(f"\nGuest '{args.label}' is ready.")
     print(f"  sandbox id: {sb.id}")
-    print(f"  PRESS PLAY (send this link): {preview.url}")
+    print(f"  PRESS PLAY (send this link): {guest_url}")
     print("  (The chat takes ~15-20s to come up on first load while the UI builds.)")
 
 
