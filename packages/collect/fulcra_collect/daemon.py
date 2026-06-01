@@ -481,7 +481,17 @@ class Daemon:
         try:
             out: dict[str, str] = {}
             for cred in plugin.required_credentials:
-                out[cred.key] = "set" if credentials.has_secret(plugin_id, cred.key) else "missing"
+                # Probe the SAME keychain scope the plugin actually reads:
+                # user-level ("fulcra-collect:user") for user_level creds,
+                # plugin-level otherwise. Reading the wrong scope is exactly
+                # the attention-relay false-"missing" bug (the extension-token
+                # lives in the user store but was probed plugin-level).
+                present = (
+                    credentials.has_user_secret(cred.key)
+                    if getattr(cred, "user_level", False)
+                    else credentials.has_secret(plugin_id, cred.key)
+                )
+                out[cred.key] = "set" if present else "missing"
             return {"ok": True, "credentials": out}
         except Exception:
             import logging

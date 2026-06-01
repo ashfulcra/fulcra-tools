@@ -152,6 +152,13 @@ PLUGIN = Plugin(
         Credential(
             key="extension-token",
             label="Extension token",
+            # Account-scoped, not plugin-scoped: the pair route writes it via
+            # credentials.set_user_secret("extension-token", ...), the ingest
+            # route reads it via get_user_secret, and run() above checks it
+            # via has_user_secret. user_level=True keeps the credential-status
+            # endpoint reading from that same "fulcra-collect:user" store so it
+            # no longer reports a working token as "missing".
+            user_level=True,
             help=(
                 "Shared secret the browser extension uses to authenticate "
                 "to the daemon. The pairing step in setup generates and "
