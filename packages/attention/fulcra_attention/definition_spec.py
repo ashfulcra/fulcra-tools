@@ -29,7 +29,7 @@ keys only on annotation_type + measurement_spec, so the account converges on
 one def either way. This module deliberately single-sources only the
 STRUCTURAL match-spec and the create payload's parameters; it does not change
 what description/tags the resolver create sends (that would alter what gets
-created for existing users). See the task report for the discrepancy details.
+created for existing users).
 """
 from __future__ import annotations
 
@@ -40,8 +40,10 @@ from fulcra_common import wire
 # The canonical Attention definition parameters — the ONE place these live.
 # Tags are intentionally excluded: they are runtime-resolved tag ids (the
 # bootstrap path looks up "attention"/"web" tag ids), not a static part of
-# the descriptor. annotation_type ("duration") and measurement_type are
-# fixed by wire.duration_definition_payload and not re-stated here.
+# the descriptor. value_type and unit are passed through to
+# wire.duration_definition_payload; annotation_type ("duration") and
+# measurement_type ("duration") are fixed by that wire helper, so they are
+# not re-stated here.
 ATTENTION_CANONICAL: dict = {
     "name": "Attention",
     "description": "What the user paid attention to (browsing).",
