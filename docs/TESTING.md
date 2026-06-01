@@ -365,12 +365,15 @@ http://127.0.0.1:9292/api/extension/attention
 
 To wire up the extension:
 
-1. Walk the Attention plugin's onboarding wizard in the Fulcra Collect
-   web UI. It will ask you to pick a bearer token (the
-   `extension-token`) and prompt you to paste it into the extension's
-   options page along with the URL above.
-2. The daemon validates each POST against the `extension-token` you set
-   in the keychain; mismatched or missing tokens return 401.
+1. In the Fulcra Collect web UI, open the **Attention** plugin and click
+   **Pair extension**. The daemon issues a bearer token (the
+   `extension-token`) and shows it for you to paste into the extension —
+   either the onboarding wizard's "Connect to Fulcra Collect" step or the
+   popup's token field. The extension already targets the endpoint URL
+   above; you only paste the token. Re-running **Pair extension** re-issues
+   the token if you ever need a fresh one.
+2. The daemon validates each POST against the `extension-token` it stored
+   in the keychain during pairing; mismatched or missing tokens return 401.
 3. Use `fulcra-attention status` to inspect the per-machine state file
    (definition id, hostname tag, per-client watermarks). The
    `fulcra-attention relay` subcommand and the launchd-install half of

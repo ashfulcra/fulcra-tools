@@ -144,9 +144,20 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     //   "idle"     → button shown, nothing in flight
     //   "pairing"  → POST + postMessage sent, awaiting ack
     //   "success"  → got the ack from the extension
-    //   "fallback" → 3 s passed with no ack; show the manual paste-token UI
+    //   "fallback" → timed out with no ack; show the reload guidance +
+    //                manual paste-token UI
     pairStatus: "idle",
     pairFallbackToken: null,
+    // Why the fallback fired. When the handshake times out the single
+    // most likely cause is content-script injection timing (see
+    // startExtensionPair), so we surface a "reload the page" hint as the
+    // primary recovery action. Distinct from a hard POST/route error,
+    // which sets stepError instead.
+    pairTimedOut: false,
+    // Handle for the ack-wait timeout so we can cancel it on success /
+    // step exit and never let a stale timer flip a re-paired step back
+    // into the fallback UI.
+    _pairTimeoutHandle: null,
     // Once-set callback to drop our postMessage listener on success /
     // step exit, so we don't leak a listener across navigations.
     _pairListenerCleanup: null,
@@ -244,6 +255,7 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.current_permission_id,
           this.extensionConfirmed,
           this.pairStatus, this.pairFallbackToken, this.pairManuallyConfirmed,
+          this.pairTimedOut,
           this.firstRunStatus, this.firstRunSummary, this.firstRunTimelineUrl,
           this.nextBlocked, this.stepError,
           this.input_fields,
@@ -715,6 +727,11 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
       this.pairStatus = "idle";
       this.pairFallbackToken = null;
       this.pairManuallyConfirmed = false;
+      this.pairTimedOut = false;
+      if (this._pairTimeoutHandle) {
+        clearTimeout(this._pairTimeoutHandle);
+        this._pairTimeoutHandle = null;
+      }
       if (this._pairListenerCleanup) {
         try { this._pairListenerCleanup(); } catch (_) { /* ignore */ }
         this._pairListenerCleanup = null;
@@ -722,7 +739,12 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     },
 
     async startExtensionPair() {
+      // Defensive: clear any prior listener/timer/fallback flags before starting
+      // a new pairing attempt so a re-entry can never orphan a previous listener
+      // or timeout handle. (Resets pairStatus to "idle"; immediately re-set below.)
+      this._resetPairState();
       this.stepError = "";
+      this.pairTimedOut = false;
       this.pairStatus = "pairing";
       let resp;
       try {
@@ -751,6 +773,11 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         if (!d || d.type !== "fulcra-attention-pair-ack" || d.ok !== true) return;
         self.pairStatus = "success";
         self.nextBlocked = false;
+        // Cancel the pending timeout so a late tick can't clobber success.
+        if (self._pairTimeoutHandle) {
+          clearTimeout(self._pairTimeoutHandle);
+          self._pairTimeoutHandle = null;
+        }
         self._cleanupPairListener();
       };
       window.addEventListener("message", onMessage);
@@ -764,12 +791,29 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         "*",
       );
 
-      // 3 s fallback. If we're still pairing, switch to manual paste UI.
-      setTimeout(() => {
+      // Fallback timeout. If we're still "pairing" after this, no ack ever
+      // arrived. The dominant cause is content-script injection timing:
+      // Chrome only injects a content script into pages that were loaded
+      // AFTER the extension was installed/enabled. If this wizard tab was
+      // already open when the extension went in, pair-listener.ts is simply
+      // not on this page, so our postMessage above lands nowhere and no ack
+      // is ever posted back. Reloading the tab re-injects the content script
+      // and makes Pair work — so the fallback UI leads with that. We also
+      // tear down our own message listener here (the success path already
+      // does, but a timeout previously left it dangling) and set pairTimedOut
+      // so the step component can show the actionable "reload" guidance
+      // rather than a silent no-op. 7 s gives a slow content script room to
+      // respond before we give up.
+      this._pairTimeoutHandle = setTimeout(() => {
+        this._pairTimeoutHandle = null;
         if (self.pairStatus === "pairing") {
+          self.pairTimedOut = true;
           self.pairStatus = "fallback";
+          // Stop listening — no ack is coming on this page load. A retry
+          // (after reload) registers a fresh listener via startExtensionPair.
+          self._cleanupPairListener();
         }
-      }, 3000);
+      }, 7000);
     },
 
     _cleanupPairListener() {

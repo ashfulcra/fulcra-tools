@@ -13,8 +13,8 @@ Ingest goes through `fulcra_common.ingest.IngestPipeline` (refactor #69)
 from __future__ import annotations
 
 from fulcra_common import BaseFulcraClient
-from fulcra_common import wire
 
+from .definition_spec import attention_create_payload
 from .state import State
 
 
@@ -124,11 +124,10 @@ class FulcraClient(BaseFulcraClient):
         if existing is not None:
             state.attention_definition_id = existing
             return
-        body = wire.duration_definition_payload(
-            name="Attention",
-            description="What the user paid attention to (browsing).",
-            tags=[attention, web],
-        )
+        # Built from the canonical Attention descriptor (definition_spec.py)
+        # so the CLI create payload and the daemon resolver's match-spec
+        # share one source of truth and can't drift.
+        body = attention_create_payload(tags=[attention, web])
         r = self._client().post(
             "/user/v1alpha1/annotation",
             json=body,

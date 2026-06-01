@@ -1,9 +1,11 @@
 """CLI entry point — exercised via click's CliRunner.
 
-Phase 2 change: the `setup` command no longer generates a relay
-bearer token or installs a launchd/systemd unit (the daemon owns the
-HTTP listener now). It just registers the `machine:<host>` tag.
-The standalone `relay` subcommand is gone.
+The standalone HTTP relay is gone: the fulcra-collect daemon owns the
+ingest endpoint. The CLI surface is the set of headless/multi-machine
+management commands (bootstrap / setup / status / defs / adopt / reset)
+and runs no listener of its own. `setup` just registers the
+`machine:<host>` tag — it does not generate a token or install a
+service unit.
 """
 from __future__ import annotations
 
@@ -34,6 +36,16 @@ def _isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("FULCRA_ATTENTION_STATE", str(state_path))
     monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
     yield state_path
+
+
+def test_cli_command_surface_is_the_intended_set():
+    """The relay-era listener command is gone; the surface is exactly the
+    headless/multi-machine management commands. Pinned so a stray re-add of
+    a relay subcommand (or accidental removal of a kept one) is caught."""
+    assert set(cli.commands) == {
+        "bootstrap", "setup", "status", "defs", "adopt", "reset",
+    }
+    assert "relay" not in cli.commands
 
 
 def test_bootstrap_creates_def_and_tags(_isolate_state, mocker):

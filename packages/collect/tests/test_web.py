@@ -203,6 +203,52 @@ def test_set_and_delete_credential(collect_home, _in_memory_keyring):
     assert r.json()["credentials"]["api_key"] == "missing"
 
 
+def test_credentials_user_level_reflects_user_store(collect_home, _in_memory_keyring):
+    """A credential declared `user_level=True` must report its presence from
+    the USER-level keychain store, not the plugin-level store.
+
+    Regression for the attention-relay extension-token false-"missing" bug:
+    the token is written/read via credentials.set_user_secret /
+    get_user_secret ("fulcra-collect:user"), but /credentials previously
+    always probed the plugin-level service ("fulcra-collect:<plugin_id>"),
+    so a working token reported "missing"."""
+    from fulcra_collect.plugin import Plugin, Credential
+    from fulcra_collect import credentials as _creds
+    plugin = Plugin(
+        id="attention-relay",
+        name="Attention",
+        kind="manual",
+        collect_mode="live_continuous",
+        run=lambda c: None,
+        required_credentials=(
+            Credential(
+                key="extension-token",
+                label="Extension token",
+                help="",
+                user_level=True,
+            ),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={"attention-relay": plugin})
+    client = _client(daemon)
+
+    # Control: nothing stored anywhere → "missing".
+    r = client.get("/api/plugin/attention-relay/credentials")
+    assert r.status_code == 200
+    assert r.json()["credentials"]["extension-token"] == "missing"
+
+    # Writing to the PLUGIN-level store must NOT flip it to "set" — the
+    # plugin reads the user-level store, so the status must mirror that scope.
+    _creds.set_secret("attention-relay", "extension-token", "wrong-scope")
+    r = client.get("/api/plugin/attention-relay/credentials")
+    assert r.json()["credentials"]["extension-token"] == "missing"
+
+    # Writing to the USER-level store (what the pair/ingest paths use) → "set".
+    _creds.set_user_secret("extension-token", "the-real-token")
+    r = client.get("/api/plugin/attention-relay/credentials")
+    assert r.json()["credentials"]["extension-token"] == "set"
+
+
 # ---------------------------------------------------------------------------
 # Plugin settings
 # ---------------------------------------------------------------------------

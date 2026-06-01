@@ -39,7 +39,7 @@ export function BearerForm() {
       <div className="row">
         <input
           type="password"
-          placeholder="Paste bearer token from relay.json"
+          placeholder="Paste bearer token from Fulcra Collect pairing"
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />

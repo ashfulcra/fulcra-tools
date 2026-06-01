@@ -481,7 +481,17 @@ class Daemon:
         try:
             out: dict[str, str] = {}
             for cred in plugin.required_credentials:
-                out[cred.key] = "set" if credentials.has_secret(plugin_id, cred.key) else "missing"
+                # Probe the SAME keychain scope the plugin actually reads:
+                # user-level ("fulcra-collect:user") for user_level creds,
+                # plugin-level otherwise. Reading the wrong scope is exactly
+                # the attention-relay false-"missing" bug (the extension-token
+                # lives in the user store but was probed plugin-level).
+                present = (
+                    credentials.has_user_secret(cred.key)
+                    if getattr(cred, "user_level", False)
+                    else credentials.has_secret(plugin_id, cred.key)
+                )
+                out[cred.key] = "set" if present else "missing"
             return {"ok": True, "credentials": out}
         except Exception:
             import logging
@@ -502,6 +512,14 @@ class Daemon:
         return None
 
     def _set_credential(self, plugin_id: str, key: str, secret: str) -> dict:
+        # NOTE: This generic credential-write path operates on the plugin-scoped
+        # store only and does NOT honor Credential.user_level (unlike
+        # _credential_status, which reads from the user-level store when the flag
+        # is set). The sole current user_level credential (attention-relay's
+        # extension-token) is written/read exclusively via routes/extension.py,
+        # so this asymmetry is currently harmless. A future user_level credential
+        # that needs the generic PUT/DELETE routes would require the same
+        # user_level store routing to be added here (and in _delete_credential).
         err = self._check_credential_key(plugin_id, key)
         if err is not None:
             return err
@@ -518,6 +536,11 @@ class Daemon:
             return {"ok": False, "error": "keychain write failed"}
 
     def _delete_credential(self, plugin_id: str, key: str) -> dict:
+        # NOTE: Like _set_credential, this generic credential-delete path operates
+        # on the plugin-scoped store only and does NOT honor Credential.user_level.
+        # See _set_credential for the full rationale; a future user_level
+        # credential needing the generic PUT/DELETE routes would require
+        # user_level store routing here too.
         err = self._check_credential_key(plugin_id, key)
         if err is not None:
             return err

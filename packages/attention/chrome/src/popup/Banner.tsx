@@ -7,8 +7,8 @@ interface IngestError { kind: "unauthorized" | "unreachable"; at: number; }
 /**
  * Top-of-popup status banner. Three things rolled into one:
  *
- *   - 401 from the relay → "Reconnect — your token doesn't match"
- *   - repeated network failures → "Relay unreachable; N events queued"
+ *   - 401 from the daemon → "Reconnect — your token doesn't match"
+ *   - repeated network failures → "Fulcra Collect unreachable; N events queued"
  *   - normal outbox depth → "N events waiting to ship" + Flush Now
  *
  * On a healthy run with no queued events, the banner renders nothing.
@@ -46,16 +46,16 @@ export function Banner() {
   if (err?.kind === "unauthorized") {
     return (
       <div className="banner banner-error">
-        <strong>Reconnect.</strong> The relay rejected your bearer token —
-        paste the current one from <code>~/.config/fulcra-attention/relay.json</code>
-        into the field below and click Save.
+        <strong>Reconnect.</strong> Fulcra Collect rejected your bearer token.
+        Re-pair from the Collect app (<em>Attention → Pair extension</em>) to
+        get a fresh token, then paste it into the field below and click Save.
       </div>
     );
   }
   if (err?.kind === "unreachable") {
     return (
       <div className="banner banner-warn">
-        <strong>Relay unreachable.</strong> {queued} event{queued === 1 ? "" : "s"} queued; will retry every minute.
+        <strong>Fulcra Collect unreachable.</strong> {queued} event{queued === 1 ? "" : "s"} queued; will retry every minute.
         <button onClick={() => void flushNow()} disabled={flushing}
                 style={{ marginLeft: 8 }}>
           {flushing ? "…" : "Retry now"}
