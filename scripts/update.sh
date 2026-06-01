@@ -4,7 +4,10 @@
 #
 # What it does, in order:
 #   1. git pull --ff-only           — fast-forward to the latest commit
-#   2. uv sync --all-packages       — re-resolve workspace deps (no-op if unchanged)
+#   2. uv sync --all-packages --all-extras  — re-resolve workspace deps incl. the
+#                                     dev (pytest) + macos (PyObjC/rumps) extras.
+#                                     Without --all-extras, uv prunes those out,
+#                                     re-breaking the menubar import + the tests.
 #   3. restart the launchd daemon   — only if it's installed; picks up new code
 #   4. restart the menubar app      — only if it's currently running
 #
@@ -21,8 +24,8 @@ REPO="$PWD"
 echo "=== 1/4  git pull --ff-only ==="
 git pull --ff-only
 
-echo "=== 2/4  uv sync --all-packages ==="
-uv sync --all-packages
+echo "=== 2/4  uv sync --all-packages --all-extras ==="
+uv sync --all-packages --all-extras
 
 LABEL="com.fulcra.collect"
 echo "=== 3/4  restart the launchd daemon ($LABEL) ==="
