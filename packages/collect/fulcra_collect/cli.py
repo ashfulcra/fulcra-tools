@@ -5,6 +5,8 @@ over the control socket. `_worker` is the internal worker entrypoint.
 """
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import sys
 
@@ -20,6 +22,37 @@ def _socket_path():
     return config_mod.config_dir() / "control.sock"
 
 
+def _configure_logging() -> None:
+    """Install a single stderr handler on the root logger at INFO.
+
+    Without this the daemon ran with no root handler, so INFO records
+    (the ``web UI: ...`` startup line, anything below WARNING) hit
+    Python's last-resort handler and were dropped — ``daemon.out.log``
+    stayed empty even while the server answered requests, which hid live
+    401s. launchd captures stderr to ``~/Library/Logs/fulcra-collect/``,
+    so a stderr handler is what surfaces in the log files.
+
+    Level is overridable via ``FULCRA_COLLECT_LOG_LEVEL`` (e.g. DEBUG).
+    Idempotent: repeated calls re-use the handler we tagged rather than
+    stacking duplicates, so restarting the server in-process stays clean.
+    """
+    level_name = os.environ.get("FULCRA_COLLECT_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(level)
+    for handler in root.handlers:
+        if getattr(handler, "_fulcra_collect", False):
+            handler.setLevel(level)
+            return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(level)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    )
+    handler._fulcra_collect = True  # type: ignore[attr-defined]
+    root.addHandler(handler)
+
+
 @click.group()
 def cli() -> None:
     """Background hub for the Fulcra local helpers."""
@@ -28,6 +61,7 @@ def cli() -> None:
 @cli.command()
 def daemon() -> None:
     """Run the hub core in the foreground (the launchd/systemd entrypoint)."""
+    _configure_logging()
     Daemon().serve()
 
 
@@ -123,6 +157,10 @@ def set_credential(plugin_id: str, key: str) -> None:
 @click.argument("plugin_id")
 def _worker(plugin_id: str) -> None:
     """Internal — the worker-subprocess entrypoint."""
+    # Same logging setup as the daemon: the worker is a separate process,
+    # so without this its INFO records would hit the no-handler last-resort
+    # path and vanish — the same gap the daemon fix closes.
+    _configure_logging()
     sys.exit(worker.main([plugin_id]))
 
 

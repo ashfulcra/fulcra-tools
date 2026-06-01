@@ -208,6 +208,19 @@ def _ensure_token() -> str:
     return token
 
 
+# uvicorn only accepts these level names; anything else makes
+# uvicorn.Config raise KeyError and kills web-server startup. The root
+# logger (cli._configure_logging) tolerates a bad FULCRA_COLLECT_LOG_LEVEL
+# by falling back to INFO, so this consumer must too — a debug knob that
+# can crash the daemon defeats the diagnosability this logging is for.
+_UVICORN_LOG_LEVELS = {"critical", "error", "warning", "info", "debug", "trace"}
+
+
+def _uvicorn_log_level() -> str:
+    level = os.environ.get("FULCRA_COLLECT_LOG_LEVEL", "INFO").lower()
+    return level if level in _UVICORN_LOG_LEVELS else "info"
+
+
 def _frontend_dir() -> Path:
     # Dev: <workspace>/packages/web-ui/dist. Frozen: <Resources>/web-ui/dist.
     # _resources owns the branch so this stays a thin alias.
@@ -308,6 +321,14 @@ def build_app(daemon) -> FastAPI:
         resp = FileResponse(str(idx))
         resp.set_cookie("fulcra_token", token, httponly=False,
                          samesite="strict", secure=False, path="/")
+        # no-store, not just no-cache: this response carries the
+        # Set-Cookie that bootstraps the SPA's auth. FileResponse otherwise
+        # ships an ETag with no Cache-Control, so a reload could be served
+        # from cache/bfcache without ever re-applying the cookie — leaving
+        # a tab with a stale fulcra_token stuck on "auth required" even
+        # after the user reloads. no-store forces a fresh GET (and thus a
+        # fresh cookie) on every load, including the error screen's Reload.
+        resp.headers["Cache-Control"] = "no-store"
         return resp
 
     static_dir = _frontend_dir() / "static"
@@ -426,8 +447,13 @@ def serve(daemon, *, host: str = "127.0.0.1", port: int | None = None) -> tuple[
         probe.close()
 
     app = build_app(daemon)
+    # log_level was "warning", which suppressed uvicorn's INFO access log
+    # and startup lines — so a request that 401'd (e.g. a stale web-token
+    # cookie during onboarding) left no trace in daemon.out.log. INFO
+    # gives us per-request access logging; override via the same
+    # FULCRA_COLLECT_LOG_LEVEL env var the root logger honours.
     config = uvicorn.Config(
-        app=app, host=host, port=port, log_level="warning",
+        app=app, host=host, port=port, log_level=_uvicorn_log_level(),
     )
     server = uvicorn.Server(config)
 
