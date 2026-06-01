@@ -73,6 +73,23 @@ def test_root_returns_placeholder_when_frontend_missing(collect_home):
     assert r.status_code == 200
 
 
+def test_root_sets_cookie_and_is_uncacheable(collect_home):
+    # The `/` response carries the Set-Cookie that bootstraps the SPA's
+    # bearer auth. It must be no-store so a reload always re-hits the
+    # daemon and re-issues the cookie — otherwise a tab with a stale
+    # fulcra_token cookie can be served `/` from cache and stay stuck on
+    # "auth required" even after reloading (the onboarding bug this fixes).
+    token = _ensure_token()
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 200
+    # dist/index.html ships in the repo, so this is the HTML+cookie path.
+    assert r.cookies.get("fulcra_token") == token
+    assert r.headers.get("cache-control") == "no-store"
+
+
 def test_token_file_has_0600_permissions(collect_home, tmp_path, monkeypatch):
     """The web token file must be 0600 so other users can't read it."""
     monkeypatch.setenv("FULCRA_COLLECT_HOME", str(tmp_path))
