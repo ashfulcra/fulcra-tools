@@ -21,6 +21,7 @@ from fulcra_collect.plugin import (
     Credential, Plugin, RunContext, SetupStep,
 )
 
+from .definition_spec import attention_resolver_spec
 from .state import DEFAULT_PATH
 from .state import load as _state_load
 from .state import save as _state_save
@@ -28,17 +29,15 @@ from .state import save as _state_save
 # The Fulcra annotation definition shape for the Attention DurationAnnotation.
 # Passed to ctx.resolved_definition_id as the expected_spec so the shared
 # resolver can verify an adopted definition has the right structure, or create
-# a new one when none exists. Mirrors the payload produced by
-# wire.duration_definition_payload (the bootstrap CLI path) — annotation_type
-# and measurement_spec are the two axes that _spec_matches compares.
-ATTENTION_SPEC: dict = {
-    "annotation_type": "duration",
-    "measurement_spec": {
-        "measurement_type": "duration",
-        "value_type": "duration",
-        "unit": None,
-    },
-}
+# a new one when none exists.
+#
+# DERIVED, not hand-maintained: this is the canonical create payload (built by
+# the same wire.duration_definition_payload the CLI bootstrap path uses)
+# projected onto exactly the keys _spec_matches compares (annotation_type +
+# measurement_spec). Single-sourcing it in definition_spec.py means the
+# resolver's match-spec can't silently drift from the CLI create payload's
+# measurement structure. See fulcra_attention/definition_spec.py.
+ATTENTION_SPEC: dict = attention_resolver_spec()
 
 
 def load_state():
