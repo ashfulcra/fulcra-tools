@@ -140,6 +140,82 @@ def test_resolve_creates_when_not_found():
     ]
 
 
+def test_resolve_create_extra_merged_into_create_payload():
+    """`create_extra` (optional) lets a caller enrich the create body with
+    fields outside the structural match-spec — e.g. description + resolved
+    tag ids. It is merged into the POST body in the no-candidates create
+    branch only."""
+    client = _FakeClient()
+    out = resolve_definition_id(
+        canonical_name="Attention",
+        expected_spec={"annotation_type": "duration",
+                       "measurement_spec": {"unit": None}},
+        fulcra_client=client,
+        create_extra={"description": "desc.", "tags": ["t-a", "t-w"]},
+    )
+    assert out == "new-101"
+    assert client.create_calls == [
+        {"name": "Attention", "annotation_type": "duration",
+         "measurement_spec": {"unit": None},
+         "description": "desc.", "tags": ["t-a", "t-w"]}
+    ]
+
+
+def test_resolve_create_extra_merged_on_force_new():
+    """force_new also honours create_extra so a forced new def carries the
+    same rich body as a first-time create."""
+    client = _FakeClient()
+    out = resolve_definition_id(
+        canonical_name="Attention",
+        expected_spec={"annotation_type": "duration",
+                       "measurement_spec": {"unit": None}},
+        fulcra_client=client,
+        force_new=True,
+        machine_id="mini",
+        create_extra={"description": "desc.", "tags": ["t-a"]},
+    )
+    assert out == "new-101"
+    assert client.create_calls == [
+        {"name": "Attention (mini)", "annotation_type": "duration",
+         "measurement_spec": {"unit": None},
+         "description": "desc.", "tags": ["t-a"]}
+    ]
+
+
+def test_resolve_create_extra_default_none_leaves_payload_sparse():
+    """No-regression: when create_extra is omitted (the default for every
+    other plugin), the create body is exactly name + expected_spec — no
+    description, no tags injected by the resolver."""
+    client = _FakeClient()
+    resolve_definition_id(
+        canonical_name="lastfm-listens",
+        expected_spec={"annotation_type": "moment"},
+        fulcra_client=client,
+    )
+    assert client.create_calls == [
+        {"name": "lastfm-listens", "annotation_type": "moment"}
+    ]
+    assert "description" not in client.create_calls[0]
+    assert "tags" not in client.create_calls[0]
+
+
+def test_resolve_create_extra_not_applied_when_adopting():
+    """Existing-user safety: when a matching def already exists, the resolver
+    ADOPTS it and NEVER creates — so create_extra is irrelevant and no
+    mutation/duplicate happens even if create_extra is supplied."""
+    spec = {"annotation_type": "duration",
+            "measurement_spec": {"unit": None}}
+    client = _FakeClient(existing=[{"id": "abc", "name": "Attention", **spec}])
+    out = resolve_definition_id(
+        canonical_name="Attention",
+        expected_spec=spec,
+        fulcra_client=client,
+        create_extra={"description": "desc.", "tags": ["t-a", "t-w"]},
+    )
+    assert out == "abc"            # adopted unchanged
+    assert client.create_calls == []   # no second def, no mutation
+
+
 def test_resolve_adopts_existing_when_schema_matches():
     spec = {"annotation_type": "moment"}
     client = _FakeClient(existing=[{"id": "abc", "name": "lastfm-listens", **spec}])

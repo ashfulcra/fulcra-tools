@@ -67,6 +67,7 @@ def resolve_definition_id(
     fulcra_client: Any,
     force_new: bool = False,
     machine_id: str | None = None,
+    create_extra: dict | None = None,
 ) -> str:
     """Find an existing Fulcra definition with `canonical_name`, or
     create one. Returns the definition's id.
@@ -84,16 +85,29 @@ def resolve_definition_id(
     `machine_id` (or `platform.node()`'s first dotted component) as a
     suffix so the new and existing defs are distinguishable in Fulcra.
 
+    `create_extra` (optional) is a dict of additional fields merged into
+    the create POST body — and ONLY the create body. It defaults to
+    None, in which case the create body is exactly name + expected_spec,
+    preserving the historical sparse-create behaviour every plugin relies
+    on. It is the seam a plugin uses to enrich a *fresh* create (e.g. the
+    Attention plugin supplies its canonical description + resolved tag
+    ids so a wizard-onboarded user gets the same rich def the CLI creates).
+    It is NEVER applied when an existing def is adopted, so it cannot
+    mutate or duplicate an existing user's definition.
+
     Raises `DefinitionSchemaMismatch` when an existing def with the
     same name has a different schema."""
+    extra = create_extra or {}
     if force_new:
         suffix = machine_id or platform.node().split(".", 1)[0] or "unknown-host"
         new_name = f"{canonical_name} ({suffix})"
-        return fulcra_client.create_definition(name=new_name, **expected_spec)["id"]
+        return fulcra_client.create_definition(
+            name=new_name, **expected_spec, **extra)["id"]
 
     candidates = fulcra_client.list_definitions(name=canonical_name)
     if not candidates:
-        return fulcra_client.create_definition(name=canonical_name, **expected_spec)["id"]
+        return fulcra_client.create_definition(
+            name=canonical_name, **expected_spec, **extra)["id"]
 
     # Sort deterministically so every machine converges on the same def.
     # Prefer oldest by created_at (matching the attention package's

@@ -81,6 +81,17 @@ class _FulcraDefinitionAdapter:
         failure (be conservative — don't churn re-resolutions on flakes)."""
         return self._c.definition_exists(def_id)
 
+    def resolve_tag(self, name: str) -> str:
+        """Look up / create a tag by name and return its id.
+
+        Pass-through to ``BaseFulcraClient._resolve_tag`` so a plugin that
+        needs resolved tag ids for a rich definition create (the Attention
+        plugin's canonical attention/web tags) can resolve them through the
+        SAME daemon-side client the resolver uses — no second client, no
+        separate auth path. Exposed publicly on the adapter so plugins
+        never reach into the base client's private helper."""
+        return self._c._resolve_tag(name)
+
 
 def _make_fulcra_definition_client() -> _FulcraDefinitionAdapter:
     """Zero-arg factory: return a definition adapter over a fresh
