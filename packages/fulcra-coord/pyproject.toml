@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-coord"
+version = "0.1.0"
+description = "Shared agent coordination layer using Fulcra Files as a coordination bus"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["fulcra", "agent", "coordination", "ai", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# No non-stdlib dependencies — just subprocess + stdlib JSON/pathlib.
+dependencies = []
+
+[project.scripts]
+fulcra-coord = "fulcra_coord.entry:main"
+
+[project.optional-dependencies]
+# pyyaml is a TEST-ONLY dep (validating the adapter OpenAPI YAML parses) — the
+# core fulcra_coord package stays strictly stdlib-only.
+dev = ["pytest>=7.0", "pyyaml>=6.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_coord"]
+# Ship the OpenClaw Track B plugin sources inside the wheel so
+# `install-openclaw --with-plugin` can materialize them on an end user's
+# machine. The CLI can't build/register the plugin (that needs npm/tsc), but it
+# lays down the exact source tree the install README walks through.
+force-include = { "adapters/openclaw/plugin" = "fulcra_coord/_data/openclaw_plugin" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

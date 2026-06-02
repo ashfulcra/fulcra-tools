@@ -1,0 +1,293 @@
+openapi: 3.1.0
+info:
+  title: Fulcra Coordination — Custom GPT Action (facade)
+  description: >-
+    Turnkey OpenAPI schema for a hosted **Custom GPT** that reads and writes
+    `fulcra-coord` coordination state through the coordination **facade**
+    (`adapters/chatgpt/facade/`). Both operations hit the facade server, NOT
+    `api.fulcradynamics.com`: the facade wraps the `fulcra_coord` package so a
+    milestone write performs the task upload + materialized-view rebuild
+    server-side (a correct write is not a single Fulcra HTTP call).
+
+    This is the copy-paste schema to import in the GPT builder. Before importing,
+    replace the `{{FACADE_BASE_URL}}` placeholder below with your tunnel URL
+    (the public HTTPS address from `cloudflared`/`ngrok` — see SETUP.md). Then set
+    the Action auth to **API Key → Bearer**, value = `FULCRA_COORD_FACADE_TOKEN`
+    (the same token the facade was started with). See `../facade/README.md` for
+    the facade's design and the two-leg auth model.
+  version: 1.0.0
+servers:
+  # FACADE base URL. Replace {{FACADE_BASE_URL}} with your public tunnel URL
+  # (e.g. https://<random>.trycloudflare.com) before importing into the GPT.
+  - url: "{{FACADE_BASE_URL}}"
+    description: Coordination write facade (set to your tunnel URL at import time)
+tags:
+  - name: facade
+    description: >-
+      Coordination facade operations (POST report + GET status). These hit the
+      facade server above, which wraps the fulcra_coord package so a milestone
+      write performs the task upload + view rebuild server-side.
+paths:
+  /coordination/report:
+    post:
+      operationId: reportMilestone
+      x-openai-isConsequential: true
+      tags:
+        - facade
+      summary: Report a coordination milestone (create-or-update a task) via the facade.
+      description: >-
+        Records a milestone for the calling Custom GPT session. The facade
+        find-or-creates a task for `(agent_id, session_key)` (or updates
+        `task_id` if given), then uploads the task file AND rebuilds all
+        materialized views via the `fulcra_coord` package. This is the ONLY way
+        a Custom GPT Action can durably write coordination state.
+
+
+        Authenticated with the shared facade bearer token (`facadeBearer`), which
+        matches `FULCRA_COORD_FACADE_TOKEN` on the facade host — NOT a Fulcra
+        token. The facade uses the host's own Fulcra credentials to reach Fulcra.
+      security:
+        - facadeBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportRequest"
+      responses:
+        "200":
+          description: The task that was created or updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportResponse"
+        "400":
+          description: >-
+            The requested status transition is not satisfiable via the facade.
+            `done`/`block`/`abandon` require the `fulcra-coord` CLI (they need
+            evidence/reason); the request schema restricts `status` to
+            `active`/`waiting`, so an unsupported value is rejected earlier (422).
+        "401":
+          description: Missing or invalid facade token.
+        "404":
+          description: Explicit task_id given but no such task exists.
+        "409":
+          description: >-
+            Concurrent remote change the facade could not safely merge. Retry, or
+            tell the user to run `fulcra-coord reconcile`.
+        "422":
+          description: >-
+            Malformed body: a missing/empty/whitespace-only required field, a
+            field exceeding its length cap, or a `status` outside the supported
+            `active`/`waiting` enum.
+        "502":
+          description: >-
+            Facade reached but could not write to Fulcra (its host fulcra-api may
+            not be authenticated).
+  /coordination/status:
+    get:
+      operationId: getCoordinationStatus
+      x-openai-isConsequential: false
+      tags:
+        - facade
+      summary: Read the active coordination index via the facade.
+      description: >-
+        Returns the coordination index (counts + active task summaries + recent
+        done), optionally filtered by `agent_id` and/or `workstream`. One call
+        against the facade. Authenticated with the facade bearer token.
+      security:
+        - facadeBearer: []
+      parameters:
+        - name: agent_id
+          in: query
+          required: false
+          description: Filter to tasks owned by this agent id.
+          schema:
+            type: string
+        - name: workstream
+          in: query
+          required: false
+          description: Filter to this workstream.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The coordination index view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoordinationIndex"
+        "401":
+          description: Missing or invalid facade token.
+        "503":
+          description: >-
+            The coordination backend is unreachable (the facade host's fulcra-api
+            may be unauthenticated, or Fulcra is unavailable). This is explicitly
+            NOT an empty coordination state — the GPT must NOT report "no
+            in-flight work"; tell the user coordination is temporarily
+            unreachable.
+components:
+  securitySchemes:
+    # FACADE auth: the token the GPT sends to the write facade. This is a
+    # facade-owned shared secret (FULCRA_COORD_FACADE_TOKEN on the facade host),
+    # NOT a Fulcra token — the facade uses the host's own fulcra-api creds to
+    # talk to Fulcra. Constant-time compared on every facade request.
+    facadeBearer:
+      type: http
+      scheme: bearer
+      description: >-
+        Shared bearer token for the coordination facade
+        (Authorization: Bearer <token>), matching FULCRA_COORD_FACADE_TOKEN on
+        the facade host. Set it in the GPT builder under Authentication →
+        API Key → Bearer.
+  schemas:
+    TaskSummary:
+      type: object
+      description: >-
+        Compact task record as it appears inside coordination views
+        (fulcra_coord `task_summary`). Fields shown are the load-bearing ones for
+        answering "what am I working on"; other fields may be present.
+      properties:
+        task_id:
+          type: string
+          example: TASK-20260601-chatgpt-action-ab12
+        title:
+          type: string
+        status:
+          type: string
+          enum:
+            - proposed
+            - active
+            - waiting
+            - blocked
+            - done
+            - abandoned
+        priority:
+          type: string
+          example: P2
+        workstream:
+          type: string
+        owner_agent:
+          type: string
+          description: Which agent owns the task (e.g. chatgpt:fulcra-coord:ash).
+        summary:
+          type: string
+        next_action:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    CoordinationIndex:
+      type: object
+      description: >-
+        The global index view returned by GET /coordination/status.
+        schema = "fulcra.coordination.index.v1".
+      properties:
+        schema:
+          type: string
+          example: fulcra.coordination.index.v1
+        updated_at:
+          type: string
+          format: date-time
+        counts:
+          type: object
+          properties:
+            by_status:
+              type: object
+              additionalProperties:
+                type: integer
+            by_workstream:
+              type: object
+              additionalProperties:
+                type: integer
+            by_agent:
+              type: object
+              additionalProperties:
+                type: integer
+        active:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskSummary"
+        recent_done:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskSummary"
+    ReportRequest:
+      type: object
+      description: >-
+        Body of POST /coordination/report. `agent_id` + `session_key` identify
+        the GPT working session (the GPT mints `session_key`; the platform gives
+        no session id). If `task_id` is supplied that exact task is updated;
+        otherwise the facade find-or-creates the task for this
+        (agent_id, session_key).
+      required:
+        - agent_id
+        - session_key
+        - summary
+      properties:
+        agent_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: chatgpt:fulcra-coord:ash
+        session_key:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: 20260601T1730Z-r7q2
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: One-line current status / milestone. Must not be blank/whitespace-only.
+        next_action:
+          type: string
+          maxLength: 2000
+          description: What happens next (optional).
+        title:
+          type: string
+          maxLength: 256
+          description: Task title — used only when creating a new task. Must not be blank/whitespace-only.
+        workstream:
+          type: string
+          maxLength: 100
+          description: Workstream label — used only when creating (default "general").
+        status:
+          type: string
+          description: >-
+            Optional status transition. Restricted to the values the facade can
+            satisfy from a find-or-create flow. `done`/`block`/`abandon` are NOT
+            available here — they need evidence/reason and must go through the
+            `fulcra-coord` CLI.
+          enum:
+            - active
+            - waiting
+        task_id:
+          type: string
+          maxLength: 200
+          description: Update this exact task instead of find-or-create.
+    ReportResponse:
+      type: object
+      description: Result of a milestone report.
+      required:
+        - task_id
+        - status
+        - created
+      properties:
+        task_id:
+          type: string
+          example: TASK-20260601-chatgpt-facade-ab12cd34
+        status:
+          type: string
+          example: active
+        created:
+          type: boolean
+          description: True if a new task was created; false if an existing one was updated.
+        needs_reconcile:
+          type: boolean
+          description: >-
+            True if the task was written but some views failed and need a
+            `fulcra-coord reconcile` pass.
+# The facade operations both authenticate with the shared facade bearer token.
+security:
+  - facadeBearer: []
