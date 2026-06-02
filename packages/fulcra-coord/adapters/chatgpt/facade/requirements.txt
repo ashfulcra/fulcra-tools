@@ -1,0 +1,15 @@
+# Fulcra Coordination write facade — runtime + test dependencies.
+#
+# These are SEPARATE from the core fulcra_coord package, which is deliberately
+# stdlib-only (see ../../../pyproject.toml: dependencies = []). The facade is an
+# HTTP service, so it pulls in FastAPI/uvicorn here without polluting the core.
+#
+# The facade also imports the fulcra_coord package itself; install the repo
+# (pip install -e . from the repo root) or run with the repo root on PYTHONPATH.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.0
+
+# Test-only:
+httpx>=0.27        # required by fastapi.testclient.TestClient
+pytest>=7.0
