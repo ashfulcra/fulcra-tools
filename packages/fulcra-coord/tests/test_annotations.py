@@ -335,6 +335,19 @@ class TestWriteCli(unittest.TestCase):
 
         return recorded, fake_run
 
+    def test_annotation_cli_override_decouples_from_file_cli(self):
+        # FULCRA_COORD_ANNOTATION_CLI must take precedence over FULCRA_CLI_COMMAND
+        # so the annotation writer can point at the annotations-capable build while
+        # file-ops stay on the Files-capable build (no single fulcra-api build has
+        # both create-data-type AND the file group yet).
+        recorded, fake_run = self._capture_cmd(returncode=0)
+        with patch.dict(os.environ, {"FULCRA_COORD_ANNOTATION_CLI": "annfulcra --x"}):
+            with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+                annotations._write_cli(self._payload())
+        self.assertEqual(recorded[0][:2], ["annfulcra", "--x"])  # override, not myfulcra
+        # and unset -> falls back to the shared file CLI base (FULCRA_CLI_COMMAND)
+        self.assertEqual(annotations._annotation_cli_base()[:1], ["myfulcra"])
+
     def test_builds_create_data_type_momentannotation(self):
         recorded, fake_run = self._capture_cmd(returncode=0)
         with patch.object(annotations.subprocess, "run", side_effect=fake_run):
