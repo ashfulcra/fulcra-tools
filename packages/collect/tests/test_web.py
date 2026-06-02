@@ -249,6 +249,103 @@ def test_credentials_user_level_reflects_user_store(collect_home, _in_memory_key
     assert r.json()["credentials"]["extension-token"] == "set"
 
 
+def test_set_delete_user_level_credential_routes_to_user_store(
+    collect_home, _in_memory_keyring,
+):
+    """The generic set/delete credential routes must honor user_level: a
+    credential declared `user_level=True` lands in (and is deleted from) the
+    USER-level keychain store ("fulcra-collect:user"), NOT the plugin-level
+    store ("fulcra-collect:<plugin_id>").
+
+    Closes the write/delete asymmetry: _credential_status already reads
+    user-level creds from the user store, but the generic set/delete paths
+    previously always wrote/deleted plugin-level, so a user_level credential
+    set via the generic route would land in the wrong store and the status
+    path would still report it "missing"."""
+    from fulcra_collect.plugin import Plugin, Credential
+    plugin = Plugin(
+        id="attention-relay",
+        name="Attention",
+        kind="manual",
+        collect_mode="live_continuous",
+        run=lambda c: None,
+        required_credentials=(
+            Credential(
+                key="extension-token",
+                label="Extension token",
+                help="",
+                user_level=True,
+            ),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={"attention-relay": plugin})
+    client = _client(daemon)
+    store = _in_memory_keyring  # underlying (service, key) -> value dict
+
+    user_service = "fulcra-collect:user"
+    plugin_service = "fulcra-collect:attention-relay"
+
+    # Set via the generic route → lands in the USER store, not the plugin store.
+    r = client.put(
+        "/api/plugin/attention-relay/credential/extension-token",
+        json={"secret": "the-real-token"},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert store.get((user_service, "extension-token")) == "the-real-token"
+    assert (plugin_service, "extension-token") not in store
+
+    # ...and the status path (which reads user-level) now reports it "set".
+    r = client.get("/api/plugin/attention-relay/credentials")
+    assert r.json()["credentials"]["extension-token"] == "set"
+
+    # Delete via the generic route → removed from the USER store.
+    r = client.delete("/api/plugin/attention-relay/credential/extension-token")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert (user_service, "extension-token") not in store
+
+    # ...and the status path now reports it "missing" again.
+    r = client.get("/api/plugin/attention-relay/credentials")
+    assert r.json()["credentials"]["extension-token"] == "missing"
+
+
+def test_set_delete_plugin_level_credential_still_routes_to_plugin_store(
+    collect_home, _in_memory_keyring,
+):
+    """Control: a plugin-level (default, user_level=False) credential must
+    STILL route to the plugin-scoped store exactly as before — the common
+    case must be unchanged by the user_level routing."""
+    from fulcra_collect.plugin import Plugin, Credential
+    plugin = Plugin(
+        id="svc",
+        name="Service",
+        kind="manual",
+        collect_mode="historical",
+        run=lambda c: None,
+        required_credentials=(
+            Credential(key="api_key", label="API Key", help=""),
+        ),
+    )
+    daemon = _build_test_daemon(collect_home, plugins={"svc": plugin})
+    client = _client(daemon)
+    store = _in_memory_keyring
+
+    plugin_service = "fulcra-collect:svc"
+    user_service = "fulcra-collect:user"
+
+    r = client.put(
+        "/api/plugin/svc/credential/api_key", json={"secret": "s3cr3t"},
+    )
+    assert r.status_code == 200
+    assert store.get((plugin_service, "api_key")) == "s3cr3t"
+    assert (user_service, "api_key") not in store
+
+    r = client.delete("/api/plugin/svc/credential/api_key")
+    assert r.status_code == 200
+    assert (plugin_service, "api_key") not in store
+
+
 # ---------------------------------------------------------------------------
 # Plugin settings
 # ---------------------------------------------------------------------------
