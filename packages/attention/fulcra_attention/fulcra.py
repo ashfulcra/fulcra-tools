@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from fulcra_common import BaseFulcraClient
 
-from .definition_spec import attention_create_payload
+from .definition_spec import (
+    ATTENTION_DEFINITION_TAG_NAMES,
+    attention_create_payload,
+)
 from .state import State
 
 
@@ -106,8 +109,12 @@ class FulcraClient(BaseFulcraClient):
         # ensure_tag is cache-first so safe to call on every bootstrap.
         # Always re-ensures vocab tags even if the def already exists, so a
         # bootstrap on an old account back-fills the new tag schema.
-        attention = self.ensure_tag("attention", state)
-        web = self.ensure_tag("web", state)
+        # Single-sourced tag names (definition_spec) so the CLI create and
+        # the daemon resolver-create attach the SAME tags to the def.
+        def_tag_ids = [
+            self.ensure_tag(name, state)
+            for name in ATTENTION_DEFINITION_TAG_NAMES
+        ]
         # Pre-create category tags (Tier 2 vocabulary).
         for slug in CATEGORY_VOCAB:
             # Vocab slugs are hand-picked to be short + ascii so they
@@ -127,7 +134,7 @@ class FulcraClient(BaseFulcraClient):
         # Built from the canonical Attention descriptor (definition_spec.py)
         # so the CLI create payload and the daemon resolver's match-spec
         # share one source of truth and can't drift.
-        body = attention_create_payload(tags=[attention, web])
+        body = attention_create_payload(tags=def_tag_ids)
         r = self._client().post(
             "/user/v1alpha1/annotation",
             json=body,
