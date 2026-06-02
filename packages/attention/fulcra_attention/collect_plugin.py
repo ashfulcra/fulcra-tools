@@ -21,7 +21,7 @@ from fulcra_collect.plugin import (
     Credential, Plugin, RunContext, SetupStep,
 )
 
-from .definition_spec import attention_resolver_spec
+from .definition_spec import attention_create_extra, attention_resolver_spec
 from .state import DEFAULT_PATH
 from .state import load as _state_load
 from .state import save as _state_save
@@ -42,6 +42,31 @@ ATTENTION_SPEC: dict = attention_resolver_spec()
 
 def load_state():
     return _state_load(DEFAULT_PATH)
+
+
+def _attention_create_extra(ctx: RunContext) -> dict | None:
+    """Build the resolver create_extra (canonical description + resolved
+    attention/web tag ids) so a wizard-onboarded user gets the SAME rich
+    Attention def the CLI bootstrap creates.
+
+    Resolves tag names through the daemon's own client — the adapter the
+    worker injects exposes ``resolve_tag(name)`` (BaseFulcraClient's tag
+    lookup). Returns None when no client/resolver is available (e.g. a
+    minimal fake in tests), so the resolver falls back to the historical
+    sparse create rather than crashing — the def still gets adopted-or-
+    created with the right structure, just without the enrichment.
+
+    create_extra is applied ONLY on a fresh create (never on adoption), so
+    a user who already has an "Attention" def is unaffected by this path.
+    """
+    factory = ctx._fulcra_client_factory
+    if factory is None:
+        return None
+    client = factory()
+    resolve_tag = getattr(client, "resolve_tag", None)
+    if resolve_tag is None:
+        return None
+    return attention_create_extra(resolve_tag)
 
 
 def run(ctx: RunContext) -> None:
@@ -82,6 +107,7 @@ def run(ctx: RunContext) -> None:
             def_id = ctx.resolved_definition_id(
                 ATTENTION_SPEC,
                 canonical_name="Attention",
+                create_extra=_attention_create_extra(ctx),
             )
             state.attention_definition_id = def_id
             _state_save(state)

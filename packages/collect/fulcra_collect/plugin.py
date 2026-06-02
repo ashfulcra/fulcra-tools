@@ -328,6 +328,7 @@ class RunContext:
         *,
         canonical_name: str,
         force_new: bool = False,
+        create_extra: dict | None = None,
     ) -> str:
         """Return the cached Fulcra definition id for this plugin, or call
         the resolver, cache the result in state, and return the freshly
@@ -355,6 +356,14 @@ class RunContext:
         worker's `_FulcraDefinitionAdapter`); a fake client without
         that method skips validation, which is fine for tests that
         don't exercise the stale path.
+
+        `create_extra` (optional, default None) is forwarded verbatim to
+        ``fulcra_common.definitions.resolve_definition_id`` and is merged
+        into the create POST body ONLY when a new def is created — never
+        when an existing def is adopted. Plugins that want a richer
+        first-time create (e.g. Attention's canonical description +
+        resolved tag ids) pass it here; every other plugin leaves it None
+        and gets the unchanged sparse-create behaviour.
         """
         cached = getattr(self.state, "definition_id", None)
         if cached and not force_new:
@@ -393,6 +402,7 @@ class RunContext:
                 expected_spec=expected_spec,
                 fulcra_client=client,
                 force_new=False,
+                create_extra=create_extra,
             )
             # One-shot: the override has done its job. Clear it so a
             # later re-resolve (e.g. account switch) falls back to the
@@ -405,6 +415,7 @@ class RunContext:
                 expected_spec=expected_spec,
                 fulcra_client=client,
                 force_new=force_new,
+                create_extra=create_extra,
             )
         self.state.definition_id = new_id
         return new_id

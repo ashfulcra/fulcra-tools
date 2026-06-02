@@ -178,6 +178,120 @@ def test_run_resolves_definition_when_state_empty(monkeypatch, tmp_path):
     assert def_check["ok"] is True
 
 
+def test_run_resolver_create_is_equivalent_to_cli_create(monkeypatch):
+    """Unification: the def the resolver-create path now CREATES is byte-for-
+    byte identical (name, description, tags, annotation_type, measurement_spec)
+    to what the CLI bootstrap's attention_create_payload(...) produces — both
+    derive from definition_spec, the single source. This is the whole point of
+    the change: a wizard-onboarded user gets the same rich def as a CLI user."""
+    from fulcra_attention.definition_spec import (
+        ATTENTION_DEFINITION_TAG_NAMES,
+        attention_create_payload,
+    )
+    from fulcra_attention.state import State
+
+    # Map tag NAMES -> deterministic fake ids, the same way the CLI's
+    # ensure_tag and the daemon's resolve_tag both would on a real account.
+    tag_ids = {"attention": "tag-id-attention", "web": "tag-id-web"}
+
+    attention_state = State()
+    monkeypatch.setattr(
+        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
+    )
+    monkeypatch.setattr(
+        "fulcra_attention.collect_plugin._state_save", lambda s: None,
+    )
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.has_user_secret", lambda key: True,
+    )
+
+    created_bodies: list = []
+
+    class _FakeClient:
+        # No "Attention" def yet -> a fresh CREATE happens.
+        def list_definitions(self, *, name): return []
+        def resolve_tag(self, name): return tag_ids[name]
+        def create_definition(self, *, name, **spec):
+            created_bodies.append({"name": name, **spec})
+            return {"id": "def-new"}
+
+    ctx = _make_ctx(factory=lambda: _FakeClient())
+
+    class _PluginState:
+        definition_id = None
+        override_definition_name = None
+    ctx.state = _PluginState()
+
+    PLUGIN.run(ctx)
+
+    # Exactly one create, and its body equals the CLI create payload built
+    # from the same resolved tag ids.
+    assert len(created_bodies) == 1
+    resolver_body = created_bodies[0]
+    cli_body = attention_create_payload(
+        tags=[tag_ids[n] for n in ATTENTION_DEFINITION_TAG_NAMES]
+    )
+    cli_body_with_name = {"name": "Attention", **cli_body}
+    assert resolver_body == cli_body_with_name
+    # Spell out the rich fields so a regression to the sparse def is obvious.
+    assert resolver_body["description"] == (
+        "What the user paid attention to (browsing)."
+    )
+    assert resolver_body["tags"] == ["tag-id-attention", "tag-id-web"]
+    assert resolver_body["annotation_type"] == "duration"
+    assert resolver_body["measurement_spec"]["measurement_type"] == "duration"
+
+
+def test_run_adopts_existing_attention_def_without_creating(monkeypatch):
+    """Existing-user safety: when a matching 'Attention' def already exists,
+    the resolver ADOPTS it (returns its id) and does NOT create a second one
+    — no duplicate, no mutation — even though the create_extra enrichment is
+    supplied. The change must only affect fresh creates."""
+    from fulcra_attention.definition_spec import attention_resolver_spec
+    from fulcra_attention.state import State
+
+    attention_state = State()
+    saved: list = []
+    monkeypatch.setattr(
+        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
+    )
+    monkeypatch.setattr(
+        "fulcra_attention.collect_plugin._state_save", lambda s: saved.append(s),
+    )
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.has_user_secret", lambda key: True,
+    )
+
+    existing_def = {
+        "id": "existing-attention-def",
+        "name": "Attention",
+        **attention_resolver_spec(),
+    }
+    create_calls: list = []
+
+    class _FakeClient:
+        def list_definitions(self, *, name):
+            return [existing_def] if name == "Attention" else []
+        def resolve_tag(self, name):  # should still work but be irrelevant
+            return f"tag-{name}"
+        def create_definition(self, *, name, **spec):
+            create_calls.append({"name": name, **spec})
+            return {"id": "should-not-happen"}
+
+    ctx = _make_ctx(factory=lambda: _FakeClient())
+
+    class _PluginState:
+        definition_id = None
+        override_definition_name = None
+    ctx.state = _PluginState()
+
+    PLUGIN.run(ctx)
+
+    # Adopted the existing def, created nothing.
+    assert attention_state.attention_definition_id == "existing-attention-def"
+    assert create_calls == []
+
+
 def test_run_reports_recent_activity_present(monkeypatch):
     """A watermark within the last 24h counts as recent activity."""
     from fulcra_attention.state import State

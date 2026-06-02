@@ -33,7 +33,7 @@ created for existing users).
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from fulcra_common import wire
 
@@ -50,6 +50,14 @@ ATTENTION_CANONICAL: dict = {
     "value_type": "duration",
     "unit": None,
 }
+
+# The tag NAMES the canonical Attention definition is created with. The CLI
+# bootstrap (fulcra.py ensure_definitions) resolves these to ids and passes
+# them to attention_create_payload; the daemon resolver-create path resolves
+# the same names (via the daemon's client) and passes the ids as create_extra.
+# Single-sourced here so the two create paths attach the SAME tags. These are
+# tag NAMES, not ids — ids are account-specific and resolved at runtime.
+ATTENTION_DEFINITION_TAG_NAMES: tuple[str, ...] = ("attention", "web")
 
 # The keys fulcra_common.definitions._spec_matches() actually compares when
 # deciding whether to adopt an existing Fulcra def. The resolver match-spec
@@ -70,6 +78,27 @@ def attention_create_payload(tags: Sequence[str]) -> dict:
         value_type=ATTENTION_CANONICAL["value_type"],
         unit=ATTENTION_CANONICAL["unit"],
     )
+
+
+def attention_create_extra(resolve_tag: Callable[[str], str]) -> dict:
+    """The extra create-body fields the daemon resolver-create path must
+    supply so a wizard-onboarded user gets the SAME rich Attention def the
+    CLI bootstrap creates: the canonical description plus the resolved
+    attention/web tag ids.
+
+    `resolve_tag` maps a tag NAME to its id on the current account (the
+    daemon supplies the same client the resolver uses). Both the
+    description and the tag NAMES come from this module, so there is still
+    ONE canonical source: change the description or the tag set here and
+    both the CLI create and the resolver create move together.
+
+    The returned dict is passed to ``ctx.resolved_definition_id(...,
+    create_extra=...)`` and merged into the create POST only on a fresh
+    create — never on adoption — so it cannot mutate an existing def."""
+    return {
+        "description": ATTENTION_CANONICAL["description"],
+        "tags": [resolve_tag(name) for name in ATTENTION_DEFINITION_TAG_NAMES],
+    }
 
 
 def attention_resolver_spec() -> dict:
