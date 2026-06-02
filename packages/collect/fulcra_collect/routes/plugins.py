@@ -428,7 +428,17 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         from ..plugin import RunContext
         ctx_credentials = {}
         for c in plugin.required_credentials:
-            val = _creds.get_secret(plugin_id, c.key)
+            # Read each credential from the SAME scope the plugin actually
+            # uses: user-level ("fulcra-collect:user") for user_level creds,
+            # plugin-level otherwise. Mirrors _credential_status / the
+            # set/delete routes so a health_check that reads a user_level
+            # credential (e.g. a shared account token) sees the real value
+            # instead of an always-empty plugin-scoped read.
+            val = (
+                _creds.get_user_secret(c.key)
+                if getattr(c, "user_level", False)
+                else _creds.get_secret(plugin_id, c.key)
+            )
             if val is not None:
                 ctx_credentials[c.key] = val
         ctx_config = dict(_config.load().plugin_settings.get(plugin_id, {}))
@@ -478,7 +488,13 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         from ..plugin import RunContext
         ctx_credentials = {}
         for c in plugin.required_credentials:
-            val = _creds.get_secret(plugin_id, c.key)
+            # Read each credential from the scope the plugin uses — see the
+            # health_check route above for the rationale.
+            val = (
+                _creds.get_user_secret(c.key)
+                if getattr(c, "user_level", False)
+                else _creds.get_secret(plugin_id, c.key)
+            )
             if val is not None:
                 ctx_credentials[c.key] = val
         cfg = _config.load()
