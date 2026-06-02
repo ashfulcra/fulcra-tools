@@ -21,7 +21,8 @@ agent on [Daytona](https://www.daytona.io) that onboards each of them into their
 ## Quickstart
 
 ```bash
-# 0. one-time setup
+# 0. one-time setup — run from this package's directory
+cd packages/hermes-daytona           # if you're at the fulcra-tools root
 uv sync                              # installs deps + the fhd-* commands
 cp .env.example .env                 # then fill in your keys (see Prerequisites)
 
@@ -42,7 +43,7 @@ That's the whole loop. Spawn shortly before a demo (sandboxes auto-stop after
 ## Prerequisites
 
 - Python 3.12 and [`uv`](https://docs.astral.sh/uv/).
-- A `.env` file in the repo root (gitignored — never committed) with:
+- A `.env` file in this package's directory (`packages/hermes-daytona/.env`, gitignored — never committed) with:
 
   ```
   DAYTONA_API_KEY=dtn_...

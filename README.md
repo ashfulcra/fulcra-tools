@@ -15,10 +15,11 @@ and tests; this README is the index that points you to them.
 | Project | What it is | Start here |
 |---|---|---|
 | **Fulcra Collect** | The main project — a local-ingest daemon + plugins that import your personal-data streams into [Fulcra](https://fulcradynamics.com). Spans the daemon ([`packages/collect`](packages/collect)), its web wizard, the macOS menu-bar companion, the shared API client, and the data-source plugins. | [`docs/collect.md`](docs/collect.md) |
+| **Hermes Daytona demo** | Operator tooling for the Fulcra "press play" demo — spawn per-guest ephemeral [Hermes](https://hermes-agent.nousresearch.com) agents on [Daytona](https://www.daytona.io) that onboard each person into their own Fulcra account. | [`packages/hermes-daytona/README.md`](packages/hermes-daytona/README.md) |
 
-> **More coming.** For now this index covers just Fulcra Collect. Other Fulcra
-> projects will be added here as the team consolidates them into this repo —
-> each as its own row above, linking to its own overview.
+> **More coming.** Other Fulcra projects will be added here as the team
+> consolidates them into this repo — each as its own row above, linking to
+> its own overview.
 
 ## Repo notes
 
