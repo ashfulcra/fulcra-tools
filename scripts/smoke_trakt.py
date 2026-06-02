@@ -215,6 +215,50 @@ def mock_outbound_httpx():
 # ---------------------------------------------------------------------------
 
 @contextmanager
+def block_real_fulcra_cli():
+    """Belt-and-braces hermeticity guard.
+
+    The daemon's auth routes and the 401-refresh path shell out to the real
+    ``fulcra`` CLI via ``subprocess.run([cli_path, "auth", ...])``. The
+    individual CLI steps below mock ``subprocess.run`` locally, but anything
+    we miss — a refresh-on-401 fired from a plugin run, a future route that
+    calls the CLI — would otherwise silently spawn the *real* binary and read
+    this machine's actual auth state, breaking determinism.
+
+    This wraps the global ``subprocess.run`` so that any attempt to invoke a
+    ``fulcra`` binary raises loudly instead of running it. Per-step patches of
+    ``subprocess.run`` replace this wrapper entirely for their duration (canned
+    CLI output), so the mocked happy paths are unaffected. Non-fulcra
+    subprocesses (if any) pass straight through to the real implementation.
+    """
+    import subprocess
+
+    real_run = subprocess.run
+
+    def _guarded_run(args, *a, **kw):
+        argv0 = ""
+        if isinstance(args, (list, tuple)) and args:
+            argv0 = str(args[0])
+        elif isinstance(args, (str, bytes)):
+            argv0 = args.decode() if isinstance(args, bytes) else args
+        if "fulcra" in os.path.basename(argv0):
+            raise AssertionError(
+                "HERMETICITY VIOLATION: smoke test tried to spawn the real "
+                f"fulcra CLI ({argv0!r}). A daemon code path shelled out to "
+                "the CLI without being mocked — patch the relevant seam "
+                "(credentials._find_fulcra_cli / subprocess.run) for that step."
+            )
+        return real_run(args, *a, **kw)
+
+    orig = subprocess.run
+    subprocess.run = _guarded_run
+    try:
+        yield
+    finally:
+        subprocess.run = orig
+
+
+@contextmanager
 def in_memory_keyring():
     """Replace keyring backend with a dict for hermetic test isolation."""
     store: dict[tuple[str, str], str] = {}
@@ -289,6 +333,7 @@ def main() -> int:
 
     with synthetic_daemon() as daemon:
         with in_memory_keyring():
+          with block_real_fulcra_cli():
             with mock_outbound_httpx():
                 token = _ensure_token()
                 app = build_app(daemon)
@@ -310,15 +355,32 @@ def main() -> int:
                 #
                 # The daemon shells out to `fulcra auth login` (opens the
                 # user's browser, polls for device-auth completion) and then
-                # `fulcra auth print-access-token` to capture the token. We
-                # mock both subprocess.run AND shutil.which so the smoke runs
-                # without the real CLI being installed.
+                # `fulcra auth print-access-token` to capture the token.
+                #
+                # IMPORTANT — hermeticity: the routes resolve the CLI via
+                # ``credentials._find_fulcra_cli()``, NOT bare ``shutil.which``.
+                # ``_find_fulcra_cli`` falls back to well-known paths
+                # (``~/.local/bin/fulcra``, ``/opt/homebrew/bin/fulcra``,
+                # ``/usr/local/bin/fulcra``), so on a machine that actually has
+                # the CLI installed, patching ``shutil.which`` alone does NOT
+                # stop the daemon from finding — and running — the real binary
+                # (which talks to the network / the user's real auth state).
+                # We therefore patch ``credentials._find_fulcra_cli`` directly
+                # to control CLI presence, and ``subprocess.run`` to feed canned
+                # CLI output so no real ``fulcra`` process is ever spawned.
+                #
+                # A process-wide subprocess guard (installed in main() around
+                # the whole run) is the belt-and-braces: any unmocked attempt
+                # to spawn the real ``fulcra`` CLI raises loudly instead of
+                # silently shelling out.
                 # --------------------------------------------------------
                 from unittest.mock import patch as _patch
 
+                _FIND_CLI = "fulcra_collect.credentials._find_fulcra_cli"
+
                 @step("GET /api/fulcra/auth/cli_status (no CLI) → available:false")
                 def step_cli_status_absent():
-                    with _patch("shutil.which", return_value=None):
+                    with _patch(_FIND_CLI, return_value=None):
                         r = client.get("/api/fulcra/auth/cli_status", headers=h)
                     assert r.status_code == 200, f"status={r.status_code}"
                     body = r.json()
@@ -327,7 +389,7 @@ def main() -> int:
 
                 @step("POST /api/fulcra/auth/cli_login (no CLI) → 424")
                 def step_cli_login_absent():
-                    with _patch("shutil.which", return_value=None):
+                    with _patch(_FIND_CLI, return_value=None):
                         r = client.post("/api/fulcra/auth/cli_login", headers=h)
                     assert r.status_code == 424, (
                         f"expected 424 when CLI absent; got {r.status_code} {r.text}"
@@ -339,7 +401,7 @@ def main() -> int:
                     fake = MagicMock()
                     fake.returncode = 1
                     fake.stdout = ""
-                    with _patch("shutil.which", return_value="/fake/path/fulcra"), \
+                    with _patch(_FIND_CLI, return_value="/fake/path/fulcra"), \
                          _patch("subprocess.run", return_value=fake):
                         r = client.get("/api/fulcra/auth/cli_status", headers=h)
                     assert r.status_code == 200
@@ -359,7 +421,7 @@ def main() -> int:
                     token_ok.stdout = "mocked-fulcra-cli-token\n"
                     token_ok.stderr = ""
 
-                    with _patch("shutil.which", return_value="/fake/path/fulcra"), \
+                    with _patch(_FIND_CLI, return_value="/fake/path/fulcra"), \
                          _patch("subprocess.run", side_effect=[login_ok, token_ok]):
                         r = client.post("/api/fulcra/auth/cli_login", headers=h)
                     assert r.status_code == 200, f"status={r.status_code} body={r.text}"
@@ -398,17 +460,23 @@ def main() -> int:
                 # --------------------------------------------------------
                 # Step 4 — Status: confirm 16 plugins registered
                 # --------------------------------------------------------
-                @step("GET /api/status → 16 plugins registered")
+                @step("GET /api/status → trakt among registered plugins")
                 def step_04():
                     r = client.get("/api/status", headers=h)
                     assert r.status_code == 200, f"status={r.status_code}"
                     body = r.json()
                     assert body.get("ok") is True
                     plugins = body.get("plugins", [])
-                    assert len(plugins) == 16, (
-                        f"expected 16 plugins, got {len(plugins)}: "
+                    # The registry grows as plugins are added; assert on the
+                    # invariant the smoke actually cares about (trakt is
+                    # discoverable + a healthy-sized registry) rather than an
+                    # exact count that goes stale every time a plugin lands.
+                    assert len(plugins) >= 16, (
+                        f"expected at least 16 plugins, got {len(plugins)}: "
                         f"{[p['id'] for p in plugins]}"
                     )
+                    ids = {p["id"] for p in plugins}
+                    assert "trakt" in ids, f"trakt not registered; got {sorted(ids)}"
 
                 # --------------------------------------------------------
                 # Step 5 — Plugin contract: 7 steps, correct shape
