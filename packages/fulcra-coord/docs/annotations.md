@@ -28,17 +28,27 @@ fulcra create-data-type MomentAnnotation "<NAME>" \
 ### CLI build dependency
 
 This `create-data-type` support currently lives on the Fulcra CLI's
-**`create-annotations-commands`** branch — it is **not yet on `fulcra-api`
-main**. Until it merges, point fulcra-coord at that build via
-`FULCRA_CLI_COMMAND`, e.g.:
+**`create-annotations-commands`** branch — **not yet on `fulcra-api` main**.
+
+**Important — use a SEPARATE pointer, not `FULCRA_CLI_COMMAND`.** That branch
+carries `create-data-type` but **not** the `file` command group, and the
+Files-capable build (`file-management`) lacks `create-data-type` — **no single
+fulcra-api build has both yet.** Since the core coordination file-ops and the
+annotation write would otherwise resolve from the same base, pointing
+`FULCRA_CLI_COMMAND` at the annotations build **breaks task I/O**. Instead, point
+only the annotation writer at it via the dedicated **`FULCRA_COORD_ANNOTATION_CLI`**,
+leaving `FULCRA_CLI_COMMAND` on the Files build:
 
 ```
-export FULCRA_CLI_COMMAND="uv run --project /path/to/fulcra-api-python fulcra"
+# file-ops stay on the Files-capable build:
+export FULCRA_CLI_COMMAND="uv run --project /path/to/fulcra-api-python-files fulcra"
+# annotations use the annotations build:
+export FULCRA_COORD_ANNOTATION_CLI="uv run --project /path/to/fulcra-api-python-annotations fulcra"
 ```
 
-Once the branch lands on `fulcra-api` main and the installed CLI gains
-`create-data-type`, no pointer is needed — the default resolution
-(`fulcra-api` on PATH) just works.
+Once both command sets land on `fulcra-api` main and the installed CLI has
+`create-data-type` AND `file`, neither pointer is needed — `FULCRA_COORD_ANNOTATION_CLI`
+falls back to the shared `FULCRA_CLI_COMMAND` → `fulcra-api` on PATH resolution.
 
 The **`api` transport remains deferred**: the `fulcra_api` Python core library
 still exposes only annotation *read* methods (`moment_annotations()`,
@@ -54,7 +64,7 @@ Set `FULCRA_COORD_ANNOTATIONS`:
 | Value | Behaviour |
 |---|---|
 | unset / `off` / anything unrecognized | No-op (default). Task ops behave exactly as before. |
-| `cli` | **LIVE.** Route writes through `create-data-type MomentAnnotation ... --add-to-timeline` on the resolved Fulcra CLI (the same CLI base file ops use, via `FULCRA_CLI_COMMAND` → `fulcra-api` on PATH → `uv tool run fulcra-api`). Requires a CLI build with annotation support (see above). |
+| `cli` | **LIVE.** Route writes through `create-data-type MomentAnnotation ... --add-to-timeline` on the annotation CLI base — `FULCRA_COORD_ANNOTATION_CLI` if set, else the shared `FULCRA_CLI_COMMAND` → `fulcra-api` on PATH → `uv tool run fulcra-api`. Requires a CLI build with annotation support (see above). |
 | `api` | POST to the Fulcra annotations HTTP endpoint. Still a no-op pending a confirmed create endpoint. |
 
 The CLI base for annotation writes is resolved by `remote.cli_base_cmd()` — the

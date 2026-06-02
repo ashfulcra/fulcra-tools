@@ -292,6 +292,25 @@ def _write_timeout() -> int:
     return remote._write_timeout()
 
 
+def _annotation_cli_base() -> list[str]:
+    """CLI base for the annotation write — separable from the file/coordination CLI.
+
+    Annotations use ``create-data-type``, which today lives only on the fulcra-api
+    ``create-annotations-commands`` branch — a build that does NOT carry the
+    ``file`` command group the core coordination ops require (and the Files-capable
+    build lacks ``create-data-type``). No single fulcra-api build has both yet, and
+    file-ops + annotations otherwise resolve from the SAME base — so enabling
+    annotations would break task I/O. Until both command sets land on fulcra-api
+    ``main``, honour a dedicated ``FULCRA_COORD_ANNOTATION_CLI`` (whitespace-split)
+    so an operator can point the annotation writer at the annotations build while
+    ``FULCRA_CLI_COMMAND`` stays on the Files build. Falls back to the shared
+    ``remote.cli_base_cmd()`` when unset (correct once one build has both)."""
+    override = os.environ.get("FULCRA_COORD_ANNOTATION_CLI", "").strip()
+    if override:
+        return override.split()
+    return remote.cli_base_cmd()
+
+
 def _write_cli(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
     """Write the annotation by shelling out to the Fulcra CLI (CONFIRMED LIVE).
 
@@ -315,7 +334,7 @@ def _write_cli(payload: dict[str, Any], *, backend: Optional[list[str]] = None) 
     Implemented as a function (not inlined) so tests can monkeypatch
     ``subprocess.run`` and assert the exact invocation without a live backend.
     """
-    base = backend if backend is not None else remote.cli_base_cmd()
+    base = backend if backend is not None else _annotation_cli_base()
     cmd = list(base) + [
         "create-data-type",
         "MomentAnnotation",
