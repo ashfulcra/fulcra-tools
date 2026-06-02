@@ -9,27 +9,32 @@ Two paths encode the "Attention" definition and can drift:
      fulcra_common.definitions._spec_matches() compares against an existing
      Fulcra def to decide adopt-vs-create.
 
-This module holds the canonical descriptor ONCE and derives both:
+This module holds the canonical descriptor ONCE and derives all three:
 
   - attention_create_payload(tags) -> the wire create body, and
   - attention_resolver_spec()      -> the structural match-spec, computed as
-    a projection of that same payload onto the keys _spec_matches reads.
+    a projection of that same payload onto the keys _spec_matches reads, and
+  - attention_create_extra(resolve_tag) -> the description + resolved tag ids
+    the daemon resolver-create path injects (via create_extra) so its fresh
+    create carries the same rich fields the CLI create does.
 
 So the resolver's match-spec can never silently desync from the create
 payload's measurement structure: change the measurement_spec in one place
 (here, via the wire helper) and both paths move together.
 
-NOTE on creation behaviour (data-correctness): the two paths still CREATE
-slightly different defs when each is the first to run, because the resolver
-path only sends the projected keys (name + annotation_type +
-measurement_spec) and the daemon's create adapter defaults description="",
-tags=[] — whereas the CLI path sends this module's description plus the
-attention/web tags. Both paths find-or-adopt before creating and adoption
-keys only on annotation_type + measurement_spec, so the account converges on
-one def either way. This module deliberately single-sources only the
-STRUCTURAL match-spec and the create payload's parameters; it does not change
-what description/tags the resolver create sends (that would alter what gets
-created for existing users).
+NOTE on creation behaviour (data-correctness): both paths now CREATE the
+IDENTICAL rich Attention def — same name, description, and attention/web
+tags. The CLI path sends this module's create payload directly; the daemon
+resolver-create path sends the projected match-spec (name + annotation_type +
+measurement_spec) PLUS attention_create_extra() (description + resolved tag
+ids) as create_extra, which the resolver merges into the create body. Because
+both the description and the tag NAMES come from this module
+(ATTENTION_CANONICAL + ATTENTION_DEFINITION_TAG_NAMES), a user onboarded via
+the wizard gets the same def as one onboarded via the CLI. create_extra is
+applied ONLY on a fresh create — both paths still find-or-adopt by name
+first (adoption keys only on annotation_type + measurement_spec), so an
+existing "Attention" def is adopted unchanged (no duplicate, no mutation) and
+the account converges on one def either way.
 """
 from __future__ import annotations
 
