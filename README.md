@@ -1,7 +1,7 @@
 # fulcra-tools
 
-The umbrella repo for the Fulcra team's shared work — one place to find and
-share the various Fulcra projects. Each project keeps its own overview, build,
+The umbrella repo for Ash's Fulcra work — one place to find and
+share the various Fulcra helper projects. Each project keeps its own overview, build,
 and tests; this README is the index that points you to them.
 
 > **Working in this repo with an AI agent (Claude, Codex, Cursor, …)?**
