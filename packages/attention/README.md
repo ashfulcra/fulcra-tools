@@ -20,6 +20,16 @@ Setup is via the daemon's onboarding wizard:
    - **Pair extension** — one click hands the extension its bearer token and the daemon's port. Stored in `chrome.storage.local`.
 3. (Optional) Run `fulcra-attention setup` once to tag this machine's events with its hostname.
 
+### Two paths, one definition
+
+The daemon's wizard above (**Attention → Pair extension**, plus the auto-resolver
+that bootstraps the definition on first use) is the **interactive** path. The
+`fulcra-attention` CLI (`bootstrap` / `setup` / `status` / `defs` / `adopt` /
+`reset`, see `pyproject.toml` entry points) is the **headless / scriptable /
+multi-machine** path for managing the Attention definition, tags, and local
+state. Both operate on the same Fulcra "Attention" definition — use whichever
+fits the context.
+
 ## Architecture
 
 - Daemon hosts the ingest endpoint on its configured `[daemon] web_port` (default `9292`) — loopback only.
