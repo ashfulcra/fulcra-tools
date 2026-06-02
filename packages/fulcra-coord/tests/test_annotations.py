@@ -279,6 +279,221 @@ class TestIdempotency(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# CLI transport: _write_cli builds the create-data-type invocation
+# ---------------------------------------------------------------------------
+
+class TestWriteCli(unittest.TestCase):
+    """Unit-test the real `_write_cli` transport with a MOCKED subprocess.
+
+    These tests NEVER shell out. They assert the exact `create-data-type`
+    invocation shape: MomentAnnotation base type, the resolved CLI base
+    (honouring FULCRA_CLI_COMMAND), the agent-tasks track tag plus lifecycle /
+    agent / session tags, --add-to-timeline, and best-effort rc handling.
+    """
+
+    def setUp(self):
+        self._saved_cli = os.environ.get("FULCRA_CLI_COMMAND")
+        self._saved_backend = os.environ.get("FULCRA_COORD_BACKEND")
+        # Pin an explicit CLI base so the resolver is deterministic and we can
+        # assert it propagates into the built command. Clear the file-ops fake
+        # backend override so it can't leak into annotation resolution.
+        os.environ["FULCRA_CLI_COMMAND"] = "myfulcra --flag"
+        os.environ.pop("FULCRA_COORD_BACKEND", None)
+
+    def tearDown(self):
+        for k, v in (
+            ("FULCRA_CLI_COMMAND", self._saved_cli),
+            ("FULCRA_COORD_BACKEND", self._saved_backend),
+        ):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _payload(self, lifecycle="complete", agent="claude-code:mb:repo"):
+        task = schema.make_task(
+            title="Fix the widget pipeline",
+            workstream="devops",
+            agent=agent,
+            summary="rewiring the spline",
+            next_action="ship it",
+        )
+        task["id"] = "20260602-fix-the-widget"
+        return annotations.build_annotation(
+            lifecycle=lifecycle, task=task, agent=agent
+        )
+
+    def _capture_cmd(self, returncode=0, raises=None):
+        """Patch subprocess.run; return (recorded_cmds, fake_run)."""
+        recorded = []
+
+        def fake_run(cmd, *args, **kwargs):
+            recorded.append(cmd)
+            if raises is not None:
+                raise raises
+            return types.SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+        return recorded, fake_run
+
+    def test_builds_create_data_type_momentannotation(self):
+        recorded, fake_run = self._capture_cmd(returncode=0)
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            ok = annotations._write_cli(self._payload())
+        self.assertTrue(ok)
+        self.assertEqual(len(recorded), 1)
+        cmd = recorded[0]
+        self.assertIn("create-data-type", cmd)
+        self.assertIn("MomentAnnotation", cmd)
+        self.assertIn("--add-to-timeline", cmd)
+
+    def test_uses_resolved_cli_base(self):
+        # Honours FULCRA_CLI_COMMAND — never hardcodes `fulcra`.
+        recorded, fake_run = self._capture_cmd(returncode=0)
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            annotations._write_cli(self._payload())
+        cmd = recorded[0]
+        self.assertEqual(cmd[:2], ["myfulcra", "--flag"])
+        self.assertEqual(cmd[2], "create-data-type")
+
+    def test_name_is_annotation_text(self):
+        recorded, fake_run = self._capture_cmd(returncode=0)
+        payload = self._payload(lifecycle="complete")
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            annotations._write_cli(payload)
+        cmd = recorded[0]
+        # NAME is the positional after MomentAnnotation.
+        name_idx = cmd.index("MomentAnnotation") + 1
+        name = cmd[name_idx]
+        self.assertIn("complete", name)
+        self.assertIn("Fix the widget pipeline", name)
+        self.assertIn("20260602-fix-the-widget", name)
+
+    def test_tag_set_is_track_lifecycle_agent_session(self):
+        recorded, fake_run = self._capture_cmd(returncode=0)
+        payload = self._payload(lifecycle="complete", agent="claude-code:mb:repo")
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            annotations._write_cli(payload)
+        cmd = recorded[0]
+        tags = [cmd[i + 1] for i, a in enumerate(cmd) if a in ("--tag", "-t")]
+        self.assertIn("agent-tasks", tags)          # shared TRACK tag
+        self.assertIn("complete", tags)             # lifecycle
+        self.assertIn("agent:claude", tags)         # agent:<kind>
+        self.assertIn("session:mb", tags)           # session:<sess>
+
+    def test_description_present(self):
+        recorded, fake_run = self._capture_cmd(returncode=0)
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            annotations._write_cli(self._payload())
+        cmd = recorded[0]
+        self.assertTrue("--description" in cmd or "-d" in cmd)
+
+    def test_each_lifecycle_carries_its_tag(self):
+        for lc in ("create", "pickup", "update", "complete"):
+            recorded, fake_run = self._capture_cmd(returncode=0)
+            with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+                annotations._write_cli(self._payload(lifecycle=lc))
+            cmd = recorded[0]
+            tags = [cmd[i + 1] for i, a in enumerate(cmd) if a in ("--tag", "-t")]
+            self.assertIn(lc, tags, f"lifecycle {lc} missing from tags")
+            self.assertIn("agent-tasks", tags)
+
+    def test_nonzero_rc_returns_false(self):
+        recorded, fake_run = self._capture_cmd(returncode=2)
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            ok = annotations._write_cli(self._payload())
+        self.assertFalse(ok)
+
+    def test_raising_subprocess_returns_false(self):
+        recorded, fake_run = self._capture_cmd(raises=FileNotFoundError("no cli"))
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            ok = annotations._write_cli(self._payload())
+        self.assertFalse(ok)
+
+
+# ---------------------------------------------------------------------------
+# emit gating drives the real _write_cli: default off makes no subprocess call
+# ---------------------------------------------------------------------------
+
+class TestEmitCliIntegration(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self._saved_mode = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+        self._saved_cli = os.environ.get("FULCRA_CLI_COMMAND")
+        self._saved_backend = os.environ.get("FULCRA_COORD_BACKEND")
+        os.environ["FULCRA_CLI_COMMAND"] = "myfulcra"
+        os.environ.pop("FULCRA_COORD_BACKEND", None)
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        for k, v in (
+            ("FULCRA_COORD_ANNOTATIONS", self._saved_mode),
+            ("FULCRA_CLI_COMMAND", self._saved_cli),
+            ("FULCRA_COORD_BACKEND", self._saved_backend),
+        ):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _task(self):
+        return schema.make_task(
+            title="A task", workstream="devops", agent="claude-code:mb:repo"
+        )
+
+    def test_default_off_makes_no_subprocess_call(self):
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        recorded = []
+        with patch.object(annotations.subprocess, "run",
+                          side_effect=lambda *a, **k: recorded.append(a)):
+            result = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=self._task(), agent="claude-code:mb:repo")
+        self.assertFalse(result)
+        self.assertEqual(recorded, [])
+
+    def test_cli_mode_shells_out_and_records_marker(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        recorded = []
+
+        def fake_run(cmd, *a, **k):
+            recorded.append(cmd)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        task = self._task()
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            r1 = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=task, agent="claude-code:mb:repo")
+            # Retry the identical transition -> idempotent, no second shell-out.
+            r2 = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=task, agent="claude-code:mb:repo")
+        self.assertTrue(r1)
+        self.assertFalse(r2)
+        self.assertEqual(len(recorded), 1)
+
+    def test_cli_mode_failure_writes_no_marker(self):
+        # A non-zero rc on the first call must NOT record a marker, so a later
+        # retry is free to try again (failure is not "already annotated").
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        rcs = [2, 0]
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            return types.SimpleNamespace(returncode=rcs[len(calls) - 1],
+                                         stdout="", stderr="")
+
+        task = self._task()
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            r1 = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=task, agent="claude-code:mb:repo")
+            r2 = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=task, agent="claude-code:mb:repo")
+        self.assertFalse(r1)   # rc 2 -> failure
+        self.assertTrue(r2)    # retry succeeds (no marker blocked it)
+        self.assertEqual(len(calls), 2)
+
+
+# ---------------------------------------------------------------------------
 # CLI hook wiring: each lifecycle command emits exactly one annotation
 # ---------------------------------------------------------------------------
 

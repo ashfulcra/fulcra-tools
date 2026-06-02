@@ -5,26 +5,47 @@ time an agent moves a coordination task through its lifecycle. The goal: looking
 at your own Life timeline in `library.fulcradynamics.com`, you can see *what the
 agents were doing, and when* — interleaved with everything else Fulcra records.
 
-All annotations land on a single **moment annotation track named `Agent Tasks`**.
+All Agent-Tasks moments share a single **track tag `agent-tasks`** so they can
+be filtered together on the timeline regardless of lifecycle or agent.
 
-## Status: deferred real write (gated, safe today)
+## Status: real write LIVE via the Fulcra CLI (gated, off by default)
 
-The feature is **off by default** and currently a **no-op even when enabled**,
-because the installed Fulcra surface does not yet expose an annotation *write*
-path:
+The write is **confirmed working**. Each lifecycle event creates a *moment
+annotation* on the operator's timeline by shelling out to the Fulcra CLI:
 
-- The `fulcra-api` CLI has **no** `annotation` / `moment` / `event` write
-  subcommand. Its command set is auth + `file` (library files) + data *reads*
-  (`metric-time-series`, `get-records`, `sleep-*`, location, etc.).
-- The `fulcra_api` Python core library exposes annotation **read** methods
-  (`moment_annotations()`, `annotations_catalog()`) against
-  `/data/v1alpha1/event/MomentAnnotation` and `/user/v1alpha1/annotation`, but
-  **no create/upload** method.
+```
+fulcra create-data-type MomentAnnotation "<NAME>" \
+    --description "<desc>" --add-to-timeline \
+    --tag agent-tasks --tag <lifecycle> --tag agent:<kind> --tag session:<sess>
+```
 
-So the writer is built end-to-end (tag derivation, payload, gating, idempotency,
-CLI hook points) but the two transport functions (`_write_cli`, `_write_api`)
-return `False` with a `TODO` until Fulcra ships a confirmed annotation-write
-surface. When it does, only those two private helpers change.
+- `--add-to-timeline` makes it a real occurrence on the Life timeline.
+- Tags passed by name are **auto-created** by Fulcra.
+- The create returns JSON including the annotation `id` and `fulcra_source_id`
+  (`com.fulcradynamics.annotation.<id>`); it is deletable via
+  `fulcra delete-data-type <id>` (used only by the live smoke test).
+
+### CLI build dependency
+
+This `create-data-type` support currently lives on the Fulcra CLI's
+**`create-annotations-commands`** branch — it is **not yet on `fulcra-api`
+main**. Until it merges, point fulcra-coord at that build via
+`FULCRA_CLI_COMMAND`, e.g.:
+
+```
+export FULCRA_CLI_COMMAND="uv run --project /path/to/fulcra-api-python fulcra"
+```
+
+Once the branch lands on `fulcra-api` main and the installed CLI gains
+`create-data-type`, no pointer is needed — the default resolution
+(`fulcra-api` on PATH) just works.
+
+The **`api` transport remains deferred**: the `fulcra_api` Python core library
+still exposes only annotation *read* methods (`moment_annotations()`,
+`annotations_catalog()` against `/data/v1alpha1/event/MomentAnnotation` and
+`/user/v1alpha1/annotation`) and **no create/upload** method, so `_write_api`
+returns `False` with a `TODO`. When that endpoint is confirmed, only `_write_api`
+changes.
 
 ## Enabling
 
@@ -33,8 +54,14 @@ Set `FULCRA_COORD_ANNOTATIONS`:
 | Value | Behaviour |
 |---|---|
 | unset / `off` / anything unrecognized | No-op (default). Task ops behave exactly as before. |
-| `cli` | Route writes through the resolved Fulcra CLI backend (the same backend file ops use). Currently a no-op pending a real CLI annotation subcommand. |
-| `api` | POST to the Fulcra annotations HTTP endpoint. Currently a no-op pending a confirmed endpoint. |
+| `cli` | **LIVE.** Route writes through `create-data-type MomentAnnotation ... --add-to-timeline` on the resolved Fulcra CLI (the same CLI base file ops use, via `FULCRA_CLI_COMMAND` → `fulcra-api` on PATH → `uv tool run fulcra-api`). Requires a CLI build with annotation support (see above). |
+| `api` | POST to the Fulcra annotations HTTP endpoint. Still a no-op pending a confirmed create endpoint. |
+
+The CLI base for annotation writes is resolved by `remote.cli_base_cmd()` — the
+**same** resolution file ops use, minus the `file` subcommand — so the binary is
+never hardcoded. (The `FULCRA_COORD_BACKEND` file-ops/test override is **not**
+consulted for annotations: it speaks the file-protocol of the test emulator, not
+the CLI's top-level command surface.)
 
 The annotation write is **best-effort and never raises** into a task operation.
 A missing, slow, or broken annotation backend can never break — or even change
@@ -57,34 +84,45 @@ for the claim case, the resulting status):
 
 ## Tags
 
+The CLI write attaches four tags (the `cli_tags` field of the built payload):
+
 ```
-[ <lifecycle>, <agent_kind>, <session_tag> ]
+[ agent-tasks, <lifecycle>, agent:<kind>, session:<sess> ]
 ```
 
+- **agent-tasks** — the shared **track tag**, first, so every Agent-Tasks moment
+  is filterable together on the timeline regardless of lifecycle/agent.
 - **lifecycle** — `create` | `pickup` | `update` | `complete`.
-- **agent_kind** — from the first segment of the agent id (`<kind>:<host>:<repo>`):
-  `claude-code → claude`, `openclaw → openclaw`, `codex → chatgpt`,
-  `chatgpt → chatgpt`. Any other family is lowercased and passed through.
-- **session_tag** — the 2nd agent-id segment (host/session), falling back to the
-  3rd (repo/channel) when the 2nd is blank. Omitted when the id has no segments
-  beyond the kind.
+- **agent:`<kind>`** — agent kind from the first segment of the agent id
+  (`<kind>:<host>:<repo>`): `claude-code → claude`, `openclaw → openclaw`,
+  `codex → chatgpt`, `chatgpt → chatgpt`. Any other family is lowercased and
+  passed through. Namespaced with the `agent:` prefix so the flat tag space
+  stays unambiguous.
+- **session:`<sess>`** — the 2nd agent-id segment (host/session), falling back to
+  the 3rd (repo/channel) when the 2nd is blank. Omitted when the id has no
+  segments beyond the kind. Namespaced with the `session:` prefix.
 
-## Text and link
+(The payload also keeps a bare `tags` list `[<lifecycle>, <kind>, <session>]`
+for the deferred `api` transport / existing readers.)
+
+## Name and description
+
+The annotation **NAME** (the timeline label) is the concise, link-free form:
 
 ```
-<lifecycle>: <title> (<task-id>) <library link>
+<lifecycle>: <title> (<task-id>)
 ```
 
-The **library link** is a best-effort deep link to the task file in the Fulcra
-library web app:
+The **description** is a one-line detail — the task's `next_action`, falling back
+to `current_summary`, falling back to the **library link**:
 
 ```
 https://library.fulcradynamics.com/files/<remote-root>/tasks/<task-id>.json
 ```
 
-This URL shape is **assumed** (the coordination tasks are Fulcra Files under
-`<remote_root>/tasks/<id>.json`). If/when Fulcra exposes a canonical per-task
-permalink, only `annotations.library_link()` changes.
+This library-link URL shape is **assumed** (the coordination tasks are Fulcra
+Files under `<remote_root>/tasks/<id>.json`). If/when Fulcra exposes a canonical
+per-task permalink, only `annotations.library_link()` changes.
 
 ## Idempotency
 

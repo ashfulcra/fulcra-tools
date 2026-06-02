@@ -32,24 +32,43 @@ from . import remote_root
 # Backend resolution
 # ---------------------------------------------------------------------------
 
+def cli_base_cmd() -> list[str]:
+    """Resolve the *base* Fulcra CLI invocation (NO subcommand appended).
+
+    This is the single source of truth for "how do we shell the Fulcra CLI on
+    this machine". File ops append ``file`` to it; annotation writes append
+    ``create-data-type`` / ``delete-data-type``. Resolution order mirrors the
+    documented backend precedence so every consumer honours the SAME configured
+    CLI (e.g. ``FULCRA_CLI_COMMAND``) rather than each hardcoding ``fulcra``:
+
+      1. ``FULCRA_CLI_COMMAND`` env var (explicit operator override)
+      2. ``fulcra-api`` if found on PATH
+      3. ``uv tool run fulcra-api`` (fallback)
+
+    Note ``FULCRA_COORD_BACKEND`` is deliberately NOT consulted here: that
+    override is the file-ops *fake backend* used in tests (it speaks the ``file``
+    subcommand protocol of the emulator, not the real CLI's top-level command
+    surface), so it has no meaning for annotation writes. Annotation tests inject
+    their own base via ``FULCRA_CLI_COMMAND``."""
+    env_cli = os.environ.get("FULCRA_CLI_COMMAND", "").strip()
+    if env_cli:
+        return env_cli.split()
+
+    if shutil.which("fulcra-api"):
+        return ["fulcra-api"]
+
+    return ["uv", "tool", "run", "fulcra-api"]
+
+
 def _backend_cmd() -> list[str]:
     """Return the base command list for Fulcra file operations."""
-    # 1. Test override
+    # 1. Test override (fake backend emulator speaking the `file` protocol).
     env_test = os.environ.get("FULCRA_COORD_BACKEND", "").strip()
     if env_test:
         return env_test.split()
 
-    # 2. Explicit CLI command override
-    env_cli = os.environ.get("FULCRA_CLI_COMMAND", "").strip()
-    if env_cli:
-        return env_cli.split() + ["file"]
-
-    # 3. fulcra-api on PATH
-    if shutil.which("fulcra-api"):
-        return ["fulcra-api", "file"]
-
-    # 4. uv tool run fulcra-api
-    return ["uv", "tool", "run", "fulcra-api", "file"]
+    # 2-4. Resolved real CLI base + the `file` subcommand.
+    return cli_base_cmd() + ["file"]
 
 
 def _read_timeout() -> int:

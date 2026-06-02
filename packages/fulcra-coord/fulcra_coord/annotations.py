@@ -8,30 +8,44 @@ task, we want a single durable breadcrumb on the operator's Fulcra timeline — 
 their own Life timeline, *what the agents were doing and when*. One track, one
 annotation per real lifecycle transition.
 
+THE WRITE MECHANISM (confirmed live via the Fulcra CLI)
+-------------------------------------------------------
+The per-occurrence write is a *moment annotation* created on the timeline via
+the Fulcra CLI's ``create-data-type`` command::
+
+    fulcra create-data-type MomentAnnotation "<NAME>" \
+        --description "<desc>" --add-to-timeline \
+        --tag agent-tasks --tag <lifecycle> --tag agent:<kind> --tag session:<sess>
+
+``--add-to-timeline`` makes it a real occurrence on the operator's Life
+timeline; tags passed by name are auto-created. The shared track tag
+``agent-tasks`` lets every Agent-Tasks moment be filtered together regardless
+of lifecycle/agent. The created annotation returns JSON including its ``id`` and
+``fulcra_source_id`` and is deletable via ``fulcra delete-data-type <id>`` (used
+only by the live smoke test, never in the task path).
+
+This support currently lives on the Fulcra CLI's ``create-annotations-commands``
+branch (not yet on ``fulcra-api`` main). Until it merges, point fulcra-coord at
+that build via ``FULCRA_CLI_COMMAND`` (e.g.
+``FULCRA_CLI_COMMAND="uv run --project /path/to/fulcra-api-python fulcra"``);
+once it lands on ``fulcra-api`` main and the installed CLI gains
+``create-data-type``, no pointer is needed.
+
 WHY IT IS CAPABILITY-GATED (and OFF by default)
 -----------------------------------------------
-As of this writing the installed Fulcra surface does NOT expose an annotation
-*write* path:
+Even though the write is now live, the feature stays GATED behind
+``FULCRA_COORD_ANNOTATIONS`` so it cannot perturb task ops unless an operator
+opts in, and so machines without the annotations-capable CLI stay inert:
 
-  * the `fulcra-api` CLI has no `annotation` / `moment` / `event` write
-    subcommand (only data-read subcommands like `metric-time-series`, `file`,
-    `get-records`); and
-  * the `fulcra_api` Python core library exposes annotation *read* methods
-    (`moment_annotations()`, `annotations_catalog()` -> `/user/v1alpha1/annotation`,
-    `/data/v1alpha1/event/MomentAnnotation`) but NO create/upload method.
+  * unset / "off" / anything unrecognized  -> NO-OP (the default; safe)
+  * "cli"  -> shell ``create-data-type MomentAnnotation ... --add-to-timeline``
+    through the resolved Fulcra CLI (the same CLI base file ops use)
+  * "api"  -> POST to the Fulcra annotations HTTP endpoint (still DEFERRED — no
+    confirmed create endpoint in the core library; see ``_write_api``)
 
-So a real write cannot be confirmed today. Rather than guess and risk breaking
-task ops, this module is GATED behind `FULCRA_COORD_ANNOTATIONS`:
-
-  * unset / "off" / anything unrecognized  -> NO-OP (the default; safe today)
-  * "cli"  -> shell the (assumed) annotation subcommand via the resolved backend
-  * "api"  -> POST to the (assumed) Fulcra annotations HTTP endpoint
-
-Both "cli" and "api" remain behind the flag precisely because the surface is
-unconfirmed — see the TODOs on `_write_cli` / `_write_api`. When Fulcra ships a
-confirmed annotation write, only those two private helpers change; the public
-contract, tag mapping, text/link building, gating, idempotency, and the CLI
-hook points all stay put.
+When the HTTP create path is confirmed, only ``_write_api`` changes; the public
+contract, tag mapping, text/link building, gating, idempotency, and the CLI hook
+points all stay put.
 
 CONTRACT
 --------
@@ -45,9 +59,10 @@ bool is returned (True = an annotation was actually written this call).
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import Any, Optional
 
-from . import cache, remote_root
+from . import cache, remote, remote_root
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +157,10 @@ def build_annotation(
 
         {
           "track": "Agent Tasks",
-          "tags":  ["<lifecycle>", "<agent_kind>", "<session>"],
+          "tags":     ["<lifecycle>", "<agent_kind>", "<session>"],
+          "cli_tags": ["agent-tasks", "<lifecycle>", "agent:<kind>", "session:<sess>"],
+          "name":  "<lifecycle>: <title> (<id>)",
+          "desc":  "<next_action | current_summary | link>",
           "text":  "<lifecycle>: <title> (<id>) <link>",
           "link":  "https://library.fulcradynamics.com/...",
           "lifecycle": "<lifecycle>",
@@ -150,22 +168,51 @@ def build_annotation(
           "agent": "<full agent id>",
         }
 
-    Kept separate from the writers so tests (and a future API/CLI shaping step)
+    Two tag lists coexist on purpose:
+
+      * ``tags`` is the legacy bare list (``[lifecycle, kind, session]``) kept for
+        the API transport / existing readers.
+      * ``cli_tags`` is the form the CLI ``create-data-type`` write uses:
+        ``agent-tasks`` first as the shared TRACK tag (so every Agent-Tasks
+        moment is filterable together), then the lifecycle, then PREFIXED
+        ``agent:<kind>`` / ``session:<sess>`` so the timeline UI's flat tag space
+        stays namespaced and unambiguous.
+
+    ``name`` is the CLI annotation NAME — the concise, link-free
+    ``<lifecycle>: <title> (<id>)`` (kept short; the deep link lives in ``desc``
+    instead so the timeline label stays readable). ``desc`` prefers the task's
+    ``next_action`` then ``current_summary`` for a one-line detail, falling back
+    to the library link when neither is present.
+
+    Kept separate from the writers so tests (and the API/CLI shaping steps)
     operate on a stable dict regardless of transport."""
     title = task.get("title", "(untitled)")
     task_id = task.get("id", "")
     link = library_link(task)
-
-    tags = [lifecycle, agent_kind(agent)]
+    kind = agent_kind(agent)
     st = session_tag(agent)
+
+    tags = [lifecycle, kind]
     if st:
         tags.append(st)
 
-    text = f"{lifecycle}: {title} ({task_id}) {link}"
+    cli_tags = ["agent-tasks", lifecycle, f"agent:{kind}"]
+    if st:
+        cli_tags.append(f"session:{st}")
+
+    name = f"{lifecycle}: {title} ({task_id})"
+    text = f"{name} {link}"
+
+    detail = (task.get("next_action") or "").strip() or \
+        (task.get("current_summary") or "").strip()
+    desc = detail or link
 
     return {
         "track": TRACK_NAME,
         "tags": tags,
+        "cli_tags": cli_tags,
+        "name": name,
+        "desc": desc,
         "text": text,
         "link": link,
         "lifecycle": lifecycle,
@@ -232,28 +279,64 @@ def _record_annotated(lifecycle: str, task: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Transport writers (DEFERRED until the Fulcra annotation surface is confirmed)
+# Transport writers
+#   _write_cli — LIVE: create-data-type MomentAnnotation --add-to-timeline
+#   _write_api — DEFERRED: no confirmed HTTP create endpoint yet
 # ---------------------------------------------------------------------------
 
+def _write_timeout() -> int:
+    """Timeout (s) for the annotation create shell-out.
+
+    Reuses the file-write timeout floor (>=15s) so a slow ``create-data-type``
+    can't hang a task op indefinitely while still tolerating normal latency."""
+    return remote._write_timeout()
+
+
 def _write_cli(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
-    """Write the annotation by shelling out to the Fulcra CLI.
+    """Write the annotation by shelling out to the Fulcra CLI (CONFIRMED LIVE).
 
-    DEFERRED / UNCONFIRMED. The installed ``fulcra-api`` CLI exposes no
-    annotation/moment write subcommand today (verified: its command list is
-    auth/file/data-read only). When Fulcra ships one, this is the single place
-    to wire it — e.g. ``<backend-base> annotation moment --track "Agent Tasks"
-    --tag <t> ... --text <text>``. Until then this returns False so the gated
-    path is a no-op even when the operator sets ``FULCRA_COORD_ANNOTATIONS=cli``.
+    Builds and runs::
 
-    Implemented as a function (not inlined) precisely so tests can monkeypatch it
-    to assert the gated/idempotent/best-effort behavior without a live backend.
+        <cli-base> create-data-type MomentAnnotation "<NAME>" \
+            --description "<desc>" --add-to-timeline \
+            --tag agent-tasks --tag <lifecycle> --tag agent:<kind> --tag session:<sess>
+
+    ``<cli-base>`` comes from :func:`remote.cli_base_cmd` — the SAME resolution
+    file ops use (``FULCRA_CLI_COMMAND`` -> ``fulcra-api`` on PATH -> ``uv tool
+    run fulcra-api``) — so we never hardcode the binary. ``--add-to-timeline``
+    makes it a real moment occurrence; tags passed by name are auto-created.
+
+    BEST-EFFORT: rc == 0 is success; any non-zero rc, missing CLI, timeout, or OS
+    error returns False and is swallowed so it can NEVER raise into the caller's
+    task op. (The public ``emit_lifecycle_annotation`` only records the
+    idempotency marker on a True return, so a failure here leaves the transition
+    free to be retried.)
+
+    Implemented as a function (not inlined) so tests can monkeypatch
+    ``subprocess.run`` and assert the exact invocation without a live backend.
     """
-    # TODO(annotations): wire to the real CLI annotation subcommand once it
-    # exists. Expected shape (assumed):
-    #   <backend> annotation moment create \
-    #       --name "Agent Tasks" --text "<text>" --tag <lifecycle> --tag <kind> ...
-    # Shell via subprocess mirroring fulcra_coord.remote, returning rc == 0.
-    return False
+    base = backend if backend is not None else remote.cli_base_cmd()
+    cmd = list(base) + [
+        "create-data-type",
+        "MomentAnnotation",
+        payload["name"],
+        "--description",
+        payload["desc"],
+        "--add-to-timeline",
+    ]
+    for tag in payload.get("cli_tags", []):
+        cmd += ["--tag", tag]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_write_timeout(),
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
 
 
 def _write_api(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
@@ -298,7 +381,7 @@ def emit_lifecycle_annotation(
     """Emit one Agent-Tasks lifecycle annotation. BEST-EFFORT, NEVER RAISES.
 
     Returns True only when an annotation was actually written on THIS call;
-    False for every no-op path (feature off, unconfirmed transport, already
+    False for every no-op path (feature off, deferred `api` transport, already
     annotated, or any swallowed error). The whole body is wrapped so a broken or
     slow annotation backend can never break — or even slow the failure of — the
     coordination task write that triggered it.
@@ -322,8 +405,16 @@ def emit_lifecycle_annotation(
 
         payload = build_annotation(lifecycle=lifecycle, task=task, agent=agent)
 
+        # NOTE: the ``backend`` threaded in here is the FILE-OPS backend (e.g.
+        # ``[... , "file"]`` or the test fake-backend emulator) — it speaks the
+        # file protocol, NOT the CLI's top-level command surface, so it is the
+        # wrong base for ``create-data-type``. We therefore do NOT forward it to
+        # ``_write_cli``; that helper resolves the real CLI base itself via
+        # ``remote.cli_base_cmd()`` (honouring ``FULCRA_CLI_COMMAND``). The
+        # ``backend`` kwarg on the writers exists only for direct unit-test
+        # injection.
         if mode == "cli":
-            wrote = _write_cli(payload, backend=backend)
+            wrote = _write_cli(payload)
         elif mode == "api":
             wrote = _write_api(payload, backend=backend)
         else:  # pragma: no cover - _mode only returns off/cli/api
