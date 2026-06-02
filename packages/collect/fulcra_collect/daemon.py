@@ -511,22 +511,46 @@ class Daemon:
                     "error": f"plugin {plugin_id!r} does not declare credential {key!r}"}
         return None
 
+    def _credential_is_user_level(self, plugin_id: str, key: str) -> bool:
+        """Return whether the plugin declares credential ``key`` as
+        user_level (account-scoped, stored under "fulcra-collect:user")
+        rather than plugin-scoped.
+
+        This is the SAME per-credential lookup ``_credential_status`` uses
+        (find the plugin's declared Credential for ``key``, read its
+        ``user_level`` flag) — factored out so the status / set / delete
+        paths all route to the same keychain scope and can't drift apart.
+        Defaults to False (plugin-scoped, the common case) when the plugin
+        or the credential isn't found; callers gate on
+        ``_check_credential_key`` first, so a missing credential here means
+        "treat as the default plugin scope" rather than an error."""
+        plugin = self.registry.plugins.get(plugin_id)
+        if plugin is None:
+            return False
+        for cred in plugin.required_credentials:
+            if cred.key == key:
+                return bool(getattr(cred, "user_level", False))
+        return False
+
     def _set_credential(self, plugin_id: str, key: str, secret: str) -> dict:
-        # NOTE: This generic credential-write path operates on the plugin-scoped
-        # store only and does NOT honor Credential.user_level (unlike
-        # _credential_status, which reads from the user-level store when the flag
-        # is set). The sole current user_level credential (attention-relay's
-        # extension-token) is written/read exclusively via routes/extension.py,
-        # so this asymmetry is currently harmless. A future user_level credential
-        # that needs the generic PUT/DELETE routes would require the same
-        # user_level store routing to be added here (and in _delete_credential).
+        # Route by scope, mirroring _credential_status: a credential the
+        # plugin declares user_level=True is written to the account-scoped
+        # store ("fulcra-collect:user") via set_user_secret; everything else
+        # (the common case) goes to the plugin-scoped store via set_secret.
+        # Using the SAME _credential_is_user_level lookup the status/delete
+        # paths use keeps all three scopes consistent — a user_level
+        # credential set here is found by has_user_secret in _credential_status
+        # and removed by delete_user_secret in _delete_credential.
         err = self._check_credential_key(plugin_id, key)
         if err is not None:
             return err
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
         try:
-            credentials.set_secret(plugin_id, key, secret)
+            if self._credential_is_user_level(plugin_id, key):
+                credentials.set_user_secret(key, secret)
+            else:
+                credentials.set_secret(plugin_id, key, secret)
             return {"ok": True}
         except Exception:
             import logging
@@ -536,18 +560,20 @@ class Daemon:
             return {"ok": False, "error": "keychain write failed"}
 
     def _delete_credential(self, plugin_id: str, key: str) -> dict:
-        # NOTE: Like _set_credential, this generic credential-delete path operates
-        # on the plugin-scoped store only and does NOT honor Credential.user_level.
-        # See _set_credential for the full rationale; a future user_level
-        # credential needing the generic PUT/DELETE routes would require
-        # user_level store routing here too.
+        # Route by scope, mirroring _set_credential / _credential_status: a
+        # user_level credential is removed from the account-scoped store via
+        # delete_user_secret; everything else from the plugin-scoped store via
+        # delete_secret. Both deletes are idempotent (absence is success).
         err = self._check_credential_key(plugin_id, key)
         if err is not None:
             return err
         from . import credentials  # deferred so daemon stays importable without
                                    # a live keychain; tests monkeypatch on this module
         try:
-            credentials.delete_secret(plugin_id, key)
+            if self._credential_is_user_level(plugin_id, key):
+                credentials.delete_user_secret(key)
+            else:
+                credentials.delete_secret(plugin_id, key)
             return {"ok": True}
         except Exception:
             import logging
