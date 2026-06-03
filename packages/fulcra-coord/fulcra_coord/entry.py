@@ -251,6 +251,11 @@ def build_parser() -> argparse.ArgumentParser:
     isp_set.add_argument("--format", choices=["table", "json"], default="table")
     isp_clear = isub.add_parser("clear", help="Remove the persisted identity")
     isp_clear.add_argument("--format", choices=["table", "json"], default="table")
+    isp_migrate = isub.add_parser(
+        "migrate",
+        help="Copy a legacy global identity into this repo's per-cwd entry "
+             "(the legacy global is no longer resolved automatically)")
+    isp_migrate.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- resume ----
     sp = sub.add_parser("resume",

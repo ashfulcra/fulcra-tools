@@ -421,7 +421,10 @@ def cmd_identity(args: Any, backend: Optional[list[str]] = None) -> int:
                               Per-cwd, so a sibling session in another repo is
                               never clobbered.
     - `identity clear`      → remove the persisted id for the current cwd (fall
-                              back to legacy-global/env/derived).
+                              back to env/derived; the legacy global is NOT used).
+    - `identity migrate`    → copy the legacy global identity (if any) into this
+                              cwd's per-cwd entry, so a pre-split setup keeps its
+                              declared id without the silent global fallback (I-1).
     """
     action = getattr(args, "identity_action", None)
     out_format = getattr(args, "format", "table")
@@ -434,6 +437,26 @@ def cmd_identity(args: Any, backend: Optional[list[str]] = None) -> int:
         else:
             _info(f"Identity set: {agent_id}")
             _info(f"  Persisted to: {identity.identity_path()}")
+        return 0
+
+    if action == "migrate":
+        # I-1 migration helper: the legacy global is no longer resolved silently,
+        # so an operator who relied on it copies it into this repo's per-cwd entry
+        # once. No-op (with a note) when there's nothing to migrate.
+        legacy = identity.read_legacy_identity()
+        if legacy:
+            identity.set_identity(legacy)
+        agent, source = identity.resolve_agent_source()
+        if out_format == "json":
+            _print_json({"agent": agent, "source": source, "action": "migrate",
+                         "migrated": bool(legacy)})
+        else:
+            if legacy:
+                _info(f"Migrated legacy global identity '{legacy}' into this repo.")
+                _info(f"  Persisted to: {identity.identity_path()}")
+            else:
+                _info("No legacy global identity to migrate.")
+            _info(f"Now resolving as: {agent}  (source: {source})")
         return 0
 
     if action == "clear":
@@ -452,13 +475,24 @@ def cmd_identity(args: Any, backend: Optional[list[str]] = None) -> int:
 
     # show (default)
     agent, source = identity.resolve_agent_source()
+    # I-1: surface a one-line hint when a legacy global exists AND this cwd has no
+    # per-cwd entry, so an operator who set the old global learns it no longer
+    # resolves automatically and how to re-declare it for this repo.
+    legacy = identity.read_legacy_identity()
+    show_legacy_hint = bool(legacy) and identity.read_identity() is None
     if out_format == "json":
         _print_json({"agent": agent, "source": source,
-                     "identity_file": str(identity.identity_path())})
+                     "identity_file": str(identity.identity_path()),
+                     "legacy_global": legacy})
     else:
         _info(f"Agent:  {agent}")
         _info(f"Source: {source}")
-        if source != "config":
+        if show_legacy_hint:
+            _info(f"  Note: legacy global identity '{legacy}' found; it is no longer "
+                  f"used automatically —")
+            _info(f"        run `fulcra-coord identity set <id>` to set this repo's "
+                  f"identity (or `identity migrate`).")
+        elif source != "config":
             _info(f"  (declare a stable id with: fulcra-coord identity set <agent-id>)")
     return 0
 

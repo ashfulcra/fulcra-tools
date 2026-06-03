@@ -18,11 +18,18 @@ was the source of a clobber bug: every same-machine session's `identity set`
 overwrote the others', so sibling sessions in different repos could not each
 declare a stable id. Entries now live under
 ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/identities/<cwd-hash>.json (keyed by
-the absolute cwd). A legacy global identity.json is still read as a fallback so
-machines configured before the split keep resolving. The config dir is NOT
-root-scoped (an agent's id is a property of the session/repo, not of the
-coordination root) and lives under XDG_CONFIG_HOME so tests can isolate it and it
-never collides with the cache.
+the realpath of the cwd). The config dir is NOT root-scoped (an agent's id is a
+property of the session/repo, not of the coordination root) and lives under
+XDG_CONFIG_HOME so tests can isolate it and it never collides with the cache.
+
+The legacy global identity.json is DELIBERATELY NOT in the resolution path
+(I-1). It was a silent fallback for un-set cwds, but that meant a single
+stale/clobbered global (e.g. another tool's ``codex:host:main``) leaked in as the
+resolved identity for EVERY repo with no per-cwd entry — masquerading as a
+declared "config" identity. Removing it makes the safe ``derived`` id the default
+for an un-set cwd. The file is still read via ``read_legacy_identity`` ONLY to
+surface a migration hint (``identity show``) and to power ``identity migrate``,
+never to resolve.
 """
 
 from __future__ import annotations
@@ -50,8 +57,8 @@ def _legacy_identity_path() -> Path:
     Historically the persisted identity was one global file. That was the source
     of the clobber bug: every same-machine session's ``identity set`` overwrote
     the others' (e.g. a ``:vercel`` session then a ``:birdnet-pi`` session
-    clobbered the ``:fulcra-coord`` one). It is retained ONLY as a read-time
-    fallback so existing setups keep resolving until they re-set per-cwd."""
+    clobbered the ``:fulcra-coord`` one). It is NO LONGER part of resolution
+    (I-1) — kept only so ``read_legacy_identity`` can surface a migration hint."""
     return config_root() / "identity.json"
 
 
@@ -107,15 +114,23 @@ def _read_identity_file(path: Path) -> Optional[str]:
 
 
 def read_identity(cwd: Optional[str] = None) -> Optional[str]:
-    """Return the persisted agent id for the current cwd, or None.
+    """Return the PER-CWD persisted agent id for the current cwd, or None.
 
-    Reads the PER-CWD entry first; if there is none, falls back to the LEGACY
-    global ``identity.json`` so machines configured before the per-cwd split keep
-    resolving (the migration path). A per-cwd entry always wins over the legacy
-    global file. Tolerant of malformed files at either layer."""
-    per_cwd = _read_identity_file(identity_path(cwd))
-    if per_cwd:
-        return per_cwd
+    I-1: reads ONLY the per-cwd entry. The legacy global ``identity.json`` is no
+    longer a fallback — a stale global must not silently resolve as the identity
+    for an un-set cwd (that masked a clobbered global as a declared id across
+    every repo). Tolerant of a malformed per-cwd file."""
+    return _read_identity_file(identity_path(cwd))
+
+
+def read_legacy_identity() -> Optional[str]:
+    """Return the legacy GLOBAL identity, or None — for HINTING ONLY.
+
+    The legacy global file is no longer part of resolution (see I-1 / module
+    docstring). This accessor exists so ``identity show`` can tell an operator a
+    stale global still exists ("…no longer used automatically; run identity set")
+    and so ``identity migrate`` can copy it into the per-cwd entry. It must NEVER
+    be wired back into ``read_identity`` / ``resolve_agent``."""
     return _read_identity_file(_legacy_identity_path())
 
 
@@ -134,7 +149,8 @@ def set_identity(agent_id: str, cwd: Optional[str] = None) -> Path:
 def clear_identity(cwd: Optional[str] = None) -> bool:
     """Remove the persisted identity for the CURRENT cwd. Returns True if a file
     was removed. Per-cwd: clearing one repo's identity leaves other repos' intact.
-    After clearing, resolve_agent falls back to the legacy global / env / derived."""
+    After clearing, resolve_agent falls back to env / derived (NOT the legacy
+    global, which is no longer in the resolution path — see I-1)."""
     path = identity_path(cwd)
     if path.exists():
         path.unlink()
