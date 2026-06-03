@@ -2502,6 +2502,29 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
         _info("  -> Install Fulcra CLI: uv tool install fulcra-api")
         _info("  -> Or set FULCRA_CLI_COMMAND to your CLI invocation")
 
+    # File command group probe — the #1 fresh-agent onboarding failure.
+    #
+    # The public PyPI `fulcra-api` build lacks the `file` command group that the
+    # entire coordination bus is driven by, so an agent that pip-installs it sees
+    # every bus op fail silently. This probe targets the *resolved real CLI* (not
+    # the injected fake backend, which speaks the `file` subcommand protocol but
+    # has no top-level `file` group), so it answers "does the installed CLI have
+    # `file`?". Wrapped defensively: a hung or broken probe must degrade to FAIL,
+    # never crash doctor.
+    try:
+        file_ok, file_msg = remote.check_file_commands()
+    except Exception as e:  # defensive — check_file_commands shouldn't raise
+        file_ok, file_msg = False, f"file probe error: {e}"
+    file_status = "OK" if file_ok else "FAIL"
+    _info(f"  File commands: {file_status}  ({file_msg})")
+    if not file_ok:
+        ok_all = False
+        _info("  -> The installed Fulcra CLI lacks the `file` command group that "
+              "fulcra-coord needs to drive the bus.")
+        _info("  -> Install a file-capable build (the `file-management` branch of "
+              "fulcradynamics/fulcra-api-python).")
+        _info("  -> See docs/fulcra-cli-branch.md for the exact install command.")
+
     # Remote access
     _info(f"\n[Remote]")
     if cli_ok or backend:

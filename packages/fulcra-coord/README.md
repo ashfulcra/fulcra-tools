@@ -21,7 +21,15 @@ pip install fulcra-coord
 uv add fulcra-coord
 ```
 
-Requires: Python 3.10+, Fulcra CLI (`fulcra-api`).
+Requires: Python 3.10+, and a **file-capable** Fulcra CLI (`fulcra-api`).
+
+> **Important:** the public PyPI `fulcra-api` build does **not** ship the `file`
+> command group that the coordination bus depends on. If `fulcra-coord doctor`
+> reports `File commands: FAIL`, install a file-capable build (the
+> `file-management` branch of `fulcradynamics/fulcra-api-python`). See
+> [`docs/fulcra-cli-branch.md`](docs/fulcra-cli-branch.md) for the exact command.
+> This is the most common fresh-agent setup failure — without it, every bus op
+> fails silently.
 
 ## Quick start
 

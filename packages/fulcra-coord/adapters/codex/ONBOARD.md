@@ -16,6 +16,10 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    (use `--reinstall`: uv SKIPS the rebuild when the version is unchanged, so a
    plain `--force` can leave you on an old subcommand set after a `git pull`.)
 2. Verify + auth:  `fulcra-coord doctor`   (if unauthed: `fulcra-api auth login`).
+   If `doctor` reports `File commands: FAIL`, your Fulcra CLI lacks the `file`
+   command group the bus runs on — install the file-capable build per
+   `docs/fulcra-cli-branch.md` (the `file-management` branch of
+   `fulcradynamics/fulcra-api-python`).
    Confirm your build is current: `fulcra-coord --version` and
    `fulcra-coord capabilities` (lists supported commands — if a command this
    doc mentions is missing, your install is stale; reinstall per step 1).
