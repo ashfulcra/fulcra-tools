@@ -112,7 +112,8 @@ create mean you're sharing a checkout — move out before committing.
 **Never push directly to `main`. Every change goes through a PR, gets reviewed
 by another agent, and is merged by its original author — not the reviewer.**
 
-1. Do the work on a branch in your own worktree; open a PR (CI must pass).
+1. Do the work on a branch in your own worktree; open a PR (CI must pass when
+   the repo has CI).
 2. Post a bus message to your **reviewer**: `tell <reviewer> "Review PR #<n> in
    <repo> — assume there are bugs that need fixing."` (Adversarial framing — the
    reviewer hunts for bugs, doesn't rubber-stamp.)
