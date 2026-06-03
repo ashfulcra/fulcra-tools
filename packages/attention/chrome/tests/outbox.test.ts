@@ -124,6 +124,58 @@ describe("flushOutbox", () => {
     expect(fresh).toHaveLength(5);
   });
 
+  test("two concurrent flushes do not double-send (single-flight)", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    const N = 4;
+    for (let i = 0; i < N; i++) {
+      await addToOutbox(makeEvent(`https://x${i}.com/`));
+    }
+    // Slow fetch so the two flushes genuinely overlap in time if both run.
+    const f = vi.mocked(fetch).mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      return new Response('{"posted":1}', { status: 200 });
+    });
+    // Fire two flushes WITHOUT awaiting the first before starting the second.
+    const a = flushOutbox();
+    const b = flushOutbox();
+    await Promise.all([a, b]);
+    // Each entry POSTed exactly once — not 2N.
+    expect(f).toHaveBeenCalledTimes(N);
+    expect(await loadOutbox()).toHaveLength(0);
+  });
+
+  test("guard resets: a later flush sends newly-queued entries", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    const f = vi.mocked(fetch).mockResolvedValue(new Response('{"posted":1}', { status: 200 }));
+    await addToOutbox(makeEvent("https://a.com/"));
+    await flushOutbox();
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(await loadOutbox()).toHaveLength(0);
+    // After the first flush settled, a fresh flush must run again.
+    await addToOutbox(makeEvent("https://b.com/"));
+    await flushOutbox();
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(await loadOutbox()).toHaveLength(0);
+  });
+
+  test("guard resets after a throwing flush", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await addToOutbox(makeEvent("https://a.com/"));
+    // Force flushOutbox to throw on its first run by making the underlying
+    // storage read reject once. This exercises the finally-resets-guard path.
+    const origGet = chrome.storage.local.get;
+    vi.spyOn(chrome.storage.local, "get").mockImplementationOnce(() => {
+      throw new Error("boom");
+    });
+    await expect(flushOutbox()).rejects.toThrow();
+    // Restore real storage; guard must have reset so this flush runs.
+    chrome.storage.local.get = origGet;
+    const f = vi.mocked(fetch).mockResolvedValue(new Response('{"posted":1}', { status: 200 }));
+    await flushOutbox();
+    expect(f).toHaveBeenCalled();
+    expect(await loadOutbox()).toHaveLength(0);
+  });
+
   test("uses AbortController with 10s timeout per fetch", async () => {
     await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
     await addToOutbox(makeEvent());

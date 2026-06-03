@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fulcra_common.ingest import IngestPipeline
 
 from .. import config as _config
+from .. import db as _db
 from ._deps import RouteContext
 
 
@@ -297,6 +298,56 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             # attention FulcraClient (which carries the bearer-token +
             # httpx setup) and owns the wire-format construction.
             event = build_attention_event(payload, state=attention_state)
+
+            # --- Dedup by source_id (data-corruption guard) --------------
+            # The event's source_id is DETERMINISTIC
+            # (com.fulcra.attention.v2.<hash> of url|start_time-to-second).
+            # Fulcra does NOT dedupe by source_id at write time, so if the
+            # extension re-POSTs the same event (its outbox-flush concurrency
+            # bug re-sends identical entries many times), forwarding each one
+            # would create PERMANENT duplicates in the user's Fulcra account.
+            #
+            # claim_attention_source_id is a single atomic INSERT OR IGNORE
+            # against a PRIMARY KEY, so a storm of identical concurrent POSTs
+            # yields exactly one True (forward) and the rest False (skip) —
+            # SQLite's unique constraint does the dedup, no app-level lock.
+            #
+            # Decision: claim-FIRST, then forward (we do NOT roll the claim
+            # back if the forward fails). This guarantees we never send a
+            # duplicate even under a concurrent storm. The trade-off is that
+            # a forward which FAILS after the claim won't be retried — that's
+            # acceptable for attention (best-effort telemetry), and honours
+            # the stated preference of "never send a duplicate" over "never
+            # lose an event". Rolling the row back on failure would reopen
+            # the duplicate window (a racing POST that already saw the row
+            # and returned 200-deduped would have skipped its own send), so
+            # we deliberately don't.
+            try:
+                conn = _db.open()
+                newly_claimed = _db.claim_attention_source_id(
+                    conn, event.source_id,
+                )
+            except Exception:
+                # If the dedup store is unavailable we must not silently
+                # forward (that risks duplicates) nor 500. Fail closed for
+                # this event: log and report it deduped/dropped. Attention
+                # is best-effort, so dropping one event beats either a crash
+                # or a permanent duplicate.
+                _log.exception(
+                    "extension POST: dedup claim failed; skipping forward "
+                    "to avoid a possible duplicate"
+                )
+                return {"posted": 0, "dropped": 1, "deduped": 1}
+
+            if not newly_claimed:
+                # Already forwarded this exact source_id. Return success so
+                # the extension's outbox clears, but do NOT re-forward.
+                _log.info(
+                    "extension POST: source_id %s already forwarded; "
+                    "skipping duplicate", event.source_id,
+                )
+                return {"posted": 0, "dropped": 0, "deduped": 1}
+
             try:
                 IngestPipeline(client=client).ingest_one(event)
             except Exception as exc:

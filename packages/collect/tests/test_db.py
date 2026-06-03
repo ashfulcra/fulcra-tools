@@ -86,3 +86,42 @@ def test_migrate_on_a_blank_connection_runs_all_migrations(tmp_path):
         ).fetchall()
     ]
     assert versions == list(range(1, db.LATEST_VERSION + 1))
+
+
+def test_forwarded_attention_table_has_the_dedup_columns(collect_home):
+    """Migration 003 creates the attention-dedup table with source_id as
+    the PRIMARY KEY (the constraint that makes INSERT OR IGNORE atomic)."""
+    conn = db.open()
+    cols = {
+        r["name"]
+        for r in conn.execute(
+            "PRAGMA table_info(forwarded_attention)"
+        ).fetchall()
+    }
+    assert cols == {"source_id", "forwarded_at"}
+    pk = [
+        r["name"]
+        for r in conn.execute(
+            "PRAGMA table_info(forwarded_attention)"
+        ).fetchall()
+        if r["pk"]
+    ]
+    assert pk == ["source_id"]
+
+
+def test_claim_attention_source_id_is_idempotent(collect_home):
+    """First claim of a source_id returns True (forward it); every repeat
+    returns False (skip the duplicate). Exactly one row persists."""
+    conn = db.open()
+    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.abc") is True
+    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.abc") is False
+    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.abc") is False
+    # A different source_id is independently claimable.
+    assert db.claim_attention_source_id(conn, "com.fulcra.attention.v2.xyz") is True
+    rows = conn.execute(
+        "SELECT source_id FROM forwarded_attention ORDER BY source_id"
+    ).fetchall()
+    assert [r["source_id"] for r in rows] == [
+        "com.fulcra.attention.v2.abc",
+        "com.fulcra.attention.v2.xyz",
+    ]

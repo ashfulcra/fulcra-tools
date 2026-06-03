@@ -816,8 +816,10 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: FLUSH_INTERVAL_MIN });
 chrome.alarms.create(SWEEP_ALARM, { periodInMinutes: SWEEP_INTERVAL_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  // flushOutbox doesn't touch visits, only its own outbox key; safe
-  // outside the mutex. sweepStaleBlurred mutates visits → must be locked.
+  // flushOutbox doesn't touch visits, only its own outbox key, so it stays
+  // outside the visits mutex. It has its OWN single-flight guard (see
+  // outbox.ts) so this alarm tick can't overlap the backfill's flush and
+  // double-send. sweepStaleBlurred mutates visits → must be locked.
   if (alarm.name === FLUSH_ALARM) void flushOutbox();
   if (alarm.name === SWEEP_ALARM) void withSwLock(() => sweepStaleBlurred(Date.now()));
 });
