@@ -289,6 +289,12 @@ class RunContext:
     twins can't double-write. ``None`` when no daemon db is available
     (standalone CLI), in which case the import path falls back to the
     readback-skip only."""
+    _unclaim_dedup_keys: Callable[[set[str]], None] | None = field(default=None, repr=False)
+    """Inverse of ``_claim_dedup_keys``: releases a set of dedup keys. The
+    media import path passes ``ctx.unclaim_dedup_keys`` into ``run_import``
+    so a batch POST that FAILS can release the claims it just took, letting
+    the next run retry those durable-timeline events instead of skipping
+    them forever. ``None`` when no daemon db is available."""
 
     def claim_dedup_keys(self, keys: set[str]) -> bool:
         """Atomically claim a set of dedup keys for one event, returning
@@ -305,6 +311,16 @@ class RunContext:
         if self._claim_dedup_keys is None:
             return True
         return self._claim_dedup_keys(set(keys))
+
+    def unclaim_dedup_keys(self, keys: set[str]) -> None:
+        """Release a set of previously-claimed dedup keys (the inverse of
+        ``claim_dedup_keys``). Used by the media import path to roll back a
+        claim when the subsequent Fulcra POST failed, so the event is retried
+        rather than lost. A no-op when no unclaim backend was supplied — same
+        contexts where ``claim_dedup_keys`` is a no-op True."""
+        if self._unclaim_dedup_keys is None:
+            return
+        self._unclaim_dedup_keys(set(keys))
 
     def progress(self, **fields: object) -> None:
         """Report structured progress back to the hub core."""

@@ -121,6 +121,7 @@ class FulcraClient(BaseFulcraClient):
         window_pad_minutes: int = 10,
         check_only: bool = False,
         claim: "Callable[[set[str]], bool] | None" = None,
+        unclaim: "Callable[[set[str]], None] | None" = None,
     ) -> ImportResult:
         """Run the dedup-readback + ingest pipeline.
 
@@ -143,6 +144,18 @@ class FulcraClient(BaseFulcraClient):
         being written this very run). When ``claim is None`` (standalone CLI
         imports outside the daemon) behaviour is exactly as before:
         readback-skip only, no per-event claim.
+
+        `unclaim`: the OPTIONAL inverse of ``claim``, injected alongside it
+        (``ctx.unclaim_dedup_keys``). Claims are taken BEFORE the batch POST
+        so a concurrent run is blocked during the POST window — but a media
+        annotation is durable timeline data, so if the POST RAISES we must
+        release the keys we just claimed for that batch, or those events are
+        skipped forever and silently lost. On a POST failure we unclaim
+        exactly the keys this batch newly claimed (NOT pre-existing rows or
+        rows from other batches/events) and re-raise, so the next run retries
+        them. On POST success the claims stay. When ``unclaim is None`` the
+        keys are left claimed on failure (the pre-fix behaviour) — only the
+        daemon path supplies it, and only it has durable-loss exposure.
         """
         events = list(events)
         total = len(events)
@@ -203,11 +216,18 @@ class FulcraClient(BaseFulcraClient):
             # skipped and don't POST it. ``check_only`` is a dry run and must
             # not mutate the shared dedup store, so the claim is bypassed
             # there (matching the "don't POST" semantics of check_only).
+            # Keys THIS batch newly inserted into forwarded_events — the only
+            # ones we may release if the POST fails. Built from the events
+            # whose claim returned True, so it never includes pre-existing
+            # rows or keys owned by a different event/batch.
+            newly_claimed_keys: set[str] = set()
             if claim is not None and not check_only:
                 claimed_events = []
                 for e in new_events:
-                    if claim({e.deterministic_id, *e.extra_source_ids}):
+                    keyset = {e.deterministic_id, *e.extra_source_ids}
+                    if claim(keyset):
                         claimed_events.append(e)
+                        newly_claimed_keys |= keyset
                 skipped += len(new_events) - len(claimed_events)
                 new_events = claimed_events
 
@@ -215,7 +235,21 @@ class FulcraClient(BaseFulcraClient):
                 if check_only:
                     posted += len(new_events)
                 else:
-                    self.ingest_batch(new_events, state)
+                    try:
+                        self.ingest_batch(new_events, state)
+                    except Exception:
+                        # Durable-loss guard: the POST failed, so release the
+                        # claims this batch took (scoped to keys WE newly
+                        # inserted) and let the next run retry these events.
+                        # Without this they'd be skipped forever. Best-effort
+                        # — never let an unclaim error mask the original POST
+                        # failure, which is the one the caller must see.
+                        if unclaim is not None and newly_claimed_keys:
+                            try:
+                                unclaim(newly_claimed_keys)
+                            except Exception:
+                                pass
+                        raise
                     posted += len(new_events)
                     after = self.fetch_existing_source_ids(
                         win_start, win_end, only_for_defs=current_def_source_ids or None

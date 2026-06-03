@@ -249,3 +249,51 @@ def test_migration_004_preserves_existing_forwarded_attention_rows(tmp_path):
     assert "com.fulcra.attention.v2.legacy" in recorded
     # And a re-claim of that legacy key is correctly rejected.
     assert db.claim_dedup_keys(conn, {"com.fulcra.attention.v2.legacy"}) is False
+
+
+def test_unclaim_dedup_keys_releases_so_a_reclaim_succeeds(collect_home):
+    """unclaim deletes the rows, so a key that was claimed can be claimed
+    again afterwards (the POST-failure retry path)."""
+    conn = db.open()
+    keys = {"det-X", "com.fulcra.content.tv.v1.zzz"}
+    assert db.claim_dedup_keys(conn, keys) is True
+    # Re-claim now blocked.
+    assert db.claim_dedup_keys(conn, keys) is False
+    # Release, then it's claimable again.
+    db.unclaim_dedup_keys(conn, keys)
+    rows = {
+        r["dedup_key"]
+        for r in conn.execute("SELECT dedup_key FROM forwarded_events").fetchall()
+    }
+    assert not (keys & rows)
+    assert db.claim_dedup_keys(conn, keys) is True
+
+
+def test_unclaim_dedup_keys_only_deletes_named_keys(collect_home):
+    """unclaim is scoped: it removes exactly the keys passed, leaving other
+    claimed rows (e.g. a sibling batch's) intact."""
+    conn = db.open()
+    assert db.claim_dedup_keys(conn, {"keep-1"}) is True
+    assert db.claim_dedup_keys(conn, {"drop-1", "drop-2"}) is True
+    db.unclaim_dedup_keys(conn, {"drop-1", "drop-2"})
+    remaining = {
+        r["dedup_key"]
+        for r in conn.execute("SELECT dedup_key FROM forwarded_events").fetchall()
+    }
+    assert "keep-1" in remaining
+    assert "drop-1" not in remaining
+    assert "drop-2" not in remaining
+
+
+def test_unclaim_dedup_keys_empty_and_missing_are_noops(collect_home):
+    conn = db.open()
+    db.unclaim_dedup_keys(conn, set())          # empty → no-op
+    db.unclaim_dedup_keys(conn, {"never-claimed"})  # absent → no-op, no error
+
+
+def test_claim_dedup_keys_repeated_key_in_one_set_is_not_self_duplicate(
+        collect_home):
+    """Defensive: a key repeated WITHIN one event's set (a list-passing
+    caller) must not be mis-flagged as already-present — the event is new."""
+    conn = db.open()
+    assert db.claim_dedup_keys(conn, ["dup", "dup", "other"]) is True

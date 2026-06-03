@@ -241,7 +241,8 @@ def run_scheduled_import(
     media_state = state_load(STATE_PATH)
     client = fulcra_client_cls()
     client.ensure_tag(tag, media_state)
-    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys)
+    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
+                               unclaim=ctx.unclaim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:
@@ -297,7 +298,8 @@ def import_events(
     media_state = state_load(STATE_PATH)
     client = fulcra_client_cls()
     client.ensure_tag(tag, media_state)
-    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys)
+    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
+                               unclaim=ctx.unclaim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:
@@ -382,7 +384,8 @@ def rss_import_and_advance(
     media_state = state_load(STATE_PATH)
     client = fulcra_client_cls()
     client.ensure_tag(tag, media_state)
-    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys)
+    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
+                               unclaim=ctx.unclaim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:

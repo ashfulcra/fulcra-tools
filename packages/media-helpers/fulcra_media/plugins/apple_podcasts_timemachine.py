@@ -60,7 +60,8 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
     ctx.progress(stage="parsed", count=len(all_events))
     client = FulcraClient()
     client.ensure_tag("apple-podcasts", media_state)
-    result = client.run_import(all_events, media_state, claim=ctx.claim_dedup_keys)
+    result = client.run_import(all_events, media_state, claim=ctx.claim_dedup_keys,
+                               unclaim=ctx.unclaim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:

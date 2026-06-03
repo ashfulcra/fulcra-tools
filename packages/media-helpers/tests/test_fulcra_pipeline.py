@@ -208,6 +208,117 @@ def test_run_import_check_only_does_not_call_claim(recording_transport):
     assert calls == []          # claim never invoked in a dry run
 
 
+def _claim_pair(store: set):
+    """Return (claim, unclaim) callables backed by ``store`` — a real
+    in-memory analogue of forwarded_events. claim records all keys iff none
+    pre-exist; unclaim deletes exactly the named keys."""
+    def claim(keys: set[str]) -> bool:
+        if store & keys:
+            return False
+        store.update(keys)
+        return True
+
+    def unclaim(keys: set[str]) -> None:
+        store.difference_update(keys)
+
+    return claim, unclaim
+
+
+def test_run_import_unclaims_on_post_failure_so_event_is_retried(
+        recording_transport):
+    """Durable-loss guard: if the batch POST RAISES, the keys this batch
+    claimed are released — they're NOT left in the store, so a re-run
+    re-posts the event instead of skipping it forever."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])  # readback passes
+        return httpx.Response(500)  # POST fails → raise_for_status raises
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    store: set[str] = set()
+    claim, unclaim = _claim_pair(store)
+
+    ev = _ev(1)
+    with pytest.raises(Exception):
+        client.run_import([ev], state, chunk_size=10,
+                          claim=claim, unclaim=unclaim)
+
+    # The failed event's key was released — store is clean.
+    assert ev.deterministic_id not in store
+    assert store == set()
+
+
+def test_run_import_keeps_claim_on_post_success(recording_transport):
+    """The complement: a SUCCESSFUL POST leaves the claim in place, so a
+    re-run skips the already-written event (no duplicate)."""
+    post_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])
+        post_count["n"] += 1
+        return httpx.Response(204)
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    store: set[str] = set()
+    claim, unclaim = _claim_pair(store)
+
+    ev = _ev(1)
+    result = client.run_import([ev], state, chunk_size=10,
+                               claim=claim, unclaim=unclaim)
+    assert result.posted == 1
+    assert post_count["n"] == 1
+    # Claim retained on success.
+    assert ev.deterministic_id in store
+
+    # Re-run with the SAME store → the claim blocks a second POST.
+    result2 = client.run_import([_ev(1)], state, chunk_size=10,
+                                claim=claim, unclaim=unclaim)
+    assert result2.posted == 0
+    assert result2.skipped_existing == 1
+    assert post_count["n"] == 1  # no second POST
+
+
+def test_run_import_failure_unclaim_scoped_to_failed_batch_only(
+        recording_transport):
+    """With two chunks where the FIRST succeeds and the SECOND fails, only
+    the second batch's keys are released — the first batch's claim stays so
+    the already-written events aren't re-posted on retry."""
+    posts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])
+        posts["n"] += 1
+        # First chunk's POST succeeds; second chunk's POST fails.
+        return httpx.Response(204 if posts["n"] == 1 else 500)
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    store: set[str] = set()
+    claim, unclaim = _claim_pair(store)
+
+    # chunk_size=1 → ev(1) is batch 1 (succeeds), ev(2) is batch 2 (fails).
+    with pytest.raises(Exception):
+        client.run_import([_ev(1), _ev(2)], state, chunk_size=1,
+                          claim=claim, unclaim=unclaim)
+
+    # Batch 1's claim retained; batch 2's claim released.
+    assert "com.fulcra.media.netflix.id0001" in store
+    assert "com.fulcra.media.netflix.id0002" not in store
+
+
 def test_run_import_chunks_large_input(recording_transport):
     post_count = {"n": 0}
     def handler(request: httpx.Request) -> httpx.Response:

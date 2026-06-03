@@ -45,6 +45,22 @@ def _claim_dedup_keys(keys: set[str]) -> bool:
         return False
 
 
+def _unclaim_dedup_keys(keys: set[str]) -> None:
+    """Release dedup keys in the daemon's ``state.db`` — the inverse of
+    ``_claim_dedup_keys``. Called by the media import path after a batch POST
+    FAILED, so the events are retried on the next run rather than lost. A
+    failure here is logged and swallowed: the run is already unwinding on the
+    POST error, and re-raising would only mask it."""
+    try:
+        conn = db.open()
+        db.unclaim_dedup_keys(conn, keys)
+    except Exception:  # noqa: BLE001 — never mask the original POST failure
+        logging.getLogger("fulcra_collect.worker").exception(
+            "dedup unclaim failed; %d key(s) may stay claimed and be skipped "
+            "next run", len(set(keys)),
+        )
+
+
 class _FulcraDefinitionAdapter:
     """Thin adapter over BaseFulcraClient exposing the interface expected by
     ``fulcra_common.definitions.resolve_definition_id``:
@@ -170,6 +186,7 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         _emit=emit,
         _fulcra_client_factory=_make_fulcra_definition_client,
         _claim_dedup_keys=_claim_dedup_keys,
+        _unclaim_dedup_keys=_unclaim_dedup_keys,
     )
     missing = sorted(c.key for c in plugin.required_credentials
                      if not ctx.credentials.get(c.key))

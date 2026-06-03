@@ -82,7 +82,7 @@ def _make_fake_client(captured, *, result):
         def ensure_tag(self, name, state):
             captured["ensure_tag"] = name
 
-        def run_import(self, events, state, check_only=False, claim=None):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             captured["imported"] = list(events)
             return result
     return FakeClient

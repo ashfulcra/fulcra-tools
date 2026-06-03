@@ -419,7 +419,12 @@ def claim_dedup_keys(conn: sqlite3.Connection, keys: Iterable[str]) -> bool:
     callers should never pass an empty set, but failing open here would be
     surprising; failing to a no-op True keeps the "claim then POST" caller
     behaving exactly as the un-claimed path."""
-    key_list = list(keys)
+    # Dedupe the incoming keys first: a key repeated WITHIN one event's set
+    # (a future list-passing caller) would otherwise hit its own just-inserted
+    # row on the second occurrence and be mis-counted as already_present,
+    # falsely flagging a brand-new event as a duplicate. set() makes the
+    # per-key collision count reflect only PRE-EXISTING rows.
+    key_list = list(set(keys))
     now = datetime.now(timezone.utc).isoformat()
     # autocommit (isolation_level=None) connections need an explicit BEGIN to
     # group the inserts; IMMEDIATE grabs the write lock now so concurrent
@@ -440,6 +445,39 @@ def claim_dedup_keys(conn: sqlite3.Connection, keys: Iterable[str]) -> bool:
         is_new = already_present == 0
         conn.execute("COMMIT")
         return is_new
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def unclaim_dedup_keys(conn: sqlite3.Connection, keys: Iterable[str]) -> None:
+    """Release a set of previously-claimed dedup keys (delete their rows from
+    ``forwarded_events``) in a single atomic transaction.
+
+    The media import path claims an event's keys BEFORE its batch POST so a
+    concurrent run is blocked from writing the same event during the POST
+    window. But a media annotation is durable timeline data — if the POST
+    then FAILS, the claim must be released, or the event is skipped forever on
+    every future run (permanent silent loss). The caller unclaims exactly the
+    keys it newly inserted for the failed batch, so on the next run those
+    events pass the claim again and get retried. The only cost is a negligible
+    re-dup window between the POST failure and the unclaim — far preferable to
+    losing the event.
+
+    Deletes are wrapped in one ``BEGIN IMMEDIATE`` transaction for the same
+    serialise-the-writers reason ``claim_dedup_keys`` uses. Idempotent: a key
+    that isn't present (e.g. another run already re-claimed and committed it)
+    is simply a no-op DELETE."""
+    key_list = list(set(keys))
+    if not key_list:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            "DELETE FROM forwarded_events WHERE dedup_key = ?",
+            [(k,) for k in key_list],
+        )
+        conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
