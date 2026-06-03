@@ -5874,6 +5874,19 @@ class TestResume(unittest.TestCase):
         # other:a:b owns TASK-blocked-on-me (assigned to me) -> it's in owed_to_others.
         self.assertIn("TASK-blocked-on-me", [t["id"] for t in out["owed_to_others"]])
 
+    def test_self_filed_on_human_task_not_double_listed(self):
+        # M-2: a task I own that is assigned to the human is "blocked on human";
+        # it must NOT also appear under "owed to others" (it's the same task, and
+        # listing it twice double-counts what I owe).
+        cache.write_cached_task(self._task("TASK-i-owe-human", owner=self.me,
+                                            assignee="ash", status="blocked",
+                                            na="ping ash"))
+        out = self._run(agent=self.me)
+        owed = [t["id"] for t in out["owed_to_others"]]
+        on_human = [t["id"] for t in out["blocked_on_human"]]
+        self.assertIn("TASK-i-owe-human", on_human)
+        self.assertNotIn("TASK-i-owe-human", owed)
+
 
 # ---------------------------------------------------------------------------
 # Situational awareness — Piece 1: human handle (resolve_human + `human` cmd)

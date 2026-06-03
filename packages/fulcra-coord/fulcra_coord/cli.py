@@ -1301,13 +1301,18 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
         and t.get("owner_agent") != me
         and t.get("status") in ("proposed", "waiting", "blocked")
     ]
+    blocked_on_human = views.needs_human(all_tasks, human)
+    # M-2: a task I own that is assigned to the human is already surfaced under
+    # "blocked on human"; exclude it from "owed to others" so a self-filed
+    # on-user task is listed once, not double-counted across both sections.
+    _on_human_ids = {s.get("id") for s in blocked_on_human}
     owed_to_others = [
         schema.task_summary(t) for t in all_tasks
         if t.get("owner_agent") == me
         and t.get("assignee") and not views.agent_matches(me, t.get("assignee"))
         and t.get("status") in open_statuses
+        and t.get("id") not in _on_human_ids
     ]
-    blocked_on_human = views.needs_human(all_tasks, human)
 
     def _sort(items):
         return sorted(items, key=lambda x: (x.get("priority", "P9"),
