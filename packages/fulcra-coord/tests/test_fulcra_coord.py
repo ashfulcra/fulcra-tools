@@ -4796,6 +4796,52 @@ class TestIdentityCommand(unittest.TestCase):
         self.assertEqual(data["source"], "derived")
         self.assertTrue(data["agent"].startswith("claude-code:"))
 
+    def _run_text(self, **kw):
+        import io, contextlib
+        from fulcra_coord.cli import cmd_identity
+        args = types.SimpleNamespace(format="table", **kw)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_identity(args)
+        return rc, buf.getvalue()
+
+    def test_show_surfaces_legacy_hint_when_unset(self):
+        # I-1: a legacy global exists and this cwd has no per-cwd entry -> show a
+        # one-line note that it's no longer used and how to set the repo identity.
+        from fulcra_coord import identity
+        legacy = identity.config_root() / "identity.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"agent": "codex:Mac:main"}))
+        rc, out = self._run_text(identity_action=None, agent_id=None)
+        self.assertEqual(rc, 0)
+        self.assertIn("legacy global identity", out)
+        self.assertIn("codex:Mac:main", out)
+        self.assertIn("identity set", out)
+
+    def test_show_no_legacy_hint_when_per_cwd_set(self):
+        # Once this cwd declares its own identity the legacy hint is suppressed.
+        from fulcra_coord import identity
+        legacy = identity.config_root() / "identity.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"agent": "codex:Mac:main"}))
+        self._run(identity_action="set", agent_id="claude-code:Desk:proj")
+        rc, out = self._run_text(identity_action=None, agent_id=None)
+        self.assertNotIn("legacy global identity", out)
+
+    def test_migrate_copies_legacy_into_per_cwd(self):
+        # `identity migrate` copies the legacy global into this cwd's entry so it
+        # resolves with source "config" afterward.
+        from fulcra_coord import identity
+        legacy = identity.config_root() / "identity.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"agent": "codex:Mac:main"}))
+        rc, _ = self._run(identity_action="migrate", agent_id=None)
+        self.assertEqual(rc, 0)
+        rc, out = self._run(identity_action=None, agent_id=None)
+        data = json.loads(out)
+        self.assertEqual(data["agent"], "codex:Mac:main")
+        self.assertEqual(data["source"], "config")
+
 
 class TestInboxPrefixRegression(unittest.TestCase):
     """The real arc bug, end-to-end through the CLI: a directive `tell`-ed to the
@@ -5541,18 +5587,33 @@ class TestPerCwdIdentity(unittest.TestCase):
         self.assertNotEqual(pa, pb)
         self.assertIn("identities", str(pa))
 
-    def test_legacy_global_fallback(self):
+    def test_legacy_global_does_not_resolve(self):
         from fulcra_coord import identity
         # Simulate an existing pre-per-cwd setup: a legacy global identity.json.
+        # I-1: the legacy global must NOT silently resolve for an un-set cwd —
+        # a stale/clobbered global (e.g. another tool's id) would otherwise leak
+        # in as the identity for EVERY repo. The safe derived id is used instead.
         legacy = identity.config_root() / "identity.json"
         legacy.parent.mkdir(parents=True, exist_ok=True)
         legacy.write_text(json.dumps({"agent": "legacy:agent"}))
         os.chdir(self.cwd_a)
-        # No per-cwd entry -> the legacy global file resolves.
-        self.assertEqual(identity.read_identity(), "legacy:agent")
-        self.assertEqual(identity.resolve_agent(), "legacy:agent")
+        # No per-cwd entry -> the legacy global is IGNORED for resolution.
+        self.assertIsNone(identity.read_identity())
+        agent, source = identity.resolve_agent_source()
+        self.assertNotEqual(agent, "legacy:agent")
+        self.assertEqual(source, "derived")
 
-    def test_per_cwd_beats_legacy_global(self):
+    def test_legacy_global_still_readable_for_hint(self):
+        from fulcra_coord import identity
+        # The legacy file is kept readable ONLY to surface a migration hint; it
+        # never feeds resolution. read_legacy_identity exposes it for that note.
+        legacy = identity.config_root() / "identity.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"agent": "legacy:agent"}))
+        os.chdir(self.cwd_a)
+        self.assertEqual(identity.read_legacy_identity(), "legacy:agent")
+
+    def test_per_cwd_resolves_over_legacy_global(self):
         from fulcra_coord import identity
         legacy = identity.config_root() / "identity.json"
         legacy.parent.mkdir(parents=True, exist_ok=True)
@@ -5560,6 +5621,7 @@ class TestPerCwdIdentity(unittest.TestCase):
         os.chdir(self.cwd_a)
         identity.set_identity("percwd:agent")
         self.assertEqual(identity.read_identity(), "percwd:agent")
+        self.assertEqual(identity.resolve_agent(), "percwd:agent")
 
     def test_precedence_env_beats_per_cwd(self):
         from fulcra_coord import identity
