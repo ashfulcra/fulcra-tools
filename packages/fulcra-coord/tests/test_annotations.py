@@ -1186,5 +1186,147 @@ class TestEmitHttpIntegration(unittest.TestCase):
         self.assertEqual(annotations._mode(), "off")
 
 
+# ---------------------------------------------------------------------------
+# Persisted annotation-mode config (Task B): the operator enables annotations
+# ONCE (a config file) instead of exporting FULCRA_COORD_ANNOTATIONS in every
+# shell, so every agent emits. Env still wins when present (a session override).
+# Mirrors the human-handle persistence in identity.py.
+# ---------------------------------------------------------------------------
+
+class TestPersistedAnnotationMode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        # Isolate BOTH the config dir (where the persisted mode lives) and the
+        # env var so a real ~/.config/fulcra-coord/annotations or an inherited
+        # export on the dev machine can't leak into these assertions.
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        self._saved = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+
+    def tearDown(self):
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        if self._saved is None:
+            os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        else:
+            os.environ["FULCRA_COORD_ANNOTATIONS"] = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_default_off_when_nothing_set(self):
+        self.assertEqual(annotations._mode(), "off")
+        self.assertIsNone(annotations._persisted_mode())
+
+    def test_persisted_http_resolves_when_no_env(self):
+        annotations.set_persisted_mode("http")
+        self.assertEqual(annotations._persisted_mode(), "http")
+        self.assertEqual(annotations._mode(), "http")
+
+    def test_env_wins_over_persisted_config(self):
+        # A session can override the persisted enablement: env always takes
+        # precedence so a single shell can force a different mode (or off).
+        annotations.set_persisted_mode("http")
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        self.assertEqual(annotations._mode(), "cli")
+
+    def test_api_alias_normalizes_in_persisted_file(self):
+        # The api->http alias applies to the FILE too, not just the env, so an
+        # operator who wrote the legacy `api` value still gets the working path.
+        annotations.set_persisted_mode("api")
+        self.assertEqual(annotations._persisted_mode(), "http")
+        self.assertEqual(annotations._mode(), "http")
+
+    def test_clear_persisted_reverts_to_off(self):
+        annotations.set_persisted_mode("http")
+        removed = annotations.clear_persisted_mode()
+        self.assertTrue(removed)
+        self.assertIsNone(annotations._persisted_mode())
+        self.assertEqual(annotations._mode(), "off")
+
+    def test_clear_when_absent_returns_false(self):
+        self.assertFalse(annotations.clear_persisted_mode())
+
+    def test_resolve_mode_source_reports_env_config_default(self):
+        # env source
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        self.assertEqual(annotations.resolve_mode_source(), ("http", "env"))
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        # config source
+        annotations.set_persisted_mode("http")
+        self.assertEqual(annotations.resolve_mode_source(), ("http", "config"))
+        # default source
+        annotations.clear_persisted_mode()
+        self.assertEqual(annotations.resolve_mode_source(), ("off", "default"))
+
+
+# ---------------------------------------------------------------------------
+# `annotations` command (Task B): on/off/status.
+# ---------------------------------------------------------------------------
+
+class TestAnnotationsCommand(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        self._saved = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+
+    def tearDown(self):
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        if self._saved is None:
+            os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        else:
+            os.environ["FULCRA_COORD_ANNOTATIONS"] = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, action, out_format="table"):
+        import io, contextlib
+        from fulcra_coord.cli import cmd_annotations
+        args = types.SimpleNamespace(annotations_action=action, format=out_format)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_annotations(args)
+        return rc, buf.getvalue()
+
+    def test_on_persists_http(self):
+        rc, _ = self._run("on")
+        self.assertEqual(rc, 0)
+        self.assertEqual(annotations._mode(), "http")
+
+    def test_off_clears_config(self):
+        self._run("on")
+        rc, _ = self._run("off")
+        self.assertEqual(rc, 0)
+        self.assertEqual(annotations._mode(), "off")
+
+    def test_status_reports_config_source_json(self):
+        self._run("on")
+        # Never resolve a real token in the unit test — stub it out.
+        with patch.object(annotations, "_resolve_token", return_value=None):
+            rc, out = self._run("status", out_format="json")
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertEqual(data["mode"], "http")
+        self.assertEqual(data["source"], "config")
+        self.assertFalse(data["token_ok"])
+        # The token value itself must NEVER appear in output.
+        self.assertNotIn("token", {k for k in data if k != "token_ok"})
+
+    def test_status_default_reports_off(self):
+        with patch.object(annotations, "_resolve_token", return_value=None):
+            rc, out = self._run(None, out_format="json")
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertEqual(data["mode"], "off")
+        self.assertEqual(data["source"], "default")
+
+    def test_status_env_source(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        with patch.object(annotations, "_resolve_token", return_value="tok"):
+            rc, out = self._run("status", out_format="json")
+        data = json.loads(out)
+        self.assertEqual(data["source"], "env")
+        self.assertTrue(data["token_ok"])
+
+
 if __name__ == "__main__":
     unittest.main()
