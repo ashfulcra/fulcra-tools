@@ -204,6 +204,59 @@ def make_task(
     }
 
 
+# ---------------------------------------------------------------------------
+# Agent presence (workstream-on-connect)
+# ---------------------------------------------------------------------------
+
+PRESENCE_SCHEMA = "fulcra.coordination.presence.v1"
+
+
+def _normalize_workstreams(workstreams: Optional[list[str]]) -> list[str]:
+    """Normalize a presence record's workstreams to a sorted, unique list of
+    non-empty trimmed strings.
+
+    WHY: workstreams arrive from two merged sources (explicit ``--workstream``
+    values and the distinct ``workstream`` of an agent's open tasks), so the same
+    stream can appear twice, with stray whitespace, or as an empty token from a
+    trailing comma. Normalizing here — at construction — means every downstream
+    consumer (the roster, the read commands) sees a clean, deterministically
+    ordered set without re-deduping, and two records built from the same streams
+    in different orders compare equal."""
+    seen = {w.strip() for w in (workstreams or []) if w and w.strip()}
+    return sorted(seen)
+
+
+def make_presence(
+    agent: str,
+    *,
+    workstreams: Optional[list[str]] = None,
+    summary: str = "",
+    last_seen: Optional[str] = None,
+    session: Optional[str] = None,
+) -> dict[str, Any]:
+    """Build a validated per-agent presence record (``presence/<slug>.json``).
+
+    Presence is the situational-awareness primitive: an agent declares the major
+    workstream(s) it is currently on, so the human sees what it is working on
+    EVEN WHEN it owns no active coordination task. Only the agent itself writes
+    its own record, so there is no cross-agent write contention — mirroring the
+    per-entity tasks→views pattern.
+
+    ``last_seen`` defaults to now (ISO-Z) so the liveness model in
+    views.build_presence can age it; ``session`` is an opaque optional key the
+    connecting surface may pass for traceability."""
+    if last_seen is None:
+        last_seen = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "schema": PRESENCE_SCHEMA,
+        "agent": agent,
+        "workstreams": _normalize_workstreams(workstreams),
+        "summary": summary or "",
+        "last_seen": last_seen,
+        "session": session,
+    }
+
+
 def build_tags(
     *,
     status: str,
