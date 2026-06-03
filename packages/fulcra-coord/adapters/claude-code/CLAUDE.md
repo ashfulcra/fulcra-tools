@@ -48,10 +48,17 @@ fulcra-coord pause TASK-... \
   --next "Specific next step for whoever picks this up." \
   --agent claude-code
 
-# Block
+# Block (on an agent / external thing)
 fulcra-coord block TASK-... \
   --blocked-on "Waiting for X before I can proceed." \
   --agent claude-code
+
+# Block ON THE OPERATOR — when you need the human to do something
+fulcra-coord block TASK-... \
+  --on-user "Approve the deploy / paste the API key / decide between A and B."
+# ^ assigns the task to the human, tags needs:human, lands it on `needs-me`,
+#   and leads their next SessionStart. This is how "blocked on the human"
+#   becomes visible instead of buried in a summary.
 
 # Done — requires evidence
 fulcra-coord done TASK-... \
@@ -65,14 +72,30 @@ fulcra-coord abandon TASK-... \
   --agent claude-code
 ```
 
+## Identity
+
+Declare a clear, stable, human-legible identity so directives reach you and the
+operator can tell who's who on the bus — set it once per repo (identity is now
+scoped per working directory):
+
+```bash
+fulcra-coord identity set vendor:host:purpose   # e.g. claude-code:DeskbookPro:fulcra-coord
+```
+
+Always identify yourself in what you direct at others.
+
 ## Rules
 
-1. **Do not** write coordination updates for one-message answers or internal tool steps.
-2. **Do** write updates at task boundaries: start, pause, block, done, abandon.
-3. **Always** set `next_action` when pausing or blocking — it's the handoff note.
-4. **Always** provide `evidence` when marking done.
-5. **Print** the done line prominently to the user: `>>> Marked TASK-... done: <evidence>`
-6. **Hooks cover the boundaries** — SessionStart surfaces in-flight work,
+1. **Declare your identity** (`identity set vendor:host:purpose`) and always
+   identify yourself — see the Identity section above.
+2. **Do not** write coordination updates for one-message answers or internal tool steps.
+3. **Do** write updates at task boundaries: start, pause, block, done, abandon.
+4. **Mark anything you need the operator to do** with `block --on-user "<ask>"` —
+   it lands on the human's `needs-me` plate and leads their next SessionStart.
+5. **Always** set `next_action` when pausing or blocking — it's the handoff note.
+6. **Always** provide `evidence` when marking done.
+7. **Print** the done line prominently to the user: `>>> Marked TASK-... done: <evidence>`
+8. **Hooks cover the boundaries** — SessionStart surfaces in-flight work,
    PreCompact checkpoints before context loss, SessionEnd parks your task.
    Your job is to keep `next_action` and `--summary` *meaningful* via `update`
    at real milestones, so those automatic checkpoints capture useful state.

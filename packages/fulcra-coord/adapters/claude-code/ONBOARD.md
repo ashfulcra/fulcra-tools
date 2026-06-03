@@ -7,11 +7,36 @@ running when hooks were installed must onboard manually — run these now:
 1. Check setup: `fulcra-coord doctor`
    - If unauthed: `fulcra-api auth login` and complete the device flow.
 2. Wire future sessions (idempotent): `fulcra-coord install-claude-code --global`
-3. Load current in-flight work: `fulcra-coord status`
-4. If you are continuing or claiming a task, run `fulcra-coord start ...` or
+3. **Declare a clear, stable, human-legible identity** so directives reach you
+   and the human can tell who's who on the bus:
+   `fulcra-coord identity set vendor:host:purpose`
+   (e.g. `claude-code:DeskbookPro:fulcra-coord`). Identity is now scoped per
+   working directory, so each repo holds its own — set it once per repo.
+   **Always identify yourself** in what you direct at others.
+4. Load current in-flight work + reload your context:
+   `fulcra-coord status`  and  `fulcra-coord resume`
+   (`resume` shows your active work, what's blocked on you, what you owe others,
+   and what's blocked on the human).
+5. If you are continuing or claiming a task, run `fulcra-coord start ...` or
    `fulcra-coord update <id> --status active --agent claude-code:<host>:<repo>`.
    This stamps this session's task pointer, so PreCompact/SessionEnd hooks
    checkpoint it for the rest of this session's life.
 
 Report milestones as you work (start / done / block); the hooks handle
 start-surfacing, pre-compaction checkpoints, and session-end parking.
+
+**When you need the operator to do something, mark it with**
+`fulcra-coord block <id> --on-user "<what you need them to do>"` — this blocks
+the task on the human, lands it on their `needs-me` plate, and surfaces it at
+the top of their next SessionStart. It's how "blocked on the human" becomes
+visible instead of buried in a summary.
+
+## Operator setup (one-time)
+
+Personalize the human handle so `--on-user` / `needs-me` address you by name
+(default is the neutral `human`):
+
+```bash
+fulcra-coord human set <your-name>     # e.g. fulcra-coord human set ash
+fulcra-coord needs-me                  # what's blocked on you, across all agents
+```

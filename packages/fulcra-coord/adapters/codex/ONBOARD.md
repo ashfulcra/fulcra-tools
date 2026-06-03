@@ -16,14 +16,20 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
 2. Verify + auth:  `fulcra-coord doctor`   (if unauthed: `fulcra-api auth login`)
 3. Wire your Codex lifecycle hooks (SessionStart / Stop / PreCompact):
    `fulcra-coord install-codex`        (+ optional `fulcra-coord install-listener --agent codex:<host>:<label>`)
-4. Declare your identity so directives reach you:
+4. Declare a clear, stable, human-legible identity (vendor:host:purpose) so
+   directives reach you and the human can tell who's who on the bus:
    `fulcra-coord identity set codex:<host>:<label>`
-5. Load the mesh + your inbox — there may already be a directive waiting:
-   `fulcra-coord agents`   and   `fulcra-coord inbox`
-   (ack it: `fulcra-coord inbox --ack <id>`)
+   (identity is scoped per working directory — set it once per repo). Always
+   identify yourself in what you direct at others.
+5. Load the mesh + reload your context — there may already be a directive waiting:
+   `fulcra-coord agents` · `fulcra-coord inbox` · `fulcra-coord resume`
+   (ack an inbox item: `fulcra-coord inbox --ack <id>`)
 6. Coordinate at task boundaries from now on:
    `fulcra-coord start "<objective>" --workstream <ws>` · `update` · `pause` ·
    `done --evidence "…"` · and `tell <agent> "…"` / `broadcast "…"` to direct others.
+   When you need the OPERATOR to do something, mark it with
+   `fulcra-coord block <id> --on-user "<the ask>"` — it lands on the human's
+   `needs-me` plate and leads their next SessionStart.
 7. (Optional) Agent-Tasks Fulcra timeline annotations:
    `export FULCRA_COORD_ANNOTATIONS=cli` and point
    `FULCRA_COORD_ANNOTATION_CLI` at a create-annotations-commands fulcra build
@@ -31,6 +37,12 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
 
 Acknowledge on the bus when you're in.
 ```
+
+## Operator setup (one-time)
+Personalize the human handle so `block --on-user` / `needs-me` address you by
+name (default is the neutral `human`):
+`fulcra-coord human set <your-name>` (e.g. `fulcra-coord human set ash`), then
+`fulcra-coord needs-me` shows what's blocked on you across all agents.
 
 ## Codex specifics
 - Use **`install-codex`** (not `install-claude-code`). It wires Codex's

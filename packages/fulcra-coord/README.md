@@ -65,10 +65,13 @@ fulcra-coord done TASK-... \
 | `broadcast` | Direct work at **every** agent: create a `proposed` directive with the wildcard assignee `*` (`broadcast "<title>" [--from <me>] [--next] [--workstream] [--priority]`). It lands in every agent's inbox and is acknowledged **per-agent** — one agent's `inbox --ack` clears it for that agent only, so no agent loses or duplicates the directive. Use `tell` for one agent, `broadcast` for all (e.g. "update fulcra-coord when main changes") |
 | `assign` | Set or redirect the `assignee` on an existing task (`assign <task-id> <assignee>`) |
 | `inbox` | List open directives addressed to you (`--agent`, `--format json`); `--ack <task-id>` marks one seen without claiming it. Matching is prefix-aware: a directive addressed to a short id (`claude-code`) reaches the full-id agent (`claude-code:<host>:<repo>`) it prefixes |
-| `identity` | Show, set, or clear this host's declared agent id — the identity handshake reused by every bus op. `identity` shows the resolved id + its source; `identity set <agent-id>` persists it; `identity clear` removes it (`--format json`) |
+| `identity` | Show, set, or clear this host's declared agent id — the identity handshake reused by every bus op. `identity` shows the resolved id + its source; `identity set <agent-id>` persists it; `identity clear` removes it (`--format json`). **Scoped per working directory** so sibling sessions in different repos no longer clobber each other's identity |
+| `human` | Show, set, or clear the human operator's handle — the addressable identity tasks are "blocked on ME" against. Defaults to the neutral `human`; personalize with `human set <name>` (e.g. `human set ash`). `human clear` reverts (`--format json`). Global per machine |
+| `needs-me` | **What's blocked on YOU** (the human): every open task assigned to / blocked on you across all agents, showing who's waiting, the ask, and how long it's been (`--human <handle>`, `--format json`). The "what's on my plate from my agents" glance |
+| `resume` | Pick-up-where-you-left-off briefing for an agent: your active/waiting work, what's blocked on you, what you owe others, and what's blocked on the human (`--agent`, `--format json`). Read-only — run after a restart to reload context |
 | `start` | Create a new task |
 | `update` | Update summary / next_action / status |
-| `block` | Mark as blocked |
+| `block` | Mark as blocked. `--blocked-on "<reason>"` for an agent/external blocker; **`--on-user "<ask>"`** to block on the human — assigns the task to the resolved human handle, tags `needs:human`, and lands it on `needs-me` + the human's next SessionStart |
 | `pause` | Set to waiting with a next_action |
 | `done` | Mark done (requires evidence) |
 | `abandon` | Mark abandoned |
@@ -94,9 +97,10 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_COORD_TIMEOUT_SECONDS` | `5` | Read timeout |
 | `FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS` | `90` | Reconcile timeout |
 | `XDG_CACHE_HOME` | `~/.cache` | Local cache base |
-| `XDG_CONFIG_HOME` | `~/.config` | Config base; the persisted identity lives at `<XDG_CONFIG_HOME>/fulcra-coord/identity.json` (global, not root-scoped) |
+| `XDG_CONFIG_HOME` | `~/.config` | Config base. The persisted identity is scoped **per working directory** at `<XDG_CONFIG_HOME>/fulcra-coord/identities/<cwd-hash>.json` (a legacy global `identity.json` is still read as a fallback); the human handle lives at `<XDG_CONFIG_HOME>/fulcra-coord/human`. Neither is root-scoped |
 | `FULCRA_COORD_STALE_HOURS` | `2` | An `active` task older than this is flagged `stale` and collected into `views/needs-attention.json` |
-| `FULCRA_COORD_AGENT` | — | Session-scoped override for your agent id. Identity resolution order is: explicit `--agent` > `FULCRA_COORD_AGENT` > persisted identity (`fulcra-coord identity set`) > derived `claude-code:<host>:<repo>` (matching the SessionStart hook) |
+| `FULCRA_COORD_AGENT` | — | Session-scoped override for your agent id. Identity resolution order is: explicit `--agent` > `FULCRA_COORD_AGENT` > per-cwd persisted identity (`fulcra-coord identity set`) > derived `claude-code:<host>:<repo>` (matching the SessionStart hook) |
+| `FULCRA_COORD_HUMAN` | `human` | The human operator's handle — who tasks are "blocked on ME" against (`needs-me`, `block --on-user`). Resolution order: `FULCRA_COORD_HUMAN` > persisted handle (`fulcra-coord human set`) > default `human`. Personalize with `fulcra-coord human set <name>` |
 | `FULCRA_COORD_BACKEND` | — | Override backend (testing only) |
 | `FULCRA_COORD_ANNOTATIONS` | `off` | Emit lifecycle annotations to the Fulcra **Agent Tasks** timeline track: `off` (default, inert), `cli`, or `api`. See [docs/annotations.md](docs/annotations.md). Real writes are deferred until Fulcra exposes an annotation-write surface, so even `cli`/`api` are currently no-ops behind the flag. |
 | `FULCRA_COORD_SESSION_KEY` | — | Generic session pointer key for non-Claude-Code agents (OpenClaw passes its `sessionKey` here); `CLAUDE_CODE_SESSION_ID` takes precedence |

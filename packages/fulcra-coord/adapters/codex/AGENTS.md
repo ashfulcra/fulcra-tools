@@ -44,8 +44,13 @@ fulcra-coord update TASK-... --summary "..." --next "..."
 # Pause when session ends
 fulcra-coord pause TASK-... --next "Next step for next session." --agent codex:paperclip
 
-# Mark blocked
+# Mark blocked (on an agent / external thing)
 fulcra-coord block TASK-... --blocked-on "Reason." --agent codex:paperclip
+
+# Mark blocked ON THE OPERATOR — when you need the human to do something
+fulcra-coord block TASK-... --on-user "Approve the deploy / paste the key."
+# ^ assigns the task to the human, tags needs:human, lands it on `needs-me`,
+#   and leads their next SessionStart.
 
 # Mark done (requires evidence)
 fulcra-coord done TASK-... --evidence "What was verified." --verification-level agent-verified
@@ -56,8 +61,12 @@ fulcra-coord abandon TASK-... --reason "Why." --agent codex:paperclip
 
 ## Key rules
 
+- **Declare a stable, human-legible identity** (`identity set vendor:host:purpose`)
+  and always identify yourself, so directives reach you and the human can tell
+  who's who. Identity is scoped per working directory.
 - Write at **boundaries**: start, pause, block, done, abandon.
 - Never write for every internal step.
+- **Mark anything you need the operator to do** with `block --on-user "<ask>"`.
 - `next_action` is required when pausing or blocking — it's the handoff.
 - `evidence` is required when marking done.
 - If `fulcra-coord` is unavailable, cache files locally and run `reconcile` when connectivity recovers.
