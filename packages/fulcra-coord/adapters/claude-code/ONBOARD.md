@@ -31,6 +31,32 @@ the task on the human, lands it on their `needs-me` plate, and surfaces it at
 the top of their next SessionStart. It's how "blocked on the human" becomes
 visible instead of buried in a summary.
 
+## Working-directory hygiene (one worktree per session)
+
+**Each agent session should operate in its OWN git worktree (or clone) — never
+share one checkout across concurrent sessions.** When several sessions point at
+the same working tree they fight over a single index and `HEAD`: commits from
+different branches interleave, one session's `git merge`/`rebase` leaves
+conflict markers staged in *everyone's* tree, and an in-progress change can get
+swept into an unrelated session's commit. (We hit all three on the
+`fulcra-tools` monorepo.)
+
+This is the structural partner to the per-cwd identity scoping (step 3): a
+distinct worktree gives this session both an isolated checkout *and* its own
+persisted identity, so neither your git state nor your bus identity collides
+with a sibling session.
+
+```bash
+# From an existing clone, give this session its own worktree + branch:
+git worktree add ../fulcra-tools-<purpose> -b <vendor>/<purpose> origin/main
+cd ../fulcra-tools-<purpose>
+fulcra-coord identity set claude-code:<host>:<purpose>   # per-cwd identity
+```
+
+If you find conflict markers or unrelated staged files you did not create, you
+are almost certainly sharing a checkout — stop and move to your own worktree
+rather than committing over another session's work.
+
 ## Operator setup (one-time)
 
 Personalize the human handle so `--on-user` / `needs-me` address you by name

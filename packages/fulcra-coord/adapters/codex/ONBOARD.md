@@ -44,6 +44,22 @@ name (default is the neutral `human`):
 `fulcra-coord human set <your-name>` (e.g. `fulcra-coord human set ash`), then
 `fulcra-coord needs-me` shows what's blocked on you across all agents.
 
+## Working-directory hygiene (one worktree per session)
+**Each agent session should operate in its OWN git worktree (or clone) — never
+share one checkout across concurrent sessions.** Sharing a working tree makes
+sessions fight over a single index and `HEAD`: commits from different branches
+interleave, one session's merge/rebase leaves conflict markers staged in
+everyone's tree, and in-progress edits get swept into unrelated commits. This is
+the structural partner to per-cwd identity (step 4): a distinct worktree gives
+this session an isolated checkout *and* its own persisted identity.
+```bash
+git worktree add ../fulcra-tools-<purpose> -b codex/<purpose> origin/main
+cd ../fulcra-tools-<purpose>
+fulcra-coord identity set codex:<host>:<purpose>
+```
+If you see conflict markers or staged files you did not create, you're sharing a
+checkout — move to your own worktree instead of committing over another session.
+
 ## Codex specifics
 - Use **`install-codex`** (not `install-claude-code`). It wires Codex's
   `SessionStart` / `Stop` / `PreCompact` hooks. Codex has **no `SessionEnd`**;
