@@ -352,13 +352,28 @@ def needs_human(tasks: list[dict[str, Any]], human: str) -> list[dict[str, Any]]
     waiting / blocked (an active or terminal task is not awaiting the human).
 
     Returned oldest-first (by ``updated_at``) so the longest-waiting ask — the
-    thing the human has been blocking the longest — sorts to the top."""
+    thing the human has been blocking the longest — sorts to the top.
+
+    PRECISION (broadcast exclusion): a broadcast (``assignee == "*"``) reaches
+    every agent's inbox via ``agent_matches``'s wildcard, but an all-agent
+    announcement is NOT a personal ask blocked on the human. Including them
+    floods the SessionStart "⛔ BLOCKED ON YOU" banner with join-announcement
+    noise and buries the real asks — defeating the whole situational-awareness
+    point. So membership here is the STRICT signal: a CONCRETE assignee that
+    matches the human (``block --on-user`` sets ``assignee = human``), OR the
+    explicit ``needs:human`` tag. The broadcast wildcard never qualifies."""
     items = []
     for t in tasks:
-        assignee = t.get("assignee")
-        if not assignee or not agent_matches(human, assignee):
-            continue
         if t.get("status") not in NEEDS_HUMAN_OPEN_STATUSES:
+            continue
+        assignee = t.get("assignee")
+        tags = t.get("tags") or []
+        # Concrete (non-broadcast) assignee directed at the human, OR the
+        # explicit needs:human marker. A bare "*" broadcast does NOT count.
+        concrete_for_human = (
+            assignee and assignee != BROADCAST and agent_matches(human, assignee)
+        )
+        if not (concrete_for_human or "needs:human" in tags):
             continue
         items.append(task_summary(t))
     return sorted(items, key=lambda x: x.get("updated_at", ""))
