@@ -6823,6 +6823,121 @@ class TestStartAgentOptional(_PresenceBackendCase):
 
 
 # ---------------------------------------------------------------------------
+# Onboarding UX hints (Task C): non-blocking STDERR nudges.
+#   1. `start` with a TASK-id-shaped title -> "you probably meant to claim".
+#   2. `connect`/`start` with a DERIVED identity + a legacy global identity.json
+#      present -> "migrate your legacy identity".
+# Both are warnings only; behavior (task creation, presence write) is unchanged.
+# ---------------------------------------------------------------------------
+
+class TestOnboardingHints(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.fake_root = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ["FULCRA_FAKE_ROOT"] = self.fake_root
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        backend_script = str(Path(__file__).resolve().parent / "fake_fulcra_backend.py")
+        self.fake_backend = [sys.executable, backend_script]
+
+    def tearDown(self):
+        for k in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "FULCRA_FAKE_ROOT",
+                  "FULCRA_COORD_AGENT"):
+            os.environ.pop(k, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.fake_root, ignore_errors=True)
+
+    def _ns(self, **kw):
+        return types.SimpleNamespace(**kw)
+
+    def _run_capturing_stderr(self, fn, args):
+        """Run a command and capture BOTH streams (the hints go to STDERR so the
+        backgrounded `connect` hook discards them; tests must read stderr)."""
+        import io, contextlib
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = fn(args, backend=self.fake_backend)
+        return rc, out.getvalue(), err.getvalue()
+
+    def _write_legacy_identity(self, agent="codex:Mac:main"):
+        from fulcra_coord import identity
+        legacy = identity.config_root() / "identity.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"agent": agent}))
+
+    # ---- start-vs-claim hint ----
+
+    def test_start_with_task_id_title_emits_claim_hint_but_still_creates(self):
+        from fulcra_coord.cli import cmd_start
+        title = "TASK-20260101-deploy-the-thing-ab12cd34"
+        rc, out, err = self._run_capturing_stderr(cmd_start, self._ns(
+            title=title, workstream="devops", agent="claude-code:h:r",
+            kind="ops", priority="P2", summary="", next="", surface=None))
+        # Non-blocking: the task is still created (cached) regardless of rc.
+        tasks = cache.list_cached_tasks()
+        self.assertTrue(any(t["title"] == title for t in tasks),
+                        "start must still create the task despite the hint")
+        self.assertIn("update", err)
+        self.assertIn("--status active", err)
+
+    def test_start_with_normal_title_no_claim_hint(self):
+        from fulcra_coord.cli import cmd_start
+        rc, out, err = self._run_capturing_stderr(cmd_start, self._ns(
+            title="Deploy the widget", workstream="devops",
+            agent="claude-code:h:r", kind="ops", priority="P2",
+            summary="", next="", surface=None))
+        self.assertNotIn("--status active", err)
+
+    # ---- legacy-identity migrate hint ----
+
+    def test_connect_emits_legacy_hint_when_derived_and_legacy_present(self):
+        # No explicit/env/per-cwd identity -> source is "derived"; a legacy
+        # global exists -> hint fires (on STDERR).
+        from fulcra_coord.cli import cmd_connect
+        self._write_legacy_identity()
+        rc, out, err = self._run_capturing_stderr(cmd_connect, self._ns(
+            agent=None, workstream=None, summary="", format="table"))
+        self.assertEqual(rc, 0)
+        self.assertIn("identity.json", err)
+        self.assertIn("identity migrate", err)
+
+    def test_start_emits_legacy_hint_when_derived_and_legacy_present(self):
+        from fulcra_coord.cli import cmd_start
+        self._write_legacy_identity()
+        rc, out, err = self._run_capturing_stderr(cmd_start, self._ns(
+            title="A normal task", workstream="devops", agent=None,
+            kind="ops", priority="P2", summary="", next="", surface=None))
+        self.assertIn("identity migrate", err)
+
+    def test_no_legacy_hint_when_per_cwd_identity_set(self):
+        # A declared per-cwd identity -> source "config", not "derived" -> no hint
+        # even though a legacy global is present.
+        from fulcra_coord.cli import cmd_connect
+        from fulcra_coord import identity
+        self._write_legacy_identity()
+        identity.set_identity("claude-code:host:thisrepo")
+        rc, out, err = self._run_capturing_stderr(cmd_connect, self._ns(
+            agent=None, workstream=None, summary="", format="table"))
+        self.assertNotIn("identity migrate", err)
+
+    def test_no_legacy_hint_when_no_legacy_file(self):
+        # Derived identity but NO legacy file -> nothing to migrate -> no hint.
+        from fulcra_coord.cli import cmd_connect
+        rc, out, err = self._run_capturing_stderr(cmd_connect, self._ns(
+            agent=None, workstream=None, summary="", format="table"))
+        self.assertNotIn("identity migrate", err)
+
+    def test_no_legacy_hint_when_explicit_agent(self):
+        # An explicit --agent -> source "explicit", not "derived" -> no hint.
+        from fulcra_coord.cli import cmd_connect
+        self._write_legacy_identity()
+        rc, out, err = self._run_capturing_stderr(cmd_connect, self._ns(
+            agent="explicit:h:r", workstream=None, summary="", format="table"))
+        self.assertNotIn("identity migrate", err)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

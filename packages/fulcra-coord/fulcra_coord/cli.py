@@ -9,6 +9,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -39,6 +40,35 @@ def _warn(msg: str) -> None:
 
 def _info(msg: str) -> None:
     print(msg)
+
+
+#: A title that LOOKS like a task id (``TASK-YYYYMMDD-…``). When ``start`` is
+#: handed one of these the operator almost certainly meant to CLAIM/activate the
+#: existing task, not create a new one named after an id. Only the prefix is
+#: matched (date-stamped ``TASK-<8 digits>-``) so a genuine title that merely
+#: mentions a date can't trip it.
+_TASK_ID_TITLE_RE = re.compile(r"^TASK-\d{8}-")
+
+
+def _maybe_warn_legacy_identity(explicit: Optional[str]) -> None:
+    """Print a one-line migration hint (to STDERR) iff the resolved identity is
+    purely DERIVED (nothing explicit/env/per-cwd) AND a legacy global
+    ``identity.json`` exists.
+
+    Rationale: an operator who set the pre-split global identity gets a derived
+    id in every repo now (the global is no longer resolved automatically, I-1),
+    so their agent shows up under an unexpected ``claude-code:<host>:<repo>``.
+    This nudges them to declare a per-cwd id. STDERR so the backgrounded
+    ``connect`` hook discards it; one line; only when BOTH conditions hold so it
+    never nags a correctly-configured session."""
+    _agent, source = identity.resolve_agent_source(explicit)
+    if source != "derived":
+        return
+    legacy = identity.read_legacy_identity()
+    if not legacy:
+        return
+    _warn("legacy identity.json found but per-cwd identity isn't set here — run "
+          "'fulcra-coord identity migrate' (or 'identity set <vendor>:<host>:<purpose>').")
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +701,69 @@ def cmd_human(args: Any, backend: Optional[list[str]] = None) -> int:
         _info(f"Source: {source}")
         if source == "default":
             _info("  (personalize with: fulcra-coord human set <handle>)")
+    return 0
+
+
+def cmd_annotations(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Enable, disable, or inspect the Agent-Tasks timeline annotations writer.
+
+    Annotations drop a durable breadcrumb on the operator's Fulcra timeline every
+    time an agent creates/picks-up/updates/completes a task. Historically they
+    only fired if ``FULCRA_COORD_ANNOTATIONS=http`` was exported in each shell, so
+    the timeline rarely filled. This command PERSISTS the enablement once
+    (machine-wide) so every agent emits without a per-session export.
+
+    - ``annotations on``     → persist ``http`` to the config file.
+    - ``annotations off``    → remove the config file (resolves to off unless the
+                               env var is set — env always wins).
+    - ``annotations`` / ``status`` → report the resolved mode, its SOURCE
+                               (env/config/default), and whether a bearer token
+                               resolves (the token VALUE is never printed).
+    """
+    action = getattr(args, "annotations_action", None)
+    out_format = getattr(args, "format", "table")
+
+    if action == "on":
+        path = lifecycle_annotations.set_persisted_mode("http")
+        if out_format == "json":
+            _print_json({"mode": "http", "source": "config", "action": "on"})
+        else:
+            _info("Annotations enabled (mode: http).")
+            _info(f"  Persisted to: {path}")
+            _info("  Every agent on this machine will now emit Agent-Tasks "
+                  "timeline annotations.")
+        return 0
+
+    if action == "off":
+        removed = lifecycle_annotations.clear_persisted_mode()
+        mode, source = lifecycle_annotations.resolve_mode_source()
+        if out_format == "json":
+            _print_json({"mode": mode, "source": source, "action": "off",
+                         "removed": removed})
+        else:
+            _info("Annotations disabled." if removed
+                  else "No persisted annotation mode to clear.")
+            if source == "env":
+                _info(f"  Note: FULCRA_COORD_ANNOTATIONS is set in this shell — "
+                      f"still resolving as {mode} (env overrides config).")
+            else:
+                _info(f"  Now resolving as: {mode}  (source: {source})")
+        return 0
+
+    # status (default / bare)
+    mode, source = lifecycle_annotations.resolve_mode_source()
+    # Reuse the doctor's token check so `status` and `[Annotations]` agree on
+    # whether a write could actually authenticate. NEVER print the token value.
+    token_ok = bool(lifecycle_annotations._resolve_token())
+    if out_format == "json":
+        _print_json({"mode": mode, "source": source, "token_ok": token_ok,
+                     "config_file": str(lifecycle_annotations._annotations_config_path())})
+    else:
+        _info(f"Annotations: {mode}")
+        _info(f"Source:      {source}")
+        _info(f"Token:       {'OK' if token_ok else 'not available'}")
+        if mode == "off":
+            _info("  (enable for every agent with: fulcra-coord annotations on)")
     return 0
 
 
@@ -1399,9 +1492,16 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     of this agent's open tasks, so the common case needs no extra typing. Writes
     the durable per-agent record and opportunistically refreshes the aggregate.
     Best-effort: a presence write never fails the session boot."""
-    me = identity.resolve_agent(getattr(args, "agent", None))
+    explicit_agent = getattr(args, "agent", None)
+    me = identity.resolve_agent(explicit_agent)
     out_format = getattr(args, "format", "table")
     summary = getattr(args, "summary", "") or ""
+
+    # Non-blocking onboarding nudge (Task C): a derived identity + a lingering
+    # legacy global identity.json means the operator's old declared id is being
+    # silently ignored here. Hint to migrate. STDERR so the backgrounded connect
+    # hook discards it (it only matters in an interactive run).
+    _maybe_warn_legacy_identity(explicit_agent)
 
     explicit = _split_workstreams(getattr(args, "workstream", None))
     derived = _derive_workstreams_from_open_tasks(me, backend=backend)
@@ -1808,12 +1908,23 @@ def cmd_start(args: Any, backend: Optional[list[str]] = None) -> int:
     # --agent is now OPTIONAL (parity with update/block/done/etc., which all
     # auto-resolve): fall back to the normal identity resolution when omitted so
     # `start` no longer uniquely requires it. --agent stays as an explicit override.
-    agent = identity.resolve_agent(getattr(args, "agent", None))
+    explicit_agent = getattr(args, "agent", None)
+    agent = identity.resolve_agent(explicit_agent)
     kind = getattr(args, "kind", "ops") or "ops"
     priority = getattr(args, "priority", "P2") or "P2"
     summary = getattr(args, "summary", "") or ""
     next_action = getattr(args, "next", "") or ""
     surface = getattr(args, "surface", None)
+
+    # Non-blocking onboarding nudges (Task C). A title shaped like a task id is a
+    # near-certain "I meant to claim an existing task" — warn but PROCEED (start
+    # always creates a NEW task, by design). And if this session is running on a
+    # derived identity while a legacy global identity.json lingers, point the
+    # operator at migration. Both go to STDERR, one line each.
+    if title and _TASK_ID_TITLE_RE.match(title):
+        _warn("'start' always creates a NEW task. To claim/activate an existing "
+              "one: fulcra-coord update <id> --status active")
+    _maybe_warn_legacy_identity(explicit_agent)
 
     if workstream not in schema.SUGGESTED_WORKSTREAMS:
         _warn(f"Workstream {workstream!r} is not in the suggested set. Proceeding anyway.")
@@ -2424,10 +2535,11 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
     # was simply disabled. Reports the resolved mode, whether a bearer token is
     # obtainable (WITHOUT ever printing it), and the API base the writer targets.
     _info(f"\n[Annotations]")
-    ann_mode = lifecycle_annotations._mode()
-    _info(f"  Mode:          {ann_mode}")
+    ann_mode, ann_source = lifecycle_annotations.resolve_mode_source()
+    _info(f"  Mode:          {ann_mode}  (source: {ann_source})")
     if ann_mode == "off":
-        _info("  -> disabled — set FULCRA_COORD_ANNOTATIONS=http to enable")
+        _info("  -> disabled — run `fulcra-coord annotations on` to enable for "
+              "every agent (or set FULCRA_COORD_ANNOTATIONS=http for this shell)")
     else:
         _info(f"  API base:      {lifecycle_annotations._api_base()}")
         # Resolve the token only to confirm one EXISTS; never echo its value.
