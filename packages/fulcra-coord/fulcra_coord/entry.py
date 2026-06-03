@@ -46,6 +46,52 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Filter to one agent (what was I working on)")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- connect ----
+    sp = sub.add_parser("connect",
+                        help="Record this agent's presence on connect: declared "
+                             "workstream(s) + a one-line 'what I'm on', so the "
+                             "human sees what each agent is working on even with "
+                             "no active task (SessionStart hooks call this)")
+    sp.add_argument("--workstream", "-w", default=None, metavar="WS",
+                    help="Comma-separated workstream(s); UNIONed with the "
+                         "distinct workstream of your open tasks")
+    sp.add_argument("--summary", "-s", default="", metavar="SUMMARY",
+                    help="One-line 'what I'm currently on'")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Who is connecting (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
+    # ---- workstream ----
+    sp = sub.add_parser("workstream",
+                        help="Declare/update THIS agent's presence workstreams "
+                             "(set/add/clear). Bare `workstream` shows current presence.")
+    sp.add_argument("--summary", "-s", default=None, metavar="SUMMARY",
+                    help="Update the one-line 'what I'm on'")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Whose presence (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+    wsub = sp.add_subparsers(dest="ws_action")
+    wsp_set = wsub.add_parser("set", help="REPLACE the workstream list")
+    wsp_set.add_argument("workstreams", metavar="WS", help="Comma-separated workstream(s)")
+    wsp_set.add_argument("--summary", "-s", default=None, metavar="SUMMARY")
+    wsp_set.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    wsp_set.add_argument("--format", choices=["table", "json"], default="table")
+    wsp_add = wsub.add_parser("add", help="APPEND to the workstream list")
+    wsp_add.add_argument("workstreams", metavar="WS", help="Comma-separated workstream(s)")
+    wsp_add.add_argument("--summary", "-s", default=None, metavar="SUMMARY")
+    wsp_add.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    wsp_add.add_argument("--format", choices=["table", "json"], default="table")
+    wsp_clear = wsub.add_parser("clear", help="Empty the workstream list")
+    wsp_clear.add_argument("--summary", "-s", default=None, metavar="SUMMARY")
+    wsp_clear.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    wsp_clear.add_argument("--format", choices=["table", "json"], default="table")
+
+    # ---- presence ----
+    sp = sub.add_parser("presence",
+                        help="Show the agent presence roster: who is working on "
+                             "what right now, with last-seen age + live/idle/stale")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- tell ----
     sp = sub.add_parser("tell",
                         help="Direct work at another agent: create a proposed "
@@ -94,7 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("start", help="Create and start a new task")
     sp.add_argument("title", metavar="TITLE", help="Short durable task objective")
     sp.add_argument("--workstream", "-w", required=True, metavar="WS")
-    sp.add_argument("--agent", "-a", required=True, metavar="AGENT")
+    # --agent is OPTIONAL (auto-resolved via identity when omitted) — parity with
+    # every sibling write-command; it used to uniquely require it. Stays an override.
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
     sp.add_argument("--kind", "-k", default="ops", metavar="KIND",
                     help="ops|feature|bug|research|infra|config|comms|other")
     sp.add_argument("--priority", "-p", default="P2", metavar="PRIORITY",
@@ -313,6 +361,9 @@ def build_parser() -> argparse.ArgumentParser:
 COMMAND_MAP = {
     "status": _cli.cmd_status,
     "agents": _cli.cmd_agents,
+    "connect": _cli.cmd_connect,
+    "workstream": _cli.cmd_workstream,
+    "presence": _cli.cmd_presence,
     "tell": _cli.cmd_tell,
     "broadcast": _cli.cmd_broadcast,
     "assign": _cli.cmd_assign,

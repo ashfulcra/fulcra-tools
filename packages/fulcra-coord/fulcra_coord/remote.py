@@ -323,6 +323,21 @@ def agent_remote_path(agent: str) -> str:
     return f"{remote_root()}/agents/{agent}.json"
 
 
+def presence_remote_path(agent_slug: str) -> str:
+    """Per-agent presence record path. Takes an ALREADY-SLUGGED agent id (via
+    views.agent_slug) so the colons in a raw ``kind:host:repo`` id never reach a
+    filename — mirroring how the inbox views are keyed by slug. Only that agent
+    writes this file, so there is zero cross-agent write contention."""
+    return f"{remote_root()}/presence/{agent_slug}.json"
+
+
+def presence_view_path() -> str:
+    """The aggregate presence roster (``views/presence.json``) — the one file the
+    read commands (presence/agents/resume) load, rebuilt by reconcile and
+    refreshed opportunistically on connect. Mirrors view_remote_path's layout."""
+    return f"{remote_root()}/views/presence.json"
+
+
 # ---------------------------------------------------------------------------
 # Auth / doctor helpers
 # ---------------------------------------------------------------------------

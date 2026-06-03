@@ -29,6 +29,13 @@ AGENT="$("${FULCRA_COORD[@]}" identity --format json 2>/dev/null | python3 -c 'i
 JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
 [ -z "$JSON" ] && exit 0
 
+# Report presence on connect (situational awareness): record this agent's current
+# workstream(s) on the bus so `agents`/`presence` show what it's working on even
+# when it owns no active task. `connect` auto-derives workstreams from this
+# agent's open tasks. Backgrounded + silenced — best-effort, never blocks or
+# delays session start; a missing/old CLI without `connect` simply no-ops.
+"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &
+
 # Directives addressed to this agent. status JSON may not carry `assignee`, so
 # we ask the inbox command directly (fail-safe: empty/missing -> no section).
 # This is the only extra call; it is silent and never blocks the session.
