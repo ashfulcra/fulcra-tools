@@ -238,6 +238,29 @@ def emit_notification(agent: str, count: int) -> None:
         pass
 
 
+def emit_message(message: str, *, title: str = "fulcra-coord") -> None:
+    """Best-effort desktop notification of an arbitrary `message`.
+
+    The general-purpose sibling of ``emit_notification`` (which formats a fixed
+    inbox-count string). Used for the blocked-on-you alert
+    ("⛔ <agent> needs you: <ask>") where the caller composes the full message.
+    macOS -> osascript ``display notification``; elsewhere -> a stderr line that
+    cron/launchd capture. Swallows EVERY error so a failed notification never
+    breaks the scheduled tick (fail-safe contract). Pure side-effect."""
+    try:
+        if scheduler_env.is_macos():
+            subprocess.run(
+                ["osascript", "-e",
+                 f'display notification {_osa_quote(message)} '
+                 f'with title {_osa_quote(title)}'],
+                capture_output=True, timeout=5, check=False,
+            )
+        else:
+            print(f"[fulcra-coord] {message}", file=sys.stderr)
+    except Exception:
+        pass
+
+
 def _osa_quote(s: str) -> str:
     """Quote a string for an AppleScript literal (double-quote delimited):
     backslash-escape backslashes and double-quotes so a directive count string

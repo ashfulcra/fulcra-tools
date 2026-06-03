@@ -1091,6 +1091,52 @@ def _inbox_surface_path(agent: str):
     return cache.cache_root() / f"inbox-pending-{listener.agent_slug(agent)}.json"
 
 
+def _needs_me_seen_path(human: str):
+    """Seen-set surface for blocked-on-you notifications, keyed by the HUMAN
+    handle (not the polling agent): the "has the operator already been alerted
+    about this item" marker. Like the inbox-pending surface but a set of task
+    ids, so the listener notifies ONCE per new needs-me item and never re-fires
+    for one it already announced. Slugged via the same agent_slug so a handle
+    with odd characters maps to a safe filename."""
+    return cache.cache_root() / f"needs-me-seen-{listener.agent_slug(human)}.json"
+
+
+def _notify_new_needs_me(backend: Optional[list[str]] = None) -> None:
+    """Fire a desktop notification for each NEW item blocked on the human.
+
+    Polled alongside the inbox by the listener (Part 5). Resolves the human via
+    resolve_human(), loads what's blocked on them, and for every item not yet in
+    the per-human seen-set emits "⛔ <agent> needs you: <ask>" once. Idempotent:
+    the seen-set (a task-id list persisted next to the inbox surface) means a
+    repeat tick over the same item does not re-notify, while a genuinely new
+    blocked-on-you item alerts. Best-effort — wrapped by the caller's try/except
+    so it can never crash a polling tick. No-op when nothing is blocked."""
+    human = identity.resolve_human()
+    items = views.needs_human(_load_all_tasks(backend=backend), human)
+    seen_path = _needs_me_seen_path(human)
+    seen: set[str] = set()
+    if seen_path.exists():
+        try:
+            seen = set(json.loads(seen_path.read_text()))
+        except (json.JSONDecodeError, OSError, TypeError):
+            seen = set()
+
+    current_ids = {i["id"] for i in items}
+    for it in items:
+        if it["id"] in seen:
+            continue
+        ask = (it.get("blocked_on") or it.get("next_action") or "").strip()
+        frm = it.get("owner_agent", "?")
+        listener.emit_message(f"⛔ {frm} needs you: {ask}" if ask
+                              else f"⛔ {frm} needs you: {it.get('title','')}")
+
+    # Persist the seen-set as the CURRENT item ids: newly-notified items are now
+    # seen, and items that have since cleared (resolved) drop out so that if the
+    # SAME task is blocked-on-you again later it re-notifies (a fresh ask).
+    cache.cache_root().mkdir(parents=True, exist_ok=True)
+    seen_path.write_text(json.dumps(sorted(current_ids)))
+
+
 def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """Poll the inbox for an agent; on non-empty, surface + notify (Part 3).
 
@@ -1110,6 +1156,10 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         surface.write_text(json.dumps(payload, indent=2))
         if items:
             listener.emit_notification(me, len(items))
+        # ALSO notice anything newly blocked on the human (Part 5). Independent
+        # of the agent's own inbox: a tick with an empty inbox can still alert on
+        # a new blocked-on-you item. Best-effort within the same fail-safe guard.
+        _notify_new_needs_me(backend=backend)
     except Exception as e:
         # A polling tick that fails must not bring down the scheduler; report to
         # stderr and exit clean (fail-safe contract).

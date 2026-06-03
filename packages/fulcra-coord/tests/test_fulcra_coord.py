@@ -4345,6 +4345,78 @@ class TestNotifyInbox(unittest.TestCase):
             self.assertEqual(json.loads(sf.read_text())["inbox"], [])
 
 
+class TestNotifyBlockedOnYou(unittest.TestCase):
+    """notify-inbox ALSO notifies on NEW blocked-on-you items for the resolved
+    human, once per item (idempotent seen-set), no-op when empty."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        self.fake_backend = ["false"]
+
+    def tearDown(self):
+        for k in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "FULCRA_COORD_HUMAN",
+                  "FULCRA_COORD_AGENT"):
+            os.environ.pop(k, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _human_item(self, tid):
+        # A blocked-on-human task: assignee=ash, status blocked, needs:human.
+        d = _directive("ash", owner="claude-code:h:vercel", status="blocked",
+                       blocked_on="approve the deploy")
+        d["id"] = tid
+        d["tags"] = sorted(set(d["tags"] + ["needs:human"]))
+        return d
+
+    def test_new_blocked_item_notifies_once(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        cache.write_cached_task(self._human_item("TASK-20260603-x-aaaaaaaa"))
+        with patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        emsg.assert_called_once()
+        # The message names the requesting agent + the ask.
+        msg = emsg.call_args[0][0]
+        self.assertIn("claude-code:h:vercel", msg)
+        self.assertIn("approve the deploy", msg)
+
+    def test_repeat_does_not_renotify(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        cache.write_cached_task(self._human_item("TASK-20260603-x-bbbbbbbb"))
+        with patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                             backend=self.fake_backend)
+            cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                             backend=self.fake_backend)
+        self.assertEqual(emsg.call_count, 1)
+
+    def test_empty_no_notification(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        with patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                             backend=self.fake_backend)
+        emsg.assert_not_called()
+
+    def test_second_new_item_notifies_again(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        cache.write_cached_task(self._human_item("TASK-20260603-x-cccccccc"))
+        with patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                             backend=self.fake_backend)
+            cache.write_cached_task(self._human_item("TASK-20260603-x-dddddddd"))
+            cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                             backend=self.fake_backend)
+        self.assertEqual(emsg.call_count, 2)
+
+
 class TestListenerParity(unittest.TestCase):
     def test_openclaw_heartbeat_runs_notify_inbox(self):
         from fulcra_coord import openclaw as oc
