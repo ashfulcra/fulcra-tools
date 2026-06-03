@@ -9,6 +9,45 @@ from fulcra_collect import config as config_mod
 from fulcra_collect.cli import cli
 
 
+def test_daemon_foreground_prints_durability_hint_on_tty(monkeypatch):
+    """A foreground `fulcra-collect daemon` should print a one-line hint
+    pointing first-time operators at the launchd install path — but ONLY when
+    stderr is a real TTY (under launchd there's no TTY and the hint would just
+    clutter the log file)."""
+    monkeypatch.setattr("fulcra_collect.cli._stderr_is_a_tty", lambda: True)
+
+    # Stub Daemon().serve() so we don't actually start a server.
+    class _StubDaemon:
+        def serve(self):  # noqa: D401 — mirrors real Daemon.serve
+            return None
+
+    monkeypatch.setattr("fulcra_collect.cli.Daemon", _StubDaemon)
+
+    res = CliRunner().invoke(cli, ["daemon"])
+    assert res.exit_code == 0
+    # Hint goes to stderr (err=True in click.echo). Check both for portability.
+    combined = (res.stderr or "") + (res.output or "")
+    assert "running in the foreground" in combined
+    assert "fulcra-collect install" in combined
+    assert "launchctl bootstrap" in combined
+
+
+def test_daemon_under_launchd_stays_quiet(monkeypatch):
+    """When stderr is NOT a TTY (launchd), the durability hint must not print —
+    it would just spam ~/Library/Logs/fulcra-collect/daemon.err.log."""
+    monkeypatch.setattr("fulcra_collect.cli._stderr_is_a_tty", lambda: False)
+
+    class _StubDaemon:
+        def serve(self):
+            return None
+    monkeypatch.setattr("fulcra_collect.cli.Daemon", _StubDaemon)
+
+    res = CliRunner().invoke(cli, ["daemon"])
+    assert res.exit_code == 0
+    combined = (res.stderr or "") + (res.output or "")
+    assert "running in the foreground" not in combined
+
+
 def test_enable_then_disable_update_config(collect_home: Path):
     runner = CliRunner()
     assert runner.invoke(cli, ["enable", "lastfm"]).exit_code == 0
