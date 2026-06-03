@@ -2,6 +2,30 @@
 
 `fulcra-coord` uses Fulcra Files as its transport. A normal Fulcra CLI install is not enough unless it exposes the `file` command group.
 
+> **Why this matters (the #1 fresh-agent onboarding failure):** the public PyPI
+> `fulcra-api` build (e.g. 0.1.32) does **not** ship the `file` command group,
+> yet the entire coordination bus is driven by `fulcra file` ops
+> (upload/download/stat/list). If you `pip install fulcra-api` and run
+> `fulcra-coord`, every bus op fails *silently* — there is no obvious signal
+> why. `fulcra-coord doctor` now probes for this explicitly and reports
+> `File commands: FAIL` when the installed CLI lacks `file`. The fix is to
+> install a **file-capable build**, e.g. the `file-management` branch of
+> `fulcradynamics/fulcra-api-python`.
+
+## Canonical file-capable install
+
+```bash
+# Install/point fulcra-coord at the file-capable build (file-management branch).
+# Option A — run it straight from the branch checkout via uv:
+git clone -b file-management https://github.com/fulcradynamics/fulcra-api-python.git
+export FULCRA_CLI_COMMAND="uv run --project /absolute/path/to/fulcra-api-python fulcra"
+
+# Option B — if your installed `fulcra-api` already exposes `file` (verify below):
+export FULCRA_CLI_COMMAND="fulcra-api"
+
+fulcra-coord doctor   # expect: "File commands: OK"
+```
+
 For the current cross-agent test, use any Files-capable Fulcra CLI build. The required check is:
 
 ```bash

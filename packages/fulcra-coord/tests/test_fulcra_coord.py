@@ -658,6 +658,67 @@ Previous Versions: 1
         self.assertTrue(ok)
         self.assertEqual(msg, "fulcra-api file")
 
+    def test_check_file_commands_ok_when_file_help_succeeds(self):
+        """`<cli> file --help` exits 0 → file command group present."""
+        result = types.SimpleNamespace(
+            returncode=0,
+            stdout="Usage: fulcra file [OPTIONS]\n  upload\n  download\n  stat",
+            stderr="",
+        )
+        with patch("fulcra_coord.remote.subprocess.run", return_value=result):
+            ok, msg = self.remote.check_file_commands(["fulcra-api"])
+        self.assertTrue(ok)
+        # Message should name the probed base command for transparency.
+        self.assertIn("fulcra-api", msg)
+
+    def test_check_file_commands_fail_when_no_file_subcommand(self):
+        """Public PyPI build lacking `file` → non-zero exit → FAIL."""
+        result = types.SimpleNamespace(
+            returncode=2,
+            stdout="",
+            stderr="Error: No such command 'file'.",
+        )
+        with patch("fulcra_coord.remote.subprocess.run", return_value=result):
+            ok, msg = self.remote.check_file_commands(["fulcra-api"])
+        self.assertFalse(ok)
+        self.assertIn("file", msg)
+
+    def test_check_file_commands_fail_when_cli_missing(self):
+        """CLI binary not installed at all → FileNotFoundError → FAIL, no crash."""
+        with patch("fulcra_coord.remote.subprocess.run", side_effect=FileNotFoundError()):
+            ok, msg = self.remote.check_file_commands(["nonexistent-cli"])
+        self.assertFalse(ok)
+
+    def test_check_file_commands_fail_on_timeout(self):
+        """A hung probe must degrade to FAIL, never propagate the timeout."""
+        with patch(
+            "fulcra_coord.remote.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="fulcra-api file --help", timeout=5),
+        ):
+            ok, msg = self.remote.check_file_commands(["fulcra-api"])
+        self.assertFalse(ok)
+
+    def test_check_file_commands_uses_real_cli_base_not_fake_backend(self):
+        """The probe must target the *resolved real CLI* base + `file`, never the
+        file-ops fake backend. A fake backend speaks the `file` subcommand protocol
+        (e.g. ``stat``/``download`` directly) and has no top-level `file` group, so
+        probing it would give a misleading FAIL. With FULCRA_CLI_COMMAND set, the
+        probe must shell ``<that base> file --help``."""
+        os.environ["FULCRA_CLI_COMMAND"] = "my-fulcra"
+        try:
+            captured = {}
+
+            def fake_run(cmd, *a, **kw):
+                captured["cmd"] = cmd
+                return types.SimpleNamespace(returncode=0, stdout="file", stderr="")
+
+            with patch("fulcra_coord.remote.subprocess.run", side_effect=fake_run):
+                ok, msg = self.remote.check_file_commands()
+            self.assertTrue(ok)
+            self.assertEqual(captured["cmd"][:3], ["my-fulcra", "file", "--help"])
+        finally:
+            del os.environ["FULCRA_CLI_COMMAND"]
+
 
 # ---------------------------------------------------------------------------
 # CLI integration (dry-run via fake backend)
@@ -1462,6 +1523,7 @@ class TestDoctorRemoteAccessExitCode(unittest.TestCase):
         from fulcra_coord.cli import cmd_doctor
 
         with patch("fulcra_coord.cli.remote.check_cli_available", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_file_commands", return_value=(True, "fulcra-api file")), \
              patch("fulcra_coord.cli.remote.check_remote_access",
                    return_value=(False, "Could not stat /coordination/index.json")):
             args = types.SimpleNamespace()
@@ -1474,12 +1536,79 @@ class TestDoctorRemoteAccessExitCode(unittest.TestCase):
         from fulcra_coord.cli import cmd_doctor
 
         with patch("fulcra_coord.cli.remote.check_cli_available", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_file_commands", return_value=(True, "fulcra-api file")), \
              patch("fulcra_coord.cli.remote.check_remote_access",
                    return_value=(True, "Remote accessible (/coordination/index.json)")):
             args = types.SimpleNamespace()
             rc = cmd_doctor(args, backend=["false"])
 
         self.assertEqual(rc, 0, "doctor must return 0 when CLI and remote are both healthy")
+
+
+class TestDoctorFileCapabilityCheck(unittest.TestCase):
+    """Doctor must explicitly probe the `file` command group.
+
+    The #1 fresh-agent onboarding failure: the public PyPI `fulcra-api` build
+    lacks the `file` command group that drives the coordination bus. Without a
+    dedicated probe, the agent installs fulcra-api, runs fulcra-coord, and every
+    bus op fails silently with no clear signal why. Doctor surfaces this with a
+    FAIL + the fix (install the file-capable build per docs/fulcra-cli-branch.md)
+    and marks the overall result not-ok.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def _run_doctor(self, file_ok, file_msg):
+        from fulcra_coord.cli import cmd_doctor
+
+        lines = []
+        with patch("fulcra_coord.cli.remote.check_cli_available", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_file_commands", return_value=(file_ok, file_msg)), \
+             patch("fulcra_coord.cli.remote.check_remote_access",
+                   return_value=(True, "Remote accessible")), \
+             patch("fulcra_coord.cli._info",
+                   side_effect=lambda *a, **kw: lines.append(" ".join(str(x) for x in a))):
+            rc = cmd_doctor(types.SimpleNamespace(), backend=["false"])
+        return rc, "\n".join(lines)
+
+    def test_doctor_reports_file_commands_ok(self):
+        """Probe succeeds → `File commands: OK` printed, exit stays 0."""
+        rc, out = self._run_doctor(True, "fulcra-api file")
+        self.assertIn("File commands: OK", out)
+        self.assertEqual(rc, 0)
+
+    def test_doctor_reports_file_commands_fail_with_fix(self):
+        """Probe fails → FAIL line + fix hint pointing at the file-capable build,
+        and the overall doctor result is not-ok (exit 1)."""
+        rc, out = self._run_doctor(False, "No such command 'file'.")
+        self.assertIn("File commands: FAIL", out)
+        self.assertIn("file-management", out)
+        self.assertIn("docs/fulcra-cli-branch.md", out)
+        self.assertEqual(rc, 1, "missing file command group must mark doctor not-ok")
+
+    def test_doctor_file_probe_never_crashes(self):
+        """If the underlying probe raises, doctor must still complete (the helper
+        swallows exceptions → FAIL), never propagate the exception."""
+        from fulcra_coord.cli import cmd_doctor
+
+        with patch("fulcra_coord.cli.remote.check_cli_available", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_file_commands",
+                   side_effect=RuntimeError("unexpected")), \
+             patch("fulcra_coord.cli.remote.check_remote_access",
+                   return_value=(True, "Remote accessible")):
+            # Even if the helper itself were to raise, cmd_doctor must not crash.
+            # In practice check_file_commands swallows its own errors; this guards
+            # the call site too.
+            try:
+                rc = cmd_doctor(types.SimpleNamespace(), backend=["false"])
+            except Exception as e:  # pragma: no cover - this is the assertion
+                self.fail(f"cmd_doctor crashed on file-probe error: {e}")
+        self.assertEqual(rc, 1)
 
 
 # ---------------------------------------------------------------------------
