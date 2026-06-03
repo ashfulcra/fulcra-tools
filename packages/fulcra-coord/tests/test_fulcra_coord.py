@@ -5415,6 +5415,63 @@ class TestBlockOnUser(unittest.TestCase):
         self.assertIsNone(t.get("assignee"))
         self.assertNotIn("needs:human", t["tags"])
 
+    def test_block_on_user_emits_needs_user_annotation_when_gated(self):
+        # Uses the STATEFUL fake backend so the block fully succeeds and the
+        # post-success annotation hook fires (the ["false"] backend would fail
+        # the upload and short-circuit before the annotation).
+        from fulcra_coord import cli
+        from unittest.mock import patch
+        backend = [sys.executable, str(Path(__file__).resolve().parent
+                                       / "fake_fulcra_backend.py")]
+        fake_root = tempfile.mkdtemp()
+        os.environ["FULCRA_FAKE_ROOT"] = fake_root
+        try:
+            cli.cmd_start(self._ns(title="annotate-me", workstream="devops",
+                                   agent="claude-code:host:repo", kind="ops",
+                                   priority="P2", summary="", next="", surface=None),
+                          backend=backend)
+            tid = next(t for t in cache.list_cached_tasks()
+                       if t["title"] == "annotate-me")["id"]
+            cli.cmd_update(self._ns(task_id=tid, summary=None, next=None,
+                                    blocked_on=None, status="active", agent=None),
+                           backend=backend)
+            with patch.object(cli.lifecycle_annotations,
+                              "emit_needs_user_annotation") as emit:
+                cli.cmd_block(self._ns(task_id=tid, blocked_on=None,
+                                       on_user="approve it", agent=None),
+                              backend=backend)
+            emit.assert_called_once()
+            self.assertEqual(emit.call_args.kwargs["task"]["blocked_on"], "approve it")
+        finally:
+            os.environ.pop("FULCRA_FAKE_ROOT", None)
+            shutil.rmtree(fake_root, ignore_errors=True)
+
+    def test_block_without_on_user_does_not_emit_needs_user(self):
+        from fulcra_coord import cli
+        from unittest.mock import patch
+        backend = [sys.executable, str(Path(__file__).resolve().parent
+                                       / "fake_fulcra_backend.py")]
+        fake_root = tempfile.mkdtemp()
+        os.environ["FULCRA_FAKE_ROOT"] = fake_root
+        try:
+            cli.cmd_start(self._ns(title="no-annotate", workstream="devops",
+                                   agent="claude-code:host:repo", kind="ops",
+                                   priority="P2", summary="", next="", surface=None),
+                          backend=backend)
+            tid = next(t for t in cache.list_cached_tasks()
+                       if t["title"] == "no-annotate")["id"]
+            cli.cmd_update(self._ns(task_id=tid, summary=None, next=None,
+                                    blocked_on=None, status="active", agent=None),
+                           backend=backend)
+            with patch.object(cli.lifecycle_annotations,
+                              "emit_needs_user_annotation") as emit:
+                cli.cmd_block(self._ns(task_id=tid, blocked_on="CI", on_user=None,
+                                       agent=None), backend=backend)
+            emit.assert_not_called()
+        finally:
+            os.environ.pop("FULCRA_FAKE_ROOT", None)
+            shutil.rmtree(fake_root, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # Situational awareness — Piece 2: per-cwd identity (fix the global clobber)
