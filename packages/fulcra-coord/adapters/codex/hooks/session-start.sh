@@ -7,7 +7,6 @@ CWD="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.st
 [ -z "$CWD" ] && CWD="$PWD"
 HOST="$(hostname -s 2>/dev/null || echo host)"
 REPO="$(basename "$CWD")"
-AGENT="claude-code:${HOST}:${REPO}"
 STALE_HOURS="${FULCRA_COORD_STALE_HOURS:-2}"
 # Resolved at install time (Gap 1) so the hook works under uv-tool / source
 # installs where a bare `fulcra-coord` is not on PATH. A bash ARRAY (not a
@@ -15,6 +14,17 @@ STALE_HOURS="${FULCRA_COORD_STALE_HOURS:-2}"
 # "~/Library/Application Support/") survives intact under `"${FULCRA_COORD[@]}"`
 # expansion — an unquoted string would word-split it into broken tokens (C1).
 FULCRA_COORD=(__FULCRA_COORD_ARGV__)
+
+# Resolve the agent id through the CLI so EVERY section agrees on "who am I"
+# (I-2). inbox/needs-me already resolve via identity.resolve_agent (per-cwd
+# persisted id), so the banner's "mine" filter, title, and resume hint must use
+# the SAME resolution or they diverge the moment a stable id is declared with
+# `identity set` — the shell-derived claude-code:<host>:<repo> would then differ
+# from the declared id and the banner would show the wrong agent's open work.
+# Fail-safe: an old/missing CLI yields empty -> fall back to the shell-derived id
+# (the same shape resolve_agent derives), so the hook still works pre-handshake.
+AGENT="$("${FULCRA_COORD[@]}" identity --format json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("agent",""))' 2>/dev/null)"
+[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"
 
 JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
 [ -z "$JSON" ] && exit 0
