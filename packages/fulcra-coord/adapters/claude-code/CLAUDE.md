@@ -107,6 +107,41 @@ create mean you're sharing a checkout — move out before committing.
    Your job is to keep `next_action` and `--summary` *meaningful* via `update`
    at real milestones, so those automatic checkpoints capture useful state.
 
+## Code review & merge (global — every repo)
+
+**Never push directly to `main`. Every change goes through a PR, gets reviewed
+by another agent, and is merged by its original author — not the reviewer.**
+
+1. Do the work on a branch in your own worktree; open a PR (CI must pass).
+2. Post a bus message to your **reviewer**: `tell <reviewer> "Review PR #<n> in
+   <repo> — assume there are bugs that need fixing."` (Adversarial framing — the
+   reviewer hunts for bugs, doesn't rubber-stamp.)
+   - **Reviewer routing:** non-Arc Claude Code agents → the **Codex reviewer**
+     (currently `codex:Mac.localdomain:main`). Arc sessions (`claude-code:ArcBot:*`)
+     → the **Arc code-review** session (`claude-code:ArcBot:Arc-Code-Review`).
+     If you *are* the Codex reviewer, ask the operator to assign a Claude agent
+     to review your own PRs.
+3. The reviewer reviews, **commits fixes onto the PR branch**, then messages you
+   back to review those fixes.
+4. **You (the author) review the reviewer's fixes and do the final merge.** The
+   reviewer never merges.
+5. If the reviewer doesn't respond in a reasonable window, **ping the operator
+   (`block --on-user`) — never merge unreviewed.**
+
+## Repo homes (where work lives)
+
+Everything lives on **GitHub** so PRs are possible — if a repo isn't on GitHub,
+get it there before merging (ask the operator where it should go if unsure).
+
+- **`ashfulcra/fulcra-tools`** (this monorepo, currently Fulcra-internal) is
+  **only for things that make Fulcra useful for other people** — Fulcra-ecosystem
+  tools that may become public/product later (ingest, onboarding, agent
+  coordination, …).
+- **Everything else** — personal projects, unrelated infra — goes in **separate,
+  logically-arranged repos under `ashfulcra` or `reversity`**, NOT in this
+  monorepo.
+- When unsure where a new repo or package belongs, **ask the operator first.**
+
 ## Search
 
 ```bash
