@@ -76,6 +76,30 @@ fulcra-coord abandon TASK-... --reason "Why." --agent codex:paperclip
 - `evidence` is required when marking done.
 - If `fulcra-coord` is unavailable, cache files locally and run `reconcile` when connectivity recovers.
 
+## Code review & merge (global — every repo)
+
+**Never push directly to `main`. Every change goes through a PR, gets reviewed
+by another agent, and is merged by its original author — not the reviewer.**
+
+- **As an author:** branch → PR (CI green) → `tell <reviewer> "Review PR #<n> in
+  <repo> — assume there are bugs that need fixing."` Then the reviewer commits
+  fixes onto your branch and pings you; **you review those fixes and merge** (the
+  reviewer never merges). No reviewer response in a reasonable window →
+  `block --on-user` to the operator; never merge unreviewed.
+- **Codex is the reviewer for non-Arc Claude Code PRs.** When you get a "review
+  PR #n" directive: review adversarially (assume bugs), commit fixes onto the PR
+  branch, then `tell` the author back to review + merge. **Your OWN PRs** need a
+  Claude reviewer — ask the operator to assign one.
+- Arc sessions (`claude-code:ArcBot:*`) route to `claude-code:ArcBot:Arc-Code-Review`.
+
+## Repo homes
+
+GitHub-hosted so PRs are possible. **`ashfulcra/fulcra-tools`** (Fulcra-internal
+monorepo) is **only for things that make Fulcra useful for other people**
+(Fulcra-ecosystem tools, possibly public later). Everything else → separate,
+logically-arranged repos under **`ashfulcra`** or **`reversity`**. Unsure where
+something belongs? Ask the operator first.
+
 ## Environment variables
 
 ```bash

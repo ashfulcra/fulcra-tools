@@ -33,3 +33,18 @@ launchd runs the daemon with a restricted PATH (`/usr/bin:/bin:/usr/sbin:/sbin`)
 
 ## Sign-in & first run
 Full first-run walkthrough + troubleshooting: `docs/TESTING.md`.
+
+## Code review & merge (all repos)
+**No direct pushes to `main` — every change goes through a PR, is reviewed by
+another agent, and is merged by its original author (not the reviewer).** Open a
+PR → `tell` your reviewer "Review PR #n in <repo> — assume there are bugs to
+fix" → reviewer commits fixes onto the branch and pings you → you review + merge.
+Reviewer routing: non-Arc Claude agents → `codex:Mac.localdomain:main`; Arc
+sessions → `claude-code:ArcBot:Arc-Code-Review`. No reviewer response → ping the
+operator (`fulcra-coord block --on-user`); never merge unreviewed. Full rule:
+`packages/fulcra-coord/adapters/claude-code/CLAUDE.md`.
+
+## Repo homes
+This monorepo (Fulcra-internal for now) is **only for things that make Fulcra
+useful for other people**. Personal/unrelated projects go in separate repos
+under `ashfulcra` or `reversity` — ask the operator when unsure.
