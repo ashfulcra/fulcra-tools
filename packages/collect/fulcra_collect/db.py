@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .config import config_dir
 
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 
 _LOG = logging.getLogger("fulcra_collect.db")
 
@@ -166,6 +166,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < 2:
         _migration_002_import_plugin_state_json(conn)
         _record_version(conn, 2)
+    if current < 3:
+        _migration_003_forwarded_attention(conn)
+        _record_version(conn, 3)
 
 
 def _migration_001_initial(conn: sqlite3.Connection) -> None:
@@ -257,6 +260,31 @@ def _migration_002_import_plugin_state_json(conn: sqlite3.Connection) -> None:
             )
 
 
+def _migration_003_forwarded_attention(conn: sqlite3.Connection) -> None:
+    """Create the ``forwarded_attention`` dedup table.
+
+    The daemon's ``POST /api/extension/attention`` route forwards each
+    attention event to Fulcra keyed by a DETERMINISTIC ``source_id``
+    (``com.fulcra.attention.v2.<hash>``). Fulcra does NOT dedupe by
+    ``source_id`` at write time — it's a query-time hint only — so a
+    re-POSTed event (the extension's outbox-flush concurrency bug re-sends
+    the same entries many times) creates a PERMANENT duplicate in the
+    user's Fulcra account. This table is the daemon's memory of which
+    attention ``source_id``s it has already forwarded, so it can forward
+    each unique source_id at most once. ``source_id`` is the PRIMARY KEY,
+    which lets ``INSERT OR IGNORE`` do the atomic check-and-record under a
+    storm of identical concurrent POSTs without any application-level
+    locking."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS forwarded_attention (
+            source_id    TEXT PRIMARY KEY,
+            forwarded_at TEXT NOT NULL
+        );
+        """,
+    )
+
+
 # ---- low-level CRUD used by state.py --------------------------------
 
 
@@ -291,6 +319,30 @@ def upsert_plugin_state(conn: sqlite3.Connection, *, plugin_id: str,
             datetime.now(timezone.utc).isoformat(),
         ),
     )
+
+
+def claim_attention_source_id(conn: sqlite3.Connection,
+                              source_id: str) -> bool:
+    """Atomically claim an attention ``source_id`` for forwarding.
+
+    Returns ``True`` if THIS call inserted the row (the source_id has not
+    been forwarded before → the caller should forward to Fulcra), or
+    ``False`` if the row already existed (a duplicate → the caller should
+    SKIP the forward).
+
+    ``INSERT OR IGNORE`` against the ``source_id`` PRIMARY KEY makes the
+    check-and-record a single atomic statement, so the extension's flush
+    storm (many identical source_ids POSTed near-simultaneously) results
+    in exactly one ``True`` and the rest ``False`` — SQLite serialises the
+    inserts and the unique constraint does the dedup. No application-level
+    lock needed. ``cursor.rowcount`` is 1 when a row was actually inserted
+    and 0 when the IGNORE swallowed a constraint violation."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO forwarded_attention (source_id, forwarded_at) "
+        "VALUES (?, ?)",
+        (source_id, datetime.now(timezone.utc).isoformat()),
+    )
+    return cur.rowcount == 1
 
 
 def all_plugin_ids(conn: sqlite3.Connection) -> list[str]:

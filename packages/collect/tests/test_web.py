@@ -1857,10 +1857,19 @@ def test_extension_attention_throttles_activity_feed_entries(
     daemon._monotonic = _advance_clock
 
     # Each POST below sets state["current"] to the next pending value.
+    # Every POST carries a DISTINCT url so it survives the source_id
+    # dedup guard — this throttle test is about distinct attention events
+    # (per-tab focus changes), not re-sends of the same event.
+    _seq = {"n": 0}
+    def _distinct_payload() -> dict:
+        p = _valid_attention_payload()
+        _seq["n"] += 1
+        p["url"] = f"https://example.com/article-{_seq['n']}"
+        return p
 
     for _ in range(2):
         r = c.post("/api/extension/attention",
-                   json=_valid_attention_payload(),
+                   json=_distinct_payload(),
                    headers={"Authorization": "Bearer the-right-one"})
         assert r.status_code == 200, r.text
         state["current"] = pending.pop(0)
@@ -1868,7 +1877,7 @@ def test_extension_attention_throttles_activity_feed_entries(
     # After 3 POSTs inside the 60s window, exactly one activity entry
     # should be present (the first POST at t=0 vs last_at=-inf → fires).
     r = c.post("/api/extension/attention",
-               json=_valid_attention_payload(),
+               json=_distinct_payload(),
                headers={"Authorization": "Bearer the-right-one"})
     assert r.status_code == 200, r.text
     entries = daemon.activity.recent()
@@ -1883,7 +1892,7 @@ def test_extension_attention_throttles_activity_feed_entries(
     # suppressed at t=1 and t=2, plus this 4th POST itself).
     state["current"] = pending.pop(0)
     r = c.post("/api/extension/attention",
-               json=_valid_attention_payload(),
+               json=_distinct_payload(),
                headers={"Authorization": "Bearer the-right-one"})
     assert r.status_code == 200, r.text
     entries = daemon.activity.recent()
@@ -2458,3 +2467,183 @@ def test_delete_definition_prunes_from_favorites(
 
     # def-pinned was removed from favorites; def-other is untouched.
     assert _favs.load() == {"def-other"}
+
+
+# ---------------------------------------------------------------------------
+# source_id dedup — the daemon must forward each unique attention
+# source_id to Fulcra at most once, even when the extension re-POSTs the
+# same event many times (its outbox-flush concurrency bug). Fulcra does
+# NOT dedupe by source_id at write time, so without this guard duplicate
+# POSTs become permanent duplicate records in the user's account.
+# ---------------------------------------------------------------------------
+
+def _install_attention_dedup_stubs(monkeypatch):
+    """Stub attention state + FulcraClient + IngestPipeline so the
+    extension route runs end-to-end without network. Returns the list
+    that captures the typed events handed to IngestPipeline.ingest_one,
+    so a test can assert how many forwards actually happened."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("extension-token", "the-right-one")
+
+    from fulcra_attention.state import State
+    fake_state = State(
+        attention_definition_id="def-att",
+        tag_ids={"attention": "a", "web": "w"},
+    )
+    monkeypatch.setattr("fulcra_attention.state.load",
+                        lambda *a, **kw: fake_state)
+    monkeypatch.setattr("fulcra_attention.state.save",
+                        lambda *a, **kw: None)
+
+    ingest_calls: list = []
+
+    class _CapturingPipeline:
+        def __init__(self, client=None): pass
+        def ingest_one(self, event):
+            ingest_calls.append(event)
+        def ingest_batch(self, events):
+            ingest_calls.extend(events)
+    monkeypatch.setattr(
+        "fulcra_collect.routes.extension.IngestPipeline", _CapturingPipeline,
+    )
+
+    class _FakeFulcraClient:
+        def __init__(self, *a, **kw): pass
+        def ensure_tag(self, name, state): return "tag-stub"
+        def definition_exists(self, def_id): return True
+    monkeypatch.setattr("fulcra_attention.fulcra.FulcraClient",
+                        _FakeFulcraClient)
+    return ingest_calls
+
+
+def test_extension_attention_dedupes_repeated_source_id(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """The same payload POSTed twice → Fulcra forward happens exactly
+    once; both POSTs return 200 (so the extension's outbox clears)."""
+    ingest_calls = _install_attention_dedup_stubs(monkeypatch)
+
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    from fastapi.testclient import TestClient
+    c = TestClient(app)
+
+    payload = _valid_attention_payload()
+    r1 = c.post("/api/extension/attention", json=payload,
+                headers={"Authorization": "Bearer the-right-one"})
+    r2 = c.post("/api/extension/attention", json=payload,
+                headers={"Authorization": "Bearer the-right-one"})
+
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    # Forwarded to Fulcra exactly once despite two identical POSTs.
+    assert len(ingest_calls) == 1
+    # The dedup table records the single source_id.
+    from fulcra_collect import db as _db
+    rows = _db.open().execute(
+        "SELECT source_id FROM forwarded_attention").fetchall()
+    assert len(rows) == 1
+
+
+def test_extension_attention_forwards_distinct_source_ids(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Two DIFFERENT source_ids (different URLs) → forwarded twice."""
+    ingest_calls = _install_attention_dedup_stubs(monkeypatch)
+
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    from fastapi.testclient import TestClient
+    c = TestClient(app)
+
+    p1 = _valid_attention_payload()
+    p1["url"] = "https://example.com/one"
+    p2 = _valid_attention_payload()
+    p2["url"] = "https://example.com/two"
+
+    r1 = c.post("/api/extension/attention", json=p1,
+                headers={"Authorization": "Bearer the-right-one"})
+    r2 = c.post("/api/extension/attention", json=p2,
+                headers={"Authorization": "Bearer the-right-one"})
+
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    assert len(ingest_calls) == 2
+    source_ids = {e.source_id for e in ingest_calls}
+    assert len(source_ids) == 2
+
+
+def test_extension_attention_dedupes_under_storm(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """Simulate the extension's flush storm: N concurrent identical POSTs
+    → exactly one forward to Fulcra and exactly one dedup-table row."""
+    import threading
+
+    ingest_calls = _install_attention_dedup_stubs(monkeypatch)
+
+    daemon = _build_test_daemon(collect_home)
+    app = build_app(daemon)
+    from fastapi.testclient import TestClient
+    c = TestClient(app)
+
+    payload = _valid_attention_payload()
+    N = 25
+    statuses: list[int] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(N)
+
+    def _hit():
+        # Line every thread up at the barrier so the POSTs land as close
+        # to simultaneously as the GIL + SQLite locking allow.
+        barrier.wait()
+        resp = c.post("/api/extension/attention", json=payload,
+                      headers={"Authorization": "Bearer the-right-one"})
+        with lock:
+            statuses.append(resp.status_code)
+
+    threads = [threading.Thread(target=_hit) for _ in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Every POST returned 200 (deduped duplicates still succeed so the
+    # extension's outbox clears).
+    assert statuses == [200] * N
+    # But Fulcra was only forwarded the event once.
+    assert len(ingest_calls) == 1
+    from fulcra_collect import db as _db
+    rows = _db.open().execute(
+        "SELECT source_id FROM forwarded_attention").fetchall()
+    assert len(rows) == 1
+
+
+def test_extension_attention_dedup_survives_db_reopen(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """The dedup is persistent: once a source_id is recorded in state.db,
+    a daemon/db restart still dedupes it (no second forward)."""
+    ingest_calls = _install_attention_dedup_stubs(monkeypatch)
+
+    payload = _valid_attention_payload()
+
+    from fastapi.testclient import TestClient
+    from fulcra_collect import db as _db
+
+    # First daemon instance forwards the event once.
+    daemon1 = _build_test_daemon(collect_home)
+    c1 = TestClient(build_app(daemon1))
+    r1 = c1.post("/api/extension/attention", json=payload,
+                 headers={"Authorization": "Bearer the-right-one"})
+    assert r1.status_code == 200, r1.text
+    assert len(ingest_calls) == 1
+
+    # Simulate a restart: drop the cached SQLite connection so the next
+    # db.open() opens state.db fresh from disk.
+    _db.close_all()
+
+    # Second daemon instance, same FULCRA_COLLECT_HOME / state.db.
+    daemon2 = _build_test_daemon(collect_home)
+    c2 = TestClient(build_app(daemon2))
+    r2 = c2.post("/api/extension/attention", json=payload,
+                 headers={"Authorization": "Bearer the-right-one"})
+    assert r2.status_code == 200, r2.text
+    # Still exactly one forward — the persisted source_id deduped it.
+    assert len(ingest_calls) == 1

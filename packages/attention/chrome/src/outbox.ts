@@ -53,7 +53,33 @@ export async function addToOutbox(payload: AttentionEvent): Promise<void> {
   await saveOutbox(cur);
 }
 
-export async function flushOutbox(): Promise<void> {
+// Single-flight guard. flushOutbox loads the outbox snapshot at the top and
+// only writes the remaining entries at the very end (after every POST). If two
+// flushes overlap — e.g. the per-minute FLUSH_ALARM tick and the history
+// backfill's fire-and-forget `void flushOutbox()` — both read the SAME snapshot
+// and both POST every entry before either clears it, producing duplicate
+// ingests (observed: thousands of duplicate annotations per event). We
+// serialize by holding the in-flight flush's promise at module scope: a second
+// concurrent call awaits and returns that same promise instead of starting an
+// overlapping run. The next alarm tick drains whatever the in-flight run left.
+//
+// A dedicated guard (rather than reusing background.ts's withSwLock) is
+// deliberate: flushOutbox touches only the `outbox` storage key, never the
+// `visits` map that withSwLock protects, so coupling the two would needlessly
+// serialize unrelated navigation handling against network flushes. The guard
+// always resets in a finally so a throw can't wedge it permanently.
+let inFlightFlush: Promise<void> | null = null;
+
+export function flushOutbox(): Promise<void> {
+  if (inFlightFlush) return inFlightFlush;
+  const run = doFlushOutbox().finally(() => {
+    inFlightFlush = null;
+  });
+  inFlightFlush = run;
+  return run;
+}
+
+async function doFlushOutbox(): Promise<void> {
   const settings = await loadSettings();
   if (!settings.bearerToken) return;
   const entries = await loadOutbox();
