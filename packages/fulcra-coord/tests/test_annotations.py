@@ -125,11 +125,18 @@ class TestEmitGating(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["XDG_CACHE_HOME"] = self.tmp
+        # Isolate XDG_CONFIG_HOME too: with the env var unset, _mode() falls
+        # through to the PERSISTED annotations config, so a machine that has run
+        # `annotations on` would flip these default-off assertions. An empty tmp
+        # config dir resolves cleanly to off.
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
         self._saved = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
 
     def tearDown(self):
         os.environ.pop("XDG_CACHE_HOME", None)
+        os.environ.pop("XDG_CONFIG_HOME", None)
         if self._saved is None:
             os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         else:
@@ -194,11 +201,18 @@ class TestNeedsUserAnnotation(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["XDG_CACHE_HOME"] = self.tmp
+        # Isolate XDG_CONFIG_HOME too: with the env var unset, _mode() falls
+        # through to the PERSISTED annotations config, so a machine that has run
+        # `annotations on` would flip these default-off assertions. An empty tmp
+        # config dir resolves cleanly to off.
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
         self._saved = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
 
     def tearDown(self):
         os.environ.pop("XDG_CACHE_HOME", None)
+        os.environ.pop("XDG_CONFIG_HOME", None)
         if self._saved is None:
             os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         else:
@@ -500,14 +514,18 @@ class TestEmitCliIntegration(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["XDG_CACHE_HOME"] = self.tmp
+        # Isolate config so a persisted `annotations on` can't flip default-off.
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
         self._saved_mode = os.environ.get("FULCRA_COORD_ANNOTATIONS")
         self._saved_cli = os.environ.get("FULCRA_CLI_COMMAND")
         self._saved_backend = os.environ.get("FULCRA_COORD_BACKEND")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         os.environ["FULCRA_CLI_COMMAND"] = "myfulcra"
         os.environ.pop("FULCRA_COORD_BACKEND", None)
 
     def tearDown(self):
         os.environ.pop("XDG_CACHE_HOME", None)
+        os.environ.pop("XDG_CONFIG_HOME", None)
         for k, v in (
             ("FULCRA_COORD_ANNOTATIONS", self._saved_mode),
             ("FULCRA_CLI_COMMAND", self._saved_cli),
@@ -1119,10 +1137,17 @@ class TestEmitHttpIntegration(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["XDG_CACHE_HOME"] = self.tmp
+        # Isolate XDG_CONFIG_HOME too: with the env var unset, _mode() falls
+        # through to the PERSISTED annotations config, so a machine that has run
+        # `annotations on` would flip these default-off assertions. An empty tmp
+        # config dir resolves cleanly to off.
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
         self._saved = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
 
     def tearDown(self):
         os.environ.pop("XDG_CACHE_HOME", None)
+        os.environ.pop("XDG_CONFIG_HOME", None)
         if self._saved is None:
             os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         else:
