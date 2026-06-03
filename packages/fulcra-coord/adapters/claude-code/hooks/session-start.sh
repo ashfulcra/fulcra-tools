@@ -29,7 +29,14 @@ JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
 # "claude-code:${HOST}:${REPO}" id when none is set (I1).
 INBOX="$("${FULCRA_COORD[@]}" inbox --format json 2>/dev/null)"
 
-CONTEXT="$(JSON="$JSON" INBOX="$INBOX" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null
+# What is blocked on the HUMAN — the situational-awareness banner that LEADS the
+# injected context. Deliberately NO --human flag: the CLI resolves the operator's
+# handle from $FULCRA_COORD_HUMAN / persisted config / the 'human' default, so we
+# never hardcode a name here. Fail-safe: a missing/old CLI that lacks needs-me
+# yields empty and simply omits the section.
+NEEDSME="$("${FULCRA_COORD[@]}" needs-me --format json 2>/dev/null)"
+
+CONTEXT="$(JSON="$JSON" INBOX="$INBOX" NEEDSME="$NEEDSME" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null
 import sys, json, os, datetime
 agent = os.environ.get("AGENT","")
 stale_h = float(os.environ.get("STALE_HOURS","2"))
@@ -43,6 +50,12 @@ except Exception:
     # Inbox is an optional add-on surface; a missing/old CLI that lacks the
     # subcommand must not break the in-flight+stale section, so default empty.
     inbox = []
+try:
+    needsme = (json.loads(os.environ.get("NEEDSME","")) or {}).get("items", [])
+except Exception:
+    # Same fail-safe contract as inbox: an old CLI without needs-me omits the
+    # blocked-on-you banner rather than breaking the rest of the injection.
+    needsme = []
 active = d.get("active", []) or []
 def age_hours(ts):
     try:
@@ -56,9 +69,24 @@ def age_hours(ts):
         return float('inf')
 mine = [t for t in active if t.get("owner_agent")==agent]
 stale = [t for t in active if t.get("status")=="active" and age_hours(t.get("updated_at",""))>=stale_h]
-if not mine and not stale and not inbox:
+if not mine and not stale and not inbox and not needsme:
     sys.exit(0)
-lines = ["Fulcra coordination — open work on the shared bus:"]
+lines = []
+# LEAD with what's blocked on the human — the north-star situational-awareness
+# surface — before any in-flight / directive / stale section.
+if needsme:
+    lines.append("⛔ BLOCKED ON YOU (%d):" % len(needsme))
+    for it in needsme:
+        ask = (it.get("blocked_on") or it.get("next_action") or "").strip()
+        frm = it.get("owner_agent") or "?"
+        lines.append("  %s — %s (from %s)" % (it.get("id",""), it.get("title",""), frm))
+        if ask:
+            lines.append("      needs: %s" % ask)
+# The shared-bus section header only when there's bus content to show under it
+# (in-flight, stale, or directives) — otherwise a lone blocked-on-you banner
+# would carry an empty "open work" header.
+if mine or stale or inbox:
+    lines.append("Fulcra coordination — open work on the shared bus:")
 for t in mine:
     lines.append(f"  [{t.get('status','?').upper()}] {t['id']} — {t.get('title','')}")
     if t.get("next_action"):
@@ -76,7 +104,8 @@ if inbox:
         lines.append(f"      {it.get('id','')} — {it.get('title','')} (from {frm})")
         if it.get("next_action"):
             lines.append(f"          next: {it['next_action']}")
-lines.append("  To resume: "+os.environ.get("FULCRA_COORD","fulcra-coord")+" update <id> --status active --agent "+agent)
+if mine or stale or inbox:
+    lines.append("  To resume: "+os.environ.get("FULCRA_COORD","fulcra-coord")+" update <id> --status active --agent "+agent)
 print("\n".join(lines))
 PY
 )"
