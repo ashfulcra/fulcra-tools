@@ -361,3 +361,116 @@ def test_record_twins_after_post_only_runs_on_posted(cache_path):
     # posted > 0 → write
     _common.record_twins_after_post([high], posted=1)
     assert "x" in twin_cache.load(cache_path)
+
+
+# ---------------------------------------------------------------------------
+# Apple Podcasts: the inline run_import plugins must also sit on the twin seam.
+#
+# apple_podcasts / apple_podcasts_timemachine call client.run_import inline and
+# bypassed the shared funnels, so before this fix they neither populated nor
+# consulted the twin cache. These drive the real plugin run functions.
+# ---------------------------------------------------------------------------
+
+def _ap_evt(*, fp: str, confidence: str, sid: str,
+            ts: datetime | None = None) -> NormalizedEvent:
+    ts = ts or datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return NormalizedEvent(
+        importer="apple-podcasts",
+        service="apple-podcasts",
+        category="listened",
+        note="x",
+        title="x",
+        start_time=ts,
+        end_time=ts,
+        deterministic_id=sid,
+        timestamp_confidence=confidence,
+        external_ids={"content_fingerprint": fp},
+    )
+
+
+def _ap_ctx(config: dict) -> RunContext:
+    return RunContext(
+        plugin_id="apple-podcasts",
+        config=config,
+        credentials={},
+        state=PluginState("apple-podcasts"),
+        log=logging.getLogger("t"),
+        _emit=lambda e: None,
+    )
+
+
+def test_apple_podcasts_scheduled_import_populates_twin_cache(cache_path, monkeypatch):
+    """A HIGH-conf apple-podcasts scheduled import writes its fingerprint into
+    the twin cache — which the inline plugin did NOT do before this fix."""
+    from fulcra_media.collect_plugins import APPLE_PODCASTS_PLUGIN
+
+    high = _ap_evt(fp="pod:show:ep1", confidence="high", sid="ap-1")
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.ap.parse_db",
+                        lambda db_path: iter([high]))
+    captured = {}
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient",
+                        _make_fake_client(captured, result=_FakeResult(posted=1)))
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.newest_event_iso",
+                        lambda events: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
+                        lambda path: _bootstrapped_media_state())
+
+    APPLE_PODCASTS_PLUGIN.run(_ap_ctx({}))
+
+    cache = twin_cache.load(cache_path)
+    assert "pod:show:ep1" in cache
+    assert cache["pod:show:ep1"]["source_id"] == "ap-1"
+
+
+def test_apple_podcasts_does_not_populate_when_nothing_posted(cache_path, monkeypatch):
+    """No POST (all duplicates) → no cache write, mirroring the shared seam."""
+    from fulcra_media.collect_plugins import APPLE_PODCASTS_PLUGIN
+
+    high = _ap_evt(fp="pod:show:ep1", confidence="high", sid="ap-1")
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.ap.parse_db",
+                        lambda db_path: iter([high]))
+    captured = {}
+    monkeypatch.setattr(
+        "fulcra_media.plugins.apple_podcasts.FulcraClient",
+        _make_fake_client(captured, result=_FakeResult(posted=0, skipped_existing=1)),
+    )
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.newest_event_iso",
+                        lambda events: "2026-01-01T00:00:00Z")
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
+                        lambda path: _bootstrapped_media_state())
+
+    APPLE_PODCASTS_PLUGIN.run(_ap_ctx({}))
+
+    assert twin_cache.load(cache_path) == {}
+
+
+def test_apple_podcasts_auto_discard_consults_cache(cache_path, monkeypatch):
+    """A LOW-conf apple-podcasts import with twin_policy='auto-discard' consults
+    the cache and drops the incoming low-conf event whose fingerprint matches a
+    cached high-conf twin. Before this fix the inline plugin never consulted."""
+    from fulcra_media.collect_plugins import APPLE_PODCASTS_PLUGIN
+
+    twin_cache.record_imported_events(
+        [_ap_evt(fp="pod:show:ep1", confidence="high", sid="netflix-1",
+                 ts=datetime(2026, 4, 1, tzinfo=timezone.utc))],
+        cache_path,
+    )
+    low = _ap_evt(fp="pod:show:ep1", confidence="low", sid="ap-low",
+                  ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
+    keep = _ap_evt(fp="pod:show:ep2", confidence="low", sid="ap-keep",
+                   ts=datetime(2026, 5, 17, tzinfo=timezone.utc))
+
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.ap.parse_db",
+                        lambda db_path: iter([low, keep]))
+    captured = {}
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient",
+                        _make_fake_client(captured, result=_FakeResult(posted=1)))
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.newest_event_iso",
+                        lambda events: "2026-05-17T00:00:00Z")
+    monkeypatch.setattr("fulcra_media.plugins.apple_podcasts._state_load",
+                        lambda path: _bootstrapped_media_state())
+
+    APPLE_PODCASTS_PLUGIN.run(_ap_ctx({"twin_policy": "auto-discard"}))
+
+    # The matched low-conf twin was dropped; the unmatched one stays.
+    assert captured["imported"] == [keep]

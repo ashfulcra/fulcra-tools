@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from fulcra_collect.plugin import Credential, Plugin, RunContext, SetupStep
-from fulcra_csv import ClusterPolicy, apply_cluster_policy, apply_twin_decisions, find_low_conf_twins
+from fulcra_csv import ClusterPolicy, apply_cluster_policy, find_low_conf_twins
 
 from .. import twin_cache
 from ..fulcra import FulcraClient
@@ -20,6 +20,24 @@ from ._common import DURATION_SPEC, ensure_media_def, newest_event_iso
 # Same structure as NETFLIX_WATCHED_SPEC — all Watched plugins share the same
 # definition.
 TRAKT_WATCHED_SPEC: dict = DURATION_SPEC
+
+
+def apply_twin_decisions(events: list, discard_source_ids: set[str]) -> list:
+    """Cross-name-safe replacement for ``fulcra_csv.apply_twin_decisions``.
+
+    fulcra_csv's version filters on ``e.source_id`` only, but trakt's events
+    are ``NormalizedEvent``s whose dedup id is ``deterministic_id`` — so the
+    upstream filter raised ``AttributeError`` on the auto-discard path. This
+    uses ``twin_cache._source_id_of``, the same accessor that builds
+    ``discard_source_ids``, so the read and the filter agree regardless of which
+    id attribute the event carries (GenericEvent: source_id, NormalizedEvent:
+    deterministic_id). Kept as a module-level symbol so the existing
+    ``fulcra_media.plugins.trakt.apply_twin_decisions`` monkeypatch still works.
+    """
+    return [
+        e for e in events
+        if twin_cache._source_id_of(e) not in discard_source_ids
+    ]
 
 
 def _run_trakt(ctx: RunContext) -> None:

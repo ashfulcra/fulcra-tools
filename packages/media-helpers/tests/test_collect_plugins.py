@@ -2718,6 +2718,96 @@ def test_trakt_plugin_auto_discards_twins_when_policy_is_auto_discard(monkeypatc
     assert "low-id" in discard_calls[0]
 
 
+def test_trakt_auto_discard_does_not_crash_on_normalized_event(monkeypatch):
+    """Regression: trakt's auto-discard path filtered with fulcra_csv's
+    apply_twin_decisions, which reads ``e.source_id`` — but NormalizedEvent
+    exposes its dedup id as ``deterministic_id``, so the real filter raised
+    AttributeError. Drive the path with REAL NormalizedEvents (no patch over
+    the filter) and assert the matched low-conf twin is dropped WITHOUT raising.
+    """
+    from datetime import datetime, timezone
+
+    from fulcra_media.importers.base import NormalizedEvent
+
+    def _ne(*, sid, conf, fp, ts):
+        return NormalizedEvent(
+            importer="trakt", service="trakt", category="watched",
+            note="x", title="x", start_time=ts, end_time=ts,
+            deterministic_id=sid, timestamp_confidence=conf,
+            external_ids={"content_fingerprint": fp},
+        )
+
+    low = _ne(sid="trakt-low", conf="low", fp="tv:dune:s01e01",
+              ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
+    keep = _ne(sid="trakt-keep", conf="low", fp="tv:other:s01e01",
+               ts=datetime(2026, 5, 17, tzinfo=timezone.utc))
+    high = _ne(sid="netflix-high", conf="high", fp="tv:dune:s01e01",
+               ts=datetime(2026, 4, 1, tzinfo=timezone.utc))
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history", lambda: [])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [low, keep])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
+        lambda events, policy: events)
+    # Real find_low_conf_twins + real filter path — only the cache load is faked.
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
+        lambda: [high])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.newest_event_iso", lambda events: None)
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    ctx, _ = _make_ctx("trakt", {"twin_policy": "auto-discard"})
+    TRAKT_PLUGIN.run(ctx)  # must not raise AttributeError
+
+    # The matched low-conf twin was dropped; the unmatched low-conf event stays.
+    assert fake_client.calls["imported"] == [keep]
+
+
+def test_trakt_default_keep_policy_imports_everything(monkeypatch):
+    """Default twin_policy ('keep') is a no-op: nothing is discarded even when a
+    matching high-conf twin exists in the cache."""
+    from datetime import datetime, timezone
+
+    from fulcra_media.importers.base import NormalizedEvent
+
+    low = NormalizedEvent(
+        importer="trakt", service="trakt", category="watched", note="x",
+        title="x", start_time=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        end_time=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        deterministic_id="trakt-low", timestamp_confidence="low",
+        external_ids={"content_fingerprint": "tv:dune:s01e01"},
+    )
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history", lambda: [])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [low])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
+        lambda events, policy: events)
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.newest_event_iso", lambda events: None)
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    ctx, _ = _make_ctx("trakt", {})  # default twin_policy = keep
+    TRAKT_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [low]
+
+
 # ---------------------------------------------------------------------------
 # R8 regression-guard tests for trakt resolver
 # ---------------------------------------------------------------------------

@@ -12,7 +12,13 @@ from ..importers import apple_podcasts as ap
 from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
 from ..state import save as _state_save
-from ._common import DURATION_SPEC, ensure_media_def, newest_event_iso
+from ._common import (
+    DURATION_SPEC,
+    consult_twin_cache,
+    ensure_media_def,
+    newest_event_iso,
+    record_twins_after_post,
+)
 
 
 _FULL_DISK_ACCESS_PERMISSION = Permission(
@@ -99,6 +105,12 @@ def _run_apple_podcasts(ctx: RunContext) -> None:
 
     ctx.progress(stage="parsed", count=len(events))
 
+    # Cross-source twin dedup: consult the local high-conf twin cache and apply
+    # the configured twin policy (default "keep" → no-op) before importing.
+    # This plugin imports inline rather than through _common.run_scheduled_import,
+    # so it wires the same twin seam by hand. See _common.consult_twin_cache.
+    events = consult_twin_cache(ctx, events)
+
     # Ensure the "Listened" annotation definition is known before importing.
     # On a fresh install (machine 2) the media state file may have no
     # listened_definition_id because bootstrap was never run on this machine.
@@ -122,6 +134,10 @@ def _run_apple_podcasts(ctx: RunContext) -> None:
             + ("s" if result.posted != 1 else ""),
             ok=True,
         )
+
+    # Populate the twin cache with this run's high-conf events (after a
+    # successful POST only), so a future low-conf twin can defer to them.
+    record_twins_after_post(events, posted=result.posted)
 
     # Advance even when posted == 0 — see _common.run_scheduled_import for rationale.
     new_wm = newest_event_iso(events)

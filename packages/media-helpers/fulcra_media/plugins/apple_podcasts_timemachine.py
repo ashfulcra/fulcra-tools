@@ -8,7 +8,12 @@ from ..importers import apple_podcasts as ap
 from ..state import DEFAULT_PATH as STATE_PATH
 from ..state import load as _state_load
 from ..state import save as _state_save
-from ._common import DURATION_SPEC, ensure_media_def
+from ._common import (
+    DURATION_SPEC,
+    consult_twin_cache,
+    ensure_media_def,
+    record_twins_after_post,
+)
 from .apple_podcasts import _FULL_DISK_ACCESS_PERMISSION
 
 
@@ -58,6 +63,13 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
             )
 
     ctx.progress(stage="parsed", count=len(all_events))
+
+    # Cross-source twin dedup: consult the local high-conf twin cache and apply
+    # the configured twin policy (default "keep" → no-op) before importing. This
+    # plugin imports inline rather than through the shared glue, so it wires the
+    # same twin seam by hand. See _common.consult_twin_cache.
+    all_events = consult_twin_cache(ctx, all_events)
+
     client = FulcraClient()
     client.ensure_tag("apple-podcasts", media_state)
     result = client.run_import(all_events, media_state, claim=ctx.claim_dedup_keys,
@@ -70,6 +82,10 @@ def _run_apple_podcasts_timemachine(ctx: RunContext) -> None:
             + ("s" if result.posted != 1 else ""),
             ok=True,
         )
+
+    # Populate the twin cache with this run's high-conf events (after a
+    # successful POST only), so a future low-conf twin can defer to them.
+    record_twins_after_post(all_events, posted=result.posted)
     # No watermark advance — this is a manual, one-shot recovery run.
 
 
