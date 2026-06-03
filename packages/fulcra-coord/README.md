@@ -154,7 +154,11 @@ Read commands use local cache when fresh. Full remote sync happens on `status` a
   `session_id`/`transcript_path`/`cwd` stdin shape; PreCompact keys the session
   pointer on `FULCRA_COORD_SESSION_KEY`) into `~/.codex/hooks.json` via an
   idempotent surgical JSON merge. No Stop hook: Codex `Stop` fires every turn and
-  would thrash the task, so end-parking is delegated to the heartbeat.
+  would thrash the task, so end-parking is delegated to the heartbeat. Codex
+  Desktop active threads do not get live text injected by launchd; if the
+  operator wants broadcasts to appear in an already-open thread, add a Codex app
+  heartbeat/automation that polls `fulcra-coord inbox --agent <id>` for that
+  thread.
 - `fulcra-coord install-heartbeat` — installs a scheduled `fulcra-coord reconcile`
   (launchd LaunchAgent on macOS, a managed crontab line elsewhere). The reconciler
   is the coordination safety net: it sweeps `active` tasks left dangling by crashed

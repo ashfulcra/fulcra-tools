@@ -3,7 +3,7 @@
 Cold-start a Codex agent onto the fulcra-coord mesh. A session that was already
 running won't have had its hooks fire, so it self-onboards by running these.
 (Once `fulcra-coord install-codex` has run, future Codex sessions integrate
-automatically via the Codex `SessionStart`/`Stop`/`PreCompact` hooks.)
+automatically via the Codex `SessionStart`/`PreCompact` hooks.)
 
 Paste this into a Codex session:
 
@@ -19,7 +19,7 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    Confirm your build is current: `fulcra-coord --version` and
    `fulcra-coord capabilities` (lists supported commands — if a command this
    doc mentions is missing, your install is stale; reinstall per step 1).
-3. Wire your Codex lifecycle hooks (SessionStart / Stop / PreCompact):
+3. Wire your Codex lifecycle hooks (SessionStart / PreCompact):
    `fulcra-coord install-codex`        (+ optional `fulcra-coord install-listener --agent codex:<host>:<label>`)
 4. Declare a clear, stable, human-legible identity (vendor:host:purpose) so
    directives reach you and the human can tell who's who on the bus:
@@ -67,8 +67,15 @@ checkout — move to your own worktree instead of committing over another sessio
 
 ## Codex specifics
 - Use **`install-codex`** (not `install-claude-code`). It wires Codex's
-  `SessionStart` / `Stop` / `PreCompact` hooks. Codex has **no `SessionEnd`**;
-  `Stop` fires at end-of-turn, so the checkpoint is idempotent.
+  `SessionStart` / `PreCompact` hooks. Codex has **no `SessionEnd`**;
+  `Stop` fires at end-of-turn, so fulcra-coord deliberately does not use it for
+  parking; install the heartbeat if you want that backstop.
+- `install-listener` is notify-only: it polls the bus, writes the pending inbox
+  surface, and emits a desktop notification. A fresh/resumed Codex session will
+  see directives through `SessionStart`, but an already-open Codex Desktop
+  thread will not receive live inbox text unless the operator also adds a Codex
+  app heartbeat/automation for that thread or the agent manually runs
+  `fulcra-coord inbox --agent <id>`.
 - Identity convention: `codex:<host>:<label>`. Address Codex on the bus by the
   prefix `codex` (identity prefix-matching) or its full id.
 - Annotations need a build with `create-data-type`; file-ops need the `file`
