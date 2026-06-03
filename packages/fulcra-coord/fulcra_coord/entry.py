@@ -111,9 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
     # ---- block ----
-    sp = sub.add_parser("block", help="Mark a task as blocked")
+    sp = sub.add_parser("block",
+                        help="Mark a task as blocked. --blocked-on for an "
+                             "agent/external blocker; --on-user to block on the "
+                             "human (assigns to them + needs:human, lands on needs-me)")
     sp.add_argument("task_id", metavar="TASK-ID")
-    sp.add_argument("--blocked-on", required=True, metavar="REASON")
+    sp.add_argument("--blocked-on", default=None, metavar="REASON",
+                    help="What an agent/external thing is blocking on")
+    sp.add_argument("--on-user", dest="on_user", default=None, metavar="ASK",
+                    help="What you need the HUMAN to do — assigns the task to the "
+                         "resolved human handle + tags needs:human")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
     # ---- pause ----
@@ -245,6 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
     isp_clear = isub.add_parser("clear", help="Remove the persisted identity")
     isp_clear.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- needs-me ----
+    sp = sub.add_parser("needs-me",
+                        help="What's blocked on YOU (the human): every open task "
+                             "assigned to / blocked on you across all agents, with "
+                             "who's waiting, the ask, and how long it's been")
+    sp.add_argument("--human", default=None, metavar="HANDLE",
+                    help="Whose plate (default: $FULCRA_COORD_HUMAN or persisted "
+                         "human handle or 'human')")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- human ----
     sp = sub.add_parser("human",
                         help="Show, set, or clear the human operator's handle — "
@@ -290,6 +307,7 @@ COMMAND_MAP = {
     "install-codex": _cli.cmd_install_codex,
     "identity": _cli.cmd_identity,
     "human": _cli.cmd_human,
+    "needs-me": _cli.cmd_needs_me,
     "__session-task": _cli.cmd_session_task,
 }
 

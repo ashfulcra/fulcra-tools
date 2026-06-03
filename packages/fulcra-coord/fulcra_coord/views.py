@@ -335,6 +335,35 @@ def inbox_for(me: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda x: (x.get("priority", "P9"), x.get("updated_at", "")))
 
 
+# Statuses at which a task counts as "still on the human's plate": proposed
+# (asked, not started), waiting (parked on them), or blocked (blocked --on-user).
+# Terminal/active states are not awaiting the human, so they are excluded.
+NEEDS_HUMAN_OPEN_STATUSES = ("proposed", "waiting", "blocked")
+
+
+def needs_human(tasks: list[dict[str, Any]], human: str) -> list[dict[str, Any]]:
+    """Every OPEN task assigned to / blocked on the human, across all owners.
+
+    The data layer behind ``needs-me`` and the SessionStart "BLOCKED ON YOU"
+    banner: the human's situational-awareness glance of "what's on my plate from
+    my agents." Membership is prefix-aware via ``agent_matches`` so both the
+    neutral ``human`` and a personalized handle (``ash``) resolve, and an
+    assignee addressed to a short id reaches the full one. Open = proposed /
+    waiting / blocked (an active or terminal task is not awaiting the human).
+
+    Returned oldest-first (by ``updated_at``) so the longest-waiting ask — the
+    thing the human has been blocking the longest — sorts to the top."""
+    items = []
+    for t in tasks:
+        assignee = t.get("assignee")
+        if not assignee or not agent_matches(human, assignee):
+            continue
+        if t.get("status") not in NEEDS_HUMAN_OPEN_STATUSES:
+            continue
+        items.append(task_summary(t))
+    return sorted(items, key=lambda x: x.get("updated_at", ""))
+
+
 def build_next(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Proposed and waiting tasks — candidates for starting next."""
     if updated_at is None:
