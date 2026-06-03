@@ -138,10 +138,13 @@ get it there before merging (ask the operator where it should go if unsure).
   **only for things that make Fulcra useful for other people** — Fulcra-ecosystem
   tools that may become public/product later (ingest, onboarding, agent
   coordination, …).
-- **Everything else** — personal projects, unrelated infra — goes in **separate,
-  logically-arranged repos under `ashfulcra` or `reversity`**, NOT in this
-  monorepo.
-- When unsure where a new repo or package belongs, **ask the operator first.**
+- **Fulcra-related** work that isn't "useful-to-others" enough for the monorepo
+  (infra, proxies, runtimes — e.g. an LLM proxy, a Hermes runtime) → its own
+  **`ashfulcra/<repo>`**.
+- **Personal / unrelated** projects (e.g. a home-automation or hobby project) →
+  its own **`reversity/<repo>`**.
+- One logically-arranged repo per project; when unsure where something belongs,
+  **ask the operator first.**
 
 ## Search
 
