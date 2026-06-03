@@ -1295,9 +1295,15 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
         schema.task_summary(t) for t in all_tasks
         if t.get("owner_agent") == me and t.get("status") in ("active", "waiting")
     ]
+    # Broadcast exclusion (parity with views.needs_human): a broadcast ("*")
+    # reaches every agent's inbox, but an all-agent announcement is ambient
+    # context, not work PARKED on me. Including it floods the resume briefing
+    # with join-announcement noise. "Blocked on me" = directives addressed to
+    # me CONCRETELY (or via my id prefix); broadcasts stay visible via `inbox`.
     blocked_on_me = [
         schema.task_summary(t) for t in all_tasks
-        if t.get("assignee") and views.agent_matches(me, t.get("assignee"))
+        if t.get("assignee") and t.get("assignee") != views.BROADCAST
+        and views.agent_matches(me, t.get("assignee"))
         and t.get("owner_agent") != me
         and t.get("status") in ("proposed", "waiting", "blocked")
     ]

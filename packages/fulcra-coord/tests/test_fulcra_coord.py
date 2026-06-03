@@ -5460,6 +5460,30 @@ class TestNeedsHumanView(unittest.TestCase):
         tasks = [self._t("a", "ash", blocked_on="x")]
         self.assertEqual(len(needs_human(tasks, "ash")), 1)
 
+    def test_broadcast_is_not_blocked_on_human(self):
+        # A broadcast (assignee="*") reaches every agent's inbox, but an
+        # all-agent announcement is NOT a personal ask blocked on the human.
+        # The "blocked on YOU" plate must be precise — only tasks SPECIFICALLY
+        # directed at the human (concrete assignee) or tagged needs:human count.
+        # Otherwise every join-announcement broadcast floods the SessionStart
+        # ⛔ banner and buries the real asks (defeats the whole feature).
+        from fulcra_coord.views import needs_human
+        tasks = [
+            self._t("broadcast-noise", "*", blocked_on="fyi to everyone"),
+            self._t("real-ask", "human", blocked_on="review the PR"),
+        ]
+        out = needs_human(tasks, "human")
+        self.assertEqual([s["title"] for s in out], ["real-ask"])
+
+    def test_needs_human_tag_counts_even_if_assignee_drifts(self):
+        # A task carrying the needs:human tag (set by `block --on-user`) is on
+        # the human's plate regardless of how assignee was later edited.
+        from fulcra_coord.views import needs_human
+        t = self._t("tagged", "*", blocked_on="do the thing")
+        t["tags"] = ["needs:human", "agent-tasks"]
+        self.assertEqual([s["title"] for s in needs_human([t], "human")],
+                         ["tagged"])
+
     def test_only_open_statuses(self):
         from fulcra_coord.views import needs_human
         tasks = [
@@ -5862,6 +5886,19 @@ class TestResume(unittest.TestCase):
         # Not my own active work, not blocked-on-me.
         self.assertNotIn("TASK-mine-active", ids)
         self.assertNotIn("TASK-blocked-on-me", ids)
+
+    def test_broadcast_not_in_blocked_on_me(self):
+        # A broadcast (assignee="*") owned by another agent reaches my inbox but
+        # is an all-agent announcement, not work PARKED on me. It must NOT pad
+        # the resume "blocked on me" section (parity with needs_human; visible
+        # via `inbox` instead). Otherwise join-announcements bury real asks.
+        cache.write_cached_task(self._task("TASK-broadcast-noise", owner="other:x:y",
+                                            assignee="*", status="proposed",
+                                            na="fyi everyone"))
+        out = self._run(agent=self.me)
+        ids = [t["id"] for t in out["blocked_on_me"]]
+        self.assertNotIn("TASK-broadcast-noise", ids)
+        self.assertIn("TASK-blocked-on-me", ids)  # concrete directive still shows
 
     def test_blocked_on_human_section(self):
         out = self._run(agent=self.me)
