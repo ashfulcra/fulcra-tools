@@ -10,6 +10,12 @@ and tests; this README is the index that points you to them.
 > and the PATH/keychain gotchas — that otherwise cost time to rediscover on
 > first run.
 
+> **First-time setup, one command:** `bash scripts/setup.sh` — installs the
+> right Python + `uv` extras, the `fulcra` CLI, and runs the test suite to
+> verify. Then `uv run fulcra-collect daemon` (foreground) or install as a
+> launchd agent per [`docs/TESTING.md`](docs/TESTING.md). Diagnose later
+> with `uv run fulcra-collect doctor`.
+
 ## What's in here
 
 | Project | What it is | Start here |
