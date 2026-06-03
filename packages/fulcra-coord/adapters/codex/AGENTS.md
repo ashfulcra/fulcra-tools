@@ -18,9 +18,14 @@ Before starting non-trivial work:
 ```bash
 fulcra-coord status --workstream <workstream>
 fulcra-coord status --agent <your-agent-id>
+fulcra-coord inbox --agent <your-agent-id>
 ```
 
 Check for tasks already `waiting` or `active` that may belong to your workstream.
+For an already-open Codex Desktop thread, remember that `install-listener` emits
+desktop notifications and prepares the next `SessionStart`; it cannot inject
+new broadcast text into the live conversation. Use the Codex app heartbeat for
+thread wakeups, or poll `inbox` manually at task boundaries.
 
 ## Creating a task
 
