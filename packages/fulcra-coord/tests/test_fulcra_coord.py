@@ -6025,6 +6025,72 @@ class TestHumanCommand(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Versioning + capabilities probe (ArcBot-2 feedback)
+# ---------------------------------------------------------------------------
+
+class TestVersionFlag(unittest.TestCase):
+    """`--version` prints the real package version and exits 0 — even though a
+    subcommand is otherwise required (argparse's version action fires first)."""
+
+    def test_version_flag_prints_version_and_exits_zero(self):
+        import io, contextlib
+        from fulcra_coord.entry import build_parser
+        from fulcra_coord import __version__
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(buf):
+            build_parser().parse_args(["--version"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn(__version__, buf.getvalue())
+        self.assertIn("fulcra-coord", buf.getvalue())
+
+    def test_version_is_not_the_frozen_placeholder(self):
+        # ArcBot-2: the CLI was "stuck at v0.1.0 across breaking subcommand
+        # additions." Guard that the surface has actually moved past it.
+        from fulcra_coord import __version__
+        self.assertNotEqual(__version__, "0.1.0")
+
+
+class TestCapabilitiesProbe(unittest.TestCase):
+    """`capabilities` reports the version + supported commands so onboarding can
+    detect a stale install before invoking a missing subcommand."""
+
+    def _run(self, fmt="json"):
+        import io, contextlib
+        from fulcra_coord.cli import cmd_capabilities
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_capabilities(types.SimpleNamespace(format=fmt))
+        return buf.getvalue()
+
+    def test_json_lists_situational_awareness_commands(self):
+        from fulcra_coord import __version__
+        data = json.loads(self._run("json"))
+        self.assertEqual(data["version"], __version__)
+        self.assertEqual(data["name"], "fulcra-coord")
+        # The commands the onboarding docs rely on must be advertised.
+        for cmd in ("needs-me", "resume", "human", "block", "capabilities"):
+            self.assertIn(cmd, data["commands"])
+
+    def test_hidden_hook_command_is_not_advertised(self):
+        # __session-task is a hook-only internal, not part of the public probe.
+        data = json.loads(self._run("json"))
+        self.assertNotIn("__session-task", data["commands"])
+
+    def test_commands_match_dispatch_table(self):
+        # The probe must never claim a command main can't actually route.
+        from fulcra_coord.entry import COMMAND_MAP
+        data = json.loads(self._run("json"))
+        expected = sorted(k for k in COMMAND_MAP if not k.startswith("__"))
+        self.assertEqual(data["commands"], expected)
+
+    def test_table_format_human_readable(self):
+        from fulcra_coord import __version__
+        out = self._run("table")
+        self.assertIn(__version__, out)
+        self.assertIn("needs-me", out)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

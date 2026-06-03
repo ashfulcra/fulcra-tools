@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fulcra-coord"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Shared agent coordination layer using Fulcra Files as a coordination bus"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,11 @@ fulcra-coord = "fulcra_coord.entry:main"
 # pyyaml is a TEST-ONLY dep (validating the adapter OpenAPI YAML parses) — the
 # core fulcra_coord package stays strictly stdlib-only.
 dev = ["pytest>=7.0", "pyyaml>=6.0"]
+
+# Version derives from fulcra_coord/__init__.py::__version__ — one source of
+# truth, so the packaged version and the CLI's `--version` can never drift.
+[tool.hatch.version]
+path = "fulcra_coord/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fulcra_coord"]
