@@ -17,12 +17,13 @@ import logging
 import os
 import sqlite3
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import config_dir
 
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 
 _LOG = logging.getLogger("fulcra_collect.db")
 
@@ -169,6 +170,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < 3:
         _migration_003_forwarded_attention(conn)
         _record_version(conn, 3)
+    if current < 4:
+        _migration_004_forwarded_events(conn)
+        _record_version(conn, 4)
 
 
 def _migration_001_initial(conn: sqlite3.Connection) -> None:
@@ -285,6 +289,50 @@ def _migration_003_forwarded_attention(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004_forwarded_events(conn: sqlite3.Connection) -> None:
+    """Generalise the attention dedup table into a per-event dedup keyed on
+    an arbitrary ``dedup_key``.
+
+    PR #20 added ``forwarded_attention`` to stop the attention route from
+    re-forwarding a re-POSTed event (the extension's outbox-flush storm).
+    The media import path needs the SAME guarantee, keyed on a *set* of
+    dedup keys per event (``deterministic_id`` ∪ the ``com.fulcra.content.*``
+    cross-source fingerprints) rather than one attention ``source_id``. This
+    table generalises that: any string key, ``INSERT OR IGNORE`` against the
+    PRIMARY KEY does the atomic claim under concurrency.
+
+    Migration safety: every existing ``forwarded_attention.source_id`` is
+    copied into ``forwarded_events`` so an attention source_id that was
+    already forwarded by a pre-#004 daemon is still recognised as a
+    duplicate after upgrade — no attention claim is lost. The
+    ``forwarded_attention`` table is intentionally left in place (it remains
+    the backing store for ``claim_attention_source_id``, whose contract is
+    unchanged); the copy means both tables agree on the historical rows."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS forwarded_events (
+            dedup_key    TEXT PRIMARY KEY,
+            forwarded_at TEXT NOT NULL
+        );
+        """,
+    )
+    # Preserve already-forwarded attention claims: copy each historical
+    # source_id into the generalised table so the route (now keyed via
+    # claim_dedup_keys) still treats it as a duplicate post-upgrade. The
+    # forwarded_attention table may not exist on a brand-new db where 003
+    # and 004 run back-to-back from migrate() — but 003 always runs first
+    # in that loop, so the table is present whenever 004 runs.
+    row = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='forwarded_attention'",
+    ).fetchone()
+    if row is not None:
+        conn.execute(
+            "INSERT OR IGNORE INTO forwarded_events (dedup_key, forwarded_at) "
+            "SELECT source_id, forwarded_at FROM forwarded_attention",
+        )
+
+
 # ---- low-level CRUD used by state.py --------------------------------
 
 
@@ -343,6 +391,96 @@ def claim_attention_source_id(conn: sqlite3.Connection,
         (source_id, datetime.now(timezone.utc).isoformat()),
     )
     return cur.rowcount == 1
+
+
+def claim_dedup_keys(conn: sqlite3.Connection, keys: Iterable[str]) -> bool:
+    """Atomically claim a SET of dedup keys for one event.
+
+    An event is identified by its full dedup-key set: its per-source
+    ``deterministic_id`` plus any ``com.fulcra.content.*`` cross-source
+    fingerprints. Returns ``True`` iff NONE of ``keys`` had been claimed
+    before (the event is new → the caller should forward/POST it), or
+    ``False`` if ANY key already existed (a same-run or concurrent
+    cross-source twin already claimed it → the caller should SKIP). On a
+    ``True`` return every key in the set is recorded, so a later twin that
+    shares only *one* of the keys still sees a collision.
+
+    Atomicity under concurrency: the whole claim runs inside a single
+    ``BEGIN IMMEDIATE`` transaction. ``BEGIN IMMEDIATE`` takes the database's
+    write lock up front, so two concurrent claimers are serialised — the
+    second blocks (under ``busy_timeout``) until the first commits, then
+    sees the first's rows and returns ``False``. This makes "exactly one
+    True among N identical concurrent claims" hold even though the decision
+    spans multiple INSERTs and a pre-check. We use ``INSERT OR IGNORE`` per
+    key and count how many keys were *already* present: if any pre-existed,
+    the event is a duplicate.
+
+    An empty key set returns ``True`` (vacuously new) and records nothing —
+    callers should never pass an empty set, but failing open here would be
+    surprising; failing to a no-op True keeps the "claim then POST" caller
+    behaving exactly as the un-claimed path."""
+    # Dedupe the incoming keys first: a key repeated WITHIN one event's set
+    # (a future list-passing caller) would otherwise hit its own just-inserted
+    # row on the second occurrence and be mis-counted as already_present,
+    # falsely flagging a brand-new event as a duplicate. set() makes the
+    # per-key collision count reflect only PRE-EXISTING rows.
+    key_list = list(set(keys))
+    now = datetime.now(timezone.utc).isoformat()
+    # autocommit (isolation_level=None) connections need an explicit BEGIN to
+    # group the inserts; IMMEDIATE grabs the write lock now so concurrent
+    # claimers serialise rather than both reading "absent" then both inserting.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        already_present = 0
+        for key in key_list:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO forwarded_events "
+                "(dedup_key, forwarded_at) VALUES (?, ?)",
+                (key, now),
+            )
+            if cur.rowcount == 0:
+                # IGNORE swallowed a PK collision → this key was already
+                # claimed by a previous event.
+                already_present += 1
+        is_new = already_present == 0
+        conn.execute("COMMIT")
+        return is_new
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def unclaim_dedup_keys(conn: sqlite3.Connection, keys: Iterable[str]) -> None:
+    """Release a set of previously-claimed dedup keys (delete their rows from
+    ``forwarded_events``) in a single atomic transaction.
+
+    The media import path claims an event's keys BEFORE its batch POST so a
+    concurrent run is blocked from writing the same event during the POST
+    window. But a media annotation is durable timeline data — if the POST
+    then FAILS, the claim must be released, or the event is skipped forever on
+    every future run (permanent silent loss). The caller unclaims exactly the
+    keys it newly inserted for the failed batch, so on the next run those
+    events pass the claim again and get retried. The only cost is a negligible
+    re-dup window between the POST failure and the unclaim — far preferable to
+    losing the event.
+
+    Deletes are wrapped in one ``BEGIN IMMEDIATE`` transaction for the same
+    serialise-the-writers reason ``claim_dedup_keys`` uses. Idempotent: a key
+    that isn't present (e.g. another run already re-claimed and committed it)
+    is simply a no-op DELETE."""
+    key_list = list(set(keys))
+    if not key_list:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executemany(
+            "DELETE FROM forwarded_events WHERE dedup_key = ?",
+            [(k,) for k in key_list],
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def all_plugin_ids(conn: sqlite3.Connection) -> list[str]:

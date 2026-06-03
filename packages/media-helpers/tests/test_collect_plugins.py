@@ -122,7 +122,7 @@ def test_run_fetches_normalizes_imports_and_advances_watermark(monkeypatch):
     class FakeClient:
         def ensure_tag(self, name, state):
             calls["ensure_tag"] = name
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             calls["imported"] = list(events)
             return FakeResult()
 
@@ -195,7 +195,7 @@ def test_run_forwards_username_and_api_key_to_the_importer(monkeypatch):
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
@@ -235,7 +235,7 @@ def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return AllDupResult()
 
     monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
@@ -255,6 +255,61 @@ def test_run_advances_watermark_on_all_duplicate_window(monkeypatch):
     # Every event was successfully processed (skipped_existing means already
     # ingested into Fulcra), so the watermark must reflect that progress.
     assert st.watermark == "2026-05-22T12:00:00Z"
+
+
+def test_run_threads_ctx_claim_dedup_keys_into_run_import(monkeypatch):
+    """Component 3 seam: the scheduled media plugin must pass the daemon's
+    per-event write-dedup claim (ctx.claim_dedup_keys) down into run_import,
+    so concurrent runs / same-run cross-source twins can't double-write.
+    Regression guard against the claim quietly dropping out of the call
+    chain (plugin → _common.run_scheduled_import → run_import)."""
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.fetch_recent_tracks",
+                        lambda creds, since, max_pages: [{"raw": 1}])
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.normalize_history",
+                        lambda raw: ["event-1"])
+
+    seen = {}
+
+    class FakeResult:
+        posted = 1
+        skipped_existing = 0
+        verified = 1
+
+    class FakeClient:
+        def ensure_tag(self, name, state):
+            pass
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
+            seen["claim"] = claim
+            return FakeResult()
+
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
+                        lambda: FakeClient())
+    monkeypatch.setattr("fulcra_media.plugins.lastfm.newest_event_iso",
+                        lambda events: "2026-05-22T12:00:00Z")
+    monkeypatch.setattr("fulcra_media.plugins.lastfm._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    claim_calls = []
+
+    def fake_claim(keys: set[str]) -> bool:
+        claim_calls.append(keys)
+        return True
+
+    st = PluginState("lastfm")
+    ctx = RunContext(plugin_id="lastfm",
+                     config={"username": "test_user"},
+                     credentials={"api-key": "K"},
+                     state=st, log=logging.getLogger("t"), _emit=lambda e: None,
+                     _claim_dedup_keys=fake_claim)
+    LASTFM_PLUGIN.run(ctx)
+
+    # A claim WAS handed to run_import (not None), and invoking it routes
+    # through to our injected backend — proving ctx.claim_dedup_keys was
+    # threaded down rather than dropped. (Bound methods aren't identity-equal
+    # across accesses, so we assert behaviour, not object identity.)
+    assert seen["claim"] is not None
+    assert seen["claim"]({"k"}) is True
+    assert claim_calls == [{"k"}]
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +347,7 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped(monkeypatch
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
@@ -363,7 +418,7 @@ def test_run_does_not_call_resolver_when_definition_already_bootstrapped(monkeyp
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient",
@@ -422,7 +477,7 @@ class _FakeClient:
     def ensure_tag(self, name, state):
         self.calls["ensure_tag"] = name
 
-    def run_import(self, events, state, check_only=False):
+    def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
         self.calls["imported"] = list(events)
         return _FakeResult()
 
@@ -527,7 +582,7 @@ def test_netflix_uses_resolver_when_watched_definition_not_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.netflix.FulcraClient",
@@ -595,7 +650,7 @@ def test_netflix_does_not_call_resolver_when_definition_already_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.netflix.FulcraClient",
@@ -715,7 +770,7 @@ def test_run_uses_resolver_when_listened_definition_not_bootstrapped_spotify_ext
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.spotify_extended.FulcraClient",
@@ -785,7 +840,7 @@ def test_run_does_not_call_resolver_when_definition_already_bootstrapped_spotify
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.spotify_extended.FulcraClient",
@@ -903,7 +958,7 @@ def test_youtube_uses_resolver_when_watched_definition_not_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.youtube.FulcraClient",
@@ -966,7 +1021,7 @@ def test_youtube_does_not_call_resolver_when_definition_already_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.youtube.FulcraClient",
@@ -1114,7 +1169,7 @@ def test_spotify_ifttt_uses_resolver_when_listened_definition_not_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.FulcraClient",
@@ -1177,7 +1232,7 @@ def test_spotify_ifttt_does_not_call_resolver_when_definition_already_bootstrapp
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.spotify_ifttt.FulcraClient",
@@ -1343,7 +1398,7 @@ def test_apple_takeout_uses_resolver_when_watched_definition_not_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.apple_takeout.FulcraClient",
@@ -1406,7 +1461,7 @@ def test_apple_takeout_does_not_call_resolver_when_definition_already_bootstrapp
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.apple_takeout.FulcraClient",
@@ -1640,7 +1695,7 @@ def test_generic_rss_uses_resolver_for_watched_category(monkeypatch):
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient",
@@ -1706,7 +1761,7 @@ def test_generic_rss_uses_resolver_for_listened_category(monkeypatch):
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient",
@@ -1767,7 +1822,7 @@ def test_generic_rss_does_not_call_resolver_when_definition_already_bootstrapped
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.generic_rss.FulcraClient",
@@ -1911,7 +1966,7 @@ def test_letterboxd_uses_resolver_when_watched_definition_not_bootstrapped(monke
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.letterboxd.FulcraClient",
@@ -1973,7 +2028,7 @@ def test_letterboxd_does_not_call_resolver_when_definition_already_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.letterboxd.FulcraClient",
@@ -2118,7 +2173,7 @@ def test_goodreads_uses_resolver_when_read_definition_not_bootstrapped(monkeypat
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.goodreads.FulcraClient",
@@ -2180,7 +2235,7 @@ def test_goodreads_does_not_call_resolver_when_definition_already_bootstrapped(m
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.goodreads.FulcraClient",
@@ -2362,7 +2417,7 @@ def test_deezer_uses_resolver_when_listened_definition_not_bootstrapped(monkeypa
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.deezer.FulcraClient",
@@ -2429,7 +2484,7 @@ def test_deezer_does_not_call_resolver_when_definition_already_bootstrapped(monk
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.deezer.FulcraClient",
@@ -2663,6 +2718,96 @@ def test_trakt_plugin_auto_discards_twins_when_policy_is_auto_discard(monkeypatc
     assert "low-id" in discard_calls[0]
 
 
+def test_trakt_auto_discard_does_not_crash_on_normalized_event(monkeypatch):
+    """Regression: trakt's auto-discard path filtered with fulcra_csv's
+    apply_twin_decisions, which reads ``e.source_id`` — but NormalizedEvent
+    exposes its dedup id as ``deterministic_id``, so the real filter raised
+    AttributeError. Drive the path with REAL NormalizedEvents (no patch over
+    the filter) and assert the matched low-conf twin is dropped WITHOUT raising.
+    """
+    from datetime import datetime, timezone
+
+    from fulcra_media.importers.base import NormalizedEvent
+
+    def _ne(*, sid, conf, fp, ts):
+        return NormalizedEvent(
+            importer="trakt", service="trakt", category="watched",
+            note="x", title="x", start_time=ts, end_time=ts,
+            deterministic_id=sid, timestamp_confidence=conf,
+            external_ids={"content_fingerprint": fp},
+        )
+
+    low = _ne(sid="trakt-low", conf="low", fp="tv:dune:s01e01",
+              ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
+    keep = _ne(sid="trakt-keep", conf="low", fp="tv:other:s01e01",
+               ts=datetime(2026, 5, 17, tzinfo=timezone.utc))
+    high = _ne(sid="netflix-high", conf="high", fp="tv:dune:s01e01",
+               ts=datetime(2026, 4, 1, tzinfo=timezone.utc))
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history", lambda: [])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [low, keep])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
+        lambda events, policy: events)
+    # Real find_low_conf_twins + real filter path — only the cache load is faked.
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.twin_cache.load_for_twin_lookup",
+        lambda: [high])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.newest_event_iso", lambda events: None)
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    ctx, _ = _make_ctx("trakt", {"twin_policy": "auto-discard"})
+    TRAKT_PLUGIN.run(ctx)  # must not raise AttributeError
+
+    # The matched low-conf twin was dropped; the unmatched low-conf event stays.
+    assert fake_client.calls["imported"] == [keep]
+
+
+def test_trakt_default_keep_policy_imports_everything(monkeypatch):
+    """Default twin_policy ('keep') is a no-op: nothing is discarded even when a
+    matching high-conf twin exists in the cache."""
+    from datetime import datetime, timezone
+
+    from fulcra_media.importers.base import NormalizedEvent
+
+    low = NormalizedEvent(
+        importer="trakt", service="trakt", category="watched", note="x",
+        title="x", start_time=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        end_time=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        deterministic_id="trakt-low", timestamp_confidence="low",
+        external_ids={"content_fingerprint": "tv:dune:s01e01"},
+    )
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.fetch_history", lambda: [])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.trakt_importer.normalize_history",
+        lambda items, cluster_threshold: [low])
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.apply_cluster_policy",
+        lambda events, policy: events)
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.FulcraClient", lambda: fake_client)
+    monkeypatch.setattr(
+        "fulcra_media.plugins.trakt.newest_event_iso", lambda events: None)
+    monkeypatch.setattr("fulcra_media.plugins.trakt._state_load",
+                        lambda path: _make_bootstrapped_media_state())
+
+    ctx, _ = _make_ctx("trakt", {})  # default twin_policy = keep
+    TRAKT_PLUGIN.run(ctx)
+
+    assert fake_client.calls["imported"] == [low]
+
+
 # ---------------------------------------------------------------------------
 # R8 regression-guard tests for trakt resolver
 # ---------------------------------------------------------------------------
@@ -2728,7 +2873,7 @@ def test_trakt_uses_resolver_when_watched_definition_not_bootstrapped(monkeypatc
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient",
@@ -2806,7 +2951,7 @@ def test_trakt_does_not_call_resolver_when_definition_already_bootstrapped(monke
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient",
@@ -2965,7 +3110,7 @@ def test_apple_podcasts_uses_resolver_when_listened_definition_not_bootstrapped(
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient",
@@ -3026,7 +3171,7 @@ def test_apple_podcasts_does_not_call_resolver_when_definition_already_bootstrap
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.apple_podcasts.FulcraClient",
@@ -3219,7 +3364,7 @@ def test_apple_podcasts_timemachine_uses_resolver_when_listened_definition_not_b
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine.FulcraClient",
@@ -3285,7 +3430,7 @@ def test_apple_podcasts_timemachine_does_not_call_resolver_when_definition_alrea
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.apple_podcasts_timemachine.FulcraClient",
@@ -3858,7 +4003,7 @@ def test_generic_csv_uses_resolver_for_watched_category(monkeypatch, tmp_path):
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient",
@@ -3924,7 +4069,7 @@ def test_generic_csv_uses_resolver_for_listened_category(monkeypatch, tmp_path):
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient",
@@ -3987,7 +4132,7 @@ def test_generic_csv_does_not_call_resolver_when_definition_already_bootstrapped
     class FakeClient:
         def ensure_tag(self, name, state):
             pass
-        def run_import(self, events, state, check_only=False):
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None):
             return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.generic_csv.FulcraClient",
@@ -4067,7 +4212,7 @@ def test_run_trakt_uses_keychain_oauth_credentials_when_available(monkeypatch):
 
     class FakeClient:
         def ensure_tag(self, name, state): pass
-        def run_import(self, events, state, check_only=False): return FakeResult()
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None): return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.trakt.FulcraClient", lambda: FakeClient())
 
@@ -4116,7 +4261,7 @@ def test_lastfm_emits_annotation_event_on_successful_writes(monkeypatch):
 
     class FakeClient:
         def ensure_tag(self, name, state): pass
-        def run_import(self, events, state, check_only=False): return FakeResult()
+        def run_import(self, events, state, check_only=False, claim=None, unclaim=None): return FakeResult()
 
     monkeypatch.setattr("fulcra_media.plugins.lastfm.FulcraClient", lambda: FakeClient())
     monkeypatch.setattr(

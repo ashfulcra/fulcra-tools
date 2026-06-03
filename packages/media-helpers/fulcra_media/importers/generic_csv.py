@@ -16,6 +16,11 @@ from pathlib import Path
 
 from fulcra_csv import ColumnMap, parse_csv
 
+from fulcra_common.cross_source_fingerprint import (
+    listened_fingerprint,
+    watched_movie_fingerprint,
+)
+
 from .base import NormalizedEvent, content_fingerprint
 
 VALID_CATEGORIES = {"watched", "listened", "read"}
@@ -106,6 +111,31 @@ def parse_media_csv(
                 fp_kwargs["author"] = author
             external_ids["content_fingerprint"] = content_fingerprint("book", **fp_kwargs)
 
+        # Cross-source fingerprint: a CSV mapped to listened/watched should
+        # dedup against the dedicated importers (lastfm, letterboxd, ...) the
+        # same way they dedup against each other. We mirror the per-category
+        # kinds: "listened" -> listened_fingerprint(artist, track), "watched"
+        # -> watched_movie_fingerprint(title). The generic CSV mapping has no
+        # season/episode columns, so we can only build the movie watch key
+        # (a TV episode would need S/E we don't have). "read" has no
+        # cross-source kind, so we emit nothing for it.
+        extra_source_ids: tuple[str, ...] = ()
+        cross: str | None = None
+        if category == "listened":
+            artist = external_ids.get("artist")
+            if ev.title:
+                cross = listened_fingerprint(
+                    timestamp=ev.start_time,
+                    artist=artist or "",
+                    track=ev.title,
+                )
+        elif category == "watched" and ev.title:
+            cross = watched_movie_fingerprint(
+                timestamp=ev.start_time, title=ev.title,
+            )
+        if cross:
+            extra_source_ids = (cross,)
+
         yield NormalizedEvent(
             importer="generic-csv",
             service=service,
@@ -117,4 +147,5 @@ def parse_media_csv(
             deterministic_id=ev.source_id,
             timestamp_confidence=confidence,
             external_ids=external_ids,
+            extra_source_ids=extra_source_ids,
         )

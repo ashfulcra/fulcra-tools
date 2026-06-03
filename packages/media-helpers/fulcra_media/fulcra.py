@@ -11,6 +11,7 @@ soft-delete, and event readback come from the base.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -119,12 +120,42 @@ class FulcraClient(BaseFulcraClient):
         chunk_size: int = 500,
         window_pad_minutes: int = 10,
         check_only: bool = False,
+        claim: "Callable[[set[str]], bool] | None" = None,
+        unclaim: "Callable[[set[str]], None] | None" = None,
     ) -> ImportResult:
         """Run the dedup-readback + ingest pipeline.
 
         `check_only`: when True, do all the readbacks and dedup math but
         don't POST. Result.posted reports how many *would* post; verified
         stays 0.
+
+        `claim`: an OPTIONAL per-event write-dedup claim, injected by the
+        daemon (``ctx.claim_dedup_keys``) so media-helpers never imports
+        ``fulcra-collect``. For each event that SURVIVES the readback-skip,
+        ``claim`` is called with that event's full dedup-key set
+        (``{deterministic_id} ∪ extra_source_ids``); the event is POSTed
+        only when ``claim`` returns ``True``. This closes the window the
+        readback alone can't: two concurrent runs, or two cross-source
+        twins in the SAME run that share a ``com.fulcra.content.*``
+        fingerprint, would each pass the readback (neither is in Fulcra
+        yet) — the claim, an atomic INSERT OR IGNORE against a shared
+        PRIMARY KEY, lets exactly one of them through. A claimed-but-skipped
+        event counts as ``skipped_existing`` (it's a duplicate of a sibling
+        being written this very run). When ``claim is None`` (standalone CLI
+        imports outside the daemon) behaviour is exactly as before:
+        readback-skip only, no per-event claim.
+
+        `unclaim`: the OPTIONAL inverse of ``claim``, injected alongside it
+        (``ctx.unclaim_dedup_keys``). Claims are taken BEFORE the batch POST
+        so a concurrent run is blocked during the POST window — but a media
+        annotation is durable timeline data, so if the POST RAISES we must
+        release the keys we just claimed for that batch, or those events are
+        skipped forever and silently lost. On a POST failure we unclaim
+        exactly the keys this batch newly claimed (NOT pre-existing rows or
+        rows from other batches/events) and re-raise, so the next run retries
+        them. On POST success the claims stay. When ``unclaim is None`` the
+        keys are left claimed on failure (the pre-fix behaviour) — only the
+        daemon path supplies it, and only it has durable-loss exposure.
         """
         events = list(events)
         total = len(events)
@@ -163,14 +194,62 @@ class FulcraClient(BaseFulcraClient):
             existing = self.fetch_existing_source_ids(
                 win_start, win_end, only_for_defs=current_def_source_ids or None
             )
-            new_events = [e for e in chunk if e.deterministic_id not in existing]
+            # Skip an event if ANY of its dedup keys is already present — the
+            # per-plugin deterministic_id OR a cross-source content fingerprint
+            # (com.fulcra.content.*.v1.<hash>) carried in extra_source_ids. The
+            # fingerprints are already in `existing` via fetch_existing_source_ids
+            # (it reads both the sources and metadata.source arrays). An event
+            # with no extra_source_ids therefore behaves exactly as before:
+            # skip iff deterministic_id in existing.
+            new_events = [
+                e for e in chunk
+                if not ({e.deterministic_id, *e.extra_source_ids} & existing)
+            ]
             skipped += len(chunk) - len(new_events)
+
+            # Per-event write-dedup claim (component 3). For each event that
+            # survived the readback-skip, atomically claim its full dedup-key
+            # set; POST only the events whose claim succeeded. A claim that
+            # returns False means a concurrent run — or a cross-source twin
+            # earlier in THIS chunk's iteration — already claimed one of the
+            # event's keys, so this event would be a duplicate: count it as
+            # skipped and don't POST it. ``check_only`` is a dry run and must
+            # not mutate the shared dedup store, so the claim is bypassed
+            # there (matching the "don't POST" semantics of check_only).
+            # Keys THIS batch newly inserted into forwarded_events — the only
+            # ones we may release if the POST fails. Built from the events
+            # whose claim returned True, so it never includes pre-existing
+            # rows or keys owned by a different event/batch.
+            newly_claimed_keys: set[str] = set()
+            if claim is not None and not check_only:
+                claimed_events = []
+                for e in new_events:
+                    keyset = {e.deterministic_id, *e.extra_source_ids}
+                    if claim(keyset):
+                        claimed_events.append(e)
+                        newly_claimed_keys |= keyset
+                skipped += len(new_events) - len(claimed_events)
+                new_events = claimed_events
 
             if new_events:
                 if check_only:
                     posted += len(new_events)
                 else:
-                    self.ingest_batch(new_events, state)
+                    try:
+                        self.ingest_batch(new_events, state)
+                    except Exception:
+                        # Durable-loss guard: the POST failed, so release the
+                        # claims this batch took (scoped to keys WE newly
+                        # inserted) and let the next run retry these events.
+                        # Without this they'd be skipped forever. Best-effort
+                        # — never let an unclaim error mask the original POST
+                        # failure, which is the one the caller must see.
+                        if unclaim is not None and newly_claimed_keys:
+                            try:
+                                unclaim(newly_claimed_keys)
+                            except Exception:
+                                pass
+                        raise
                     posted += len(new_events)
                     after = self.fetch_existing_source_ids(
                         win_start, win_end, only_for_defs=current_def_source_ids or None

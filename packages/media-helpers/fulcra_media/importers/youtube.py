@@ -106,6 +106,18 @@ def normalize_entry(entry: dict) -> NormalizedEvent | None:
     if channel_url:
         external["channel_url"] = channel_url
 
+    # NOTE: no cross-source fingerprint (extra_source_ids) is emitted for
+    # YouTube watches, and this is deliberate. The watched_* fingerprints key
+    # on canonical TV (show + season + episode) or movie titles at a 5-minute
+    # bucket — identities that multiple sources independently report the same
+    # way (Trakt, Netflix, Letterboxd, Apple TV+). A YouTube entry is a
+    # free-form video title with no season/episode and no movie identity, and
+    # no other importer reports YouTube video identity, so there is no twin to
+    # dedup against. Forcing a watched_movie_fingerprint on the raw video title
+    # would only create false-merge risk (e.g. a video titled "Dune" colliding
+    # with the actual film watched on another service in the same 5-min
+    # window). The per-importer content_fingerprint("movie", ...) twin-cache
+    # string above is left untouched; only the cross-source key is omitted.
     return NormalizedEvent(
         importer="youtube",
         service="youtube",

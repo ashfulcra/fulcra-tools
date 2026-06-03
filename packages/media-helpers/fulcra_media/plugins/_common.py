@@ -20,7 +20,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from fulcra_collect.plugin import RunContext
+from fulcra_csv import find_low_conf_twins
 
+from .. import twin_cache
 from ..state import DEFAULT_PATH as STATE_PATH
 
 
@@ -111,6 +113,98 @@ def since_from_watermark(ctx: RunContext) -> datetime | None:
     ) - timedelta(hours=1)
 
 
+# ---------------------------------------------------------------------------
+# Cross-source twin dedup on the scheduled path (Component 4).
+#
+# The local high-confidence twin cache lets a LOW-confidence incoming event
+# defer to a cached HIGH-confidence twin of the same content (same
+# content_fingerprint) imported on a previous run — the kind of match the
+# exact-bucket .content.* dedup key can't catch because confidence and
+# timestamps differ. Both halves below run for EVERY scheduled / file / RSS
+# plugin that routes through this shared glue, mirroring what the CLI import
+# path does in cli_common.run_and_emit + cli._maybe_apply_twin_dedup. Trakt
+# keeps its own inline copy of this logic (it predates the shared seam and
+# carries extra cluster-policy handling); the behaviour is identical.
+# ---------------------------------------------------------------------------
+
+def apply_twin_policy(
+    events: list,
+    *,
+    twin_policy: str,
+    cached_pool: list,
+) -> list:
+    """Consult the twin cache and apply the configured twin policy to ``events``.
+
+    ``twin_policy`` mirrors the CLI / trakt non-interactive branches:
+      - "keep" (DEFAULT): no-op. The machinery is consulted only when a
+        non-default policy is set, so the steady-state behaviour is unchanged.
+      - "auto-discard": drop any low-conf incoming event whose
+        content_fingerprint matches a high-conf entry in ``cached_pool``.
+      - "ask": interactive — unsupported headlessly, raises RuntimeError so the
+        failure is loud rather than a silent skip (matches trakt's guard).
+
+    ``cached_pool`` is the already-ingested high-conf pool (from
+    ``twin_cache.load_for_twin_lookup()``); passed in so callers can inject a
+    test pool and so the load happens once per run.
+    """
+    if twin_policy == "keep":
+        return events
+    if twin_policy == "ask":
+        raise RuntimeError(
+            "twin_policy 'ask' is interactive — set it to auto-discard or "
+            "keep in the plugin config for scheduled/headless runs"
+        )
+    if twin_policy != "auto-discard":
+        raise RuntimeError(
+            f"unknown twin_policy {twin_policy!r} — must be auto-discard or keep"
+        )
+    pairs = find_low_conf_twins(events, extra_pool=cached_pool)
+    if not pairs:
+        return events
+    to_drop = {twin_cache._source_id_of(low) for low, _high in pairs}
+    # Filter on the same id accessor that built ``to_drop``. fulcra_csv's
+    # apply_twin_decisions reads ``e.source_id`` only, but media-helpers'
+    # NormalizedEvent exposes its dedup id as ``deterministic_id``; the cross-
+    # name accessor _source_id_of handles both, keeping the scheduled path
+    # correct for real NormalizedEvents (GenericEvent already matches both).
+    return [e for e in events if twin_cache._source_id_of(e) not in to_drop]
+
+
+def consult_twin_cache(ctx: RunContext, events: list) -> list:
+    """Load the twin cache and apply ctx's configured twin policy to ``events``.
+
+    The single seam scheduled plugins call before importing. With the default
+    ("keep") policy this loads nothing and returns ``events`` unchanged — so it
+    is free and behaviour-preserving until a user opts into "auto-discard".
+    """
+    twin_policy = ctx.config.get("twin_policy", "keep")
+    if twin_policy == "keep":
+        # Fast path: no need to touch the cache for the no-op default.
+        return events
+    cached = twin_cache.load_for_twin_lookup()
+    return apply_twin_policy(events, twin_policy=twin_policy, cached_pool=cached)
+
+
+def record_twins_after_post(events: list, *, posted: int) -> None:
+    """Populate the twin cache with this run's high-confidence events — but
+    only after a successful POST (``posted`` > 0), so we never cache an event
+    that wasn't actually written to Fulcra. Mirrors cli_common.run_and_emit.
+
+    ``record_imported_events`` itself filters to high-confidence events that
+    carry a content_fingerprint, so we pass the full batch. Cache failures
+    must never break an import, so we swallow and log.
+    """
+    if posted <= 0:
+        return
+    try:
+        twin_cache.record_imported_events(events)
+    except Exception:  # pragma: no cover - defensive; cache is best-effort
+        import logging
+        logging.getLogger("fulcra_media.twin_cache").warning(
+            "twin cache write failed after scheduled import", exc_info=True
+        )
+
+
 def run_scheduled_import(
     ctx: RunContext,
     *,
@@ -140,10 +234,15 @@ def run_scheduled_import(
     events = list(normalize(raw))
     ctx.progress(stage="fetched", count=len(events))
 
+    # Cross-source twin dedup: consult the local high-conf twin cache and apply
+    # the configured twin policy (default "keep" → no-op) before importing.
+    events = consult_twin_cache(ctx, events)
+
     media_state = state_load(STATE_PATH)
     client = fulcra_client_cls()
     client.ensure_tag(tag, media_state)
-    result = client.run_import(events, media_state)
+    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
+                               unclaim=ctx.unclaim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:
@@ -152,6 +251,10 @@ def run_scheduled_import(
             + ("s" if result.posted != 1 else ""),
             ok=True,
         )
+
+    # Populate the twin cache with this run's high-conf events (after a
+    # successful POST only), so a future low-conf twin can defer to them.
+    record_twins_after_post(events, posted=result.posted)
 
     # Advance even when posted == 0: every event in ``events`` was either posted
     # OR skipped-as-already-in-Fulcra — both count as successfully processed.
@@ -188,10 +291,15 @@ def import_events(
 ) -> None:
     """Run the standard ensure_tag + run_import pipeline and report progress."""
     ctx.progress(stage="parsed", count=len(events))
+
+    # Cross-source twin dedup (default "keep" → no-op); see run_scheduled_import.
+    events = consult_twin_cache(ctx, events)
+
     media_state = state_load(STATE_PATH)
     client = fulcra_client_cls()
     client.ensure_tag(tag, media_state)
-    result = client.run_import(events, media_state)
+    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
+                               unclaim=ctx.unclaim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:
@@ -200,6 +308,9 @@ def import_events(
             + ("s" if result.posted != 1 else ""),
             ok=True,
         )
+
+    # Populate the twin cache with this run's high-conf events (post-POST only).
+    record_twins_after_post(events, posted=result.posted)
 
 
 def run_file_import(
@@ -266,10 +377,15 @@ def rss_import_and_advance(
         events = events[:max_entries]
 
     ctx.progress(stage="fetched", count=len(events))
+
+    # Cross-source twin dedup (default "keep" → no-op); see run_scheduled_import.
+    events = consult_twin_cache(ctx, events)
+
     media_state = state_load(STATE_PATH)
     client = fulcra_client_cls()
     client.ensure_tag(tag, media_state)
-    result = client.run_import(events, media_state)
+    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys,
+                               unclaim=ctx.unclaim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:
@@ -278,6 +394,9 @@ def rss_import_and_advance(
             + ("s" if result.posted != 1 else ""),
             ok=True,
         )
+
+    # Populate the twin cache with this run's high-conf events (post-POST only).
+    record_twins_after_post(events, posted=result.posted)
 
     # Advance even when posted == 0 — same rationale as run_scheduled_import.
     new_wm = newest_iso(events)
