@@ -58,10 +58,29 @@ def cli() -> None:
     """Background hub for the Fulcra local helpers."""
 
 
+def _stderr_is_a_tty() -> bool:
+    """Module-level seam so tests can mock the TTY check; CliRunner swaps
+    sys.stderr to a buffer at invoke time, so monkeypatching sys.stderr.isatty
+    from a test doesn't reach the daemon command."""
+    return sys.stderr.isatty()
+
+
 @cli.command()
 def daemon() -> None:
     """Run the hub core in the foreground (the launchd/systemd entrypoint)."""
     _configure_logging()
+    # When launched interactively (not under launchd), print a one-line hint
+    # so first-time operators know they're running a non-durable foreground
+    # daemon and where to find the persistent option. launchd has no
+    # controlling TTY, so the TTY check guards us from spamming the log file.
+    if _stderr_is_a_tty():
+        click.echo(
+            "running in the foreground (this daemon will die when you close "
+            "this terminal). For a persistent daemon: `fulcra-collect install` "
+            "then `launchctl bootstrap gui/$(id -u) "
+            "~/Library/LaunchAgents/com.fulcra.collect.plist`.",
+            err=True,
+        )
     Daemon().serve()
 
 
