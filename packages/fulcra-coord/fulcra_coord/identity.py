@@ -9,17 +9,25 @@ adds a persisted, global identity file so an agent can announce itself once.
 Resolution order (resolve_agent), highest precedence first:
   1. explicit  — an `--agent`/`--from` value passed on the command line
   2. env       — $FULCRA_COORD_AGENT (the operator's session-scoped override)
-  3. config    — the persisted identity file (the handshake: declared once, reused)
+  3. config    — the persisted identity (the handshake: declared once, reused),
+                 scoped PER WORKING DIRECTORY
   4. derived   — claude-code:<hostname -s>:<cwd-basename> (environment best-effort)
 
-The identity file is GLOBAL (not root-scoped like the cache): an agent's id is a
-property of the session/host, not of which coordination root it happens to be
-writing to. It lives under ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/identity.json
-so tests can isolate it via XDG_CONFIG_HOME and it never collides with the cache.
+The persisted identity is scoped PER CWD, not globally. The original global file
+was the source of a clobber bug: every same-machine session's `identity set`
+overwrote the others', so sibling sessions in different repos could not each
+declare a stable id. Entries now live under
+${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/identities/<cwd-hash>.json (keyed by
+the absolute cwd). A legacy global identity.json is still read as a fallback so
+machines configured before the split keep resolving. The config dir is NOT
+root-scoped (an agent's id is a property of the session/repo, not of the
+coordination root) and lives under XDG_CONFIG_HOME so tests can isolate it and it
+never collides with the cache.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -36,8 +44,38 @@ def config_root() -> Path:
     return base / "fulcra-coord"
 
 
-def identity_path() -> Path:
+def _legacy_identity_path() -> Path:
+    """The pre-per-cwd GLOBAL identity file.
+
+    Historically the persisted identity was one global file. That was the source
+    of the clobber bug: every same-machine session's ``identity set`` overwrote
+    the others' (e.g. a ``:vercel`` session then a ``:birdnet-pi`` session
+    clobbered the ``:fulcra-coord`` one). It is retained ONLY as a read-time
+    fallback so existing setups keep resolving until they re-set per-cwd."""
     return config_root() / "identity.json"
+
+
+def _identities_dir() -> Path:
+    """Directory of per-cwd identity files (the clobber fix)."""
+    return config_root() / "identities"
+
+
+def _cwd_hash(cwd: Optional[str] = None) -> str:
+    """Stable filesystem-safe key for the current working directory.
+
+    The persisted identity is scoped to the ABSOLUTE cwd so two sibling sessions
+    (different repos on the same machine) hold distinct identities and never
+    clobber each other. Hashing the abspath keeps the filename short and portable
+    regardless of how deep or oddly-charactered the path is."""
+    abspath = os.path.abspath(cwd if cwd is not None else os.getcwd())
+    return hashlib.sha1(abspath.encode()).hexdigest()[:16]
+
+
+def identity_path(cwd: Optional[str] = None) -> Path:
+    """Per-cwd identity file path. Each working directory gets its own entry
+    under ``identities/<cwd-hash>.json`` so identities are scoped to the repo a
+    session runs in, not shared globally across every same-machine session."""
+    return _identities_dir() / f"{_cwd_hash(cwd)}.json"
 
 
 def derived_agent() -> str:
@@ -53,12 +91,11 @@ def derived_agent() -> str:
     return f"claude-code:{host}:{repo}"
 
 
-def read_identity() -> Optional[str]:
-    """Return the persisted agent id, or None if no identity file / it's unreadable.
+def _read_identity_file(path: Path) -> Optional[str]:
+    """Read an ``{"agent": ...}`` identity file, tolerating absence/corruption.
 
-    Tolerant of a malformed file (corrupt JSON, missing key): a broken identity
-    file must not wedge every command — we fall through to derived instead."""
-    path = identity_path()
+    A broken identity file must not wedge every command — return None so the
+    caller falls through to the next resolution source."""
     if not path.exists():
         return None
     try:
@@ -69,19 +106,36 @@ def read_identity() -> Optional[str]:
     return agent if isinstance(agent, str) and agent.strip() else None
 
 
-def set_identity(agent_id: str) -> Path:
-    """Persist `agent_id` as this host's declared identity (the handshake). Global,
-    so it survives across coordination roots and sessions until cleared."""
-    path = identity_path()
+def read_identity(cwd: Optional[str] = None) -> Optional[str]:
+    """Return the persisted agent id for the current cwd, or None.
+
+    Reads the PER-CWD entry first; if there is none, falls back to the LEGACY
+    global ``identity.json`` so machines configured before the per-cwd split keep
+    resolving (the migration path). A per-cwd entry always wins over the legacy
+    global file. Tolerant of malformed files at either layer."""
+    per_cwd = _read_identity_file(identity_path(cwd))
+    if per_cwd:
+        return per_cwd
+    return _read_identity_file(_legacy_identity_path())
+
+
+def set_identity(agent_id: str, cwd: Optional[str] = None) -> Path:
+    """Persist `agent_id` as the declared identity for the CURRENT cwd.
+
+    Per-cwd (the clobber fix): writing the identity in one repo no longer
+    overwrites a sibling session's identity in another repo. Survives across
+    coordination roots and sessions until cleared."""
+    path = identity_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"agent": agent_id}, indent=2))
     return path
 
 
-def clear_identity() -> bool:
-    """Remove the persisted identity. Returns True if a file was removed. After
-    clearing, resolve_agent falls back to env/derived."""
-    path = identity_path()
+def clear_identity(cwd: Optional[str] = None) -> bool:
+    """Remove the persisted identity for the CURRENT cwd. Returns True if a file
+    was removed. Per-cwd: clearing one repo's identity leaves other repos' intact.
+    After clearing, resolve_agent falls back to the legacy global / env / derived."""
+    path = identity_path(cwd)
     if path.exists():
         path.unlink()
         return True
