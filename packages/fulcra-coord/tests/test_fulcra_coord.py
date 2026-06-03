@@ -6091,6 +6091,420 @@ class TestCapabilitiesProbe(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Summaries aggregate + summary-sourced views (performance refactor)
+# ---------------------------------------------------------------------------
+
+def _make_representative_tasks() -> list[dict]:
+    """Tasks spanning every status, with the fields that distinguish full
+    bodies from summaries: last_touched_by != owner_agent, done.done_at both
+    inside and outside the search/recently-done cutoffs, assignees, tags.
+
+    Used by the equivalence test (the linchpin proving build_all_views gives
+    identical output from full bodies vs task_summary dicts) and by
+    build_summaries shape tests.
+    """
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    recent_iso = (now - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    old_iso = (now - timedelta(days=40)).isoformat().replace("+00:00", "Z")
+
+    # active, touched by a different agent than the owner (exercises build_agent_view)
+    active = apply_transition(_sample_task(), "active", by="agent-x")
+    active["owner_agent"] = "agent-a"
+    active["last_touched_by"] = "agent-x"
+
+    # waiting
+    waiting = _with_status(_sample_task(), "waiting")
+    waiting["title"] = "Parked task"
+    waiting["workstream"] = "research"
+
+    # blocked, assigned to a human (needs:human path)
+    blocked = _with_status(_sample_task(), "blocked")
+    blocked["title"] = "Blocked on human"
+    blocked["owner_agent"] = "agent-b"
+    blocked["assignee"] = "ash"
+    blocked["blocked_on"] = "need a decision"
+    blocked["tags"] = sorted(set(blocked.get("tags", []) + ["needs:human"]))
+
+    # proposed directive addressed to another agent (inbox path)
+    proposed = _sample_task()
+    proposed["title"] = "Directive to codex"
+    proposed["owner_agent"] = "agent-a"
+    proposed["assignee"] = "codex"
+
+    # proposed directive that the assignee has ALREADY acked — exercises the
+    # acked_by flattening (events live only on a full body; a summary carries the
+    # ack set). Without acked_by on the summary, the rebuilt inbox view would
+    # re-surface this and break the full-body-vs-summary equivalence.
+    acked = _sample_task()
+    acked["title"] = "Acked directive"
+    acked["owner_agent"] = "agent-a"
+    acked["assignee"] = "agent-z"
+    acked = schema.apply_event(acked, "inbox_ack", by="agent-z",
+                               summary="seen", dt=now)
+
+    # done INSIDE the search-index cutoff (30d) and recently-done (7d) cutoff
+    done_recent = _with_status(_sample_task(), "done")
+    done_recent["title"] = "Recently shipped"
+    done_recent["owner_agent"] = "agent-c"
+    done_recent["last_touched_by"] = "agent-d"
+    done_recent["updated_at"] = recent_iso
+    done_recent["done"] = {
+        "done_at": recent_iso, "done_by": "agent-d",
+        "evidence": "shipped", "verification_level": "agent-verified",
+        "confidence": None,
+    }
+
+    # done OUTSIDE both cutoffs (should be excluded from recently-done + search)
+    done_old = _with_status(_sample_task(), "done")
+    done_old["title"] = "Ancient task"
+    done_old["owner_agent"] = "agent-c"
+    done_old["updated_at"] = old_iso
+    done_old["done"] = {
+        "done_at": old_iso, "done_by": "agent-c",
+        "evidence": "old", "verification_level": "agent-verified",
+        "confidence": None,
+    }
+
+    # abandoned recently
+    abandoned = _with_status(_sample_task(), "abandoned")
+    abandoned["title"] = "Dropped task"
+    abandoned["updated_at"] = recent_iso
+    abandoned["done"] = {
+        "done_at": recent_iso, "done_by": "agent-a",
+        "evidence": None, "verification_level": None, "confidence": None,
+    }
+
+    return [active, waiting, blocked, proposed, acked, done_recent, done_old, abandoned]
+
+
+class TestTaskSummaryIdempotence(unittest.TestCase):
+    """task_summary must be a fixpoint: feeding a summary back in returns it
+    unchanged. This is what makes summaries a faithful re-buildable view source
+    (build_all_views over summaries == over full bodies)."""
+
+    def test_idempotent(self):
+        from datetime import datetime, timezone, timedelta
+        done_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        t = _with_status(_sample_task(), "done")
+        t["owner_agent"] = "agent-a"
+        t["last_touched_by"] = "agent-b"
+        t["assignee"] = "codex"
+        t["tags"] = sorted(set(t.get("tags", []) + ["needs:human"]))
+        t["updated_at"] = done_at
+        t["done"] = {
+            "done_at": done_at, "done_by": "agent-b",
+            "evidence": "x", "verification_level": "agent-verified", "confidence": None,
+        }
+        s1 = schema.task_summary(t)
+        s2 = schema.task_summary(s1)
+        self.assertEqual(s1, s2)
+
+    def test_carries_last_touched_by_and_done_at(self):
+        # Pick the done_recent task by identity rather than a brittle index.
+        tasks = _make_representative_tasks()
+        t = next(x for x in tasks if x["title"] == "Recently shipped")
+        s = schema.task_summary(t)
+        self.assertEqual(s["last_touched_by"], "agent-d")
+        self.assertEqual(s["done_at"], t["done"]["done_at"])
+
+
+class TestBuildAllViewsEquivalence(unittest.TestCase):
+    """THE linchpin: build_all_views must produce IDENTICAL output whether fed
+    full task bodies or task_summary dicts. Proves the write path can rebuild
+    views from the summaries aggregate without re-fetching task bodies."""
+
+    def test_full_bodies_equal_summaries(self):
+        tasks = _make_representative_tasks()
+        summaries = [schema.task_summary(t) for t in tasks]
+        # Freeze "now" inside build_all_views so the updated_at stamps match
+        # across the two calls (they would otherwise differ by microseconds).
+        fixed = "2026-06-03T00:00:00Z"
+        with patch("fulcra_coord.views._now") as mock_now:
+            from datetime import datetime, timezone
+            mock_now.return_value = datetime(2026, 6, 3, tzinfo=timezone.utc)
+            from_full = build_all_views(tasks)
+            from_summaries = build_all_views(summaries)
+        self.assertEqual(set(from_full), set(from_summaries),
+                         "view name sets differ")
+        for name in from_full:
+            self.assertEqual(from_full[name], from_summaries[name],
+                             f"view {name!r} differs between full bodies and summaries")
+
+
+class TestBuildSummaries(unittest.TestCase):
+    """build_summaries: the read-side aggregate so reads don't fetch bodies."""
+
+    def test_shape_and_membership(self):
+        tasks = _make_representative_tasks()
+        v = views.build_summaries(tasks)
+        self.assertEqual(v["schema"], "fulcra.coordination.summaries.v1")
+        self.assertEqual(v["view"], "summaries")
+        self.assertIn("updated_at", v)
+        self.assertIsInstance(v["summaries"], list)
+        # Includes the full passed-in set, one summary per task.
+        self.assertEqual(
+            {s["id"] for s in v["summaries"]},
+            {t["id"] for t in tasks},
+        )
+        # Each entry is exactly task_summary(t).
+        by_id = {s["id"]: s for s in v["summaries"]}
+        for t in tasks:
+            self.assertEqual(by_id[t["id"]], schema.task_summary(t))
+
+    def test_in_build_all_views(self):
+        tasks = _make_representative_tasks()
+        all_v = build_all_views(tasks)
+        self.assertIn("summaries", all_v)
+        self.assertEqual(all_v["summaries"]["view"], "summaries")
+
+
+class TestLoadTaskSummaries(unittest.TestCase):
+    """_load_task_summaries reads views/summaries.json when present, else falls
+    back to a full task load (older bus that never wrote the aggregate)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def test_reads_present_summaries_view(self):
+        from fulcra_coord.cli import _load_task_summaries
+        from fulcra_coord import remote
+        tasks = _make_representative_tasks()
+        summaries_view = views.build_summaries(tasks)
+        sum_path = remote.view_remote_path("summaries")
+
+        def fake_download(path, *, backend=None, timeout=None):
+            if path == sum_path:
+                return summaries_view
+            return None
+
+        with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download):
+            got = _load_task_summaries(backend=["false"])
+        self.assertEqual({s["id"] for s in got}, {t["id"] for t in tasks})
+
+    def test_falls_back_to_full_load_when_absent(self):
+        from fulcra_coord.cli import _load_task_summaries
+        tasks = _make_representative_tasks()
+        for t in tasks:
+            cache.write_cached_task(t)
+
+        # No summaries.json remotely (download returns None for everything).
+        with patch("fulcra_coord.cli.remote.download_json", return_value=None):
+            got = _load_task_summaries(backend=["false"])
+        # Fallback returns task_summary per cached task.
+        self.assertEqual({s["id"] for s in got}, {t["id"] for t in tasks})
+
+
+class TestReadsSourcedFromSummaries(unittest.TestCase):
+    """Read commands must answer correctly from a summaries.json without ever
+    fetching task bodies. We patch _cache_remote_task to blow up so the test
+    fails loudly if a read path tries to fetch a body."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def test_needs_me_from_summaries_no_body_fetch(self):
+        from fulcra_coord.cli import cmd_needs_me
+        from fulcra_coord import remote
+        tasks = _make_representative_tasks()  # 'blocked' is assigned to ash
+        summaries_view = views.build_summaries(tasks)
+        sum_path = remote.view_remote_path("summaries")
+
+        def fake_download(path, *, backend=None, timeout=None):
+            if path == sum_path:
+                return summaries_view
+            return None
+
+        def boom(*a, **k):
+            raise AssertionError("read path fetched a task body — should use summaries")
+
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download), \
+             patch("fulcra_coord.cli._cache_remote_task", side_effect=boom), \
+             redirect_stdout(buf):
+            args = types.SimpleNamespace(human="ash", format="json")
+            rc = cmd_needs_me(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        data = json.loads(buf.getvalue())
+        ids = {i["id"] for i in data["items"]}
+        self.assertIn(tasks[2]["id"], ids)  # the blocked-on-ash task
+
+
+class TestParallelViewUpload(unittest.TestCase):
+    """P1: the parallel view-upload fan-out must preserve exact semantics —
+    raise NeedsReconcile when any single view fails, upload all on success."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def _setup_remote(self):
+        """Make the optimistic-concurrency pre-stat see no remote file (fresh
+        write) and the task upload succeed, so we isolate the view fan-out."""
+        from fulcra_coord import remote
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+        cache.write_cached_task(task)
+        return task
+
+    def test_raises_needs_reconcile_when_one_view_fails(self):
+        from fulcra_coord.cli import _write_task_and_views
+        task = self._setup_remote()
+        index_path = "/".join([__import__("fulcra_coord").remote.view_remote_path("index")])
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            # Fail exactly one view upload (index); task + every other view ok.
+            if path.endswith("/index.json"):
+                return False
+            return True
+
+        with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._load_task_summaries",
+                   return_value=[schema.task_summary(task)]), \
+             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]):
+            with self.assertRaises(schema.NeedsReconcile):
+                _write_task_and_views(task, backend=["false"], command="update")
+
+    def test_uploads_all_views_on_success(self):
+        from fulcra_coord.cli import _write_task_and_views
+        task = self._setup_remote()
+        uploaded_paths = []
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            uploaded_paths.append(path)
+            return True
+
+        with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._load_task_summaries",
+                   return_value=[schema.task_summary(task)]), \
+             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]):
+            ok = _write_task_and_views(task, backend=["false"], command="update")
+        self.assertTrue(ok)
+        # Every standard view path was uploaded (index + summaries + active ...).
+        self.assertTrue(any(p.endswith("/index.json") for p in uploaded_paths))
+        self.assertTrue(any(p.endswith("/views/summaries.json") for p in uploaded_paths))
+        self.assertTrue(any(p.endswith("/views/active.json") for p in uploaded_paths))
+
+
+class TestRebuildSourceRobustness(unittest.TestCase):
+    """`_load_summaries_for_rebuild` must (B1) preserve acks the truncated event
+    log can no longer prove, and (S2) recover a task this agent knows about that
+    a raced aggregate dropped — without resurrecting a stale local copy."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def _agg(self, summaries):
+        from fulcra_coord import remote
+        sum_path = remote.view_remote_path("summaries")
+        view = {"schema": "fulcra.coordination.summaries.v1", "view": "summaries",
+                "updated_at": "2026-06-03T00:00:00Z", "summaries": summaries}
+
+        def fake_download(path, *, backend=None, timeout=None):
+            return view if path == sum_path else None
+        return fake_download
+
+    def test_b1_preserves_acks_lost_to_event_truncation(self):
+        # The written task body shows no ack (event scrolled out of the inline
+        # window); the durable aggregate still records it. Rebuild must keep it.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+        self.assertEqual(schema.task_summary(task).get("acked_by") or [], [])
+        prior = schema.task_summary(task)
+        prior["acked_by"] = ["openclaw:macmini:infra"]
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([prior])):
+            out = _load_summaries_for_rebuild(task, backend=["false"])
+        entry = next(s for s in out if s["id"] == task["id"])
+        self.assertIn("openclaw:macmini:infra", entry["acked_by"])
+
+    def test_s2_recovers_locally_known_task_missing_from_aggregate(self):
+        # A peer's raced write left the downloaded aggregate without taskB, but
+        # this agent has taskB cached → it must survive the rebuild.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        task_b = _sample_task()
+        task_b["id"] = "TASK-20260603-peer-task-aaaaaaaa"
+        task_b["updated_at"] = "2026-06-03T10:00:00Z"
+        cache.write_cached_task(task_b)
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)])):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        ids = {s["id"] for s in out}
+        self.assertIn(task_b["id"], ids)   # recovered from local cache
+        self.assertIn(task_a["id"], ids)
+
+    def test_s2_does_not_resurrect_stale_local_over_fresh_aggregate(self):
+        # Aggregate has a NEWER taskB; local cache has a STALE taskB. Freshest
+        # (aggregate) must win — no stale resurrection.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        stale_b = _sample_task()
+        stale_b["id"] = "TASK-20260603-peer-task-bbbbbbbb"
+        stale_b["title"] = "STALE"
+        stale_b["updated_at"] = "2026-06-01T00:00:00Z"
+        cache.write_cached_task(stale_b)
+        fresh_b = dict(schema.task_summary(stale_b))
+        fresh_b["title"] = "FRESH"
+        fresh_b["updated_at"] = "2026-06-03T00:00:00Z"
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a), fresh_b])):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        entry = next(s for s in out if s["id"] == stale_b["id"])
+        self.assertEqual(entry["title"], "FRESH")
+
+
+class TestParallelUploadExceptionSafety(unittest.TestCase):
+    """S3: a view upload that RAISES (not just returns False) must still be
+    treated as a failed view → NeedsReconcile, never escaping uncaught."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def test_raising_upload_becomes_needs_reconcile(self):
+        from fulcra_coord.cli import _write_task_and_views
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+        cache.write_cached_task(task)
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                raise RuntimeError("simulated network blowup")
+            return True
+
+        with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._load_summaries_for_rebuild",
+                   return_value=[schema.task_summary(task)]):
+            with self.assertRaises(schema.NeedsReconcile):
+                _write_task_and_views(task, backend=["false"], command="update")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

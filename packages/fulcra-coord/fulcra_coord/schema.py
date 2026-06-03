@@ -460,7 +460,45 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
     this function on the needs-attention / reconcile path; hard-indexing those
     keys raised KeyError on exactly the dangling tasks the safety-net view exists
     to surface. The defaults let such a task render instead of crashing the view.
+
+    PERF (summaries as a complete view source): every field a view builder reads
+    MUST appear here, or build_all_views(summaries) would silently diverge from
+    build_all_views(full_bodies) — and the write path now rebuilds views from the
+    summaries aggregate, never re-fetched bodies. Two fields were previously
+    omitted and are now included:
+
+      * ``last_touched_by`` — build_agent_view groups by owner_agent OR
+        last_touched_by, so a hand-off agent (touched but doesn't own) would lose
+        its per-agent view if this were dropped.
+      * ``done_at`` — flattened from ``done.done_at`` (which the full body nests).
+        build_search_index / build_recently_done / build_workstream_view /
+        build_agent_view all gate done/abandoned tasks on this timestamp. A
+        summary has no nested ``done`` block, so the flattened key is what those
+        builders read.
+
+    IDEMPOTENCE: task_summary(task_summary(t)) == task_summary(t). A summary has
+    no nested ``done`` dict but carries the flat ``done_at``, so we resolve it
+    from either source — re-summarizing a summary preserves the value rather than
+    nulling it. This makes summaries safely re-summarizable on the rebuild path.
     """
+    # Resolve the done timestamp from the nested full-body block OR an already-
+    # flattened summary key, so re-summarizing a summary is a fixpoint.
+    done_at = (task.get("done") or {}).get("done_at") or task.get("done_at")
+    # Flatten the set of agents who have acked this as an inbox directive. The
+    # inbox builders (views.is_open_directive / inbox_for) need to know "has <me>
+    # acked this" to drop a handled directive — a fact that lives only in the
+    # event log on a full body. A summary carries no events, so without this the
+    # rebuilt inbox view would re-surface acked directives forever (and
+    # build_all_views(summaries) would diverge from full bodies on any acked
+    # directive). Derived from inbox_ack events when present, else carried through
+    # from an existing summary's acked_by — keeping task_summary idempotent.
+    if "acked_by" in task and "events" not in task:
+        acked_by = list(task.get("acked_by") or [])
+    else:
+        acked_by = sorted({
+            e.get("by") for e in task.get("events", [])
+            if e.get("type") == "inbox_ack" and e.get("by")
+        })
     return {
         "id": task["id"],
         "title": task["title"],
@@ -472,10 +510,20 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         # before this field existed) render None rather than KeyError-crashing
         # the view — symmetric with priority/updated_at above.
         "assignee": task.get("assignee"),
+        # last_touched_by drives build_agent_view's hand-off grouping; default to
+        # owner_agent (the touching agent on a brand-new task) so an old task body
+        # missing the field summarizes sensibly rather than to None.
+        "last_touched_by": task.get("last_touched_by", task.get("owner_agent")),
         "current_summary": task.get("current_summary", ""),
         "next_action": task.get("next_action", ""),
         "blocked_on": task.get("blocked_on"),
         "tags": task.get("tags", []),
         "updated_at": task.get("updated_at", ""),
+        # Flattened done timestamp (see docstring): the single key every
+        # done/abandoned-gating view builder reads off a summary.
+        "done_at": done_at,
+        # Agents who have inbox-acked this directive (see docstring) — the inbox
+        # builders read this off a summary instead of scanning the event log.
+        "acked_by": acked_by,
         "task_file": task_file_path(task["id"]),
     }
