@@ -191,12 +191,13 @@ def _load_summaries_for_rebuild(
 
     ROBUSTNESS (S2): the single aggregate is one file under last-writer-wins, so
     a concurrent peer's write could leave the copy we downloaded missing a task.
-    To avoid dropping tasks THIS agent already knows about, we union in our local
-    cached task summaries, preferring the FRESHER record per id by ``updated_at``
-    (so we never resurrect a stale local copy over a newer remote one). Tasks
-    only another agent knows about and that raced out of the aggregate still heal
-    on the next ``reconcile`` (which rebuilds from the full index+search+next
-    union) — that residual transient is accepted by design.
+    Two layers recover it: (1) we union in our local cached task summaries,
+    freshest-per-id by ``updated_at`` (never resurrecting a stale local copy over
+    a newer remote one); and (2) the SELF-HEAL below — we enumerate the durable
+    per-task files and re-include any whose file exists but whom the aggregate
+    dropped. Because the task files are the un-clobberable source of truth, a
+    dropped task is recovered on the very NEXT write by any agent, not only on a
+    full ``reconcile``.
 
     ACK PRESERVATION (B1): ``acked_by`` on the just-written task is recomputed
     from its event log, which is truncated to the last MAX_EVENTS_INLINE events.
@@ -218,14 +219,37 @@ def _load_summaries_for_rebuild(
         s["id"]: s for s in summaries_view["summaries"] if s.get("id")
     }
 
-    # S2: union local cached task summaries, freshest-by-updated_at wins, so a
-    # task this agent knows about that a raced aggregate dropped is recovered —
-    # without ever overwriting a newer remote record with a stale local one.
+    # S2 layer 1: union local cached task summaries, freshest-by-updated_at wins,
+    # so a task this agent knows about that a raced aggregate dropped is recovered
+    # — without ever overwriting a newer remote record with a stale local one.
     for t in cache.list_cached_tasks():
         s = schema.task_summary(t)
         prev = by_id.get(s["id"])
         if prev is None or s.get("updated_at", "") > prev.get("updated_at", ""):
             by_id[s["id"]] = s
+
+    # S2 layer 2 — SELF-HEAL: the per-task FILES are the durable, un-clobberable
+    # truth (each owned by one agent). Enumerate them and recover any id whose
+    # file exists but is absent from the aggregate AND our cache — i.e. a task a
+    # concurrent write dropped from summaries.json. This heals the drop on THIS
+    # write (seconds) instead of leaving it invisible until a 90s reconcile. One
+    # `list` call; a body is fetched ONLY for an id nothing else already covers,
+    # so steady-state cost is ~0 fetches. Best-effort and ADD-only: a failed or
+    # empty listing contributes nothing and can never make the rebuild worse than
+    # the aggregate alone.
+    try:
+        prefix = f"{remote.remote_root()}/tasks/"
+        for path in remote.list_files(prefix, backend=backend):
+            if not path.endswith(".json"):
+                continue
+            tid = path.rsplit("/", 1)[-1][: -len(".json")]
+            if not tid or tid in by_id:
+                continue
+            body = _cache_remote_task(tid, backend=backend)
+            if body and body.get("id"):
+                by_id[body["id"]] = schema.task_summary(body)
+    except Exception:
+        pass  # listing is best-effort; never break a task write over it
 
     # Upsert the just-written task. B1: preserve any acks the truncated event log
     # can no longer prove by unioning the prior known acked_by set.

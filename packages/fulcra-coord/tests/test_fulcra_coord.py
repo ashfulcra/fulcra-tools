@@ -6603,6 +6603,60 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         entry = next(s for s in out if s["id"] == stale_b["id"])
         self.assertEqual(entry["title"], "FRESH")
 
+    def test_selfheal_recovers_dropped_task_via_file_listing(self):
+        # The hard case: a peer's task was clobbered out of the aggregate AND this
+        # agent never cached it — but its durable FILE exists. Enumerating the
+        # task files must recover it (fetch its body), healing the drop on THIS
+        # write instead of leaving it invisible until a reconcile.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        from fulcra_coord import remote
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        dropped = _sample_task()
+        dropped["id"] = "TASK-20260603-peer-dropped-cccccccc"
+        droppath = remote.task_remote_path(dropped["id"])
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)])), \
+             patch("fulcra_coord.cli.remote.list_files",
+                   return_value=[remote.task_remote_path(task_a["id"]), droppath]), \
+             patch("fulcra_coord.cli._cache_remote_task",
+                   side_effect=lambda tid, backend=None: dropped if tid == dropped["id"] else None):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        ids = {s["id"] for s in out}
+        self.assertIn(dropped["id"], ids)   # recovered from the file listing
+        self.assertIn(task_a["id"], ids)
+
+    def test_selfheal_no_body_fetch_when_aggregate_already_complete(self):
+        # Steady state: every listed task file is already in the aggregate, so the
+        # self-heal must fetch ZERO bodies (the cheap common path).
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        from fulcra_coord import remote
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        task_b = _sample_task(); task_b["id"] = "TASK-20260603-peer-known-dddddddd"
+
+        def boom(*a, **k):
+            raise AssertionError("fetched a body though the aggregate already covered the id")
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a), schema.task_summary(task_b)])), \
+             patch("fulcra_coord.cli.remote.list_files",
+                   return_value=[remote.task_remote_path(task_a["id"]), remote.task_remote_path(task_b["id"])]), \
+             patch("fulcra_coord.cli._cache_remote_task", side_effect=boom):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        self.assertEqual({s["id"] for s in out}, {task_a["id"], task_b["id"]})
+
+    def test_selfheal_listing_failure_is_safe(self):
+        # A failed/raising listing must never break the write — it just adds
+        # nothing, leaving the aggregate-derived rebuild intact.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)])), \
+             patch("fulcra_coord.cli.remote.list_files",
+                   side_effect=RuntimeError("list blew up")):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        self.assertEqual({s["id"] for s in out}, {task_a["id"]})
+
 
 class TestParallelUploadExceptionSafety(unittest.TestCase):
     """S3: a view upload that RAISES (not just returns False) must still be
