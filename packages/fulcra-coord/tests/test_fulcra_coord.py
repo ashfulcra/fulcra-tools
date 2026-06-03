@@ -2616,6 +2616,76 @@ class TestSessionStartBlockedOnYouBanner(unittest.TestCase):
         self.assertLess(ctx.index("BLOCKED ON YOU"), ctx.index("TASK-mine"))
 
 
+class TestSessionStartAgentResolution(unittest.TestCase):
+    """I-2: the banner resolves AGENT through the CLI (`identity --format json`)
+    so the "mine" filter, title, and resume hint agree with inbox/needs-me. A
+    declared per-cwd identity (not the shell-derived claude-code:<host>:<repo>)
+    must drive which tasks count as "mine"."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
+        # Fake CLI: identity -> a DECLARED id different from the derived shape;
+        # status -> canned; needs-me/inbox -> empty.
+        fake = os.path.join(self.bin, "fulcra-coord")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env bash\n"
+                    'if [ "$1" = "identity" ]; then echo "{\\"agent\\": \\"declared:custom:id\\"}"; exit 0; fi\n'
+                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
+                    'if [ "$1" = "needs-me" ]; then echo "{\\"items\\": []}"; exit 0; fi\n'
+                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'exit 0\n' % (os.path.join(self.tmp, "status.json"),))
+        os.chmod(fake, 0o755)
+        from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
+        from fulcra_coord import claude_code as cc
+        self.hooks = os.path.join(self.tmp, "hooks"); os.makedirs(self.hooks)
+        out = os.path.join(self.hooks, "session-start.sh")
+        with open(out, "w") as f:
+            f.write(cc.SESSION_START_SH.replace(
+                PLACEHOLDER_ARGV, materialize_argv([fake])))
+        os.chmod(out, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, statusjson):
+        with open(os.path.join(self.tmp, "status.json"), "w") as f:
+            f.write(statusjson)
+        env = dict(os.environ); env["PATH"] = self.bin + os.pathsep + env["PATH"]
+        return subprocess.run(["bash", os.path.join(self.hooks, "session-start.sh")],
+                              input=json.dumps({"cwd": self.tmp}),
+                              capture_output=True, text=True, env=env)
+
+    def test_declared_identity_drives_mine_filter(self):
+        # A task owned by the DECLARED id is "mine"; the shell-derived id is not
+        # used. The resume hint also carries the declared id.
+        sj = json.dumps({"active": [
+            {"id": "TASK-declared", "title": "my declared work", "status": "active",
+             "owner_agent": "declared:custom:id",
+             "updated_at": "2026-06-01T00:00:00Z", "next_action": "do X"}]})
+        r = self._run(sj)
+        self.assertEqual(r.returncode, 0)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("TASK-declared", ctx)
+        self.assertIn("--agent declared:custom:id", ctx)
+
+    def test_derived_owner_not_mine_under_declared_identity(self):
+        # A task owned by the shell-derived id is NOT mine once a different id is
+        # declared (it can only surface via the stale path, not the mine path).
+        host = os.uname().nodename.split(".")[0]
+        derived = "claude-code:%s:%s" % (host, os.path.basename(self.tmp))
+        sj = json.dumps({"active": [
+            {"id": "TASK-derived", "title": "derived work", "status": "active",
+             "owner_agent": derived,
+             "updated_at": "2026-06-01T00:00:00Z", "next_action": "do Y"}]})
+        r = self._run(sj)
+        self.assertEqual(r.returncode, 0)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        # Title (first active task owned by AGENT) must be empty -> no sessionTitle
+        # since the derived-owned task is not owned by the declared AGENT.
+        self.assertNotIn("sessionTitle", r.stdout)
+
+
 class TestOpenClawTemplates(unittest.TestCase):
     def test_prompt_and_hook_templates_present(self):
         from fulcra_coord import openclaw as oc
