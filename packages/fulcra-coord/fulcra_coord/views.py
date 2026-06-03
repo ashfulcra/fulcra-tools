@@ -609,6 +609,68 @@ def build_summaries(tasks: list[dict[str, Any]],
 
 
 # ---------------------------------------------------------------------------
+# Agent presence roster (situational awareness)
+# ---------------------------------------------------------------------------
+
+PRESENCE_VIEW_SCHEMA = "fulcra.coordination.presence_view.v1"
+
+
+def presence_liveness(last_seen: str, now: Optional[datetime] = None,
+                      stale_hours: Optional[float] = None) -> str:
+    """Classify a presence record's recency into live / idle / stale.
+
+    Reuses the SAME staleness threshold the task views use (``_stale_hours`` ->
+    ``FULCRA_COORD_STALE_HOURS``, default 2h) so "stale" means one thing across
+    the whole tool. Bands (documented in the design):
+
+      * live  — younger than HALF the threshold: actively working right now.
+      * idle  — between half and the full threshold: quiet but not yet suspect.
+      * stale — at or past the threshold: probably crashed / forgotten session.
+
+    Splitting at 0.5x gives a meaningful "live" band without a second env knob;
+    a missing/unparseable ``last_seen`` ages to +inf (via _age_hours) and so
+    classifies stale — the same fail-toward-surfacing choice is_stale makes."""
+    threshold = _stale_hours(stale_hours)
+    if now is None:
+        now = _now()
+    age = _age_hours(last_seen, now)
+    if age < threshold * 0.5:
+        return "live"
+    if age < threshold:
+        return "idle"
+    return "stale"
+
+
+def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None,
+                   updated_at: Optional[str] = None) -> dict[str, Any]:
+    """Build the aggregate presence roster from per-agent presence records.
+
+    Pure function over a list of ``make_presence`` dicts: each entry is carried
+    through with a ``liveness`` annotation (live/idle/stale by last_seen age) and
+    the roster is sorted most-recently-active first, so the human glancing at it
+    sees who is actively working at the top. This is the read-side aggregate the
+    ``presence`` / ``agents`` / ``resume`` surfaces consume in one download."""
+    if updated_at is None:
+        updated_at = _now().isoformat().replace("+00:00", "Z")
+    if now is None:
+        now = _now()
+    agents = []
+    for rec in records:
+        entry = dict(rec)
+        entry["liveness"] = presence_liveness(rec.get("last_seen", ""), now)
+        agents.append(entry)
+    # Most-recently-seen first (descending last_seen). A missing timestamp sorts
+    # last (empty string is < any real ISO timestamp).
+    agents.sort(key=lambda a: a.get("last_seen", ""), reverse=True)
+    return {
+        "schema": PRESENCE_VIEW_SCHEMA,
+        "view": "presence",
+        "updated_at": updated_at,
+        "agents": agents,
+    }
+
+
+# ---------------------------------------------------------------------------
 # All views at once (for write fan-out)
 # ---------------------------------------------------------------------------
 

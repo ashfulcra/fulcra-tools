@@ -6504,6 +6504,324 @@ class TestParallelUploadExceptionSafety(unittest.TestCase):
                 _write_task_and_views(task, backend=["false"], command="update")
 
 
+# ===========================================================================
+# AGENT PRESENCE — workstream-on-connect (situational awareness)
+# ===========================================================================
+
+class TestMakePresence(unittest.TestCase):
+    """schema.make_presence: validated per-agent presence record."""
+
+    def test_required_fields_and_schema(self):
+        rec = schema.make_presence("claude-code:h:r", workstreams=["fulcra"])
+        self.assertEqual(rec["schema"], "fulcra.coordination.presence.v1")
+        self.assertEqual(rec["agent"], "claude-code:h:r")
+        self.assertEqual(rec["workstreams"], ["fulcra"])
+        self.assertIn("last_seen", rec)
+        # default last_seen is an ISO-Z timestamp
+        self.assertTrue(rec["last_seen"].endswith("Z"))
+        self.assertEqual(rec["summary"], "")
+        self.assertIsNone(rec["session"])
+
+    def test_workstreams_normalized_sorted_unique_nonempty(self):
+        rec = schema.make_presence(
+            "a", workstreams=["zeta", "alpha", "alpha", "", "  ", " beta "])
+        # sorted, deduped, stripped, empties dropped
+        self.assertEqual(rec["workstreams"], ["alpha", "beta", "zeta"])
+
+    def test_workstreams_none_becomes_empty_list(self):
+        rec = schema.make_presence("a", workstreams=None)
+        self.assertEqual(rec["workstreams"], [])
+
+    def test_explicit_last_seen_and_session_preserved(self):
+        rec = schema.make_presence(
+            "a", workstreams=["x"], summary="on it",
+            last_seen="2026-06-03T00:00:00Z", session="sess-1")
+        self.assertEqual(rec["last_seen"], "2026-06-03T00:00:00Z")
+        self.assertEqual(rec["session"], "sess-1")
+        self.assertEqual(rec["summary"], "on it")
+
+
+class TestBuildPresence(unittest.TestCase):
+    """views.build_presence: aggregate roster with liveness + sort order."""
+
+    def _rec(self, agent, hours_ago, workstreams=("x",)):
+        from datetime import datetime, timezone, timedelta
+        ts = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)) \
+            .isoformat().replace("+00:00", "Z")
+        return schema.make_presence(agent, workstreams=list(workstreams),
+                                    last_seen=ts)
+
+    def tearDown(self):
+        os.environ.pop("FULCRA_COORD_STALE_HOURS", None)
+
+    def test_schema_and_shape(self):
+        out = views.build_presence([self._rec("a", 0)])
+        self.assertEqual(out["view"], "presence")
+        self.assertEqual(out["schema"], "fulcra.coordination.presence_view.v1")
+        self.assertIn("updated_at", out)
+        self.assertEqual(len(out["agents"]), 1)
+        self.assertIn("liveness", out["agents"][0])
+
+    def test_liveness_bands(self):
+        # threshold = 2h: live < 1h (0.5x), idle < 2h, else stale
+        os.environ["FULCRA_COORD_STALE_HOURS"] = "2"
+        recs = [self._rec("live-agent", 0.1),
+                self._rec("idle-agent", 1.5),
+                self._rec("stale-agent", 5)]
+        out = views.build_presence(recs)
+        by_agent = {a["agent"]: a["liveness"] for a in out["agents"]}
+        self.assertEqual(by_agent["live-agent"], "live")
+        self.assertEqual(by_agent["idle-agent"], "idle")
+        self.assertEqual(by_agent["stale-agent"], "stale")
+
+    def test_sorted_by_last_seen_desc(self):
+        recs = [self._rec("old", 5), self._rec("fresh", 0.1),
+                self._rec("mid", 2)]
+        out = views.build_presence(recs)
+        order = [a["agent"] for a in out["agents"]]
+        self.assertEqual(order, ["fresh", "mid", "old"])
+
+
+class TestPresenceRemotePaths(unittest.TestCase):
+    def test_paths(self):
+        from fulcra_coord import remote
+        self.assertTrue(
+            remote.presence_remote_path("claude-code-h-r").endswith(
+                "/presence/claude-code-h-r.json"))
+        self.assertTrue(
+            remote.presence_view_path().endswith("/views/presence.json"))
+
+
+class _PresenceBackendCase(unittest.TestCase):
+    """Base: stateful fake backend so connect/workstream/presence run E2E."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.fake_root = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["FULCRA_FAKE_ROOT"] = self.fake_root
+        backend_script = str(Path(__file__).resolve().parent / "fake_fulcra_backend.py")
+        self.fake_backend = [sys.executable, backend_script]
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        os.environ.pop("FULCRA_FAKE_ROOT", None)
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.fake_root, ignore_errors=True)
+
+    def _ns(self, **kw):
+        return types.SimpleNamespace(**kw)
+
+    def _run(self, fn, args):
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = fn(args, backend=self.fake_backend)
+        return rc, buf.getvalue()
+
+
+class TestConnectCommand(_PresenceBackendCase):
+    def test_connect_writes_presence_record(self):
+        from fulcra_coord.cli import cmd_connect
+        from fulcra_coord import remote
+        rc, _ = self._run(cmd_connect, self._ns(
+            agent="claude-code:h:r", workstream="fulcra", summary="boot",
+            format="table"))
+        self.assertEqual(rc, 0)
+        rec = remote.download_json(
+            remote.presence_remote_path(views.agent_slug("claude-code:h:r")),
+            backend=self.fake_backend)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["agent"], "claude-code:h:r")
+        self.assertIn("fulcra", rec["workstreams"])
+
+    def test_connect_derives_workstreams_from_open_tasks_union_explicit(self):
+        from fulcra_coord.cli import cmd_start, cmd_connect
+        from fulcra_coord import remote
+        me = "claude-code:h:r"
+        # Two open tasks owned by me in distinct workstreams.
+        self._run(cmd_start, self._ns(
+            title="t1", workstream="devops", agent=me, kind="ops",
+            priority="P2", summary="", next="", surface=None))
+        self._run(cmd_start, self._ns(
+            title="t2", workstream="insights", agent=me, kind="ops",
+            priority="P2", summary="", next="", surface=None))
+        # Connect with an explicit extra workstream.
+        rc, _ = self._run(cmd_connect, self._ns(
+            agent=me, workstream="research", summary="", format="table"))
+        self.assertEqual(rc, 0)
+        rec = remote.download_json(
+            remote.presence_remote_path(views.agent_slug(me)),
+            backend=self.fake_backend)
+        # Union of explicit (research) + derived (devops, insights).
+        self.assertEqual(set(rec["workstreams"]),
+                         {"research", "devops", "insights"})
+
+    def test_connect_upserts_aggregate(self):
+        from fulcra_coord.cli import cmd_connect
+        from fulcra_coord import remote
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        agg = remote.download_json(remote.presence_view_path(),
+                                   backend=self.fake_backend)
+        self.assertIsNotNone(agg)
+        agents = [a["agent"] for a in agg["agents"]]
+        self.assertIn(me, agents)
+        # second connect by another agent must not clobber the first
+        self._run(cmd_connect, self._ns(
+            agent="codex:h:r", workstream="ops", summary="", format="table"))
+        agg = remote.download_json(remote.presence_view_path(),
+                                   backend=self.fake_backend)
+        agents = [a["agent"] for a in agg["agents"]]
+        self.assertIn(me, agents)
+        self.assertIn("codex:h:r", agents)
+
+
+class TestWorkstreamCommand(_PresenceBackendCase):
+    def _record(self, me):
+        from fulcra_coord import remote
+        return remote.download_json(
+            remote.presence_remote_path(views.agent_slug(me)),
+            backend=self.fake_backend)
+
+    def test_set_replaces(self):
+        from fulcra_coord.cli import cmd_connect, cmd_workstream
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="set", workstreams="a,b", summary=None,
+            format="table"))
+        self.assertEqual(set(self._record(me)["workstreams"]), {"a", "b"})
+
+    def test_add_appends(self):
+        from fulcra_coord.cli import cmd_connect, cmd_workstream
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="add", workstreams="extra", summary=None,
+            format="table"))
+        self.assertEqual(set(self._record(me)["workstreams"]),
+                         {"fulcra", "extra"})
+
+    def test_clear_empties(self):
+        from fulcra_coord.cli import cmd_connect, cmd_workstream
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="clear", workstreams=None, summary=None,
+            format="table"))
+        self.assertEqual(self._record(me)["workstreams"], [])
+
+    def test_set_updates_summary(self):
+        from fulcra_coord.cli import cmd_connect, cmd_workstream
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="set", workstreams="x", summary="new note",
+            format="table"))
+        self.assertEqual(self._record(me)["summary"], "new note")
+
+
+class TestPresenceCommand(_PresenceBackendCase):
+    def test_empty_roster_message(self):
+        from fulcra_coord.cli import cmd_presence
+        rc, out = self._run(cmd_presence, self._ns(format="table"))
+        self.assertEqual(rc, 0)
+        self.assertIn("No agent presence recorded yet", out)
+
+    def test_renders_agent_with_no_tasks(self):
+        """The key requirement: an agent with a presence record but NO tasks
+        still shows in the roster."""
+        from fulcra_coord.cli import cmd_connect, cmd_presence
+        me = "lonely-agent:h:r"
+        # connect with no open tasks -> presence record exists, no tasks.
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="solo-stream", summary="working alone",
+            format="table"))
+        rc, out = self._run(cmd_presence, self._ns(format="table"))
+        self.assertEqual(rc, 0)
+        self.assertIn(me, out)
+        self.assertIn("solo-stream", out)
+
+    def test_json_roster(self):
+        from fulcra_coord.cli import cmd_connect, cmd_presence
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        rc, out = self._run(cmd_presence, self._ns(format="json"))
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertEqual(data["view"], "presence")
+        self.assertIn(me, [a["agent"] for a in data["agents"]])
+
+
+class TestAgentsIncludesPresenceOnly(_PresenceBackendCase):
+    def test_presence_only_agent_surfaces_in_agents(self):
+        """cmd_agents must include an agent that has a presence record but no
+        active task (the situational-awareness requirement)."""
+        from fulcra_coord.cli import cmd_connect, cmd_agents
+        ghost = "presence-only:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=ghost, workstream="ambient-work", summary="just lurking",
+            format="table"))
+        rc, out = self._run(cmd_agents, self._ns(mine=None, format="table"))
+        self.assertEqual(rc, 0)
+        self.assertIn(ghost, out)
+        self.assertIn("ambient-work", out)
+
+
+class TestPresenceReconcile(_PresenceBackendCase):
+    def test_reconcile_rebuilds_presence_aggregate_from_records(self):
+        """reconcile lists presence/*.json and rebuilds views/presence.json."""
+        from fulcra_coord.cli import cmd_connect, cmd_reconcile
+        from fulcra_coord import remote
+        a, b = "agent-a:h:r", "agent-b:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=a, workstream="wa", summary="", format="table"))
+        self._run(cmd_connect, self._ns(
+            agent=b, workstream="wb", summary="", format="table"))
+        # Nuke the aggregate; reconcile must rebuild it from per-agent records.
+        agg_local = remote.presence_view_path()
+        rel = agg_local.lstrip("/")
+        (Path(self.fake_root) / rel).unlink()
+        self._run(cmd_reconcile, self._ns())
+        agg = remote.download_json(remote.presence_view_path(),
+                                   backend=self.fake_backend)
+        self.assertIsNotNone(agg)
+        agents = {x["agent"] for x in agg["agents"]}
+        self.assertEqual(agents, {a, b})
+
+
+class TestStartAgentOptional(_PresenceBackendCase):
+    def test_start_without_agent_resolves_via_resolve_agent(self):
+        from fulcra_coord.cli import cmd_start
+        from fulcra_coord import remote
+        os.environ["FULCRA_COORD_AGENT"] = "env-agent:h:r"
+        # No --agent attribute set on the namespace at all (omitted).
+        rc, out = self._run(cmd_start, self._ns(
+            title="resolve me", workstream="devops", kind="ops",
+            priority="P2", summary="", next="", surface=None, agent=None))
+        self.assertEqual(rc, 0)
+        # The created task's owner must be the resolved env agent.
+        self.assertIn("env-agent:h:r", out)
+
+    def test_start_with_agent_overrides(self):
+        from fulcra_coord.cli import cmd_start
+        os.environ["FULCRA_COORD_AGENT"] = "env-agent:h:r"
+        rc, out = self._run(cmd_start, self._ns(
+            title="explicit", workstream="devops", kind="ops",
+            priority="P2", summary="", next="", surface=None,
+            agent="explicit-agent:h:r"))
+        self.assertEqual(rc, 0)
+        self.assertIn("explicit-agent:h:r", out)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

@@ -1014,11 +1014,50 @@ def cmd_agents(args: Any, backend: Optional[list[str]] = None) -> int:
             })
         agent_blocks.append({"agent": agent, "counts": counts, "tasks": task_entries})
 
+    # Fold in presence (situational awareness): annotate each task-derived agent
+    # with its declared workstreams + liveness, AND surface agents that have a
+    # presence record but NO active task — the whole point of presence. One read
+    # of the aggregate roster (no task re-fetch). Best-effort: a missing roster
+    # leaves `agents` behaving exactly as before (backward compatible).
+    presence_by_agent: dict[str, dict[str, Any]] = {}
+    try:
+        agg = remote.download_json(remote.presence_view_path(), backend=backend)
+        if agg:
+            roster = views.build_presence([
+                {k: v for k, v in a.items() if k != "liveness"}
+                for a in agg.get("agents", [])
+            ])
+            for a in roster["agents"]:
+                if mine and a.get("agent") != mine:
+                    continue
+                presence_by_agent[a["agent"]] = a
+    except Exception:
+        presence_by_agent = {}
+
+    # Annotate task blocks with presence (where present).
+    task_agents = {b["agent"] for b in agent_blocks}
+    for blk in agent_blocks:
+        p = presence_by_agent.get(blk["agent"])
+        if p:
+            blk["presence"] = {
+                "workstreams": p.get("workstreams", []),
+                "summary": p.get("summary", ""),
+                "last_seen": p.get("last_seen", ""),
+                "liveness": p.get("liveness", ""),
+            }
+
+    # Presence-only agents: have a record but no active/waiting/blocked task.
+    presence_only = [
+        p for agent, p in sorted(presence_by_agent.items())
+        if agent not in task_agents
+    ]
+
     if out_format == "json":
-        _print_json({"agents": agent_blocks, "mine": mine})
+        _print_json({"agents": agent_blocks, "presence_only": presence_only,
+                     "mine": mine})
         return 0
 
-    if not agent_blocks:
+    if not agent_blocks and not presence_only:
         scope = f" for {mine}" if mine else ""
         _info(f"No active/waiting/blocked work{scope} on the coordination bus.")
         return 0
@@ -1032,12 +1071,27 @@ def cmd_agents(args: Any, backend: Optional[list[str]] = None) -> int:
         c = blk["counts"]
         print(f"\n  {blk['agent']}  "
               f"(active {c['active']} / waiting {c['waiting']} / blocked {c['blocked']})")
+        p = blk.get("presence")
+        if p:
+            ws = ", ".join(p.get("workstreams", [])) or "(none)"
+            age = _age_str(p.get("last_seen", ""))
+            print(f"    presence: {ws}  [{p.get('liveness','')}] (seen {age})")
         for t in blk["tasks"]:
             mark = " ⚠" if t["stale"] else ""
             print(f"    [{t['status'].upper()}] [{t['priority']}] "
                   f"{t['id'][:28]}{mark}  {t['title'][:50]}")
             if t["next_action"]:
                 print(f"          next: {t['next_action'][:70]}")
+
+    if presence_only:
+        print(f"\n  --- Present (no active task) ---")
+        for p in presence_only:
+            ws = ", ".join(p.get("workstreams", [])) or "(none)"
+            age = _age_str(p.get("last_seen", ""))
+            print(f"\n  {p['agent']}  [{p.get('liveness','')}] (seen {age})")
+            print(f"    workstreams: {ws}")
+            if p.get("summary"):
+                print(f"    on: {p['summary'][:80]}")
     print()
     return 0
 
@@ -1256,6 +1310,221 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None) -> list[dict[str, 
     return views.inbox_for(me, all_tasks)
 
 
+# ---------------------------------------------------------------------------
+# Presence (workstream-on-connect) — best-effort, never raises into a task op
+# ---------------------------------------------------------------------------
+
+def _derive_workstreams_from_open_tasks(
+    me: str, backend: Optional[list[str]] = None) -> list[str]:
+    """The distinct ``workstream`` of this agent's OPEN tasks (proposed/active/
+    waiting/blocked) that it OWNS.
+
+    Read via the summaries fast-path (one download), so deriving presence
+    workstreams costs the same single round-trip the other read commands pay —
+    no per-task body fetch. Best-effort: any failure yields an empty list rather
+    than raising into the connect path."""
+    open_statuses = ("proposed", "active", "waiting", "blocked")
+    try:
+        summaries = _load_task_summaries(backend=backend)
+    except Exception:
+        return []
+    return sorted({
+        t.get("workstream") for t in summaries
+        if t.get("owner_agent") == me
+        and t.get("status") in open_statuses
+        and t.get("workstream")
+    })
+
+
+def _upsert_presence_aggregate(
+    record: dict[str, Any], backend: Optional[list[str]] = None) -> None:
+    """Opportunistically merge this agent's presence record into the aggregate
+    roster (``views/presence.json``) so ``presence`` / ``agents`` see it
+    immediately, without waiting for a reconcile.
+
+    Cheap (1 download + 1 upload) and BEST-EFFORT: it downloads the current
+    aggregate, replaces this agent's entry by id (disjoint keys → trivial union,
+    newest record wins), and re-uploads. Any failure is swallowed — the durable
+    per-agent record is already written, and reconcile self-heals the aggregate,
+    so a transient aggregate write must never surface as an error to connect."""
+    try:
+        agg = remote.download_json(remote.presence_view_path(), backend=backend)
+        existing = (agg or {}).get("agents", []) if agg else []
+        # Drop any prior entry for this agent, then rebuild from the union so the
+        # entry carries a fresh liveness annotation alongside the others.
+        records = [
+            {k: v for k, v in a.items() if k != "liveness"}
+            for a in existing if a.get("agent") != record["agent"]
+        ]
+        records.append(record)
+        view = views.build_presence(records)
+        remote.upload_json(view, remote.presence_view_path(), backend=backend)
+        cache.write_cached_view("presence", view)
+    except Exception:
+        pass  # aggregate is opportunistic; reconcile heals it
+
+
+def _write_presence(
+    record: dict[str, Any], backend: Optional[list[str]] = None) -> bool:
+    """Write a presence record to its per-agent file + upsert the aggregate.
+
+    Returns True when the durable per-agent record uploaded. The aggregate upsert
+    is best-effort on top. Whole thing is guarded so a presence write can never
+    raise into a caller (mirrors _stamp_session_pointer's contract)."""
+    try:
+        slug = views.agent_slug(record["agent"])
+        ok = remote.upload_json(
+            record, remote.presence_remote_path(slug), backend=backend)
+        _upsert_presence_aggregate(record, backend=backend)
+        return ok
+    except Exception:
+        return False
+
+
+def _load_own_presence(
+    me: str, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+    """Download this agent's own presence record (``presence/<slug>.json``), or
+    None if it has never connected. Used by `workstream` to mutate the existing
+    record rather than clobber declared streams/summary."""
+    slug = views.agent_slug(me)
+    return remote.download_json(remote.presence_remote_path(slug), backend=backend)
+
+
+def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Record this agent's presence on connect (workstream-on-connect).
+
+    The SessionStart/Codex hooks call this so the human sees what each agent is
+    working on even when it owns no active task — the north star. Workstreams are
+    the UNION of explicit ``--workstream`` values and the distinct ``workstream``
+    of this agent's open tasks, so the common case needs no extra typing. Writes
+    the durable per-agent record and opportunistically refreshes the aggregate.
+    Best-effort: a presence write never fails the session boot."""
+    me = identity.resolve_agent(getattr(args, "agent", None))
+    out_format = getattr(args, "format", "table")
+    summary = getattr(args, "summary", "") or ""
+
+    explicit = _split_workstreams(getattr(args, "workstream", None))
+    derived = _derive_workstreams_from_open_tasks(me, backend=backend)
+    workstreams = sorted(set(explicit) | set(derived))
+
+    record = schema.make_presence(me, workstreams=workstreams, summary=summary,
+                                  session=os.environ.get("FULCRA_COORD_SESSION") or None)
+    _write_presence(record, backend=backend)
+
+    if out_format == "json":
+        _print_json(record)
+        return 0
+    ws = ", ".join(record["workstreams"]) or "(none)"
+    _info(f"Connected: {me} — workstreams: {ws}")
+    if summary:
+        _info(f"  on: {summary}")
+    return 0
+
+
+def _split_workstreams(raw: Optional[str]) -> list[str]:
+    """Split a comma-separated ``--workstream`` value into a clean list. Empty
+    tokens (e.g. a trailing comma) are dropped; make_presence normalizes the rest."""
+    if not raw:
+        return []
+    return [w.strip() for w in raw.split(",") if w.strip()]
+
+
+def cmd_workstream(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Declare/update THIS agent's presence workstreams (manual path).
+
+    Subcommands mutate the agent's own presence record:
+      * ``set <ws>[,…]`` — REPLACE the workstream list.
+      * ``add <ws>``     — APPEND to the existing list.
+      * ``clear``        — empty the list.
+    A bare ``workstream`` (no subcommand) just SHOWS the current presence. A
+    ``--summary`` updates the one-line "what I'm on" on any mutating action.
+    Reads the agent's own ``presence/<slug>.json``, mutates, and rewrites +
+    upserts the aggregate (same writer as connect → no contention)."""
+    me = identity.resolve_agent(getattr(args, "agent", None))
+    out_format = getattr(args, "format", "table")
+    action = getattr(args, "ws_action", None)
+    summary_arg = getattr(args, "summary", None)
+
+    current = _load_own_presence(me, backend=backend)
+    cur_workstreams = list((current or {}).get("workstreams", []))
+    cur_summary = (current or {}).get("summary", "")
+
+    if action is None:
+        # Show current presence (no mutation).
+        rec = current or schema.make_presence(me, workstreams=[], summary="")
+        if out_format == "json":
+            _print_json(rec)
+            return 0
+        ws = ", ".join(rec.get("workstreams", [])) or "(none)"
+        _info(f"{me} — workstreams: {ws}")
+        if rec.get("summary"):
+            _info(f"  on: {rec['summary']}")
+        return 0
+
+    if action == "set":
+        new_workstreams = _split_workstreams(getattr(args, "workstreams", None))
+    elif action == "add":
+        new_workstreams = cur_workstreams + _split_workstreams(
+            getattr(args, "workstreams", None))
+    elif action == "clear":
+        new_workstreams = []
+    else:
+        _err(f"Unknown workstream action: {action}")
+        return 1
+
+    new_summary = summary_arg if summary_arg is not None else cur_summary
+    record = schema.make_presence(me, workstreams=new_workstreams,
+                                  summary=new_summary,
+                                  session=(current or {}).get("session"))
+    _write_presence(record, backend=backend)
+
+    if out_format == "json":
+        _print_json(record)
+        return 0
+    ws = ", ".join(record["workstreams"]) or "(none)"
+    _info(f"Workstreams for {me}: {ws}")
+    return 0
+
+
+def cmd_presence(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Show the agent presence roster — who is working on what, right now.
+
+    Reads the aggregate ``views/presence.json`` (one download) and renders, per
+    agent: workstreams · summary · last-seen age · liveness. This is the surface
+    that answers "what is every agent on" even for agents with no active task.
+    Empty/missing roster → a clear "nothing recorded yet" message."""
+    out_format = getattr(args, "format", "table")
+    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+    # Re-derive liveness at read time so the age reflects NOW, not the moment the
+    # aggregate was last written (the stored liveness can have drifted to stale).
+    records = [
+        {k: v for k, v in a.items() if k != "liveness"}
+        for a in (agg or {}).get("agents", [])
+    ] if agg else []
+    view = views.build_presence(records)
+
+    if out_format == "json":
+        _print_json(view)
+        return 0
+
+    if not view["agents"]:
+        _info("No agent presence recorded yet.")
+        return 0
+
+    print(f"\n{'='*60}")
+    print("  Fulcra Coordination — Presence")
+    print(f"{'='*60}")
+    for a in view["agents"]:
+        ws = ", ".join(a.get("workstreams", [])) or "(none)"
+        age = _age_str(a.get("last_seen", ""))
+        print(f"\n  {a['agent']}  [{a['liveness']}]  (seen {age})")
+        print(f"    workstreams: {ws}")
+        if a.get("summary"):
+            print(f"    on: {a['summary'][:80]}")
+    print()
+    return 0
+
+
 def _inbox_surface_path(agent: str):
     """Where the listener drops pending directives for the next SessionStart to
     read. Root-scoped via cache_root() and suffixed by the agent slug so two
@@ -1471,6 +1740,22 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     blocked_on_me = _sort(blocked_on_me)
     owed_to_others = _sort(owed_to_others)
 
+    # Team state (presence): what OTHER agents are currently on, so an agent
+    # resuming sees the room — including agents with no active task. One read of
+    # the aggregate roster; best-effort (a missing roster yields an empty list,
+    # so resume behaves exactly as before on an older bus).
+    other_agents = []
+    try:
+        agg = remote.download_json(remote.presence_view_path(), backend=backend)
+        if agg:
+            roster = views.build_presence([
+                {k: v for k, v in a.items() if k != "liveness"}
+                for a in agg.get("agents", [])
+            ])
+            other_agents = [a for a in roster["agents"] if a.get("agent") != me]
+    except Exception:
+        other_agents = []
+
     if out_format == "json":
         _print_json({
             "agent": me,
@@ -1479,6 +1764,7 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
             "blocked_on_me": blocked_on_me,
             "owed_to_others": owed_to_others,
             "blocked_on_human": blocked_on_human,
+            "other_agents": other_agents,
         })
         return 0
 
@@ -1503,6 +1789,14 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     _section("Blocked on YOU", blocked_on_me, ask_field=True)
     _section("You owe others", owed_to_others)
     _section(f"Blocked on the human ({human})", blocked_on_human, ask_field=True)
+
+    # Concise team-state footer so a resuming agent sees what the others are on.
+    if other_agents:
+        print(f"\n  Other agents (presence) ({len(other_agents)})")
+        for a in other_agents:
+            ws = ", ".join(a.get("workstreams", [])) or "(none)"
+            age = _age_str(a.get("last_seen", ""))
+            print(f"    {a['agent']}  [{a.get('liveness','')}] (seen {age}): {ws}")
     print()
     return 0
 
@@ -1511,7 +1805,10 @@ def cmd_start(args: Any, backend: Optional[list[str]] = None) -> int:
     """Create a new task and upload it."""
     title = args.title
     workstream = args.workstream
-    agent = args.agent
+    # --agent is now OPTIONAL (parity with update/block/done/etc., which all
+    # auto-resolve): fall back to the normal identity resolution when omitted so
+    # `start` no longer uniquely requires it. --agent stays as an explicit override.
+    agent = identity.resolve_agent(getattr(args, "agent", None))
     kind = getattr(args, "kind", "ops") or "ops"
     priority = getattr(args, "priority", "P2") or "P2"
     summary = getattr(args, "summary", "") or ""
@@ -1872,6 +2169,38 @@ def cmd_abandon(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+def _reconcile_presence(backend: Optional[list[str]] = None) -> None:
+    """Rebuild ``views/presence.json`` from the durable ``presence/*.json`` files.
+
+    Lists ``<root>/presence/`` (remote.list_files), downloads each per-agent
+    record, and rebuilds the aggregate roster — the presence analogue of the task
+    view self-heal. This is what makes the opportunistic connect-time aggregate
+    merge eventually-consistent: even if a connect's best-effort upsert was lost,
+    reconcile reconstructs the roster from the authoritative per-agent records.
+
+    LISTING REQUIREMENT: relies on remote.list_files being able to enumerate the
+    presence dir. If listing returns nothing (empty dir, or a backend without a
+    working list), no aggregate is written — the existing one is left intact
+    rather than clobbered to empty. Best-effort: never raises into reconcile."""
+    try:
+        prefix = f"{remote.remote_root()}/presence/"
+        paths = remote.list_files(prefix, backend=backend)
+        records = []
+        for path in paths:
+            if not path.endswith(".json"):
+                continue
+            rec = remote.download_json(path, backend=backend)
+            if rec and rec.get("agent"):
+                records.append(rec)
+        if not records:
+            return
+        view = views.build_presence(records)
+        remote.upload_json(view, remote.presence_view_path(), backend=backend)
+        cache.write_cached_view("presence", view)
+    except Exception:
+        pass  # presence rebuild is best-effort; task-view reconcile is the contract
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
     import time
@@ -1926,6 +2255,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             _err("Reconcile timeout exceeded mid-upload.")
             ops_log.log_op("reconcile", status="timeout")
             return 1
+
+    # Rebuild the presence aggregate from the durable per-agent presence records,
+    # mirroring how the task views self-heal here. Best-effort: a presence rebuild
+    # failure must not fail a task-view reconcile, so it is reported but does not
+    # count toward `failures`.
+    _reconcile_presence(backend=backend)
 
     if failures:
         _warn(f"  View upload failures: {failures}")
