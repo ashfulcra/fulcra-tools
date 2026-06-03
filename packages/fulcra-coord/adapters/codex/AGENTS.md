@@ -97,9 +97,9 @@ by another agent, and is merged by its original author — not the reviewer.**
 
 GitHub-hosted so PRs are possible. **`ashfulcra/fulcra-tools`** (Fulcra-internal
 monorepo) is **only for things that make Fulcra useful for other people**
-(Fulcra-ecosystem tools, possibly public later). Everything else → separate,
-logically-arranged repos under **`ashfulcra`** or **`reversity`**. Unsure where
-something belongs? Ask the operator first.
+(Fulcra-ecosystem tools, possibly public later). **Fulcra-related infra** that
+isn't useful-to-others enough → its own **`ashfulcra/<repo>`**. **Personal /
+unrelated** projects → their own **`reversity/<repo>`**. Unsure? Ask the operator.
 
 ## Environment variables
 

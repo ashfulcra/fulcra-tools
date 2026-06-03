@@ -46,5 +46,6 @@ operator (`fulcra-coord block --on-user`); never merge unreviewed. Full rule:
 
 ## Repo homes
 This monorepo (Fulcra-internal for now) is **only for things that make Fulcra
-useful for other people**. Personal/unrelated projects go in separate repos
-under `ashfulcra` or `reversity` — ask the operator when unsure.
+useful for other people**. Fulcra-related infra that isn't useful-to-others
+enough → its own `ashfulcra/<repo>`; personal/unrelated projects → their own
+`reversity/<repo>`. Ask the operator when unsure.
