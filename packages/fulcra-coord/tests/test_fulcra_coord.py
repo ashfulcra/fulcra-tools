@@ -2538,6 +2538,84 @@ class TestHookScriptsE2E(unittest.TestCase):
         self.assertFalse(os.path.exists(self.calls) and "pause" in open(self.calls).read())
 
 
+class TestSessionStartBlockedOnYouBanner(unittest.TestCase):
+    """SessionStart leads with a ⛔ BLOCKED ON YOU section (from needs-me) before
+    the in-flight / directives / stale sections; silent when needs-me is empty."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
+        # Fake CLI: status -> canned; needs-me -> canned; inbox -> empty; others log.
+        fake = os.path.join(self.bin, "fulcra-coord")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env bash\n"
+                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
+                    'if [ "$1" = "needs-me" ]; then cat "%s"; exit 0; fi\n'
+                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'exit 0\n'
+                    % (os.path.join(self.tmp, "status.json"),
+                       os.path.join(self.tmp, "needsme.json")))
+        os.chmod(fake, 0o755)
+        from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
+        from fulcra_coord import claude_code as cc
+        self.hooks = os.path.join(self.tmp, "hooks"); os.makedirs(self.hooks)
+        out = os.path.join(self.hooks, "session-start.sh")
+        with open(out, "w") as f:
+            f.write(cc.SESSION_START_SH.replace(
+                PLACEHOLDER_ARGV, materialize_argv([fake])))
+        os.chmod(out, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, statusjson="{}", needsme="{}"):
+        with open(os.path.join(self.tmp, "status.json"), "w") as f:
+            f.write(statusjson)
+        with open(os.path.join(self.tmp, "needsme.json"), "w") as f:
+            f.write(needsme)
+        env = dict(os.environ); env["PATH"] = self.bin + os.pathsep + env["PATH"]
+        return subprocess.run(["bash", os.path.join(self.hooks, "session-start.sh")],
+                              input=json.dumps({"cwd": self.tmp}),
+                              capture_output=True, text=True, env=env)
+
+    def test_blocked_on_you_section_appears_first(self):
+        needsme = json.dumps({"human": "ash", "count": 1, "items": [
+            {"id": "TASK-x", "title": "approve deploy", "status": "blocked",
+             "owner_agent": "claude-code:h:vercel", "blocked_on": "approve the deploy",
+             "next_action": "", "updated_at": "2026-06-01T00:00:00Z"}]})
+        r = self._run(json.dumps({"active": []}), needsme)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("BLOCKED ON YOU", r.stdout)
+        self.assertIn("approve the deploy", r.stdout)
+        self.assertIn("claude-code:h:vercel", r.stdout)
+        # The blocked-on-you banner leads the injected context (it is the very
+        # first line — no bus work in this case, so it stands alone at the top).
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("⛔ BLOCKED ON YOU"))
+
+    def test_silent_when_nothing_blocked_and_clean(self):
+        r = self._run(json.dumps({"active": []}),
+                      json.dumps({"human": "ash", "count": 0, "items": []}))
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_blocked_on_you_with_inflight_both_present(self):
+        host = os.uname().nodename.split(".")[0]
+        sj = json.dumps({"active": [
+            {"id": "TASK-mine", "title": "my work", "status": "active",
+             "owner_agent": "claude-code:%s:%s" % (host, os.path.basename(self.tmp)),
+             "updated_at": "2026-06-01T00:00:00Z", "next_action": "do X"}]})
+        needsme = json.dumps({"human": "ash", "count": 1, "items": [
+            {"id": "TASK-x", "title": "approve deploy", "status": "blocked",
+             "owner_agent": "claude-code:h:vercel", "blocked_on": "approve it",
+             "next_action": "", "updated_at": "2026-06-01T00:00:00Z"}]})
+        r = self._run(sj, needsme)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("BLOCKED ON YOU", ctx)
+        self.assertIn("TASK-mine", ctx)
+        self.assertLess(ctx.index("BLOCKED ON YOU"), ctx.index("TASK-mine"))
+
+
 class TestOpenClawTemplates(unittest.TestCase):
     def test_prompt_and_hook_templates_present(self):
         from fulcra_coord import openclaw as oc
