@@ -245,6 +245,19 @@ def build_parser() -> argparse.ArgumentParser:
     isp_clear = isub.add_parser("clear", help="Remove the persisted identity")
     isp_clear.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- human ----
+    sp = sub.add_parser("human",
+                        help="Show, set, or clear the human operator's handle — "
+                             "the addressable identity tasks are 'blocked on ME' "
+                             "against (default 'human'; personalize with set)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+    hsub = sp.add_subparsers(dest="human_action")
+    hsp_set = hsub.add_parser("set", help="Persist <handle> as the human operator")
+    hsp_set.add_argument("handle", metavar="HANDLE", help="e.g. ash")
+    hsp_set.add_argument("--format", choices=["table", "json"], default="table")
+    hsp_clear = hsub.add_parser("clear", help="Remove the persisted human handle")
+    hsp_clear.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- __session-task (hidden, used by hooks) ----
     sp = sub.add_parser("__session-task", help=argparse.SUPPRESS)
     sp.add_argument("session_id", metavar="SESSION_ID")
@@ -276,6 +289,7 @@ COMMAND_MAP = {
     "notify-inbox": _cli.cmd_notify_inbox,
     "install-codex": _cli.cmd_install_codex,
     "identity": _cli.cmd_identity,
+    "human": _cli.cmd_human,
     "__session-task": _cli.cmd_session_task,
 }
 

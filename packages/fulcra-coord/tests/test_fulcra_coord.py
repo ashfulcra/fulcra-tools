@@ -5095,6 +5095,105 @@ class TestBroadcastEndToEnd(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Situational awareness — Piece 1: human handle (resolve_human + `human` cmd)
+# ---------------------------------------------------------------------------
+
+class TestResolveHuman(unittest.TestCase):
+    """resolve_human order: FULCRA_COORD_HUMAN env > persisted human file >
+    default 'human'. Config isolated via XDG_CONFIG_HOME."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ.pop("FULCRA_COORD_HUMAN", None)
+
+    def tearDown(self):
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        os.environ.pop("FULCRA_COORD_HUMAN", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_default_is_human(self):
+        from fulcra_coord import identity
+        self.assertEqual(identity.resolve_human(), "human")
+        self.assertEqual(identity.resolve_human_source(), ("human", "default"))
+
+    def test_env_wins_over_default(self):
+        from fulcra_coord import identity
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        self.assertEqual(identity.resolve_human(), "ash")
+        self.assertEqual(identity.resolve_human_source()[1], "env")
+
+    def test_env_wins_over_config(self):
+        from fulcra_coord import identity
+        identity.set_human("file-ash")
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        self.assertEqual(identity.resolve_human(), "ash")
+
+    def test_config_wins_over_default(self):
+        from fulcra_coord import identity
+        identity.set_human("ash")
+        self.assertEqual(identity.resolve_human(), "ash")
+        self.assertEqual(identity.resolve_human_source(), ("ash", "config"))
+
+    def test_set_then_clear_reverts_to_default(self):
+        from fulcra_coord import identity
+        identity.set_human("ash")
+        self.assertTrue(identity.clear_human())
+        self.assertEqual(identity.resolve_human(), "human")
+
+    def test_human_path_under_xdg(self):
+        from fulcra_coord import identity
+        identity.set_human("ash")
+        self.assertTrue(str(identity.human_path()).startswith(
+            os.path.join(self.tmp, "config")))
+
+
+class TestHumanCommand(unittest.TestCase):
+    """`fulcra-coord human` show/set/clear."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ.pop("FULCRA_COORD_HUMAN", None)
+
+    def tearDown(self):
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        os.environ.pop("FULCRA_COORD_HUMAN", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, **kw):
+        import io, contextlib
+        from fulcra_coord.cli import cmd_human
+        args = types.SimpleNamespace(format="json", **kw)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_human(args)
+        return rc, buf.getvalue()
+
+    def test_default_show(self):
+        rc, out = self._run(human_action=None, handle=None)
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertEqual(data["human"], "human")
+        self.assertEqual(data["source"], "default")
+
+    def test_set_then_show(self):
+        rc, _ = self._run(human_action="set", handle="ash")
+        self.assertEqual(rc, 0)
+        rc, out = self._run(human_action=None, handle=None)
+        data = json.loads(out)
+        self.assertEqual(data["human"], "ash")
+        self.assertEqual(data["source"], "config")
+
+    def test_clear_reverts_to_default(self):
+        self._run(human_action="set", handle="ash")
+        rc, _ = self._run(human_action="clear", handle=None)
+        self.assertEqual(rc, 0)
+        rc, out = self._run(human_action=None, handle=None)
+        self.assertEqual(json.loads(out)["source"], "default")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

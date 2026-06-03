@@ -88,6 +88,88 @@ def clear_identity() -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Human handle (situational awareness)
+# ---------------------------------------------------------------------------
+#
+# The human operator is a first-class, addressable identity on the bus — the one
+# everything is "blocked on ME" against. It defaults to the neutral handle
+# ``human`` so the public repo carries no personal name, and is personalizable
+# (this operator runs ``fulcra-coord human set ash``). Resolution mirrors
+# ``resolve_agent``: env override first (a session-scoped pin), then a persisted
+# config file (declared once, reused), then the neutral default. It is GLOBAL,
+# not root-scoped: who the human is is a property of the machine, not of which
+# coordination root a command happens to target.
+
+#: Neutral default human handle. Personal handles are opt-in via env/config so
+#: the shipped default leaks no name.
+DEFAULT_HUMAN = "human"
+
+
+def human_path() -> Path:
+    return config_root() / "human"
+
+
+def read_human() -> Optional[str]:
+    """Return the persisted human handle, or None if unset/unreadable.
+
+    Stored as a single trimmed line (not JSON): the human handle is one short
+    token, so a plain file is simpler than a JSON object and matches the spec's
+    ``${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/human`` path. Tolerant of a
+    missing/empty/unreadable file — a broken handle must never wedge a command,
+    so we fall through to the default."""
+    path = human_path()
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return None
+    return raw or None
+
+
+def set_human(handle: str) -> Path:
+    """Persist `handle` as this machine's human operator handle. Global, so it
+    survives across coordination roots and sessions until cleared."""
+    path = human_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(handle.strip() + "\n")
+    return path
+
+
+def clear_human() -> bool:
+    """Remove the persisted human handle. Returns True if a file was removed.
+    After clearing, resolve_human falls back to env/default."""
+    path = human_path()
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def resolve_human_source() -> tuple[str, str]:
+    """Resolve the human handle AND report its source.
+
+    Returns (handle, source) where source is "env" | "config" | "default".
+    Order: ``$FULCRA_COORD_HUMAN`` > persisted ``human`` file > ``DEFAULT_HUMAN``.
+    Surfacing the source lets the ``human`` command explain *why* it resolved
+    the way it did (mirrors ``resolve_agent_source``)."""
+    env = os.environ.get("FULCRA_COORD_HUMAN", "").strip()
+    if env:
+        return env, "env"
+    persisted = read_human()
+    if persisted:
+        return persisted, "config"
+    return DEFAULT_HUMAN, "default"
+
+
+def resolve_human() -> str:
+    """The single "who is the human" entry point. Order: env > config > default
+    (``human``). Used by needs-me, block --on-user, the SessionStart banner, and
+    the listener so they all agree on whose plate "blocked on me" lands on."""
+    return resolve_human_source()[0]
+
+
 def resolve_agent_source(explicit: Optional[str] = None) -> tuple[str, str]:
     """Resolve the agent id AND report where it came from.
 

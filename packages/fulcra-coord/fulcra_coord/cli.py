@@ -460,6 +460,56 @@ def cmd_identity(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+def cmd_human(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Show, set, or clear the human operator's handle (situational awareness).
+
+    The human is an addressable identity on the bus — the one tasks are
+    "blocked on ME" against. Defaults to the neutral ``human`` so the public repo
+    carries no name; this operator runs ``fulcra-coord human set ash``.
+
+    - `human`              → show the resolved handle + its source (env/config/
+                             default).
+    - `human set <handle>` → persist <handle> globally for this machine.
+    - `human clear`        → remove the persisted handle (fall back to env/default).
+    """
+    action = getattr(args, "human_action", None)
+    out_format = getattr(args, "format", "table")
+
+    if action == "set":
+        handle = args.handle
+        identity.set_human(handle)
+        if out_format == "json":
+            _print_json({"human": handle, "source": "config", "action": "set"})
+        else:
+            _info(f"Human handle set: {handle}")
+            _info(f"  Persisted to: {identity.human_path()}")
+        return 0
+
+    if action == "clear":
+        removed = identity.clear_human()
+        handle, source = identity.resolve_human_source()
+        if out_format == "json":
+            _print_json({"human": handle, "source": source, "action": "clear",
+                         "removed": removed})
+        else:
+            _info("Human handle cleared." if removed
+                  else "No persisted human handle to clear.")
+            _info(f"Now resolving as: {handle}  (source: {source})")
+        return 0
+
+    # show (default)
+    handle, source = identity.resolve_human_source()
+    if out_format == "json":
+        _print_json({"human": handle, "source": source,
+                     "human_file": str(identity.human_path())})
+    else:
+        _info(f"Human:  {handle}")
+        _info(f"Source: {source}")
+        if source == "default":
+            _info("  (personalize with: fulcra-coord human set <handle>)")
+    return 0
+
+
 def _report_resolved_cli(plan: dict[str, Any]) -> None:
     """Print the CLI invocation baked into the just-installed hooks, and warn if
     it had to fall back to `python -m` (Gap 1) — that works, but signals the
