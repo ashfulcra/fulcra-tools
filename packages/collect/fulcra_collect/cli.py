@@ -164,6 +164,218 @@ def _worker(plugin_id: str) -> None:
     sys.exit(worker.main([plugin_id]))
 
 
+@cli.command()
+def doctor() -> None:
+    """Run a pre-flight diagnostic — checks the seven things that most often
+    go wrong during first-run onboarding and prints OK / WARN / FAIL for each.
+
+    Exits 0 when there are no FAILs, 1 otherwise. Output is copy/pasteable
+    into a bug report or support thread.
+    """
+    import platform
+    import subprocess
+
+    from . import service_manager
+    from .control import send_request as _send_request
+
+    ok_count = warn_count = fail_count = 0
+
+    def _row(label: str, status: str, detail: str) -> None:
+        nonlocal ok_count, warn_count, fail_count
+        width = 42
+        padded = label.ljust(width)
+        click.echo(f"  {padded} [{status}]  {detail}")
+        if status == "OK":
+            ok_count += 1
+        elif status == "WARN":
+            warn_count += 1
+        else:
+            fail_count += 1
+
+    click.echo("fulcra-collect doctor")
+    click.echo("─" * 66)
+
+    # ── 1. fulcra CLI on PATH ────────────────────────────────────────────────
+    cli_path = credentials._find_fulcra_cli()
+    if cli_path:
+        _row("fulcra CLI on PATH", "OK", cli_path)
+    else:
+        _row(
+            "fulcra CLI on PATH",
+            "FAIL",
+            "not found — fix: uv tool install fulcra-api",
+        )
+
+    # ── 2. fulcra CLI reachable (actually works / signed in) ─────────────────
+    if cli_path:
+        try:
+            r = subprocess.run(
+                [cli_path, "auth", "print-access-token"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                _row("fulcra CLI reachable", "OK", "auth OK, token returned")
+            else:
+                _row(
+                    "fulcra CLI reachable",
+                    "WARN",
+                    "CLI returned non-zero or empty token — fix: fulcra auth login",
+                )
+        except subprocess.TimeoutExpired:
+            _row(
+                "fulcra CLI reachable",
+                "FAIL",
+                "timed out invoking fulcra auth print-access-token",
+            )
+    else:
+        _row("fulcra CLI reachable", "FAIL", "skipped — CLI not found (see above)")
+
+    # ── 3. Daemon control socket reachable ───────────────────────────────────
+    sock = config_mod.config_dir() / "control.sock"
+    plist_exists = (
+        service_manager.launchd_plist_path().exists()
+        if platform.system() == "Darwin"
+        else service_manager.systemd_unit_path().exists()
+        if platform.system() == "Linux"
+        else False
+    )
+    try:
+        reply = _send_request(sock, {"cmd": "status"}, timeout=3.0)
+        if reply.get("ok") is not False:
+            n = len(reply.get("plugins", []))
+            _row("Daemon control socket", "OK", f"reachable, {n} plugin(s) loaded")
+        else:
+            _row("Daemon control socket", "FAIL", f"daemon replied with error: {reply.get('error', '?')}")
+    except (ConnectionError, OSError, TimeoutError):
+        if plist_exists:
+            _row(
+                "Daemon control socket",
+                "FAIL",
+                "not reachable — fix: launchctl bootstrap "
+                f"gui/$(id -u) {service_manager.launchd_plist_path()}",
+            )
+        else:
+            _row(
+                "Daemon control socket",
+                "FAIL",
+                "not reachable — fix: uv run fulcra-collect install  (then bootstrap)",
+            )
+
+    # ── 4. launchd / systemd agent installed ─────────────────────────────────
+    system = platform.system()
+    if system == "Darwin":
+        plist_path = service_manager.launchd_plist_path()
+        if plist_path.exists():
+            _row("launchd agent installed", "OK", str(plist_path))
+        else:
+            _row(
+                "launchd agent installed",
+                "WARN",
+                "plist not found — fix: uv run fulcra-collect install",
+            )
+    elif system == "Linux":
+        unit_path = service_manager.systemd_unit_path()
+        if unit_path.exists():
+            _row("systemd unit installed", "OK", str(unit_path))
+        else:
+            _row(
+                "systemd unit installed",
+                "WARN",
+                "unit not found — fix: uv run fulcra-collect install",
+            )
+    else:
+        _row("Service agent installed", "OK", f"skipped (platform={system!r})")
+
+    # ── 5. launchd agent loaded + running (macOS only) ───────────────────────
+    if system == "Darwin":
+        try:
+            r = subprocess.run(
+                ["launchctl", "print", f"gui/{os.getuid()}/{service_manager.LAUNCHD_LABEL}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if r.returncode == 0:
+                _row("launchd agent running", "OK", "agent is loaded and running")
+            else:
+                plist = service_manager.launchd_plist_path()
+                _row(
+                    "launchd agent running",
+                    "WARN",
+                    f"installed but not loaded — fix: launchctl bootstrap "
+                    f"gui/$(id -u) {plist}",
+                )
+        except subprocess.TimeoutExpired:
+            _row("launchd agent running", "WARN", "launchctl timed out")
+        except FileNotFoundError:
+            _row("launchd agent running", "WARN", "launchctl not found (non-macOS?)")
+
+    # ── 6. Web token + cookie bootstrap ─────────────────────────────────────
+    web_token_path = config_mod.config_dir() / "web-token"
+    if web_token_path.exists() and web_token_path.read_bytes().strip():
+        _row("Web token present", "OK", str(web_token_path))
+    else:
+        _row(
+            "Web token present",
+            "FAIL",
+            "~/.config/fulcra-collect/web-token absent — fix: start the daemon "
+            "(it writes this file on startup)",
+        )
+
+    # ── 7. Bearer token in keychain + Fulcra API healthy ────────────────────
+    tok = credentials.get_user_secret("bearer-token")
+    if not tok:
+        web_url_path = config_mod.config_dir() / "web-url"
+        url_hint = (
+            web_url_path.read_text().strip()
+            if web_url_path.exists()
+            else "http://127.0.0.1:9292"
+        )
+        _row(
+            "Bearer token / API health",
+            "WARN",
+            f"not signed in yet — fix: open {url_hint}",
+        )
+    else:
+        try:
+            import httpx
+
+            resp = httpx.get(
+                "https://api.fulcradynamics.com/user/v1alpha1/annotation",
+                headers={"Authorization": f"Bearer {tok}"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                _row("Bearer token / API health", "OK", "API responded 200")
+            elif resp.status_code == 401:
+                _row(
+                    "Bearer token / API health",
+                    "WARN",
+                    "token rejected (401) — fix: Reconnect via Settings in the web UI",
+                )
+            else:
+                _row(
+                    "Bearer token / API health",
+                    "WARN",
+                    f"unexpected API status {resp.status_code}",
+                )
+        except Exception as exc:  # noqa: BLE001 — network errors, httpx not installed
+            _row(
+                "Bearer token / API health",
+                "FAIL",
+                f"network error / timeout: {exc}",
+            )
+
+    click.echo("─" * 66)
+    click.echo(
+        f"  {ok_count} passed, {warn_count} warning(s), {fail_count} failed"
+    )
+    if fail_count:
+        raise SystemExit(1)
+
+
 @cli.group()
 def plugin() -> None:
     """Per-plugin state and configuration commands."""
