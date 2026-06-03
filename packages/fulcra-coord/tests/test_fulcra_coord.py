@@ -5630,6 +5630,20 @@ class TestPerCwdIdentity(unittest.TestCase):
         os.environ["FULCRA_COORD_AGENT"] = "env:agent"
         self.assertEqual(identity.resolve_agent(), "env:agent")
 
+    def test_symlinked_path_shares_identity_with_realpath(self):
+        # M-3: _cwd_hash uses realpath, so entering a repo via a symlink resolves
+        # the SAME identity entry as the canonical path. Set under the real path,
+        # read back via the symlink.
+        from fulcra_coord import identity
+        link = os.path.join(self.tmp, "repo-a-link")
+        os.symlink(self.cwd_a, link)
+        os.chdir(self.cwd_a)
+        identity.set_identity("real:agent")
+        os.chdir(link)
+        self.assertEqual(identity.read_identity(), "real:agent")
+        self.assertEqual(identity.identity_path(self.cwd_a),
+                         identity.identity_path(link))
+
 
 # ---------------------------------------------------------------------------
 # Situational awareness — Piece 7: resume (pick-up-where-you-left-off briefing)

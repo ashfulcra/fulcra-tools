@@ -70,12 +70,17 @@ def _identities_dir() -> Path:
 def _cwd_hash(cwd: Optional[str] = None) -> str:
     """Stable filesystem-safe key for the current working directory.
 
-    The persisted identity is scoped to the ABSOLUTE cwd so two sibling sessions
-    (different repos on the same machine) hold distinct identities and never
-    clobber each other. Hashing the abspath keeps the filename short and portable
-    regardless of how deep or oddly-charactered the path is."""
-    abspath = os.path.abspath(cwd if cwd is not None else os.getcwd())
-    return hashlib.sha1(abspath.encode()).hexdigest()[:16]
+    The persisted identity is scoped to the REALPATH of the cwd so two sibling
+    sessions (different repos on the same machine) hold distinct identities and
+    never clobber each other. Hashing keeps the filename short and portable
+    regardless of how deep or oddly-charactered the path is.
+
+    M-3: realpath (not abspath) so a symlinked path and its real target resolve
+    to the SAME entry — a session entered via a symlink (e.g. /tmp on macOS is a
+    symlink to /private/tmp, or a worktree symlinked into place) must see the
+    identity it declared under the canonical path, not a phantom separate one."""
+    real = os.path.realpath(cwd if cwd is not None else os.getcwd())
+    return hashlib.sha1(real.encode()).hexdigest()[:16]
 
 
 def identity_path(cwd: Optional[str] = None) -> Path:
