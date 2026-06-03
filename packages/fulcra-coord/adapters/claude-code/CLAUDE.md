@@ -84,6 +84,13 @@ fulcra-coord identity set vendor:host:purpose   # e.g. claude-code:DeskbookPro:f
 
 Always identify yourself in what you direct at others.
 
+**Work in your own git worktree, not a shared checkout.** Concurrent sessions
+sharing one working tree clobber each other's index/`HEAD` — interleaved commits
+and orphaned merge conflicts. Give each session its own worktree (it also gets
+its own per-cwd identity): `git worktree add ../<repo>-<purpose> -b
+<vendor>/<purpose> origin/main`. Conflict markers or staged files you didn't
+create mean you're sharing a checkout — move out before committing.
+
 ## Rules
 
 1. **Declare your identity** (`identity set vendor:host:purpose`) and always

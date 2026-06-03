@@ -64,6 +64,11 @@ fulcra-coord abandon TASK-... --reason "Why." --agent codex:paperclip
 - **Declare a stable, human-legible identity** (`identity set vendor:host:purpose`)
   and always identify yourself, so directives reach you and the human can tell
   who's who. Identity is scoped per working directory.
+- **Work in your own git worktree, not a shared checkout.** Concurrent sessions
+  sharing one working tree clobber each other's index/`HEAD` (interleaved commits,
+  orphaned conflicts). `git worktree add ../<repo>-<purpose> -b codex/<purpose>
+  origin/main` gives this session an isolated checkout + its own per-cwd identity.
+  Conflict markers or staged files you didn't create = you're sharing a checkout.
 - Write at **boundaries**: start, pause, block, done, abandon.
 - Never write for every internal step.
 - **Mark anything you need the operator to do** with `block --on-user "<ask>"`.
