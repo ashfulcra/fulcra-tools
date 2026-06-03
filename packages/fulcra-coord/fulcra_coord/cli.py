@@ -1118,6 +1118,69 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+def _age_str(updated_at: str) -> str:
+    """Human-legible age of a timestamp, e.g. "3h" / "2d" / "12m" / "just now".
+
+    Used by needs-me / resume to show "how long it's been" — the third thing the
+    human wants at a glance (who, what, how long). Best-effort: an unparseable
+    timestamp renders "?" rather than crashing the read-only view."""
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return "?"
+    secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h"
+    return f"{int(secs // 86400)}d"
+
+
+def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
+    """THE "what's blocked on ME" view (situational awareness piece 3).
+
+    Lists every OPEN task (proposed/waiting/blocked) assigned to / blocked on the
+    human, across all agents — showing WHO is waiting (owner_agent), WHAT they
+    need (blocked_on / next_action), and HOW LONG it's been. This is the human's
+    glance of "what's on my plate from my agents." Read-only.
+
+    The human is resolved via ``--human`` > ``resolve_human()`` (env > config >
+    default ``human``); matching is prefix-aware so ``human`` and ``ash`` both
+    work. ``--format json`` for tooling (the SessionStart banner + the listener).
+    """
+    human = getattr(args, "human", None) or identity.resolve_human()
+    out_format = getattr(args, "format", "table")
+
+    all_tasks = _load_all_tasks(backend=backend)
+    items = views.needs_human(all_tasks, human)
+
+    if out_format == "json":
+        _print_json({"human": human, "count": len(items), "items": items})
+        return 0
+
+    if not items:
+        _info(f"Nothing blocked on you ({human}).")
+        return 0
+
+    print(f"\n{'='*60}")
+    print(f"  ⛔ BLOCKED ON YOU ({len(items)}) — {human}")
+    print(f"{'='*60}")
+    for s in items:
+        ask = (s.get("blocked_on") or s.get("next_action") or "").strip()
+        frm = s.get("owner_agent", "?")
+        age = _age_str(s.get("updated_at", ""))
+        print(f"  [{s.get('status','?').upper()}] {s.get('id','')}  "
+              f"{s.get('title','')[:50]}  ({age})")
+        print(f"        from: {frm}")
+        if ask:
+            print(f"        needs: {ask[:80]}")
+    print()
+    return 0
+
+
 def cmd_start(args: Any, backend: Optional[list[str]] = None) -> int:
     """Create a new task and upload it."""
     title = args.title
@@ -1254,10 +1317,31 @@ def cmd_update(args: Any, backend: Optional[list[str]] = None) -> int:
 
 
 def cmd_block(args: Any, backend: Optional[list[str]] = None) -> int:
-    """Mark a task as blocked."""
+    """Mark a task as blocked.
+
+    Two flavours, mutually friendly:
+      * ``--blocked-on "<reason>"`` — blocked on an agent / external thing (the
+        original behaviour). No assignee change.
+      * ``--on-user "<ask>"`` — blocked on the HUMAN (the situational-awareness
+        path): sets blocked_on=<ask>, assignee=resolve_human(), and adds a
+        ``needs:human`` tag, so it shows as blocked AND lands on the human's
+        ``needs-me`` plate (and inbox). The ask answers "what you need me to do".
+
+    If both are given, ``--on-user`` wins for the blocked_on text (it's the more
+    specific human-facing ask); the human-assignment still applies.
+    """
     task_id = args.task_id
-    blocked_on = args.blocked_on
+    blocked_on = getattr(args, "blocked_on", None)
+    on_user = getattr(args, "on_user", None)
     agent = getattr(args, "agent", None) or _derive_agent()
+
+    if not blocked_on and not on_user:
+        _err("block requires --blocked-on or --on-user.")
+        return 1
+
+    # The ask text: --on-user is the human-facing ask and takes precedence.
+    block_reason = on_user or blocked_on
+    human = identity.resolve_human() if on_user else None
 
     task = _load_task(task_id, backend=backend)
     if task is None:
@@ -1269,11 +1353,19 @@ def cmd_block(args: Any, backend: Optional[list[str]] = None) -> int:
             task,
             "blocked",
             by=agent,
-            blocked_on=blocked_on,
+            blocked_on=block_reason,
         )
     except (schema.TransitionError, schema.SchemaError) as e:
         _err(str(e))
         return 1
+
+    if on_user:
+        # Land it on the human: assign + tag. apply_transition rebuilds standard
+        # tags but preserves non-standard ones, so adding needs:human AFTER the
+        # transition keeps it through any later transition's tag rebuild.
+        task["assignee"] = human
+        if "needs:human" not in task.get("tags", []):
+            task["tags"] = sorted(set(task.get("tags", []) + ["needs:human"]))
 
     cache.write_cached_task(task)
 
@@ -1294,8 +1386,12 @@ def cmd_block(args: Any, backend: Optional[list[str]] = None) -> int:
         )
         return 1
 
-    _info(f"Blocked: {task_id}")
-    _info(f"  Blocked on: {blocked_on}")
+    if on_user:
+        _info(f"Blocked on {human}: {task_id}")
+        _info(f"  Needs: {block_reason}")
+    else:
+        _info(f"Blocked: {task_id}")
+        _info(f"  Blocked on: {block_reason}")
     return 0
 
 

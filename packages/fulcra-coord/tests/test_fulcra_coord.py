@@ -5095,6 +5095,178 @@ class TestBroadcastEndToEnd(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Situational awareness — Piece 3: blocked-on-you (block --on-user + needs-me)
+# ---------------------------------------------------------------------------
+
+class TestNeedsHumanView(unittest.TestCase):
+    """views.needs_human: every OPEN task (proposed/waiting/blocked) whose
+    assignee matches the human (prefix-aware), across all owners."""
+
+    def _t(self, tid, assignee, status="blocked", owner="claude-code:h:r",
+           blocked_on=None, next_action="", updated="2026-06-01T00:00:00Z"):
+        from fulcra_coord import schema
+        t = schema.make_task(title=tid, workstream="general", agent=owner,
+                             owner_agent=owner, assignee=assignee)
+        t["status"] = status
+        t["blocked_on"] = blocked_on
+        t["next_action"] = next_action
+        t["updated_at"] = updated
+        return t
+
+    def test_collects_blocked_on_human(self):
+        from fulcra_coord.views import needs_human
+        tasks = [
+            self._t("a", "human", blocked_on="review the PR"),
+            self._t("b", "claude-code:h:r", status="active"),  # not for human
+        ]
+        out = needs_human(tasks, "human")
+        self.assertEqual([s["title"] for s in out], ["a"])
+
+    def test_ash_matches_human_via_prefix_when_assignee_is_ash(self):
+        # assignee "ash" reached by querying human "ash".
+        from fulcra_coord.views import needs_human
+        tasks = [self._t("a", "ash", blocked_on="x")]
+        self.assertEqual(len(needs_human(tasks, "ash")), 1)
+
+    def test_only_open_statuses(self):
+        from fulcra_coord.views import needs_human
+        tasks = [
+            self._t("done-one", "human", status="done"),
+            self._t("active-one", "human", status="active"),
+            self._t("blocked-one", "human", status="blocked"),
+            self._t("waiting-one", "human", status="waiting"),
+            self._t("proposed-one", "human", status="proposed"),
+        ]
+        titles = {s["title"] for s in needs_human(tasks, "human")}
+        self.assertEqual(titles, {"blocked-one", "waiting-one", "proposed-one"})
+
+    def test_sorted_by_age_oldest_first(self):
+        from fulcra_coord.views import needs_human
+        tasks = [
+            self._t("newer", "human", updated="2026-06-02T00:00:00Z"),
+            self._t("older", "human", updated="2026-06-01T00:00:00Z"),
+        ]
+        self.assertEqual([s["title"] for s in needs_human(tasks, "human")],
+                         ["older", "newer"])
+
+    def test_aggregates_across_multiple_owners(self):
+        from fulcra_coord.views import needs_human
+        tasks = [
+            self._t("from-a", "human", owner="claude-code:h:a"),
+            self._t("from-b", "human", owner="claude-code:h:b"),
+        ]
+        owners = {s["owner_agent"] for s in needs_human(tasks, "human")}
+        self.assertEqual(owners, {"claude-code:h:a", "claude-code:h:b"})
+
+
+class TestBlockOnUser(unittest.TestCase):
+    """`block --on-user` marks blocked, sets blocked_on + assignee=human +
+    needs:human tag; `needs-me` then lists it; a non-human inbox excludes it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        os.environ.pop("FULCRA_COORD_HUMAN", None)
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        self.fake_backend = ["false"]
+
+    def tearDown(self):
+        for k in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "FULCRA_COORD_AGENT",
+                  "FULCRA_COORD_HUMAN", "FULCRA_COORD_ANNOTATIONS"):
+            os.environ.pop(k, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ns(self, **kw):
+        return types.SimpleNamespace(**kw)
+
+    def _make_active(self, title, owner="claude-code:host:repo"):
+        from fulcra_coord.cli import cmd_start
+        cmd_start(self._ns(title=title, workstream="devops", agent=owner,
+                           kind="ops", priority="P2", summary="", next="",
+                           surface=None), backend=self.fake_backend)
+        task = next(t for t in cache.list_cached_tasks() if t["title"] == title)
+        active = apply_transition(task, "active", by=owner)
+        cache.write_cached_task(active)
+        return task["id"]
+
+    def test_block_on_user_sets_assignee_and_tag(self):
+        from fulcra_coord.cli import cmd_block
+        tid = self._make_active("needs-review")
+        cmd_block(self._ns(task_id=tid, blocked_on=None, on_user="approve the deploy",
+                           agent=None), backend=self.fake_backend)
+        t = cache.read_cached_task(tid)
+        self.assertEqual(t["status"], "blocked")
+        self.assertEqual(t["blocked_on"], "approve the deploy")
+        self.assertEqual(t["assignee"], "human")
+        self.assertIn("needs:human", t["tags"])
+
+    def test_block_on_user_honors_resolved_human(self):
+        from fulcra_coord.cli import cmd_block
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        tid = self._make_active("needs-ash")
+        cmd_block(self._ns(task_id=tid, blocked_on=None, on_user="decide X",
+                           agent=None), backend=self.fake_backend)
+        self.assertEqual(cache.read_cached_task(tid)["assignee"], "ash")
+
+    def test_needs_me_lists_block_on_user_item(self):
+        from fulcra_coord.cli import cmd_block, cmd_needs_me
+        import io, contextlib
+        tid = self._make_active("review-me")
+        cmd_block(self._ns(task_id=tid, blocked_on=None, on_user="look at it",
+                           agent=None), backend=self.fake_backend)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_needs_me(self._ns(human=None, format="json"),
+                         backend=self.fake_backend)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["human"], "human")
+        titles = [i["title"] for i in out["items"]]
+        self.assertIn("review-me", titles)
+
+    def test_needs_me_resolves_ash_and_human_both(self):
+        from fulcra_coord.cli import cmd_block, cmd_needs_me
+        import io, contextlib
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        tid = self._make_active("ash-item")
+        cmd_block(self._ns(task_id=tid, blocked_on=None, on_user="ash decides",
+                           agent=None), backend=self.fake_backend)
+        # Query with explicit --human ash
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_needs_me(self._ns(human="ash", format="json"),
+                         backend=self.fake_backend)
+        out = json.loads(buf.getvalue())
+        self.assertIn("ash-item", [i["title"] for i in out["items"]])
+
+    def test_non_human_inbox_excludes_block_on_user(self):
+        from fulcra_coord.cli import cmd_block, cmd_inbox
+        import io, contextlib
+        tid = self._make_active("human-only")
+        cmd_block(self._ns(task_id=tid, blocked_on=None, on_user="human does it",
+                           agent=None), backend=self.fake_backend)
+        # A regular agent's inbox must not show a needs:human directive
+        # (it's blocked, not proposed/waiting, and owned by the agent itself).
+        inbox_args = self._ns(agent="claude-code:other:repo", format="json", ack=None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_inbox(inbox_args, backend=self.fake_backend)
+        self.assertEqual(json.loads(buf.getvalue())["inbox"], [])
+
+    def test_block_blocked_on_still_works(self):
+        # The existing agent-blocker path is preserved.
+        from fulcra_coord.cli import cmd_block
+        tid = self._make_active("agent-blocked")
+        cmd_block(self._ns(task_id=tid, blocked_on="waiting on CI", on_user=None,
+                           agent=None), backend=self.fake_backend)
+        t = cache.read_cached_task(tid)
+        self.assertEqual(t["blocked_on"], "waiting on CI")
+        self.assertIsNone(t.get("assignee"))
+        self.assertNotIn("needs:human", t["tags"])
+
+
+# ---------------------------------------------------------------------------
 # Situational awareness — Piece 2: per-cwd identity (fix the global clobber)
 # ---------------------------------------------------------------------------
 
