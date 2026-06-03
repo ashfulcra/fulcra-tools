@@ -18,6 +18,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import httpx
+import pytest
+
+from fulcra_media.fulcra import FulcraClient
 from fulcra_media.importers import (
     apple_music_takeout,
     apple_podcasts,
@@ -28,6 +32,8 @@ from fulcra_media.importers import (
     spotify,
     trakt,
 )
+from fulcra_media.state import State
+from media_test_helpers import json_response
 
 
 # ---------------------------------------------------------------------------
@@ -353,3 +359,138 @@ def test_lastfm_and_apple_music_bucket_boundary_DOES_NOT_dedup() -> None:
             if s.startswith("com.fulcra.content.listened.v1.")
         )
     assert _content_fp(lastfm_ev) != _content_fp(apple_events[0])
+
+
+# ---------------------------------------------------------------------------
+# Integration: run_import must skip on the cross-source fingerprint, not just
+# the per-plugin deterministic_id. These drive the real run_import pipeline
+# through a fake HTTP transport (no network).
+# ---------------------------------------------------------------------------
+
+
+_DEF_SID = "com.fulcradynamics.annotation.def-listened"
+
+
+@pytest.fixture(autouse=True)
+def _fake_token(mocker):
+    mocker.patch.dict("os.environ", {"FULCRA_ACCESS_TOKEN": "test-token"})
+
+
+def _content_fp_of(ev) -> str:
+    matching = [
+        s for s in ev.extra_source_ids
+        if s.startswith("com.fulcra.content.listened.v1.")
+    ]
+    assert len(matching) == 1, ev.extra_source_ids
+    return matching[0]
+
+
+def _lastfm_yellow():
+    ev = lastfm.normalize_track({
+        "name": "Yellow",
+        "artist": {"#text": "Coldplay"},
+        "date": {"uts": "1748270250"},  # 2025-05-26T14:37:30Z — bucket 14:35
+    })
+    assert ev is not None
+    return ev
+
+
+def _apple_yellow(start="2025-05-26T14:35:00Z", end="2025-05-26T14:39:30Z"):
+    header = (
+        "Event Type,Song Name,Container Album Name,Container Artist Name,"
+        "Event Start Timestamp,Event End Timestamp,Play Duration Milliseconds,"
+        "UTC Offset In Seconds\n"
+    )
+    row = f"PLAY_END,Yellow,Parachutes,Coldplay,{start},{end},270000,0\n"
+    events = list(
+        apple_music_takeout.parse_lines(iter((header + row).splitlines(keepends=True)))
+    )
+    assert len(events) == 1
+    return events[0]
+
+
+def _client_with_existing(recording_transport, existing_records):
+    """A FulcraClient whose GET readback always returns `existing_records`
+    and whose POST returns 204. POST bodies are captured for assertions."""
+    posted = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, existing_records)
+        if request.method == "POST":
+            posted["count"] += 1
+            return httpx.Response(204)
+        pytest.fail(request.url)
+
+    client = FulcraClient(transport=recording_transport(handler))
+    state = State(
+        watched_definition_id="def-watched",
+        listened_definition_id="def-listened",
+        read_definition_id="def-read",
+        tag_ids={"apple-music-takeout": "tag-am", "lastfm": "tag-lf"},
+    )
+    return client, state, posted
+
+
+def test_run_import_skips_source_b_on_matching_cross_fingerprint(recording_transport):
+    """Source A (Last.fm) already present in Fulcra — its .content.* listened
+    fingerprint is in the readback. Source B (Apple Music takeout) for the SAME
+    listen has a DIFFERENT deterministic_id but the SAME .content.* key, so it
+    must be SKIPPED (not posted)."""
+    lastfm_ev = _lastfm_yellow()
+    apple_ev = _apple_yellow()
+    # Sanity: different deterministic_id, same cross fingerprint.
+    assert lastfm_ev.deterministic_id != apple_ev.deterministic_id
+    assert _content_fp_of(lastfm_ev) == _content_fp_of(apple_ev)
+
+    # Fulcra already holds source A: its sources array carries A's
+    # deterministic_id AND the shared cross fingerprint.
+    existing = [{
+        "source_id": _DEF_SID,
+        "sources": [lastfm_ev.deterministic_id, _content_fp_of(lastfm_ev), _DEF_SID],
+    }]
+    client, state, posted = _client_with_existing(recording_transport, existing)
+
+    result = client.run_import([apple_ev], state, chunk_size=10)
+    assert result.total == 1
+    assert result.skipped_existing == 1
+    assert result.posted == 0
+    assert posted["count"] == 0
+
+
+def test_run_import_posts_when_cross_fingerprint_differs(recording_transport):
+    """Negative control: source B's listen lands in a DIFFERENT 5-minute bucket,
+    so its .content.* key differs from what's in Fulcra — it must be POSTed."""
+    lastfm_ev = _lastfm_yellow()
+    # Apple play in the 14:30 bucket → different content fingerprint.
+    apple_ev = _apple_yellow(start="2025-05-26T14:30:00Z", end="2025-05-26T14:33:00Z")
+    assert _content_fp_of(lastfm_ev) != _content_fp_of(apple_ev)
+
+    existing = [{
+        "source_id": _DEF_SID,
+        "sources": [lastfm_ev.deterministic_id, _content_fp_of(lastfm_ev), _DEF_SID],
+    }]
+    client, state, posted = _client_with_existing(recording_transport, existing)
+
+    result = client.run_import([apple_ev], state, chunk_size=10)
+    assert result.total == 1
+    assert result.skipped_existing == 0
+    assert result.posted == 1
+    assert posted["count"] == 1
+
+
+def test_run_import_still_skips_on_deterministic_id(recording_transport):
+    """Regression: an event whose deterministic_id is already present is still
+    skipped, even with no cross-fingerprint involvement (existing behavior)."""
+    apple_ev = _apple_yellow()
+    existing = [{
+        "source_id": _DEF_SID,
+        "sources": [apple_ev.deterministic_id, _DEF_SID],
+    }]
+    client, state, posted = _client_with_existing(recording_transport, existing)
+
+    result = client.run_import([apple_ev], state, chunk_size=10)
+    assert result.total == 1
+    assert result.skipped_existing == 1
+    assert result.posted == 0
+    assert posted["count"] == 0

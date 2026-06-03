@@ -163,7 +163,17 @@ class FulcraClient(BaseFulcraClient):
             existing = self.fetch_existing_source_ids(
                 win_start, win_end, only_for_defs=current_def_source_ids or None
             )
-            new_events = [e for e in chunk if e.deterministic_id not in existing]
+            # Skip an event if ANY of its dedup keys is already present — the
+            # per-plugin deterministic_id OR a cross-source content fingerprint
+            # (com.fulcra.content.*.v1.<hash>) carried in extra_source_ids. The
+            # fingerprints are already in `existing` via fetch_existing_source_ids
+            # (it reads both the sources and metadata.source arrays). An event
+            # with no extra_source_ids therefore behaves exactly as before:
+            # skip iff deterministic_id in existing.
+            new_events = [
+                e for e in chunk
+                if not ({e.deterministic_id, *e.extra_source_ids} & existing)
+            ]
             skipped += len(chunk) - len(new_events)
 
             if new_events:
