@@ -791,5 +791,400 @@ class TestCLILifecycleHooks(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+# ---------------------------------------------------------------------------
+# HTTP transport: _write_http replicates the fulcra-collect API flow over
+# urllib (stdlib-only). These tests NEVER hit the network — urllib.request
+# .urlopen and the token resolver are mocked.
+# ---------------------------------------------------------------------------
+
+import io
+import urllib.error
+from urllib import request as urllib_request
+
+
+class _FakeResp:
+    """Minimal context-manager stand-in for an http.client.HTTPResponse.
+
+    urllib.request.urlopen returns an object usable as a context manager
+    whose .read() yields the body bytes and .status carries the code. We
+    only need read()/status here."""
+
+    def __init__(self, body, status=200):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body).encode()
+        elif isinstance(body, str):
+            body = body.encode()
+        self._body = body or b""
+        self.status = status
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _http_error(code, body=b""):
+    return urllib.error.HTTPError(
+        url="http://x", code=code, msg="err", hdrs=None,
+        fp=io.BytesIO(body if isinstance(body, bytes) else body.encode()),
+    )
+
+
+class _Router:
+    """Records every urlopen call and answers by (METHOD, path-substring).
+
+    Each entry in `routes` is (method, needle, response-or-callable). The
+    first matching route wins; a callable is invoked with the Request so a
+    route can record bodies or raise an HTTPError. Unmatched -> AssertionError
+    so a test fails loudly on an unexpected endpoint rather than silently
+    passing."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []  # list of (method, full_url, body_bytes, headers)
+
+    def __call__(self, req, *args, **kwargs):
+        method = req.get_method()
+        url = req.full_url
+        body = req.data
+        # Header keys are capitalized by Request.add_header; normalize.
+        headers = {k.lower(): v for k, v in req.header_items()}
+        self.calls.append((method, url, body, headers))
+        for m, needle, resp in self.routes:
+            if m == method and needle in url:
+                if callable(resp):
+                    return resp(req)
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+        raise AssertionError(f"unrouted request: {method} {url}")
+
+    def posts_to(self, needle):
+        return [c for c in self.calls if c[0] == "POST" and needle in c[1]]
+
+    def gets_to(self, needle):
+        return [c for c in self.calls if c[0] == "GET" and needle in c[1]]
+
+
+class TestWriteHttp(unittest.TestCase):
+    """Unit-test the real `_write_http` transport with urlopen + token mocked.
+
+    Asserts the exact 3-endpoint flow fulcra-collect uses: tag resolve/create,
+    moment-definition resolve/create (cached), then the JSONL record POST. The
+    write must be best-effort — any urllib error returns False, never raises."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self._saved = {
+            k: os.environ.get(k)
+            for k in ("FULCRA_COORD_ANNOTATIONS", "FULCRA_ACCESS_TOKEN",
+                      "FULCRA_API_BASE", "FULCRA_COORD_REMOTE_ROOT")
+        }
+        os.environ["FULCRA_ACCESS_TOKEN"] = "tkn-abc"
+        os.environ["FULCRA_API_BASE"] = "https://api.example.test"
+        os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination-httptest"
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _payload(self, lifecycle="complete", agent="claude-code:mb:repo"):
+        task = schema.make_task(
+            title="Fix the widget pipeline", workstream="devops",
+            agent=agent, summary="rewiring", next_action="ship it",
+        )
+        task["id"] = "20260602-fix-the-widget"
+        return annotations.build_annotation(
+            lifecycle=lifecycle, task=task, agent=agent)
+
+    def _happy_router(self, defs_initially_empty=True):
+        """A router that resolves every tag to id 'tag-<name>', returns an
+        empty (or pre-populated) annotation list, creates the def as 'def-1',
+        and accepts the ingest POST."""
+        tag_counter = {"n": 0}
+
+        def tag_get(req):
+            # Every tag name resolves on GET (200) -> deterministic id.
+            name = req.full_url.rsplit("/", 1)[-1]
+            return _FakeResp({"id": f"tag-{name}"})
+
+        def ann_list(req):
+            if defs_initially_empty:
+                return _FakeResp([])
+            return _FakeResp([{"id": "def-existing", "name": "Agent Tasks"}])
+
+        def ann_create(req):
+            return _FakeResp({"id": "def-1"})
+
+        return _Router([
+            ("GET", "/user/v1alpha1/tag/name/", tag_get),
+            ("POST", "/user/v1alpha1/tag", lambda r: _FakeResp({"id": "tag-posted"})),
+            ("GET", "/user/v1alpha1/annotation", ann_list),
+            ("POST", "/user/v1alpha1/annotation", ann_create),
+            ("POST", "/ingest/v1/record/batch", lambda r: _FakeResp(b"", 200)),
+        ])
+
+    def test_happy_path_three_endpoint_flow(self):
+        router = self._happy_router()
+        with patch.object(urllib_request, "urlopen", side_effect=router):
+            ok = annotations._write_http(self._payload())
+        self.assertTrue(ok)
+        # (a) tag resolution happened for each cli_tag
+        self.assertTrue(router.gets_to("/user/v1alpha1/tag/name/"))
+        # (b) definition resolve (GET list) + create (POST) happened
+        self.assertTrue(router.gets_to("/user/v1alpha1/annotation"))
+        self.assertTrue(router.posts_to("/user/v1alpha1/annotation"))
+        # (c) exactly one ingest POST
+        ingest = router.posts_to("/ingest/v1/record/batch")
+        self.assertEqual(len(ingest), 1)
+
+    def test_ingest_post_shape(self):
+        router = self._happy_router()
+        with patch.object(urllib_request, "urlopen", side_effect=router):
+            annotations._write_http(self._payload(lifecycle="complete"))
+        _, url, body, headers = router.posts_to("/ingest/v1/record/batch")[0]
+        self.assertEqual(headers.get("content-type"), "application/x-jsonl")
+        self.assertEqual(headers.get("authorization"), "Bearer tkn-abc")
+        # Body is JSONL: one object + trailing newline.
+        self.assertTrue(body.endswith(b"\n"))
+        rec = json.loads(body.decode().strip())
+        self.assertEqual(rec["metadata"]["data_type"], "MomentAnnotation")
+        self.assertEqual(rec["specversion"], 1)
+        # source carries the definition source entry
+        self.assertTrue(any(
+            s == "com.fulcradynamics.annotation.def-1"
+            for s in rec["metadata"]["source"]))
+        # source also carries a lifecycle-stamped fulcra-coord source id
+        self.assertTrue(any(
+            "com.fulcradynamics.fulcra-coord.complete." in s
+            for s in rec["metadata"]["source"]))
+        # resolved tag ids (not raw names) ride in metadata.tags
+        self.assertTrue(all(t.startswith("tag-") for t in rec["metadata"]["tags"]))
+        # inner data carries title + note
+        inner = json.loads(rec["data"])
+        self.assertIn("Fix the widget pipeline", inner["title"])
+        self.assertTrue(inner.get("note"))
+
+    def test_definition_id_is_cached_across_calls(self):
+        # Second annotation must NOT re-resolve the definition: the GET list /
+        # POST create pair runs once, then the cached id is reused.
+        router = self._happy_router()
+        with patch.object(urllib_request, "urlopen", side_effect=router):
+            annotations._write_http(self._payload(lifecycle="create"))
+            annotations._write_http(self._payload(lifecycle="update"))
+        self.assertEqual(len(router.gets_to("/user/v1alpha1/annotation")), 1)
+        self.assertEqual(len(router.posts_to("/user/v1alpha1/annotation")), 1)
+        # Both ingests still posted.
+        self.assertEqual(len(router.posts_to("/ingest/v1/record/batch")), 2)
+
+    def test_existing_definition_is_adopted_not_created(self):
+        router = self._happy_router(defs_initially_empty=False)
+        with patch.object(urllib_request, "urlopen", side_effect=router):
+            ok = annotations._write_http(self._payload())
+        self.assertTrue(ok)
+        # No create POST when an "Agent Tasks" def already exists.
+        self.assertEqual(len(router.posts_to("/user/v1alpha1/annotation")), 0)
+        _, _, body, _ = router.posts_to("/ingest/v1/record/batch")[0]
+        rec = json.loads(body.decode().strip())
+        self.assertIn("com.fulcradynamics.annotation.def-existing",
+                      rec["metadata"]["source"])
+
+    def test_tag_404_then_create(self):
+        # On a 404 GET, the writer POSTs to create the tag and uses that id.
+        def tag_get(req):
+            raise _http_error(404)
+
+        router = _Router([
+            ("GET", "/user/v1alpha1/tag/name/", tag_get),
+            ("POST", "/user/v1alpha1/tag", lambda r: _FakeResp({"id": "tag-created"})),
+            ("GET", "/user/v1alpha1/annotation", lambda r: _FakeResp([])),
+            ("POST", "/user/v1alpha1/annotation", lambda r: _FakeResp({"id": "def-1"})),
+            ("POST", "/ingest/v1/record/batch", lambda r: _FakeResp(b"", 200)),
+        ])
+        with patch.object(urllib_request, "urlopen", side_effect=router):
+            ok = annotations._write_http(self._payload())
+        self.assertTrue(ok)
+        self.assertTrue(router.posts_to("/user/v1alpha1/tag"))
+        _, _, body, _ = router.posts_to("/ingest/v1/record/batch")[0]
+        rec = json.loads(body.decode().strip())
+        self.assertIn("tag-created", rec["metadata"]["tags"])
+
+    def test_http_error_anywhere_returns_false_never_raises(self):
+        # A 500 on the ingest POST must yield False, not an exception.
+        router = _Router([
+            ("GET", "/user/v1alpha1/tag/name/",
+             lambda r: _FakeResp({"id": "tag-x"})),
+            ("GET", "/user/v1alpha1/annotation", lambda r: _FakeResp([])),
+            ("POST", "/user/v1alpha1/annotation", lambda r: _FakeResp({"id": "def-1"})),
+            ("POST", "/ingest/v1/record/batch", _http_error(500)),
+        ])
+        with patch.object(urllib_request, "urlopen", side_effect=router):
+            ok = annotations._write_http(self._payload())
+        self.assertFalse(ok)
+
+    def test_urlerror_returns_false(self):
+        def boom(req, *a, **k):
+            raise urllib.error.URLError("connection refused")
+
+        with patch.object(urllib_request, "urlopen", side_effect=boom):
+            ok = annotations._write_http(self._payload())
+        self.assertFalse(ok)
+
+
+class TestHttpTokenResolution(unittest.TestCase):
+    """The token comes from FULCRA_ACCESS_TOKEN, else `fulcra auth
+    print-access-token`; no token at all -> _write_http no-ops to False with
+    NO POST attempted."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self._saved = {
+            k: os.environ.get(k)
+            for k in ("FULCRA_ACCESS_TOKEN", "FULCRA_API_BASE",
+                      "FULCRA_COORD_REMOTE_ROOT")
+        }
+        os.environ.pop("FULCRA_ACCESS_TOKEN", None)
+        os.environ["FULCRA_API_BASE"] = "https://api.example.test"
+        os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination-tok"
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _payload(self):
+        task = schema.make_task(title="T", workstream="devops",
+                                agent="claude-code:mb:repo")
+        task["id"] = "20260602-t"
+        return annotations.build_annotation(
+            lifecycle="create", task=task, agent="claude-code:mb:repo")
+
+    def test_env_token_used_when_set(self):
+        os.environ["FULCRA_ACCESS_TOKEN"] = "env-token"
+        self.assertEqual(annotations._resolve_token(), "env-token")
+
+    def test_falls_back_to_cli_when_env_unset(self):
+        # No env token -> shell out to `fulcra auth print-access-token`.
+        recorded = {}
+
+        def fake_run(cmd, *a, **k):
+            recorded["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout="cli-token\n", stderr="")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            tok = annotations._resolve_token()
+        self.assertEqual(tok, "cli-token")
+        self.assertIn("print-access-token", recorded["cmd"])
+
+    def test_no_token_makes_write_a_noop_false(self):
+        # Neither env nor CLI yields a token -> _write_http returns False and
+        # never posts.
+        called = []
+
+        def no_token():
+            return None
+
+        with patch.object(annotations, "_resolve_token", side_effect=no_token):
+            with patch.object(urllib_request, "urlopen",
+                              side_effect=lambda *a, **k: called.append(a)):
+                ok = annotations._write_http(self._payload())
+        self.assertFalse(ok)
+        self.assertEqual(called, [])
+
+    def test_cli_failure_yields_no_token(self):
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="nope")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._resolve_token())
+
+
+class TestEmitHttpIntegration(unittest.TestCase):
+    """emit_* gating routes mode=http (and the `api` alias) to _write_http,
+    records the marker on success, and stays a no-op when the flag is off."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self._saved = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        if self._saved is None:
+            os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        else:
+            os.environ["FULCRA_COORD_ANNOTATIONS"] = self._saved
+
+    def _task(self):
+        return schema.make_task(title="A task", workstream="devops",
+                                agent="claude-code:mb:repo")
+
+    def test_http_mode_routes_to_write_http(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        calls = []
+        with patch.object(annotations, "_write_http",
+                          side_effect=lambda p, *, backend=None: calls.append(p) or True):
+            r = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=self._task(), agent="claude-code:mb:repo")
+        self.assertTrue(r)
+        self.assertEqual(len(calls), 1)
+
+    def test_api_alias_routes_to_write_http(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "api"
+        calls = []
+        with patch.object(annotations, "_write_http",
+                          side_effect=lambda p, *, backend=None: calls.append(p) or True):
+            r = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=self._task(), agent="claude-code:mb:repo")
+        self.assertTrue(r)
+        self.assertEqual(len(calls), 1)
+
+    def test_http_mode_off_default_no_call(self):
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        calls = []
+        with patch.object(annotations, "_write_http",
+                          side_effect=lambda p, *, backend=None: calls.append(p) or True):
+            r = annotations.emit_lifecycle_annotation(
+                lifecycle="create", task=self._task(), agent="claude-code:mb:repo")
+        self.assertFalse(r)
+        self.assertEqual(calls, [])
+
+    def test_needs_user_routes_to_write_http(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        t = self._task()
+        t["status"] = "blocked"
+        t["blocked_on"] = "approve it"
+        calls = []
+        with patch.object(annotations, "_write_http",
+                          side_effect=lambda p, *, backend=None: calls.append(p) or True):
+            r = annotations.emit_needs_user_annotation(
+                task=t, agent="claude-code:mb:repo")
+        self.assertTrue(r)
+        self.assertEqual(len(calls), 1)
+
+    def test_mode_resolves_http_and_api(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        self.assertEqual(annotations._mode(), "http")
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "api"
+        self.assertEqual(annotations._mode(), "http")
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        self.assertEqual(annotations._mode(), "cli")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        self.assertEqual(annotations._mode(), "off")
+
+
 if __name__ == "__main__":
     unittest.main()
