@@ -7,7 +7,12 @@ CLI:         FULCRA_CLI_COMMAND (default: fulcra-api or uv tool run fulcra-api)
 
 import os
 
-__version__ = "0.1.0"
+# Single source of truth for the version (pyproject derives it via
+# [tool.hatch.version]). Bump on every user-visible change so `--version` is
+# accurate AND so `uv tool install --force` actually rebuilds — uv skips the
+# rebuild when the version is unchanged, which is what silently froze older
+# installs at an old subcommand set. SemVer-ish: minor for additive surfaces.
+__version__ = "0.4.0"
 
 SCHEMA_VERSION = "fulcra.coordination.task.v1"
 DEFAULT_REMOTE_ROOT = "/coordination"
