@@ -6,6 +6,7 @@ override for testing without live Fulcra access.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import sys
@@ -118,6 +119,98 @@ def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]
     return list(task_map.values())
 
 
+def _load_task_summaries(backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """Load the compact task-summary list WITHOUT fetching task bodies.
+
+    The performance fast-path for reads (status/agents/needs-me/resume/search/
+    inbox): one download of ``views/summaries.json`` replaces ``_load_all_tasks``'
+    N+3 round-trips (index + search-index + next, then one body fetch per task).
+    Every read command and the view builders operate on summary dicts, which now
+    carry every field they read (schema.task_summary was enriched with
+    ``last_touched_by`` and a flattened ``done_at`` for exactly this).
+
+    BACKWARD COMPAT: a bus that predates this aggregate has no
+    ``views/summaries.json``. When the download is absent/None we FALL BACK to the
+    full ``_load_all_tasks`` path and summarize locally — correctness over speed —
+    so an older bus keeps working (just without the speedup) until its next write
+    materializes the aggregate."""
+    summaries_view = remote.download_json(
+        remote.view_remote_path("summaries"), backend=backend)
+    if summaries_view and summaries_view.get("summaries") is not None:
+        return summaries_view["summaries"]
+    # Older bus: no aggregate yet — fall back to the authoritative full load.
+    return [schema.task_summary(t) for t in _load_all_tasks(backend=backend)]
+
+
+def _load_summaries_for_rebuild(
+    task: dict[str, Any], *, backend: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """The write-path view-rebuild source: the summaries aggregate with the
+    just-written task's summary upserted in.
+
+    Downloads the authoritative ``views/summaries.json`` (NOT the local cache —
+    another agent may have written since we loaded), replaces the entry for this
+    task by id (or appends it if new), and returns the merged summary list. Since
+    build_all_views gives identical output from summaries as from full bodies,
+    this list is a complete view source without re-fetching any task body.
+
+    BACKWARD COMPAT: when the aggregate is absent (older bus that never wrote it),
+    fall back to the full ``_load_all_tasks`` path and summarize locally —
+    correctness over speed — so views still rebuild from the complete task set.
+    The fallback returns summaries too, so build_all_views sees a uniform shape.
+
+    ROBUSTNESS (S2): the single aggregate is one file under last-writer-wins, so
+    a concurrent peer's write could leave the copy we downloaded missing a task.
+    To avoid dropping tasks THIS agent already knows about, we union in our local
+    cached task summaries, preferring the FRESHER record per id by ``updated_at``
+    (so we never resurrect a stale local copy over a newer remote one). Tasks
+    only another agent knows about and that raced out of the aggregate still heal
+    on the next ``reconcile`` (which rebuilds from the full index+search+next
+    union) — that residual transient is accepted by design.
+
+    ACK PRESERVATION (B1): ``acked_by`` on the just-written task is recomputed
+    from its event log, which is truncated to the last MAX_EVENTS_INLINE events.
+    A heavily-acked broadcast can scroll an ``inbox_ack`` out of that window, so
+    the body-derived acks may be INCOMPLETE. The durable aggregate entry holds
+    the previously-recorded acks, so we UNION them into the written task's summary
+    rather than letting a recompute silently drop an ack (which would re-surface a
+    directive an agent already cleared)."""
+    summaries_view = remote.download_json(
+        remote.view_remote_path("summaries"), backend=backend)
+    if not (summaries_view and summaries_view.get("summaries") is not None):
+        # Older bus: no aggregate. Rebuild from the authoritative full task set so
+        # a fresh machine doesn't truncate views; the just-written task is already
+        # cached and thus present in _load_all_tasks' result.
+        return [schema.task_summary(t) for t in _load_all_tasks(backend=backend)]
+
+    # Start from the downloaded aggregate, keyed by id.
+    by_id: dict[str, dict[str, Any]] = {
+        s["id"]: s for s in summaries_view["summaries"] if s.get("id")
+    }
+
+    # S2: union local cached task summaries, freshest-by-updated_at wins, so a
+    # task this agent knows about that a raced aggregate dropped is recovered —
+    # without ever overwriting a newer remote record with a stale local one.
+    for t in cache.list_cached_tasks():
+        s = schema.task_summary(t)
+        prev = by_id.get(s["id"])
+        if prev is None or s.get("updated_at", "") > prev.get("updated_at", ""):
+            by_id[s["id"]] = s
+
+    # Upsert the just-written task. B1: preserve any acks the truncated event log
+    # can no longer prove by unioning the prior known acked_by set.
+    this_summary = schema.task_summary(task)
+    prior = by_id.get(task["id"])
+    if prior:
+        this_summary["acked_by"] = sorted(
+            set(this_summary.get("acked_by", []) or [])
+            | set(prior.get("acked_by", []) or [])
+        )
+    by_id[task["id"]] = this_summary
+
+    return list(by_id.values())
+
+
 def _load_task(task_id: str, *, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
     """Load a specific task from cache or remote."""
     t = cache.read_cached_task(task_id)
@@ -201,24 +294,58 @@ def _write_task_and_views(
 
     cache.write_cached_task(task)
 
-    # Regenerate all views from the full task set.
-    # Use _load_all_tasks so that a fresh machine that ran only _load_task()
-    # pulls all remote tasks into cache before building views — without this,
-    # a machine that loaded a single task would build views from a truncated
-    # local set and silently drop every task it never individually fetched.
-    # The current task is already in local cache (line above), so it is
-    # always included in the returned list.
-    all_tasks = _load_all_tasks(backend=backend)
-    all_views = views.build_all_views(all_tasks)
+    # Regenerate all views from the compact summaries aggregate, NOT re-fetched
+    # task bodies. build_all_views produces identical output from task_summary
+    # dicts as from full bodies (guarded by the equivalence test), so the
+    # authoritative ``views/summaries.json`` (one download) plus the just-written
+    # task's own summary upserted in is a complete, current view source. This is
+    # the write-path half of the perf refactor: it removes the per-task body
+    # fetch loop (~N round-trips) that _load_all_tasks performed on every write.
+    #
+    # BACKWARD COMPAT: a bus that predates the aggregate has no summaries.json. In
+    # that case _load_summaries_for_rebuild returns None and we fall back to the
+    # old _load_all_tasks path (correctness over speed) — a fresh machine that ran
+    # only _load_task() still pulls every remote task before building views, so no
+    # task is silently dropped. The current task is already cached (line above),
+    # so it is always part of the rebuilt set either way.
+    rebuild_source = _load_summaries_for_rebuild(task, backend=backend)
+    all_views = views.build_all_views(rebuild_source)
 
-    # Upload views — treat partial failure as needs_reconcile
+    # Upload views CONCURRENTLY (P1): remote.upload_json is thread-safe (each
+    # call writes a unique tempfile + runs an independent subprocess; remote.py
+    # holds no shared mutable state), so a small thread pool collapses the ~8-15
+    # sequential view uploads into one round-trip's wall-time. Semantics are
+    # preserved exactly: per-view success is collected, any failure lands in
+    # view_failures, and the partial-upload handling below is unchanged. Local
+    # cache writes happen in the main thread after the futures resolve.
+    view_items = list(all_views.items())
     view_failures = []
-    for view_name, view_data in all_views.items():
+
+    def _upload_one(item):
+        view_name, view_data = item
         vpath = _view_name_to_remote(view_name)
-        ok = remote.upload_json(view_data, vpath, backend=backend)
+        # S3: treat a RAISING upload as a failed view, not an escape hatch. If
+        # upload_json ever raises (rather than returning False), an unguarded
+        # pool.map would re-raise out of _write_task_and_views, bypassing the
+        # view_failures -> NeedsReconcile path and leaving a half-written op with
+        # an in_progress marker. Catching keeps the contract: any failure (False
+        # OR exception) lands in view_failures.
+        try:
+            ok = remote.upload_json(view_data, vpath, backend=backend)
+        except Exception:
+            ok = False
+        return view_name, ok
+
+    max_workers = min(8, len(view_items)) or 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for view_name, ok in pool.map(_upload_one, view_items):
+            if not ok:
+                view_failures.append(view_name)
+
+    # Cache every view locally regardless of upload outcome (matches prior
+    # behavior: the old loop wrote the cache for every view, success or not).
+    for view_name, view_data in view_items:
         cache.write_cached_view(view_name, view_data)
-        if not ok:
-            view_failures.append(view_name)
 
     if view_failures:
         op_marker["status"] = "partial"
@@ -755,8 +882,13 @@ def cmd_install_listener(args: Any, backend: Optional[list[str]] = None) -> int:
 
 
 def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
-    """Show current coordination status."""
-    all_tasks = _load_all_tasks(backend=backend)
+    """Show current coordination status.
+
+    Reads the compact summaries aggregate (one download) rather than fetching
+    every task body — every field this command and build_index read is present
+    on a summary. Falls back to a full load on an older bus (see
+    _load_task_summaries)."""
+    all_tasks = _load_task_summaries(backend=backend)
 
     workstream_filter = getattr(args, "workstream", None)
     agent_filter = getattr(args, "agent", None)
@@ -833,7 +965,10 @@ def cmd_agents(args: Any, backend: Optional[list[str]] = None) -> int:
     out_format = getattr(args, "format", "table")
     mine = getattr(args, "mine", None)
 
-    all_tasks = _load_all_tasks(backend=backend)
+    # Summaries fast-path: cmd_agents reads only status/owner_agent/id/title/
+    # priority/next_action/updated_at — all present on a summary — and is_stale
+    # reads status + updated_at. No task body is needed.
+    all_tasks = _load_task_summaries(backend=backend)
     open_tasks = [t for t in all_tasks if t.get("status") in ("active", "waiting", "blocked")]
     if mine:
         open_tasks = [t for t in open_tasks if t.get("owner_agent") == mine]
@@ -1114,7 +1249,10 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None) -> list[dict[str, 
     always reflects the current truth, at the cost of one task-set load — the same
     cost cmd_agents pays.
     """
-    all_tasks = _load_all_tasks(backend=backend)
+    # Summaries fast-path: inbox_for reads assignee/status/owner_agent and the
+    # ack set, which the summary now carries (acked_by) — no event log / body
+    # fetch needed. Falls back to a full load on an older bus.
+    all_tasks = _load_task_summaries(backend=backend)
     return views.inbox_for(me, all_tasks)
 
 
@@ -1146,7 +1284,8 @@ def _notify_new_needs_me(backend: Optional[list[str]] = None) -> None:
     blocked-on-you item alerts. Best-effort — wrapped by the caller's try/except
     so it can never crash a polling tick. No-op when nothing is blocked."""
     human = identity.resolve_human()
-    items = views.needs_human(_load_all_tasks(backend=backend), human)
+    # needs_human reads status/assignee/tags — all on a summary; no body fetch.
+    items = views.needs_human(_load_task_summaries(backend=backend), human)
     seen_path = _needs_me_seen_path(human)
     seen: set[str] = set()
     if seen_path.exists():
@@ -1238,7 +1377,8 @@ def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
     human = getattr(args, "human", None) or identity.resolve_human()
     out_format = getattr(args, "format", "table")
 
-    all_tasks = _load_all_tasks(backend=backend)
+    # needs_human reads status/assignee/tags — all on a summary; no body fetch.
+    all_tasks = _load_task_summaries(backend=backend)
     items = views.needs_human(all_tasks, human)
 
     if out_format == "json":
@@ -1288,7 +1428,10 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     human = identity.resolve_human()
     out_format = getattr(args, "format", "table")
 
-    all_tasks = _load_all_tasks(backend=backend)
+    # Summaries fast-path: resume reads owner_agent/status/assignee and re-wraps
+    # entries with task_summary (now idempotent, so summarizing a summary is a
+    # no-op). No task body is needed; falls back to a full load on an older bus.
+    all_tasks = _load_task_summaries(backend=backend)
     open_statuses = ("proposed", "active", "waiting", "blocked")
 
     active = [
@@ -1819,7 +1962,10 @@ def cmd_search(args: Any, backend: Optional[list[str]] = None) -> int:
             if q in text:
                 results.append(r)
     else:
-        all_tasks = _load_all_tasks(backend=backend)
+        # No cached search-index — search the summaries aggregate. search_tasks
+        # reads title/current_summary/workstream/owner_agent/tags, all present on
+        # a summary; no task body fetch. Falls back to a full load on an older bus.
+        all_tasks = _load_task_summaries(backend=backend)
         results = views.search_tasks(query, all_tasks)
 
     if out_format == "json":
