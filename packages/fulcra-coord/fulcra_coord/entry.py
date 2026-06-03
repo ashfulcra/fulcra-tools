@@ -252,6 +252,15 @@ def build_parser() -> argparse.ArgumentParser:
     isp_clear = isub.add_parser("clear", help="Remove the persisted identity")
     isp_clear.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- resume ----
+    sp = sub.add_parser("resume",
+                        help="Pick-up-where-you-left-off briefing for an agent: "
+                             "your active/waiting work, what's blocked on you, "
+                             "what you owe others, and what's blocked on the human")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Whose briefing (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- needs-me ----
     sp = sub.add_parser("needs-me",
                         help="What's blocked on YOU (the human): every open task "
@@ -308,6 +317,7 @@ COMMAND_MAP = {
     "identity": _cli.cmd_identity,
     "human": _cli.cmd_human,
     "needs-me": _cli.cmd_needs_me,
+    "resume": _cli.cmd_resume,
     "__session-task": _cli.cmd_session_task,
 }
 
