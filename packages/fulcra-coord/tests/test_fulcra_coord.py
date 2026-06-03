@@ -5570,6 +5570,100 @@ class TestPerCwdIdentity(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Situational awareness — Piece 7: resume (pick-up-where-you-left-off briefing)
+# ---------------------------------------------------------------------------
+
+class TestResume(unittest.TestCase):
+    """`resume` builds a read-only four-section briefing for an agent: your
+    active/waiting work, what's blocked on you, what you owe others, and what's
+    blocked on the human."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        self.fake_backend = ["false"]
+        self.me = "claude-code:host:repo"
+        self._seed()
+
+    def tearDown(self):
+        for k in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "FULCRA_COORD_HUMAN",
+                  "FULCRA_COORD_AGENT"):
+            os.environ.pop(k, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ns(self, **kw):
+        return types.SimpleNamespace(**kw)
+
+    def _task(self, tid, *, owner, assignee=None, status="active", na=""):
+        from fulcra_coord import schema
+        t = schema.make_task(title=tid, workstream="general", agent=owner,
+                             owner_agent=owner, assignee=assignee)
+        t["id"] = tid
+        t["status"] = status
+        t["next_action"] = na
+        return t
+
+    def _seed(self):
+        # (a) my active task
+        cache.write_cached_task(self._task("TASK-mine-active", owner=self.me,
+                                           status="active", na="finish X"))
+        # (b) blocked on me: someone else owns it, assigned to me, open
+        cache.write_cached_task(self._task("TASK-blocked-on-me", owner="other:a:b",
+                                           assignee=self.me, status="waiting",
+                                           na="need your input"))
+        # (c) I owe others: I own/created it, assigned to someone else, open
+        cache.write_cached_task(self._task("TASK-i-owe", owner=self.me,
+                                           assignee="other:c:d", status="proposed",
+                                           na="do the thing"))
+        # (d) blocked on the human (ash)
+        cache.write_cached_task(self._task("TASK-on-human", owner="other:e:f",
+                                           assignee="ash", status="blocked",
+                                           na="approve"))
+
+    def _run(self, **kw):
+        import io, contextlib
+        from fulcra_coord.cli import cmd_resume
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_resume(self._ns(format="json", **kw), backend=self.fake_backend)
+        return json.loads(buf.getvalue())
+
+    def test_my_active_section(self):
+        out = self._run(agent=self.me)
+        self.assertEqual(out["agent"], self.me)
+        ids = [t["id"] for t in out["active"]]
+        self.assertIn("TASK-mine-active", ids)
+
+    def test_blocked_on_me_section(self):
+        out = self._run(agent=self.me)
+        ids = [t["id"] for t in out["blocked_on_me"]]
+        self.assertIn("TASK-blocked-on-me", ids)
+        self.assertNotIn("TASK-mine-active", ids)
+
+    def test_i_owe_others_section(self):
+        out = self._run(agent=self.me)
+        ids = [t["id"] for t in out["owed_to_others"]]
+        self.assertIn("TASK-i-owe", ids)
+        # Not my own active work, not blocked-on-me.
+        self.assertNotIn("TASK-mine-active", ids)
+        self.assertNotIn("TASK-blocked-on-me", ids)
+
+    def test_blocked_on_human_section(self):
+        out = self._run(agent=self.me)
+        ids = [t["id"] for t in out["blocked_on_human"]]
+        self.assertIn("TASK-on-human", ids)
+
+    def test_resolves_explicit_agent(self):
+        # A different agent sees a different briefing.
+        out = self._run(agent="other:a:b")
+        # other:a:b owns TASK-blocked-on-me (assigned to me) -> it's in owed_to_others.
+        self.assertIn("TASK-blocked-on-me", [t["id"] for t in out["owed_to_others"]])
+
+
+# ---------------------------------------------------------------------------
 # Situational awareness — Piece 1: human handle (resolve_human + `human` cmd)
 # ---------------------------------------------------------------------------
 

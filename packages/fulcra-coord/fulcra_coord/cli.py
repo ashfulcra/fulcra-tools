@@ -1231,6 +1231,94 @@ def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Pick-up-where-you-left-off briefing for an agent (situational awareness
+    piece 7). Read-only.
+
+    Four sections, all built from the live task set so a fresh session (or the
+    operator after a reboot) can reload context in one call:
+
+      (a) active   — your active/waiting tasks + next_action (what you were doing)
+      (b) blocked_on_me   — open tasks assigned to you but owned by someone else
+                            (directives + things parked on you)
+      (c) owed_to_others  — open tasks you own/created that are assigned to
+                            someone ELSE (work you directed and still owe a result
+                            or a nudge on)
+      (d) blocked_on_human — what's blocked on the operator (needs-me), so an
+                            agent acting for the user sees the human's plate too
+
+    The agent is resolved via ``--agent`` > the normal identity resolution.
+    ``--format json`` for tooling.
+    """
+    me = identity.resolve_agent(getattr(args, "agent", None))
+    human = identity.resolve_human()
+    out_format = getattr(args, "format", "table")
+
+    all_tasks = _load_all_tasks(backend=backend)
+    open_statuses = ("proposed", "active", "waiting", "blocked")
+
+    active = [
+        schema.task_summary(t) for t in all_tasks
+        if t.get("owner_agent") == me and t.get("status") in ("active", "waiting")
+    ]
+    blocked_on_me = [
+        schema.task_summary(t) for t in all_tasks
+        if t.get("assignee") and views.agent_matches(me, t.get("assignee"))
+        and t.get("owner_agent") != me
+        and t.get("status") in ("proposed", "waiting", "blocked")
+    ]
+    owed_to_others = [
+        schema.task_summary(t) for t in all_tasks
+        if t.get("owner_agent") == me
+        and t.get("assignee") and not views.agent_matches(me, t.get("assignee"))
+        and t.get("status") in open_statuses
+    ]
+    blocked_on_human = views.needs_human(all_tasks, human)
+
+    def _sort(items):
+        return sorted(items, key=lambda x: (x.get("priority", "P9"),
+                                            x.get("updated_at", "")))
+
+    active = _sort(active)
+    blocked_on_me = _sort(blocked_on_me)
+    owed_to_others = _sort(owed_to_others)
+
+    if out_format == "json":
+        _print_json({
+            "agent": me,
+            "human": human,
+            "active": active,
+            "blocked_on_me": blocked_on_me,
+            "owed_to_others": owed_to_others,
+            "blocked_on_human": blocked_on_human,
+        })
+        return 0
+
+    print(f"\n{'='*60}")
+    print(f"  Resume briefing — {me}")
+    print(f"{'='*60}")
+
+    def _section(label, items, ask_field=None):
+        print(f"\n  {label} ({len(items)})")
+        for s in items:
+            print(f"    [{s.get('status','?').upper()}] [{s.get('priority','??')}] "
+                  f"{s.get('id','')}  {s.get('title','')[:50]}")
+            na = (s.get("next_action") or "").strip()
+            if na:
+                print(f"          next: {na[:70]}")
+            if ask_field:
+                ask = (s.get("blocked_on") or "").strip()
+                if ask:
+                    print(f"          needs: {ask[:70]}")
+
+    _section("Your active/waiting work", active)
+    _section("Blocked on YOU", blocked_on_me, ask_field=True)
+    _section("You owe others", owed_to_others)
+    _section(f"Blocked on the human ({human})", blocked_on_human, ask_field=True)
+    print()
+    return 0
+
+
 def cmd_start(args: Any, backend: Optional[list[str]] = None) -> int:
     """Create a new task and upload it."""
     title = args.title
