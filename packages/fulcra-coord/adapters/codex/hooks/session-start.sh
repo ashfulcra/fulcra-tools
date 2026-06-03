@@ -92,6 +92,13 @@ if needsme:
         lines.append("  %s — %s (from %s)" % (it.get("id",""), it.get("title",""), frm))
         if ask:
             lines.append("      needs: %s" % ask)
+# M-1: a self-filed `block --on-user` task is owned by the agent AND appears in
+# needs-me, so without this it would show BOTH in the ⛔ BLOCKED ON YOU banner
+# above and again under "open work". Seed `seen` with the needs-me ids and drop
+# those from `mine` BEFORE the header/resume checks so such a task is shown once
+# (in the banner) and never produces an empty "open work" header below.
+seen = {it.get("id") for it in needsme if it.get("id")}
+mine = [t for t in mine if t['id'] not in seen]
 # The shared-bus section header only when there's bus content to show under it
 # (in-flight, stale, or directives) — otherwise a lone blocked-on-you banner
 # would carry an empty "open work" header.
@@ -101,7 +108,7 @@ for t in mine:
     lines.append(f"  [{t.get('status','?').upper()}] {t['id']} — {t.get('title','')}")
     if t.get("next_action"):
         lines.append(f"      next: {t['next_action']}")
-seen = {t['id'] for t in mine}
+seen |= {t['id'] for t in mine}
 extra = [t for t in stale if t['id'] not in seen]
 if extra:
     lines.append("  ⚠ Possibly-forgotten (active, no recent update):")

@@ -2686,6 +2686,72 @@ class TestSessionStartAgentResolution(unittest.TestCase):
         self.assertNotIn("sessionTitle", r.stdout)
 
 
+class TestSessionStartSelfBlockedDedup(unittest.TestCase):
+    """M-1: a self-filed `block --on-user` task is owned by the agent AND appears
+    in needs-me. It must show ONCE (in the ⛔ BLOCKED ON YOU banner), not again
+    under the "open work" mine/possibly-forgotten sections."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
+        self.host = os.uname().nodename.split(".")[0]
+        self.repo = os.path.basename(self.tmp)
+        self.agent = "claude-code:%s:%s" % (self.host, self.repo)
+        fake = os.path.join(self.bin, "fulcra-coord")
+        with open(fake, "w") as f:
+            # identity -> empty (exercise the derived fallback so AGENT == the
+            # owner_agent of the self-filed task below).
+            f.write("#!/usr/bin/env bash\n"
+                    'if [ "$1" = "identity" ]; then exit 0; fi\n'
+                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
+                    'if [ "$1" = "needs-me" ]; then cat "%s"; exit 0; fi\n'
+                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'exit 0\n'
+                    % (os.path.join(self.tmp, "status.json"),
+                       os.path.join(self.tmp, "needsme.json")))
+        os.chmod(fake, 0o755)
+        from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
+        from fulcra_coord import claude_code as cc
+        self.hooks = os.path.join(self.tmp, "hooks"); os.makedirs(self.hooks)
+        out = os.path.join(self.hooks, "session-start.sh")
+        with open(out, "w") as f:
+            f.write(cc.SESSION_START_SH.replace(
+                PLACEHOLDER_ARGV, materialize_argv([fake])))
+        os.chmod(out, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, statusjson, needsme):
+        with open(os.path.join(self.tmp, "status.json"), "w") as f:
+            f.write(statusjson)
+        with open(os.path.join(self.tmp, "needsme.json"), "w") as f:
+            f.write(needsme)
+        env = dict(os.environ); env["PATH"] = self.bin + os.pathsep + env["PATH"]
+        return subprocess.run(["bash", os.path.join(self.hooks, "session-start.sh")],
+                              input=json.dumps({"cwd": self.tmp}),
+                              capture_output=True, text=True, env=env)
+
+    def test_self_filed_on_user_task_shows_once(self):
+        # The task is owned by THIS agent (so it would land in "mine") AND is in
+        # needs-me (the blocked-on-you banner). It must appear exactly once.
+        sj = json.dumps({"active": [
+            {"id": "TASK-self", "title": "self-blocked", "status": "blocked",
+             "owner_agent": self.agent, "updated_at": "2026-06-01T00:00:00Z",
+             "next_action": "wait on human"}]})
+        needsme = json.dumps({"human": "ash", "count": 1, "items": [
+            {"id": "TASK-self", "title": "self-blocked", "status": "blocked",
+             "owner_agent": self.agent, "blocked_on": "need a decision",
+             "next_action": "", "updated_at": "2026-06-01T00:00:00Z"}]})
+        r = self._run(sj, needsme)
+        self.assertEqual(r.returncode, 0)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(ctx.count("TASK-self"), 1)
+        self.assertIn("BLOCKED ON YOU", ctx)
+        # It must NOT spawn an empty "open work" header (no other bus content).
+        self.assertNotIn("open work on the shared bus", ctx)
+
+
 class TestOpenClawTemplates(unittest.TestCase):
     def test_prompt_and_hook_templates_present(self):
         from fulcra_coord import openclaw as oc
