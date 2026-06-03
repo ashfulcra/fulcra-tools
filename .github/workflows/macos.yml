@@ -1,0 +1,53 @@
+name: macOS CI
+
+# Runs the full Python test suite on macOS so the macOS-only code paths
+# (PyObjC menubar, UserNotifications bundle guard, fulcra-CLI resolution
+# under launchd's restricted PATH) are exercised on every push + PR. The
+# two regressions the other-machine onboarding session hit
+# (`bundleProxyForCurrentProcess is nil` crash, sign-in path resolving
+# `shutil.which("fulcra")` to None) both merged because nothing tested
+# those paths on a clean macOS runner.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'packages/attention/chrome/**'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'packages/attention/chrome/**'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        # Pinned by version, not @latest, so a uv release can't silently
+        # break CI (or hide a real failure under a tooling change).
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+          enable-cache: true
+
+      - name: Set up Python (matches .python-version)
+        run: uv python install
+
+      - name: Install workspace with all extras (dev + macos)
+        # Bare `uv sync` is NOT enough — pytest is in each package's `dev`
+        # extra and PyObjC/rumps is in `macos`. AGENTS.md documents this.
+        run: uv sync --all-packages --all-extras
+
+      - name: Run the full test suite
+        # Must NOT hit the network. ~1500 tests, ~20s on a clean runner.
+        # Fail fast on the first error to surface the cause quickly.
+        run: uv run pytest packages/ -q --maxfail=1
