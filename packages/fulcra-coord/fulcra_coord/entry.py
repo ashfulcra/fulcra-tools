@@ -351,6 +351,20 @@ def build_parser() -> argparse.ArgumentParser:
     hsp_clear = hsub.add_parser("clear", help="Remove the persisted human handle")
     hsp_clear.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- annotations ----
+    sp = sub.add_parser("annotations",
+                        help="Enable/disable/inspect the Agent-Tasks timeline "
+                             "annotations writer (persisted so every agent emits "
+                             "without a per-shell FULCRA_COORD_ANNOTATIONS export)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+    asub = sp.add_subparsers(dest="annotations_action")
+    asp_on = asub.add_parser("on", help="Persist annotations on (mode: http)")
+    asp_on.add_argument("--format", choices=["table", "json"], default="table")
+    asp_off = asub.add_parser("off", help="Remove the persisted mode (off unless env set)")
+    asp_off.add_argument("--format", choices=["table", "json"], default="table")
+    asp_status = asub.add_parser("status", help="Show resolved mode, source, and token state")
+    asp_status.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- __session-task (hidden, used by hooks) ----
     sp = sub.add_parser("__session-task", help=argparse.SUPPRESS)
     sp.add_argument("session_id", metavar="SESSION_ID")
@@ -387,6 +401,7 @@ COMMAND_MAP = {
     "install-codex": _cli.cmd_install_codex,
     "identity": _cli.cmd_identity,
     "human": _cli.cmd_human,
+    "annotations": _cli.cmd_annotations,
     "needs-me": _cli.cmd_needs_me,
     "resume": _cli.cmd_resume,
     "__session-task": _cli.cmd_session_task,

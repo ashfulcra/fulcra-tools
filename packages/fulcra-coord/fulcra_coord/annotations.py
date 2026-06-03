@@ -70,6 +70,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from . import cache, remote, remote_root
@@ -286,25 +287,117 @@ def build_needs_user_annotation(
 # Capability gate
 # ---------------------------------------------------------------------------
 
-def _mode() -> str:
-    """Resolve the enable mode from ``FULCRA_COORD_ANNOTATIONS``.
+def _annotations_config_path() -> "Path":
+    """Path of the persisted annotation-mode file.
 
-    Returns one of ``off`` | ``cli`` | ``http``. Unset or unrecognized -> ``off``
-    so the feature is inert by default and an operator must opt in explicitly.
+    Lives at ``${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/annotations`` — the same
+    config root the human handle and per-cwd identities use (via
+    ``identity.config_root``), so all of fulcra-coord's persisted operator
+    preferences sit together and tests isolate them with one ``XDG_CONFIG_HOME``.
+    Imported lazily to avoid any import-order coupling with ``identity``."""
+    from . import identity
+    return identity.config_root() / "annotations"
 
-    ``http`` is the proven path: it writes annotations directly over the Fulcra
-    HTTP API exactly the way ``fulcra-collect`` does (tag resolve -> moment-def
-    resolve/create -> JSONL record POST). ``api`` is kept as a back-compat ALIAS
-    for ``http`` — the original deferred-stub flag value — so an operator who set
-    ``=api`` before the HTTP writer landed gets the working path, not a no-op.
-    ``cli`` still routes to the legacy ``create-data-type`` shell-out for any
-    environment pinned to the annotations-capable CLI build."""
-    raw = os.environ.get("FULCRA_COORD_ANNOTATIONS", "").strip().lower()
+
+def _normalize_mode(raw: str) -> Optional[str]:
+    """Map a raw mode token to one of ``cli`` | ``http``, or None if unrecognized.
+
+    The ``api``->``http`` alias is honoured HERE so it applies uniformly to both
+    the env var and the persisted config file: an operator who wrote the legacy
+    ``api`` value (the original deferred-stub flag) gets the working HTTP path,
+    not a no-op, no matter which source it came from."""
+    raw = (raw or "").strip().lower()
     if raw == "cli":
         return "cli"
     if raw in ("http", "api"):
         return "http"
-    return "off"
+    return None
+
+
+def _persisted_mode() -> Optional[str]:
+    """Return the persisted annotation mode (``cli``/``http``), or None.
+
+    The mode is enabled ONCE by the operator (``annotations on``) and stored as a
+    single trimmed line in ``${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/annotations``
+    — exactly the human-handle persistence pattern in ``identity.py``. Persisting
+    it (rather than requiring ``FULCRA_COORD_ANNOTATIONS`` exported in every
+    shell) is what lets EVERY agent on the machine emit, so the operator's
+    timeline actually fills. Tolerant of a missing/empty/unreadable/garbage file
+    — a broken config must never wedge a task op, so we fall through to ``off``.
+    The ``api`` alias normalizes here too (see ``_normalize_mode``)."""
+    path = _annotations_config_path()
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return None
+    return _normalize_mode(raw)
+
+
+def set_persisted_mode(mode: str) -> "Path":
+    """Persist ``mode`` (normalized to ``cli``/``http``) so every agent emits.
+
+    Mirrors ``identity.set_human``: creates the config dir and writes a single
+    trimmed line. The value is normalized through ``_normalize_mode`` so an
+    ``api`` alias lands as ``http`` on disk. Returns the file path."""
+    normalized = _normalize_mode(mode) or "off"
+    path = _annotations_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(normalized + "\n")
+    return path
+
+
+def clear_persisted_mode() -> bool:
+    """Remove the persisted mode file. Returns True if a file was removed.
+
+    After clearing, ``_mode`` resolves to ``off`` unless ``FULCRA_COORD_ANNOTATIONS``
+    is set (env still wins). Mirrors ``identity.clear_human``."""
+    path = _annotations_config_path()
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def resolve_mode_source() -> tuple[str, str]:
+    """Resolve the annotation mode AND report its source.
+
+    Returns ``(mode, source)`` where ``mode`` ∈ ``off``|``cli``|``http`` and
+    ``source`` ∈ ``env``|``config``|``default``. Order: ``FULCRA_COORD_ANNOTATIONS``
+    (when non-empty and recognized) > persisted config file > ``off``. Surfacing
+    the source lets ``annotations status`` / ``doctor`` explain *why* it resolved
+    the way it did (mirrors ``identity.resolve_human_source``). Env always wins so
+    a single session can override the machine-wide persisted enablement."""
+    env_raw = os.environ.get("FULCRA_COORD_ANNOTATIONS", "").strip()
+    if env_raw:
+        # A non-empty but unrecognized env value (e.g. "off"/"bogus") still
+        # COUNTS as an explicit env decision -> off, source env. This preserves
+        # the existing "unknown flag value is off" contract while letting a
+        # session deliberately disable a machine that has it persisted on.
+        return (_normalize_mode(env_raw) or "off", "env")
+    persisted = _persisted_mode()
+    if persisted:
+        return (persisted, "config")
+    return ("off", "default")
+
+
+def _mode() -> str:
+    """Resolve the enable mode. Returns one of ``off`` | ``cli`` | ``http``.
+
+    Resolution order: ``FULCRA_COORD_ANNOTATIONS`` env (when non-empty) > the
+    persisted config file (``annotations on``) > ``off``. The persisted file is
+    what lets the feature stay on across every shell/agent without a per-session
+    export; env still wins so a session can override. Unset/unrecognized -> ``off``
+    so the feature is inert by default and an operator must opt in explicitly.
+
+    ``http`` is the proven path: it writes annotations directly over the Fulcra
+    HTTP API exactly the way ``fulcra-collect`` does (tag resolve -> moment-def
+    resolve/create -> JSONL record POST). ``api`` is a back-compat ALIAS for
+    ``http`` (normalized for both env and file). ``cli`` still routes to the
+    legacy ``create-data-type`` shell-out for any environment pinned to the
+    annotations-capable CLI build."""
+    return resolve_mode_source()[0]
 
 
 # ---------------------------------------------------------------------------
