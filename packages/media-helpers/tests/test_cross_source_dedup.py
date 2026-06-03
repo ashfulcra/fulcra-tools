@@ -26,11 +26,14 @@ from fulcra_media.importers import (
     apple_music_takeout,
     apple_podcasts,
     apple_takeout,
+    deezer,
+    generic_csv,
     lastfm,
     letterboxd,
     netflix,
     spotify,
     trakt,
+    youtube,
 )
 from fulcra_media.state import State
 from media_test_helpers import json_response
@@ -58,6 +61,18 @@ def test_lastfm_emits_listened_fingerprint() -> None:
         "name": "Yellow",
         "artist": {"#text": "Coldplay"},
         "date": {"uts": "1748266500"},  # 2025-05-26 ...
+    })
+    assert ev is not None
+    _assert_has_content_fp(ev, "listened")
+
+
+def test_deezer_emits_listened_fingerprint() -> None:
+    ev = deezer.normalize_track({
+        "id": 12345,
+        "title": "Yellow",
+        "artist": {"name": "Coldplay"},
+        "album": {"title": "Parachutes"},
+        "timestamp": 1748266500,  # 2025-05-26 ...
     })
     assert ev is not None
     _assert_has_content_fp(ev, "listened")
@@ -225,6 +240,104 @@ def test_letterboxd_emits_movie_fingerprint() -> None:
     extras = letterboxd._extract_extra_source_ids(entry, start)
     assert extras
     assert extras[0].startswith("com.fulcra.content.watched.v1.")
+
+
+def test_generic_csv_listened_emits_listened_fingerprint(tmp_path) -> None:
+    """A CSV mapped to `listened` with an artist subtitle column should emit
+    a com.fulcra.content.listened.v1.* cross-source id, mirroring lastfm."""
+    csv_path = tmp_path / "listens.csv"
+    csv_path.write_text(
+        "timestamp,title,artist,id\n"
+        "2025-05-26T14:35:00Z,Yellow,Coldplay,row1\n"
+    )
+    events = list(
+        generic_csv.parse_media_csv(
+            csv_path, service="myscrobbler", category="listened",
+        )
+    )
+    assert len(events) == 1
+    _assert_has_content_fp(events[0], "listened")
+
+
+def test_generic_csv_watched_emits_watched_fingerprint(tmp_path) -> None:
+    """A CSV mapped to `watched` (movie) should emit a watched fingerprint."""
+    csv_path = tmp_path / "watches.csv"
+    csv_path.write_text(
+        "timestamp,title,artist,id\n"
+        "2025-05-26T22:00:00Z,Dune Part Two,,row1\n"
+    )
+    events = list(
+        generic_csv.parse_media_csv(
+            csv_path, service="mywatcher", category="watched",
+        )
+    )
+    assert len(events) == 1
+    _assert_has_content_fp(events[0], "watched")
+
+
+def test_generic_csv_read_has_no_cross_fingerprint(tmp_path) -> None:
+    """`read` has no cross-source content fingerprint kind — it must NOT emit
+    a com.fulcra.content.* id (no books cross-source key exists)."""
+    csv_path = tmp_path / "reads.csv"
+    csv_path.write_text(
+        "timestamp,title,artist,id\n"
+        "2025-05-26T22:00:00Z,Dune,Frank Herbert,row1\n"
+    )
+    events = list(
+        generic_csv.parse_media_csv(
+            csv_path, service="mybooks", category="read",
+        )
+    )
+    assert len(events) == 1
+    extras = events[0].extra_source_ids
+    assert not [s for s in extras if s.startswith("com.fulcra.content.")], extras
+
+
+def test_generic_csv_dedups_against_lastfm(tmp_path) -> None:
+    """End-to-end: a generic CSV listen of the same track at the same 5-min
+    bucket as a Last.fm scrobble emits the IDENTICAL listened fingerprint."""
+    lastfm_ev = lastfm.normalize_track({
+        "name": "Yellow",
+        "artist": {"#text": "Coldplay"},
+        "date": {"uts": "1748270250"},  # 2025-05-26T14:37:30Z — bucket 14:35
+    })
+    assert lastfm_ev is not None
+    csv_path = tmp_path / "listens.csv"
+    csv_path.write_text(
+        "timestamp,title,artist,id\n"
+        "2025-05-26T14:35:00Z,Yellow,Coldplay,row1\n"
+    )
+    csv_events = list(
+        generic_csv.parse_media_csv(
+            csv_path, service="myscrobbler", category="listened",
+        )
+    )
+    assert len(csv_events) == 1
+
+    def _fp(ev):
+        return next(
+            s for s in ev.extra_source_ids
+            if s.startswith("com.fulcra.content.listened.v1.")
+        )
+    assert _fp(lastfm_ev) == _fp(csv_events[0])
+
+
+def test_youtube_has_no_cross_source_fingerprint() -> None:
+    """YouTube watches have no cross-source twin (no other importer reports
+    YouTube video identity, and a free-form video title would risk a false
+    merge against an unrelated movie of the same title). So youtube must
+    NOT emit a com.fulcra.content.* id — only its content_fingerprint twin
+    cache string remains."""
+    ev = youtube.normalize_entry({
+        "header": "YouTube",
+        "title": "Watched Some Random Vlog",
+        "titleUrl": "https://www.youtube.com/watch?v=abc123",
+        "time": "2025-05-26T22:00:00Z",
+    })
+    assert ev is not None
+    assert not [
+        s for s in ev.extra_source_ids if s.startswith("com.fulcra.content.")
+    ], ev.extra_source_ids
 
 
 def test_spotify_ifttt_emits_listened_fingerprint(monkeypatch) -> None:
