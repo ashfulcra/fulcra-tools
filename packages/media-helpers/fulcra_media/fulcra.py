@@ -11,6 +11,7 @@ soft-delete, and event readback come from the base.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -119,12 +120,29 @@ class FulcraClient(BaseFulcraClient):
         chunk_size: int = 500,
         window_pad_minutes: int = 10,
         check_only: bool = False,
+        claim: "Callable[[set[str]], bool] | None" = None,
     ) -> ImportResult:
         """Run the dedup-readback + ingest pipeline.
 
         `check_only`: when True, do all the readbacks and dedup math but
         don't POST. Result.posted reports how many *would* post; verified
         stays 0.
+
+        `claim`: an OPTIONAL per-event write-dedup claim, injected by the
+        daemon (``ctx.claim_dedup_keys``) so media-helpers never imports
+        ``fulcra-collect``. For each event that SURVIVES the readback-skip,
+        ``claim`` is called with that event's full dedup-key set
+        (``{deterministic_id} ∪ extra_source_ids``); the event is POSTed
+        only when ``claim`` returns ``True``. This closes the window the
+        readback alone can't: two concurrent runs, or two cross-source
+        twins in the SAME run that share a ``com.fulcra.content.*``
+        fingerprint, would each pass the readback (neither is in Fulcra
+        yet) — the claim, an atomic INSERT OR IGNORE against a shared
+        PRIMARY KEY, lets exactly one of them through. A claimed-but-skipped
+        event counts as ``skipped_existing`` (it's a duplicate of a sibling
+        being written this very run). When ``claim is None`` (standalone CLI
+        imports outside the daemon) behaviour is exactly as before:
+        readback-skip only, no per-event claim.
         """
         events = list(events)
         total = len(events)
@@ -175,6 +193,23 @@ class FulcraClient(BaseFulcraClient):
                 if not ({e.deterministic_id, *e.extra_source_ids} & existing)
             ]
             skipped += len(chunk) - len(new_events)
+
+            # Per-event write-dedup claim (component 3). For each event that
+            # survived the readback-skip, atomically claim its full dedup-key
+            # set; POST only the events whose claim succeeded. A claim that
+            # returns False means a concurrent run — or a cross-source twin
+            # earlier in THIS chunk's iteration — already claimed one of the
+            # event's keys, so this event would be a duplicate: count it as
+            # skipped and don't POST it. ``check_only`` is a dry run and must
+            # not mutate the shared dedup store, so the claim is bypassed
+            # there (matching the "don't POST" semantics of check_only).
+            if claim is not None and not check_only:
+                claimed_events = []
+                for e in new_events:
+                    if claim({e.deterministic_id, *e.extra_source_ids}):
+                        claimed_events.append(e)
+                skipped += len(new_events) - len(claimed_events)
+                new_events = claimed_events
 
             if new_events:
                 if check_only:

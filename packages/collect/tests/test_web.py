@@ -2537,10 +2537,12 @@ def test_extension_attention_dedupes_repeated_source_id(
     assert r2.status_code == 200, r2.text
     # Forwarded to Fulcra exactly once despite two identical POSTs.
     assert len(ingest_calls) == 1
-    # The dedup table records the single source_id.
+    # The dedup table records the single source_id. The route now claims via
+    # the generalised forwarded_events table (component 3); behaviour
+    # (forward exactly once) is identical to PR #20.
     from fulcra_collect import db as _db
     rows = _db.open().execute(
-        "SELECT source_id FROM forwarded_attention").fetchall()
+        "SELECT dedup_key FROM forwarded_events").fetchall()
     assert len(rows) == 1
 
 
@@ -2612,7 +2614,7 @@ def test_extension_attention_dedupes_under_storm(
     assert len(ingest_calls) == 1
     from fulcra_collect import db as _db
     rows = _db.open().execute(
-        "SELECT source_id FROM forwarded_attention").fetchall()
+        "SELECT dedup_key FROM forwarded_events").fetchall()
     assert len(rows) == 1
 
 

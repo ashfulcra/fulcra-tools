@@ -280,6 +280,31 @@ class RunContext:
     log: logging.Logger
     _emit: Callable[[dict], None] = field(repr=False)
     _fulcra_client_factory: Callable[[], object] | None = field(default=None, repr=False)
+    _claim_dedup_keys: Callable[[set[str]], bool] | None = field(default=None, repr=False)
+    """Daemon-backed per-event write-dedup claim. The worker supplies a
+    callable that atomically claims a set of dedup keys in the daemon's
+    ``state.db`` (the same store the attention route uses). Plugins that
+    write to Fulcra (the media import path) pass ``ctx.claim_dedup_keys``
+    down into ``run_import`` so concurrent runs / same-run cross-source
+    twins can't double-write. ``None`` when no daemon db is available
+    (standalone CLI), in which case the import path falls back to the
+    readback-skip only."""
+
+    def claim_dedup_keys(self, keys: set[str]) -> bool:
+        """Atomically claim a set of dedup keys for one event, returning
+        ``True`` iff the event is new (none of its keys were already
+        claimed) and should be written to Fulcra, else ``False`` (skip).
+
+        Backed by the daemon's ``state.db`` via the injected
+        ``_claim_dedup_keys`` callable. When no claim backend was supplied
+        (standalone CLI, or a RunContext built for health/permission checks
+        that never write), this returns ``True`` — "always new" — so the
+        caller's behaviour is identical to the pre-claim readback-only path.
+        It is wired as a bound method (not the raw callable) so callers can
+        pass ``ctx.claim_dedup_keys`` uniformly regardless of backend."""
+        if self._claim_dedup_keys is None:
+            return True
+        return self._claim_dedup_keys(set(keys))
 
     def progress(self, **fields: object) -> None:
         """Report structured progress back to the hub core."""

@@ -142,7 +142,7 @@ def _run_trakt(ctx: RunContext) -> None:
 
     client = FulcraClient()
     client.ensure_tag("trakt", media_state)
-    result = client.run_import(events, media_state)
+    result = client.run_import(events, media_state, claim=ctx.claim_dedup_keys)
     ctx.progress(stage="imported", posted=result.posted,
                  skipped=result.skipped_existing)
     if result.posted > 0:

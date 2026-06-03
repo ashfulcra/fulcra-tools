@@ -125,3 +125,127 @@ def test_claim_attention_source_id_is_idempotent(collect_home):
         "com.fulcra.attention.v2.abc",
         "com.fulcra.attention.v2.xyz",
     ]
+
+
+# ---- forwarded_events / claim_dedup_keys (component 3) ---------------
+
+
+def test_forwarded_events_table_has_the_dedup_columns(collect_home):
+    """Migration 004 creates the generalised dedup table with dedup_key as
+    the PRIMARY KEY (the constraint that makes INSERT OR IGNORE atomic)."""
+    conn = db.open()
+    cols = {
+        r["name"]
+        for r in conn.execute(
+            "PRAGMA table_info(forwarded_events)"
+        ).fetchall()
+    }
+    assert cols == {"dedup_key", "forwarded_at"}
+    pk = [
+        r["name"]
+        for r in conn.execute("PRAGMA table_info(forwarded_events)").fetchall()
+        if r["pk"]
+    ]
+    assert pk == ["dedup_key"]
+
+
+def test_claim_dedup_keys_new_keys_returns_true_and_records_all(collect_home):
+    """A brand-new key set → True, and every key is recorded so a later
+    twin sharing only one key still collides."""
+    conn = db.open()
+    keys = {"com.fulcra.media.netflix.aaa", "com.fulcra.content.tv.v1.bbb"}
+    assert db.claim_dedup_keys(conn, keys) is True
+    recorded = {
+        r["dedup_key"]
+        for r in conn.execute("SELECT dedup_key FROM forwarded_events").fetchall()
+    }
+    assert keys <= recorded
+
+
+def test_claim_dedup_keys_any_present_returns_false(collect_home):
+    """If ANY key in the set was already claimed, the event is a duplicate
+    → False (skip). A cross-source twin shares only the content fingerprint
+    but must still be rejected."""
+    conn = db.open()
+    assert db.claim_dedup_keys(
+        conn, {"det-A", "com.fulcra.content.music.v1.shared"}
+    ) is True
+    # Twin: different per-source deterministic_id, SAME content fingerprint.
+    assert db.claim_dedup_keys(
+        conn, {"det-B", "com.fulcra.content.music.v1.shared"}
+    ) is False
+
+
+def test_claim_dedup_keys_empty_set_is_vacuously_new(collect_home):
+    conn = db.open()
+    assert db.claim_dedup_keys(conn, set()) is True
+
+
+def test_claim_dedup_keys_exactly_one_true_under_concurrency(collect_home):
+    """N threads claim the SAME key set simultaneously → exactly one True."""
+    import threading
+
+    from fulcra_collect import config as _config
+
+    home = _config.config_dir()
+    keys = {"det-concurrent", "com.fulcra.content.movie.v1.x"}
+    N = 25
+    results: list[bool] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(N)
+
+    def _claim():
+        # Each thread opens its own connection to the SAME db file (the
+        # thread-local cache means we can't share one connection across
+        # threads). This mirrors the worker-subprocess reality.
+        conn = db.open(home / "state.db")
+        barrier.wait()
+        ok = db.claim_dedup_keys(conn, keys)
+        with lock:
+            results.append(ok)
+
+    threads = [threading.Thread(target=_claim) for _ in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(1 for r in results if r) == 1, results
+
+
+def test_claim_dedup_keys_persists_across_reopen(collect_home):
+    """Once recorded, a claim survives a db connection drop + reopen."""
+    conn = db.open()
+    assert db.claim_dedup_keys(conn, {"persist-key"}) is True
+    db.close_all()
+    conn2 = db.open()
+    assert db.claim_dedup_keys(conn2, {"persist-key"}) is False
+
+
+def test_migration_004_preserves_existing_forwarded_attention_rows(tmp_path):
+    """Upgrade safety: a db that already has forwarded_attention rows (from a
+    pre-#004 daemon) carries them into forwarded_events so an attention
+    source_id already forwarded is still recognised as a duplicate."""
+    path = tmp_path / "upgrade.db"
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    # Bring the db up to version 3 only (pre-generalisation).
+    db._migration_001_initial(conn)
+    db._record_version(conn, 1)
+    db._migration_002_import_plugin_state_json(conn)
+    db._record_version(conn, 2)
+    db._migration_003_forwarded_attention(conn)
+    db._record_version(conn, 3)
+    conn.execute(
+        "INSERT INTO forwarded_attention (source_id, forwarded_at) VALUES (?, ?)",
+        ("com.fulcra.attention.v2.legacy", "2025-01-01T00:00:00+00:00"),
+    )
+    # Now run the rest of the migrations (004).
+    db.migrate(conn)
+    recorded = {
+        r["dedup_key"]
+        for r in conn.execute("SELECT dedup_key FROM forwarded_events").fetchall()
+    }
+    assert "com.fulcra.attention.v2.legacy" in recorded
+    # And a re-claim of that legacy key is correctly rejected.
+    assert db.claim_dedup_keys(conn, {"com.fulcra.attention.v2.legacy"}) is False
