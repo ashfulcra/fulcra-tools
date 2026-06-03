@@ -366,6 +366,55 @@ def check_cli_available(backend: Optional[list[str]] = None) -> tuple[bool, str]
         return False, str(e)
 
 
+def check_file_commands(backend: Optional[list[str]] = None) -> tuple[bool, str]:
+    """Probe whether the resolved Fulcra CLI exposes the ``file`` command group.
+
+    WHY THIS EXISTS (the #1 fresh-agent onboarding failure):
+    The public PyPI ``fulcra-api`` build (e.g. 0.1.32) does NOT ship the ``file``
+    command group, yet the entire coordination bus is driven by ``fulcra file``
+    ops (upload/download/stat/list). A freshly-onboarded agent that pip-installs
+    ``fulcra-api`` and runs ``fulcra-coord`` then sees every bus op fail
+    *silently* with no clear signal why. This probe gives doctor a dedicated,
+    legible signal so the failure points straight at the fix: install a
+    file-capable build (the ``file-management`` branch of
+    ``fulcradynamics/fulcra-api-python`` — see docs/fulcra-cli-branch.md).
+
+    Distinct from ``check_cli_available``: that helper probes whatever
+    ``_backend_cmd()`` resolves to, which in tests is the *fake backend* (it
+    speaks the ``file`` subcommand protocol directly and has no top-level
+    ``file`` group). This helper deliberately targets the **resolved real CLI
+    base** (``cli_base_cmd()``) + ``file --help``, the same base every real file
+    op shells, so it answers exactly "does the installed CLI have ``file``?".
+
+    Robust by contract: a missing binary, a non-zero exit, a timeout, or any OS
+    error all degrade to ``(False, message)`` — this must never raise, so doctor
+    can call it without a guard and never crash on a hung or absent CLI.
+
+    Returns ``(ok, message)`` where ``message`` names the probed base on success
+    or describes the failure otherwise.
+    """
+    base = backend or cli_base_cmd()
+    cmd = base + ["file", "--help"]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return True, " ".join(base)
+        detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
+        suffix = f": {detail[0]}" if detail else ""
+        return False, f"`{' '.join(base)} file` returned code {result.returncode}{suffix}"
+    except FileNotFoundError:
+        return False, f"Command not found: {base[0]}"
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, f"file probe failed: {e}"
+    except Exception as e:  # pragma: no cover - defensive: never crash doctor
+        return False, f"file probe error: {e}"
+
+
 def probe_reachable(backend: Optional[list[str]] = None) -> bool:
     """Cheap liveness probe: is the Fulcra remote reachable at all?
 

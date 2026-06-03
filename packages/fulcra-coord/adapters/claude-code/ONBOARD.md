@@ -6,6 +6,10 @@ running when hooks were installed must onboard manually — run these now:
 
 1. Check setup: `fulcra-coord doctor`
    - If unauthed: `fulcra-api auth login` and complete the device flow.
+   - If `doctor` reports `File commands: FAIL`, your Fulcra CLI lacks the `file`
+     command group the bus runs on — install the file-capable build per
+     `docs/fulcra-cli-branch.md` (the `file-management` branch of
+     `fulcradynamics/fulcra-api-python`).
    - Confirm the build is current: `fulcra-coord --version` /
      `fulcra-coord capabilities` (lists supported commands). If a command this
      doc mentions is missing, your install is stale — from the package dir run
