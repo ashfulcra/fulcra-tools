@@ -307,10 +307,14 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             # bug re-sends identical entries many times), forwarding each one
             # would create PERMANENT duplicates in the user's Fulcra account.
             #
-            # claim_attention_source_id is a single atomic INSERT OR IGNORE
-            # against a PRIMARY KEY, so a storm of identical concurrent POSTs
-            # yields exactly one True (forward) and the rest False (skip) —
-            # SQLite's unique constraint does the dedup, no app-level lock.
+            # claim_dedup_keys is an atomic claim against a PRIMARY KEY (the
+            # generalised forwarded_events table shared with the media import
+            # path), so a storm of identical concurrent POSTs yields exactly
+            # one True (forward) and the rest False (skip) — SQLite's unique
+            # constraint does the dedup, no app-level lock. Attention's key
+            # set is the single deterministic source_id; the helper is shared
+            # so media events (whose set is deterministic_id ∪ content
+            # fingerprints) get the identical write-once guarantee.
             #
             # Decision: claim-FIRST, then forward (we do NOT roll the claim
             # back if the forward fails). This guarantees we never send a
@@ -324,8 +328,8 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
             # we deliberately don't.
             try:
                 conn = _db.open()
-                newly_claimed = _db.claim_attention_source_id(
-                    conn, event.source_id,
+                newly_claimed = _db.claim_dedup_keys(
+                    conn, {event.source_id},
                 )
             except Exception:
                 # If the dedup store is unavailable we must not silently

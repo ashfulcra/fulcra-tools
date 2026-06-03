@@ -18,9 +18,47 @@ from typing import TYPE_CHECKING, TextIO
 if TYPE_CHECKING:
     from fulcra_common import BaseFulcraClient
 
-from . import config, credentials, state
+from . import config, credentials, db, state
 from .plugin import Plugin, RunContext
 from .registry import RegistryResult, discover
+
+
+def _claim_dedup_keys(keys: set[str]) -> bool:
+    """Worker-side per-event write-dedup claim, backed by the daemon's
+    ``state.db`` — the SAME store the attention extension route claims
+    against. Opens (or reuses) this process's thread-local connection to
+    the daemon home's ``state.db`` and atomically claims the key set.
+
+    Fail-closed: if the dedup store is unavailable we return ``False``
+    (skip the write) rather than risk a duplicate — mirroring the
+    attention route's "never send a duplicate" preference over "never lose
+    an event". The worker runs as a subprocess on the same machine as the
+    daemon, so the db path resolves to the identical file via
+    ``db.default_path()`` / ``config_dir()``."""
+    try:
+        conn = db.open()
+        return db.claim_dedup_keys(conn, keys)
+    except Exception:  # noqa: BLE001 — fail closed, never crash the run
+        logging.getLogger("fulcra_collect.worker").exception(
+            "dedup claim failed; skipping write to avoid a possible duplicate",
+        )
+        return False
+
+
+def _unclaim_dedup_keys(keys: set[str]) -> None:
+    """Release dedup keys in the daemon's ``state.db`` — the inverse of
+    ``_claim_dedup_keys``. Called by the media import path after a batch POST
+    FAILED, so the events are retried on the next run rather than lost. A
+    failure here is logged and swallowed: the run is already unwinding on the
+    POST error, and re-raising would only mask it."""
+    try:
+        conn = db.open()
+        db.unclaim_dedup_keys(conn, keys)
+    except Exception:  # noqa: BLE001 — never mask the original POST failure
+        logging.getLogger("fulcra_collect.worker").exception(
+            "dedup unclaim failed; %d key(s) may stay claimed and be skipped "
+            "next run", len(set(keys)),
+        )
 
 
 class _FulcraDefinitionAdapter:
@@ -147,6 +185,8 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         log=logging.getLogger(f"fulcra_collect.plugin.{plugin.id}"),
         _emit=emit,
         _fulcra_client_factory=_make_fulcra_definition_client,
+        _claim_dedup_keys=_claim_dedup_keys,
+        _unclaim_dedup_keys=_unclaim_dedup_keys,
     )
     missing = sorted(c.key for c in plugin.required_credentials
                      if not ctx.credentials.get(c.key))

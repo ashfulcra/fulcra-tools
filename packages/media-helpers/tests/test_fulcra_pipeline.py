@@ -87,6 +87,238 @@ def test_run_import_no_new_events_does_not_post(recording_transport):
     assert result.verified == 0
 
 
+def _ev_with_extra(i: int, extra: tuple[str, ...]) -> NormalizedEvent:
+    ev = _ev(i)
+    ev.extra_source_ids = extra
+    return ev
+
+
+def test_run_import_claim_skips_already_claimed_event(recording_transport):
+    """An event whose dedup key set was already claimed (claim returns False)
+    is NOT posted; it counts as skipped_existing instead."""
+    post_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])  # nothing in Fulcra → readback passes
+        post_count["n"] += 1
+        return httpx.Response(204)
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    # Pre-claimed: the daemon already forwarded this event's key in a prior
+    # run; claim returns False for its deterministic_id.
+    already = {"com.fulcra.media.netflix.id0001"}
+
+    def claim(keys: set[str]) -> bool:
+        return not (keys & already)
+
+    result = client.run_import([_ev(1)], state, chunk_size=10, claim=claim)
+    assert result.posted == 0
+    assert result.skipped_existing == 1
+    assert post_count["n"] == 0
+
+
+def test_run_import_claim_none_behaves_as_before(recording_transport):
+    """claim=None → identical to the pre-component-3 readback-only path:
+    a new (not-in-Fulcra) event is posted."""
+    post_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])
+        post_count["n"] += 1
+        return httpx.Response(204)
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+    result = client.run_import([_ev(1)], state, chunk_size=10, claim=None)
+    assert result.posted == 1
+    assert post_count["n"] == 1
+
+
+def test_run_import_claim_dedups_same_run_cross_source_twin(recording_transport):
+    """Two events in ONE run share a com.fulcra.content.* fingerprint but
+    have different deterministic_ids — neither is in Fulcra yet (readback
+    passes for both). A real per-event claim (atomic INSERT OR IGNORE on the
+    shared key) lets exactly one through; the twin is skipped."""
+    post_bodies: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])
+        post_bodies.append(request.content)
+        return httpx.Response(204)
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    shared_fp = "com.fulcra.content.movie.v1.sharedhash"
+    twin_a = _ev_with_extra(1, (shared_fp,))  # det id0001
+    twin_b = _ev_with_extra(2, (shared_fp,))  # det id0002, same fingerprint
+
+    # A real claim store: a set of already-claimed keys. The first event to
+    # claim records all its keys; the second sees the shared fingerprint and
+    # is rejected — exactly the forwarded_events INSERT OR IGNORE semantics.
+    claimed: set[str] = set()
+
+    def claim(keys: set[str]) -> bool:
+        if keys & claimed:
+            return False
+        claimed.update(keys)
+        return True
+
+    result = client.run_import([twin_a, twin_b], state, chunk_size=10,
+                               claim=claim)
+    # Exactly one of the twins posted; the other was skipped by the claim.
+    assert result.posted == 1
+    assert result.skipped_existing == 1
+    assert len(post_bodies) == 1
+
+
+def test_run_import_check_only_does_not_call_claim(recording_transport):
+    """check_only is a dry run; it must not mutate the shared dedup store,
+    so the claim is bypassed entirely."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])
+        pytest.fail(f"check_only must not POST: {request.url}")
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    calls: list = []
+
+    def claim(keys: set[str]) -> bool:
+        calls.append(keys)
+        return True
+
+    result = client.run_import([_ev(1)], state, chunk_size=10,
+                               check_only=True, claim=claim)
+    assert result.posted == 1   # would-post count
+    assert calls == []          # claim never invoked in a dry run
+
+
+def _claim_pair(store: set):
+    """Return (claim, unclaim) callables backed by ``store`` — a real
+    in-memory analogue of forwarded_events. claim records all keys iff none
+    pre-exist; unclaim deletes exactly the named keys."""
+    def claim(keys: set[str]) -> bool:
+        if store & keys:
+            return False
+        store.update(keys)
+        return True
+
+    def unclaim(keys: set[str]) -> None:
+        store.difference_update(keys)
+
+    return claim, unclaim
+
+
+def test_run_import_unclaims_on_post_failure_so_event_is_retried(
+        recording_transport):
+    """Durable-loss guard: if the batch POST RAISES, the keys this batch
+    claimed are released — they're NOT left in the store, so a re-run
+    re-posts the event instead of skipping it forever."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])  # readback passes
+        return httpx.Response(500)  # POST fails → raise_for_status raises
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    store: set[str] = set()
+    claim, unclaim = _claim_pair(store)
+
+    ev = _ev(1)
+    with pytest.raises(Exception):
+        client.run_import([ev], state, chunk_size=10,
+                          claim=claim, unclaim=unclaim)
+
+    # The failed event's key was released — store is clean.
+    assert ev.deterministic_id not in store
+    assert store == set()
+
+
+def test_run_import_keeps_claim_on_post_success(recording_transport):
+    """The complement: a SUCCESSFUL POST leaves the claim in place, so a
+    re-run skips the already-written event (no duplicate)."""
+    post_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])
+        post_count["n"] += 1
+        return httpx.Response(204)
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    store: set[str] = set()
+    claim, unclaim = _claim_pair(store)
+
+    ev = _ev(1)
+    result = client.run_import([ev], state, chunk_size=10,
+                               claim=claim, unclaim=unclaim)
+    assert result.posted == 1
+    assert post_count["n"] == 1
+    # Claim retained on success.
+    assert ev.deterministic_id in store
+
+    # Re-run with the SAME store → the claim blocks a second POST.
+    result2 = client.run_import([_ev(1)], state, chunk_size=10,
+                                claim=claim, unclaim=unclaim)
+    assert result2.posted == 0
+    assert result2.skipped_existing == 1
+    assert post_count["n"] == 1  # no second POST
+
+
+def test_run_import_failure_unclaim_scoped_to_failed_batch_only(
+        recording_transport):
+    """With two chunks where the FIRST succeeds and the SECOND fails, only
+    the second batch's keys are released — the first batch's claim stays so
+    the already-written events aren't re-posted on retry."""
+    posts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return json_response(200, [])
+        posts["n"] += 1
+        # First chunk's POST succeeds; second chunk's POST fails.
+        return httpx.Response(204 if posts["n"] == 1 else 500)
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    state = State(watched_definition_id="d", listened_definition_id="d2",
+                  tag_ids={"netflix": "t"})
+
+    store: set[str] = set()
+    claim, unclaim = _claim_pair(store)
+
+    # chunk_size=1 → ev(1) is batch 1 (succeeds), ev(2) is batch 2 (fails).
+    with pytest.raises(Exception):
+        client.run_import([_ev(1), _ev(2)], state, chunk_size=1,
+                          claim=claim, unclaim=unclaim)
+
+    # Batch 1's claim retained; batch 2's claim released.
+    assert "com.fulcra.media.netflix.id0001" in store
+    assert "com.fulcra.media.netflix.id0002" not in store
+
+
 def test_run_import_chunks_large_input(recording_transport):
     post_count = {"n": 0}
     def handler(request: httpx.Request) -> httpx.Response:

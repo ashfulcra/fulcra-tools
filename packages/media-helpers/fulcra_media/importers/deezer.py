@@ -33,6 +33,8 @@ from typing import Any
 
 import httpx
 
+from fulcra_common.cross_source_fingerprint import listened_fingerprint
+
 from .base import NormalizedEvent, content_fingerprint
 
 CREDS_PATH = Path(os.path.expanduser("~/.config/fulcra-media/deezer.json"))
@@ -85,6 +87,11 @@ def normalize_track(track: dict) -> NormalizedEvent | None:
         if album_title:
             external["album"] = album_title
 
+    # Cross-source listen fingerprint so a Deezer play of the same track at
+    # the same 5-minute bucket dedups against Last.fm / Apple Music / Spotify.
+    cross = listened_fingerprint(timestamp=start, artist=artist_name, track=title)
+    extra_source_ids: tuple[str, ...] = (cross,) if cross else ()
+
     return NormalizedEvent(
         importer="deezer",
         service="deezer",
@@ -96,6 +103,7 @@ def normalize_track(track: dict) -> NormalizedEvent | None:
         deterministic_id=_det_id(track_id, uts),
         timestamp_confidence="high",
         external_ids=external,
+        extra_source_ids=extra_source_ids,
     )
 
 
