@@ -6657,6 +6657,33 @@ class TestRebuildSourceRobustness(unittest.TestCase):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
         self.assertEqual({s["id"] for s in out}, {task_a["id"]})
 
+    def test_selfheal_bad_body_does_not_stop_later_recovery(self):
+        # A malformed/unreadable task body in the listing must not abort the
+        # whole self-heal loop. Skip the bad one and still recover later valid
+        # dropped tasks.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        from fulcra_coord import remote
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        good = _sample_task()
+        good["id"] = "TASK-20260603-peer-dropped-good"
+        bad_id = "TASK-20260603-peer-dropped-bad"
+
+        def fake_cache(tid, backend=None):
+            if tid == bad_id:
+                raise ValueError("bad task body")
+            return good if tid == good["id"] else None
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)])), \
+             patch("fulcra_coord.cli.remote.list_files",
+                   return_value=[remote.task_remote_path(bad_id),
+                                 remote.task_remote_path(good["id"])]), \
+             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_cache):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        ids = {s["id"] for s in out}
+        self.assertIn(good["id"], ids)
+        self.assertNotIn(bad_id, ids)
+
 
 class TestParallelUploadExceptionSafety(unittest.TestCase):
     """S3: a view upload that RAISES (not just returns False) must still be
