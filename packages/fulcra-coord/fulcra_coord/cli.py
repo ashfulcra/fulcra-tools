@@ -415,10 +415,13 @@ def cmd_identity(args: Any, backend: Optional[list[str]] = None) -> int:
     - `identity`            → show the resolved id and its source (explicit/env/
                               config/derived) so an operator can see who they are
                               and *why*.
-    - `identity set <id>`   → persist <id> to the global identity file; an existing
+    - `identity set <id>`   → persist <id> for the CURRENT cwd; an existing
                               long-running session declares its stable id once and
-                              every subsequent bus op reuses it.
-    - `identity clear`      → remove the persisted id (fall back to env/derived).
+                              every subsequent bus op in that repo reuses it.
+                              Per-cwd, so a sibling session in another repo is
+                              never clobbered.
+    - `identity clear`      → remove the persisted id for the current cwd (fall
+                              back to legacy-global/env/derived).
     """
     action = getattr(args, "identity_action", None)
     out_format = getattr(args, "format", "table")
