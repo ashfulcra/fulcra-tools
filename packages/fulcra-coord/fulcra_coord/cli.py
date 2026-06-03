@@ -1437,6 +1437,16 @@ def cmd_block(args: Any, backend: Optional[list[str]] = None) -> int:
         return 1
 
     if on_user:
+        # Best-effort needs-user timeline annotation (situational awareness piece
+        # 6). Gated by FULCRA_COORD_ANNOTATIONS (off by default -> no-op); never
+        # raises into the task op. Emitted AFTER the write fully succeeds so we
+        # never annotate a block that didn't land, and guarded so even a bug in
+        # the hook can't break a successful block.
+        try:
+            lifecycle_annotations.emit_needs_user_annotation(
+                task=task, agent=agent, backend=backend)
+        except Exception:
+            pass
         _info(f"Blocked on {human}: {task_id}")
         _info(f"  Needs: {block_reason}")
     else:

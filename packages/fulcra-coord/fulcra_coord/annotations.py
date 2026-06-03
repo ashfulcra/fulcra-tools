@@ -221,6 +221,57 @@ def build_annotation(
     }
 
 
+#: The track tag for "the operator needs to do something" moments (situational
+#: awareness piece 6). Shares the ``agent-tasks`` track with lifecycle moments so
+#: they filter together, but carries its own ``needs-user`` tag so the human can
+#: pull up exactly "what have my agents asked of me" on their Fulcra timeline.
+NEEDS_USER_TAG = "needs-user"
+
+
+def build_needs_user_annotation(
+    *, task: dict[str, Any], agent: str
+) -> dict[str, Any]:
+    """Build the ``needs-user`` moment payload for a ``block --on-user`` (pure).
+
+    Same shape as :func:`build_annotation` but tagged ``needs-user`` instead of a
+    lifecycle, and the DESCRIPTION leads with the ask (``blocked_on``) so the
+    timeline entry reads as "the thing the agent needs the human to do." The
+    requesting agent's kind/session tags are carried so the human can see WHO
+    asked. The ``needs-user`` tag occupies the lifecycle slot of ``tags`` for
+    symmetry with the lifecycle payloads."""
+    title = task.get("title", "(untitled)")
+    task_id = task.get("id", "")
+    link = library_link(task)
+    kind = agent_kind(agent)
+    st = session_tag(agent)
+    ask = (task.get("blocked_on") or task.get("next_action") or "").strip()
+
+    tags = [NEEDS_USER_TAG, kind]
+    if st:
+        tags.append(st)
+    cli_tags = ["agent-tasks", NEEDS_USER_TAG, f"agent:{kind}"]
+    if st:
+        cli_tags.append(f"session:{st}")
+
+    name = f"needs-user: {title} ({task_id})"
+    desc = (f"{ask} — {link}" if ask else link)
+    text = f"{name} {link}"
+
+    return {
+        "track": TRACK_NAME,
+        "tags": tags,
+        "cli_tags": cli_tags,
+        "name": name,
+        "desc": desc,
+        "text": text,
+        "link": link,
+        "lifecycle": NEEDS_USER_TAG,
+        "task_id": task_id,
+        "agent": agent,
+        "ask": ask,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Capability gate
 # ---------------------------------------------------------------------------
@@ -445,4 +496,43 @@ def emit_lifecycle_annotation(
     except Exception:
         # Best-effort contract: an annotation failure must be invisible to the
         # caller's task op. Swallow everything and report "did nothing".
+        return False
+
+
+def emit_needs_user_annotation(
+    *,
+    task: dict[str, Any],
+    agent: str,
+    backend: Optional[list[str]] = None,
+) -> bool:
+    """Emit one ``needs-user`` moment when a task is blocked on the human.
+
+    Fired by ``block --on-user`` so "the agent needs me to do X" lands on the
+    operator's Fulcra timeline (tagged ``needs-user`` + ``agent-tasks`` + the
+    requesting agent). Same gating/transport/idempotency contract as
+    :func:`emit_lifecycle_annotation`: honours ``FULCRA_COORD_ANNOTATIONS``
+    (off by default -> no-op), routes through the same ``_write_cli``, dedupes on
+    a per-(task, needs-user, transition-anchor) marker, and NEVER raises into the
+    caller — a task op must not fail because a timeline write was slow/missing.
+    Returns True only when a moment was actually written on THIS call."""
+    try:
+        mode = _mode()
+        if mode == "off":
+            return False
+        if _already_annotated(NEEDS_USER_TAG, task):
+            return False
+
+        payload = build_needs_user_annotation(task=task, agent=agent)
+
+        if mode == "cli":
+            wrote = _write_cli(payload)
+        elif mode == "api":
+            wrote = _write_api(payload, backend=backend)
+        else:  # pragma: no cover - _mode only returns off/cli/api
+            wrote = False
+
+        if wrote:
+            _record_annotated(NEEDS_USER_TAG, task)
+        return bool(wrote)
+    except Exception:
         return False

@@ -186,6 +186,75 @@ class TestEmitGating(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# needs-user annotation (situational awareness piece 6): emitted on
+# block --on-user, gated, off by default.
+# ---------------------------------------------------------------------------
+
+class TestNeedsUserAnnotation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self._saved = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        if self._saved is None:
+            os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        else:
+            os.environ["FULCRA_COORD_ANNOTATIONS"] = self._saved
+
+    def _task(self):
+        t = schema.make_task(title="Approve deploy", workstream="devops",
+                             agent="claude-code:mb:vercel")
+        t["status"] = "blocked"
+        t["blocked_on"] = "approve the deploy"
+        t["assignee"] = "ash"
+        return t
+
+    def test_build_needs_user_tags(self):
+        p = annotations.build_needs_user_annotation(
+            task=self._task(), agent="claude-code:mb:vercel")
+        self.assertEqual(p["track"], "Agent Tasks")
+        self.assertIn("agent-tasks", p["cli_tags"])
+        self.assertIn("needs-user", p["cli_tags"])
+        self.assertIn("agent:claude", p["cli_tags"])
+        # The ask is carried in the description.
+        self.assertIn("approve the deploy", p["desc"])
+
+    def test_default_off_is_noop(self):
+        r = annotations.emit_needs_user_annotation(
+            task=self._task(), agent="claude-code:mb:vercel")
+        self.assertFalse(r)
+
+    def test_cli_mode_invokes_writer_once(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        calls = []
+
+        def fake_writer(payload, *, backend=None):
+            calls.append(payload)
+            return True
+
+        with patch.object(annotations, "_write_cli", side_effect=fake_writer):
+            r = annotations.emit_needs_user_annotation(
+                task=self._task(), agent="claude-code:mb:vercel")
+        self.assertTrue(r)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("needs-user", calls[0]["cli_tags"])
+
+    def test_raising_writer_never_propagates(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+
+        def boom(payload, *, backend=None):
+            raise RuntimeError("boom")
+
+        with patch.object(annotations, "_write_cli", side_effect=boom):
+            r = annotations.emit_needs_user_annotation(
+                task=self._task(), agent="claude-code:mb:vercel")
+        self.assertFalse(r)
+
+
+# ---------------------------------------------------------------------------
 # Idempotency: one annotation per real transition, not per write-retry
 # ---------------------------------------------------------------------------
 
