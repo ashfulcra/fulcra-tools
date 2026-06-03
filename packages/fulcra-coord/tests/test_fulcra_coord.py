@@ -5095,6 +5095,102 @@ class TestBroadcastEndToEnd(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Situational awareness — Piece 2: per-cwd identity (fix the global clobber)
+# ---------------------------------------------------------------------------
+
+class TestPerCwdIdentity(unittest.TestCase):
+    """The persisted identity is scoped PER WORKING DIRECTORY, fixing the bug
+    where a sibling session's `identity set` in one repo clobbered another's.
+    Two cwds hold distinct identities; setting in one never affects the other."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        self.cwd_a = os.path.join(self.tmp, "repo-a")
+        self.cwd_b = os.path.join(self.tmp, "repo-b")
+        os.makedirs(self.cwd_a)
+        os.makedirs(self.cwd_b)
+        self._orig_cwd = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self._orig_cwd)
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_two_cwds_hold_distinct_identities(self):
+        from fulcra_coord import identity
+        os.chdir(self.cwd_a)
+        identity.set_identity("claude-code:host:repo-a")
+        os.chdir(self.cwd_b)
+        identity.set_identity("claude-code:host:repo-b")
+        os.chdir(self.cwd_a)
+        self.assertEqual(identity.resolve_agent(), "claude-code:host:repo-a")
+        os.chdir(self.cwd_b)
+        self.assertEqual(identity.resolve_agent(), "claude-code:host:repo-b")
+
+    def test_set_in_a_does_not_change_b(self):
+        from fulcra_coord import identity
+        os.chdir(self.cwd_b)
+        identity.set_identity("claude-code:host:repo-b")
+        os.chdir(self.cwd_a)
+        identity.set_identity("claude-code:host:repo-a")
+        # B is untouched.
+        os.chdir(self.cwd_b)
+        self.assertEqual(identity.read_identity(), "claude-code:host:repo-b")
+
+    def test_clear_is_per_cwd(self):
+        from fulcra_coord import identity
+        os.chdir(self.cwd_a)
+        identity.set_identity("a:agent")
+        os.chdir(self.cwd_b)
+        identity.set_identity("b:agent")
+        os.chdir(self.cwd_a)
+        identity.clear_identity()
+        self.assertIsNone(identity.read_identity())
+        # B still resolves.
+        os.chdir(self.cwd_b)
+        self.assertEqual(identity.read_identity(), "b:agent")
+
+    def test_identity_path_is_per_cwd_distinct(self):
+        from fulcra_coord import identity
+        os.chdir(self.cwd_a)
+        pa = identity.identity_path()
+        os.chdir(self.cwd_b)
+        pb = identity.identity_path()
+        self.assertNotEqual(pa, pb)
+        self.assertIn("identities", str(pa))
+
+    def test_legacy_global_fallback(self):
+        from fulcra_coord import identity
+        # Simulate an existing pre-per-cwd setup: a legacy global identity.json.
+        legacy = identity.config_root() / "identity.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"agent": "legacy:agent"}))
+        os.chdir(self.cwd_a)
+        # No per-cwd entry -> the legacy global file resolves.
+        self.assertEqual(identity.read_identity(), "legacy:agent")
+        self.assertEqual(identity.resolve_agent(), "legacy:agent")
+
+    def test_per_cwd_beats_legacy_global(self):
+        from fulcra_coord import identity
+        legacy = identity.config_root() / "identity.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"agent": "legacy:agent"}))
+        os.chdir(self.cwd_a)
+        identity.set_identity("percwd:agent")
+        self.assertEqual(identity.read_identity(), "percwd:agent")
+
+    def test_precedence_env_beats_per_cwd(self):
+        from fulcra_coord import identity
+        os.chdir(self.cwd_a)
+        identity.set_identity("percwd:agent")
+        os.environ["FULCRA_COORD_AGENT"] = "env:agent"
+        self.assertEqual(identity.resolve_agent(), "env:agent")
+
+
+# ---------------------------------------------------------------------------
 # Situational awareness — Piece 1: human handle (resolve_human + `human` cmd)
 # ---------------------------------------------------------------------------
 
