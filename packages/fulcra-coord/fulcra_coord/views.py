@@ -90,6 +90,35 @@ def _parse_dt(iso: str) -> Optional[datetime]:
         return None
 
 
+def _done_at(t: dict[str, Any]) -> str:
+    """Resolve a task's done/abandoned timestamp from EITHER a full body (nested
+    ``done.done_at``) OR a summary dict (flat ``done_at`` emitted by
+    schema.task_summary), falling back to ``updated_at``.
+
+    This is the linchpin of the summaries-as-view-source refactor: builders gate
+    recently-done / search retention on this timestamp, and they must compute the
+    SAME value whether handed full task bodies or task_summary dicts. Centralizing
+    the lookup here (instead of the old inline ``t.get("done",{}).get("done_at")``,
+    which returned None for a summary that has no nested ``done`` block) is what
+    makes build_all_views(summaries) == build_all_views(full_bodies)."""
+    return (t.get("done") or {}).get("done_at") or t.get("done_at") or t.get("updated_at", "")
+
+
+def _acked_by(t: dict[str, Any], who: str) -> bool:
+    """True when ``who`` has inbox-acked this task, resolved from EITHER a full
+    body (an inbox_ack event whose ``by`` is who) OR a summary's flat ``acked_by``
+    list (schema.task_summary). The inbox builders use this so they give the same
+    answer whether handed full bodies or summaries — without it, a rebuilt inbox
+    view (sourced from summaries, which carry no event log) would re-surface
+    directives the assignee already acked."""
+    if "acked_by" in t and "events" not in t:
+        return who in (t.get("acked_by") or [])
+    for e in t.get("events", []):
+        if e.get("type") == "inbox_ack" and e.get("by") == who:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Individual view builders
 # ---------------------------------------------------------------------------
@@ -125,7 +154,7 @@ def build_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -
     for t in tasks:
         if t.get("status") not in ("done", "abandoned"):
             continue
-        done_at = t.get("done", {}).get("done_at") or t.get("updated_at", "")
+        done_at = _done_at(t)
         if done_at:
             dt = _parse_dt(done_at)
             if dt and dt >= cutoff:
@@ -279,9 +308,8 @@ def is_open_directive(task: dict[str, Any], assignee: str) -> bool:
         return False
     if task.get("owner_agent") == assignee:
         return False
-    for e in task.get("events", []):
-        if e.get("type") == "inbox_ack" and e.get("by") == assignee:
-            return False
+    if _acked_by(task, assignee):
+        return False
     return True
 
 
@@ -328,8 +356,7 @@ def inbox_for(me: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if t.get("owner_agent") == me or t.get("owner_agent") == assignee:
             continue
-        if any(e.get("type") == "inbox_ack" and e.get("by") == me
-               for e in t.get("events", [])):
+        if _acked_by(t, me):
             continue
         items.append(task_summary(t))
     return sorted(items, key=lambda x: (x.get("priority", "P9"), x.get("updated_at", "")))
@@ -407,7 +434,7 @@ def build_recently_done(
     for t in tasks:
         if t.get("status") not in ("done", "abandoned"):
             continue
-        done_at = t.get("done", {}).get("done_at") or t.get("updated_at", "")
+        done_at = _done_at(t)
         if done_at:
             dt = _parse_dt(done_at)
             if dt and dt >= cutoff:
@@ -431,7 +458,7 @@ def build_search_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = 
     for t in tasks:
         status = t.get("status", "")
         if status in ("done", "abandoned"):
-            done_at = t.get("done", {}).get("done_at") or t.get("updated_at", "")
+            done_at = _done_at(t)
             if done_at:
                 dt = _parse_dt(done_at)
                 if not dt or dt < cutoff_done:
@@ -475,7 +502,7 @@ def build_workstream_view(
     for t in ws_tasks:
         if t.get("status") not in ("done", "abandoned"):
             continue
-        done_at = t.get("done", {}).get("done_at") or t.get("updated_at", "")
+        done_at = _done_at(t)
         if done_at:
             dt = _parse_dt(done_at)
             if dt and dt >= cutoff:
@@ -512,7 +539,7 @@ def build_agent_view(
     for t in agent_tasks:
         if t.get("status") not in ("done", "abandoned"):
             continue
-        done_at = t.get("done", {}).get("done_at") or t.get("updated_at", "")
+        done_at = _done_at(t)
         if done_at:
             dt = _parse_dt(done_at)
             if dt and dt >= cutoff:
@@ -549,11 +576,51 @@ def search_tasks(query: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Summaries aggregate (the read-side + rebuild source)
+# ---------------------------------------------------------------------------
+
+def build_summaries(tasks: list[dict[str, Any]],
+                    updated_at: Optional[str] = None) -> dict[str, Any]:
+    """The single durable aggregate of task_summary dicts (``views/summaries.json``).
+
+    WHY this exists (the performance refactor): before this, every READ
+    (status/agents/needs-me/resume/search) and every WRITE's view rebuild called
+    _load_all_tasks, which fetches each task BODY one network round-trip at a
+    time (~N round-trips). This aggregate is ONE file: reads load it directly, and
+    the write path upserts the just-written summary into it and rebuilds all views
+    from it — so neither path ever fetches N bodies again.
+
+    Membership: ALL tasks passed in. Callers already pass exactly the set the
+    other views collectively cover (all non-terminal tasks plus done/abandoned
+    inside the recently-done / search cutoffs), so including everything passed is
+    the simplest correct choice; the per-view cutoffs still apply inside each
+    builder when views are rebuilt from this list.
+
+    A LIST (not a map) of summaries, for consistency with the other views' task
+    lists and so it round-trips as plain JSON without key-ordering concerns."""
+    if updated_at is None:
+        updated_at = _now().isoformat().replace("+00:00", "Z")
+    return {
+        "schema": "fulcra.coordination.summaries.v1",
+        "view": "summaries",
+        "updated_at": updated_at,
+        "summaries": [task_summary(t) for t in tasks],
+    }
+
+
+# ---------------------------------------------------------------------------
 # All views at once (for write fan-out)
 # ---------------------------------------------------------------------------
 
 def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Build every standard view. Returns dict of name -> view data."""
+    """Build every standard view. Returns dict of name -> view data.
+
+    INVARIANT (the linchpin of the perf refactor): this must produce IDENTICAL
+    output whether ``tasks`` are full task bodies or ``schema.task_summary`` dicts.
+    Every builder reads only fields task_summary emits (done_at and last_touched_by
+    were added there for exactly this reason), so the write path can rebuild views
+    from the summaries aggregate instead of re-fetching task bodies. The
+    equivalence test (TestBuildAllViewsEquivalence) guards this property."""
     now = _now().isoformat().replace("+00:00", "Z")
     result: dict[str, dict[str, Any]] = {
         "index": build_index(tasks, now),
@@ -562,6 +629,9 @@ def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         "recently-done": build_recently_done(tasks, now),
         "search-index": build_search_index(tasks, now),
         "needs-attention": build_needs_attention(tasks, now),
+        # The summaries aggregate is itself a view, so it is rebuilt and uploaded
+        # on every write alongside the others — keeping the read-side source fresh.
+        "summaries": build_summaries(tasks, now),
     }
 
     workstreams = sorted(set(t.get("workstream", "") for t in tasks) - {""})
