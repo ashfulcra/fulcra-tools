@@ -6,6 +6,11 @@ running when hooks were installed must onboard manually — run these now:
 
 1. Check setup: `fulcra-coord doctor`
    - If unauthed: `fulcra-api auth login` and complete the device flow.
+   - Confirm the build is current: `fulcra-coord --version` /
+     `fulcra-coord capabilities` (lists supported commands). If a command this
+     doc mentions is missing, your install is stale — from the package dir run
+     `git pull && uv tool install --reinstall --force .` (use `--reinstall`: uv
+     skips the rebuild when the version is unchanged).
 2. Wire future sessions (idempotent): `fulcra-coord install-claude-code --global`
 3. **Declare a clear, stable, human-legible identity** so directives reach you
    and the human can tell who's who on the bus:

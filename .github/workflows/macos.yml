@@ -32,11 +32,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        # Pinned by version, not @latest, so a uv release can't silently
-        # break CI (or hide a real failure under a tooling change).
+        # Pinned by series, not @latest, so a uv release can't silently
+        # break CI (or hide a real failure under a tooling change). Must be
+        # recent enough to build the workspace's git deps: fulcra-api uses the
+        # uv_build backend (uv_build>=0.11.3) and `default-groups = "all"`,
+        # neither of which the old 0.5.x pin could parse — so `uv sync` failed
+        # with a TOML error before any test ran, and EVERY push went red.
         uses: astral-sh/setup-uv@v3
         with:
-          version: "0.5.x"
+          version: "0.11.x"
           enable-cache: true
 
       - name: Set up Python (matches .python-version)

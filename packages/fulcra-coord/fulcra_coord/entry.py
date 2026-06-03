@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 
+from . import __version__
 from . import cli as _cli
 
 
@@ -23,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # `--version` works even though a subcommand is required — argparse's
+    # version action fires before the subparser-required check. ArcBot-2 flagged
+    # the CLI as having no usable version signal across breaking subcommand
+    # additions; this plus the dynamic version makes `--version` authoritative.
+    p.add_argument("--version", action="version",
+                   version=f"fulcra-coord {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     # ---- status ----
@@ -159,6 +166,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ---- doctor ----
     sub.add_parser("doctor", help="Check configuration, CLI availability, and remote access")
+
+    # ---- capabilities ----
+    sp = sub.add_parser("capabilities",
+                        help="Print this build's version + supported commands "
+                             "(a probe so onboarding can detect whether the "
+                             "installed CLI has a given subcommand before using it)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- install-shim ----
     sub.add_parser("install-shim", help="Install fulcra-coord shim to ~/.local/bin/")
@@ -312,6 +326,7 @@ COMMAND_MAP = {
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "doctor": _cli.cmd_doctor,
+    "capabilities": _cli.cmd_capabilities,
     "install-shim": _cli.cmd_install_shim,
     "install-claude-code": _cli.cmd_install_claude_code,
     "install-openclaw": _cli.cmd_install_openclaw,

@@ -1846,6 +1846,37 @@ def cmd_search(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+def cmd_capabilities(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Print this build's version + the commands it supports — a capability probe.
+
+    ArcBot-2 flagged that onboarding instructions can drift ahead of the
+    installed CLI: a doc tells an agent to run a subcommand its build doesn't
+    have yet. This gives onboarding a machine-readable check —
+    ``capabilities --format json`` returns ``{name, version, commands}`` so a
+    script can verify e.g. ``"needs-me" in commands`` before relying on it,
+    instead of discovering the gap via an argparse error. The command list is
+    sourced from the dispatch table (``entry.COMMAND_MAP``) — the same registry
+    ``main`` routes on, so it can never claim a command that won't run. The
+    hidden hook-only ``__session-task`` is excluded (not part of the public
+    surface). Read-only; never touches the bus."""
+    from . import __version__
+    # Lazy import: entry imports this module at load, so importing entry at cli
+    # module scope would be circular. Inside the function it resolves fine.
+    from .entry import COMMAND_MAP
+
+    commands = sorted(k for k in COMMAND_MAP if not k.startswith("__"))
+    out_format = getattr(args, "format", "table")
+
+    if out_format == "json":
+        _print_json({"name": "fulcra-coord", "version": __version__,
+                     "commands": commands})
+        return 0
+
+    print(f"fulcra-coord {__version__}")
+    print(f"commands ({len(commands)}): {' '.join(commands)}")
+    return 0
+
+
 def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
     """Check configuration, CLI availability, and remote access."""
     import shutil

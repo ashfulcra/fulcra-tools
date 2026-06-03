@@ -12,8 +12,13 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
 
 1. Make the CLI available: canonical repo is ashfulcra/fulcra-tools, package at
    packages/fulcra-coord. If `fulcra-coord` isn't on PATH:
-   `cd <…>/fulcra-tools/packages/fulcra-coord && uv tool install --force .`
-2. Verify + auth:  `fulcra-coord doctor`   (if unauthed: `fulcra-api auth login`)
+   `cd <…>/fulcra-tools/packages/fulcra-coord && git pull && uv tool install --reinstall --force .`
+   (use `--reinstall`: uv SKIPS the rebuild when the version is unchanged, so a
+   plain `--force` can leave you on an old subcommand set after a `git pull`.)
+2. Verify + auth:  `fulcra-coord doctor`   (if unauthed: `fulcra-api auth login`).
+   Confirm your build is current: `fulcra-coord --version` and
+   `fulcra-coord capabilities` (lists supported commands — if a command this
+   doc mentions is missing, your install is stale; reinstall per step 1).
 3. Wire your Codex lifecycle hooks (SessionStart / Stop / PreCompact):
    `fulcra-coord install-codex`        (+ optional `fulcra-coord install-listener --agent codex:<host>:<label>`)
 4. Declare a clear, stable, human-legible identity (vendor:host:purpose) so
