@@ -245,9 +245,12 @@ def _load_summaries_for_rebuild(
             tid = path.rsplit("/", 1)[-1][: -len(".json")]
             if not tid or tid in by_id:
                 continue
-            body = _cache_remote_task(tid, backend=backend)
-            if body and body.get("id"):
-                by_id[body["id"]] = schema.task_summary(body)
+            try:
+                body = _cache_remote_task(tid, backend=backend)
+                if body and body.get("id"):
+                    by_id[body["id"]] = schema.task_summary(body)
+            except Exception:
+                continue
     except Exception:
         pass  # listing is best-effort; never break a task write over it
 
