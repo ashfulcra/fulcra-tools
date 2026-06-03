@@ -2082,6 +2082,31 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
     else:
         _info(f"  Needs reconcile: 0")
 
+    # Annotations (Agent-Tasks timeline writer)
+    #
+    # Surfaces, at a glance, WHY a timeline write would or wouldn't happen — the
+    # diagnostic that would have told the operator immediately that the feature
+    # was simply disabled. Reports the resolved mode, whether a bearer token is
+    # obtainable (WITHOUT ever printing it), and the API base the writer targets.
+    _info(f"\n[Annotations]")
+    ann_mode = lifecycle_annotations._mode()
+    _info(f"  Mode:          {ann_mode}")
+    if ann_mode == "off":
+        _info("  -> disabled — set FULCRA_COORD_ANNOTATIONS=http to enable")
+    else:
+        _info(f"  API base:      {lifecycle_annotations._api_base()}")
+        # Resolve the token only to confirm one EXISTS; never echo its value.
+        token = lifecycle_annotations._resolve_token()
+        if token:
+            src = ("FULCRA_ACCESS_TOKEN" if os.environ.get("FULCRA_ACCESS_TOKEN")
+                   else "fulcra auth print-access-token")
+            _info(f"  Token:         OK (via {src})")
+        else:
+            ok_all = False
+            _info("  Token:         FAIL (no FULCRA_ACCESS_TOKEN and "
+                  "`fulcra auth print-access-token` did not yield one)")
+            _info("  -> Run: fulcra auth login   (or set FULCRA_ACCESS_TOKEN)")
+
     _info(f"\n{'='*50}")
     _info("OK" if ok_all else "Issues detected — see above.")
     return 0 if ok_all else 1

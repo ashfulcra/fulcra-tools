@@ -8,10 +8,37 @@ agents were doing, and when* — interleaved with everything else Fulcra records
 All Agent-Tasks moments share a single **track tag `agent-tasks`** so they can
 be filtered together on the timeline regardless of lifecycle or agent.
 
-## Status: real write LIVE via the Fulcra CLI (gated, off by default)
+## Status: real write LIVE via the Fulcra HTTP API (gated, off by default)
 
-The write is **confirmed working**. Each lifecycle event creates a *moment
-annotation* on the operator's timeline by shelling out to the Fulcra CLI:
+The recommended transport is **`http`** (alias `api`): it writes annotations
+**directly over the Fulcra HTTP API** using only the Python standard library
+(`urllib` + `json`) — no `httpx`, no `fulcra-common` dependency — replicating the
+exact proven path `fulcra-collect` uses. Set `FULCRA_COORD_ANNOTATIONS=http`.
+
+For each lifecycle event the `http` writer runs three Fulcra endpoints in order:
+
+1. **Resolve/create each tag** — `GET /user/v1alpha1/tag/name/{name}` (200 → id),
+   else `POST /user/v1alpha1/tag {"name": ...}` on a 404.
+2. **Resolve/create the shared `Agent Tasks` moment definition** —
+   `GET /user/v1alpha1/annotation` (adopt the existing def by name), else
+   `POST /user/v1alpha1/annotation` with an `annotation_type: moment` body. The
+   resolved definition id is **cached locally** (`<cache-root>/.../annotations/
+   definition.json`) so this resolve/create happens once, not per annotation.
+3. **Post the record** — `POST /ingest/v1/record/batch` with header
+   `content-type: application/x-jsonl` and a one-line JSONL body whose
+   `metadata.data_type` is `MomentAnnotation`, `metadata.tags` are the resolved
+   tag ids, and `metadata.source` carries both a lifecycle-stamped
+   `com.fulcradynamics.fulcra-coord.<lifecycle>.<uuid>` id and the
+   `com.fulcradynamics.annotation.<definition_id>` definition source.
+
+The bearer token comes from `FULCRA_ACCESS_TOKEN` if set, else the stdout of
+`fulcra auth print-access-token`; with no token the write cleanly no-ops. The
+API base is `FULCRA_API_BASE` (default `https://api.fulcradynamics.com`).
+
+### Legacy `cli` transport
+
+The older `cli` transport instead creates each *moment annotation* by shelling
+out to the Fulcra CLI:
 
 ```
 fulcra create-data-type MomentAnnotation "<NAME>" \
@@ -50,12 +77,9 @@ Once both command sets land on `fulcra-api` main and the installed CLI has
 `create-data-type` AND `file`, neither pointer is needed — `FULCRA_COORD_ANNOTATION_CLI`
 falls back to the shared `FULCRA_CLI_COMMAND` → `fulcra-api` on PATH resolution.
 
-The **`api` transport remains deferred**: the `fulcra_api` Python core library
-still exposes only annotation *read* methods (`moment_annotations()`,
-`annotations_catalog()` against `/data/v1alpha1/event/MomentAnnotation` and
-`/user/v1alpha1/annotation`) and **no create/upload** method, so `_write_api`
-returns `False` with a `TODO`. When that endpoint is confirmed, only `_write_api`
-changes.
+The `cli` transport's `create-data-type` support lives only on a CLI build that
+the everyday installed CLI lacks (see below), which is exactly why `http` is the
+default-recommended path — it needs nothing beyond a Fulcra token.
 
 ## Enabling
 
@@ -64,8 +88,8 @@ Set `FULCRA_COORD_ANNOTATIONS`:
 | Value | Behaviour |
 |---|---|
 | unset / `off` / anything unrecognized | No-op (default). Task ops behave exactly as before. |
-| `cli` | **LIVE.** Route writes through `create-data-type MomentAnnotation ... --add-to-timeline` on the annotation CLI base — `FULCRA_COORD_ANNOTATION_CLI` if set, else the shared `FULCRA_CLI_COMMAND` → `fulcra-api` on PATH → `uv tool run fulcra-api`. Requires a CLI build with annotation support (see above). |
-| `api` | POST to the Fulcra annotations HTTP endpoint. Still a no-op pending a confirmed create endpoint. |
+| `http` (alias `api`) | **LIVE, recommended.** Write directly over the Fulcra HTTP API via stdlib `urllib` (tag resolve → moment-def resolve/create+cache → `POST /ingest/v1/record/batch`). Needs a token (`FULCRA_ACCESS_TOKEN` or `fulcra auth print-access-token`); base from `FULCRA_API_BASE`. See `_write_http`. |
+| `cli` | **Legacy.** Route writes through `create-data-type MomentAnnotation ... --add-to-timeline` on the annotation CLI base — `FULCRA_COORD_ANNOTATION_CLI` if set, else the shared `FULCRA_CLI_COMMAND` → `fulcra-api` on PATH → `uv tool run fulcra-api`. Requires a CLI build with annotation support (see above). |
 
 The CLI base for annotation writes is resolved by `remote.cli_base_cmd()` — the
 **same** resolution file ops use, minus the `file` subcommand — so the binary is
@@ -113,7 +137,9 @@ The CLI write attaches four tags (the `cli_tags` field of the built payload):
   segments beyond the kind. Namespaced with the `session:` prefix.
 
 (The payload also keeps a bare `tags` list `[<lifecycle>, <kind>, <session>]`
-for the deferred `api` transport / existing readers.)
+for existing readers. The `http` writer resolves the `cli_tags` names — the
+`agent-tasks` track tag plus the prefixed forms — to tag ids and rides those in
+`metadata.tags`.)
 
 ## Name and description
 
@@ -145,23 +171,36 @@ existing marker and is skipped; a new transition gets a fresh anchor and emits
 again. The marker is deliberately **local** (not stored on the shared task JSON)
 so it never pollutes the cross-agent payload or tangles with merge logic.
 
-## Assumed API shape (deferred)
+## HTTP wire shape (`http` transport)
 
-When wiring the `api` transport, the assumed (unconfirmed) create call is:
+The `http` writer (`fulcra_coord/annotations.py::_write_http`) posts a single
+JSONL record:
 
 ```
-POST https://api.fulcradynamics.com/data/v1alpha1/event/MomentAnnotation
+POST <FULCRA_API_BASE>/ingest/v1/record/batch
 Authorization: Bearer <fulcra access token>
-Content-Type: application/json
+content-type: application/x-jsonl
 
-{
-  "annotation": "<UUID of the 'Agent Tasks' moment-annotation type>",
-  "time": "<ISO-8601>",
-  "note": "<text>",
-  "tags": ["create", "claude", "<session>"]
-}
+{"specversion": 1,
+ "data": "{\"note\": \"<desc>\", \"title\": \"<name>\"}",
+ "metadata": {
+   "data_type": "MomentAnnotation",
+   "recorded_at": "<ISO-8601 Z>",
+   "tags": [<resolved tag ids>],
+   "source": ["com.fulcradynamics.fulcra-coord.<lifecycle>.<uuid>",
+              "com.fulcradynamics.annotation.<definition_id>"],
+   "content_type": "application/json"}}
 ```
 
-The `Agent Tasks` type would first be resolved/created via the user annotation
-catalog (`/user/v1alpha1/annotation`). Confirm against `fulcra-api` source before
-removing the TODO in `fulcra_coord/annotations.py::_write_api`.
+The `<definition_id>` is the resolved/created `Agent Tasks` moment definition
+(`/user/v1alpha1/annotation`), cached locally so it is resolved once. Tag ids are
+resolved/created via `/user/v1alpha1/tag`. This mirrors the `fulcra-collect`
+ingest path byte-for-byte in shape, implemented with stdlib `urllib` so
+fulcra-coord stays dependency-free.
+
+## doctor
+
+`fulcra-coord doctor` prints an `[Annotations]` section: the resolved mode
+(`off`/`cli`/`http`), and when enabled, the API base and whether a token is
+resolvable (it never prints the token). An `off` mode says so plainly with the
+enable hint — the fast answer to "why didn't anything appear on my timeline?".

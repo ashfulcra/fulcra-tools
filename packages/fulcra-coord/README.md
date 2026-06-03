@@ -102,7 +102,9 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_COORD_AGENT` | — | Session-scoped override for your agent id. Identity resolution order is: explicit `--agent` > `FULCRA_COORD_AGENT` > per-cwd persisted identity (`fulcra-coord identity set`) > derived `claude-code:<host>:<repo>` (matching the SessionStart hook) |
 | `FULCRA_COORD_HUMAN` | `human` | The human operator's handle — who tasks are "blocked on ME" against (`needs-me`, `block --on-user`). Resolution order: `FULCRA_COORD_HUMAN` > persisted handle (`fulcra-coord human set`) > default `human`. Personalize with `fulcra-coord human set <name>` |
 | `FULCRA_COORD_BACKEND` | — | Override backend (testing only) |
-| `FULCRA_COORD_ANNOTATIONS` | `off` | Emit lifecycle annotations to the Fulcra **Agent Tasks** timeline track: `off` (default, inert), `cli`, or `api`. See [docs/annotations.md](docs/annotations.md). Real writes are deferred until Fulcra exposes an annotation-write surface, so even `cli`/`api` are currently no-ops behind the flag. |
+| `FULCRA_COORD_ANNOTATIONS` | `off` | Emit lifecycle annotations to the Fulcra **Agent Tasks** timeline track: `off` (default, inert), `http` (alias `api`, **recommended** — writes directly over the Fulcra HTTP API via stdlib `urllib`, needs only a Fulcra token), or `cli` (legacy CLI shell-out). See [docs/annotations.md](docs/annotations.md). |
+| `FULCRA_API_BASE` | `https://api.fulcradynamics.com` | Fulcra HTTP API base for the `http` annotation transport. |
+| `FULCRA_ACCESS_TOKEN` | _(unset)_ | Bearer token for the `http` annotation transport; when unset the writer falls back to `fulcra auth print-access-token`. |
 | `FULCRA_COORD_SESSION_KEY` | — | Generic session pointer key for non-Claude-Code agents (OpenClaw passes its `sessionKey` here); `CLAUDE_CODE_SESSION_ID` takes precedence |
 | `FULCRA_OPENCLAW_HOOKS_ROOT` | `~/.openclaw/hooks` | OpenClaw automation-hooks dir for `install-openclaw` |
 | `FULCRA_OPENCLAW_PLUGIN_DIR` | `~/.openclaw/plugins/fulcra-coord` | Target dir for the materialized Track B plugin sources (`install-openclaw --with-plugin`); overridable via `--plugin-dir` |

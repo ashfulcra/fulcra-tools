@@ -38,14 +38,18 @@ Even though the write is now live, the feature stays GATED behind
 opts in, and so machines without the annotations-capable CLI stay inert:
 
   * unset / "off" / anything unrecognized  -> NO-OP (the default; safe)
+  * "http" (or its alias "api")  -> POST to the Fulcra HTTP API directly via
+    stdlib ``urllib`` (no httpx / fulcra-common dep), replicating the proven
+    fulcra-collect write path: resolve/create tags, resolve/create the shared
+    "Agent Tasks" moment definition (cached), then POST a JSONL record to
+    ``/ingest/v1/record/batch``. See ``_write_http``.
   * "cli"  -> shell ``create-data-type MomentAnnotation ... --add-to-timeline``
-    through the resolved Fulcra CLI (the same CLI base file ops use)
-  * "api"  -> POST to the Fulcra annotations HTTP endpoint (still DEFERRED — no
-    confirmed create endpoint in the core library; see ``_write_api``)
+    through the resolved Fulcra CLI (legacy; needs the annotations-capable CLI
+    build, which the everyday installed CLI lacks — kept for back-compat)
 
-When the HTTP create path is confirmed, only ``_write_api`` changes; the public
-contract, tag mapping, text/link building, gating, idempotency, and the CLI hook
-points all stay put.
+The HTTP path is the recommended one; the public contract, tag mapping,
+text/link building, gating, idempotency, and the CLI hook points are unchanged
+regardless of transport.
 
 CONTRACT
 --------
@@ -58,8 +62,14 @@ bool is returned (True = an annotation was actually written this call).
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import cache, remote, remote_root
@@ -279,11 +289,21 @@ def build_needs_user_annotation(
 def _mode() -> str:
     """Resolve the enable mode from ``FULCRA_COORD_ANNOTATIONS``.
 
-    Returns one of ``off`` | ``cli`` | ``api``. Unset or unrecognized -> ``off``
-    so the feature is inert by default and an operator must opt in explicitly."""
+    Returns one of ``off`` | ``cli`` | ``http``. Unset or unrecognized -> ``off``
+    so the feature is inert by default and an operator must opt in explicitly.
+
+    ``http`` is the proven path: it writes annotations directly over the Fulcra
+    HTTP API exactly the way ``fulcra-collect`` does (tag resolve -> moment-def
+    resolve/create -> JSONL record POST). ``api`` is kept as a back-compat ALIAS
+    for ``http`` — the original deferred-stub flag value — so an operator who set
+    ``=api`` before the HTTP writer landed gets the working path, not a no-op.
+    ``cli`` still routes to the legacy ``create-data-type`` shell-out for any
+    environment pinned to the annotations-capable CLI build."""
     raw = os.environ.get("FULCRA_COORD_ANNOTATIONS", "").strip().lower()
-    if raw in ("cli", "api"):
-        return raw
+    if raw == "cli":
+        return "cli"
+    if raw in ("http", "api"):
+        return "http"
     return "off"
 
 
@@ -331,8 +351,8 @@ def _record_annotated(lifecycle: str, task: dict[str, Any]) -> None:
 
 # ---------------------------------------------------------------------------
 # Transport writers
-#   _write_cli — LIVE: create-data-type MomentAnnotation --add-to-timeline
-#   _write_api — DEFERRED: no confirmed HTTP create endpoint yet
+#   _write_cli  — legacy: create-data-type MomentAnnotation --add-to-timeline
+#   _write_http — LIVE: direct Fulcra HTTP API via urllib (recommended path)
 # ---------------------------------------------------------------------------
 
 def _write_timeout() -> int:
@@ -409,32 +429,261 @@ def _write_cli(payload: dict[str, Any], *, backend: Optional[list[str]] = None) 
         return False
 
 
-def _write_api(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
-    """Write the annotation via the Fulcra annotations HTTP API.
+# ---------------------------------------------------------------------------
+# HTTP transport (stdlib-only) — replicates the fulcra-collect / fulcra-common
+# annotation write over urllib.request, so fulcra-coord needs NO httpx /
+# fulcra-common dependency. Three Fulcra endpoints, in order:
+#   1. resolve/create each tag        GET/POST  /user/v1alpha1/tag(/name/{n})
+#   2. resolve/create the moment def  GET/POST  /user/v1alpha1/annotation
+#   3. post the annotation record     POST      /ingest/v1/record/batch
+# ---------------------------------------------------------------------------
 
-    DEFERRED / UNCONFIRMED. The ``fulcra_api`` core library READS moment
-    annotations from ``/data/v1alpha1/event/MomentAnnotation`` and lists defined
-    annotations at ``/user/v1alpha1/annotation``, but exposes NO create/upload
-    method, so the write endpoint is unconfirmed.
+#: Canonical name of the moment-annotation definition every Agent-Tasks moment
+#: groups under. Matched by name in the user annotation catalog so all machines
+#: converge on one definition instead of each creating a duplicate.
+DEFINITION_NAME = "Agent Tasks"
+DEFINITION_DESCRIPTION = (
+    "Lifecycle moments for fulcra-coord agent coordination tasks "
+    "(create / pickup / update / complete, plus needs-user asks)."
+)
 
-    ASSUMED endpoint + shape (documented, behind the flag):
-        POST https://api.fulcradynamics.com/data/v1alpha1/event/MomentAnnotation
-        Authorization: Bearer <fulcra access token>
-        Content-Type: application/json
-        {
-          "annotation": "<UUID of the 'Agent Tasks' moment annotation type>",
-          "time": "<ISO-8601>",
-          "note": "<text>",
-          "tags": ["create", "claude", "<session>"]
+
+def _api_base() -> str:
+    """Fulcra API base URL — env ``FULCRA_API_BASE`` else the prod host.
+
+    Mirrors ``fulcra_common.client.DEFAULT_BASE_URL`` so fulcra-coord and the
+    rest of fulcra-tools talk to the same API surface, with the same env knob
+    for pointing tests / staging elsewhere. Trailing slash is stripped so path
+    concatenation is unambiguous."""
+    base = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
+    return base.rstrip("/")
+
+
+def _resolve_token() -> Optional[str]:
+    """Return a Fulcra bearer token, or None if one can't be obtained.
+
+    Token source mirrors ``fulcra_common.client.BaseFulcraClient.get_token``:
+    the ``FULCRA_ACCESS_TOKEN`` env var when set, else the stdout of
+    ``fulcra auth print-access-token``. Best-effort: a missing CLI, a non-zero
+    exit, a timeout, or an empty result all yield None rather than raising, so
+    the caller cleanly no-ops instead of breaking the task op. The token is
+    NEVER logged."""
+    env = os.environ.get("FULCRA_ACCESS_TOKEN")
+    if env and env.strip():
+        return env.strip()
+    try:
+        result = subprocess.run(
+            ["fulcra", "auth", "print-access-token"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    tok = (result.stdout or "").strip()
+    return tok or None
+
+
+def _request(method: str, url: str, token: str, *,
+             body: Optional[bytes] = None,
+             content_type: str = "application/json") -> tuple[int, bytes]:
+    """Issue one authenticated HTTP request via urllib; return (status, body).
+
+    Raises ``urllib.error.HTTPError`` on a non-2xx response (so the caller can
+    branch on, e.g., a 404 tag-not-found) and ``urllib.error.URLError`` on a
+    transport failure. The Authorization header carries the bearer token; a
+    JSON/JSONL body sets the matching content-type. A 30s timeout matches the
+    httpx client's so a stuck API can't hang a task op."""
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("User-Agent", "fulcra-coord")
+    if body is not None:
+        req.add_header("Content-Type", content_type)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        status = getattr(resp, "status", None) or resp.getcode()
+        return status, resp.read()
+
+
+def _resolve_tag_id(name: str, token: str) -> str:
+    """Return the id of the tag named ``name``, creating it if absent.
+
+    GET ``/user/v1alpha1/tag/name/{quoted}`` -> 200 ``{"id": ...}``; on a 404 the
+    tag doesn't exist yet so POST ``/user/v1alpha1/tag`` ``{"name": name}`` to
+    create it and return the new id. The name is percent-encoded (``safe=''``)
+    so spaces / slashes in a tag name can't break the path — matching
+    fulcra-common's ``_resolve_tag(quote_name=True)`` shape."""
+    base = _api_base()
+    quoted = urllib.parse.quote(name, safe="")
+    try:
+        status, raw = _request("GET", f"{base}/user/v1alpha1/tag/name/{quoted}", token)
+        if status == 200:
+            return json.loads(raw)["id"]
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+    # Absent (404) -> create.
+    payload = json.dumps({"name": name}).encode()
+    _, raw = _request("POST", f"{base}/user/v1alpha1/tag", token, body=payload)
+    return json.loads(raw)["id"]
+
+
+def _definition_cache_path():
+    """Path to the cached ``Agent Tasks`` definition-id json under the cache root.
+
+    Scoped per remote root (alongside the annotation idempotency markers) so the
+    id is resolved against the Fulcra API ONCE and reused on every subsequent
+    annotation, rather than re-listing the catalog per write. Kept in the local
+    cache (not the shared task JSON) because the def id is a per-account API
+    handle, not coordination state."""
+    return cache.annotations_dir() / "definition.json"
+
+
+def _cached_definition_id() -> Optional[str]:
+    path = _definition_cache_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text())
+            did = data.get("id")
+            if did:
+                return did
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _store_definition_id(def_id: str) -> None:
+    """Persist the resolved definition id. Best-effort: a cache-write failure
+    just means the next call re-resolves, never a failed annotation."""
+    try:
+        cache.annotations_dir().mkdir(parents=True, exist_ok=True)
+        _definition_cache_path().write_text(json.dumps({"id": def_id}))
+    except OSError:
+        pass
+
+
+def _resolve_definition_id(token: str, tag_ids: list[str]) -> str:
+    """Return the ``Agent Tasks`` moment-definition id, resolving once + caching.
+
+    Cache hit -> return immediately (no HTTP). On a miss: GET
+    ``/user/v1alpha1/annotation`` (the catalog of definitions), adopt the first
+    live one named ``Agent Tasks`` if present; otherwise POST a new ``moment``
+    definition (no measurement_spec — moments carry none) carrying the resolved
+    tag ids. The resolved id is cached so this whole resolve/create dance runs
+    at most once per machine per remote root."""
+    cached = _cached_definition_id()
+    if cached:
+        return cached
+
+    base = _api_base()
+    status, raw = _request("GET", f"{base}/user/v1alpha1/annotation", token)
+    for d in json.loads(raw) or []:
+        if d.get("name") == DEFINITION_NAME and not d.get("deleted_at"):
+            _store_definition_id(d["id"])
+            return d["id"]
+
+    body = json.dumps({
+        "annotation_type": "moment",
+        "name": DEFINITION_NAME,
+        "description": DEFINITION_DESCRIPTION,
+        "tags": tag_ids,
+    }).encode()
+    _, raw = _request("POST", f"{base}/user/v1alpha1/annotation", token, body=body)
+    def_id = json.loads(raw)["id"]
+    _store_definition_id(def_id)
+    return def_id
+
+
+def _recorded_at(payload: dict[str, Any]) -> str:
+    """ISO-8601 Z timestamp for the annotation, from the payload anchor else now.
+
+    Prefers a timestamp carried on the payload (``recorded_at``/``at``/``ts``) so
+    the moment lands on the timeline at the transition time; falls back to the
+    current UTC instant when none is present. Always normalized to a trailing
+    ``Z``."""
+    for key in ("recorded_at", "at", "ts", "timestamp"):
+        val = payload.get(key)
+        if val:
+            return str(val).replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
+    """Write the annotation via the Fulcra HTTP API (stdlib urllib only).
+
+    Replicates the proven fulcra-collect path with NO httpx / fulcra-common
+    dependency — three endpoints, in order:
+
+      1. resolve/create each tag name (``payload['cli_tags']`` or ``['tags']``)
+         to a tag id;
+      2. resolve/create the shared ``Agent Tasks`` moment definition (cached
+         locally so this happens once, not per annotation);
+      3. POST a single JSONL record to ``/ingest/v1/record/batch`` with
+         ``content-type: application/x-jsonl`` — metadata ``data_type:
+         MomentAnnotation``, the resolved tag ids, and a ``source`` array
+         carrying both a lifecycle-stamped fulcra-coord source id and the
+         ``com.fulcradynamics.annotation.<def_id>`` definition source.
+
+    BEST-EFFORT: a missing token, any urllib/HTTP error, or any other failure is
+    caught and returns False — this MUST NEVER raise into the caller's task op.
+    (``emit_*`` records the idempotency marker only on a True return, so a
+    failure here leaves the transition free to retry.)
+
+    The inner ``data`` dict is ``{"title": <name>, "note": <description>}`` with
+    empty values omitted. ``backend`` is accepted for signature symmetry with the
+    other writers; the HTTP path resolves its own base/token and ignores it."""
+    try:
+        token = _resolve_token()
+        if not token:
+            return False
+
+        tag_names = payload.get("cli_tags") or payload.get("tags") or []
+        tag_ids: list[str] = []
+        for name in tag_names:
+            if not name:
+                continue
+            tag_ids.append(_resolve_tag_id(name, token))
+
+        def_id = _resolve_definition_id(token, tag_ids)
+
+        inner: dict[str, Any] = {}
+        title = (payload.get("name") or "").strip()
+        note = (payload.get("desc") or payload.get("description") or "").strip()
+        if title:
+            inner["title"] = title
+        if note:
+            inner["note"] = note
+
+        lifecycle = payload.get("lifecycle") or "event"
+        source = [
+            f"com.fulcradynamics.fulcra-coord.{lifecycle}.{uuid.uuid4()}",
+            f"com.fulcradynamics.annotation.{def_id}",
+        ]
+
+        record = {
+            "specversion": 1,
+            "data": json.dumps(inner, sort_keys=True),
+            "metadata": {
+                "data_type": "MomentAnnotation",
+                "recorded_at": _recorded_at(payload),
+                "tags": tag_ids,
+                "source": source,
+                "content_type": "application/json",
+            },
         }
-    The 'Agent Tasks' track would first be resolved/created via the user
-    annotation catalog. Until this is confirmed against fulcra-api source, this
-    returns False so nothing is sent.
-    """
-    # TODO(annotations): confirm the create endpoint + body against fulcra-api
-    # source, resolve/create the "Agent Tasks" MomentAnnotation type, then POST
-    # through the same authenticated transport the file ops use.
-    return False
+        body = (json.dumps(record, sort_keys=True) + "\n").encode()
+        _request(
+            "POST",
+            f"{_api_base()}/ingest/v1/record/batch",
+            token,
+            body=body,
+            content_type="application/x-jsonl",
+        )
+        return True
+    except Exception:
+        # Best-effort contract: a timeline write must be invisible to the task op.
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -485,9 +734,9 @@ def emit_lifecycle_annotation(
         # injection.
         if mode == "cli":
             wrote = _write_cli(payload)
-        elif mode == "api":
-            wrote = _write_api(payload, backend=backend)
-        else:  # pragma: no cover - _mode only returns off/cli/api
+        elif mode == "http":
+            wrote = _write_http(payload, backend=backend)
+        else:  # pragma: no cover - _mode only returns off/cli/http
             wrote = False
 
         if wrote:
@@ -526,9 +775,9 @@ def emit_needs_user_annotation(
 
         if mode == "cli":
             wrote = _write_cli(payload)
-        elif mode == "api":
-            wrote = _write_api(payload, backend=backend)
-        else:  # pragma: no cover - _mode only returns off/cli/api
+        elif mode == "http":
+            wrote = _write_http(payload, backend=backend)
+        else:  # pragma: no cover - _mode only returns off/cli/http
             wrote = False
 
         if wrote:
