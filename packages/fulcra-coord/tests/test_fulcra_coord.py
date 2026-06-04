@@ -8363,6 +8363,253 @@ class TestSessionStartUpcomingBanner(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# PERF: reconcile parallelism (heartbeat regression fix)
+# ---------------------------------------------------------------------------
+
+class TestLoadAllTasksParallelFetch(unittest.TestCase):
+    """PERF: _load_all_tasks fetches per-id task bodies CONCURRENTLY.
+
+    The sequential body-fetch loop (one ~1.3s `fulcra file download` subprocess
+    per remote id) made reconcile blow past its 90s timeout at ~76 tasks. The
+    fix parallelizes the fetch with a thread pool. These tests pin the
+    semantics the parallelization must preserve: the complete deduped task set,
+    None-skip for a failed fetch, and that the fetches actually overlap in time
+    (so a regression back to sequential is caught)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def _index_only_download(self, ids):
+        """download_json that exposes `ids` via the index, no search/next view."""
+        def fake_download(path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                return {"active": [{"id": i} for i in ids], "recent_done": []}
+            return None
+        return fake_download
+
+    def test_returns_complete_deduped_set(self):
+        from fulcra_coord.cli import _load_all_tasks
+        ids = [f"TASK-2026-parallel-{n:08d}" for n in range(12)]
+        bodies = {i: _sample_task(id=i) for i in ids}
+
+        def fake_fetch(tid, backend=None):
+            return bodies.get(tid)
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._index_only_download(ids)), \
+             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+            tasks = _load_all_tasks(backend=["false"])
+
+        got = {t["id"] for t in tasks}
+        self.assertEqual(got, set(ids), "all remote ids must be fetched and returned")
+        # No duplicates even though each id is distinct in the map.
+        self.assertEqual(len(tasks), len(ids))
+
+    def test_none_results_are_skipped(self):
+        from fulcra_coord.cli import _load_all_tasks
+        ids = [f"TASK-2026-skip-{n:08d}" for n in range(6)]
+        # Half the ids 404 (fetch returns None) — they must be dropped, not crash.
+        good = {i: _sample_task(id=i) for i in ids[:3]}
+
+        def fake_fetch(tid, backend=None):
+            return good.get(tid)  # None for ids[3:]
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._index_only_download(ids)), \
+             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+            tasks = _load_all_tasks(backend=["false"])
+
+        self.assertEqual({t["id"] for t in tasks}, set(ids[:3]))
+
+    def test_local_cache_base_preserved_when_not_in_index(self):
+        from fulcra_coord.cli import _load_all_tasks
+        # A locally-cached task NOT named by any remote source must survive
+        # (the task_map seeds from cache, then remote bodies upsert in).
+        local = _sample_task(id="TASK-2026-localonly-00000001")
+        cache.write_cached_task(local)
+        remote_ids = ["TASK-2026-remote-00000002"]
+        bodies = {remote_ids[0]: _sample_task(id=remote_ids[0])}
+
+        def fake_fetch(tid, backend=None):
+            return bodies.get(tid)
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._index_only_download(remote_ids)), \
+             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+            tasks = _load_all_tasks(backend=["false"])
+
+        ids = {t["id"] for t in tasks}
+        self.assertIn(local["id"], ids)
+        self.assertIn(remote_ids[0], ids)
+
+    def test_fetches_run_concurrently(self):
+        """Regression guard: a sequential loop would serialize these blocking
+        fetches; the pool must overlap them. We record the max concurrency seen
+        across the fetch fn and require it to exceed 1."""
+        import threading
+        from fulcra_coord.cli import _load_all_tasks
+        ids = [f"TASK-2026-conc-{n:08d}" for n in range(8)]
+        bodies = {i: _sample_task(id=i) for i in ids}
+
+        lock = threading.Lock()
+        state = {"active": 0, "max": 0}
+        barrier = threading.Barrier(len(ids), timeout=10)
+
+        def fake_fetch(tid, backend=None):
+            with lock:
+                state["active"] += 1
+                state["max"] = max(state["max"], state["active"])
+            try:
+                # All fetches must be in-flight at once for the barrier to release;
+                # a sequential caller would deadlock here, so the timeout proves
+                # concurrency rather than silently passing.
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                pass
+            with lock:
+                state["active"] -= 1
+            return bodies.get(tid)
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._index_only_download(ids)), \
+             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+            tasks = _load_all_tasks(backend=["false"])
+
+        self.assertEqual({t["id"] for t in tasks}, set(ids))
+        self.assertGreater(state["max"], 1,
+                           "body fetches must run concurrently, not sequentially")
+
+
+class TestReconcileParallelUpload(unittest.TestCase):
+    """PERF: cmd_reconcile uploads its views CONCURRENTLY, with the exact same
+    partial-failure / op-marker / exit-code semantics as the sequential loop."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def test_uploads_all_views_on_success(self):
+        from fulcra_coord.cli import cmd_reconcile
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+        uploaded = []
+        lock = __import__("threading").Lock()
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            with lock:
+                uploaded.append(path)
+            return True
+
+        with patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._reconcile_presence"):
+            rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(any(p.endswith("/index.json") for p in uploaded))
+        self.assertTrue(any(p.endswith("/views/active.json") for p in uploaded))
+        # Every view is also cached locally.
+        self.assertIsNotNone(cache.read_cached_view("index"))
+
+    def test_partial_failure_preserves_markers_and_returns_1(self):
+        from fulcra_coord.cli import cmd_reconcile
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+        cache.ensure_dirs()
+        cache.write_op_marker("repairP", {
+            "op_id": "repairP", "command": "update", "task_id": task["id"],
+            "status": "partial", "needs_reconcile": True,
+            "started_at": "2026-01-01T00:00:00Z",
+        })
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            return not path.endswith("/index.json")  # fail exactly one view
+
+        with patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._reconcile_presence"):
+            rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+
+        self.assertEqual(rc, 1, "a failed view upload must surface as exit 1")
+        remaining = cache.list_op_markers()
+        self.assertTrue(any(m["op_id"] == "repairP" for m in remaining),
+                        "needs_reconcile marker must survive a partial reconcile")
+
+    def test_raising_upload_is_caught_as_failure(self):
+        """A view upload that RAISES must be counted as a failed view (exit 1),
+        never escape and crash the whole reconcile."""
+        from fulcra_coord.cli import cmd_reconcile
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                raise RuntimeError("simulated upload blowup")
+            return True
+
+        with patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._reconcile_presence"):
+            rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+
+        self.assertEqual(rc, 1, "a raising upload must be caught and counted as a failure")
+
+    def test_parallel_upload_respects_global_timeout_for_queued_views(self):
+        """Queued upload work must not start after the reconcile deadline.
+
+        With 8 workers and more than 8 views, a backend that stalls every upload
+        used to consume one full timeout per batch. The worker checks the shared
+        deadline before calling upload_json, so queued views past the deadline
+        fail fast instead of starting another over-budget batch.
+        """
+        import threading
+        import time
+        from fulcra_coord.cli import cmd_reconcile
+
+        views_to_upload = {f"view-{i}": {"tasks": []} for i in range(10)}
+        active_calls = 0
+        max_active = 0
+        total_calls = 0
+        lock = threading.Lock()
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            nonlocal active_calls, max_active, total_calls
+            with lock:
+                active_calls += 1
+                total_calls += 1
+                max_active = max(max_active, active_calls)
+            time.sleep(1.05)
+            with lock:
+                active_calls -= 1
+            return True
+
+        old_timeout = os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS")
+        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "1"
+        try:
+            with patch("fulcra_coord.cli._load_all_tasks", return_value=[]), \
+                 patch("fulcra_coord.cli.views.build_all_views",
+                       return_value=views_to_upload), \
+                 patch("fulcra_coord.cli.remote.upload_json",
+                       side_effect=upload_json), \
+                 patch("fulcra_coord.cli._reconcile_presence"):
+                rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+        finally:
+            if old_timeout is None:
+                del os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"]
+            else:
+                os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = old_timeout
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(max_active, 8, "the first batch should still run in parallel")
+        self.assertLessEqual(total_calls, 8,
+                             "queued views past the deadline must not start uploads")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
