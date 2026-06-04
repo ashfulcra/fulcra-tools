@@ -168,11 +168,8 @@ export function SignIn(props: SignInProps) {
       <div className="signin">
         <button className="primary" style={{ width: "100%" }}
                 onClick={() => void beginSignIn()}>
-          Sign in with Fulcra
+          Connect to Fulcra
         </button>
-        <p className="muted" style={{ marginTop: 8 }}>
-          Connect this browser straight to the Fulcra API — no local app needed.
-        </p>
       </div>
     );
   }

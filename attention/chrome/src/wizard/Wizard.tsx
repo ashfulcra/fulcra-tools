@@ -205,11 +205,17 @@ export function Wizard() {
       )}
 
       {step === "signin" && (
-        <SignInStep onSignedIn={() => setStep("destination")} />
+        <SignInStep
+          onSignedIn={() => setStep("destination")}
+          onBack={() => setStep("welcome")}
+        />
       )}
 
       {step === "destination" && (
-        <ChooseDestinationStep onNext={() => setStep("scan")} />
+        <ChooseDestinationStep
+          onNext={() => setStep("scan")}
+          onBack={() => setStep("signin")}
+        />
       )}
 
       {step === "scan" && (
@@ -218,6 +224,7 @@ export function Wizard() {
           maxResults={maxResults} setMaxResults={setMaxResults}
           scanError={scanError}
           onNext={() => void runScan()}
+          onBack={() => setStep("destination")}
         />
       )}
 
@@ -296,14 +303,12 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
   );
 }
 
-function SignInStep(props: { onSignedIn: () => void }) {
+function SignInStep(props: { onSignedIn: () => void; onBack?: () => void }) {
   return (
     <>
-      <h2>Sign in to Fulcra</h2>
+      <h2>Connect to Fulcra</h2>
       <p>
-        Connect this browser straight to the Fulcra API — no local app needed.
-        We'll open a confirmation page; approve it and we'll bring you back
-        here to choose where your attention is saved.
+        We'll open a confirmation page — approve it and you'll come back here.
       </p>
       {/*
         Reuse the popup's Fulcra sign-in surface. onSignedIn fires once the
@@ -311,6 +316,12 @@ function SignInStep(props: { onSignedIn: () => void }) {
         valid token already exists), advancing the wizard to the destination step.
       */}
       <SignIn onSignedIn={props.onSignedIn} />
+      {props.onBack && (
+        <div className="action-row">
+          <button onClick={props.onBack}>← Back</button>
+          <div className="spacer" />
+        </div>
+      )}
     </>
   );
 }
@@ -329,6 +340,7 @@ function SignInStep(props: { onSignedIn: () => void }) {
  */
 function ChooseDestinationStep(props: {
   onNext: () => void;
+  onBack?: () => void;
   tokenStore?: TokenStore;
   list?: typeof listAttentionDestinations;
   choose?: typeof chooseAttentionDestination;
@@ -525,6 +537,9 @@ function ChooseDestinationStep(props: {
       )}
 
       <div className="action-row">
+        {props.onBack && (
+          <button onClick={props.onBack} disabled={saving}>← Back</button>
+        )}
         <div className="spacer" />
         <button
           className="primary"
@@ -550,6 +565,7 @@ function ScanStep(props: {
   maxResults: number; setMaxResults: (n: number) => void;
   scanError: string | null;
   onNext: () => void;
+  onBack?: () => void;
 }) {
   return (
     <>
@@ -584,6 +600,9 @@ function ScanStep(props: {
         <p style={{ color: "var(--fa-danger)" }}>Scan failed: {props.scanError}</p>
       )}
       <div className="action-row">
+        {props.onBack && (
+          <button onClick={props.onBack}>← Back</button>
+        )}
         <div className="spacer" />
         <button className="primary" onClick={props.onNext}>Scan history →</button>
       </div>

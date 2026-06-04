@@ -121,8 +121,8 @@ describe("Wizard auth step — relayless (default)", () => {
     const { container } = await mount(<Wizard />);
     await gotoAuthStep(container);
 
-    expect(container.textContent).toContain("Sign in to Fulcra");
-    expect(container.textContent).toContain("Sign in with Fulcra");
+    expect(container.textContent).toContain("Connect to Fulcra");
+    expect(container.textContent).toContain("Connect to Fulcra");
     // No daemon bearer-token paste field.
     expect(container.querySelector('input[type="password"]')).toBeNull();
   });
@@ -143,12 +143,12 @@ describe("Wizard auth step — relayless (default)", () => {
 
     const { container } = await mount(<Wizard />);
     await gotoAuthStep(container);
-    await clickButton(container, "Sign in with Fulcra");
+    await clickButton(container, "Connect to Fulcra");
 
     // Landed on the destination step (NOT scan directly).
     expect(container.textContent).toContain("Choose where your browsing attention is saved");
     expect(container.textContent).not.toContain("Scan your history");
-    expect(container.textContent).not.toContain("Sign in with Fulcra");
+    expect(container.textContent).not.toContain("Connect to Fulcra");
   });
 
   test("already signed in → 'Continue' advances to destination, no forced re-auth", async () => {
@@ -158,9 +158,10 @@ describe("Wizard auth step — relayless (default)", () => {
     const { container } = await mount(<Wizard />);
     await gotoAuthStep(container);
 
-    // Signed-in affordance present; no sign-in button / device flow.
+    // Signed-in affordance present (Continue), and the device flow is not
+    // auto-triggered (asserted below via signInImpl.run) — no forced re-auth.
     expect(container.textContent).toContain("Signed in");
-    expect(container.textContent).not.toContain("Sign in with Fulcra");
+    expect(container.textContent).toContain("Continue");
 
     await clickButton(container, "Continue");
 
