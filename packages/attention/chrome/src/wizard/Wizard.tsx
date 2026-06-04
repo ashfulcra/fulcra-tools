@@ -22,10 +22,9 @@ import {
   type AttentionDestination,
   type EnsureOpts,
 } from "../relayless/ensureDefinition";
-import type { TransportMode } from "../types";
 
 type Step =
-  | "welcome" | "token" | "destination" | "scan" | "filter" | "heartbeat" | "ingest" | "done";
+  | "welcome" | "signin" | "destination" | "scan" | "filter" | "heartbeat" | "ingest" | "done";
 
 function FulcrumMark() {
   return <img className="logo" src={markUrl} alt="Fulcra" />;
@@ -33,12 +32,6 @@ function FulcrumMark() {
 
 export function Wizard() {
   const [step, setStep] = useState<Step>("welcome");
-
-  // ---- token / auth step state ----
-  const [token, setToken] = useState("");
-  // Drives the auth step: "relayless" (default) shows device-flow sign-in,
-  // "relay" keeps the daemon token-paste form. Null until loadSettings resolves.
-  const [transportMode, setTransportMode] = useState<TransportMode | null>(null);
 
   // ---- scan step state ----
   const [daysBack, setDaysBack] = useState(30);
@@ -70,10 +63,6 @@ export function Wizard() {
       const existing = await loadIgnoreList();
       setExistingPatterns(existing.map((e) => e.pattern));
     })();
-    void loadSettings().then((s) => {
-      setToken(s.bearerToken ?? "");
-      setTransportMode(s.transportMode);
-    });
     // If another machine on this Chrome profile already backfilled,
     // default the backfill OFF and surface a warning — re-backfilling
     // synced history would duplicate every event.
@@ -89,12 +78,6 @@ export function Wizard() {
   }, []);
 
   // ---- handlers ----
-
-  async function saveTokenAndAdvance() {
-    const cur = await loadSettings();
-    await saveSettings({ ...cur, bearerToken: token.trim() || null });
-    setStep("scan");
-  }
 
   async function runScan() {
     setScanError(null);
@@ -173,8 +156,8 @@ export function Wizard() {
       setStep("done");
     } catch (e) {
       // Surface the error so the user knows why nothing advanced —
-      // most likely the Fulcra Collect daemon is unreachable or the bearer
-      // token is missing/wrong. Events stay in the outbox and will retry
+      // most likely Fulcra Cloud is unreachable or the sign-in token has
+      // expired and needs re-auth. Events stay in the outbox and will retry
       // on the next chrome.alarms tick, so this isn't data loss.
       setIngestError((e as Error).message ?? String(e));
     } finally {
@@ -196,7 +179,7 @@ export function Wizard() {
 
   const tagForStep: Record<Step, string> = {
     welcome: "Step 1",
-    token: "Step 2",
+    signin: "Step 2",
     destination: "Step 3",
     scan: "Step 4",
     filter: "Step 5",
@@ -215,21 +198,13 @@ export function Wizard() {
 
       {step === "welcome" && (
         <WelcomeStep
-          onNext={() => setStep("token")}
+          onNext={() => setStep("signin")}
           onSkip={() => void skipWizard()}
         />
       )}
 
-      {step === "token" && transportMode === "relayless" && (
+      {step === "signin" && (
         <SignInStep onSignedIn={() => setStep("destination")} />
-      )}
-
-      {step === "token" && transportMode === "relay" && (
-        <TokenStep
-          token={token}
-          setToken={setToken}
-          onNext={() => void saveTokenAndAdvance()}
-        />
       )}
 
       {step === "destination" && (
@@ -327,12 +302,12 @@ function SignInStep(props: { onSignedIn: () => void }) {
       <p>
         Connect this browser straight to Fulcra Cloud — no local app needed.
         We'll open a confirmation page; approve it and we'll bring you back
-        here to scan your history.
+        here to choose where your attention is saved.
       </p>
       {/*
-        Reuse the popup's relayless sign-in surface. onSignedIn fires once the
+        Reuse the popup's Fulcra sign-in surface. onSignedIn fires once the
         device flow completes (or immediately via the "Continue" button when a
-        valid token already exists), advancing the wizard to the scan step.
+        valid token already exists), advancing the wizard to the destination step.
       */}
       <SignIn onSignedIn={props.onSignedIn} />
     </>
@@ -517,43 +492,6 @@ function formatCreatedAt(iso: string | null): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "unknown date";
   return new Date(t).toLocaleDateString();
-}
-
-function TokenStep(props: {
-  token: string;
-  setToken: (s: string) => void;
-  onNext: () => void;
-}) {
-  return (
-    <>
-      <h2>Connect to Fulcra Collect</h2>
-      <p>
-        Events go to the Fulcra Collect daemon running on this machine at{" "}
-        <code>http://127.0.0.1:9292/api/extension/attention</code>. Paste the
-        bearer token Collect issued when you paired the extension:
-      </p>
-      <input
-        type="password"
-        placeholder="Bearer token"
-        value={props.token}
-        onChange={(e) => props.setToken(e.target.value)}
-        style={{ width: "100%", boxSizing: "border-box" }}
-      />
-      <p className="muted">
-        Don't have one yet? Open the Fulcra Collect app, go to the{" "}
-        <strong>Attention</strong> plugin, and click{" "}
-        <strong>Pair extension</strong>. Collect issues a bearer token and
-        shows it for you to paste here. Re-running that step re-issues the
-        token if you ever need a fresh one.
-      </p>
-      <div className="action-row">
-        <div className="spacer" />
-        <button className="primary" onClick={props.onNext} disabled={!props.token.trim()}>
-          Continue →
-        </button>
-      </div>
-    </>
-  );
 }
 
 function ScanStep(props: {
@@ -930,12 +868,11 @@ function IngestStep(props: {
           <strong>Backfill failed.</strong> {props.error}
           <br />
           <span style={{ color: "var(--fa-muted)" }}>
-            Most likely cause: the Fulcra Collect daemon isn't reachable on{" "}
-            <code>127.0.0.1:9292</code>, or the bearer token in settings
-            doesn't match the one Collect issued when you paired the extension
-            (<em>Attention → Pair extension</em>). Queued events stay in the
-            outbox and will retry automatically — you can finish the wizard and
-            check the popup's Recent stream later.
+            Most likely cause: Fulcra Cloud is temporarily unreachable, or your
+            sign-in has expired and needs to be renewed (sign in again from the
+            popup). Queued events stay in the outbox and will retry
+            automatically — you can finish the wizard and check the popup's
+            Recent stream later.
           </span>
         </div>
       )}
@@ -971,7 +908,7 @@ function DoneStep({ ingestComplete }: { ingestComplete: boolean }) {
         </p>
         {ingestComplete && (
           <p style={{ margin: "10px 0 0" }}>
-            ✓ Back-filled history queued for Fulcra Collect. The outbox will drain in the background.
+            ✓ Back-filled history queued for Fulcra Cloud. The outbox will drain in the background.
           </p>
         )}
       </div>

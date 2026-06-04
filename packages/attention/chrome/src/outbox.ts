@@ -5,7 +5,7 @@
 // we drop it (permanent failure — usually a bug or stale state). Cap at
 // OUTBOX_CAP entries, dropping the oldest at overflow.
 
-import { loadOutbox, saveOutbox, loadSettings } from "./storage";
+import { loadOutbox, saveOutbox } from "./storage";
 import type { AttentionEvent, OutboxEntry } from "./types";
 import { sendBatch } from "./relayless/relaylessSender";
 import { SentSet } from "./relayless/sentSet";
@@ -16,22 +16,17 @@ import {
 } from "./relayless/ensureDefinition";
 
 export const OUTBOX_CAP = 5000;
-// The daemon's extension-events endpoint. Default port matches
-// fulcra_collect.config.Config.web_port. Same payload + Authorization:
-// Bearer scheme as the now-removed standalone relay.
-export const EXTENSION_ENDPOINT_URL = "http://127.0.0.1:9292/api/extension/attention";
 
 /**
  * Surface the most recent ingest issue so the popup + toolbar icon
  * can show it. The popup reads this key; the SW's
  * refreshToolbarIcon() also reads it to flip the icon to "error".
  *
- *   { kind: "unauthorized" } — daemon rejected the bearer token. User
- *     needs to re-pair the extension from the daemon's wizard.
- *   { kind: "unreachable" }  — repeated network failures. Most likely
- *     the daemon isn't running, or a bearer mismatch was mis-classified
- *     before we recognised 401.
- *   null — clear (most-recent POST was a 200).
+ *   { kind: "unauthorized" } — the cloud rejected the access token (401)
+ *     or we have no token. User needs to sign in.
+ *   { kind: "unreachable" }  — repeated network / non-401 failures
+ *     reaching Fulcra Cloud.
+ *   null — clear (most-recent POST succeeded).
  */
 export interface IngestError {
   kind: "unauthorized" | "unreachable";
@@ -86,128 +81,14 @@ export function flushOutbox(): Promise<void> {
   return run;
 }
 
-async function doFlushOutbox(): Promise<void> {
-  const settings = await loadSettings();
-  if (settings.transportMode === "relayless") {
-    await flushRelayless();
-    return;
-  }
-  await flushRelay();
-}
-
-// --- relay transport (the v1 localhost-daemon path; behavior unchanged) ----
-
-async function flushRelay(): Promise<void> {
-  const settings = await loadSettings();
-  if (!settings.bearerToken) return;
-  const entries = await loadOutbox();
-  if (entries.length === 0) {
-    // Nothing to flush. If the user just fixed a token (popup save
-    // clears `lastIngestError` directly) we're already clean; if the
-    // outbox naturally drained, clear any stale `unreachable` so the
-    // banner doesn't keep warning about a state that no longer
-    // exists. We leave `unauthorized` alone — that one only clears on
-    // explicit token save or a successful POST.
-    const r = await chrome.storage.local.get("lastIngestError");
-    if (r.lastIngestError && (r.lastIngestError as IngestError).kind === "unreachable") {
-      await chrome.storage.local.remove("lastIngestError");
-    }
-    return;
-  }
-
-  const remaining: OutboxEntry[] = [];
-  let consecutiveFailures = 0;
-  const MAX_CONSECUTIVE_FAILURES = 5;
-  const REQUEST_TIMEOUT_MS = 10_000;
-  let aborted = false;
-
-  // Track 401 separately. A 401 is "unauthorized" — token mismatch.
-  // Treat it as transient (keep the entry) so a re-paste fixes things
-  // automatically. The popup surfaces it as a "Reconnect" banner.
-  let sawUnauthorized = false;
-  let sawSuccess = false;
-
-  for (const entry of entries) {
-    // Bail out early if the relay is clearly unreachable. Keep remaining
-    // entries in the outbox — the next alarm tick retries.
-    if (aborted) {
-      remaining.push(entry);
-      continue;
-    }
-
-    let ok = false;
-    let permanentFail = false;
-    let unauthorized = false;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const resp = await fetch(EXTENSION_ENDPOINT_URL, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${settings.bearerToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(entry.payload),
-        signal: ac.signal,
-      });
-      if (resp.status === 200) ok = true;
-      else if (resp.status === 401) unauthorized = true;
-      else if (resp.status >= 400 && resp.status < 500) permanentFail = true;
-    } catch {
-      // Network error / abort — keep for retry.
-    } finally {
-      clearTimeout(timer);
-    }
-
-    if (ok) {
-      consecutiveFailures = 0;
-      sawSuccess = true;
-      continue;
-    }
-    if (unauthorized) {
-      // Keep the entry — a re-paste of the token will retry. But mark
-      // the run as auth-failing so the popup can surface it.
-      remaining.push({ ...entry, attempts: entry.attempts + 1 });
-      sawUnauthorized = true;
-      consecutiveFailures += 1;
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) aborted = true;
-      continue;
-    }
-    if (permanentFail) {
-      consecutiveFailures = 0;
-      continue;  // drop entry — relay said no, in a way that won't fix itself
-    }
-    // Transient failure — keep and bump attempts.
-    remaining.push({ ...entry, attempts: entry.attempts + 1 });
-    consecutiveFailures += 1;
-    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-      aborted = true;
-    }
-  }
-  await saveOutbox(remaining);
-
-  // Surface the most-recent state. Order: auth error > unreachable > clear.
-  if (sawUnauthorized) {
-    await writeIngestError({ kind: "unauthorized", at: Date.now() });
-  } else if (sawSuccess) {
-    await writeIngestError(null);
-  } else if (aborted || consecutiveFailures > 0) {
-    await writeIngestError({ kind: "unreachable", at: Date.now() });
-  } else {
-    // Empty pass and no failures — leave whatever state was there alone.
-  }
-}
-
-// --- relayless transport (direct-to-cloud via the relayless core) ---------
-//
-// Drains the same outbox the relay path does, but POSTs each event straight
-// to Fulcra's /ingest/v1/record/batch using the relayless core: an OIDC
-// device-flow access token (TokenStore), the extension-resolved Attention
+// Drains the outbox by POSTing each event straight to Fulcra's
+// /ingest/v1/record/batch using the relayless core: an OIDC device-flow
+// access token (TokenStore), the extension-resolved Attention
 // {definitionId, tagIds} (ensureAttentionDefinitionAndTags, cached), and the
 // core relaylessSender.sendBatch (which builds wire records, de-dups via the
 // SentSet, and POSTs the survivors).
 //
-// lastIngestError semantics are preserved and mapped to the relayless world:
+// lastIngestError semantics:
 //   - no token / 401            → { kind: "unauthorized" }  (needs sign-in;
 //                                  events are RETAINED, never dropped)
 //   - network / non-401 failure → { kind: "unreachable" }   (events retained)
@@ -215,9 +96,10 @@ async function flushRelay(): Promise<void> {
 //     flush, draining a stale
 //     "unreachable")
 //
-// Single-flight is provided by flushOutbox's module-scope guard, shared with
-// the relay path, so a relay→relayless toggle can't run two drains at once.
-async function flushRelayless(): Promise<void> {
+// Single-flight is provided by flushOutbox's module-scope guard, so the
+// per-minute alarm and the backfill's fire-and-forget flush can't run two
+// drains at once.
+async function doFlushOutbox(): Promise<void> {
   const entries = await loadOutbox();
 
   // A token store + a getToken adapter the core sender/ensure use. getToken
@@ -234,7 +116,7 @@ async function flushRelayless(): Promise<void> {
   };
 
   // Gate on having a token up front: if not signed in, surface needs-sign-in
-  // and retain events. (Mirrors the relay path's "no bearer token → return".)
+  // and retain events (never dropped — they ship once the user signs in).
   let haveToken: boolean;
   try {
     haveToken = (await tokenStore.getValidAccessToken()) != null;
@@ -250,8 +132,8 @@ async function flushRelayless(): Promise<void> {
   }
 
   if (entries.length === 0) {
-    // Nothing to flush. Drain a stale "unreachable" the same way the relay
-    // path does; leave "unauthorized" for an explicit sign-in / success.
+    // Nothing to flush. Drain a stale "unreachable"; leave "unauthorized"
+    // for an explicit sign-in / success.
     const r = await chrome.storage.local.get("lastIngestError");
     if (
       r.lastIngestError &&
@@ -291,8 +173,7 @@ async function flushRelayless(): Promise<void> {
     // ok means sendBatch processed every snapshotted event — each was either
     // POSTed successfully (now in the SentSet) or skipped because it was
     // already sent. Clear exactly the entries we snapshotted by id, so any
-    // event queued concurrently (during the POST) survives. Mirrors the
-    // relay path, which only writes back the entries it read.
+    // event queued concurrently (during the POST) survives.
     const settled = new Set(entries.map((e) => e.id));
     const current = await loadOutbox();
     await saveOutbox(current.filter((e) => !settled.has(e.id)));

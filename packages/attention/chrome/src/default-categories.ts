@@ -10,9 +10,9 @@
 // `url`/`title` null — no per-thread/per-email data leaves the
 // extension.
 //
-// Slugs MUST be in the CATEGORY_VOCAB the Python side bootstraps tags
-// for (see fulcra_attention/fulcra.py CATEGORY_VOCAB). Unknown slugs
-// would get sanitised by the relay but wouldn't bind to a tag UUID.
+// Slugs MUST be in the CATEGORY_VOCAB the extension ensures tags for at
+// ingest time (see relayless/ensureDefinition). Unknown slugs would be
+// sanitised but wouldn't bind to a tag UUID.
 
 import type { CategoryMapping } from "./types";
 

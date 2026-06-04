@@ -1,8 +1,8 @@
 // chrome/tests/wizard.test.tsx
 //
-// The onboarding wizard's auth step (step 2) is transport-aware:
-//   relayless (default) → device-flow sign-in surface (reuses popup SignIn)
-//   relay               → daemon bearer-token paste form (unchanged)
+// The onboarding wizard's auth step (step 2) is the Fulcra device-flow
+// sign-in surface (reuses the popup SignIn). There is no longer a relay /
+// daemon paste-token path.
 //
 // startDeviceSignIn is mocked at the module boundary so the SignIn surface
 // embedded in the wizard drives without network/chrome identity.
@@ -100,7 +100,7 @@ async function gotoAuthStep(container: HTMLElement): Promise<void> {
 
 describe("Wizard auth step — relayless (default)", () => {
   test("shows the sign-in surface, NOT the token-paste input", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
+    await saveSettings(DEFAULT_SETTINGS);
     const { container } = await mount(<Wizard />);
     await gotoAuthStep(container);
 
@@ -111,7 +111,7 @@ describe("Wizard auth step — relayless (default)", () => {
   });
 
   test("completing sign-in advances the wizard to the destination step", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
+    await saveSettings(DEFAULT_SETTINGS);
     // First token check (mount) → null (signed out); after the flow → a token.
     let calls = 0;
     tokenImpl.getValidAccessToken.mockImplementation(async () =>
@@ -135,7 +135,7 @@ describe("Wizard auth step — relayless (default)", () => {
   });
 
   test("already signed in → 'Continue' advances to destination, no forced re-auth", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
+    await saveSettings(DEFAULT_SETTINGS);
     tokenImpl.getValidAccessToken.mockResolvedValue("EXISTING-TOKEN");
 
     const { container } = await mount(<Wizard />);
@@ -155,7 +155,7 @@ describe("Wizard auth step — relayless (default)", () => {
 describe("Wizard destination step — relayless", () => {
   /** Sign in (already-signed-in path) and land on the destination step. */
   async function gotoDestinationStep(): Promise<{ container: HTMLElement }> {
-    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
+    await saveSettings(DEFAULT_SETTINGS);
     tokenImpl.getValidAccessToken.mockResolvedValue("EXISTING-TOKEN");
     const { container } = await mount(<Wizard />);
     await gotoAuthStep(container);
@@ -237,38 +237,5 @@ describe("Wizard destination step — relayless", () => {
 
     expect(container.textContent).toContain("boom-save");
     expect(container.textContent).not.toContain("Scan your history");
-  });
-});
-
-describe("Wizard auth step — relay (unchanged)", () => {
-  test("shows the token-paste form and advances via saveTokenAndAdvance", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay" });
-    const { container } = await mount(<Wizard />);
-    await gotoAuthStep(container);
-
-    // Relay keeps the daemon paste form, not the sign-in surface.
-    expect(container.textContent).toContain("Connect to Fulcra Collect");
-    expect(container.textContent).not.toContain("Sign in with Fulcra");
-    const input = container.querySelector<HTMLInputElement>('input[type="password"]');
-    expect(input).not.toBeNull();
-
-    // Type a token and continue.
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )!.set!;
-      setter.call(input, "tok-123");
-      input!.dispatchEvent(new Event("input", { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    await clickButton(container, "Continue");
-
-    // Advanced to scan, and the token persisted to settings.
-    expect(container.textContent).toContain("Scan your history");
-    const { loadSettings } = await import("../src/storage");
-    expect((await loadSettings()).bearerToken).toBe("tok-123");
-    expect(signInImpl.run).not.toHaveBeenCalled();
   });
 });
