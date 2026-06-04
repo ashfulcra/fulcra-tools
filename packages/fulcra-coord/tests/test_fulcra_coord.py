@@ -7148,6 +7148,434 @@ class TestOnboardingHints(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Situational awareness — DUE-DATE / NOT-BEFORE scheduling for "blocked on you"
+# A task the human can't act on yet (future not_before) must NOT clutter the
+# needs-me plate / SessionStart banner; it surfaces as "upcoming" until its
+# not_before passes, at which point it becomes a real DUE-NOW ask.
+# ---------------------------------------------------------------------------
+
+class TestParseWhen(unittest.TestCase):
+    """schema.parse_when: stdlib date parser. Accepts ISO-8601 dates/datetimes
+    and relative offsets (Nd/Nh/Nm) relative to `now`; returns an ISO-Z string
+    or None on unparseable input. Pure + testable by passing `now`."""
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_iso_date(self):
+        self.assertEqual(schema.parse_when("2026-06-08", now=self.now),
+                         "2026-06-08T00:00:00Z")
+
+    def test_iso_datetime_z(self):
+        self.assertEqual(schema.parse_when("2026-06-08T18:00:00Z", now=self.now),
+                         "2026-06-08T18:00:00Z")
+
+    def test_relative_days(self):
+        # 5 days from 2026-06-03T12:00 -> 2026-06-08T12:00.
+        self.assertEqual(schema.parse_when("5d", now=self.now),
+                         "2026-06-08T12:00:00Z")
+
+    def test_relative_hours(self):
+        # 36h from 2026-06-03T12:00 -> 2026-06-05T00:00.
+        self.assertEqual(schema.parse_when("36h", now=self.now),
+                         "2026-06-05T00:00:00Z")
+
+    def test_relative_minutes(self):
+        self.assertEqual(schema.parse_when("10m", now=self.now),
+                         "2026-06-03T12:10:00Z")
+
+    def test_bad_input_returns_none(self):
+        for bad in ("", "   ", "tomorrow", "5x", "not-a-date", "5dd", "d5",
+                    None):
+            self.assertIsNone(schema.parse_when(bad, now=self.now),
+                              f"expected None for {bad!r}")
+
+    def test_default_now_is_used(self):
+        # With no `now`, a relative offset is anchored to datetime.now(utc);
+        # we only assert it produces a parseable ISO-Z (not None).
+        out = schema.parse_when("1d")
+        self.assertIsNotNone(out)
+        self.assertTrue(out.endswith("Z"))
+
+
+class TestMakeTaskScheduleFields(unittest.TestCase):
+    """make_task carries optional not_before/due (default None), and
+    task_summary round-trips them so the rebuilt views see them."""
+
+    def test_defaults_none(self):
+        t = make_task(title="x", workstream="general", agent="a")
+        self.assertIsNone(t["not_before"])
+        self.assertIsNone(t["due"])
+
+    def test_stored_when_given(self):
+        t = make_task(title="x", workstream="general", agent="a",
+                      not_before="2026-06-08T00:00:00Z", due="2026-06-10T00:00:00Z")
+        self.assertEqual(t["not_before"], "2026-06-08T00:00:00Z")
+        self.assertEqual(t["due"], "2026-06-10T00:00:00Z")
+
+    def test_task_summary_carries_schedule_fields(self):
+        t = make_task(title="x", workstream="general", agent="a",
+                      not_before="2026-06-08T00:00:00Z", due="2026-06-10T00:00:00Z")
+        s = schema.task_summary(t)
+        self.assertEqual(s["not_before"], "2026-06-08T00:00:00Z")
+        self.assertEqual(s["due"], "2026-06-10T00:00:00Z")
+
+    def test_task_summary_defaults_none_on_old_body(self):
+        # A pre-feature body missing the keys summarizes to None, not KeyError.
+        t = make_task(title="x", workstream="general", agent="a")
+        t.pop("not_before", None)
+        t.pop("due", None)
+        s = schema.task_summary(t)
+        self.assertIsNone(s["not_before"])
+        self.assertIsNone(s["due"])
+
+
+class TestNeedsHumanNotBeforeGating(unittest.TestCase):
+    """views.needs_human gates DUE-NOW on not_before: a future not_before is
+    EXCLUDED from the due-now plate; absent/empty/past not_before behaves as
+    today. The existing broadcast/needs:human/open-status rules are intact."""
+
+    def _t(self, tid, assignee="human", status="blocked", not_before=None,
+           updated="2026-06-01T00:00:00Z"):
+        t = schema.make_task(title=tid, workstream="general", agent="o",
+                             owner_agent="o", assignee=assignee,
+                             not_before=not_before)
+        t["status"] = status
+        t["updated_at"] = updated
+        return t
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_future_not_before_excluded(self):
+        from fulcra_coord.views import needs_human
+        tasks = [self._t("nest-reauth", not_before="2026-06-08T00:00:00Z")]
+        self.assertEqual(needs_human(tasks, "human", now=self.now), [])
+
+    def test_past_not_before_included(self):
+        from fulcra_coord.views import needs_human
+        tasks = [self._t("ready", not_before="2026-06-01T00:00:00Z")]
+        self.assertEqual([s["title"] for s in needs_human(tasks, "human", now=self.now)],
+                         ["ready"])
+
+    def test_absent_not_before_included(self):
+        from fulcra_coord.views import needs_human
+        tasks = [self._t("plain", not_before=None)]
+        self.assertEqual([s["title"] for s in needs_human(tasks, "human", now=self.now)],
+                         ["plain"])
+
+    def test_empty_string_not_before_included(self):
+        from fulcra_coord.views import needs_human
+        t = self._t("emptystr")
+        t["not_before"] = ""
+        self.assertEqual([s["title"] for s in needs_human([t], "human", now=self.now)],
+                         ["emptystr"])
+
+    def test_existing_broadcast_and_status_behavior_preserved(self):
+        from fulcra_coord.views import needs_human
+        tasks = [
+            self._t("broadcast", assignee="*"),
+            self._t("done-one", status="done"),
+            self._t("real", assignee="human"),
+        ]
+        self.assertEqual([s["title"] for s in needs_human(tasks, "human", now=self.now)],
+                         ["real"])
+
+    def test_default_now_when_omitted(self):
+        # No `now` -> resolves to wall-clock; a far-future not_before is still
+        # excluded; an absent one is still included.
+        from fulcra_coord.views import needs_human
+        future = self._t("future", not_before="2099-01-01T00:00:00Z")
+        plain = self._t("plain")
+        out = needs_human([future, plain], "human")
+        self.assertEqual([s["title"] for s in out], ["plain"])
+
+
+class TestUpcomingForHuman(unittest.TestCase):
+    """views.upcoming_for_human: future-not_before items (same human-match /
+    open-status / broadcast rules) within `within_days`, sorted by not_before
+    then due, each carrying not_before + due for the UI."""
+
+    def _t(self, tid, assignee="human", status="blocked", not_before=None,
+           due=None, updated="2026-06-01T00:00:00Z"):
+        t = schema.make_task(title=tid, workstream="general", agent="o",
+                             owner_agent="o", assignee=assignee,
+                             not_before=not_before, due=due)
+        t["status"] = status
+        t["updated_at"] = updated
+        return t
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_includes_future_within_window(self):
+        from fulcra_coord.views import upcoming_for_human
+        tasks = [self._t("soon", not_before="2026-06-06T00:00:00Z",
+                         due="2026-06-08T00:00:00Z")]
+        out = upcoming_for_human(tasks, "human", now=self.now, within_days=7)
+        self.assertEqual([s["title"] for s in out], ["soon"])
+        self.assertEqual(out[0]["not_before"], "2026-06-06T00:00:00Z")
+        self.assertEqual(out[0]["due"], "2026-06-08T00:00:00Z")
+
+    def test_excludes_due_now(self):
+        # An item already actionable (past not_before) is NOT upcoming.
+        from fulcra_coord.views import upcoming_for_human
+        tasks = [self._t("ready", not_before="2026-06-01T00:00:00Z")]
+        self.assertEqual(upcoming_for_human(tasks, "human", now=self.now), [])
+
+    def test_excludes_far_future(self):
+        from fulcra_coord.views import upcoming_for_human
+        tasks = [self._t("far", not_before="2026-07-01T00:00:00Z")]
+        self.assertEqual(upcoming_for_human(tasks, "human", now=self.now,
+                                            within_days=7), [])
+
+    def test_excludes_absent_not_before(self):
+        from fulcra_coord.views import upcoming_for_human
+        tasks = [self._t("plain", not_before=None)]
+        self.assertEqual(upcoming_for_human(tasks, "human", now=self.now), [])
+
+    def test_sorted_by_not_before_then_due(self):
+        from fulcra_coord.views import upcoming_for_human
+        tasks = [
+            self._t("b-later-nb", not_before="2026-06-07T00:00:00Z",
+                    due="2026-06-09T00:00:00Z"),
+            self._t("a-earlier-nb", not_before="2026-06-05T00:00:00Z",
+                    due="2026-06-09T00:00:00Z"),
+            self._t("a-earlier-nb-earlier-due", not_before="2026-06-05T00:00:00Z",
+                    due="2026-06-06T00:00:00Z"),
+        ]
+        out = upcoming_for_human(tasks, "human", now=self.now, within_days=7)
+        self.assertEqual([s["title"] for s in out],
+                         ["a-earlier-nb-earlier-due", "a-earlier-nb", "b-later-nb"])
+
+    def test_respects_broadcast_and_open_status(self):
+        from fulcra_coord.views import upcoming_for_human
+        tasks = [
+            self._t("broadcast", assignee="*", not_before="2026-06-06T00:00:00Z"),
+            self._t("done", status="done", not_before="2026-06-06T00:00:00Z"),
+            self._t("real", not_before="2026-06-06T00:00:00Z"),
+        ]
+        self.assertEqual([s["title"] for s in upcoming_for_human(
+            tasks, "human", now=self.now)], ["real"])
+
+
+class TestEquivalenceWithScheduleFields(unittest.TestCase):
+    """The linchpin equivalence (build_all_views(bodies)==build_all_views(
+    summaries)) must still hold once tasks carry not_before/due."""
+
+    def test_equivalence_with_schedule_fields(self):
+        tasks = _make_representative_tasks()
+        # Stamp schedule fields onto a couple of tasks (one future, one past).
+        tasks[0]["not_before"] = "2026-06-10T00:00:00Z"
+        tasks[0]["due"] = "2026-06-12T00:00:00Z"
+        tasks[1]["not_before"] = "2026-06-01T00:00:00Z"
+        summaries = [schema.task_summary(t) for t in tasks]
+        from unittest.mock import patch
+        from datetime import datetime, timezone
+        with patch("fulcra_coord.views._now") as mock_now:
+            mock_now.return_value = datetime(2026, 6, 3, tzinfo=timezone.utc)
+            from_full = build_all_views(tasks)
+            from_summaries = build_all_views(summaries)
+        for name in from_full:
+            self.assertEqual(from_full[name], from_summaries[name],
+                             f"view {name!r} differs with schedule fields")
+
+
+class TestBlockOnUserSchedule(unittest.TestCase):
+    """`block --on-user --not-before <when> --due <when>` parses and stores the
+    schedule fields on the task; a future not_before keeps it off the DUE-NOW
+    plate and onto the upcoming list."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        os.environ.pop("FULCRA_COORD_HUMAN", None)
+        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        self.fake_backend = ["false"]
+
+    def tearDown(self):
+        for k in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "FULCRA_COORD_AGENT",
+                  "FULCRA_COORD_HUMAN", "FULCRA_COORD_ANNOTATIONS"):
+            os.environ.pop(k, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ns(self, **kw):
+        kw.setdefault("not_before", None)
+        kw.setdefault("due", None)
+        return types.SimpleNamespace(**kw)
+
+    def _make_active(self, title, owner="claude-code:host:repo"):
+        from fulcra_coord.cli import cmd_start
+        cmd_start(self._ns(title=title, workstream="devops", agent=owner,
+                           kind="ops", priority="P2", summary="", next="",
+                           surface=None), backend=self.fake_backend)
+        task = next(t for t in cache.list_cached_tasks() if t["title"] == title)
+        active = apply_transition(task, "active", by=owner)
+        cache.write_cached_task(active)
+        return task["id"]
+
+    def test_block_on_user_stores_parsed_schedule(self):
+        from fulcra_coord.cli import cmd_block
+        tid = self._make_active("nest-reauth")
+        cmd_block(self._ns(task_id=tid, blocked_on=None,
+                           on_user="re-auth Nest", agent=None,
+                           not_before="2026-06-08", due="2026-06-08T18:00:00Z"),
+                  backend=self.fake_backend)
+        t = cache.read_cached_task(tid)
+        self.assertEqual(t["not_before"], "2026-06-08T00:00:00Z")
+        self.assertEqual(t["due"], "2026-06-08T18:00:00Z")
+
+    def test_block_on_user_no_schedule_leaves_none(self):
+        from fulcra_coord.cli import cmd_block
+        tid = self._make_active("plain")
+        cmd_block(self._ns(task_id=tid, blocked_on=None, on_user="do it",
+                           agent=None), backend=self.fake_backend)
+        t = cache.read_cached_task(tid)
+        self.assertIsNone(t.get("not_before"))
+        self.assertIsNone(t.get("due"))
+
+
+class TestNeedsMeSchedulingJSON(unittest.TestCase):
+    """cmd_needs_me --format json separates DUE-NOW `items` from `upcoming`:
+    a future-not_before task is in upcoming, not items."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
+        os.environ.pop("FULCRA_COORD_AGENT", None)
+        os.environ.pop("FULCRA_COORD_HUMAN", None)
+        self.fake_backend = ["false"]
+
+    def tearDown(self):
+        for k in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "FULCRA_COORD_AGENT",
+                  "FULCRA_COORD_HUMAN"):
+            os.environ.pop(k, None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed_blocked(self, title, not_before=None, due=None):
+        # Build a blocked-on-human task directly in the cache (a few days out).
+        t = schema.make_task(title=title, workstream="general",
+                             agent="claude-code:h:r", owner_agent="claude-code:h:r",
+                             assignee="human", not_before=not_before, due=due)
+        t["status"] = "blocked"
+        t["blocked_on"] = "do the thing"
+        t["tags"] = sorted(set(t.get("tags", []) + ["needs:human"]))
+        cache.write_cached_task(t)
+        return t["id"]
+
+    def _run_json(self):
+        import io, contextlib
+        from fulcra_coord.cli import cmd_needs_me
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_needs_me(types.SimpleNamespace(human=None, format="json", all=False),
+                         backend=self.fake_backend)
+        return json.loads(buf.getvalue())
+
+    def test_due_now_vs_upcoming_split(self):
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        soon = (now + timedelta(days=3)).isoformat().replace("+00:00", "Z")
+        self._seed_blocked("ready-now", not_before=None)
+        self._seed_blocked("future-task", not_before=soon)
+        out = self._run_json()
+        item_titles = [i["title"] for i in out["items"]]
+        upcoming_titles = [i["title"] for i in out["upcoming"]]
+        self.assertIn("ready-now", item_titles)
+        self.assertNotIn("future-task", item_titles)
+        self.assertIn("future-task", upcoming_titles)
+        # count reflects only due-now items, never upcoming.
+        self.assertEqual(out["count"], len(out["items"]))
+
+
+class TestSessionStartUpcomingBanner(unittest.TestCase):
+    """SessionStart banner: the ⛔ headline counts ONLY due-now `items`; a
+    non-empty `upcoming` adds a muted "(+N upcoming)" line and NEVER inflates
+    the headline count. A future-only needs-me yields no ⛔ headline at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
+        fake = os.path.join(self.bin, "fulcra-coord")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env bash\n"
+                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
+                    'if [ "$1" = "needs-me" ]; then cat "%s"; exit 0; fi\n'
+                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'exit 0\n'
+                    % (os.path.join(self.tmp, "status.json"),
+                       os.path.join(self.tmp, "needsme.json")))
+        os.chmod(fake, 0o755)
+        from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
+        from fulcra_coord import claude_code as cc
+        self.hooks = os.path.join(self.tmp, "hooks"); os.makedirs(self.hooks)
+        out = os.path.join(self.hooks, "session-start.sh")
+        with open(out, "w") as f:
+            f.write(cc.SESSION_START_SH.replace(
+                PLACEHOLDER_ARGV, materialize_argv([fake])))
+        os.chmod(out, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, statusjson="{}", needsme="{}"):
+        with open(os.path.join(self.tmp, "status.json"), "w") as f:
+            f.write(statusjson)
+        with open(os.path.join(self.tmp, "needsme.json"), "w") as f:
+            f.write(needsme)
+        env = dict(os.environ); env["PATH"] = self.bin + os.pathsep + env["PATH"]
+        return subprocess.run(["bash", os.path.join(self.hooks, "session-start.sh")],
+                              input=json.dumps({"cwd": self.tmp}),
+                              capture_output=True, text=True, env=env)
+
+    def test_headline_counts_only_due_now(self):
+        needsme = json.dumps({"human": "ash", "count": 1, "items": [
+            {"id": "TASK-now", "title": "ready", "status": "blocked",
+             "owner_agent": "claude-code:h:r", "blocked_on": "approve it",
+             "next_action": "", "updated_at": "2026-06-01T00:00:00Z"}],
+            "upcoming": [
+            {"id": "TASK-future", "title": "nest reauth", "status": "blocked",
+             "owner_agent": "claude-code:h:r", "blocked_on": "re-auth",
+             "not_before": "2099-01-01T00:00:00Z", "due": "2099-01-02T00:00:00Z"}]})
+        r = self._run(json.dumps({"active": []}), needsme)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("BLOCKED ON YOU (1)", ctx)
+        self.assertIn("(+1 upcoming)", ctx)
+        # The upcoming item must NOT appear in the headline list itself.
+        self.assertNotIn("TASK-future", ctx.split("(+1 upcoming)")[0]
+                         if "(+1 upcoming)" in ctx else ctx)
+
+    def test_no_upcoming_line_when_empty(self):
+        needsme = json.dumps({"human": "ash", "count": 1, "items": [
+            {"id": "TASK-now", "title": "ready", "status": "blocked",
+             "owner_agent": "claude-code:h:r", "blocked_on": "approve it",
+             "next_action": "", "updated_at": "2026-06-01T00:00:00Z"}],
+            "upcoming": []})
+        r = self._run(json.dumps({"active": []}), needsme)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("BLOCKED ON YOU (1)", ctx)
+        self.assertNotIn("upcoming", ctx)
+
+    def test_future_only_yields_no_headline(self):
+        # needs-me with ONLY upcoming items (no due-now) -> no ⛔ headline. With
+        # a clean bus otherwise, the hook stays silent.
+        needsme = json.dumps({"human": "ash", "count": 0, "items": [],
+            "upcoming": [
+            {"id": "TASK-future", "title": "nest reauth", "status": "blocked",
+             "owner_agent": "claude-code:h:r", "blocked_on": "re-auth",
+             "not_before": "2099-01-01T00:00:00Z", "due": "2099-01-02T00:00:00Z"}]})
+        r = self._run(json.dumps({"active": []}), needsme)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("BLOCKED ON YOU", r.stdout)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

@@ -1758,6 +1758,38 @@ def _age_str(updated_at: str) -> str:
     return f"{int(secs // 86400)}d"
 
 
+def _until_str(when: str) -> str:
+    """Time-until-actionable, e.g. "in 4d" / "in 18h" / "now". Best-effort:
+    an unparseable/empty value renders "soon" so the upcoming line never breaks
+    on a bad not_before."""
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return "soon"
+    secs = (dt - datetime.now(timezone.utc)).total_seconds()
+    if secs <= 0:
+        return "now"
+    if secs < 3600:
+        return f"in {int(secs // 60)}m"
+    if secs < 86400:
+        return f"in {int(secs // 3600)}h"
+    return f"in {int(secs // 86400)}d"
+
+
+def _due_str(due: str) -> str:
+    """A compact calendar date for a deadline, e.g. "Jun 8". Empty/unparseable
+    -> "" so the caller can drop the "(due ...)" clause entirely."""
+    from datetime import datetime
+    if not due:
+        return ""
+    try:
+        dt = datetime.fromisoformat(due.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return ""
+    return dt.strftime("%b %-d")
+
+
 def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
     """THE "what's blocked on ME" view (situational awareness piece 3).
 
@@ -1769,35 +1801,61 @@ def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
     The human is resolved via ``--human`` > ``resolve_human()`` (env > config >
     default ``human``); matching is prefix-aware so ``human`` and ``ash`` both
     work. ``--format json`` for tooling (the SessionStart banner + the listener).
+
+    SCHEDULING: the DUE-NOW section (``items``) lists only asks actionable now;
+    asks with a FUTURE ``not_before`` are split into a compact ``upcoming``
+    section so a task the human can't act on yet (e.g. a re-auth that opens next
+    week) doesn't clutter the plate. JSON returns
+    ``{human, count, items, upcoming}`` — ``count`` reflects DUE-NOW only.
     """
     human = getattr(args, "human", None) or identity.resolve_human()
     out_format = getattr(args, "format", "table")
+    show_all = getattr(args, "all", False)
 
-    # needs_human reads status/assignee/tags — all on a summary; no body fetch.
+    # needs_human / upcoming_for_human read status/assignee/tags/not_before/due —
+    # all on a summary; no body fetch. now=None -> wall-clock.
     all_tasks = _load_task_summaries(backend=backend)
     items = views.needs_human(all_tasks, human)
+    upcoming = views.upcoming_for_human(all_tasks, human)
 
     if out_format == "json":
-        _print_json({"human": human, "count": len(items), "items": items})
+        _print_json({"human": human, "count": len(items), "items": items,
+                     "upcoming": upcoming})
         return 0
 
-    if not items:
+    if not items and not upcoming:
         _info(f"Nothing blocked on you ({human}).")
         return 0
 
-    print(f"\n{'='*60}")
-    print(f"  ⛔ BLOCKED ON YOU ({len(items)}) — {human}")
-    print(f"{'='*60}")
-    for s in items:
-        ask = (s.get("blocked_on") or s.get("next_action") or "").strip()
-        frm = s.get("owner_agent", "?")
-        age = _age_str(s.get("updated_at", ""))
-        print(f"  [{s.get('status','?').upper()}] {s.get('id','')}  "
-              f"{s.get('title','')[:50]}  ({age})")
-        print(f"        from: {frm}")
-        if ask:
-            print(f"        needs: {ask[:80]}")
-    print()
+    if items:
+        print(f"\n{'='*60}")
+        print(f"  ⛔ BLOCKED ON YOU ({len(items)}) — {human}")
+        print(f"{'='*60}")
+        for s in items:
+            ask = (s.get("blocked_on") or s.get("next_action") or "").strip()
+            frm = s.get("owner_agent", "?")
+            age = _age_str(s.get("updated_at", ""))
+            print(f"  [{s.get('status','?').upper()}] {s.get('id','')}  "
+                  f"{s.get('title','')[:50]}  ({age})")
+            print(f"        from: {frm}")
+            if ask:
+                print(f"        needs: {ask[:80]}")
+        print()
+
+    # Upcoming: future-not_before asks within the window. Compact by default
+    # (just a count line) so it never competes with the DUE-NOW plate; --all
+    # expands each item inline ("[in 4d] <title> — <ask> (due Jun 8)").
+    if upcoming:
+        print(f"  Upcoming (next 7d): {len(upcoming)}")
+        if show_all or not items:
+            for s in upcoming:
+                when = _until_str(s.get("not_before") or "")
+                ask = (s.get("blocked_on") or s.get("next_action") or "").strip()
+                due = _due_str(s.get("due") or "")
+                due_clause = f" (due {due})" if due else ""
+                ask_clause = f" — {ask[:60]}" if ask else ""
+                print(f"    [{when}] {s.get('title','')[:50]}{ask_clause}{due_clause}")
+        print()
     return 0
 
 
@@ -2127,6 +2185,18 @@ def cmd_block(args: Any, backend: Optional[list[str]] = None) -> int:
         task["assignee"] = human
         if "needs:human" not in task.get("tags", []):
             task["tags"] = sorted(set(task.get("tags", []) + ["needs:human"]))
+        # Scheduling: --not-before gates when this surfaces as DUE-NOW on the
+        # human's plate; --due is the informational deadline. Both parsed via
+        # schema.parse_when (ISO date/datetime or relative Nd/Nh/Nm); an
+        # unparseable value resolves to None (treated as unset) so a typo never
+        # blocks the op. Only set when provided so an existing value isn't
+        # clobbered with None on a re-block without the flag.
+        not_before_raw = getattr(args, "not_before", None)
+        due_raw = getattr(args, "due", None)
+        if not_before_raw is not None:
+            task["not_before"] = schema.parse_when(not_before_raw)
+        if due_raw is not None:
+            task["due"] = schema.parse_when(due_raw)
 
     cache.write_cached_task(task)
 

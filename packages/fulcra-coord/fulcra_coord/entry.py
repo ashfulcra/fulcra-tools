@@ -176,6 +176,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--on-user", dest="on_user", default=None, metavar="ASK",
                     help="What you need the HUMAN to do — assigns the task to the "
                          "resolved human handle + tags needs:human")
+    sp.add_argument("--not-before", dest="not_before", default=None, metavar="WHEN",
+                    help="Don't surface as 'blocked on you NOW' until this time "
+                         "(ISO date/datetime or relative like 5d/36h/10m). Keeps "
+                         "a not-yet-actionable ask off the needs-me plate / banner "
+                         "until it's due, listing it under 'upcoming' meanwhile")
+    sp.add_argument("--due", default=None, metavar="WHEN",
+                    help="The deadline (ISO date/datetime or relative 5d/36h/10m) — "
+                         "drives upcoming ordering + urgency display; informational, "
+                         "does not gate visibility")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
     # ---- pause ----
@@ -336,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--human", default=None, metavar="HANDLE",
                     help="Whose plate (default: $FULCRA_COORD_HUMAN or persisted "
                          "human handle or 'human')")
+    sp.add_argument("--all", dest="all", action="store_true",
+                    help="Also list each upcoming (future not_before) item inline, "
+                         "not just the count")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- human ----

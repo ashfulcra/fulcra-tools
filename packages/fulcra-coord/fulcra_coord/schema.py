@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import SCHEMA_VERSION, task_file_path
@@ -105,6 +105,55 @@ def _validate_fields(
         )
 
 
+def parse_when(s: Optional[str], *, now: Optional[datetime] = None) -> Optional[str]:
+    """Parse a human/agent-supplied "when" into a canonical ISO-Z string.
+
+    Accepts, with NO third-party deps (the CLI is stdlib-only):
+      * ISO-8601 dates and datetimes — ``2026-06-08`` (midnight UTC) or
+        ``2026-06-08T18:00:00Z`` / with an explicit offset.
+      * Relative offsets ``<N>d`` / ``<N>h`` / ``<N>m`` (days/hours/minutes)
+        anchored to ``now`` — e.g. ``5d``, ``36h``, ``10m``.
+
+    Returns the resolved instant as ``...Z`` (UTC). Returns ``None`` on anything
+    unparseable so the caller can treat the field as simply unset rather than
+    erroring on a typo — a malformed ``--not-before`` should degrade to "no
+    gate", never block the whole ``block`` op.
+
+    Pure and unit-testable: pass ``now`` (defaults to ``datetime.now(utc)``) so
+    relative offsets are deterministic in tests.
+    """
+    if not s or not s.strip():
+        return None
+    s = s.strip()
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    # Relative offset: <N><unit> where unit is d/h/m. Matched first so a bare
+    # "5d" never falls through to the ISO parser (which would reject it).
+    m = re.fullmatch(r"(\d+)([dhm])", s)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        delta = {
+            "d": timedelta(days=n),
+            "h": timedelta(hours=n),
+            "m": timedelta(minutes=n),
+        }[unit]
+        return (now + delta).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # ISO-8601. fromisoformat accepts a bare date (-> midnight, naive) and full
+    # datetimes; normalize "Z" to "+00:00" first since older fromisoformat
+    # rejects the literal "Z". A naive result is assumed UTC (matches how the
+    # rest of the codebase stamps times).
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def make_task(
     *,
     title: str,
@@ -119,6 +168,8 @@ def make_task(
     collaborators: Optional[list[str]] = None,
     summary: str = "",
     next_action: str = "",
+    not_before: Optional[str] = None,
+    due: Optional[str] = None,
     task_id: Optional[str] = None,
     dt: Optional[datetime] = None,
 ) -> dict[str, Any]:
@@ -169,6 +220,16 @@ def make_task(
         "current_summary": summary,
         "next_action": next_action,
         "blocked_on": None,
+        # Scheduling for "blocked on you" surfaces (both ISO-Z or None):
+        #   not_before — the GATING field. A task is not surfaced as DUE-NOW on
+        #     the human's plate / SessionStart banner until now >= not_before, so
+        #     a blocked-on-user ask the human can't act on yet (e.g. a re-auth
+        #     window that opens next week) stays off the plate as "upcoming"
+        #     instead of nagging every session.
+        #   due — the deadline. Purely informational: drives the upcoming-list
+        #     ordering and urgency display; it does NOT gate visibility.
+        "not_before": not_before,
+        "due": due,
         "claim": {
             "claimed_by": agent,
             "claimed_at": now_iso,
@@ -570,6 +631,15 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "current_summary": task.get("current_summary", ""),
         "next_action": task.get("next_action", ""),
         "blocked_on": task.get("blocked_on"),
+        # Scheduling fields, read with .get so a pre-feature body summarizes to
+        # None rather than KeyError-crashing the view (symmetric with
+        # assignee/priority above). These MUST be carried on the summary because
+        # the write path rebuilds views from the summaries aggregate, and
+        # needs_human / upcoming_for_human read not_before/due off the summary —
+        # omitting them would make build_all_views(summaries) diverge from
+        # build_all_views(bodies) (TestBuildAllViewsEquivalence).
+        "not_before": task.get("not_before"),
+        "due": task.get("due"),
         "tags": task.get("tags", []),
         "updated_at": task.get("updated_at", ""),
         # Flattened done timestamp (see docstring): the single key every
