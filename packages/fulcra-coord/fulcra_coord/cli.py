@@ -12,7 +12,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity
@@ -2081,6 +2081,84 @@ def _render_digest(digest: dict[str, Any], *, window: str) -> tuple[str, str]:
 
     note = "\n".join(sections).strip()
     return name, note
+
+
+def _digest_window_since(window: str, now: datetime) -> datetime:
+    """The lookback boundary for a digest window (returns a tz-aware UTC datetime).
+
+    morning → since the previous evening (~last 14h, so an overnight run still
+    reports yesterday-evening's work); evening → since this morning (~last 10h);
+    any other value (on-demand) → last 12h. Approximations on purpose: the digest
+    is a human-paced glance, not an exact ledger, and the per_agent completion
+    filter is a >= compare against this instant. Always parsed datetimes."""
+    hours = {"morning": 14, "evening": 10}.get(window, 12)
+    return now - timedelta(hours=hours)
+
+
+def _claim_digest_marker(window: str, now: datetime, *,
+                         backend: Optional[list[str]] = None) -> bool:
+    """Claim the per-window digest marker (real implementation in Task 5).
+
+    Stubbed to always grant the claim so the command is testable in isolation;
+    Task 5 replaces this with the Files-bus first-writer-wins guard."""
+    return True
+
+
+def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Write the operator's situational-awareness digest to the Fulcra timeline.
+
+    Loads the compact summaries aggregate + the presence roster (the same reads
+    needs-me / presence use — one download each, no body fetch), computes the
+    window's ``since``/``now``, builds the four-block digest, and renders it to a
+    timeline (name, note). ``--dry-run`` prints the rendered text and writes
+    NOTHING. ``--format json`` prints the structured digest (for tooling/tests).
+    Otherwise it claims the per-window dedup marker (first writer wins; others
+    no-op) and emits the moment on the ``Agent Tasks — Digest`` track.
+
+    BEST-EFFORT end to end: a failed marker claim or a failed emit is logged and
+    returns 0 — a scheduled tick must never error out."""
+    window = getattr(args, "window", None) or "ondemand"
+    out_format = getattr(args, "format", "table")
+    dry_run = getattr(args, "dry_run", False)
+    human = getattr(args, "human", None) or identity.resolve_human()
+
+    now = datetime.now(timezone.utc)
+    since = _digest_window_since(window, now)
+
+    summaries = _load_task_summaries(backend=backend)
+    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+    presence = (agg or {}).get("agents", []) if agg else []
+
+    digest = views.build_operator_digest(
+        summaries, presence, human=human, now=now, since=since)
+
+    if out_format == "json":
+        _print_json(digest)
+        return 0
+
+    name, note = _render_digest(digest, window=window)
+
+    if dry_run:
+        _info(f"[dry-run] {name}")
+        _info(note or "(nothing to report)")
+        return 0
+
+    # Any-agent dedup: claim the per-window marker first; if another agent
+    # already wrote this window (or the claim errored), skip — never risk a
+    # double, and never raise into a scheduled tick.
+    if not _claim_digest_marker(window, now, backend=backend):
+        _info(f"Digest for {window} already written (or marker claim failed) — skipping.")
+        return 0
+
+    wrote = False
+    try:
+        wrote = lifecycle_annotations.emit_digest_annotation(
+            name=name, note=note, window=window,
+            agent=identity.resolve_agent(), backend=backend)
+    except Exception:
+        wrote = False
+    _info(f"Digest ({window}): {'written' if wrote else 'not written (annotations off or error)'}.")
+    return 0
 
 
 def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:

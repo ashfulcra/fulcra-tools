@@ -220,3 +220,65 @@ class TestEmitDigestAnnotation(unittest.TestCase):
             ok = annotations.emit_digest_annotation(
                 name="n", note="b", window="morning", agent="claude-code:mb:repo")
         self.assertFalse(ok)
+
+
+from fulcra_coord import entry
+
+
+class TestDigestCommand(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self.summaries = [
+            _summary(id="B1", title="Re-auth", status="blocked",
+                     tags=["needs:human"], owner_agent="claude-code:mb:repo"),
+        ]
+        self.presence = {"agents": [{"agent": "claude-code:mb:repo",
+                                     "workstreams": ["devops"], "summary": "x",
+                                     "last_seen": "2026-06-04T17:55:00Z"}]}
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+
+    def _args(self, **over):
+        ns = types.SimpleNamespace(window="evening", format="table",
+                                   dry_run=False, human="ash")
+        for k, v in over.items():
+            setattr(ns, k, v)
+        return ns
+
+    def test_dry_run_writes_nothing(self):
+        with patch("fulcra_coord.cli._load_task_summaries", return_value=self.summaries), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
+             patch("fulcra_coord.cli.lifecycle_annotations.emit_digest_annotation") as emit:
+            rc = cli.cmd_digest(self._args(dry_run=True), backend=["false"])
+        self.assertEqual(rc, 0)
+        emit.assert_not_called()
+
+    def test_real_run_emits(self):
+        with patch("fulcra_coord.cli._load_task_summaries", return_value=self.summaries), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
+             patch("fulcra_coord.cli._claim_digest_marker", return_value=True), \
+             patch("fulcra_coord.cli.lifecycle_annotations.emit_digest_annotation",
+                   return_value=True) as emit:
+            rc = cli.cmd_digest(self._args(), backend=["false"])
+        self.assertEqual(rc, 0)
+        emit.assert_called_once()
+        _, kw = emit.call_args
+        self.assertEqual(kw["window"], "evening")
+        self.assertIn("on you", kw["name"])
+
+    def test_json_format_prints_structured_digest(self):
+        import io, contextlib
+        buf = io.StringIO()
+        with patch("fulcra_coord.cli._load_task_summaries", return_value=self.summaries), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
+             contextlib.redirect_stdout(buf):
+            rc = cli.cmd_digest(self._args(format="json"), backend=["false"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["schema"], "fulcra.coordination.operator_digest.v1")
+        self.assertEqual([s["id"] for s in payload["blocked_on_you"]], ["B1"])
+
+    def test_command_is_wired_into_map(self):
+        self.assertIs(entry.COMMAND_MAP["digest"], cli.cmd_digest)

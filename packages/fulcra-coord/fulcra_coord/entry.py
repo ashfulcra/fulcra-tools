@@ -314,6 +314,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="Whose inbox (default: $FULCRA_COORD_AGENT or derived)")
 
+    # ---- digest ----
+    sp = sub.add_parser("digest",
+                        help="Write the operator situational-awareness digest "
+                             "(blocked on you / upcoming / per-agent / stale) to "
+                             "the Fulcra timeline on its own 'Agent Tasks — Digest' track")
+    sp.add_argument("--window", choices=["morning", "evening"], default=None,
+                    help="Cadence window (sets the lookback + label); omit for on-demand")
+    sp.add_argument("--human", default=None, metavar="HANDLE",
+                    help="Whose plate (default: $FULCRA_COORD_HUMAN or persisted handle)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="Render + print the digest, write nothing to the timeline")
+
     # ---- identity ----
     sp = sub.add_parser("identity",
                         help="Show, set, or clear this host's declared agent id "
@@ -419,6 +432,7 @@ COMMAND_MAP = {
     "human": _cli.cmd_human,
     "annotations": _cli.cmd_annotations,
     "needs-me": _cli.cmd_needs_me,
+    "digest": _cli.cmd_digest,
     "resume": _cli.cmd_resume,
     "__session-task": _cli.cmd_session_task,
 }
