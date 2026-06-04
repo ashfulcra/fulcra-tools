@@ -875,11 +875,18 @@ def _digest_definition_cache_path():
 
 
 def _cached_digest_definition_id() -> Optional[str]:
+    """Return the cached digest definition id, or None on miss OR expiry.
+
+    Mirrors _cached_definition_id but uses the digest-specific cache file so the
+    "Agent Tasks" and "Agent Tasks — Digest" tracks cannot clobber each other
+    while still sharing the same TTL self-heal behavior.
+    """
     path = _digest_definition_cache_path()
     try:
         if path.exists():
-            did = json.loads(path.read_text()).get("id")
-            if did:
+            data = json.loads(path.read_text())
+            did = data.get("id")
+            if did and _is_fresh(data.get("written_at")):
                 return did
     except (OSError, json.JSONDecodeError):
         pass
@@ -887,11 +894,15 @@ def _cached_digest_definition_id() -> Optional[str]:
 
 
 def _store_digest_definition_id(def_id: str) -> None:
-    """Persist the resolved digest definition id (best-effort; a write failure
-    just re-resolves next time, never a failed annotation)."""
+    """Persist the resolved digest definition id with a TTL stamp.
+
+    Best-effort: a write failure just re-resolves next time, never a failed
+    annotation.
+    """
     try:
         cache.annotations_dir().mkdir(parents=True, exist_ok=True)
-        _digest_definition_cache_path().write_text(json.dumps({"id": def_id}))
+        _digest_definition_cache_path().write_text(
+            json.dumps({"id": def_id, "written_at": _cache_now_iso()}))
     except OSError:
         pass
 
@@ -1158,7 +1169,7 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
             "data": json.dumps(inner, sort_keys=True),
             "metadata": {
                 "data_type": "MomentAnnotation",
-                "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "recorded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 "tags": tag_ids,
                 "source": source,
                 "content_type": "application/json",

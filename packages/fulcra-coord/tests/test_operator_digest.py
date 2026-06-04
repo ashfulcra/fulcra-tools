@@ -76,6 +76,11 @@ class TestPerAgentAndWindows(unittest.TestCase):
         self.assertEqual(entry["liveness"], "live")
         self.assertEqual([s["id"] for s in entry["finished_since"]], ["R"])
 
+    def test_digest_now_and_since_use_fixed_microsecond_timestamps(self):
+        d = views.build_operator_digest([], [], human="ash", now=NOW, since=SINCE)
+        self.assertRegex(d["now"], r"\.\d{6}Z$")
+        self.assertRegex(d["since"], r"\.\d{6}Z$")
+
     def test_upcoming_and_stale_blocks(self):
         # upcoming: future not_before within 7d, blocked-on-user.
         up = _summary(id="U", status="waiting", tags=["needs:human"],
@@ -213,6 +218,19 @@ class TestEmitDigestAnnotation(unittest.TestCase):
                       def_posts[0][2].decode())
         # The digest definition id was cached separately from "Agent Tasks".
         self.assertEqual(annotations._cached_digest_definition_id(), "digest-def-1")
+        cached = json.loads(annotations._digest_definition_cache_path().read_text())
+        self.assertRegex(cached["written_at"], r"\.\d{6}Z$")
+        self.assertNotEqual(annotations._digest_definition_cache_path(),
+                            annotations._definition_cache_path())
+        # The digest cache must not clobber or populate the per-event definition
+        # cache file.
+        self.assertFalse(annotations._definition_cache_path().exists())
+
+        records = [c for c in calls
+                   if c[0] == "POST" and "/ingest/v1/record/batch" in c[1]]
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0][2].decode().splitlines()[0])
+        self.assertRegex(record["metadata"]["recorded_at"], r"\.\d{6}Z$")
 
     def test_best_effort_returns_false_on_no_token(self):
         os.environ.pop("FULCRA_ACCESS_TOKEN", None)
@@ -220,6 +238,20 @@ class TestEmitDigestAnnotation(unittest.TestCase):
             ok = annotations.emit_digest_annotation(
                 name="n", note="b", window="morning", agent="claude-code:mb:repo")
         self.assertFalse(ok)
+
+    def test_digest_definition_cache_obeys_ttl(self):
+        annotations._store_digest_definition_id("digest-def-fresh")
+        self.assertEqual(annotations._cached_digest_definition_id(), "digest-def-fresh")
+
+        old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        annotations._digest_definition_cache_path().write_text(
+            json.dumps({"id": "digest-def-stale", "written_at": old}))
+        self.assertIsNone(annotations._cached_digest_definition_id())
+
+        annotations._digest_definition_cache_path().write_text(
+            json.dumps({"id": "digest-def-legacy"}))
+        self.assertIsNone(annotations._cached_digest_definition_id())
 
 
 from fulcra_coord import entry
@@ -302,6 +334,7 @@ class TestDigestMarker(unittest.TestCase):
         self.assertTrue(granted)
         self.assertTrue(uploaded["path"].endswith("digest/markers/2026-06-04-evening.json"))
         self.assertEqual(uploaded["data"]["window"], "evening")
+        self.assertRegex(uploaded["data"]["claimed_at"], r"\.\d{6}Z$")
 
     def test_present_marker_is_noop(self):
         with patch("fulcra_coord.cli.remote.download_json",

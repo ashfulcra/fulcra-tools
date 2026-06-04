@@ -2132,7 +2132,7 @@ def _claim_digest_marker(window: str, now: datetime, *,
             "window": window,
             "date": now.astimezone(timezone.utc).strftime("%Y-%m-%d"),
             "by": identity.resolve_agent(),
-            "claimed_at": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "claimed_at": now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
         }
         return bool(remote.upload_json(marker, path, backend=backend))
     except Exception:
