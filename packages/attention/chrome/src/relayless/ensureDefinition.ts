@@ -48,6 +48,25 @@ export const ATTENTION_DEFINITION_DESCRIPTION =
  * (attention, web) as the leading tagIds. */
 export const ATTENTION_DEFINITION_TAG_NAMES = ["attention", "web"] as const;
 
+/**
+ * Slugify a per-browser identity label into a tag-safe token: lowercase,
+ * collapse any run of characters outside [a-z0-9] into a single "-", trim
+ * leading/trailing "-". An empty (or all-separator) label slugs to "browser"
+ * so the machine tag is never literally "machine:".
+ */
+export function slugifyIdentity(label: string): string {
+  const slug = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug === "" ? "browser" : slug;
+}
+
+/** The per-browser machine tag name for an identity label: "machine:<slug>". */
+export function machineTagName(label: string): string {
+  return `machine:${slugifyIdentity(label)}`;
+}
+
 /** The FULL create body for the Attention duration definition. Mirrors
  * wire.duration_definition_payload(name, description, tags, value_type,
  * unit) — annotation_type "duration", measurement_spec carrying
@@ -103,6 +122,11 @@ export interface EnsureOpts {
   /** Injectable storage for the resolved-id cache. Defaults to the extension
    * local storage area. */
   storage?: StorageArea;
+  /** The per-browser identity label. When non-empty, the resolved tagIds get a
+   * trailing `machine:<slug>` tag so records from this browser are
+   * distinguishable. Null/empty → no machine tag (fallback for users who
+   * skipped onboarding). */
+  identityLabel?: string | null;
 }
 
 /** Thrown when the API rejected the token (401). The flush layer maps this to
@@ -147,8 +171,8 @@ export async function ensureAttentionDefinitionAndTags(
 
   // Resolve the def's tag ids first (so a fresh create can attach them, same
   // as the daemon's resolver-create path which passes the resolved ids as
-  // create_extra).
-  const tagIds = await resolveAttentionTagIds(ctx);
+  // create_extra). A non-empty identity label appends a machine:<slug> tag.
+  const tagIds = await resolveAttentionTagIds(ctx, opts.identityLabel);
 
   // Adopt-by-name first; create only if absent.
   let definitionId = await findAttentionDefinition(ctx);
@@ -190,10 +214,11 @@ export async function listAttentionDestinations(
 export async function chooseAttentionDestination(
   opts: EnsureOpts,
   definitionId: string,
+  identityLabel?: string | null,
 ): Promise<ResolvedAttention> {
   const storage = storageFor(opts);
   const ctx = await apiCtx(opts);
-  const tagIds = await resolveAttentionTagIds(ctx);
+  const tagIds = await resolveAttentionTagIds(ctx, identityLabel);
   const resolved: ResolvedAttention = { definitionId, tagIds };
   await writeCache(storage, resolved);
   return resolved;
@@ -209,12 +234,39 @@ export async function chooseAttentionDestination(
 export async function createAttentionDestination(
   opts: EnsureOpts,
   name: string = ATTENTION_DEFINITION_NAME,
+  identityLabel?: string | null,
 ): Promise<ResolvedAttention> {
   const storage = storageFor(opts);
   const ctx = await apiCtx(opts);
-  const tagIds = await resolveAttentionTagIds(ctx);
+  const tagIds = await resolveAttentionTagIds(ctx, identityLabel);
   const definitionId = await createAttentionDefinition(ctx, tagIds, name);
   const resolved: ResolvedAttention = { definitionId, tagIds };
+  await writeCache(storage, resolved);
+  return resolved;
+}
+
+/**
+ * Re-resolve and rewrite the cached tagIds for a NEW identity label, keeping
+ * the existing definitionId. For the popup's "rename this browser" affordance.
+ * Requires an existing cached resolution (a definitionId) — if there is no
+ * cache yet (user never onboarded a destination), this is a no-op beyond the
+ * caller persisting the label, and it returns null. Otherwise it resolves
+ * [attention, web, machine:<slug>] (or just [attention, web] when the label is
+ * empty) and rewrites the cache. Throws UnauthorizedError on 401 / no token.
+ */
+export async function updateIdentity(
+  opts: EnsureOpts,
+  label: string | null,
+): Promise<ResolvedAttention | null> {
+  const storage = storageFor(opts);
+  const cached = await readCache(storage);
+  if (!cached) return null; // nothing to re-tag yet; caller persists the label
+  const ctx = await apiCtx(opts);
+  const tagIds = await resolveAttentionTagIds(ctx, label);
+  const resolved: ResolvedAttention = {
+    definitionId: cached.definitionId,
+    tagIds,
+  };
   await writeCache(storage, resolved);
   return resolved;
 }
@@ -249,11 +301,20 @@ async function apiCtx(opts: EnsureOpts): Promise<ApiCtx> {
 }
 
 /** Resolve the canonical Attention tag ids, in ATTENTION_DEFINITION_TAG_NAMES
- * order ([attention, web]). Shared by the ensure + choose + create paths. */
-async function resolveAttentionTagIds(ctx: ApiCtx): Promise<string[]> {
+ * order ([attention, web]), then — when `identityLabel` is non-empty — append
+ * the per-browser machine tag (machine:<slug>) so records from this browser
+ * carry a distinguishing tag. A null/empty label appends nothing. Shared by
+ * the ensure + choose + create + updateIdentity paths. */
+async function resolveAttentionTagIds(
+  ctx: ApiCtx,
+  identityLabel?: string | null,
+): Promise<string[]> {
   const tagIds: string[] = [];
   for (const name of ATTENTION_DEFINITION_TAG_NAMES) {
     tagIds.push(await resolveTag(ctx, name));
+  }
+  if (identityLabel && identityLabel.trim() !== "") {
+    tagIds.push(await resolveTag(ctx, machineTagName(identityLabel)));
   }
   return tagIds;
 }

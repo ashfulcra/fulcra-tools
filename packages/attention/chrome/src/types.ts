@@ -4,7 +4,7 @@
 export const CLIENT = "fulcra-attention-chrome/0.1.0";
 
 /**
- * The wire event posted to the Fulcra cloud ingest endpoint
+ * The wire event posted to the Fulcra API ingest endpoint
  * (/ingest/v1/record/batch) by the relayless sender.
  * Exactly one of {url, category} must be non-null.
  * start_time <= end_time <= now + 5min (enforced server-side).

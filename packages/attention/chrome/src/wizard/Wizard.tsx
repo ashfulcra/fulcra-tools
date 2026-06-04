@@ -14,6 +14,7 @@ import { backfillHistory } from "./backfill";
 import { setHeartbeatEnabled, hasHeartbeatPermission } from "../heartbeat-control";
 import { SignIn } from "../popup/SignIn";
 import { TokenStore } from "../relayless/tokenStore";
+import { whoami } from "../relayless/whoami";
 import {
   listAttentionDestinations,
   chooseAttentionDestination,
@@ -156,7 +157,7 @@ export function Wizard() {
       setStep("done");
     } catch (e) {
       // Surface the error so the user knows why nothing advanced —
-      // most likely Fulcra Cloud is unreachable or the sign-in token has
+      // most likely the Fulcra API is unreachable or the sign-in token has
       // expired and needs re-auth. Events stay in the outbox and will retry
       // on the next chrome.alarms tick, so this isn't data loss.
       setIngestError((e as Error).message ?? String(e));
@@ -300,7 +301,7 @@ function SignInStep(props: { onSignedIn: () => void }) {
     <>
       <h2>Sign in to Fulcra</h2>
       <p>
-        Connect this browser straight to Fulcra Cloud — no local app needed.
+        Connect this browser straight to the Fulcra API — no local app needed.
         We'll open a confirmation page; approve it and we'll bring you back
         here to choose where your attention is saved.
       </p>
@@ -332,11 +333,13 @@ function ChooseDestinationStep(props: {
   list?: typeof listAttentionDestinations;
   choose?: typeof chooseAttentionDestination;
   create?: typeof createAttentionDestination;
+  whoamiFn?: typeof whoami;
 }) {
   const tokenStore = useMemo(() => props.tokenStore ?? new TokenStore(), [props.tokenStore]);
   const list = props.list ?? listAttentionDestinations;
   const choose = props.choose ?? chooseAttentionDestination;
   const create = props.create ?? createAttentionDestination;
+  const whoamiFn = props.whoamiFn ?? whoami;
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -346,6 +349,9 @@ function ChooseDestinationStep(props: {
   const CREATE = "__create__";
   const [selected, setSelected] = useState<string>(CREATE);
   const [newName, setNewName] = useState(ATTENTION_DEFINITION_NAME);
+  // The per-browser identity label. Prefilled from the signed-in email
+  // ("<email> browser") on mount; required to continue.
+  const [identityLabel, setIdentityLabel] = useState("");
 
   // Build EnsureOpts.getToken from the relayless token accessor. force is
   // forwarded so a 401-retry path can refresh.
@@ -383,18 +389,45 @@ function ChooseDestinationStep(props: {
     return () => { cancelled = true; };
   }, [ensureOpts, list]);
 
+  // Prefill the identity label from the signed-in email. Best-effort: if
+  // whoami fails (offline, no email claim) the field stays empty and the
+  // placeholder guides the user. Runs once on mount.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await tokenStore.getValidAccessToken();
+        if (!token || cancelled) return;
+        const { label } = await whoamiFn(token);
+        if (cancelled || !label) return;
+        setIdentityLabel((cur) => (cur === "" ? `${label} browser` : cur));
+        console.info("[wizard:destination] identity prefilled from whoami");
+      } catch {
+        // best-effort prefill only
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [tokenStore, whoamiFn]);
+
+  const labelBlank = identityLabel.trim() === "";
+
   async function onContinue(): Promise<void> {
-    if (saving || loading) return;
+    if (saving || loading || labelBlank) return;
     setSaving(true);
     setError(null);
+    const label = identityLabel.trim();
     try {
+      // Persist the identity label first so capture (and a re-run of the
+      // wizard) sees it even if the destination call fails partway.
+      const cur = await loadSettings();
+      await saveSettings({ ...cur, identityLabel: label });
       if (selected === CREATE) {
         const name = newName.trim() || ATTENTION_DEFINITION_NAME;
         console.info("[wizard:destination] choice: create", { name });
-        await create(ensureOpts, name);
+        await create(ensureOpts, name, label);
       } else {
         console.info("[wizard:destination] choice: reuse", { id: selected });
-        await choose(ensureOpts, selected);
+        await choose(ensureOpts, selected, label);
       }
       props.onNext();
     } catch (e) {
@@ -410,6 +443,24 @@ function ChooseDestinationStep(props: {
     <>
       <h2>Where your attention is saved</h2>
       <p>Choose where your browsing attention is saved in Fulcra.</p>
+
+      <div style={{ margin: "12px 0" }}>
+        <label style={{ display: "block", fontWeight: 600, marginBottom: 4 }}>
+          Name this browser
+        </label>
+        <input
+          type="text"
+          value={identityLabel}
+          onChange={(e) => setIdentityLabel(e.target.value)}
+          disabled={saving}
+          placeholder="e.g. Work MBP — Chrome"
+          style={{ width: "100%", boxSizing: "border-box" }}
+        />
+        <span className="muted" style={{ display: "block", marginTop: 4 }}>
+          All your browsers share one Attention line; this label is how you'll
+          tell them apart.
+        </span>
+      </div>
 
       {loading && <p className="muted">Loading your Fulcra annotations…</p>}
 
@@ -478,7 +529,7 @@ function ChooseDestinationStep(props: {
         <button
           className="primary"
           onClick={() => void onContinue()}
-          disabled={loading || saving}
+          disabled={loading || saving || labelBlank}
         >
           {saving ? "Saving…" : "Continue →"}
         </button>
@@ -868,7 +919,7 @@ function IngestStep(props: {
           <strong>Backfill failed.</strong> {props.error}
           <br />
           <span style={{ color: "var(--fa-muted)" }}>
-            Most likely cause: Fulcra Cloud is temporarily unreachable, or your
+            Most likely cause: the Fulcra API is temporarily unreachable, or your
             sign-in has expired and needs to be renewed (sign in again from the
             popup). Queued events stay in the outbox and will retry
             automatically — you can finish the wizard and check the popup's
@@ -908,7 +959,7 @@ function DoneStep({ ingestComplete }: { ingestComplete: boolean }) {
         </p>
         {ingestComplete && (
           <p style={{ margin: "10px 0 0" }}>
-            ✓ Back-filled history queued for Fulcra Cloud. The outbox will drain in the background.
+            ✓ Back-filled history queued for the Fulcra API. The outbox will drain in the background.
           </p>
         )}
       </div>
