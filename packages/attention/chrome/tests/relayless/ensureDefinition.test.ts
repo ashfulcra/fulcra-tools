@@ -2,6 +2,9 @@
 import { describe, test, expect, vi } from "vitest";
 import {
   ensureAttentionDefinitionAndTags,
+  listAttentionDestinations,
+  chooseAttentionDestination,
+  createAttentionDestination,
   clearResolvedAttention,
   UnauthorizedError,
   ATTENTION_DEFINITION_NAME,
@@ -197,5 +200,122 @@ describe("ensureAttentionDefinitionAndTags", () => {
     await expect(
       ensureAttentionDefinitionAndTags({ getToken, fetch: fetchFn, storage }),
     ).rejects.toBeInstanceOf(UnauthorizedError);
+  });
+});
+
+describe("listAttentionDestinations", () => {
+  test("returns only live Attention duration defs, oldest-first, isAutoPick on first", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: {},
+      defs: [
+        { id: "deleted", name: "Attention", annotation_type: "duration", deleted_at: "2026-02-02T00:00:00Z", created_at: "2026-01-01T00:00:00Z" },
+        { id: "moment", name: "Attention", annotation_type: "moment", deleted_at: null, created_at: "2026-01-01T00:00:00Z" },
+        { id: "otherName", name: "Focus", annotation_type: "duration", deleted_at: null, created_at: "2026-01-01T00:00:00Z" },
+        { id: "newer", name: "Attention", annotation_type: "duration", deleted_at: null, created_at: "2026-03-01T00:00:00Z" },
+        { id: "oldest", name: "Attention", annotation_type: "duration", deleted_at: null, created_at: "2026-02-15T00:00:00Z" },
+      ],
+    });
+    const out = await listAttentionDestinations({ getToken, fetch: fetchFn, storage });
+    expect(out.map((d) => d.id)).toEqual(["oldest", "newer"]);
+    expect(out[0]).toEqual({
+      id: "oldest",
+      name: "Attention",
+      createdAt: "2026-02-15T00:00:00Z",
+      isAutoPick: true,
+    });
+    expect(out[1].isAutoPick).toBe(false);
+    expect(calls.defGets).toBe(1);
+  });
+
+  test("returns an empty list when no Attention defs exist", async () => {
+    const storage = memStorage();
+    const { fetchFn } = makeApi({ tags: {}, defs: [] });
+    const out = await listAttentionDestinations({ getToken, fetch: fetchFn, storage });
+    expect(out).toEqual([]);
+  });
+
+  test("throws UnauthorizedError when not signed in", async () => {
+    const storage = memStorage();
+    const { fetchFn } = makeApi({ tags: {}, defs: [] });
+    const noToken = vi.fn(async () => null);
+    await expect(
+      listAttentionDestinations({ getToken: noToken, fetch: fetchFn, storage }),
+    ).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
+describe("chooseAttentionDestination", () => {
+  test("resolves tag ids and caches {definitionId, tagIds} with the chosen id", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web" },
+      defs: [],
+    });
+    const res = await chooseAttentionDestination(
+      { getToken, fetch: fetchFn, storage },
+      "chosen-def",
+    );
+    expect(res).toEqual({
+      definitionId: "chosen-def",
+      tagIds: ["tag-attn", "tag-web"],
+    });
+    expect(calls.defPosts).toHaveLength(0); // never creates
+    expect(calls.tagGets).toEqual(["attention", "web"]);
+    // Cached so capture reads exactly this destination.
+    const cached = await ensureAttentionDefinitionAndTags({ getToken, fetch: fetchFn, storage });
+    expect(cached).toEqual(res);
+  });
+
+  test("throws UnauthorizedError when not signed in", async () => {
+    const storage = memStorage();
+    const { fetchFn } = makeApi({ tags: {}, defs: [] });
+    const noToken = vi.fn(async () => null);
+    await expect(
+      chooseAttentionDestination({ getToken: noToken, fetch: fetchFn, storage }, "x"),
+    ).rejects.toBeInstanceOf(UnauthorizedError);
+  });
+});
+
+describe("createAttentionDestination", () => {
+  test("POSTs a create with the given name and caches the new id", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web" },
+      defs: [],
+      defCreateId: "fresh-def",
+    });
+    const res = await createAttentionDestination(
+      { getToken, fetch: fetchFn, storage },
+      "My Attention",
+    );
+    expect(res.definitionId).toBe("fresh-def");
+    expect(res.tagIds).toEqual(["tag-attn", "tag-web"]);
+    expect(calls.defPosts).toHaveLength(1);
+    expect(calls.defPosts[0]).toEqual({
+      annotation_type: "duration",
+      name: "My Attention",
+      description: ATTENTION_DEFINITION_DESCRIPTION,
+      tags: ["tag-attn", "tag-web"],
+      measurement_spec: {
+        measurement_type: "duration",
+        value_type: "duration",
+        unit: null,
+      },
+    });
+    const cached = await ensureAttentionDefinitionAndTags({ getToken, fetch: fetchFn, storage });
+    expect(cached).toEqual(res);
+  });
+
+  test("defaults the name to ATTENTION_DEFINITION_NAME", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: { attention: "a", web: "w" },
+      defs: [],
+      defCreateId: "fresh-def",
+    });
+    await createAttentionDestination({ getToken, fetch: fetchFn, storage });
+    expect((calls.defPosts[0] as { name: string }).name).toBe(ATTENTION_DEFINITION_NAME);
   });
 });

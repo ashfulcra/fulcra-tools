@@ -52,10 +52,13 @@ export const ATTENTION_DEFINITION_TAG_NAMES = ["attention", "web"] as const;
  * wire.duration_definition_payload(name, description, tags, value_type,
  * unit) — annotation_type "duration", measurement_spec carrying
  * measurement_type "duration", value_type "duration", unit null. */
-function attentionCreatePayload(tagIds: string[]): Record<string, unknown> {
+function attentionCreatePayload(
+  tagIds: string[],
+  name: string = ATTENTION_DEFINITION_NAME,
+): Record<string, unknown> {
   return {
     annotation_type: "duration",
-    name: ATTENTION_DEFINITION_NAME,
+    name,
     description: ATTENTION_DEFINITION_DESCRIPTION,
     tags: tagIds,
     measurement_spec: {
@@ -77,6 +80,21 @@ export interface ResolvedAttention {
 }
 
 const RESOLVED_KEY = "relaylessResolvedAttention";
+
+/** A user-selectable Attention destination definition. Surfaced by the
+ * onboarding wizard so the user can SEE and CHOOSE where browsing attention is
+ * saved instead of having it resolved silently. */
+export interface AttentionDestination {
+  /** The annotation-definition id. */
+  id: string;
+  /** The definition name (always "Attention" — that's the filter predicate). */
+  name: string;
+  /** ISO created_at, or null when the API omitted it. */
+  createdAt: string | null;
+  /** True for the one `ensureAttentionDefinitionAndTags` would auto-adopt
+   * (the oldest live def — index 0 after the oldest-first sort). */
+  isAutoPick: boolean;
+}
 
 export interface EnsureOpts {
   /** Return a valid Bearer access token (null when not signed in). */
@@ -119,25 +137,18 @@ interface DefinitionRow {
 export async function ensureAttentionDefinitionAndTags(
   opts: EnsureOpts,
 ): Promise<ResolvedAttention> {
-  const storage = opts.storage ?? defaultLocalStorageArea();
-  const fetchFn = opts.fetch ?? ((...a: Parameters<FetchFn>) => fetch(...a));
+  const storage = storageFor(opts);
 
   // Cache hit — already resolved on this profile. No network.
   const cached = await readCache(storage);
   if (cached) return cached;
 
-  const token = await opts.getToken();
-  if (!token) throw new UnauthorizedError("not signed in");
-
-  const ctx: ApiCtx = { fetchFn, token };
+  const ctx = await apiCtx(opts);
 
   // Resolve the def's tag ids first (so a fresh create can attach them, same
   // as the daemon's resolver-create path which passes the resolved ids as
   // create_extra).
-  const tagIds: string[] = [];
-  for (const name of ATTENTION_DEFINITION_TAG_NAMES) {
-    tagIds.push(await resolveTag(ctx, name));
-  }
+  const tagIds = await resolveAttentionTagIds(ctx);
 
   // Adopt-by-name first; create only if absent.
   let definitionId = await findAttentionDefinition(ctx);
@@ -145,6 +156,64 @@ export async function ensureAttentionDefinitionAndTags(
     definitionId = await createAttentionDefinition(ctx, tagIds);
   }
 
+  const resolved: ResolvedAttention = { definitionId, tagIds };
+  await writeCache(storage, resolved);
+  return resolved;
+}
+
+/**
+ * List the live "Attention" duration definitions the user could pick as the
+ * capture destination, oldest-first. Index 0 is marked `isAutoPick: true` —
+ * it is exactly the def `ensureAttentionDefinitionAndTags` would adopt. An
+ * empty list means none exist yet (the user should create one). Makes one
+ * GET; never touches the cache. Throws UnauthorizedError on 401 / no token.
+ */
+export async function listAttentionDestinations(
+  opts: EnsureOpts,
+): Promise<AttentionDestination[]> {
+  const ctx = await apiCtx(opts);
+  const matches = await findAttentionDefinitionRows(ctx);
+  return matches.map((d, i) => ({
+    id: String(d.id),
+    name: ATTENTION_DEFINITION_NAME,
+    createdAt: d.created_at ?? null,
+    isAutoPick: i === 0,
+  }));
+}
+
+/**
+ * Adopt an EXISTING Attention definition by id as the capture destination:
+ * resolve the canonical tag ids and write the {definitionId, tagIds} cache so
+ * capture uses exactly this definition. Returns the resolved record. Throws
+ * UnauthorizedError on 401 / no token.
+ */
+export async function chooseAttentionDestination(
+  opts: EnsureOpts,
+  definitionId: string,
+): Promise<ResolvedAttention> {
+  const storage = storageFor(opts);
+  const ctx = await apiCtx(opts);
+  const tagIds = await resolveAttentionTagIds(ctx);
+  const resolved: ResolvedAttention = { definitionId, tagIds };
+  await writeCache(storage, resolved);
+  return resolved;
+}
+
+/**
+ * Create a FRESH Attention destination definition (optionally named) and adopt
+ * it: resolve tags, POST the canonical create body with the given name, write
+ * the {definitionId, tagIds} cache, and return it. Defaults the name to
+ * ATTENTION_DEFINITION_NAME ("Attention") so other devices converge on it.
+ * Throws UnauthorizedError on 401 / no token.
+ */
+export async function createAttentionDestination(
+  opts: EnsureOpts,
+  name: string = ATTENTION_DEFINITION_NAME,
+): Promise<ResolvedAttention> {
+  const storage = storageFor(opts);
+  const ctx = await apiCtx(opts);
+  const tagIds = await resolveAttentionTagIds(ctx);
+  const definitionId = await createAttentionDefinition(ctx, tagIds, name);
   const resolved: ResolvedAttention = { definitionId, tagIds };
   await writeCache(storage, resolved);
   return resolved;
@@ -163,6 +232,30 @@ export async function clearResolvedAttention(
 interface ApiCtx {
   fetchFn: FetchFn;
   token: string;
+}
+
+/** The injected (or default extension-local) storage area for the cache. */
+function storageFor(opts: EnsureOpts): StorageArea {
+  return opts.storage ?? defaultLocalStorageArea();
+}
+
+/** Build an authenticated ApiCtx from EnsureOpts, requiring a token.
+ * Throws UnauthorizedError when not signed in — before any network call. */
+async function apiCtx(opts: EnsureOpts): Promise<ApiCtx> {
+  const fetchFn = opts.fetch ?? ((...a: Parameters<FetchFn>) => fetch(...a));
+  const token = await opts.getToken();
+  if (!token) throw new UnauthorizedError("not signed in");
+  return { fetchFn, token };
+}
+
+/** Resolve the canonical Attention tag ids, in ATTENTION_DEFINITION_TAG_NAMES
+ * order ([attention, web]). Shared by the ensure + choose + create paths. */
+async function resolveAttentionTagIds(ctx: ApiCtx): Promise<string[]> {
+  const tagIds: string[] = [];
+  for (const name of ATTENTION_DEFINITION_TAG_NAMES) {
+    tagIds.push(await resolveTag(ctx, name));
+  }
+  return tagIds;
 }
 
 async function readCache(
@@ -235,6 +328,19 @@ async function resolveTag(ctx: ApiCtx, name: string): Promise<string> {
  * created_at, take the oldest so every machine converges on one def.
  */
 async function findAttentionDefinition(ctx: ApiCtx): Promise<string | null> {
+  const matches = await findAttentionDefinitionRows(ctx);
+  if (matches.length === 0) return null;
+  const id = matches[0].id;
+  return typeof id === "string" ? id : null;
+}
+
+/** GET the annotation list and return the live "Attention" duration rows,
+ * sorted oldest-first (so index 0 is the def every machine converges on).
+ * Shared by findAttentionDefinition (adopt the oldest) and
+ * listAttentionDestinations (surface all, mark the oldest as the auto-pick). */
+async function findAttentionDefinitionRows(
+  ctx: ApiCtx,
+): Promise<DefinitionRow[]> {
   const resp = await ctx.fetchFn(`${API_BASE}/user/v1alpha1/annotation`, {
     method: "GET",
     headers: authHeaders(ctx.token),
@@ -245,27 +351,28 @@ async function findAttentionDefinition(ctx: ApiCtx): Promise<string | null> {
     (d) =>
       d.name === ATTENTION_DEFINITION_NAME &&
       d.annotation_type === "duration" &&
-      !d.deleted_at,
+      !d.deleted_at &&
+      typeof d.id === "string",
   );
-  if (matches.length === 0) return null;
   matches.sort((a, b) =>
     (a.created_at || "").localeCompare(b.created_at || ""),
   );
-  const id = matches[0].id;
-  return typeof id === "string" ? id : null;
+  return matches;
 }
 
-/** Create the canonical Attention definition. Mirrors fulcra.py
- * ensure_definitions' create branch: POST the full create payload (with the
- * resolved tag ids attached). */
+/** Create the canonical Attention definition (optionally named). Mirrors
+ * fulcra.py ensure_definitions' create branch: POST the full create payload
+ * (with the resolved tag ids attached). Defaults the name to the canonical
+ * "Attention". */
 async function createAttentionDefinition(
   ctx: ApiCtx,
   tagIds: string[],
+  name: string = ATTENTION_DEFINITION_NAME,
 ): Promise<string> {
   const resp = await ctx.fetchFn(`${API_BASE}/user/v1alpha1/annotation`, {
     method: "POST",
     headers: { ...authHeaders(ctx.token), "Content-Type": "application/json" },
-    body: JSON.stringify(attentionCreatePayload(tagIds)),
+    body: JSON.stringify(attentionCreatePayload(tagIds, name)),
   });
   assertOk(resp, "create annotation definition");
   const body = (await resp.json()) as { id?: string };
