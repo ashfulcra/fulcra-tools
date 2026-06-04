@@ -10,7 +10,22 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
-## [Unreleased] — Scheduling for the "blocked on you" plate *(0.5.0 candidate)*
+## [0.5.1] — Inbox auto-aging
+
+**Why:** informational broadcasts ("X joined the mesh", "identities live") linger
+as proposed directives in every agent's inbox forever (broadcasts never get
+"done"), piling up and burying real directives at SessionStart.
+
+- The inbox view now hides a **broadcast** (`assignee="*"`) that's still
+  `proposed` and older than `FULCRA_COORD_INBOX_AGE_DAYS` (default 3). Pure
+  read/view filter — task status, the task file, and the aggregate are untouched
+  (nothing is abandoned; a peer on an older CLI still sees it).
+- **Directives addressed to a concrete agent are NEVER aged out** regardless of
+  age — a real ask stays until acked/done.
+- `inbox --all` shows everything; the default prints `(N older broadcast(s)
+  hidden — --all to show)`. The SessionStart banner inherits the filter.
+
+## [0.5.0] — Scheduling for the "blocked on you" plate
 
 **Why:** an agent could block a real task on the human that wasn't *actionable
 yet* — e.g. "re-auth this 7-day OAuth token" five days before it expires. The
