@@ -2095,13 +2095,50 @@ def _digest_window_since(window: str, now: datetime) -> datetime:
     return now - timedelta(hours=hours)
 
 
+def _digest_marker_path(window: str, now: datetime) -> str:
+    """Files-bus path of the per-window digest dedup marker:
+    ``<remote_root>/digest/markers/<YYYY-MM-DD>-<window>.json``. Keyed by the UTC
+    DATE + window so morning and evening each get one marker per day, and any
+    agent on any machine claims the SAME path (the whole point of the any-agent
+    guard). ``now`` is injected for deterministic tests."""
+    from . import remote_root
+    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    return f"{remote_root()}/digest/markers/{day}-{window}.json"
+
+
 def _claim_digest_marker(window: str, now: datetime, *,
                          backend: Optional[list[str]] = None) -> bool:
-    """Claim the per-window digest marker (real implementation in Task 5).
+    """Any-agent first-writer-wins claim for one window's digest. Returns True
+    when THIS caller won the claim and should write the digest; False to skip.
 
-    Stubbed to always grant the claim so the command is testable in isolation;
-    Task 5 replaces this with the Files-bus first-writer-wins guard."""
-    return True
+    Protocol (spec §5): download the marker — if it exists, another agent already
+    wrote this window, so NO-OP (return False). If absent, upload a marker
+    stamping this agent + timestamp; on a successful upload, grant the claim.
+
+    RACE (accepted): Fulcra Files has no compare-and-swap, so two agents firing
+    in the same ~second can both see 'absent' and both write → a rare double
+    digest. Harmless on a timeline; logged, not prevented (a single-owner schedule
+    would remove the race but add a single point of failure — rejected per the
+    any-agent decision). MARKER-CLAIM FAILURE (download or upload error) → return
+    False (skip) so a transient bus error never risks a double; the next window
+    retries. Never raises — best-effort like the rest of the digest path."""
+    try:
+        path = _digest_marker_path(window, now)
+        existing = remote.download_json(path, backend=backend)
+        if existing is not None:
+            return False  # already claimed this window
+        marker = {
+            "schema": "fulcra.coordination.digest_marker.v1",
+            "window": window,
+            "date": now.astimezone(timezone.utc).strftime("%Y-%m-%d"),
+            "by": identity.resolve_agent(),
+            "claimed_at": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        return bool(remote.upload_json(marker, path, backend=backend))
+    except Exception:
+        # Best-effort: a marker error must never raise into a scheduled tick, and
+        # must skip (not write) so we never risk a double on an uncertain claim.
+        return False
 
 
 def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
