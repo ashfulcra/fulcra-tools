@@ -64,7 +64,7 @@ describe("flushOutbox", () => {
   });
 
   test("POSTs each entry, removes on 200", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "test-tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "test-tok" });
     await addToOutbox(makeEvent("https://a.com/"));
     await addToOutbox(makeEvent("https://b.com/"));
     const f = vi.mocked(fetch).mockResolvedValue(new Response('{"posted":1}', { status: 200 }));
@@ -80,7 +80,7 @@ describe("flushOutbox", () => {
   });
 
   test("leaves entry in outbox and bumps attempts on 5xx", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     await addToOutbox(makeEvent());
     vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 502 }));
     await flushOutbox();
@@ -90,7 +90,7 @@ describe("flushOutbox", () => {
   });
 
   test("leaves entry on network error", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     await addToOutbox(makeEvent());
     vi.mocked(fetch).mockRejectedValue(new TypeError("Network error"));
     await flushOutbox();
@@ -98,7 +98,7 @@ describe("flushOutbox", () => {
   });
 
   test("drops entry on 400 (permanent failure — bad payload)", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     await addToOutbox(makeEvent());
     vi.mocked(fetch).mockResolvedValue(new Response('{"error":"bad"}', { status: 400 }));
     await flushOutbox();
@@ -106,7 +106,7 @@ describe("flushOutbox", () => {
   });
 
   test("bails out after 5 consecutive network failures and keeps remaining entries", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     // Queue 10 entries.
     for (let i = 0; i < 10; i++) {
       await addToOutbox(makeEvent(`https://x${i}.com/`));
@@ -125,7 +125,7 @@ describe("flushOutbox", () => {
   });
 
   test("two concurrent flushes do not double-send (single-flight)", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     const N = 4;
     for (let i = 0; i < N; i++) {
       await addToOutbox(makeEvent(`https://x${i}.com/`));
@@ -145,7 +145,7 @@ describe("flushOutbox", () => {
   });
 
   test("guard resets: a later flush sends newly-queued entries", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     const f = vi.mocked(fetch).mockResolvedValue(new Response('{"posted":1}', { status: 200 }));
     await addToOutbox(makeEvent("https://a.com/"));
     await flushOutbox();
@@ -159,7 +159,7 @@ describe("flushOutbox", () => {
   });
 
   test("guard resets after a throwing flush", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     await addToOutbox(makeEvent("https://a.com/"));
     // Force flushOutbox to throw on its first run by making the underlying
     // storage read reject once. This exercises the finally-resets-guard path.
@@ -177,7 +177,7 @@ describe("flushOutbox", () => {
   });
 
   test("uses AbortController with 10s timeout per fetch", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay", bearerToken: "tok" });
     await addToOutbox(makeEvent());
     let observedSignal: AbortSignal | undefined;
     vi.mocked(fetch).mockImplementation(async (_url, init) => {
