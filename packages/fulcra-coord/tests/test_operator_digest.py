@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fulcra_coord import views, schema
+from fulcra_coord import views, schema, cli
 
 NOW = datetime(2026, 6, 4, 18, 0, 0, tzinfo=timezone.utc)
 SINCE = NOW - timedelta(hours=12)
@@ -86,3 +86,63 @@ class TestPerAgentAndWindows(unittest.TestCase):
                                         now=NOW, since=SINCE)
         self.assertEqual([s["id"] for s in d["upcoming"]], ["U"])
         self.assertEqual([s["id"] for s in d["stale"]], ["S"])
+
+
+class TestRenderDigest(unittest.TestCase):
+    def _full_digest(self):
+        return {
+            "schema": "fulcra.coordination.operator_digest.v1",
+            "human": "ash", "now": NOW.isoformat().replace("+00:00", "Z"),
+            "since": SINCE.isoformat().replace("+00:00", "Z"),
+            "blocked_on_you": [
+                _summary(id="B1", title="Re-auth GitHub", status="blocked",
+                         owner_agent="claude-code:mb:repo",
+                         blocked_on="approve the OAuth scope"),
+                _summary(id="B2", title="Review PR", status="waiting",
+                         owner_agent="codex:mb:main"),
+            ],
+            "upcoming": [_summary(id="U1", title="Rotate key",
+                                  not_before="2026-06-06T00:00:00Z")],
+            "per_agent": [{
+                "agent": "claude-code:mb:repo", "workstreams": ["devops"],
+                "summary": "shipping the digest", "liveness": "live",
+                "finished_since": [_summary(id="F1", title="Land annotations",
+                                            status="done")],
+            }],
+            "stale": [_summary(id="S1", title="Old churn", status="active")],
+        }
+
+    def test_name_summarizes_counts(self):
+        name, note = cli._render_digest(self._full_digest(), window="evening")
+        self.assertIn("evening", name)
+        self.assertIn("2 on you", name)
+        self.assertIn("1 upcoming", name)
+
+    def test_note_has_all_sections(self):
+        _, note = cli._render_digest(self._full_digest(), window="evening")
+        self.assertIn("Re-auth GitHub", note)
+        self.assertIn("approve the OAuth scope", note)
+        self.assertIn("Rotate key", note)
+        self.assertIn("claude-code:mb:repo", note)
+        self.assertIn("Land annotations", note)
+        self.assertIn("Old churn", note)
+
+    def test_empty_digest_is_clean(self):
+        empty = {"blocked_on_you": [], "upcoming": [], "per_agent": [], "stale": []}
+        name, note = cli._render_digest(empty, window="morning")
+        self.assertIn("0 on you", name)
+        self.assertEqual(note, "")  # no empty section headers
+
+    def test_missing_fields_do_not_crash(self):
+        # A digest with a sparse summary (only id/status) must still render.
+        d = {"blocked_on_you": [{"id": "Z", "status": "blocked"}],
+             "upcoming": [], "per_agent": [], "stale": []}
+        name, note = cli._render_digest(d, window="morning")
+        self.assertIn("1 on you", name)
+
+    def test_long_block_caps_with_more(self):
+        many = [_summary(id=f"B{i}", title=f"ask {i}", status="blocked")
+                for i in range(12)]
+        d = {"blocked_on_you": many, "upcoming": [], "per_agent": [], "stale": []}
+        _, note = cli._render_digest(d, window="evening")
+        self.assertIn("…and 4 more", note)
