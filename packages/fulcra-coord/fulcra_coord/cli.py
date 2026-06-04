@@ -2003,6 +2003,86 @@ def _due_str(due: str) -> str:
     return f"{dt:%b} {dt.day}"
 
 
+#: Max items rendered per digest block before collapsing the tail into "+N more".
+#: Keeps the timeline note bounded (a 284-event-in-two-days bus could otherwise
+#: produce a wall of text) while always showing the most-salient head of each list.
+_DIGEST_BLOCK_CAP = 8
+
+
+def _digest_lines(items: list[dict[str, Any]], fmt) -> list[str]:
+    """Render up to _DIGEST_BLOCK_CAP items via ``fmt`` (item -> str), appending a
+    '+N more' tail when the list is longer. Bounds every block identically."""
+    head = items[:_DIGEST_BLOCK_CAP]
+    lines = [fmt(s) for s in head]
+    extra = len(items) - len(head)
+    if extra > 0:
+        lines.append(f"  …and {extra} more")
+    return lines
+
+
+def _render_digest(digest: dict[str, Any], *, window: str) -> tuple[str, str]:
+    """Render the structured digest into a timeline (name, note). Pure, no I/O.
+
+    ``name`` is the concise timeline label carrying the headline counts
+    (``Agent digest — <window> (N on you, M upcoming)``); ``note`` is the body —
+    compact markdown-ish text, one block per non-empty section, each line who /
+    what / when. Empty blocks are SKIPPED entirely (no empty headers). Long lists
+    are capped via ``_digest_lines`` ('+N more'). Every field is read with
+    ``.get`` defaults so a summary missing an optional key renders instead of
+    raising — this feeds a best-effort scheduled writer that must never crash."""
+    blocked = digest.get("blocked_on_you") or []
+    upcoming = digest.get("upcoming") or []
+    per_agent = digest.get("per_agent") or []
+    stale = digest.get("stale") or []
+
+    name = (f"Agent digest — {window} "
+            f"({len(blocked)} on you, {len(upcoming)} upcoming)")
+
+    sections: list[str] = []
+
+    if blocked:
+        def _b(s):
+            ask = (s.get("blocked_on") or s.get("next_action") or "").strip()
+            who = s.get("owner_agent", "?")
+            tail = f" — {ask}" if ask else ""
+            return (f"  • [{(s.get('status') or '?').upper()}] "
+                    f"{(s.get('title') or '')[:60]} (from {who}){tail}")
+        sections.append("⛔ Blocked on you (" + str(len(blocked)) + "):")
+        sections.extend(_digest_lines(blocked, _b))
+
+    if upcoming:
+        def _u(s):
+            when = (s.get("not_before") or "").strip()
+            return f"  • {(s.get('title') or '')[:60]}" + (f" (not before {when})" if when else "")
+        sections.append("")
+        sections.append("Upcoming (next 7d) (" + str(len(upcoming)) + "):")
+        sections.extend(_digest_lines(upcoming, _u))
+
+    if per_agent:
+        sections.append("")
+        sections.append("Per agent:")
+        for a in per_agent:
+            ws = ", ".join(a.get("workstreams", [])) or "(none)"
+            sections.append(f"  {a.get('agent', '?')} [{a.get('liveness', '?')}] — {ws}")
+            if a.get("summary"):
+                sections.append(f"    on: {a['summary'][:80]}")
+            done = a.get("finished_since") or []
+            for s in done[:_DIGEST_BLOCK_CAP]:
+                sections.append(f"    ✓ {(s.get('title') or '')[:60]}")
+            if len(done) > _DIGEST_BLOCK_CAP:
+                sections.append(f"    …and {len(done) - _DIGEST_BLOCK_CAP} more done")
+
+    if stale:
+        def _s(s):
+            return f"  • {(s.get('title') or '')[:60]} (from {s.get('owner_agent', '?')})"
+        sections.append("")
+        sections.append("Stale (no update past threshold) (" + str(len(stale)) + "):")
+        sections.extend(_digest_lines(stale, _s))
+
+    note = "\n".join(sections).strip()
+    return name, note
+
+
 def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
     """THE "what's blocked on ME" view (situational awareness piece 3).
 
