@@ -134,6 +134,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Whose inbox (default: $FULCRA_COORD_AGENT or derived)")
     sp.add_argument("--ack", default=None, metavar="TASK-ID",
                     help="Acknowledge a directive (records inbox_ack; stops re-notify)")
+    sp.add_argument("--all", action="store_true",
+                    help="Include aged-out informational broadcasts "
+                         "(older than FULCRA_COORD_INBOX_AGE_DAYS) that are "
+                         "hidden from the default inbox")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- start ----

@@ -33,6 +33,14 @@ BROADCAST = "*"
 
 RECENTLY_DONE_DAYS = 7
 SEARCH_INDEX_DONE_DAYS = 30
+# Default age (days) after which a still-`proposed` BROADCAST directive drops out
+# of the live inbox view. Broadcasts are informational fan-out ("X joined the
+# mesh") — once a few days old they have served their purpose and only clutter
+# every agent's inbox / SessionStart banner. Aging is a READ filter only: it
+# never touches task status or the task file (a peer on an older CLI still sees
+# it), and `inbox --all` bypasses it. CONCRETE-assignee directives (real asks)
+# are NEVER aged out regardless of this threshold.
+INBOX_AGE_DAYS_DEFAULT = 3
 # Default staleness threshold (hours). An `active` task whose updated_at is older
 # than this is "possibly forgotten" and surfaced in views/needs-attention.json.
 STALE_HOURS_DEFAULT = 2
@@ -53,6 +61,55 @@ def _stale_hours(stale_hours: Optional[float] = None) -> float:
         except ValueError:
             pass
     return float(STALE_HOURS_DEFAULT)
+
+
+def _inbox_age_days(age_days: Optional[float] = None) -> float:
+    """Resolve the broadcast inbox age cutoff (days): explicit arg > env > default.
+
+    Mirrors _stale_hours so the knob is read in exactly one place. The env var
+    FULCRA_COORD_INBOX_AGE_DAYS lets a fleet tune how long informational
+    broadcasts linger; a non-numeric value falls back to the default rather than
+    crashing a read path.
+    """
+    if age_days is not None:
+        return age_days
+    raw = os.environ.get("FULCRA_COORD_INBOX_AGE_DAYS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(INBOX_AGE_DAYS_DEFAULT)
+
+
+def is_aged_out_broadcast(task: dict[str, Any], now: Optional[datetime] = None,
+                          age_days: Optional[float] = None) -> bool:
+    """True when `task` is a stale informational BROADCAST that should drop out of
+    the default inbox view.
+
+    A directive ages out ONLY when ALL of these hold:
+      * assignee == BROADCAST ("*") — it is fan-out, not a personal ask. A
+        directive addressed to a CONCRETE agent is a real ask and is NEVER aged
+        out here, regardless of age (callers rely on this exact guarantee).
+      * status == "proposed" — still un-acted-on informational noise. (A waiting
+        broadcast was deliberately parked; we don't second-guess that.)
+      * its updated_at is older than the age cutoff (now - age_days).
+
+    Age is measured from `updated_at` vs `now`. A missing/unparseable timestamp
+    ages to +inf (via _age_hours), so a clock-less old broadcast is treated as
+    aged — the same fail-toward-cleanup choice is_stale makes. This is a pure
+    predicate over a read filter: it never mutates the task and never changes its
+    status, so the underlying task file/aggregate is untouched and a peer on an
+    older CLI still sees the broadcast.
+    """
+    if task.get("assignee") != BROADCAST:
+        return False
+    if task.get("status") != "proposed":
+        return False
+    if now is None:
+        now = _now()
+    cutoff_hours = _inbox_age_days(age_days) * 24.0
+    return _age_hours(task.get("updated_at", ""), now) >= cutoff_hours
 
 
 def _age_hours(updated_at: str, now: datetime) -> float:
@@ -293,7 +350,10 @@ def agent_matches(me: str, assignee: str) -> bool:
     return me_parts[:len(as_parts)] == as_parts
 
 
-def is_open_directive(task: dict[str, Any], assignee: str) -> bool:
+def is_open_directive(task: dict[str, Any], assignee: str,
+                      now: Optional[datetime] = None,
+                      include_aged: bool = False,
+                      age_days: Optional[float] = None) -> bool:
     """True when `task` is an unacknowledged directive addressed to `assignee`.
 
     Open inbox item = assigned to me, in an open status (proposed/waiting),
@@ -301,6 +361,14 @@ def is_open_directive(task: dict[str, Any], assignee: str) -> bool:
     and not yet acked by me (no inbox_ack event whose `by` is me). Claiming the
     task (status -> active, owner becomes me) also drops it from the inbox via
     both the status and owner checks.
+
+    AGE-OUT: a stale informational broadcast (is_aged_out_broadcast) is treated
+    as no longer open by default, so the materialized inbox view and the
+    index.counts.inbox fold don't keep counting fan-out that the live `inbox`
+    read filter (inbox_for) already hides — the SessionStart banner count and the
+    materialized buckets must agree with the read path. `include_aged=True`
+    keeps the legacy "everything open" semantics. Concrete-assignee directives
+    are never aged out (is_aged_out_broadcast guards on assignee == BROADCAST).
     """
     if task.get("assignee") != assignee:
         return False
@@ -309,6 +377,8 @@ def is_open_directive(task: dict[str, Any], assignee: str) -> bool:
     if task.get("owner_agent") == assignee:
         return False
     if _acked_by(task, assignee):
+        return False
+    if not include_aged and is_aged_out_broadcast(task, now, age_days):
         return False
     return True
 
@@ -333,7 +403,9 @@ def build_inbox(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     return inbox
 
 
-def inbox_for(me: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def inbox_for(me: str, tasks: list[dict[str, Any]], now: Optional[datetime] = None,
+              include_aged: bool = False,
+              age_days: Optional[float] = None) -> list[dict[str, Any]]:
     """Open directives addressed to `me`, using prefix-aware matching.
 
     Membership for a querying agent is decided by agent_matches (a directive
@@ -346,6 +418,13 @@ def inbox_for(me: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     (open status, owned by someone else, not acked by me) AND agent_matches(me,
     assignee). The ack check is against `me`: my own ack clears it from my inbox
     even if the directive was addressed to a short id I prefix.
+
+    AGE-OUT (default behaviour): a stale informational BROADCAST (see
+    is_aged_out_broadcast) is excluded so old "X joined the mesh" fan-out stops
+    cluttering every inbox / SessionStart. This is a VIEW filter only — the task
+    is untouched. `include_aged=True` (the `inbox --all` path) bypasses it and
+    shows everything. `now` is injectable for deterministic tests (like
+    needs_human / is_stale). CONCRETE-assignee directives are never aged out.
     """
     items: list[dict[str, Any]] = []
     for t in tasks:
@@ -358,8 +437,26 @@ def inbox_for(me: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if _acked_by(t, me):
             continue
+        if not include_aged and is_aged_out_broadcast(t, now, age_days):
+            continue
         items.append(task_summary(t))
     return sorted(items, key=lambda x: (x.get("priority", "P9"), x.get("updated_at", "")))
+
+
+def aged_out_inbox_count(me: str, tasks: list[dict[str, Any]],
+                         now: Optional[datetime] = None,
+                         age_days: Optional[float] = None) -> int:
+    """How many of `me`'s otherwise-open directives are hidden purely by age-out.
+
+    The default `inbox` surfaces this as a one-line "(N older broadcasts hidden —
+    --all to show)" note so an agent knows the live view was trimmed and can opt
+    back in. Defined as the difference between the full membership (include_aged)
+    and the default membership, so the count can never disagree with what
+    inbox_for actually hides — there is one filter, queried two ways.
+    """
+    full = {s["id"] for s in inbox_for(me, tasks, now, include_aged=True, age_days=age_days)}
+    shown = {s["id"] for s in inbox_for(me, tasks, now, include_aged=False, age_days=age_days)}
+    return len(full - shown)
 
 
 # Statuses at which a task counts as "still on the human's plate": proposed
