@@ -7315,6 +7315,29 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         entry = next(s for s in out if s["id"] == stale_b["id"])
         self.assertEqual(entry["title"], "FRESH")
 
+    def test_s2_newer_local_wins_across_mixed_precision_timestamps(self):
+        # BUG 1 also affects the aggregate-vs-local freshness decision. A local
+        # summary at ...45.000001Z is newer than the aggregate's ...45Z, but a
+        # raw string compare inverts that ordering ('.' < 'Z') and would keep the
+        # stale aggregate entry.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        local_b = _sample_task()
+        local_b["id"] = "TASK-20260603-peer-task-mixedts"
+        local_b["title"] = "LOCAL-NEWER"
+        local_b["updated_at"] = "2026-06-03T12:30:45.000001Z"
+        cache.write_cached_task(local_b)
+        older_aggregate_b = dict(schema.task_summary(local_b))
+        older_aggregate_b["title"] = "AGGREGATE-OLDER"
+        older_aggregate_b["updated_at"] = "2026-06-03T12:30:45Z"
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a),
+                                          older_aggregate_b])):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        entry = next(s for s in out if s["id"] == local_b["id"])
+        self.assertEqual(entry["title"], "LOCAL-NEWER")
+
     def test_selfheal_recovers_dropped_task_via_file_listing(self):
         # The hard case: a peer's task was clobbered out of the aggregate AND this
         # agent never cached it — but its durable FILE exists. Enumerating the
