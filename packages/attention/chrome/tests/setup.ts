@@ -66,6 +66,7 @@ function makeArea() {
   tabs: {
     get: vi.fn(),
     query: vi.fn(async () => []),
+    create: vi.fn(async () => ({})),
     onActivated: { addListener: vi.fn() },
     onRemoved: { addListener: vi.fn() },
   },

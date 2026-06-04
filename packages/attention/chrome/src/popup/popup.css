@@ -283,3 +283,17 @@ button.primary:hover {
   font-weight: 500;
   margin-left: 6px;
 }
+
+/* ---- relayless sign-in surface ---- */
+.signin {
+  margin-bottom: 12px;
+}
+.signin .usercode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  letter-spacing: 2px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--fa-surface);
+  border: 1px solid var(--fa-edge);
+}
