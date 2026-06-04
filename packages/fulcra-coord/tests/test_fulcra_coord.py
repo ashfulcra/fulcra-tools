@@ -7925,6 +7925,56 @@ class TestReconcileParallelUpload(unittest.TestCase):
 
         self.assertEqual(rc, 1, "a raising upload must be caught and counted as a failure")
 
+    def test_parallel_upload_respects_global_timeout_for_queued_views(self):
+        """Queued upload work must not start after the reconcile deadline.
+
+        With 8 workers and more than 8 views, a backend that stalls every upload
+        used to consume one full timeout per batch. The worker checks the shared
+        deadline before calling upload_json, so queued views past the deadline
+        fail fast instead of starting another over-budget batch.
+        """
+        import threading
+        import time
+        from fulcra_coord.cli import cmd_reconcile
+
+        views_to_upload = {f"view-{i}": {"tasks": []} for i in range(10)}
+        active_calls = 0
+        max_active = 0
+        total_calls = 0
+        lock = threading.Lock()
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            nonlocal active_calls, max_active, total_calls
+            with lock:
+                active_calls += 1
+                total_calls += 1
+                max_active = max(max_active, active_calls)
+            time.sleep(1.05)
+            with lock:
+                active_calls -= 1
+            return True
+
+        old_timeout = os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS")
+        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "1"
+        try:
+            with patch("fulcra_coord.cli._load_all_tasks", return_value=[]), \
+                 patch("fulcra_coord.cli.views.build_all_views",
+                       return_value=views_to_upload), \
+                 patch("fulcra_coord.cli.remote.upload_json",
+                       side_effect=upload_json), \
+                 patch("fulcra_coord.cli._reconcile_presence"):
+                rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+        finally:
+            if old_timeout is None:
+                del os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"]
+            else:
+                os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = old_timeout
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(max_active, 8, "the first batch should still run in parallel")
+        self.assertLessEqual(total_calls, 8,
+                             "queued views past the deadline must not start uploads")
+
 
 # ---------------------------------------------------------------------------
 # Main
