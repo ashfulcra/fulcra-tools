@@ -12,6 +12,8 @@ import {
 import type { DomainGroup } from "./history";
 import { backfillHistory } from "./backfill";
 import { setHeartbeatEnabled, hasHeartbeatPermission } from "../heartbeat-control";
+import { SignIn } from "../popup/SignIn";
+import type { TransportMode } from "../types";
 
 type Step = "welcome" | "token" | "scan" | "filter" | "heartbeat" | "ingest" | "done";
 
@@ -22,8 +24,11 @@ function FulcrumMark() {
 export function Wizard() {
   const [step, setStep] = useState<Step>("welcome");
 
-  // ---- token step state ----
+  // ---- token / auth step state ----
   const [token, setToken] = useState("");
+  // Drives the auth step: "relayless" (default) shows device-flow sign-in,
+  // "relay" keeps the daemon token-paste form. Null until loadSettings resolves.
+  const [transportMode, setTransportMode] = useState<TransportMode | null>(null);
 
   // ---- scan step state ----
   const [daysBack, setDaysBack] = useState(30);
@@ -55,7 +60,10 @@ export function Wizard() {
       const existing = await loadIgnoreList();
       setExistingPatterns(existing.map((e) => e.pattern));
     })();
-    void loadSettings().then((s) => setToken(s.bearerToken ?? ""));
+    void loadSettings().then((s) => {
+      setToken(s.bearerToken ?? "");
+      setTransportMode(s.transportMode);
+    });
     // If another machine on this Chrome profile already backfilled,
     // default the backfill OFF and surface a warning — re-backfilling
     // synced history would duplicate every event.
@@ -201,7 +209,11 @@ export function Wizard() {
         />
       )}
 
-      {step === "token" && (
+      {step === "token" && transportMode === "relayless" && (
+        <SignInStep onSignedIn={() => setStep("scan")} />
+      )}
+
+      {step === "token" && transportMode === "relay" && (
         <TokenStep
           token={token}
           setToken={setToken}
@@ -289,6 +301,25 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
         <button onClick={onSkip}>Skip wizard</button>
         <button className="primary" onClick={onNext}>Get started →</button>
       </div>
+    </>
+  );
+}
+
+function SignInStep(props: { onSignedIn: () => void }) {
+  return (
+    <>
+      <h2>Sign in to Fulcra</h2>
+      <p>
+        Connect this browser straight to Fulcra Cloud — no local app needed.
+        We'll open a confirmation page; approve it and we'll bring you back
+        here to scan your history.
+      </p>
+      {/*
+        Reuse the popup's relayless sign-in surface. onSignedIn fires once the
+        device flow completes (or immediately via the "Continue" button when a
+        valid token already exists), advancing the wizard to the scan step.
+      */}
+      <SignIn onSignedIn={props.onSignedIn} />
     </>
   );
 }
