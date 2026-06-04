@@ -1787,7 +1787,7 @@ def _due_str(due: str) -> str:
         dt = datetime.fromisoformat(due.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return ""
-    return dt.strftime("%b %-d")
+    return f"{dt:%b} {dt.day}"
 
 
 def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:

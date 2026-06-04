@@ -394,6 +394,20 @@ def _now_iso_z(now: Optional[datetime]) -> str:
     return now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _schedule_iso_z(value: Any) -> Optional[str]:
+    """Normalize an optional stored schedule timestamp for comparisons.
+
+    Scheduling is a visibility gate, so malformed persisted data must degrade to
+    "no gate" rather than hiding a concrete human ask forever.
+    """
+    dt = _parse_dt(value)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def needs_human(tasks: list[dict[str, Any]], human: str, *,
                 now: Optional[datetime] = None) -> list[dict[str, Any]]:
     """Every OPEN task assigned to / blocked on the human that is ACTIONABLE NOW.
@@ -428,10 +442,10 @@ def needs_human(tasks: list[dict[str, Any]], human: str, *,
     for t in tasks:
         if not _human_match(t, human):
             continue
-        nb = t.get("not_before")
+        nb = _schedule_iso_z(t.get("not_before"))
         # Gate: a future not_before keeps it off the due-now plate. Empty/None
-        # not_before is "no gate" -> always due-now (today's behavior). ISO-Z
-        # strings compare correctly lexically.
+        # or malformed not_before is "no gate" -> always due-now (today's
+        # behavior). Canonical ISO-Z strings compare correctly lexically.
         if nb and nb > now_iso:
             continue
         items.append(task_summary(t))
@@ -460,14 +474,14 @@ def upcoming_for_human(tasks: list[dict[str, Any]], human: str, *,
     for t in tasks:
         if not _human_match(t, human):
             continue
-        nb = t.get("not_before")
-        # Only FUTURE not_before items within the horizon. No/empty/past
-        # not_before is due-now (handled by needs_human), not upcoming.
+        nb = _schedule_iso_z(t.get("not_before"))
+        # Only FUTURE not_before items within the horizon. No/empty/malformed/
+        # past not_before is due-now (handled by needs_human), not upcoming.
         if not nb or nb <= now_iso or nb > horizon_iso:
             continue
-        items.append(task_summary(t))
-    return sorted(items, key=lambda x: (x.get("not_before") or "",
-                                        x.get("due") or ""))
+        s = task_summary(t)
+        items.append((nb, _schedule_iso_z(s.get("due")) or "", s))
+    return [s for _, _, s in sorted(items, key=lambda x: (x[0], x[1]))]
 
 
 def build_next(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
