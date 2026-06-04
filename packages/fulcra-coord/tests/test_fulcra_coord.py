@@ -4392,6 +4392,46 @@ class TestTellAssignInbox(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn(d["id"], buf.getvalue())
 
+    def test_inbox_all_reveals_aged_broadcast_and_default_counts_hidden(self):
+        from fulcra_coord.cli import cmd_inbox
+        from fulcra_coord.views import BROADCAST
+        old = "2000-01-01T00:00:00Z"
+        d = _directive(BROADCAST, owner="boss:h:r", updated_at=old)
+        cache.write_cached_task(d)
+        import io, contextlib
+
+        default_buf = io.StringIO()
+        default_args = self._ns(agent="codex:h:r", format="json", ack=None, all=False)
+        with contextlib.redirect_stdout(default_buf):
+            cmd_inbox(default_args, backend=self.fake_backend)
+        default_out = json.loads(default_buf.getvalue())
+        self.assertEqual(default_out["count"], 0)
+        self.assertEqual(default_out["hidden_aged"], 1)
+        self.assertEqual(default_out["inbox"], [])
+
+        all_buf = io.StringIO()
+        all_args = self._ns(agent="codex:h:r", format="json", ack=None, all=True)
+        with contextlib.redirect_stdout(all_buf):
+            cmd_inbox(all_args, backend=self.fake_backend)
+        all_out = json.loads(all_buf.getvalue())
+        self.assertEqual(all_out["count"], 1)
+        self.assertEqual(all_out["hidden_aged"], 0)
+        self.assertEqual([i["id"] for i in all_out["inbox"]], [d["id"]])
+
+    def test_inbox_default_keeps_old_concrete_directive(self):
+        from fulcra_coord.cli import cmd_inbox
+        d = _directive("codex:h:r", owner="boss:h:r",
+                       updated_at="2000-01-01T00:00:00Z")
+        cache.write_cached_task(d)
+        import io, contextlib
+        args = self._ns(agent="codex:h:r", format="json", ack=None, all=False)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_inbox(args, backend=self.fake_backend)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["hidden_aged"], 0)
+        self.assertEqual([i["id"] for i in out["inbox"]], [d["id"]])
+
 
 # ---------------------------------------------------------------------------
 # Part 2 — SessionStart surfaces directives
