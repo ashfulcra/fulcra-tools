@@ -44,7 +44,7 @@ export interface Settings {
   onboarded: boolean;            // true once the wizard finished (any step beyond Welcome)
   pausedUntil: number | null;    // ms epoch — when null, not paused. Past = auto-resumed (lazy)
   heartbeatEnabled: boolean;     // opt-in content-script AFK watchdog (requires <all_urls>)
-  transportMode: TransportMode;  // default "relay" — relayless is opt-in until onboarding lands
+  transportMode: TransportMode;  // default "relayless" (no daemon — device-flow sign-in); switch to "relay" for the local Collect app
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -55,7 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
   onboarded: false,
   pausedUntil: null,
   heartbeatEnabled: false,
-  transportMode: "relay",
+  transportMode: "relayless",
 };
 
 /** How stale a focused visit's lastHeartbeat can be before the heartbeat
