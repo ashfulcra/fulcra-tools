@@ -761,7 +761,6 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "fulcra-coord"
-version = "0.1.0"
 source = { editable = "packages/fulcra-coord" }
 
 [package.optional-dependencies]

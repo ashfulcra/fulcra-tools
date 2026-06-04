@@ -287,7 +287,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
         This setup takes a couple of minutes:
       </p>
       <ol>
-        <li>Paste the bearer token from Fulcra Collect (<em>Attention → Pair extension</em>)</li>
+        <li>Sign in to Fulcra (a quick browser confirmation — no app needed)</li>
         <li>Scan your recent browser history</li>
         <li>Pick sites and categories to exclude (banking, healthcare, etc.)</li>
         <li>Optionally back-fill the kept history into Fulcra</li>
