@@ -2458,6 +2458,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     _info("Reconciling coordination views...")
     t0 = time.monotonic()
     timeout = int(os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "90"))
+    deadline = t0 + timeout
 
     markers = cache.list_op_markers()
     needs_repair = [m for m in markers if m.get("needs_reconcile")]
@@ -2513,6 +2514,9 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
 
     def _upload_one(item):
         view_name, view_data = item
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return view_name, False
         vpath = _view_name_to_remote(view_name)
         # Treat a RAISING upload as a failed view, not an escape hatch: an
         # unguarded pool.map would re-raise out of cmd_reconcile, bypassing the
@@ -2520,7 +2524,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # heartbeat. Catching keeps the contract: any failure is a failed view.
         try:
             ok = remote.upload_json(view_data, vpath, backend=backend,
-                                    timeout=remote._reconcile_timeout())
+                                    timeout=max(1, int(remaining)))
         except Exception:
             ok = False
         return view_name, ok
