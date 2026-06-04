@@ -287,8 +287,17 @@ def install_listener(*, agent: str, interval_min: int = INTERVAL_MIN_DEFAULT,
         plist = base / _plist_name_for(agent)
         if uninstall:
             plan["removes"].append(str(plist))
-            if not dry_run and plist.exists():
-                plist.unlink()
+            legacy = base / LEGACY_PLIST_NAME
+            if legacy.exists() and _legacy_plist_agent(legacy) == agent:
+                plan["supersedes_legacy"] = True
+                plan["removes"].append(str(legacy))
+            if not dry_run:
+                if plist.exists():
+                    plist.unlink()
+                if legacy.exists() and _legacy_plist_agent(legacy) == agent:
+                    _launchctl_unload(legacy)
+                    if legacy.exists():
+                        legacy.unlink()
             return plan
 
         # Supersede a legacy un-slugged plist ONLY when it watches this agent —

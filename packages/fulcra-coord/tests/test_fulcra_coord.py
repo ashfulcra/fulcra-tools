@@ -4757,6 +4757,42 @@ class TestInstallListener(unittest.TestCase):
         self.assertTrue(os.path.exists(legacy))
         self.assertNotIn(legacy, plan.get("removes", []))
 
+    def test_uninstall_removes_legacy_plist_for_same_agent_only(self):
+        """Uninstall must also remove a pre-0.5.3 legacy plist when it watches
+        this agent; otherwise upgrading then uninstalling leaves the old listener
+        still polling the target agent. A different agent's legacy plist stays."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-a:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             uninstall=True)
+        self.assertFalse(os.path.exists(legacy))
+        self.assertIn(legacy, plan.get("removes", []))
+
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-b:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             uninstall=True)
+        self.assertTrue(os.path.exists(legacy))
+        self.assertNotIn(legacy, plan.get("removes", []))
+
     def test_dry_run_reports_legacy_supersede_without_writing(self):
         """--dry-run names the per-agent plist and reports it would supersede a
         matching legacy plist, but writes/removes nothing."""
