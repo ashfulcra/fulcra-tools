@@ -1,7 +1,7 @@
 // chrome/tests/backfill.test.ts
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { backfillHistory, BACKFILL_CLIENT } from "../src/wizard/backfill";
-import { loadOutbox, saveIgnoreList, saveCategoryMap, loadSettings, saveSettings } from "../src/storage";
+import { loadOutbox, saveIgnoreList, saveCategoryMap } from "../src/storage";
 import type { DomainGroup } from "../src/wizard/history";
 
 const origFetch = globalThis.fetch;
@@ -72,10 +72,10 @@ describe("backfillHistory", () => {
   });
 
   test("dedups by (url + lastVisitTime-to-second) so re-runs don't flood Fulcra", async () => {
-    // Same URL at the same second → one event. The relay derives source_id
-    // from url+second, so emitting both would produce identical source_ids
-    // and (before relay-side dedup) duplicate events. Even with relay dedup,
-    // we shouldn't waste outbox slots / POST round-trips.
+    // Same URL at the same second → one event. The wire source_id is
+    // derived from url+second, so emitting both would produce identical
+    // source_ids and (before server-side dedup) duplicate events. Even with
+    // server dedup, we shouldn't waste outbox slots / POST round-trips.
     const groups = [fakeGroup("example.com", [
       { url: "https://example.com/a", lastVisitTime: 1_700_000_000_000 },
       { url: "https://example.com/a", lastVisitTime: 1_700_000_000_412 }, // same second, different ms
@@ -90,13 +90,22 @@ describe("backfillHistory", () => {
 
   test("returns after queueing — does not block on the outbox flush", async () => {
     // Regression: the wizard's backfill step froze at 100% because
-    // backfillHistory awaited flushOutbox(), which POSTs every queued
-    // event one-by-one through the relay. A bearer token is set so
-    // flushOutbox does NOT early-return, and fetch is stubbed to never
-    // resolve. If backfillHistory awaited the flush, the line below
-    // would hang forever and the test would time out.
-    const s = await loadSettings();
-    await saveSettings({ ...s, bearerToken: "test-token" });
+    // backfillHistory awaited flushOutbox(), which POSTs the queued batch
+    // to Fulcra Cloud. A valid relayless token + resolved-attention cache
+    // are seeded so flushOutbox does NOT early-return, and fetch is stubbed
+    // to never resolve (the ingest POST hangs). If backfillHistory awaited
+    // the flush, the line below would hang forever and the test would time out.
+    await chrome.storage.local.set({
+      relaylessTokens: {
+        accessToken: "ACCESS",
+        refreshToken: "REFRESH",
+        expiresAt: Date.now() + 3_600_000,
+      },
+      relaylessResolvedAttention: {
+        definitionId: "def-1",
+        tagIds: ["tag-attn", "tag-web"],
+      },
+    });
     globalThis.fetch = vi.fn(() => new Promise<Response>(() => {})) as typeof fetch;
     const groups = [fakeGroup("example.com", [
       { url: "https://example.com/a", lastVisitTime: 1 },

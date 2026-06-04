@@ -52,7 +52,7 @@ beforeEach(async () => {
   vi.mocked(chrome.scripting.executeScript).mockResolvedValue(
     [{ result: { title: "T", og_description: null, og_type: null, favicon_url: null, lang: null }, frameId: 0 }] as unknown as never,
   );
-  await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok" });
+  await saveSettings({ ...DEFAULT_SETTINGS });
 });
 
 // ---------- setForegroundTab / handleTabActivated ----------
@@ -255,7 +255,7 @@ describe("foreground-only model", () => {
     // sweep freezes the visit at lastHeartbeat + HEARTBEAT_STALE_MS,
     // not at `now`, so the duration reflects when the user actually
     // walked away — not when the sweep noticed.
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok", heartbeatEnabled: true });
+    await saveSettings({ ...DEFAULT_SETTINGS, heartbeatEnabled: true });
     stubTab(1, "https://reader.example/");
     await handleTabActivated(1, T0);
     // Pretend the content script's last heartbeat was 45s ago.
@@ -276,7 +276,7 @@ describe("foreground-only model", () => {
     // next sweep would see it as stale and instantly re-freeze the
     // visit, truncating the duration. Thaw now bumps lastHeartbeat
     // to `now` for parity with focusEpoch.
-    await saveSettings({ ...DEFAULT_SETTINGS, bearerToken: "tok", heartbeatEnabled: true });
+    await saveSettings({ ...DEFAULT_SETTINGS, heartbeatEnabled: true });
     stubTab(1, "https://reader.example/");
     await handleTabActivated(1, T0);
     // Tab-hop to another tab (freezes visit 1), then return within grace.
@@ -308,7 +308,7 @@ describe("foreground-only model", () => {
 
   test("pause: setForegroundTab + handleNavigation short-circuit when paused", async () => {
     await saveSettings({
-      ...DEFAULT_SETTINGS, bearerToken: "tok",
+      ...DEFAULT_SETTINGS,
       pausedUntil: T0 + 15 * MIN,
     });
     stubTab(1, "https://reddit.com/r/anything");
@@ -325,7 +325,7 @@ describe("foreground-only model", () => {
 
   test("pause: sweep clears pausedUntil once the deadline passes", async () => {
     await saveSettings({
-      ...DEFAULT_SETTINGS, bearerToken: "tok",
+      ...DEFAULT_SETTINGS,
       pausedUntil: T0 + 15 * MIN,
     });
     // Sweep after the deadline.

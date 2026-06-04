@@ -1,7 +1,6 @@
 // chrome/src/popup/SignIn.tsx
 //
-// The relayless sign-in surface. Replaces the daemon paste-token form when
-// transportMode === "relayless". State machine:
+// The Fulcra sign-in surface (relayless device-flow OIDC). State machine:
 //
 //   idle      → "Sign in with Fulcra" button. Click → startDeviceSignIn.
 //   prompting → device code issued: show the user code prominently + a button
