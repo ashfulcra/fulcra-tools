@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { loadCategoryMap, saveCategoryMap } from "../storage";
 import type { CategoryMapping } from "../types";
 
-// Mirrored from the Python side (fulcra_attention/fulcra.py CATEGORY_VOCAB).
-// Add new slugs in BOTH places — the relay pre-creates the tag at
-// bootstrap time, so unfamiliar slugs won't have a tag UUID to bind to.
+// Mirrors the CATEGORY_VOCAB the extension ensures tags for at ingest time
+// (relayless/ensureDefinition + background.ts). Add new slugs in those
+// places too, or an unfamiliar slug won't have a tag UUID to bind to.
 const VOCAB = [
   "search", "webmail", "ai-chat", "dm", "doc-editor", "reddit-thread",
   "calendar", "banking", "brokerage", "crypto", "tax", "healthcare",

@@ -681,7 +681,7 @@ if (chrome.contextMenus) {
 // Three visual states surface different operational realities:
 //   active    → default mark, full color (icons/icon-*.png)
 //   paused    → desaturated; clear "I'm not capturing"
-//   error     → red overlay; relay unreachable / 401 / etc.
+//   error     → red overlay; Fulcra Cloud unreachable / 401 / etc.
 //
 // We re-evaluate on every storage change + on each handler tick.
 
@@ -709,7 +709,7 @@ export async function refreshToolbarIcon(): Promise<void> {
     await chrome.action.setTitle({
       title: state === "active" ? "Fulcra Attention"
            : state === "paused" ? "Fulcra Attention — paused"
-           : "Fulcra Attention — error (Fulcra Collect unreachable?)",
+           : "Fulcra Attention — error (Fulcra Cloud unreachable?)",
     });
   } catch {
     // setIcon throws if a variant file is missing. Fall back to the
@@ -720,49 +720,6 @@ export async function refreshToolbarIcon(): Promise<void> {
 
 chrome.storage.onChanged.addListener(() => {
   void refreshToolbarIcon();
-});
-
-// ---------- one-click pairing handshake ----------
-//
-// The wizard's pair-listener content script forwards
-// {type:"pair", token, daemonUrl} here when the user clicks "Pair
-// extension". We validate the inputs, write the bearer token (and
-// optionally the relay port parsed from daemonUrl) into settings, and
-// ack so the wizard can stop spinning.
-//
-// The content script already validated event.origin against the
-// loopback pattern. We re-validate `daemonUrl` here in case a different
-// caller ever lands on this message handler — defence in depth.
-const LOOPBACK_DAEMON_URL_RE = /^http:\/\/(127\.0\.0\.1|localhost):\d+$/;
-
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type !== "pair") return false;
-  const token = typeof msg.token === "string" ? msg.token : "";
-  const daemonUrl = typeof msg.daemonUrl === "string" ? msg.daemonUrl : "";
-  if (token.length === 0 || !LOOPBACK_DAEMON_URL_RE.test(daemonUrl)) {
-    sendResponse({ ok: false });
-    return false;
-  }
-  void (async () => {
-    try {
-      const current = await loadSettings();
-      const next = { ...current, bearerToken: token };
-      // Best-effort: store the port too so the future runtime can pick
-      // the user's actual daemon port instead of the hard-coded 9292.
-      const portMatch = daemonUrl.match(/:(\d+)$/);
-      if (portMatch) {
-        const port = Number(portMatch[1]);
-        if (Number.isFinite(port) && port > 0 && port < 65536) {
-          next.relayPort = port;
-        }
-      }
-      await saveSettings(next);
-      sendResponse({ ok: true });
-    } catch {
-      sendResponse({ ok: false });
-    }
-  })();
-  return true;  // async sendResponse
 });
 
 // ---------- heartbeat ingest ----------
