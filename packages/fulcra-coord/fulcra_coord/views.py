@@ -953,3 +953,98 @@ def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         }
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Operator digest (situational-awareness fold, piece 7)
+# ---------------------------------------------------------------------------
+
+def _digest_due_key(s: dict[str, Any]) -> tuple:
+    """Ranking key for the blocked-on-you block: due soonest first, then oldest.
+
+    Both components are PARSED via _parse_dt (BUG 7 / PR #39): a missing/malformed
+    ``due`` sorts LAST (datetime.max) so dated asks lead, and the age tiebreak is
+    the parsed ``updated_at`` (oldest first) so the longest-waiting ask wins ties.
+    We compare parsed datetimes, never the mixed-precision ISO-Z strings."""
+    due = _parse_dt(s.get("due") or "")
+    upd = _parse_dt(s.get("updated_at") or "")
+    return (
+        due or datetime.max.replace(tzinfo=timezone.utc),
+        upd or datetime.max.replace(tzinfo=timezone.utc),
+    )
+
+
+def build_operator_digest(summaries: list[dict[str, Any]],
+                          presence: list[dict[str, Any]], *,
+                          human: str,
+                          now: Optional[datetime] = None,
+                          since: Optional[datetime] = None) -> dict[str, Any]:
+    """Fold bus state into the operator's situational-awareness digest (pure).
+
+    Four blocks, derived ONLY from task_summary dicts + presence records (no I/O,
+    no body fetch). Deterministic given injected ``now``/``since`` (both injected
+    for tests). Reuses the existing read-model so the digest can never disagree
+    with ``needs-me`` / ``presence`` / ``needs-attention``:
+
+      * ``blocked_on_you`` — ``needs_human`` (due-now only), RE-RANKED by due
+        soonest then oldest updated_at (the human reads the most-urgent ask
+        first). ``needs_human`` returns oldest-first; we re-sort by _digest_due_key.
+      * ``upcoming`` — ``upcoming_for_human`` (future not_before within 7d).
+      * ``per_agent`` — one entry per presence record: its agent id, workstreams,
+        liveness, summary, and the tasks it FINISHED/transitioned since ``since``
+        (done/abandoned with done_at >= since). Parsed-datetime ``since`` compare.
+      * ``stale`` — active tasks past the stale threshold (``is_stale``), the same
+        needs-attention safety-net set, sorted oldest-first.
+
+    ``now``/``since`` default to wall-clock / (now - 12h) so a bare call still
+    works, but the command always injects them explicitly."""
+    now_dt = (now or _now()).astimezone(timezone.utc)
+    since_dt = (since or (now_dt - timedelta(hours=12))).astimezone(timezone.utc)
+
+    blocked = sorted(needs_human(summaries, human, now=now_dt), key=_digest_due_key)
+    upcoming = upcoming_for_human(summaries, human, now=now_dt)
+
+    # Index finished/transitioned-since tasks by the owning/touching agent, so a
+    # per_agent entry can list what that agent wrapped up this window. A summary
+    # carries done_at (flattened) — gate on a PARSED compare against since.
+    by_agent_done: dict[str, list[dict[str, Any]]] = {}
+    for s in summaries:
+        if s.get("status") not in ("done", "abandoned"):
+            continue
+        done_dt = _parse_dt(s.get("done_at") or s.get("updated_at") or "")
+        if done_dt is None or done_dt < since_dt:
+            continue
+        for who in {s.get("owner_agent"), s.get("last_touched_by")}:
+            if who:
+                by_agent_done.setdefault(who, []).append(s)
+
+    per_agent = []
+    for rec in presence:
+        agent = rec.get("agent", "")
+        per_agent.append({
+            "agent": agent,
+            "workstreams": list(rec.get("workstreams", [])),
+            "summary": rec.get("summary", ""),
+            "liveness": presence_liveness(rec.get("last_seen", ""), now_dt),
+            "finished_since": sorted(
+                by_agent_done.get(agent, []),
+                key=lambda x: _parse_dt(x.get("done_at") or x.get("updated_at") or "")
+                or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True),
+        })
+
+    stale = sorted(
+        (s for s in summaries if is_stale(s, now_dt)),
+        key=lambda x: _parse_dt(x.get("updated_at") or "")
+        or datetime.min.replace(tzinfo=timezone.utc))
+
+    return {
+        "schema": "fulcra.coordination.operator_digest.v1",
+        "human": human,
+        "now": now_dt.isoformat().replace("+00:00", "Z"),
+        "since": since_dt.isoformat().replace("+00:00", "Z"),
+        "blocked_on_you": blocked,
+        "upcoming": upcoming,
+        "per_agent": per_agent,
+        "stale": stale,
+    }
