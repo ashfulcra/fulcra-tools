@@ -58,3 +58,31 @@ class TestBlockedRanking(unittest.TestCase):
         d = views.build_operator_digest([a, b, c], [], human="ash",
                                         now=NOW, since=SINCE)
         self.assertEqual([s["id"] for s in d["blocked_on_you"]], ["B", "C", "A"])
+
+
+class TestPerAgentAndWindows(unittest.TestCase):
+    def test_finished_since_filters_by_done_at(self):
+        recent = _summary(id="R", status="done", owner_agent="claude-code:mb:repo",
+                          done_at="2026-06-04T12:00:00Z")           # after SINCE
+        old = _summary(id="O", status="done", owner_agent="claude-code:mb:repo",
+                       done_at="2026-06-03T12:00:00Z")              # before SINCE
+        presence = [{"agent": "claude-code:mb:repo",
+                     "workstreams": ["devops"], "summary": "shipping",
+                     "last_seen": "2026-06-04T17:55:00Z"}]
+        d = views.build_operator_digest([recent, old], presence, human="ash",
+                                        now=NOW, since=SINCE)
+        self.assertEqual(len(d["per_agent"]), 1)
+        entry = d["per_agent"][0]
+        self.assertEqual(entry["liveness"], "live")
+        self.assertEqual([s["id"] for s in entry["finished_since"]], ["R"])
+
+    def test_upcoming_and_stale_blocks(self):
+        # upcoming: future not_before within 7d, blocked-on-user.
+        up = _summary(id="U", status="waiting", tags=["needs:human"],
+                      not_before="2026-06-06T00:00:00Z")
+        # stale: active, updated_at older than the 2h default threshold.
+        st = _summary(id="S", status="active", updated_at="2026-06-04T10:00:00Z")
+        d = views.build_operator_digest([up, st], [], human="ash",
+                                        now=NOW, since=SINCE)
+        self.assertEqual([s["id"] for s in d["upcoming"]], ["U"])
+        self.assertEqual([s["id"] for s in d["stale"]], ["S"])
