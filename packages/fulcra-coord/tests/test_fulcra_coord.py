@@ -2041,6 +2041,10 @@ class TestTryMergeLocalStatusChangeRemoteNewerFields(unittest.TestCase):
                          "Local's status transition must be preserved")
         self.assertEqual(result.get("current_summary"), "Remote newer summary",
                          "Remote's newer summary must override local's older summary")
+        self.assertIn("status:active", result.get("tags") or [],
+                      "Tags must be repaired to match the preserved local status")
+        self.assertNotIn("status:proposed", result.get("tags") or [],
+                         "Merged tags must not keep the remote base's stale status")
 
     def test_local_newer_fields_kept_when_local_is_more_recent(self):
         """Local changed status with a later timestamp → local fields win (no remote override)."""
@@ -2063,6 +2067,36 @@ class TestTryMergeLocalStatusChangeRemoteNewerFields(unittest.TestCase):
         self.assertEqual(result["status"], "active")
         self.assertEqual(result.get("current_summary"), "Newer local summary",
                          "Local's newer summary must win when local is more recent")
+
+    def test_remote_newer_fields_with_local_status_rebuilds_tags_from_merged_fields(self):
+        """When only local changed status but remote has a newer priority/extra
+        tag update, merged tags must reflect local status + remote priority and
+        preserve non-standard tags from both sides."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+
+        base = _sample_task()
+        t_local = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        t_remote = t_local + timedelta(seconds=30)
+
+        local_active = apply_transition(base, "active", by="agent-a", dt=t_local)
+        local_active["tags"] = sorted(set(local_active["tags"] + ["needs:human"]))
+
+        remote_updated = apply_update(base, by="agent-b",
+                                      summary="Remote newer summary", dt=t_remote)
+        remote_updated["priority"] = "P1"
+        remote_updated["tags"] = sorted(set(remote_updated["tags"] + ["custom:remote"]))
+
+        result = _try_merge(local_active, remote_updated)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(result["priority"], "P1")
+        self.assertIn("status:active", result["tags"])
+        self.assertNotIn("status:proposed", result["tags"])
+        self.assertIn("priority:P1", result["tags"])
+        self.assertNotIn("priority:P2", result["tags"])
+        self.assertIn("needs:human", result["tags"])
+        self.assertIn("custom:remote", result["tags"])
 
     def test_same_status_remote_newer_fields_applied(self):
         """Same status on both sides; remote has newer field update → remote fields win."""
