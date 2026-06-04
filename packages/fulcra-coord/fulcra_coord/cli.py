@@ -259,7 +259,7 @@ def _load_summaries_for_rebuild(
         if not s.get("id"):
             continue  # a body with no id can't key the aggregate; skip safely
         prev = by_id.get(s["id"])
-        if prev is None or s.get("updated_at", "") > prev.get("updated_at", ""):
+        if prev is None or _updated_at_key(s) > _updated_at_key(prev):
             by_id[s["id"]] = s
 
     # S2 layer 2 — SELF-HEAL: the per-task FILES are the durable, un-clobberable
