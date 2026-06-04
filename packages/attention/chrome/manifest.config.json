@@ -16,7 +16,9 @@
     "history"
   ],
   "host_permissions": [
-    "http://127.0.0.1:9292/*"
+    "http://127.0.0.1:9292/*",
+    "https://api.fulcradynamics.com/*",
+    "https://fulcra.us.auth0.com/*"
   ],
   "optional_host_permissions": [
     "http://*/*",

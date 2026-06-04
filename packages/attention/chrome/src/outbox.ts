@@ -7,6 +7,13 @@
 
 import { loadOutbox, saveOutbox, loadSettings } from "./storage";
 import type { AttentionEvent, OutboxEntry } from "./types";
+import { sendBatch } from "./relayless/relaylessSender";
+import { SentSet } from "./relayless/sentSet";
+import { TokenStore } from "./relayless/tokenStore";
+import {
+  ensureAttentionDefinitionAndTags,
+  UnauthorizedError,
+} from "./relayless/ensureDefinition";
 
 export const OUTBOX_CAP = 5000;
 // The daemon's extension-events endpoint. Default port matches
@@ -80,6 +87,17 @@ export function flushOutbox(): Promise<void> {
 }
 
 async function doFlushOutbox(): Promise<void> {
+  const settings = await loadSettings();
+  if (settings.transportMode === "relayless") {
+    await flushRelayless();
+    return;
+  }
+  await flushRelay();
+}
+
+// --- relay transport (the v1 localhost-daemon path; behavior unchanged) ----
+
+async function flushRelay(): Promise<void> {
   const settings = await loadSettings();
   if (!settings.bearerToken) return;
   const entries = await loadOutbox();
@@ -177,5 +195,116 @@ async function doFlushOutbox(): Promise<void> {
     await writeIngestError({ kind: "unreachable", at: Date.now() });
   } else {
     // Empty pass and no failures — leave whatever state was there alone.
+  }
+}
+
+// --- relayless transport (direct-to-cloud via the relayless core) ---------
+//
+// Drains the same outbox the relay path does, but POSTs each event straight
+// to Fulcra's /ingest/v1/record/batch using the relayless core: an OIDC
+// device-flow access token (TokenStore), the extension-resolved Attention
+// {definitionId, tagIds} (ensureAttentionDefinitionAndTags, cached), and the
+// core relaylessSender.sendBatch (which builds wire records, de-dups via the
+// SentSet, and POSTs the survivors).
+//
+// lastIngestError semantics are preserved and mapped to the relayless world:
+//   - no token / 401            → { kind: "unauthorized" }  (needs sign-in;
+//                                  events are RETAINED, never dropped)
+//   - network / non-401 failure → { kind: "unreachable" }   (events retained)
+//   - success (or nothing to    → clear the error
+//     flush, draining a stale
+//     "unreachable")
+//
+// Single-flight is provided by flushOutbox's module-scope guard, shared with
+// the relay path, so a relay→relayless toggle can't run two drains at once.
+async function flushRelayless(): Promise<void> {
+  const entries = await loadOutbox();
+
+  // A token store + a getToken adapter the core sender/ensure use. getToken
+  // returns the valid access token (refreshing transparently) or null when
+  // not signed in.
+  const tokenStore = new TokenStore();
+  const getToken = async (opts?: { force?: boolean }): Promise<string | null> => {
+    // The relayless TokenStore refreshes on staleness inside
+    // getValidAccessToken. A `force` (post-401) refresh is honored straight
+    // through: a 401 on a still-"fresh" (but server-revoked) token must
+    // trigger a real refresh via the refresh grant, not hand back the same
+    // rejected token. sendBatch retries exactly once with force:true.
+    return tokenStore.getValidAccessToken({ force: opts?.force });
+  };
+
+  // Gate on having a token up front: if not signed in, surface needs-sign-in
+  // and retain events. (Mirrors the relay path's "no bearer token → return".)
+  let haveToken: boolean;
+  try {
+    haveToken = (await tokenStore.getValidAccessToken()) != null;
+  } catch {
+    // Refresh failed (expired refresh token, transport) — treat as
+    // needs-sign-in so the user re-authenticates.
+    await writeIngestError({ kind: "unauthorized", at: Date.now() });
+    return;
+  }
+  if (!haveToken) {
+    await writeIngestError({ kind: "unauthorized", at: Date.now() });
+    return;
+  }
+
+  if (entries.length === 0) {
+    // Nothing to flush. Drain a stale "unreachable" the same way the relay
+    // path does; leave "unauthorized" for an explicit sign-in / success.
+    const r = await chrome.storage.local.get("lastIngestError");
+    if (
+      r.lastIngestError &&
+      (r.lastIngestError as IngestError).kind === "unreachable"
+    ) {
+      await chrome.storage.local.remove("lastIngestError");
+    }
+    return;
+  }
+
+  // Ensure (cached) the Attention definition + tags. A 401 here means the
+  // token went bad mid-flight → needs-sign-in; any other failure (network,
+  // 5xx) → unreachable. Events are retained in both cases.
+  let context: { definitionId: string; tagIds: string[] };
+  try {
+    context = await ensureAttentionDefinitionAndTags({ getToken });
+  } catch (e) {
+    if (e instanceof UnauthorizedError) {
+      await writeIngestError({ kind: "unauthorized", at: Date.now() });
+    } else {
+      await writeIngestError({ kind: "unreachable", at: Date.now() });
+    }
+    return;
+  }
+
+  // Drain via the core sender. It de-dups against the SentSet and only marks
+  // ids sent after a 2xx, so on failure nothing is lost.
+  const sentSet = new SentSet();
+  const events = entries.map((e) => e.payload);
+  const result = await sendBatch(events, {
+    getToken,
+    context,
+    sentSet,
+  });
+
+  if (result.ok) {
+    // ok means sendBatch processed every snapshotted event — each was either
+    // POSTed successfully (now in the SentSet) or skipped because it was
+    // already sent. Clear exactly the entries we snapshotted by id, so any
+    // event queued concurrently (during the POST) survives. Mirrors the
+    // relay path, which only writes back the entries it read.
+    const settled = new Set(entries.map((e) => e.id));
+    const current = await loadOutbox();
+    await saveOutbox(current.filter((e) => !settled.has(e.id)));
+    await writeIngestError(null);
+    return;
+  }
+
+  // Failure: 401 → needs-sign-in; anything else (network=0, 5xx) →
+  // unreachable. Events are retained (we did NOT clear the outbox).
+  if (result.failureStatus === 401) {
+    await writeIngestError({ kind: "unauthorized", at: Date.now() });
+  } else {
+    await writeIngestError({ kind: "unreachable", at: Date.now() });
   }
 }
