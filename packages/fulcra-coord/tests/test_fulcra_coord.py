@@ -2041,6 +2041,10 @@ class TestTryMergeLocalStatusChangeRemoteNewerFields(unittest.TestCase):
                          "Local's status transition must be preserved")
         self.assertEqual(result.get("current_summary"), "Remote newer summary",
                          "Remote's newer summary must override local's older summary")
+        self.assertIn("status:active", result.get("tags") or [],
+                      "Tags must be repaired to match the preserved local status")
+        self.assertNotIn("status:proposed", result.get("tags") or [],
+                         "Merged tags must not keep the remote base's stale status")
 
     def test_local_newer_fields_kept_when_local_is_more_recent(self):
         """Local changed status with a later timestamp → local fields win (no remote override)."""
@@ -2063,6 +2067,36 @@ class TestTryMergeLocalStatusChangeRemoteNewerFields(unittest.TestCase):
         self.assertEqual(result["status"], "active")
         self.assertEqual(result.get("current_summary"), "Newer local summary",
                          "Local's newer summary must win when local is more recent")
+
+    def test_remote_newer_fields_with_local_status_rebuilds_tags_from_merged_fields(self):
+        """When only local changed status but remote has a newer priority/extra
+        tag update, merged tags must reflect local status + remote priority and
+        preserve non-standard tags from both sides."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+
+        base = _sample_task()
+        t_local = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        t_remote = t_local + timedelta(seconds=30)
+
+        local_active = apply_transition(base, "active", by="agent-a", dt=t_local)
+        local_active["tags"] = sorted(set(local_active["tags"] + ["needs:human"]))
+
+        remote_updated = apply_update(base, by="agent-b",
+                                      summary="Remote newer summary", dt=t_remote)
+        remote_updated["priority"] = "P1"
+        remote_updated["tags"] = sorted(set(remote_updated["tags"] + ["custom:remote"]))
+
+        result = _try_merge(local_active, remote_updated)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(result["priority"], "P1")
+        self.assertIn("status:active", result["tags"])
+        self.assertNotIn("status:proposed", result["tags"])
+        self.assertIn("priority:P1", result["tags"])
+        self.assertNotIn("priority:P2", result["tags"])
+        self.assertIn("needs:human", result["tags"])
+        self.assertIn("custom:remote", result["tags"])
 
     def test_same_status_remote_newer_fields_applied(self):
         """Same status on both sides; remote has newer field update → remote fields win."""
@@ -2728,6 +2762,25 @@ class TestSessionStartBlockedOnYouBanner(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")
 
+    def test_future_only_plate_shows_upcoming_without_headline(self):
+        # BUG 9: due-now empty but upcoming non-empty. The banner must surface
+        # the muted "(+N upcoming)" line (and not exit silently), with NO ⛔
+        # BLOCKED ON YOU headline (the headline counts due-now only).
+        needsme = json.dumps({"human": "ash", "count": 0, "items": [],
+            "upcoming": [
+                {"id": "TASK-future", "title": "reauth window",
+                 "status": "blocked", "owner_agent": "claude-code:h:r",
+                 "not_before": "2099-01-01T00:00:00Z",
+                 "updated_at": "2026-06-01T00:00:00Z"}]})
+        r = self._run(json.dumps({"active": []}), needsme)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotEqual(r.stdout.strip(), "",
+                            "a future-only plate must still emit the upcoming line")
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("(+1 upcoming)", ctx)
+        self.assertNotIn("BLOCKED ON YOU", ctx,
+                         "no due-now items -> no ⛔ headline")
+
     def test_blocked_on_you_with_inflight_both_present(self):
         host = os.uname().nodename.split(".")[0]
         sj = json.dumps({"active": [
@@ -3386,6 +3439,50 @@ class TestStalenessFlag(unittest.TestCase):
         self.assertIn("needs-attention", out)
 
 
+class TestNaiveTimestampNoCrash(unittest.TestCase):
+    """BUG 8: a naive (tz-less) parsed timestamp must not crash the liveness /
+    aging paths. _parse_dt returned a naive datetime; subtracting it from an
+    aware `now` in _age_hours raised TypeError, and the +inf fail-safe contract
+    was violated. _parse_dt now coerces naive -> UTC so every caller is safe."""
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_presence_liveness_with_naive_iso(self):
+        from fulcra_coord.views import presence_liveness
+        # 10 minutes ago, but tz-less -> must classify (assume UTC), not crash.
+        out = presence_liveness("2026-06-03T11:50:00", now=self.now,
+                                stale_hours=2)
+        self.assertEqual(out, "live")
+
+    def test_is_aged_out_broadcast_with_naive_updated_at(self):
+        from fulcra_coord.views import is_aged_out_broadcast
+        t = {"id": "TASK-NB", "title": "t", "status": "proposed",
+             "workstream": "w", "owner_agent": "o", "assignee": "*",
+             "priority": "P2", "tags": [], "events": [],
+             "updated_at": "2026-06-01T12:00:00"}  # naive, 2 days old
+        # Must not raise; with a 1-day cutoff the 2-day-old broadcast ages out.
+        self.assertTrue(is_aged_out_broadcast(t, self.now, age_days=1))
+
+    def test_inbox_for_over_task_with_naive_updated_at(self):
+        from fulcra_coord.views import inbox_for
+        t = {"id": "TASK-NB2", "title": "t", "status": "proposed",
+             "workstream": "w", "owner_agent": "boss", "assignee": "claude-code",
+             "priority": "P2", "tags": [], "events": [],
+             "updated_at": "2026-06-03T11:55:00"}  # naive, recent
+        # Must not raise TypeError out of the aging check.
+        out = inbox_for("claude-code:h:r", [t], now=self.now)
+        self.assertEqual([s["id"] for s in out], ["TASK-NB2"])
+
+    def test_age_hours_naive_does_not_raise(self):
+        from fulcra_coord.views import _age_hours, _parse_dt
+        # Direct: naive parse must be aware-UTC, subtraction must work.
+        self.assertIsNotNone(_parse_dt("2026-06-03T11:00:00").tzinfo)
+        self.assertAlmostEqual(_age_hours("2026-06-03T11:00:00", self.now), 1.0,
+                               places=3)
+
+
 class TestReconcileStaleness(unittest.TestCase):
     """The reconcile path stamps staleness and materializes needs-attention."""
 
@@ -3551,7 +3648,8 @@ class TestInstallerHardening(unittest.TestCase):
              patch("sys.platform", "darwin"):
             listener.install_listener(agent="codex:h:r", target_dir=self.target,
                                       logs_dir=self.logs, interval_min=10)
-        plist = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        plist = os.path.join(self.target,
+                             "com.fulcra.coord.listener.codex-h-r.plist")
         with open(plist, "rb") as f:
             return plistlib.load(f)
 
@@ -3613,14 +3711,15 @@ class TestInstallerHardening(unittest.TestCase):
             listener.install_listener(agent="codex:h:r", target_dir=self.target,
                                       logs_dir=self.logs)
         hb = os.path.join(self.target, "com.fulcra.coord.heartbeat.plist")
-        ln = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        ln = os.path.join(self.target,
+                          "com.fulcra.coord.listener.codex-h-r.plist")
         self.assertTrue(os.path.exists(hb) and os.path.exists(ln))
         with open(hb, "rb") as f:
             self.assertEqual(plistlib.load(f)["Label"],
                              "com.fulcra.coord.heartbeat")
         with open(ln, "rb") as f:
             self.assertEqual(plistlib.load(f)["Label"],
-                             "com.fulcra.coord.listener")
+                             "com.fulcra.coord.listener.codex-h-r")
 
     # --- crontab: PATH= prefix ----------------------------------------------
 
@@ -4367,6 +4466,56 @@ class TestTellAssignInbox(unittest.TestCase):
             cmd_inbox(list_args, backend=self.fake_backend)
         self.assertEqual(json.loads(buf.getvalue())["inbox"], [])
 
+    def test_inbox_pins_single_now_across_shown_and_hidden(self):
+        # BUG 14: inbox_for (shown) and aged_out_inbox_count (hidden) each
+        # evaluated _now() independently (3+ times per cmd_inbox). At the aging
+        # boundary a broadcast could be SHOWN by one evaluation and COUNTED
+        # HIDDEN by a later one — listed and hidden at once. cmd_inbox must pin a
+        # single `now` and thread it into both so they agree.
+        from fulcra_coord.cli import cmd_inbox
+        from fulcra_coord import views
+        from datetime import datetime, timezone, timedelta
+        import io, contextlib
+
+        # One-day age cutoff; a broadcast right at the boundary.
+        os.environ["FULCRA_COORD_INBOX_AGE_DAYS"] = "1"
+        try:
+            base = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+            # updated_at sits just INSIDE the 1-day window at the first clock
+            # read: at `base` age (~23h59m) < cutoff -> SHOWN. The clock then
+            # advances 1h between reads, so the hidden-count's later read sees
+            # age ~25h >= cutoff -> would count it HIDDEN. The boundary is
+            # crossed purely by the unpinned clock advancing mid-command.
+            bc = _directive("*", owner="boss", status="proposed")
+            bc["updated_at"] = (
+                base - timedelta(days=1) + timedelta(minutes=1)
+            ).isoformat().replace("+00:00", "Z")
+            cache.write_cached_task(bc)
+
+            # A clock that advances 1h per call: the shown read sees `base`
+            # (under cutoff), the hidden-count reads see `base + Nh` (over
+            # cutoff). With the bug this makes the SAME broadcast both shown and
+            # counted hidden; pinning a single `now` makes them agree.
+            ticks = [base + timedelta(hours=i) for i in range(10)]
+            it = iter(ticks)
+            with patch.object(views, "_now", side_effect=lambda: next(it)):
+                args = self._ns(agent="codex:h:r", format="json", ack=None,
+                                all=False)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    cmd_inbox(args, backend=self.fake_backend)
+            out = json.loads(buf.getvalue())
+            shown_ids = {i["id"] for i in out["inbox"]}
+            # The broadcast must be EITHER shown OR counted hidden, never both.
+            # If shown, hidden must be 0; if hidden, it must not be in shown.
+            if bc["id"] in shown_ids:
+                self.assertEqual(out["hidden_aged"], 0,
+                    "a shown broadcast must not also be counted hidden")
+            else:
+                self.assertEqual(out["hidden_aged"], 1)
+        finally:
+            os.environ.pop("FULCRA_COORD_INBOX_AGE_DAYS", None)
+
     def test_inbox_derives_agent_from_env(self):
         from fulcra_coord.cli import cmd_inbox
         os.environ["FULCRA_COORD_AGENT"] = "codex:h:r"
@@ -4528,7 +4677,8 @@ class TestInstallListener(unittest.TestCase):
             plan = listener.install_listener(agent="codex:h:r",
                                              target_dir=self.target,
                                              interval_min=10)
-        plist = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        plist = os.path.join(self.target,
+                             "com.fulcra.coord.listener.codex-h-r.plist")
         self.assertTrue(os.path.exists(plist))
         body = open(plist).read()
         self.assertIn("/opt/bin/fulcra-coord", body)
@@ -4542,7 +4692,8 @@ class TestInstallListener(unittest.TestCase):
             listener.install_listener(agent="codex:h:r", target_dir=self.target)
             listener.install_listener(agent="codex:h:r", target_dir=self.target)
         files = os.listdir(self.target)
-        self.assertEqual(files.count("com.fulcra.coord.listener.plist"), 1)
+        self.assertEqual(
+            files.count("com.fulcra.coord.listener.codex-h-r.plist"), 1)
 
     def test_dry_run_writes_nothing(self):
         from fulcra_coord import listener
@@ -4558,7 +4709,8 @@ class TestInstallListener(unittest.TestCase):
             listener.install_listener(agent="codex:h:r", target_dir=self.target)
             listener.install_listener(agent="codex:h:r", target_dir=self.target,
                                       uninstall=True)
-        plist = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        plist = os.path.join(self.target,
+                             "com.fulcra.coord.listener.codex-h-r.plist")
         self.assertFalse(os.path.exists(plist))
 
     def test_crontab_fallback_on_non_macos(self):
@@ -4588,6 +4740,249 @@ class TestInstallListener(unittest.TestCase):
         self.assertIn("/usr/bin/other-job", body)
         self.assertNotIn("fulcra-coord-listener", body)
 
+    # --- per-agent identity: co-located agents must coexist ----------------
+
+    def test_two_agents_get_distinct_coexisting_plists(self):
+        """install A then B in the same target_dir -> two distinct plist files,
+        each with its own Label and --agent value; neither overwrites the other.
+
+        This is the core bug fix: a machine-global label made install B clobber
+        install A so only one inbox was ever watched."""
+        import plistlib
+        from fulcra_coord import listener
+        with patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]), \
+             patch("sys.platform", "darwin"):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.target)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.target)
+        pa = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-a-h-r.plist")
+        pb = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-b-h-r.plist")
+        self.assertTrue(os.path.exists(pa) and os.path.exists(pb))
+        with open(pa, "rb") as f:
+            da = plistlib.load(f)
+        with open(pb, "rb") as f:
+            db = plistlib.load(f)
+        self.assertEqual(da["Label"], "com.fulcra.coord.listener.agent-a-h-r")
+        self.assertEqual(db["Label"], "com.fulcra.coord.listener.agent-b-h-r")
+        self.assertIn("agent-a:h:r", da["ProgramArguments"])
+        self.assertIn("agent-b:h:r", db["ProgramArguments"])
+
+    def test_uninstall_one_agent_leaves_the_other(self):
+        """uninstall A removes only A's plist; B's stays intact."""
+        from fulcra_coord import listener
+        with patch("sys.platform", "darwin"):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.target)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.target)
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.target,
+                                      uninstall=True)
+        pa = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-a-h-r.plist")
+        pb = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-b-h-r.plist")
+        self.assertFalse(os.path.exists(pa))
+        self.assertTrue(os.path.exists(pb))
+
+    def test_plan_reports_per_agent_plist_path(self):
+        """The returned plan's writes path carries the per-agent slug."""
+        from fulcra_coord import listener
+        with patch("sys.platform", "darwin"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target)
+        self.assertEqual(len(plan["writes"]), 1)
+        self.assertTrue(
+            plan["writes"][0].endswith(
+                "com.fulcra.coord.listener.agent-a-h-r.plist"))
+
+    # --- per-agent cron identity -------------------------------------------
+
+    def test_two_agents_get_two_managed_cron_blocks(self):
+        """install A then B (crontab path) -> two managed marker blocks, one
+        per agent; the slug is embedded in each marker so they don't collide."""
+        from fulcra_coord import listener
+        crontab = os.path.join(self.tmp, "crontab.txt")
+        with patch("sys.platform", "linux"), \
+             patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+        body = open(crontab).read()
+        self.assertIn("fulcra-coord-listener:agent-a-h-r", body)
+        self.assertIn("fulcra-coord-listener:agent-b-h-r", body)
+        self.assertIn("agent-a:h:r", body)
+        self.assertIn("agent-b:h:r", body)
+        # two managed command lines (one per agent)
+        self.assertEqual(body.count("notify-inbox"), 2)
+
+    def test_cron_uninstall_one_agent_leaves_the_other(self):
+        """uninstall A strips only A's managed block; B's line remains."""
+        from fulcra_coord import listener
+        crontab = os.path.join(self.tmp, "crontab.txt")
+        with patch("sys.platform", "linux"), \
+             patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab, uninstall=True)
+        body = open(crontab).read()
+        self.assertNotIn("fulcra-coord-listener:agent-a-h-r", body)
+        self.assertNotIn("agent-a:h:r", body)
+        self.assertIn("fulcra-coord-listener:agent-b-h-r", body)
+        self.assertIn("agent-b:h:r", body)
+
+    def test_strip_managed_cron_is_agent_scoped(self):
+        """_strip_managed_cron / _is_managed_cron_command operate on the GIVEN
+        agent's marker only; another agent's managed block is left intact."""
+        from fulcra_coord import listener
+        marker_a = listener._cron_marker_for("agent-a:h:r")
+        marker_b = listener._cron_marker_for("agent-b:h:r")
+        line_b = ("*/10 * * * * PATH=/x /opt/bin/fulcra-coord notify-inbox "
+                  "--agent agent-b:h:r >/dev/null 2>&1")
+        text = (marker_a + "\n"
+                "*/10 * * * * PATH=/x /opt/bin/fulcra-coord notify-inbox "
+                "--agent agent-a:h:r >/dev/null 2>&1\n"
+                + marker_b + "\n" + line_b + "\n")
+        stripped = listener._strip_managed_cron(text, "agent-a:h:r")
+        self.assertNotIn(marker_a, stripped)
+        self.assertNotIn("agent-a:h:r", stripped)
+        self.assertIn(marker_b, stripped)
+        self.assertIn(line_b, stripped)
+        # The guard only claims this agent's line.
+        self.assertTrue(
+            listener._is_managed_cron_command(line_b, "agent-b:h:r"))
+        self.assertFalse(
+            listener._is_managed_cron_command(line_b, "agent-a:h:r"))
+
+    # --- legacy (un-slugged) plist migration --------------------------------
+
+    def test_install_supersedes_legacy_plist_for_same_agent(self):
+        """A legacy un-slugged com.fulcra.coord.listener.plist that watches
+        agent A is removed when A reinstalls (prevents A double-running)."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-a:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target)
+        self.assertFalse(os.path.exists(legacy))
+        self.assertIn(legacy, plan.get("removes", []))
+        # The new per-agent plist still exists.
+        self.assertTrue(os.path.exists(os.path.join(
+            self.target, "com.fulcra.coord.listener.agent-a-h-r.plist")))
+
+    def test_install_leaves_legacy_plist_for_different_agent(self):
+        """A legacy plist watching agent B is LEFT when agent A installs — B
+        migrates on its own reinstall, not when an unrelated agent installs."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-b:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target)
+        self.assertTrue(os.path.exists(legacy))
+        self.assertNotIn(legacy, plan.get("removes", []))
+
+    def test_uninstall_removes_legacy_plist_for_same_agent_only(self):
+        """Uninstall must also remove a pre-0.5.3 legacy plist when it watches
+        this agent; otherwise upgrading then uninstalling leaves the old listener
+        still polling the target agent. A different agent's legacy plist stays."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-a:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             uninstall=True)
+        self.assertFalse(os.path.exists(legacy))
+        self.assertIn(legacy, plan.get("removes", []))
+
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-b:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             uninstall=True)
+        self.assertTrue(os.path.exists(legacy))
+        self.assertNotIn(legacy, plan.get("removes", []))
+
+    def test_dry_run_reports_legacy_supersede_without_writing(self):
+        """--dry-run names the per-agent plist and reports it would supersede a
+        matching legacy plist, but writes/removes nothing."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-a:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             dry_run=True)
+        self.assertTrue(os.path.exists(legacy))  # nothing removed
+        self.assertTrue(plan["writes"][0].endswith(
+            "com.fulcra.coord.listener.agent-a-h-r.plist"))
+        self.assertTrue(plan.get("supersedes_legacy"))
+
+    def test_cron_install_supersedes_legacy_marker_for_same_agent(self):
+        """A legacy un-slugged managed marker line for agent A is superseded
+        when A installs; a legacy marker for B is left."""
+        from fulcra_coord import listener
+        crontab = os.path.join(self.tmp, "crontab.txt")
+        legacy_marker = "# fulcra-coord-listener (managed; do not edit this line)"
+        legacy_cmd = ("*/10 * * * * PATH=/x /old/fulcra-coord notify-inbox "
+                      "--agent agent-a:h:r >/dev/null 2>&1")
+        with open(crontab, "w") as f:
+            f.write(legacy_marker + "\n" + legacy_cmd + "\n")
+        with patch("sys.platform", "linux"), \
+             patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+        body = open(crontab).read()
+        # legacy un-slugged marker for A is gone; exactly one (slugged) block.
+        self.assertNotIn(legacy_marker + "\n", body)
+        self.assertIn("fulcra-coord-listener:agent-a-h-r", body)
+        self.assertEqual(body.count("notify-inbox"), 1)
+
 
 class TestInstallListenerCmd(unittest.TestCase):
     def setUp(self):
@@ -4604,8 +4999,8 @@ class TestInstallListenerCmd(unittest.TestCase):
                 agent="codex:h:r", interval_min=10, uninstall=False,
                 dry_run=False, target_dir=self.target))
         self.assertEqual(rc, 0)
-        self.assertTrue(os.path.exists(
-            os.path.join(self.target, "com.fulcra.coord.listener.plist")))
+        self.assertTrue(os.path.exists(os.path.join(
+            self.target, "com.fulcra.coord.listener.codex-h-r.plist")))
 
 
 class TestNotifyInbox(unittest.TestCase):
@@ -4913,6 +5308,80 @@ class TestTryMergePreservesAssigneeOwner(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# BUG 1 (data-loss): _try_merge must carry ALL non-event scalar/dict fields
+# from the MORE-RECENT side, not a 4-field allowlist. not_before/due/blocked_on/
+# priority/title/etc. set on the newer side were previously kept from the merge
+# base and silently LOST.
+# ---------------------------------------------------------------------------
+
+class TestTryMergeCarriesAllNewerFields(unittest.TestCase):
+    def test_newer_side_scheduling_fields_survive(self):
+        """Same-status concurrent edits: the more-recent side set not_before/
+        due/blocked_on; the other side is a plain summary update. Merged must
+        keep not_before/due/blocked_on from the newer side."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+        base = _with_status(_sample_task(), "active")
+
+        # Older side: plain summary update.
+        t_old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = apply_update(base, by="agent-a", summary="just a note", dt=t_old)
+
+        # Newer side: a summary update that also sets scheduling fields.
+        t_new = t_old + timedelta(seconds=30)
+        newer = apply_update(base, by="agent-b", summary="scheduled it", dt=t_new)
+        newer["not_before"] = "2026-06-02T09:00:00Z"
+        newer["due"] = "2026-06-03T17:00:00Z"
+        newer["blocked_on"] = "TASK-OTHER"
+
+        result = _try_merge(older, newer)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("not_before"), "2026-06-02T09:00:00Z")
+        self.assertEqual(result.get("due"), "2026-06-03T17:00:00Z")
+        self.assertEqual(result.get("blocked_on"), "TASK-OTHER")
+
+    def test_title_and_priority_edit_survives(self):
+        """A title/priority edit on the newer side must survive the merge."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+        base = _with_status(_sample_task(), "active")
+
+        t_old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = apply_update(base, by="agent-a", summary="note", dt=t_old)
+
+        t_new = t_old + timedelta(seconds=30)
+        newer = apply_update(base, by="agent-b", summary="retitled", dt=t_new)
+        newer["title"] = "Renamed task"
+        newer["priority"] = "P0"
+
+        result = _try_merge(older, newer)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("title"), "Renamed task")
+        self.assertEqual(result.get("priority"), "P0")
+
+    def test_events_still_unioned_and_acked_by_merged(self):
+        """The event-union + acked_by-union must remain intact after the rewrite."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+        base = _with_status(_sample_task(), "active")
+
+        t_old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = apply_update(base, by="agent-a", summary="local note", dt=t_old)
+        older["acked_by"] = ["agent-a"]
+
+        t_new = t_old + timedelta(seconds=30)
+        newer = apply_update(base, by="agent-b", summary="remote note", dt=t_new)
+        newer["acked_by"] = ["agent-b"]
+
+        result = _try_merge(older, newer)
+        self.assertIsNotNone(result)
+        summaries = [e.get("summary") for e in result.get("events", [])]
+        self.assertIn("local note", summaries)
+        self.assertIn("remote note", summaries)
+        self.assertEqual(set(result.get("acked_by") or []), {"agent-a", "agent-b"})
+
+
+# ---------------------------------------------------------------------------
 # Feature #1 — agent identity handshake (resolve_agent + agent_matches)
 # ---------------------------------------------------------------------------
 
@@ -5146,6 +5615,57 @@ class TestIdentityCommand(unittest.TestCase):
         data = json.loads(out)
         self.assertEqual(data["agent"], "codex:Mac:main")
         self.assertEqual(data["source"], "config")
+
+
+class TestInboxIndexPrefixOwnershipAgreement(unittest.TestCase):
+    """BUG 3 (HIGH): index.counts.inbox must not over-count vs inbox_for.
+
+    is_open_directive excluded self-owned only via exact owner_agent==assignee;
+    inbox_for / the owner's read path treat a directive whose assignee is a
+    short-id PREFIX of its owner_agent as the owner's own work (hidden). So a
+    directive owner_agent='claude-code:h:r', assignee='claude-code' was hidden
+    by the read path but still counted by the index — they disagreed.
+    """
+
+    def _directive_prefix_owner(self):
+        return {
+            "id": "TASK-PREFIX-OWN", "title": "self-owned via prefix",
+            "status": "proposed", "workstream": "general",
+            "owner_agent": "claude-code:h:r", "assignee": "claude-code",
+            "priority": "P2", "updated_at": "2026-06-03T00:00:00Z",
+            "tags": [], "events": [],
+        }
+
+    def test_inbox_for_hides_owners_own_prefixed_directive(self):
+        from fulcra_coord.views import inbox_for
+        t = self._directive_prefix_owner()
+        # The owner querying its own inbox must NOT see its own directive.
+        self.assertEqual(inbox_for("claude-code:h:r", [t]), [])
+
+    def test_index_does_not_count_owners_own_prefixed_directive(self):
+        from fulcra_coord.views import build_index
+        t = self._directive_prefix_owner()
+        idx = build_index([t])
+        # The read path hides it; the index must agree and not count it.
+        self.assertEqual(idx["counts"]["inbox"], {},
+                         "index must not count a directive the owner's read path hides")
+
+    def test_is_open_directive_excludes_prefix_self_owned(self):
+        from fulcra_coord.views import is_open_directive
+        t = self._directive_prefix_owner()
+        self.assertFalse(is_open_directive(t, "claude-code"),
+                         "prefix-self-owned directive is not an open inbox item")
+
+    def test_normal_case_still_counts_and_shows(self):
+        # A genuine cross-agent directive (owner is a DIFFERENT kind) must still
+        # be counted and shown — the fix must not over-suppress.
+        from fulcra_coord.views import inbox_for, build_index, is_open_directive
+        t = self._directive_prefix_owner()
+        t["owner_agent"] = "openclaw:host:repo"  # not a prefix-relation with assignee
+        self.assertTrue(is_open_directive(t, "claude-code"))
+        self.assertEqual(len(inbox_for("claude-code:h:r", [t])), 1)
+        idx = build_index([t])
+        self.assertEqual(idx["counts"]["inbox"].get("claude-code"), 1)
 
 
 class TestInboxPrefixRegression(unittest.TestCase):
@@ -6642,6 +7162,31 @@ class TestParallelViewUpload(unittest.TestCase):
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
 
+    def test_emit_runs_before_needs_reconcile_on_partial_failure(self):
+        # BUG 10: the task body uploaded successfully, so the lifecycle
+        # transition is REAL and must be recorded — even when a view upload
+        # fails. The emit was AFTER the NeedsReconcile raise, so a partial view
+        # failure permanently dropped the annotation. Assert emit still runs AND
+        # NeedsReconcile is still raised (emit best-effort, can't change outcome).
+        from fulcra_coord.cli import _write_task_and_views
+        task = self._setup_remote()
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                return False  # one view fails -> partial -> NeedsReconcile
+            return True
+
+        with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._load_task_summaries",
+                   return_value=[schema.task_summary(task)]), \
+             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
+             patch("fulcra_coord.cli.lifecycle_annotations.emit_lifecycle_annotation") as emit:
+            with self.assertRaises(schema.NeedsReconcile):
+                _write_task_and_views(task, backend=["false"], command="update")
+        self.assertTrue(emit.called,
+                        "lifecycle annotation must be emitted before NeedsReconcile")
+
     def test_uploads_all_views_on_success(self):
         from fulcra_coord.cli import _write_task_and_views
         task = self._setup_remote()
@@ -6818,6 +7363,35 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         ids = {s["id"] for s in out}
         self.assertIn(good["id"], ids)
         self.assertNotIn(bad_id, ids)
+
+    def test_bug2_corrupt_cached_body_is_skipped_not_raised(self):
+        # BUG 2 (data-loss): a corrupt/partial cached task body (missing
+        # required fields title/status/workstream/owner_agent) must NOT raise
+        # KeyError out of the cache-union loop. It must be skipped, and the
+        # good cached tasks still returned — so _write_task_and_views completes
+        # and never leaves views stale without a needs_reconcile marker.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+
+        good_cached = _sample_task()
+        good_cached["id"] = "TASK-20260603-good-cached-eeeeeeee"
+        good_cached["updated_at"] = "2026-06-03T10:00:00Z"
+        cache.write_cached_task(good_cached)
+
+        # A corrupt body: has an id but is missing title/status/workstream/
+        # owner_agent → schema.task_summary(t) would KeyError without a guard.
+        corrupt = {"id": "TASK-20260603-corrupt-ffffffff",
+                   "updated_at": "2026-06-03T11:00:00Z"}
+        with patch("fulcra_coord.cli.cache.list_cached_tasks",
+                   return_value=[good_cached, corrupt]), \
+             patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)])), \
+             patch("fulcra_coord.cli.remote.list_files", return_value=[]):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        ids = {s["id"] for s in out}
+        self.assertIn(good_cached["id"], ids)   # good entry survives
+        self.assertIn(task_a["id"], ids)
+        self.assertNotIn(corrupt["id"], ids)    # corrupt one skipped, not fatal
 
 
 class TestParallelUploadExceptionSafety(unittest.TestCase):
@@ -7143,6 +7717,40 @@ class TestPresenceReconcile(_PresenceBackendCase):
         self.assertEqual(agents, {a, b})
 
 
+class TestPresenceUpsertSelfHeal(_PresenceBackendCase):
+    """BUG 4 (S2-class): _upsert_presence_aggregate must self-heal by LISTING
+    the durable presence/*.json files (like the task self-heal), so a peer that
+    a concurrent connect clobbered out of the aggregate is recovered on the next
+    connect — not lost until a full reconcile."""
+
+    def test_clobbered_peer_recovered_from_durable_file(self):
+        from fulcra_coord.cli import _write_presence, _upsert_presence_aggregate
+        from fulcra_coord import remote
+        a, b = "agent-a:h:r", "agent-b:h:r"
+
+        # Both agents have written their durable per-agent presence files.
+        rec_a = schema.make_presence(a, workstreams=["wa"], summary="")
+        rec_b = schema.make_presence(b, workstreams=["wb"], summary="")
+        _write_presence(rec_a, backend=self.fake_backend)
+        _write_presence(rec_b, backend=self.fake_backend)
+
+        # Simulate the clobber: a raced last-writer-wins upload left the
+        # aggregate with ONLY b (a was dropped) — but a's durable file survives.
+        clobbered = views.build_presence([rec_b])
+        remote.upload_json(clobbered, remote.presence_view_path(),
+                           backend=self.fake_backend)
+
+        # b connects again → its upsert must rebuild from the durable files and
+        # recover a, not just re-assert b over the clobbered aggregate.
+        _upsert_presence_aggregate(rec_b, backend=self.fake_backend)
+
+        agg = remote.download_json(remote.presence_view_path(),
+                                   backend=self.fake_backend)
+        agents = {x["agent"] for x in agg["agents"]}
+        self.assertEqual(agents, {a, b},
+                         "clobbered peer a must be recovered from its durable file")
+
+
 class TestStartAgentOptional(_PresenceBackendCase):
     def test_start_without_agent_resolves_via_resolve_agent(self):
         from fulcra_coord.cli import cmd_start
@@ -7433,6 +8041,20 @@ class TestNeedsHumanNotBeforeGating(unittest.TestCase):
         out = needs_human([future, plain], "human")
         self.assertEqual([s["title"] for s in out], ["plain"])
 
+    def test_subsecond_past_not_before_is_due_now(self):
+        # BUG 7: now carries fractional seconds (microsecond != 0), not_before
+        # is whole-second and 0.4s in the PAST. A lexical string compare of the
+        # mixed-width ISO-Z strings ('Z' 0x5A vs '.' 0x2E) wrongly gated this as
+        # future. Comparing PARSED datetimes must surface it as due-now.
+        from datetime import datetime, timezone
+        from fulcra_coord.views import needs_human
+        now = datetime(2026, 6, 3, 12, 0, 0, 400000, tzinfo=timezone.utc)
+        tasks = [self._t("just-past", not_before="2026-06-03T12:00:00Z")]
+        self.assertEqual(
+            [s["title"] for s in needs_human(tasks, "human", now=now)],
+            ["just-past"],
+            "a sub-second-past not_before must gate as due-now, not future")
+
 
 class TestUpcomingForHuman(unittest.TestCase):
     """views.upcoming_for_human: future-not_before items (same human-match /
@@ -7506,6 +8128,17 @@ class TestUpcomingForHuman(unittest.TestCase):
         ]
         self.assertEqual([s["title"] for s in upcoming_for_human(
             tasks, "human", now=self.now)], ["real"])
+
+    def test_subsecond_past_not_before_excluded_from_upcoming(self):
+        # BUG 7 (symmetric): a sub-second-past not_before is due-now, NOT
+        # upcoming. The lexical mixed-width compare wrongly treated it as future
+        # and included it here; parsed-datetime compare excludes it.
+        from datetime import datetime, timezone
+        from fulcra_coord.views import upcoming_for_human
+        now = datetime(2026, 6, 3, 12, 0, 0, 400000, tzinfo=timezone.utc)
+        tasks = [self._t("just-past", not_before="2026-06-03T12:00:00Z")]
+        self.assertEqual(upcoming_for_human(tasks, "human", now=now), [],
+                         "a sub-second-past not_before is due-now, not upcoming")
 
 
 class TestNeedsMeDateFormatting(unittest.TestCase):

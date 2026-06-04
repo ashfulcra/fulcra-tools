@@ -108,11 +108,12 @@ def age_hours(ts):
         return float('inf')
 mine = [t for t in active if t.get("owner_agent")==agent]
 stale = [t for t in active if t.get("status")=="active" and age_hours(t.get("updated_at",""))>=stale_h]
-if not mine and not stale and not inbox and not needsme:
+if not mine and not stale and not inbox and not needsme and not upcoming:
     sys.exit(0)
 lines = []
 # LEAD with what's blocked on the human — the north-star situational-awareness
-# surface — before any in-flight / directive / stale section.
+# surface — before any in-flight / directive / stale section. The headline
+# counts ONLY due-now items.
 if needsme:
     lines.append("⛔ BLOCKED ON YOU (%d):" % len(needsme))
     for it in needsme:
@@ -121,11 +122,14 @@ if needsme:
         lines.append("  %s — %s (from %s)" % (it.get("id",""), it.get("title",""), frm))
         if ask:
             lines.append("      needs: %s" % ask)
-    # Muted tail: how many not-yet-actionable asks are queued behind the plate.
-    # Deliberately a bare count (not the items) so it informs without nagging,
-    # and it sits UNDER the headline so the (N) above stays the due-now count.
-    if upcoming:
-        lines.append("  … (+%d upcoming)" % len(upcoming))
+# Muted tail: how many not-yet-actionable asks are queued behind the plate.
+# Deliberately a bare count (not the items) so it informs without nagging.
+# BUG 9: hoisted OUT of the `if needsme:` block so a FUTURE-ONLY plate (no
+# due-now items but upcoming asks) still surfaces this line instead of showing
+# nothing. When due-now items exist it sits under the headline; otherwise it
+# stands alone.
+if upcoming:
+    lines.append("  … (+%d upcoming)" % len(upcoming))
 # M-1: a self-filed `block --on-user` task is owned by the agent AND appears in
 # needs-me, so without this it would show BOTH in the ⛔ BLOCKED ON YOU banner
 # above and again under "open work". Seed `seen` with the needs-me ids and drop
