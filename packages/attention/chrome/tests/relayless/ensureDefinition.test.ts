@@ -5,7 +5,10 @@ import {
   listAttentionDestinations,
   chooseAttentionDestination,
   createAttentionDestination,
+  updateIdentity,
   clearResolvedAttention,
+  slugifyIdentity,
+  machineTagName,
   UnauthorizedError,
   ATTENTION_DEFINITION_NAME,
   ATTENTION_DEFINITION_DESCRIPTION,
@@ -317,5 +320,137 @@ describe("createAttentionDestination", () => {
     });
     await createAttentionDestination({ getToken, fetch: fetchFn, storage });
     expect((calls.defPosts[0] as { name: string }).name).toBe(ATTENTION_DEFINITION_NAME);
+  });
+
+  test("with an identity label resolves+caches [attention, web, machine:<slug>]", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web", "machine:work-mbp-chrome": "tag-machine" },
+      defs: [],
+      defCreateId: "fresh-def",
+    });
+    const res = await createAttentionDestination(
+      { getToken, fetch: fetchFn, storage },
+      "My Attention",
+      "Work MBP — Chrome",
+    );
+    expect(res.tagIds).toEqual(["tag-attn", "tag-web", "tag-machine"]);
+    expect(calls.tagGets).toEqual(["attention", "web", "machine:work-mbp-chrome"]);
+    const cached = await ensureAttentionDefinitionAndTags({ getToken, fetch: fetchFn, storage });
+    expect(cached.tagIds).toEqual(["tag-attn", "tag-web", "tag-machine"]);
+  });
+});
+
+describe("slugifyIdentity", () => {
+  test("lowercases and replaces runs of non-[a-z0-9] with single -", () => {
+    expect(slugifyIdentity("Work MBP — Chrome")).toBe("work-mbp-chrome");
+    expect(slugifyIdentity("ash@fulcra's laptop!!")).toBe("ash-fulcra-s-laptop");
+  });
+
+  test("trims leading/trailing separators and collapses repeats", () => {
+    expect(slugifyIdentity("  ---Hello___World---  ")).toBe("hello-world");
+    expect(slugifyIdentity("a   b")).toBe("a-b");
+  });
+
+  test("empty / all-separator label falls back to 'browser'", () => {
+    expect(slugifyIdentity("")).toBe("browser");
+    expect(slugifyIdentity("   ")).toBe("browser");
+    expect(slugifyIdentity("---")).toBe("browser");
+  });
+
+  test("machineTagName prefixes machine:", () => {
+    expect(machineTagName("Work MBP — Chrome")).toBe("machine:work-mbp-chrome");
+    expect(machineTagName("")).toBe("machine:browser");
+  });
+});
+
+describe("ensureAttentionDefinitionAndTags — identity label", () => {
+  test("appends the machine tag when identityLabel is set", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web", "machine:home-imac": "tag-mach" },
+      defs: [{ id: "def-existing", name: "Attention", annotation_type: "duration", deleted_at: null, created_at: "2026-01-01T00:00:00Z" }],
+    });
+    const res = await ensureAttentionDefinitionAndTags({
+      getToken, fetch: fetchFn, storage, identityLabel: "Home iMac",
+    });
+    expect(res.tagIds).toEqual(["tag-attn", "tag-web", "tag-mach"]);
+    expect(calls.tagGets).toEqual(["attention", "web", "machine:home-imac"]);
+  });
+
+  test("does NOT append a machine tag when identityLabel is null", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web" },
+      defs: [{ id: "def-existing", name: "Attention", annotation_type: "duration", deleted_at: null, created_at: "2026-01-01T00:00:00Z" }],
+    });
+    const res = await ensureAttentionDefinitionAndTags({
+      getToken, fetch: fetchFn, storage, identityLabel: null,
+    });
+    expect(res.tagIds).toEqual(["tag-attn", "tag-web"]);
+    expect(calls.tagGets).toEqual(["attention", "web"]);
+  });
+});
+
+describe("chooseAttentionDestination — identity label", () => {
+  test("with a label resolves+caches [attention, web, machine:<slug>]", async () => {
+    const storage = memStorage();
+    const { fetchFn, calls } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web", "machine:work-laptop": "tag-mach" },
+      defs: [],
+    });
+    const res = await chooseAttentionDestination(
+      { getToken, fetch: fetchFn, storage },
+      "chosen-def",
+      "Work Laptop",
+    );
+    expect(res).toEqual({
+      definitionId: "chosen-def",
+      tagIds: ["tag-attn", "tag-web", "tag-mach"],
+    });
+    expect(calls.tagGets).toEqual(["attention", "web", "machine:work-laptop"]);
+    const cached = await ensureAttentionDefinitionAndTags({ getToken, fetch: fetchFn, storage });
+    expect(cached).toEqual(res);
+  });
+});
+
+describe("updateIdentity", () => {
+  test("rewrites cached tagIds keeping the definitionId", async () => {
+    const storage = memStorage();
+    // Seed a cache via choose with no identity.
+    const { fetchFn } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web", "machine:new-name": "tag-mach" },
+      defs: [],
+    });
+    await chooseAttentionDestination({ getToken, fetch: fetchFn, storage }, "def-keep");
+
+    const res = await updateIdentity({ getToken, fetch: fetchFn, storage }, "New Name");
+    expect(res).toEqual({
+      definitionId: "def-keep",
+      tagIds: ["tag-attn", "tag-web", "tag-mach"],
+    });
+    // The cache now carries the re-tagged result with the SAME definition id.
+    const cached = await ensureAttentionDefinitionAndTags({ getToken, fetch: fetchFn, storage });
+    expect(cached).toEqual(res);
+  });
+
+  test("empty label re-resolves just [attention, web]", async () => {
+    const storage = memStorage();
+    const { fetchFn } = makeApi({
+      tags: { attention: "tag-attn", web: "tag-web" },
+      defs: [],
+    });
+    await chooseAttentionDestination({ getToken, fetch: fetchFn, storage }, "def-keep", "Old");
+    const res = await updateIdentity({ getToken, fetch: fetchFn, storage }, "");
+    expect(res?.tagIds).toEqual(["tag-attn", "tag-web"]);
+    expect(res?.definitionId).toBe("def-keep");
+  });
+
+  test("no-ops (returns null) when there is no cached definition", async () => {
+    const storage = memStorage();
+    const { fetchFn } = makeApi({ tags: {}, defs: [] });
+    const res = await updateIdentity({ getToken, fetch: fetchFn, storage }, "Whatever");
+    expect(res).toBeNull();
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 });

@@ -74,8 +74,8 @@ export async function backfillHistory(
     if (opts.onProgress) opts.onProgress(queued, unique.length);
   }
   // Queueing is done — the progress bar has hit 100%. Kick off a flush
-  // but DO NOT await it: flushOutbox POSTs the queued events to Fulcra
-  // Cloud, which for a few-thousand-URL backfill takes a while. Awaiting it
+  // but DO NOT await it: flushOutbox POSTs the queued events to the Fulcra
+  // API, which for a few-thousand-URL backfill takes a while. Awaiting it
   // here froze the wizard at 100% with the advance button disabled the
   // whole time. The outbox is a write-ahead queue — the background alarm
   // drains whatever this flush doesn't, and the SentSet de-dups repeats —

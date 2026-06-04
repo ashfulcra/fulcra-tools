@@ -28,8 +28,9 @@ vi.mock("../src/relayless/tokenStore", () => ({
 }));
 
 // whoami / ensureDefinition pull in chrome + network at import; stub them out.
+const whoamiImpl = { whoami: vi.fn(async () => ({ label: null as string | null })) };
 vi.mock("../src/relayless/whoami", () => ({
-  whoami: vi.fn(async () => ({ label: null })),
+  whoami: (...a: unknown[]) => whoamiImpl.whoami(...(a as [])),
 }));
 const ensureImpl = {
   listAttentionDestinations: vi.fn(async () => [] as unknown[]),
@@ -45,7 +46,7 @@ vi.mock("../src/relayless/ensureDefinition", () => ({
 }));
 
 import { Wizard } from "../src/wizard/Wizard";
-import { saveSettings } from "../src/storage";
+import { saveSettings, loadSettings } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -58,6 +59,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   tokenImpl.getValidAccessToken.mockResolvedValue(null);
   signInImpl.run.mockReset();
+  whoamiImpl.whoami.mockResolvedValue({ label: null });
   ensureImpl.listAttentionDestinations.mockResolvedValue([]);
   ensureImpl.chooseAttentionDestination.mockResolvedValue({ definitionId: "d", tagIds: [] });
   ensureImpl.createAttentionDestination.mockResolvedValue({ definitionId: "d", tagIds: [] });
@@ -96,6 +98,21 @@ async function clickButton(container: HTMLElement, label: string): Promise<void>
 /** Advance the wizard from welcome to the auth step. */
 async function gotoAuthStep(container: HTMLElement): Promise<void> {
   await clickButton(container, "Get started");
+}
+
+/** Type a value into the first text input (React-controlled). */
+async function setTextInput(container: HTMLElement, value: string): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+  if (!input) throw new Error("no text input found");
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype, "value",
+  )!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 }
 
 describe("Wizard auth step — relayless (default)", () => {
@@ -184,38 +201,73 @@ describe("Wizard destination step — relayless", () => {
     expect(checked?.value).toBe("old");
   });
 
-  test("Continue with an existing destination selected calls chooseAttentionDestination then advances to scan", async () => {
+  test("shows the 'Name this browser' field defaulting from whoami", async () => {
+    whoamiImpl.whoami.mockResolvedValue({ label: "user@example.com" });
+    ensureImpl.listAttentionDestinations.mockResolvedValue([]);
+    const { container } = await gotoDestinationStep();
+
+    expect(container.textContent).toContain("Name this browser");
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(input?.value).toBe("user@example.com browser");
+  });
+
+  test("Continue is blocked while the label is blank, enabled once filled", async () => {
+    whoamiImpl.whoami.mockResolvedValue({ label: null }); // no prefill → blank
     ensureImpl.listAttentionDestinations.mockResolvedValue([
       { id: "old", name: "Attention", createdAt: "2026-01-01T00:00:00Z", isAutoPick: true },
     ]);
     const { container } = await gotoDestinationStep();
 
+    const cont = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("Continue"),
+    ) as HTMLButtonElement;
+    expect(cont.disabled).toBe(true);
+
+    await setTextInput(container, "My Laptop");
+    expect(cont.disabled).toBe(false);
+  });
+
+  test("Continue with an existing destination persists identityLabel + calls choose with the label then advances to scan", async () => {
+    ensureImpl.listAttentionDestinations.mockResolvedValue([
+      { id: "old", name: "Attention", createdAt: "2026-01-01T00:00:00Z", isAutoPick: true },
+    ]);
+    const { container } = await gotoDestinationStep();
+
+    await setTextInput(container, "Work Laptop");
     await clickButton(container, "Continue");
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     expect(ensureImpl.chooseAttentionDestination).toHaveBeenCalledWith(
       expect.anything(),
       "old",
+      "Work Laptop",
     );
     expect(ensureImpl.createAttentionDestination).not.toHaveBeenCalled();
+    // identityLabel persisted to settings.
+    const stored = await loadSettings();
+    expect(stored.identityLabel).toBe("Work Laptop");
     expect(container.textContent).toContain("Scan your history");
   });
 
-  test("empty list defaults to create; Continue calls createAttentionDestination then advances to scan", async () => {
+  test("empty list defaults to create; Continue persists label + calls create with the label then advances to scan", async () => {
     ensureImpl.listAttentionDestinations.mockResolvedValue([]);
     const { container } = await gotoDestinationStep();
 
     // Create option is the default selection when nothing exists.
     expect(container.textContent).toContain("Create a new Attention annotation");
 
+    await setTextInput(container, "Home iMac");
     await clickButton(container, "Continue");
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     expect(ensureImpl.createAttentionDestination).toHaveBeenCalledWith(
       expect.anything(),
       "Attention",
+      "Home iMac",
     );
     expect(ensureImpl.chooseAttentionDestination).not.toHaveBeenCalled();
+    const stored = await loadSettings();
+    expect(stored.identityLabel).toBe("Home iMac");
     expect(container.textContent).toContain("Scan your history");
   });
 
@@ -232,6 +284,7 @@ describe("Wizard destination step — relayless", () => {
     ensureImpl.chooseAttentionDestination.mockRejectedValue(new Error("boom-save"));
     const { container } = await gotoDestinationStep();
 
+    await setTextInput(container, "Some Browser");
     await clickButton(container, "Continue");
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 

@@ -681,7 +681,7 @@ if (chrome.contextMenus) {
 // Three visual states surface different operational realities:
 //   active    → default mark, full color (icons/icon-*.png)
 //   paused    → desaturated; clear "I'm not capturing"
-//   error     → red overlay; Fulcra Cloud unreachable / 401 / etc.
+//   error     → red overlay; Fulcra API unreachable / 401 / etc.
 //
 // We re-evaluate on every storage change + on each handler tick.
 
@@ -709,7 +709,7 @@ export async function refreshToolbarIcon(): Promise<void> {
     await chrome.action.setTitle({
       title: state === "active" ? "Fulcra Attention"
            : state === "paused" ? "Fulcra Attention — paused"
-           : "Fulcra Attention — error (Fulcra Cloud unreachable?)",
+           : "Fulcra Attention — error (Fulcra API unreachable?)",
     });
   } catch {
     // setIcon throws if a variant file is missing. Fall back to the
