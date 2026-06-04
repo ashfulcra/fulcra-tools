@@ -10,6 +10,92 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.5.6] — Debug sweep, rounds 2-3
+
+**Why:** a second adversarial pass focused on timestamp precision, malformed task
+bodies, human-blocking tags, annotation cache drift, and hook command hygiene.
+
+- **Timestamp precision:** all new coordination timestamps now emit fixed-width
+  microseconds, and freshness decisions parse datetimes instead of comparing raw
+  strings, so mixed-precision values already on the bus cannot silently drop the
+  newer side of a merge or rebuild.
+- **Malformed task bodies:** a cached task body with missing display fields now
+  surfaces in rebuilt views with empty-string defaults instead of vanishing from
+  every materialized view.
+- **`needs:human` cleanup:** assigning a human-blocked task away from the human
+  strips the stale `needs:human` tag; assigning it back to the human preserves
+  the marker.
+- **Annotation cache TTL:** cached definition/tag ids expire after 24h by
+  default (`FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS` override), bounding drift
+  after server-side deletes or renames while keeping annotation emission
+  best-effort.
+- **Hook command hints:** SessionStart resume hints shell-quote the resolved
+  `fulcra-coord` command and agent id before printing copy-pasteable commands.
+- **Reviewer-caught (codex):** the summaries rebuild path had one remaining raw
+  `updated_at` string compare; it now uses the same parsed timestamp key as the
+  merge path.
+
+## [0.5.5] — Reconcile performance
+
+**Why:** `reconcile` ran serially — each task's body load and each materialized
+view upload happened one round-trip at a time — taking ~96s end to end. That
+overran the heartbeat's timeout, so the heartbeat kept dying and presence/views
+went stale.
+
+- Per-task body loads and view uploads now run in parallel
+  (`ThreadPoolExecutor`), cutting reconcile from **~96s to ~23s** and
+  un-breaking the timing-out heartbeat. Partial-failure, timeout, and exit
+  semantics are preserved — a failed leg still degrades gracefully rather than
+  aborting the whole pass.
+- **Deadline fix (reviewer-caught, codex):** each parallel view upload was
+  handed the full per-call timeout instead of the *remaining* budget, so an
+  upload starting near the limit could still block for the full timeout and
+  blow the overall reconcile deadline. Now a global deadline
+  (`t0 + timeout`) is computed once and each upload gets `max(1, remaining)`,
+  skipping outright once the deadline has passed.
+
+*(0.5.2 was not released standalone — the branch version bumped to 0.5.5 during
+the stacked merges below.)*
+
+## [0.5.4] — Debug sweep, round 1
+
+**Why:** a focused audit of the merge / optimistic-concurrency and self-heal
+paths turned up 12 confirmed bugs where state could be silently dropped,
+misclassified, or mis-timed.
+
+- **Merge / optimistic concurrency:** `_try_merge` now carries forward fields it
+  was dropping and unions the `event` / `acked` collections instead of letting
+  one side overwrite the other.
+- **Summaries aggregate:** the rebuild self-heals a dropped directive rather than
+  persisting the loss.
+- **needs_human / scheduling gates:** datetime comparisons now parse before
+  comparing and coerce naive timestamps to UTC, so `not_before` / `due` gates
+  fire on the right boundary instead of throwing or comparing apples to oranges.
+- **Inbox auto-aging, presence:** both self-heal correctly under the cases the
+  sweep exercised.
+- **Annotations HTTP writer:** the tag-id cache and `recorded_at` anchoring were
+  corrected so timeline moments land at the right time with the right tags.
+- **Stale derived-tag repair (reviewer-caught, codex):** a safe merge that
+  combines local status with newer remote fields left behind a stale
+  `status:<old>` tag, misclassifying the task in tag-filtered views.
+  **`_repair_merged_tags`** rebuilds the standard tags from the merged fields
+  while preserving non-standard ones (e.g. `needs:human`).
+
+## [0.5.3] — Per-agent listener
+
+**Why:** the listener's launchd/cron identity was machine-global
+(`com.fulcra.coord.listener`), so two agents co-located on one host clobbered
+each other's listener job — installing one tore down the other's.
+
+- The listener label / plist / cron-marker now derive from the agent slug
+  (`com.fulcra.coord.listener.<slug>`), so each co-located agent gets its own
+  job. Install, uninstall, and the cron strip are all agent-scoped.
+- A legacy un-slugged plist is **superseded only for the agent it watched**, and
+  symmetrically on both install **and** uninstall — a reviewer-caught (codex)
+  install/uninstall asymmetry that would otherwise have left an orphaned legacy
+  job behind.
+- The **heartbeat stays a singleton** — only the listener is per-agent.
+
 ## [0.5.1] — Inbox auto-aging
 
 **Why:** informational broadcasts ("X joined the mesh", "identities live") linger
