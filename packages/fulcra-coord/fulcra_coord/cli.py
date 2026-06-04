@@ -980,6 +980,9 @@ def cmd_install_listener(args: Any, backend: Optional[list[str]] = None) -> int:
         _info(f"[dry-run] Listener mechanism: {plan['mechanism']}")
         _info(f"[dry-run] Scheduled command: {plan['cli_command']} "
               f"notify-inbox --agent {agent} (every {plan['interval_min']} min)")
+        if plan.get("supersedes_legacy"):
+            _info("[dry-run] Would supersede the legacy machine-global listener "
+                  f"job watching {agent} (it migrates to a per-agent job).")
         for w in plan.get("writes", []):
             _info(f"  + would write {w}")
         for r in plan.get("removes", []):
