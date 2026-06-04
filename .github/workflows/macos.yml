@@ -54,4 +54,4 @@ jobs:
       - name: Run the full test suite
         # Must NOT hit the network. ~1500 tests, ~20s on a clean runner.
         # Fail fast on the first error to surface the cause quickly.
-        run: uv run pytest packages/ -q --maxfail=1
+        run: uv run pytest packages/ attention -q --maxfail=1
