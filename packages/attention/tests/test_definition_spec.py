@@ -4,13 +4,15 @@ The Attention DurationAnnotation descriptor lives in two paths that can
 drift (see definition_spec.py):
 
   1. The CLI bootstrap create-payload — wire.duration_definition_payload(...)
-  2. The daemon resolver match-spec — ATTENTION_SPEC, passed to
-     ctx.resolved_definition_id() and compared by
+  2. The resolver match-spec — attention_resolver_spec(), compared by
      fulcra_common.definitions._spec_matches().
 
-These tests pin the invariant that ATTENTION_SPEC is a *projection* of the
-canonical create payload onto exactly the keys the resolver matches on, so a
-future change to the measurement structure can't desync the two paths.
+These tests pin the invariant that the resolver match-spec is a *projection*
+of the canonical create payload onto exactly the keys the resolver matches
+on, so a future change to the measurement structure can't desync the two
+paths. (The collect plugin is now a relayless informational pointer and no
+longer resolves a definition; the spec's single source of truth lives in
+definition_spec, where these tests now exercise it directly.)
 """
 from __future__ import annotations
 
@@ -20,9 +22,13 @@ from fulcra_attention.definition_spec import (
     attention_create_payload,
     attention_resolver_spec,
 )
-from fulcra_attention.collect_plugin import ATTENTION_SPEC
 from fulcra_common import wire
 from fulcra_common.definitions import _spec_matches
+
+# The resolver match-spec, single-sourced in definition_spec. (Used to be
+# re-exported as collect_plugin.ATTENTION_SPEC, before the collect plugin
+# became a relayless pointer.)
+ATTENTION_SPEC = attention_resolver_spec()
 
 
 def test_resolver_match_keys_are_what_spec_matches_reads():
