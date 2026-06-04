@@ -144,35 +144,11 @@ class Daemon:
         # UI's dashboard "Recently" feed. Lost on daemon restart (v1); sqlite
         # persistence is v1.5.
         self.activity = _activity.make_singleton()
-        # Throttle state for /api/extension/attention activity-feed entries.
-        # The extension can POST several events a minute during active
-        # browsing — pushing one feed entry per POST would blow through the
-        # 50-entry ring in minutes. We coalesce: at most one entry per
-        # _attention_activity_interval_s, summarising N events since last
-        # push. See note_attention_event for the producer hook and
-        # web.py extension_attention for the caller.
-        # -inf so the very first POST after a daemon restart fires
-        # immediately — the user opening the dashboard wants to see
-        # "yes, the extension is alive" without waiting 60s. Subsequent
-        # POSTs within the window get coalesced.
-        self._attention_activity_last_at: float = float("-inf")
-        self._attention_activity_count: int = 0
-        self._attention_activity_clients: set[str] = set()
-        self._attention_activity_interval_s: float = 60.0
         # Indirection so tests can inject a fake clock without monkeypatching
         # time.monotonic globally (which breaks pytest's own timing). The
         # production callable is set in __init__ and replaced in tests.
         import time as _time_mod
         self._monotonic = _time_mod.monotonic
-        # TTL cache for attention-def validation. The extension POST route
-        # re-checks every _attention_validation_interval_s that the cached
-        # attention_definition_id still exists on the current Fulcra
-        # account — protects against the daemon being re-authed to a
-        # different account leaving stale def IDs in attention/state.json
-        # that ingest happily references but the timeline can't render.
-        self._attention_def_validated_at: float = float("-inf")
-        self._attention_def_validated_id: str | None = None
-        self._attention_validation_interval_s: float = 300.0
 
         # NOTE: the account-switch pre-flight (_check_account_fingerprint)
         # is deliberately NOT run here. It reads the bearer token from the
@@ -288,11 +264,6 @@ class Daemon:
                     cleared.append(f"{label} state.json")
             except Exception:
                 logger.exception("invalidate: failed for %s state", label)
-        # Reset the in-process attention-def-validation cache too, so the
-        # extension route re-validates on the next POST instead of trusting
-        # whatever was cached pre-invalidation.
-        self._attention_def_validated_id = None
-        self._attention_def_validated_at = float("-inf")
         # Dashboard surface so the user can see what happened.
         self.activity.add(
             plugin_id="daemon",
@@ -304,61 +275,6 @@ class Daemon:
             ),
             ok=True,
         )
-
-    def note_attention_event(self, *, client: str | None) -> None:
-        """Record one attention POST for the dashboard activity feed.
-
-        Coalesces: per-POST entries would saturate the 50-entry ring in
-        minutes during active browsing, so we accumulate until the throttle
-        window elapses, then emit one summary entry covering the burst.
-
-        Idempotent w.r.t. failures: this is best-effort UI plumbing, never
-        the cause of a failed ingest. The caller (web.extension_attention)
-        invokes this only after a successful Fulcra POST.
-        """
-        self._attention_activity_count += 1
-        if client:
-            self._attention_activity_clients.add(client)
-        now_mono = self._monotonic()
-        if (now_mono - self._attention_activity_last_at
-                < self._attention_activity_interval_s):
-            return
-        n = self._attention_activity_count
-        clients = ", ".join(sorted(self._attention_activity_clients))
-        summary = (
-            f"Attention: {n} event"
-            f"{'s' if n != 1 else ''} from {clients or 'extension'}"
-        )
-        self.activity.add(
-            plugin_id="attention-relay",
-            summary=summary,
-            ok=True,
-        )
-        # Also refresh the per-plugin state so the dashboard's status pill
-        # reflects "the pipeline is healthy". The plugin's diagnostic run()
-        # is the only OTHER writer of these fields, and it can leave a stale
-        # "error" / "Failing" badge in place for hours after a single early
-        # failure (e.g. user paired the extension after a manual Run that
-        # failed because no token was set yet). Extension events arriving
-        # successfully ARE evidence the pipeline is working — surface that.
-        # User feedback 2026-05-26: dashboard said "Failing" while the
-        # activity feed showed events landing every minute.
-        try:
-            from . import state as _state_mod
-            from datetime import datetime, timezone
-            st = _state_mod.load("attention-relay")
-            st.record_finish(
-                outcome="done",
-                when=datetime.now(timezone.utc),
-                error=None,
-            )
-            _state_mod.save(st)
-        except Exception:
-            # Best-effort; never let a UI-state refresh break event ingest.
-            pass
-        self._attention_activity_last_at = now_mono
-        self._attention_activity_count = 0
-        self._attention_activity_clients.clear()
 
     # ---- control-socket request handling -------------------------------
 
@@ -483,9 +399,9 @@ class Daemon:
             for cred in plugin.required_credentials:
                 # Probe the SAME keychain scope the plugin actually reads:
                 # user-level ("fulcra-collect:user") for user_level creds,
-                # plugin-level otherwise. Reading the wrong scope is exactly
-                # the attention-relay false-"missing" bug (the extension-token
-                # lives in the user store but was probed plugin-level).
+                # plugin-level otherwise. Reading the wrong scope was the
+                # historical attention-relay false-"missing" bug (a
+                # user-store secret probed plugin-level reported "missing").
                 present = (
                     credentials.has_user_secret(cred.key)
                     if getattr(cred, "user_level", False)

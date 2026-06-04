@@ -1051,28 +1051,6 @@ def test_fingerprint_preflight_invalidates_on_token_change(collect_home, monkeyp
     assert new_fp == hashlib.sha256(b"tok-account-B").hexdigest()[:16]
 
 
-def test_fingerprint_preflight_resets_attention_def_validation_cache(
-        collect_home, monkeypatch):
-    """The in-process attention-def-validation cache (used by /api/
-    extension/attention) must also be reset on invalidation — otherwise
-    the route would trust a fingerprint from the previous account for
-    up to _attention_validation_interval_s after the switch."""
-    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
-                        lambda key: "tok-1" if key == "bearer-token" else None)
-    d1 = Daemon(registry=_registry(), config=Config())
-    d1._check_account_fingerprint()
-    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
-                        lambda key: "tok-2" if key == "bearer-token" else None)
-    d2 = Daemon(registry=_registry(), config=Config())
-    # Seed the in-process cache so we can prove the pre-flight resets it on
-    # the account switch (construction no longer runs the pre-flight).
-    d2._attention_def_validated_id = "stale-from-account-1"
-    d2._attention_def_validated_at = 1.0
-    d2._check_account_fingerprint()
-    assert d2._attention_def_validated_id is None
-    assert d2._attention_def_validated_at == float("-inf")
-
-
 # ---------------------------------------------------------------------------
 # Task #64 — quick-record favorites: list ordering + dispatch
 # ---------------------------------------------------------------------------

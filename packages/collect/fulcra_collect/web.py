@@ -3,9 +3,7 @@
 Bound to 127.0.0.1 only on a stable port (default 9292; override via
 `[daemon] web_port = N` in config.toml). A stable port is what lets OAuth
 redirect URIs stay valid across daemon restarts (otherwise every plugin's
-OAuth registration breaks when the daemon restarts) and lets the
-attention browser extension post to a known endpoint without separate
-discovery.
+OAuth registration breaks when the daemon restarts).
 
 Writes the resulting URL to ~/.config/fulcra-collect/web-url so the
 menubar and ad-hoc tools can keep using the file (it's now just the
@@ -365,7 +363,6 @@ def build_app(daemon) -> FastAPI:
         annotations,
         definitions,
         docs,
-        extension,
         fulcra_auth,
         menubar,
         oauth,
@@ -381,7 +378,6 @@ def build_app(daemon) -> FastAPI:
         activity,
         docs,
         annotations,
-        extension,
         menubar,
     ):
         module.register(app, ctx)
@@ -394,10 +390,10 @@ def serve(daemon, *, host: str = "127.0.0.1", port: int | None = None) -> tuple[
 
     The daemon binds to a stable TCP port (default 9292; override via
     `[daemon] web_port` in config.toml). A stable port is essential for
-    OAuth redirect URIs and the browser extension, both of which bake the
-    URL into a third-party configuration that can't be re-read after a
-    restart. If the port is in use we raise a clear RuntimeError instead
-    of letting uvicorn fail somewhere deep in its bind path.
+    OAuth redirect URIs, which bake the URL into a third-party
+    configuration that can't be re-read after a restart. If the port is in
+    use we raise a clear RuntimeError instead of letting uvicorn fail
+    somewhere deep in its bind path.
 
     The optional `port` keyword forces a specific port (used by tests);
     when None we read the value from Config so the daemon's chosen port
