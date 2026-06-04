@@ -159,6 +159,21 @@ def library_link(task: dict[str, Any]) -> str:
     return f"https://library.fulcradynamics.com/files/{path}"
 
 
+def _transition_at(task: dict[str, Any]) -> Optional[str]:
+    """The timestamp of the transition this annotation records (BUG 12).
+
+    Prefers the latest event's ``at`` (the moment the transition was logged),
+    falling back to the task's ``updated_at``. Returned as-is for ``_recorded_at``
+    to normalize; None when neither is present (so ``_recorded_at`` cleanly falls
+    back to now() rather than anchoring to a falsy value)."""
+    events = task.get("events") or []
+    if events:
+        at = events[-1].get("at")
+        if at:
+            return at
+    return task.get("updated_at")
+
+
 def build_annotation(
     *, lifecycle: str, task: dict[str, Any], agent: str
 ) -> dict[str, Any]:
@@ -229,6 +244,11 @@ def build_annotation(
         "lifecycle": lifecycle,
         "task_id": task_id,
         "agent": agent,
+        # BUG 12: anchor the moment at the TRANSITION time so _recorded_at lands
+        # it on the timeline when it actually happened, not at emit-time now().
+        # Without this the _recorded_at anchor branch was dead (the builders
+        # never set any of its keys) and every moment stamped now().
+        "recorded_at": _transition_at(task),
     }
 
 
@@ -280,6 +300,8 @@ def build_needs_user_annotation(
         "task_id": task_id,
         "agent": agent,
         "ask": ask,
+        # BUG 12: anchor at transition time (see build_annotation).
+        "recorded_at": _transition_at(task),
     }
 
 
@@ -557,16 +579,20 @@ def _resolve_token() -> Optional[str]:
 
     Token source mirrors ``fulcra_common.client.BaseFulcraClient.get_token``:
     the ``FULCRA_ACCESS_TOKEN`` env var when set, else the stdout of
-    ``fulcra auth print-access-token``. Best-effort: a missing CLI, a non-zero
-    exit, a timeout, or an empty result all yield None rather than raising, so
-    the caller cleanly no-ops instead of breaking the task op. The token is
-    NEVER logged."""
+    ``<cli-base> auth print-access-token``. BUG 11: the CLI base comes from
+    ``remote.cli_base_cmd()`` (honouring ``FULCRA_CLI_COMMAND`` -> ``fulcra-api``
+    -> ``uv tool run fulcra-api``), the SAME resolution every other CLI shell-out
+    uses — NOT a hardcoded ``fulcra``, which doesn't exist on a fulcra-api-only
+    install and silently killed annotations there. Best-effort: a missing CLI, a
+    non-zero exit, a timeout, or an empty result all yield None rather than
+    raising, so the caller cleanly no-ops instead of breaking the task op. The
+    token is NEVER logged."""
     env = os.environ.get("FULCRA_ACCESS_TOKEN")
     if env and env.strip():
         return env.strip()
     try:
         result = subprocess.run(
-            ["fulcra", "auth", "print-access-token"],
+            [*remote.cli_base_cmd(), "auth", "print-access-token"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -599,27 +625,74 @@ def _request(method: str, url: str, token: str, *,
         return status, resp.read()
 
 
+def _tag_cache_path():
+    """Path to the per-name tag-id cache (``name -> id`` json map).
+
+    Parallel to ``_definition_cache_path`` and scoped to the same cache dir, so
+    tag ids — like the definition id — are resolved against the Fulcra API at
+    most once per name per machine and reused on every subsequent emit, rather
+    than re-resolved (GET, maybe POST) for every tag on every annotation."""
+    return cache.annotations_dir() / "tags.json"
+
+
+def _load_tag_cache() -> dict[str, str]:
+    """Return the cached ``name -> id`` map, or {} on any read error."""
+    try:
+        path = _tag_cache_path()
+        if path.exists():
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _store_tag_id(name: str, tag_id: str) -> None:
+    """Persist a resolved ``name -> id`` mapping. Best-effort: a cache-write
+    failure just means the next emit re-resolves the tag, never a failed
+    annotation. Read-modify-write so concurrent names accumulate."""
+    try:
+        cache.annotations_dir().mkdir(parents=True, exist_ok=True)
+        data = _load_tag_cache()
+        data[name] = tag_id
+        _tag_cache_path().write_text(json.dumps(data))
+    except OSError:
+        pass
+
+
 def _resolve_tag_id(name: str, token: str) -> str:
     """Return the id of the tag named ``name``, creating it if absent.
 
-    GET ``/user/v1alpha1/tag/name/{quoted}`` -> 200 ``{"id": ...}``; on a 404 the
+    Cache hit (BUG 6) -> return immediately, no HTTP. On a miss: GET
+    ``/user/v1alpha1/tag/name/{quoted}`` -> 200 ``{"id": ...}``; on a 404 the
     tag doesn't exist yet so POST ``/user/v1alpha1/tag`` ``{"name": name}`` to
-    create it and return the new id. The name is percent-encoded (``safe=''``)
-    so spaces / slashes in a tag name can't break the path — matching
-    fulcra-common's ``_resolve_tag(quote_name=True)`` shape."""
+    create it and return the new id. The resolved id is cached per-name so a
+    repeated tag set across emits costs zero HTTP after the first resolve. The
+    name is percent-encoded (``safe=''``) so spaces / slashes in a tag name
+    can't break the path — matching fulcra-common's
+    ``_resolve_tag(quote_name=True)`` shape."""
+    cached = _load_tag_cache().get(name)
+    if cached:
+        return cached
+
     base = _api_base()
     quoted = urllib.parse.quote(name, safe="")
+    tag_id: Optional[str] = None
     try:
         status, raw = _request("GET", f"{base}/user/v1alpha1/tag/name/{quoted}", token)
         if status == 200:
-            return json.loads(raw)["id"]
+            tag_id = json.loads(raw)["id"]
     except urllib.error.HTTPError as exc:
         if exc.code != 404:
             raise
-    # Absent (404) -> create.
-    payload = json.dumps({"name": name}).encode()
-    _, raw = _request("POST", f"{base}/user/v1alpha1/tag", token, body=payload)
-    return json.loads(raw)["id"]
+    if tag_id is None:
+        # Absent (404) -> create.
+        payload = json.dumps({"name": name}).encode()
+        _, raw = _request("POST", f"{base}/user/v1alpha1/tag", token, body=payload)
+        tag_id = json.loads(raw)["id"]
+    _store_tag_id(name, tag_id)
+    return tag_id
 
 
 def _definition_cache_path():
