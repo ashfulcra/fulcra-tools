@@ -29,6 +29,7 @@ import { BLUR_GRACE_MS, CLIENT, HEARTBEAT_STALE_MS } from "./types";
 import { reconcileHeartbeatOnBoot } from "./heartbeat-control";
 import { scrubTitle } from "./title-scrub";
 import { mergeDefaults } from "./default-categories";
+import { registerAuth0OriginStrip } from "./relayless/authOriginFix";
 
 const FLUSH_ALARM = "fulcra-attention-flush";
 const SWEEP_ALARM = "fulcra-attention-sweep";
@@ -597,6 +598,12 @@ chrome.runtime.onStartup.addListener(() => {
 void withSwLock(() => reconcileHeartbeatOnBoot());
 void refreshToolbarIcon();
 
+// Strip the chrome-extension Origin header off the extension's own POSTs to
+// the Auth0 host. Without this, the relayless device-flow sign-in 403s at
+// the very first call (Auth0 "Allowed Web Origins" check). Registered at SW
+// boot so the rule is in place before the user ever clicks sign-in.
+void registerAuth0OriginStrip();
+
 // ---------- right-click context menu ----------
 //
 // Two quick actions that previously required a popup round-trip:
@@ -801,6 +808,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // every refresh.
 chrome.runtime.onInstalled.addListener(async (details) => {
   ensureContextMenus();
+  // Re-assert the Auth0 Origin-strip rule on install/update. Idempotent
+  // (removeRuleIds clears the prior rule first), so this is safe alongside
+  // the SW-boot registration above.
+  void registerAuth0OriginStrip();
   if (details.reason === "install") {
     // Seed the default category map on fresh installs so high-traffic
     // sites (Gmail, Calendar, Docs, AI chats, DM apps) collapse to a
