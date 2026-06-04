@@ -327,6 +327,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", dest="dry_run", action="store_true",
                     help="Render + print the digest, write nothing to the timeline")
 
+    # ---- install-digest ----
+    sp = sub.add_parser("install-digest",
+                        help="Install the twice-daily scheduled `fulcra-coord digest` "
+                             "jobs (launchd 08:00/18:00 on macOS, cron elsewhere) — "
+                             "the push side of the operator digest")
+    sp.add_argument("--target-dir", dest="target_dir", default=None, metavar="DIR",
+                    help="Override the LaunchAgents/cron target dir (for testing)")
+    sp.add_argument("--logs-dir", dest="logs_dir", default=None, metavar="DIR",
+                    help="Override the directory for digest stdout/stderr logs")
+    sp.add_argument("--uninstall", action="store_true", help="Remove the digest schedule")
+    sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+
     # ---- identity ----
     sp = sub.add_parser("identity",
                         help="Show, set, or clear this host's declared agent id "
@@ -433,6 +445,7 @@ COMMAND_MAP = {
     "annotations": _cli.cmd_annotations,
     "needs-me": _cli.cmd_needs_me,
     "digest": _cli.cmd_digest,
+    "install-digest": _cli.cmd_install_digest,
     "resume": _cli.cmd_resume,
     "__session-task": _cli.cmd_session_task,
 }

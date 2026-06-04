@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity
+from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity, digest_schedule
 # Imported under an alias because ``from __future__ import annotations`` above
 # binds the bare name ``annotations`` to the __future__ feature, which would
 # otherwise shadow this module on the cli namespace.
@@ -2195,6 +2195,44 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     except Exception:
         wrote = False
     _info(f"Digest ({window}): {'written' if wrote else 'not written (annotations off or error)'}.")
+    return 0
+
+
+def cmd_install_digest(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Install/uninstall the twice-daily scheduled ``fulcra-coord digest`` jobs.
+
+    Calendar-scheduled (08:00 morning + 18:00 evening), unlike the interval
+    heartbeat/listener: launchd StartCalendarInterval on macOS, fixed cron lines
+    elsewhere. Installable on every machine — the any-agent dedup marker collapses
+    concurrent ticks to one digest per window. Mirrors install-heartbeat's CLI
+    contract (dry-run prints the plan, surgical uninstall)."""
+    plan = digest_schedule.install_digest(
+        uninstall=args.uninstall,
+        dry_run=args.dry_run,
+        target_dir=getattr(args, "target_dir", None),
+        logs_dir=getattr(args, "logs_dir", None),
+    )
+    if args.dry_run:
+        _info(f"[dry-run] Digest mechanism: {plan['mechanism']}")
+        _info(f"[dry-run] Scheduled command: {plan['cli_command']} digest "
+              f"--window {{morning@08:00, evening@18:00}}")
+        for w in plan.get("writes", []):
+            _info(f"  + would write {w}")
+        for r in plan.get("removes", []):
+            _info(f"  - would remove {r}")
+        return 0
+    if args.uninstall:
+        _info(f"Removed fulcra-coord digest schedule ({plan['mechanism']}).")
+        return 0
+    _info(f"Installed fulcra-coord digest schedule ({plan['mechanism']}) — "
+          f"morning 08:00 + evening 18:00.")
+    for w in plan.get("writes", []):
+        _info(f"  + {w}")
+    if plan["mechanism"] == "launchd":
+        for w in plan.get("writes", []):
+            _info(f"Load it now (or at next login): launchctl load -w {w}")
+    else:
+        _info("Apply it now: crontab " + (plan["writes"][0] if plan["writes"] else ""))
     return 0
 
 

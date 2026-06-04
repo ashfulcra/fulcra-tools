@@ -316,3 +316,72 @@ class TestDigestMarker(unittest.TestCase):
              patch("fulcra_coord.cli.remote.upload_json", return_value=False):
             granted = cli._claim_digest_marker("evening", self.now, backend=["false"])
         self.assertFalse(granted)  # don't risk a double on a failed claim
+
+
+import plistlib
+from fulcra_coord import digest_schedule
+
+
+class TestInstallDigest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_launchd_plist_has_both_windows_and_calendar(self):
+        if not digest_schedule.scheduler_env.is_macos():
+            self.skipTest("launchd path is macOS-only")
+        plan = digest_schedule.install_digest(
+            target_dir=self.tmp, logs_dir=self.tmp / "logs")
+        self.assertEqual(plan["mechanism"], "launchd")
+        # Two plists, one per window.
+        names = sorted(Path(p).name for p in plan["writes"])
+        self.assertEqual(names, ["com.fulcra.coord.digest.evening.plist",
+                                 "com.fulcra.coord.digest.morning.plist"])
+        morning = plistlib.loads(
+            (self.tmp / "com.fulcra.coord.digest.morning.plist").read_bytes())
+        self.assertIn("digest", morning["ProgramArguments"])
+        self.assertIn("morning", morning["ProgramArguments"])
+        self.assertEqual(morning["StartCalendarInterval"], {"Hour": 8, "Minute": 0})
+        evening = plistlib.loads(
+            (self.tmp / "com.fulcra.coord.digest.evening.plist").read_bytes())
+        self.assertEqual(evening["StartCalendarInterval"], {"Hour": 18, "Minute": 0})
+
+    def test_dry_run_writes_nothing(self):
+        plan = digest_schedule.install_digest(
+            target_dir=self.tmp, logs_dir=self.tmp / "logs", dry_run=True)
+        self.assertTrue(plan["writes"])
+        self.assertFalse(any(Path(p).exists() for p in plan["writes"]))
+
+    def test_cron_has_two_managed_lines(self):
+        cron = self.tmp / "cron.txt"
+        plan = digest_schedule.install_digest(crontab_path=cron, force_cron=True)
+        text = cron.read_text()
+        self.assertIn("0 8 * * *", text)
+        self.assertIn("0 18 * * *", text)
+        self.assertIn("--window morning", text)
+        self.assertIn("--window evening", text)
+        self.assertEqual(text.count(digest_schedule.CRON_MARKER), 2)
+
+    def test_cron_uninstall_is_surgical(self):
+        cron = self.tmp / "cron.txt"
+        cron.write_text("# my own job\n*/5 * * * * echo hi\n")
+        digest_schedule.install_digest(crontab_path=cron, force_cron=True)
+        digest_schedule.install_digest(crontab_path=cron, force_cron=True, uninstall=True)
+        text = cron.read_text()
+        self.assertIn("echo hi", text)
+        self.assertNotIn(digest_schedule.CRON_MARKER, text)
+
+
+class TestInstallDigestCommand(unittest.TestCase):
+    def test_command_is_wired(self):
+        self.assertIs(entry.COMMAND_MAP["install-digest"], cli.cmd_install_digest)
+
+    def test_dry_run_reports_plan(self):
+        import io, contextlib
+        tmp = Path(tempfile.mkdtemp())
+        args = types.SimpleNamespace(uninstall=False, dry_run=True,
+                                     target_dir=str(tmp), logs_dir=str(tmp / "l"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.cmd_install_digest(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertIn("dry-run", buf.getvalue())
