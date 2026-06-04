@@ -5,12 +5,12 @@ that lets independent agents (Claude Code, Codex, OpenClaw, ChatGPT, CI)
 coordinate durable tasks over Fulcra Files as a bus, with no shared memory or
 direct calls.
 
-Format loosely follows [Keep a Changelog](https://keepachangelog.com/); versions
-are sourced from `fulcra_coord/__init__.py::__version__`.
+Format loosely follows [Keep a Changelog](https://keepachangelog.com/); released
+versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
-## [0.5.0] — Scheduling for the "blocked on you" plate *(in review)*
+## [Unreleased] — Scheduling for the "blocked on you" plate *(0.5.0 candidate)*
 
 **Why:** an agent could block a real task on the human that wasn't *actionable
 yet* — e.g. "re-auth this 7-day OAuth token" five days before it expires. The
