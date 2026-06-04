@@ -116,6 +116,34 @@ class TestBuildAnnotation(unittest.TestCase):
         self.assertIn("https://library.fulcradynamics.com", payload["text"])
         self.assertIn(task["id"], payload["link"])
 
+    def test_recorded_at_anchored_to_latest_event_not_now(self):
+        # BUG 12: build_annotation must thread the transition timestamp into the
+        # payload so _recorded_at anchors the moment at transition time (its
+        # documented promise), not the wall-clock now(). The anchor branch was
+        # dead because the builders never set recorded_at/at/ts/timestamp.
+        task = self._task()
+        # Force a latest event with an OLD timestamp.
+        old = "2026-01-01T00:00:00Z"
+        task["events"] = [
+            {"at": "2025-12-31T00:00:00Z", "type": "created", "by": "x"},
+            {"at": old, "type": "active", "by": "x"},
+        ]
+        payload = annotations.build_annotation(
+            lifecycle="pickup", task=task, agent="claude-code:mb:repo"
+        )
+        self.assertEqual(annotations._recorded_at(payload), old,
+                         "annotation must anchor to the transition time, not now()")
+
+    def test_needs_user_recorded_at_anchored_to_latest_event(self):
+        task = self._task()
+        old = "2026-02-02T12:00:00Z"
+        task["blocked_on"] = "approve it"
+        task["events"] = [{"at": old, "type": "blocked", "by": "x"}]
+        payload = annotations.build_needs_user_annotation(
+            task=task, agent="claude-code:mb:repo"
+        )
+        self.assertEqual(annotations._recorded_at(payload), old)
+
 
 # ---------------------------------------------------------------------------
 # Capability gating + best-effort
@@ -1004,6 +1032,24 @@ class TestWriteHttp(unittest.TestCase):
         # Both ingests still posted.
         self.assertEqual(len(router.posts_to("/ingest/v1/record/batch")), 2)
 
+    def test_tag_ids_are_cached_across_calls(self):
+        # BUG 6 (perf): tag ids must be cached per-name like the definition id.
+        # Two emits with the SAME tag set must resolve each tag over HTTP ONCE
+        # total (cache hit on the second emit), not once per emit.
+        router = self._happy_router()
+        with patch.object(urllib_request, "urlopen", side_effect=router):
+            annotations._write_http(self._payload(lifecycle="create"))
+            annotations._write_http(self._payload(lifecycle="update"))
+        # Per distinct tag name, exactly one GET across BOTH emits.
+        from collections import Counter
+        get_paths = Counter(c[1] for c in router.gets_to("/user/v1alpha1/tag/name/"))
+        self.assertTrue(get_paths, "expected at least one tag resolution")
+        for path, count in get_paths.items():
+            self.assertEqual(count, 1,
+                             f"tag {path} resolved {count}x over HTTP; expected 1 (cached)")
+        # Both ingests still posted (the emits themselves still happen).
+        self.assertEqual(len(router.posts_to("/ingest/v1/record/batch")), 2)
+
     def test_existing_definition_is_adopted_not_created(self):
         router = self._happy_router(defs_initially_empty=False)
         with patch.object(urllib_request, "urlopen", side_effect=router):
@@ -1106,6 +1152,33 @@ class TestHttpTokenResolution(unittest.TestCase):
             tok = annotations._resolve_token()
         self.assertEqual(tok, "cli-token")
         self.assertIn("print-access-token", recorded["cmd"])
+
+    def test_token_cli_uses_resolved_base_not_hardcoded_fulcra(self):
+        # BUG 11: on a fulcra-api-only install (FULCRA_CLI_COMMAND set, no
+        # FULCRA_ACCESS_TOKEN), the token CLI must use the SAME resolved base
+        # remote.cli_base_cmd() returns + ["auth","print-access-token"], not a
+        # hardcoded `fulcra` (which doesn't exist there -> dead annotations).
+        recorded = {}
+
+        def fake_run(cmd, *a, **k):
+            recorded["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout="cli-token\n", stderr="")
+
+        saved = os.environ.get("FULCRA_CLI_COMMAND")
+        os.environ["FULCRA_CLI_COMMAND"] = "fake-fulcra-api --flag"
+        try:
+            with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+                tok = annotations._resolve_token()
+        finally:
+            if saved is None:
+                os.environ.pop("FULCRA_CLI_COMMAND", None)
+            else:
+                os.environ["FULCRA_CLI_COMMAND"] = saved
+        self.assertEqual(tok, "cli-token")
+        # argv must start with the resolved base, not "fulcra".
+        self.assertEqual(recorded["cmd"][:2], ["fake-fulcra-api", "--flag"])
+        self.assertNotEqual(recorded["cmd"][0], "fulcra")
+        self.assertEqual(recorded["cmd"][-2:], ["auth", "print-access-token"])
 
     def test_no_token_makes_write_a_noop_false(self):
         # Neither env nor CLI yields a token -> _write_http returns False and
