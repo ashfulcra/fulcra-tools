@@ -59,13 +59,13 @@ describe("popup App", () => {
     expect(container.textContent).toContain("Fulcra Attention");
   });
 
-  test("signed out shows 'Sign in with Fulcra', no paste-token form", async () => {
+  test("signed out shows 'Connect to Fulcra', no paste-token form", async () => {
     await saveSettings({
       ...DEFAULT_SETTINGS,
       onboarded: true,
     });
     const { container } = await mount(<App />);
-    expect(container.textContent).toContain("Sign in with Fulcra");
+    expect(container.textContent).toContain("Connect to Fulcra");
     // No daemon paste-token field anymore.
     expect(container.querySelector('input[type="password"]')).toBeNull();
   });
@@ -126,9 +126,9 @@ describe("SignIn surface", () => {
       />,
     );
 
-    expect(container.textContent).toContain("Sign in with Fulcra");
+    expect(container.textContent).toContain("Connect to Fulcra");
 
-    await clickButton(container, "Sign in with Fulcra");
+    await clickButton(container, "Connect to Fulcra");
 
     // onPrompt rendered the user code and opened the verification URL.
     expect(openUrl).toHaveBeenCalledWith("https://verify.example/?code=WXYZ-9999");
@@ -162,7 +162,7 @@ describe("SignIn surface", () => {
       />,
     );
 
-    await clickButton(container, "Sign in with Fulcra");
+    await clickButton(container, "Connect to Fulcra");
 
     // Still mid-flow: the user code and the waiting state are visible.
     expect(container.textContent).toContain("PROMPT-CODE");
@@ -200,7 +200,7 @@ describe("SignIn surface", () => {
 
     expect(clear).toHaveBeenCalledTimes(1);
     expect(clearResolved).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain("Sign in with Fulcra");
+    expect(container.textContent).toContain("Connect to Fulcra");
   });
 
   test("device-flow failure shows an error + Try again", async () => {
@@ -222,7 +222,7 @@ describe("SignIn surface", () => {
       />,
     );
 
-    await clickButton(container, "Sign in with Fulcra");
+    await clickButton(container, "Connect to Fulcra");
     expect(container.textContent).toContain("Sign-in failed");
     expect(container.textContent).toContain("Try again");
   });
