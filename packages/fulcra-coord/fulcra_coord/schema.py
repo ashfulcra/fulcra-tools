@@ -139,7 +139,7 @@ def parse_when(s: Optional[str], *, now: Optional[datetime] = None) -> Optional[
             "h": timedelta(hours=n),
             "m": timedelta(minutes=n),
         }[unit]
-        return (now + delta).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return (now + delta).astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     # ISO-8601. fromisoformat accepts a bare date (-> midnight, naive) and full
     # datetimes; normalize "Z" to "+00:00" first since older fromisoformat
@@ -151,7 +151,7 @@ def parse_when(s: Optional[str], *, now: Optional[datetime] = None) -> Optional[
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def make_task(
@@ -175,7 +175,7 @@ def make_task(
 ) -> dict[str, Any]:
     if dt is None:
         dt = datetime.now(timezone.utc)
-    now_iso = dt.isoformat().replace("+00:00", "Z")
+    now_iso = dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     if task_id is None:
         task_id = make_task_id(title, dt)
@@ -307,7 +307,7 @@ def make_presence(
     views.build_presence can age it; ``session`` is an opaque optional key the
     connecting surface may pass for traceability."""
     if last_seen is None:
-        last_seen = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        last_seen = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     return {
         "schema": PRESENCE_SCHEMA,
         "agent": agent,
@@ -360,7 +360,7 @@ def apply_transition(
     """Apply a status transition to a task, returning a modified copy."""
     if dt is None:
         dt = datetime.now(timezone.utc)
-    now_iso = dt.isoformat().replace("+00:00", "Z")
+    now_iso = dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     current = task["status"]
     if new_status not in VALID_STATUSES:
@@ -416,12 +416,16 @@ def apply_transition(
     # Rebuild tags, preserving any non-standard tags
     _standard_prefixes = ("workstream:", "agent:", "kind:", "status:", "priority:")
     _extra = [t for t in task.get("tags", []) if not any(t.startswith(p) for p in _standard_prefixes)]
+    # BUG 2: read workstream/owner_agent/priority/tags with .get so a transition
+    # on a slightly-malformed body (missing one of these) rebuilds tags instead
+    # of KeyError-ing mid-write and leaving the task half-updated. Defaults match
+    # build_tags' own ("" / P9) so a normal task is unaffected.
     task["tags"] = build_tags(
         status=new_status,
-        workstream=task["workstream"],
-        agent=task["owner_agent"],
-        kind=_extract_kind_from_tags(task["tags"]),
-        priority=task["priority"],
+        workstream=task.get("workstream", ""),
+        agent=task.get("owner_agent", ""),
+        kind=_extract_kind_from_tags(task.get("tags", [])),
+        priority=task.get("priority", "P9"),
         extra=_extra or None,
     )
 
@@ -458,7 +462,7 @@ def apply_update(
     """Apply a non-status-changing update to a task."""
     if dt is None:
         dt = datetime.now(timezone.utc)
-    now_iso = dt.isoformat().replace("+00:00", "Z")
+    now_iso = dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     import copy
     task = copy.deepcopy(task)
@@ -516,7 +520,7 @@ def apply_event(
         )
     if dt is None:
         dt = datetime.now(timezone.utc)
-    now_iso = dt.isoformat().replace("+00:00", "Z")
+    now_iso = dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     import copy
     task = copy.deepcopy(task)
@@ -613,13 +617,20 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
             e.get("by") for e in task.get("events", [])
             if e.get("type") == "inbox_ack" and e.get("by")
         })
+    # BUG 2: id/title/status/workstream/owner_agent were hard-indexed, so a body
+    # missing ANY of them raised KeyError. task_summary runs in the best-effort
+    # view loader where that exception is swallowed -> the task silently VANISHED
+    # from every view. Read them all with .get + empty-string defaults so a
+    # malformed task RENDERS (and is thus visible/fixable) instead of disappearing
+    # — the defensive behaviour the docstring already promised. Symmetric with the
+    # assignee/priority/scheduling fields that were already .get-guarded.
     return {
-        "id": task["id"],
-        "title": task["title"],
-        "status": task["status"],
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "status": task.get("status", ""),
         "priority": task.get("priority", "P9"),
-        "workstream": task["workstream"],
-        "owner_agent": task["owner_agent"],
+        "workstream": task.get("workstream", ""),
+        "owner_agent": task.get("owner_agent", ""),
         # Read with .get so summaries of pre-assignee tasks (or any task built
         # before this field existed) render None rather than KeyError-crashing
         # the view — symmetric with priority/updated_at above.
@@ -648,5 +659,5 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         # Agents who have inbox-acked this directive (see docstring) — the inbox
         # builders read this off a summary instead of scanning the event log.
         "acked_by": acked_by,
-        "task_file": task_file_path(task["id"]),
+        "task_file": task_file_path(task.get("id", "")),
     }

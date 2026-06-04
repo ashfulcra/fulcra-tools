@@ -1426,5 +1426,66 @@ class TestAnnotationsCommand(unittest.TestCase):
         self.assertTrue(data["token_ok"])
 
 
+class TestDefinitionCacheTTL(unittest.TestCase):
+    """BUG 4: the definition-id and tag-id caches never expired. A server-side
+    definition deletion/rename left the cached id stale, so every future
+    annotation silently failed (the id no longer resolves). A TTL turns an old
+    cache entry into a MISS so the resolver re-runs; a fresh one stays a hit."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        os.environ.pop("FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS", None)
+
+    def test_fresh_definition_cache_is_a_hit(self):
+        annotations._store_definition_id("def-123")
+        self.assertEqual(annotations._cached_definition_id(), "def-123")
+
+    def test_stale_definition_cache_is_a_miss(self):
+        from datetime import datetime, timezone, timedelta
+        # Write a cache file with a written-at timestamp older than the TTL.
+        path = annotations._definition_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+        path.write_text(json.dumps({"id": "def-stale", "written_at": old}))
+        # Default TTL is 24h; a 2-day-old entry must read as a miss.
+        self.assertIsNone(annotations._cached_definition_id())
+
+    def test_ttl_env_override(self):
+        from datetime import datetime, timezone, timedelta
+        path = annotations._definition_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ts = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+        path.write_text(json.dumps({"id": "def-x", "written_at": ts}))
+        # A 5s TTL makes a 10s-old entry stale.
+        os.environ["FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS"] = "5"
+        self.assertIsNone(annotations._cached_definition_id())
+        # A large TTL makes it fresh again.
+        os.environ["FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS"] = "100000"
+        self.assertEqual(annotations._cached_definition_id(), "def-x")
+
+    def test_legacy_entry_without_written_at_is_a_miss(self):
+        # A pre-TTL cache file (no written_at) must be treated as stale so it
+        # re-resolves once and gets re-stamped, rather than trusting it forever.
+        path = annotations._definition_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"id": "def-legacy"}))
+        self.assertIsNone(annotations._cached_definition_id())
+
+    def test_tag_cache_ttl(self):
+        from datetime import datetime, timezone, timedelta
+        annotations._store_tag_id("status:active", "tag-1")
+        self.assertEqual(annotations._load_tag_cache().get("status:active"), "tag-1")
+        # Rewrite the tag cache with an old written_at to simulate age.
+        path = annotations._tag_cache_path()
+        old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+        path.write_text(json.dumps({"written_at": old, "tags": {"status:active": "tag-1"}}))
+        self.assertEqual(annotations._load_tag_cache(), {},
+                         "a stale tag cache must read empty so tags re-resolve")
+
+
 if __name__ == "__main__":
     unittest.main()
