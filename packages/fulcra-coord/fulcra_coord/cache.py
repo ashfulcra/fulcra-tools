@@ -251,4 +251,4 @@ def append_ops_log(entry: dict[str, Any]) -> None:
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")

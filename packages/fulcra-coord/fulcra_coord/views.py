@@ -194,7 +194,7 @@ def _acked_by(t: dict[str, Any], who: str) -> bool:
 def build_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Global compact index with counts and active summaries."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     counts_by_status: dict[str, int] = {}
     counts_by_workstream: dict[str, int] = {}
@@ -262,7 +262,7 @@ def build_active(tasks: list[dict[str, Any]], updated_at: Optional[str] = None,
     """All active, waiting, and blocked tasks. Active summaries carry a `stale`
     flag (Gap 2) so the status view can mark possibly-forgotten work."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     now = _now()
     sh = _stale_hours(stale_hours)
     active = [
@@ -287,7 +287,7 @@ def build_needs_attention(tasks: list[dict[str, Any]], updated_at: Optional[str]
     stale=true (it would not be here otherwise) for symmetry with the active view.
     """
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     now = _now()
     sh = _stale_hours(stale_hours)
     stale = []
@@ -526,7 +526,7 @@ def _schedule_iso_z(value: Any) -> Optional[str]:
     dt = _schedule_dt(value)
     if dt is None:
         return None
-    return dt.isoformat().replace("+00:00", "Z")
+    return dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _schedule_dt(value: Any) -> Optional[datetime]:
@@ -631,7 +631,7 @@ def upcoming_for_human(tasks: list[dict[str, Any]], human: str, *,
 def build_next(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Proposed and waiting tasks — candidates for starting next."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     candidates = [
         task_summary(t) for t in tasks if t.get("status") in ("proposed", "waiting")
     ]
@@ -650,7 +650,7 @@ def build_recently_done(
 ) -> dict[str, Any]:
     """Done and abandoned tasks within retention window."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     cutoff = _now() - timedelta(days=days)
     recent = []
     for t in tasks:
@@ -673,7 +673,7 @@ def build_recently_done(
 def build_search_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Compact tag/title/summary records for search."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     cutoff_done = _now() - timedelta(days=SEARCH_INDEX_DONE_DAYS)
     records = []
@@ -714,7 +714,7 @@ def build_workstream_view(
 ) -> dict[str, Any]:
     """Per-workstream view: active/waiting/blocked + recent done."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     cutoff = _now() - timedelta(days=done_days)
     ws_tasks = [t for t in tasks if t.get("workstream") == workstream]
     active = [
@@ -747,7 +747,7 @@ def build_agent_view(
 ) -> dict[str, Any]:
     """Per-agent view: tasks owned or recently touched by agent."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     cutoff = _now() - timedelta(days=done_days)
     agent_tasks = [
         t for t in tasks
@@ -821,7 +821,7 @@ def build_summaries(tasks: list[dict[str, Any]],
     A LIST (not a map) of summaries, for consistency with the other views' task
     lists and so it round-trips as plain JSON without key-ordering concerns."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     return {
         "schema": "fulcra.coordination.summaries.v1",
         "view": "summaries",
@@ -873,7 +873,7 @@ def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None
     sees who is actively working at the top. This is the read-side aggregate the
     ``presence`` / ``agents`` / ``resume`` surfaces consume in one download."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     if now is None:
         now = _now()
     agents = []
@@ -881,9 +881,15 @@ def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None
         entry = dict(rec)
         entry["liveness"] = presence_liveness(rec.get("last_seen", ""), now)
         agents.append(entry)
-    # Most-recently-seen first (descending last_seen). A missing timestamp sorts
-    # last (empty string is < any real ISO timestamp).
-    agents.sort(key=lambda a: a.get("last_seen", ""), reverse=True)
+    # Most-recently-seen first (descending last_seen). Sort by the PARSED
+    # datetime, not the raw string (BUG 1): a same-second pair where one record
+    # was stamped with microsecond=0 ("...45Z") and the other with µs>0
+    # ("...45.5Z") would mis-order under a lexical compare ('.' < 'Z'), putting
+    # a STALER agent on top. A missing/unparseable timestamp coerces to epoch
+    # (datetime.min) so it sorts LAST under reverse — matching the prior intent.
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    agents.sort(key=lambda a: _parse_dt(a.get("last_seen", "")) or _epoch,
+                reverse=True)
     return {
         "schema": PRESENCE_VIEW_SCHEMA,
         "view": "presence",
@@ -905,7 +911,7 @@ def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     were added there for exactly this reason), so the write path can rebuild views
     from the summaries aggregate instead of re-fetching task bodies. The
     equivalence test (TestBuildAllViewsEquivalence) guards this property."""
-    now = _now().isoformat().replace("+00:00", "Z")
+    now = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     result: dict[str, dict[str, Any]] = {
         "index": build_index(tasks, now),
         "active": build_active(tasks, now),
