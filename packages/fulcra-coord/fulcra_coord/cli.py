@@ -246,18 +246,20 @@ def _load_summaries_for_rebuild(
     # so a task this agent knows about that a raced aggregate dropped is recovered
     # — without ever overwriting a newer remote record with a stale local one.
     for t in cache.list_cached_tasks():
-        # BUG 2 (data-loss): a corrupt/partial cached body (missing title/
-        # status/workstream/owner_agent) makes task_summary raise KeyError. That
-        # escaped _write_task_and_views (which only catches Conflict/Reconcile),
-        # crashing AFTER the task body uploaded → stale views with NO
-        # needs_reconcile marker. Guard like the file-listing path below: skip
-        # the bad entry, keep the good ones.
+        # task_summary is now defensive (renders a partial body with "" defaults
+        # rather than KeyError-ing), so a corrupt cached body is SURFACED, not
+        # dropped. This try/except is kept as belt-and-suspenders: any OTHER
+        # unexpected failure summarizing one entry must not crash the whole
+        # rebuild AFTER the task body uploaded (which would leave stale views with
+        # no needs_reconcile marker) — skip the offending entry, keep the rest.
         try:
             s = schema.task_summary(t)
         except Exception:
             continue
+        if not s.get("id"):
+            continue  # a body with no id can't key the aggregate; skip safely
         prev = by_id.get(s["id"])
-        if prev is None or s.get("updated_at", "") > prev.get("updated_at", ""):
+        if prev is None or _updated_at_key(s) > _updated_at_key(prev):
             by_id[s["id"]] = s
 
     # S2 layer 2 — SELF-HEAL: the per-task FILES are the durable, un-clobberable
@@ -540,6 +542,23 @@ def _view_name_to_remote(name: str) -> str:
     return remote.view_remote_path(name)
 
 
+def _updated_at_key(task: dict[str, Any]) -> datetime:
+    """Parsed, tz-aware ``updated_at`` for newer/older comparison, epoch on miss.
+
+    BUG 1 (mixed-precision data loss): a raw STRING compare of two ``updated_at``
+    values mis-orders timestamps in the same second when one was emitted with
+    microsecond=0 (``...:45Z``) and the other with microseconds>0
+    (``...:45.000001Z``) — lexically ``.`` < ``Z`` so the truly-newer fractional
+    timestamp wrongly sorts BEFORE the whole-second one, and the merge would
+    silently drop the newer side's field edits. The emission fix gives all NEW
+    timestamps fixed-width microseconds, but mixed-precision data already on the
+    bus must still compare correctly, so the merge compares PARSED datetimes via
+    the shared ``views._parse_dt`` (which coerces naive->UTC). A missing or
+    unparseable timestamp sorts oldest (epoch) so a clock-less side never wins."""
+    dt = views._parse_dt(task.get("updated_at", ""))
+    return dt if dt is not None else datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _try_merge(
     local: dict[str, Any], remote_task: dict[str, Any]
 ) -> Optional[dict[str, Any]]:
@@ -584,7 +603,7 @@ def _try_merge(
             # more recent (the symmetric case below covers the same logic for
             # the local-only-status-change path).
             merged = copy.deepcopy(remote_task)
-            if local.get("updated_at", "") > remote_task.get("updated_at", ""):
+            if _updated_at_key(local) > _updated_at_key(remote_task):
                 # Carry ALL non-event scalar/dict fields from the more-recent
                 # local side EXCEPT status (remote's transition is authoritative)
                 # — a hardcoded allowlist silently dropped not_before/due/
@@ -599,7 +618,7 @@ def _try_merge(
     # the field base so EVERY non-event field follows the newer write. Status
     # is taken from the side that changed it: when only local changed status,
     # local must keep its status even if remote's updated_at is newer.
-    if remote_task.get("updated_at", "") > local.get("updated_at", ""):
+    if _updated_at_key(remote_task) > _updated_at_key(local):
         newer, older = remote_task, local
     else:
         newer, older = local, remote_task
@@ -698,7 +717,7 @@ def _repair_merged_tags(
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -1449,6 +1468,15 @@ def cmd_assign(args: Any, backend: Optional[list[str]] = None) -> int:
         summary=f"Assigned to {assignee} by {agent}.",
     )
     task["assignee"] = assignee
+    # BUG 3: a `block --on-user` task carries a ``needs:human`` tag so it shows on
+    # the human's plate (views.needs_human counts that tag, not just the assignee).
+    # When it is REASSIGNED to a non-human agent, the assignee changes but the
+    # stale tag persisted — so the human kept seeing it as "blocked on you" forever.
+    # Strip the tag whenever we reassign AWAY from the human; keep it when the new
+    # assignee IS the human (a no-op / re-park must not drop the marker). Resolve
+    # the human handle the same way cmd_block / needs-me do (identity.resolve_human).
+    if not views.agent_matches(identity.resolve_human(), assignee):
+        task["tags"] = [t for t in task.get("tags", []) if t != "needs:human"]
     cache.write_cached_task(task)
 
     ok = False
@@ -1927,6 +1955,12 @@ def _age_str(updated_at: str) -> str:
         dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return "?"
+    # BUG 6a: a tz-less stored timestamp parses NAIVE, and subtracting it from the
+    # AWARE now raised TypeError (not caught above) — crashing a read-only view.
+    # Coerce a naive parse to UTC, matching views._parse_dt, so any stored shape
+    # yields a sane age instead of a crash.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     secs = (datetime.now(timezone.utc) - dt).total_seconds()
     if secs < 60:
         return "just now"
@@ -2651,7 +2685,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     def _upload_one(item):
         view_name, view_data = item
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        # BUG 6b: the old guard was `remaining <= 0` with `timeout=max(1, int(
+        # remaining))`. With 0<remaining<1 that floored the per-view timeout UP to
+        # 1s, letting an upload run up to ~1s PAST the global reconcile deadline.
+        # Treat any sub-1s budget as past-deadline (skip, count as a failed view)
+        # so the deadline is a hard ceiling — consistent with the `<= 0` guard.
+        if remaining < 1:
             return view_name, False
         vpath = _view_name_to_remote(view_name)
         # Treat a RAISING upload as a failed view, not an escape hatch: an
@@ -2660,7 +2699,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # heartbeat. Catching keeps the contract: any failure is a failed view.
         try:
             ok = remote.upload_json(view_data, vpath, backend=backend,
-                                    timeout=max(1, int(remaining)))
+                                    timeout=int(remaining))
         except Exception:
             ok = False
         return view_name, ok
