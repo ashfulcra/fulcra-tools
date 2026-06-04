@@ -141,10 +141,21 @@ def _now() -> datetime:
 
 
 def _parse_dt(iso: str) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp to a tz-AWARE UTC datetime, or None.
+
+    BUG 8: a tz-less string parses to a NAIVE datetime; subtracting it from the
+    aware ``now`` in ``_age_hours`` raised TypeError, breaking the +inf fail-safe
+    that the liveness/aging docstrings promise (missing/unparseable -> +inf, i.e.
+    maximally stale). Coerce a naive result to UTC here, in the shared helper, so
+    every caller (_age_hours, presence_liveness, is_aged_out_broadcast, is_stale,
+    inbox_for) is safe — matching how the schedule layer already assumes UTC."""
     try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _done_at(t: dict[str, Any]) -> str:
@@ -350,6 +361,27 @@ def agent_matches(me: str, assignee: str) -> bool:
     return me_parts[:len(as_parts)] == as_parts
 
 
+def _is_owners_own_directive(owner_agent: Optional[str], assignee: str) -> bool:
+    """True when a directive is the OWNER's own work, not a cross-agent directive.
+
+    BUG 3: a task whose assignee is a short-id PREFIX of its owner_agent (e.g.
+    owner='claude-code:h:r', assignee='claude-code') is the owner's own task —
+    the owner's read path (inbox_for) hides it because owner_agent matches `me`.
+    The index used a bare exact `owner_agent == assignee` test, so it kept
+    counting these even though the read path hid them. Using the SAME prefix-
+    aware ownership relation here makes the count and the read path agree.
+    agent_matches(owner, assignee) is True when assignee equals or prefixes the
+    owner — exactly the "owner is (a refinement of) the assignee" relation.
+
+    A BROADCAST directive (assignee == "*") is fan-out to every agent, NOT the
+    owner's own work, so it is never self-owned — guarding here keeps broadcasts
+    visible/counted (agent_matches treats "*" as matching everything).
+    """
+    if not owner_agent or assignee == BROADCAST:
+        return False
+    return agent_matches(owner_agent, assignee)
+
+
 def is_open_directive(task: dict[str, Any], assignee: str,
                       now: Optional[datetime] = None,
                       include_aged: bool = False,
@@ -374,7 +406,7 @@ def is_open_directive(task: dict[str, Any], assignee: str,
         return False
     if task.get("status") not in INBOX_OPEN_STATUSES:
         return False
-    if task.get("owner_agent") == assignee:
+    if _is_owners_own_directive(task.get("owner_agent"), assignee):
         return False
     if _acked_by(task, assignee):
         return False
@@ -433,7 +465,11 @@ def inbox_for(me: str, tasks: list[dict[str, Any]], now: Optional[datetime] = No
             continue
         if t.get("status") not in INBOX_OPEN_STATUSES:
             continue
-        if t.get("owner_agent") == me or t.get("owner_agent") == assignee:
+        # Hide my own work (owner_agent == me) and any directive that is the
+        # owner's own (assignee equals/prefixes owner_agent) — the same
+        # prefix-aware ownership relation the index now uses (BUG 3), so the
+        # read path and index.counts.inbox agree.
+        if t.get("owner_agent") == me or _is_owners_own_directive(t.get("owner_agent"), assignee):
             continue
         if _acked_by(t, me):
             continue
@@ -481,28 +517,34 @@ def _human_match(t: dict[str, Any], human: str) -> bool:
     return bool(concrete_for_human or "needs:human" in tags)
 
 
-def _now_iso_z(now: Optional[datetime]) -> str:
-    """Resolve the comparison instant as an ISO-Z string for lexical comparison
-    against stored not_before/due values (all canonical ...Z), defaulting to
-    wall-clock UTC. ISO-Z strings sort identically lexically and chronologically,
-    so a string compare is correct and avoids per-item datetime parsing."""
-    if now is None:
-        now = _now()
-    return now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def _schedule_iso_z(value: Any) -> Optional[str]:
     """Normalize an optional stored schedule timestamp for comparisons.
 
     Scheduling is a visibility gate, so malformed persisted data must degrade to
     "no gate" rather than hiding a concrete human ask forever.
     """
+    dt = _schedule_dt(value)
+    if dt is None:
+        return None
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _schedule_dt(value: Any) -> Optional[datetime]:
+    """Parse an optional stored schedule timestamp to a tz-aware UTC datetime.
+
+    BUG 7: the not_before/due gates must compare PARSED datetimes, never the
+    stored ISO-Z strings. The wall-clock instant emits fractional seconds only
+    when its microsecond != 0 while a stored value keeps its own precision, so a
+    lexical compare of the mixed-width strings is unsound (``Z`` 0x5A sorts after
+    ``.`` 0x2E) — a sub-second-past not_before could gate as future. A naive
+    parsed value is assumed UTC (matching the rest of the schedule layer).
+    Malformed/absent -> None ("no gate")."""
     dt = _parse_dt(value)
     if dt is None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(timezone.utc)
 
 
 def needs_human(tasks: list[dict[str, Any]], human: str, *,
@@ -534,16 +576,17 @@ def needs_human(tasks: list[dict[str, Any]], human: str, *,
     "BLOCKED ON YOU" every session for days. Such items are surfaced separately
     by ``upcoming_for_human``. A task with no/empty/past ``not_before`` behaves
     exactly as before — the gate only ever HIDES future work, never the rest."""
-    now_iso = _now_iso_z(now)
+    now_dt = (now or _now()).astimezone(timezone.utc)
     items = []
     for t in tasks:
         if not _human_match(t, human):
             continue
-        nb = _schedule_iso_z(t.get("not_before"))
+        nb = _schedule_dt(t.get("not_before"))
         # Gate: a future not_before keeps it off the due-now plate. Empty/None
         # or malformed not_before is "no gate" -> always due-now (today's
-        # behavior). Canonical ISO-Z strings compare correctly lexically.
-        if nb and nb > now_iso:
+        # behavior). Compare PARSED datetimes (BUG 7) so sub-second precision
+        # differences between `now` and the stored value can't misgate.
+        if nb and nb > now_dt:
             continue
         items.append(task_summary(t))
     return sorted(items, key=lambda x: x.get("updated_at", ""))
@@ -564,20 +607,24 @@ def upcoming_for_human(tasks: list[dict[str, Any]], human: str, *,
     Sorted by ``not_before`` then ``due`` (soonest-actionable first, then by
     deadline) so the UI can render "in 3d / due Jun 8". Each entry carries
     ``not_before`` + ``due`` (already on task_summary)."""
-    now_iso = _now_iso_z(now)
-    horizon_iso = ((now or _now()) + timedelta(days=within_days)).astimezone(
-        timezone.utc).isoformat().replace("+00:00", "Z")
+    now_dt = (now or _now()).astimezone(timezone.utc)
+    horizon_dt = now_dt + timedelta(days=within_days)
     items = []
     for t in tasks:
         if not _human_match(t, human):
             continue
-        nb = _schedule_iso_z(t.get("not_before"))
+        nb = _schedule_dt(t.get("not_before"))
         # Only FUTURE not_before items within the horizon. No/empty/malformed/
         # past not_before is due-now (handled by needs_human), not upcoming.
-        if not nb or nb <= now_iso or nb > horizon_iso:
+        # Parsed-datetime compare (BUG 7) so a sub-second-past not_before is
+        # correctly excluded (it's due-now) rather than wrongly listed.
+        if not nb or nb <= now_dt or nb > horizon_dt:
             continue
         s = task_summary(t)
-        items.append((nb, _schedule_iso_z(s.get("due")) or "", s))
+        # Sort key stays a string (ISO-Z) — sorting only orders entries and is
+        # unaffected by the lexical/precision issue the GATE had.
+        items.append((_schedule_iso_z(s.get("not_before")) or "",
+                      _schedule_iso_z(s.get("due")) or "", s))
     return [s for _, _, s in sorted(items, key=lambda x: (x[0], x[1]))]
 
 
