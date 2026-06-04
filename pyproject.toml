@@ -2,7 +2,7 @@
 # itself — it just ties the packages/ together so `uv sync` resolves the
 # intra-repo `fulcra-common` dependency from source.
 [tool.uv.workspace]
-members = ["packages/*"]
+members = ["packages/*", "attention"]
 exclude = ["packages/web-ui"]
 
 # Workspace-wide pytest settings — applied when running `pytest packages/`

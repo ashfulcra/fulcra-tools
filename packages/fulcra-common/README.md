@@ -150,7 +150,7 @@ The four primary callsites that previously held inline
 
 - `packages/media-helpers/fulcra_media/fulcra.py:ingest_batch` →
   loops `NormalizedEvent.to_duration_event(...)` → pipeline.
-- `packages/attention/fulcra_attention/ingest.py:build_attention_event`
+- `attention/fulcra_attention/ingest.py:build_attention_event`
   returns a `DurationEvent`; the daemon's `/api/extension/attention`
   route posts via `IngestPipeline.ingest_one`.
 - `packages/csv-importer/fulcra_csv/fulcra.py:_build_record` builds a

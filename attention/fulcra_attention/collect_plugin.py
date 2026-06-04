@@ -23,8 +23,8 @@ from fulcra_collect.plugin import Plugin, RunContext
 # Where the browser extension lives in this repo, and the built unpacked
 # output the user loads into their browser. Single-sourced here so the
 # run() message and the description can't drift.
-_EXTENSION_SOURCE_DIR = "packages/attention/chrome"
-_EXTENSION_BUILD_DIR = "packages/attention/chrome/dist"
+_EXTENSION_SOURCE_DIR = "attention/chrome"
+_EXTENSION_BUILD_DIR = "attention/chrome/dist"
 
 _POINTER_MESSAGE = (
     "Attention is captured by the Fulcra Attention browser extension, which "

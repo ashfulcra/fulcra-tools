@@ -14,13 +14,13 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'packages/attention/chrome/**'
+      - 'attention/chrome/**'
   pull_request:
     branches: [main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'packages/attention/chrome/**'
+      - 'attention/chrome/**'
   workflow_dispatch:
 
 jobs:

@@ -35,7 +35,7 @@ To load a from-source build: **Load unpacked** → select **`chrome/dist/`** (th
 
 ## Cutting a release
 
-Bump `version` in `packages/attention/chrome/package.json`, commit, then push a matching tag:
+Bump `version` in `attention/chrome/package.json`, commit, then push a matching tag:
 
 ```bash
 git tag attention-v0.1.0
