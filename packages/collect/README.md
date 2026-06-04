@@ -9,7 +9,7 @@ SQLite database at `~/.config/fulcra-collect/state.db`.
 
 The daemon, the menubar app (`packages/menubar`), the web UI
 (`packages/web-ui`), and every helper that publishes data to Fulcra
-(`packages/media-helpers`, `packages/attention`, `packages/dayone`,
+(`packages/media-helpers`, `attention`, `packages/dayone`,
 …) all sit on this package. Anything new that wants to import a data
 source into a Fulcra account becomes a `fulcra-collect` plugin and gets
 the scheduler, credential storage, dashboard, wizard, and OAuth

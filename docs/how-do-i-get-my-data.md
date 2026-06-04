@@ -196,7 +196,7 @@ worth a look when nothing else matches.
   definition bound? extension posted in the last 24h?). **Chromium
   browsers only** (Chrome / Edge / Brave / Arc / Vivaldi); Firefox and
   Safari are not supported yet. Build with `npm run build` in
-  `packages/attention/chrome/` and load `dist/` as an unpacked
+  `attention/chrome/` and load `dist/` as an unpacked
   extension; pair through the wizard.
 
 ## Generic RSS / Atom feed

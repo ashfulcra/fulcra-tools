@@ -14,7 +14,14 @@ def _entry_point_ids() -> set[str]:
     """Every plugin id declared across the workspace pyprojects'
     [project.entry-points."fulcra_collect.plugins"] tables."""
     ids: set[str] = set()
-    for pyproject in _WORKSPACE.glob("packages/*/pyproject.toml"):
+    pyprojects = [
+        *_WORKSPACE.glob("packages/*/pyproject.toml"),
+        # attention lives at the repo root (top-level), not under packages/.
+        _WORKSPACE / "attention" / "pyproject.toml",
+    ]
+    for pyproject in pyprojects:
+        if not pyproject.is_file():
+            continue
         data = tomllib.loads(pyproject.read_text())
         group = (
             data.get("project", {})
