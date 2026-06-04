@@ -41,6 +41,15 @@ export interface SignInProps {
   openUrl?: (url: string) => void;
   /** Clear the resolved-attention cache on sign-out. */
   clearResolved?: () => Promise<void>;
+  /**
+   * Called when the user is signed in (either freshly, after the device
+   * flow completes, or because a valid token already existed on mount).
+   * The popup leaves this unset (the surface stays put); the onboarding
+   * wizard wires it to advance to the next step. When set, the signed-in
+   * phase also renders a "Continue" affordance so an already-signed-in
+   * user can proceed without re-authenticating.
+   */
+  onSignedIn?: () => void;
 }
 
 function defaultOpenUrl(url: string): void {
@@ -58,6 +67,7 @@ export function SignIn(props: SignInProps) {
   const resolveLabel = props.resolveLabel ?? defaultResolveLabel;
   const openUrl = props.openUrl ?? defaultOpenUrl;
   const clearResolved = props.clearResolved ?? clearResolvedDefault;
+  const onSignedIn = props.onSignedIn;
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   // Guards against setState after unmount (the poll loop can outlive the popup).
@@ -131,6 +141,9 @@ export function SignIn(props: SignInProps) {
       // a flush so queued events ship right away.
       await chrome.storage.local.remove("lastIngestError");
       void flushOutbox();
+      // Let an embedder (the onboarding wizard) advance past the auth step.
+      // The popup leaves onSignedIn unset, so this is a no-op there.
+      if (mounted.current && onSignedIn) onSignedIn();
     } catch (e) {
       if (!mounted.current) return;
       setPhase({ kind: "error", message: errorMessage(e) });
@@ -193,6 +206,14 @@ export function SignIn(props: SignInProps) {
           </span>
           <button onClick={() => void signOut()}>Sign out</button>
         </div>
+        {onSignedIn && (
+          <div className="action-row" style={{ marginTop: 10 }}>
+            <div className="spacer" />
+            <button className="primary" onClick={() => onSignedIn()}>
+              Continue →
+            </button>
+          </div>
+        )}
       </div>
     );
   }
