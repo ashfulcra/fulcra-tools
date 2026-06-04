@@ -99,4 +99,8 @@ function makeArea() {
   identity: {
     getProfileUserInfo: vi.fn(),
   },
+  declarativeNetRequest: {
+    updateDynamicRules: vi.fn(async () => undefined),
+    getDynamicRules: vi.fn(async () => []),
+  },
 };
