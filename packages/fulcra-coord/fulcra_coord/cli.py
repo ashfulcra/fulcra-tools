@@ -569,6 +569,7 @@ def _try_merge(
                 _carry_fields(merged, local, skip_status=True)
             _union_events_and_acked(merged, local, remote_task,
                                     local_event_times, remote_event_times)
+            _repair_merged_tags(merged, local, remote_task)
             return merged
 
     # Same status, or only local changed status: pick the more-recent side as
@@ -590,6 +591,7 @@ def _try_merge(
 
     _union_events_and_acked(merged, local, remote_task,
                             local_event_times, remote_event_times)
+    _repair_merged_tags(merged, local, remote_task)
     return merged
 
 
@@ -640,6 +642,36 @@ def _union_events_and_acked(
     acked = set(local.get("acked_by") or []) | set(remote_task.get("acked_by") or [])
     if acked or "acked_by" in local or "acked_by" in remote_task:
         merged["acked_by"] = sorted(acked)
+
+
+def _repair_merged_tags(
+    merged: dict[str, Any],
+    local: dict[str, Any],
+    remote_task: dict[str, Any],
+) -> None:
+    """Rebuild standard tags after merging fields from different sides.
+
+    A safe merge can intentionally combine local status with newer remote fields.
+    Copying a whole task as the field base then restoring just ``status`` leaves
+    stale derived tags such as ``status:proposed`` on an ``active`` task. Rebuild
+    the standard tags from the merged fields and keep non-standard tags from both
+    sides, so membership markers like ``needs:human`` survive too.
+    """
+    standard_prefixes = ("workstream:", "agent:", "kind:", "status:", "priority:")
+    extra = [
+        tag
+        for task in (local, remote_task, merged)
+        for tag in (task.get("tags") or [])
+        if not any(tag.startswith(prefix) for prefix in standard_prefixes)
+    ]
+    merged["tags"] = schema.build_tags(
+        status=merged.get("status", ""),
+        workstream=merged.get("workstream", ""),
+        agent=merged.get("owner_agent", ""),
+        kind=schema._extract_kind_from_tags(merged.get("tags") or []),
+        priority=merged.get("priority", ""),
+        extra=extra or None,
+    )
 
 
 def _now_iso() -> str:
