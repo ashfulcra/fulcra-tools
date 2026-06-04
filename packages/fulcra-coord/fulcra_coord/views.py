@@ -368,8 +368,35 @@ def inbox_for(me: str, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 NEEDS_HUMAN_OPEN_STATUSES = ("proposed", "waiting", "blocked")
 
 
-def needs_human(tasks: list[dict[str, Any]], human: str) -> list[dict[str, Any]]:
-    """Every OPEN task assigned to / blocked on the human, across all owners.
+def _human_match(t: dict[str, Any], human: str) -> bool:
+    """True when an OPEN task is directed at the human (the strict needs-me
+    membership rule, factored out so needs_human and upcoming_for_human share
+    one definition): open status AND (a CONCRETE non-broadcast assignee matching
+    the human OR the explicit ``needs:human`` tag). A bare ``*`` broadcast never
+    qualifies — see needs_human's docstring for why."""
+    if t.get("status") not in NEEDS_HUMAN_OPEN_STATUSES:
+        return False
+    assignee = t.get("assignee")
+    tags = t.get("tags") or []
+    concrete_for_human = (
+        assignee and assignee != BROADCAST and agent_matches(human, assignee)
+    )
+    return bool(concrete_for_human or "needs:human" in tags)
+
+
+def _now_iso_z(now: Optional[datetime]) -> str:
+    """Resolve the comparison instant as an ISO-Z string for lexical comparison
+    against stored not_before/due values (all canonical ...Z), defaulting to
+    wall-clock UTC. ISO-Z strings sort identically lexically and chronologically,
+    so a string compare is correct and avoids per-item datetime parsing."""
+    if now is None:
+        now = _now()
+    return now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def needs_human(tasks: list[dict[str, Any]], human: str, *,
+                now: Optional[datetime] = None) -> list[dict[str, Any]]:
+    """Every OPEN task assigned to / blocked on the human that is ACTIONABLE NOW.
 
     The data layer behind ``needs-me`` and the SessionStart "BLOCKED ON YOU"
     banner: the human's situational-awareness glance of "what's on my plate from
@@ -388,22 +415,59 @@ def needs_human(tasks: list[dict[str, Any]], human: str) -> list[dict[str, Any]]
     noise and buries the real asks — defeating the whole situational-awareness
     point. So membership here is the STRICT signal: a CONCRETE assignee that
     matches the human (``block --on-user`` sets ``assignee = human``), OR the
-    explicit ``needs:human`` tag. The broadcast wildcard never qualifies."""
+    explicit ``needs:human`` tag. The broadcast wildcard never qualifies.
+
+    SCHEDULING (the not_before gate): a task with a FUTURE ``not_before`` is
+    something the human CANNOT act on yet (e.g. a re-auth window that opens next
+    week), so it is EXCLUDED from this DUE-NOW plate — it would otherwise show
+    "BLOCKED ON YOU" every session for days. Such items are surfaced separately
+    by ``upcoming_for_human``. A task with no/empty/past ``not_before`` behaves
+    exactly as before — the gate only ever HIDES future work, never the rest."""
+    now_iso = _now_iso_z(now)
     items = []
     for t in tasks:
-        if t.get("status") not in NEEDS_HUMAN_OPEN_STATUSES:
+        if not _human_match(t, human):
             continue
-        assignee = t.get("assignee")
-        tags = t.get("tags") or []
-        # Concrete (non-broadcast) assignee directed at the human, OR the
-        # explicit needs:human marker. A bare "*" broadcast does NOT count.
-        concrete_for_human = (
-            assignee and assignee != BROADCAST and agent_matches(human, assignee)
-        )
-        if not (concrete_for_human or "needs:human" in tags):
+        nb = t.get("not_before")
+        # Gate: a future not_before keeps it off the due-now plate. Empty/None
+        # not_before is "no gate" -> always due-now (today's behavior). ISO-Z
+        # strings compare correctly lexically.
+        if nb and nb > now_iso:
             continue
         items.append(task_summary(t))
     return sorted(items, key=lambda x: x.get("updated_at", ""))
+
+
+def upcoming_for_human(tasks: list[dict[str, Any]], human: str, *,
+                       now: Optional[datetime] = None,
+                       within_days: int = 7) -> list[dict[str, Any]]:
+    """The human's NOT-YET-ACTIONABLE asks: open tasks directed at the human
+    whose ``not_before`` is in the FUTURE but within ``within_days``.
+
+    The companion to ``needs_human``: the not_before gate hides future work from
+    the DUE-NOW plate, and this surfaces it as a compact "Upcoming (next 7d)"
+    list so the human still has line-of-sight on what's coming — without it
+    inflating the "BLOCKED ON YOU (N)" count. Same human-match / open-status /
+    broadcast-exclusion rules as needs_human (via ``_human_match``).
+
+    Sorted by ``not_before`` then ``due`` (soonest-actionable first, then by
+    deadline) so the UI can render "in 3d / due Jun 8". Each entry carries
+    ``not_before`` + ``due`` (already on task_summary)."""
+    now_iso = _now_iso_z(now)
+    horizon_iso = ((now or _now()) + timedelta(days=within_days)).astimezone(
+        timezone.utc).isoformat().replace("+00:00", "Z")
+    items = []
+    for t in tasks:
+        if not _human_match(t, human):
+            continue
+        nb = t.get("not_before")
+        # Only FUTURE not_before items within the horizon. No/empty/past
+        # not_before is due-now (handled by needs_human), not upcoming.
+        if not nb or nb <= now_iso or nb > horizon_iso:
+            continue
+        items.append(task_summary(t))
+    return sorted(items, key=lambda x: (x.get("not_before") or "",
+                                        x.get("due") or ""))
 
 
 def build_next(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:

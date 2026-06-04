@@ -68,11 +68,18 @@ except Exception:
     # subcommand must not break the in-flight+stale section, so default empty.
     inbox = []
 try:
-    needsme = (json.loads(os.environ.get("NEEDSME","")) or {}).get("items", [])
+    _nm = json.loads(os.environ.get("NEEDSME","")) or {}
+    needsme = _nm.get("items", [])
+    # Upcoming = future-not_before asks the human cannot act on yet. They must
+    # NEVER inflate the BLOCKED ON YOU headline count (the whole point of the
+    # not_before gate); they only add one muted "+N upcoming" line. An old CLI
+    # omits the key -> empty, so the banner degrades to the prior shape.
+    upcoming = _nm.get("upcoming", [])
 except Exception:
     # Same fail-safe contract as inbox: an old CLI without needs-me omits the
     # blocked-on-you banner rather than breaking the rest of the injection.
     needsme = []
+    upcoming = []
 active = d.get("active", []) or []
 def age_hours(ts):
     try:
@@ -99,6 +106,11 @@ if needsme:
         lines.append("  %s — %s (from %s)" % (it.get("id",""), it.get("title",""), frm))
         if ask:
             lines.append("      needs: %s" % ask)
+    # Muted tail: how many not-yet-actionable asks are queued behind the plate.
+    # Deliberately a bare count (not the items) so it informs without nagging,
+    # and it sits UNDER the headline so the (N) above stays the due-now count.
+    if upcoming:
+        lines.append("  … (+%d upcoming)" % len(upcoming))
 # M-1: a self-filed `block --on-user` task is owned by the agent AND appears in
 # needs-me, so without this it would show BOTH in the ⛔ BLOCKED ON YOU banner
 # above and again under "open work". Seed `seen` with the needs-me ids and drop
