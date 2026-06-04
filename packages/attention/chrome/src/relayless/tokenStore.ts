@@ -96,13 +96,19 @@ export class TokenStore {
    * set) and return the new one. Returns null when there is no stored token
    * (not signed in). Throws if a refresh is required but there is no refresh
    * token, or the refresh itself fails.
+   *
+   * `force:true` refreshes via the refresh grant REGARDLESS of staleness. The
+   * sender calls this after a 401 — the server may have revoked a token that
+   * is still "fresh" by our local clock, so a plain staleness check would hand
+   * back the same rejected token and loop. With force we do exactly one real
+   * refresh + retry before the caller surfaces `unauthorized`.
    */
-  async getValidAccessToken(opts: { fetch?: FetchFn } = {}): Promise<
-    string | null
-  > {
+  async getValidAccessToken(
+    opts: { fetch?: FetchFn; force?: boolean } = {},
+  ): Promise<string | null> {
     const tokens = await this.get();
     if (!tokens) return null;
-    if (!this.isStale(tokens)) return tokens.accessToken;
+    if (!opts.force && !this.isStale(tokens)) return tokens.accessToken;
 
     if (!tokens.refreshToken) {
       throw new Error(

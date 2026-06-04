@@ -226,11 +226,11 @@ async function flushRelayless(): Promise<void> {
   const tokenStore = new TokenStore();
   const getToken = async (opts?: { force?: boolean }): Promise<string | null> => {
     // The relayless TokenStore refreshes on staleness inside
-    // getValidAccessToken; a `force` (post-401) refresh maps to the same
-    // call — a 401 with a still-"fresh" token means the refresh will be
-    // attempted on the next staleness window, so we just re-read here.
-    void opts;
-    return tokenStore.getValidAccessToken();
+    // getValidAccessToken. A `force` (post-401) refresh is honored straight
+    // through: a 401 on a still-"fresh" (but server-revoked) token must
+    // trigger a real refresh via the refresh grant, not hand back the same
+    // rejected token. sendBatch retries exactly once with force:true.
+    return tokenStore.getValidAccessToken({ force: opts?.force });
   };
 
   // Gate on having a token up front: if not signed in, surface needs-sign-in

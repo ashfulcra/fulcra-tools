@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { BearerForm } from "./BearerForm";
+import { SignIn } from "./SignIn";
+import { ConnectionMode } from "./ConnectionMode";
 import { LiveStream } from "./LiveStream";
 import { IgnoreList } from "./IgnoreList";
 import { Counts } from "./Counts";
@@ -9,6 +11,7 @@ import { HeartbeatToggle } from "./HeartbeatToggle";
 import { Banner } from "./Banner";
 import { CategoryEditor } from "./CategoryEditor";
 import { loadSettings } from "../storage";
+import type { TransportMode } from "../types";
 
 import markUrl from "../assets/fulcra-mark.png";
 
@@ -25,9 +28,13 @@ function openWizard() {
 
 export function App() {
   const [onboarded, setOnboarded] = useState<boolean | null>(null);
+  const [transportMode, setTransportMode] = useState<TransportMode | null>(null);
 
   useEffect(() => {
-    void loadSettings().then((s) => setOnboarded(s.onboarded));
+    void loadSettings().then((s) => {
+      setOnboarded(s.onboarded);
+      setTransportMode(s.transportMode);
+    });
   }, []);
 
   // First-run prompt: until the wizard has been completed, show a
@@ -64,8 +71,9 @@ export function App() {
         <h1>Fulcra Attention</h1>
         <span className="sub">v0.1</span>
       </header>
-      <Banner />
-      <BearerForm />
+      <Banner transportMode={transportMode ?? "relay"} />
+      {transportMode === "relayless" ? <SignIn /> : <BearerForm />}
+      <ConnectionMode onChange={setTransportMode} />
       <PauseControl />
       <Counts />
       <LiveStream />

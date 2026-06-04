@@ -10,7 +10,7 @@ import { describe, test, expect, beforeEach, vi } from "vitest";
 import { addToOutbox, flushOutbox } from "../src/outbox";
 import { loadOutbox, saveSettings } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";
-import { INGEST_BATCH_URL } from "../src/relayless/config";
+import { INGEST_BATCH_URL, TOKEN_URL } from "../src/relayless/config";
 import { mockFetch } from "./relayless/memStorage";
 import type { AttentionEvent } from "../src/types";
 
@@ -134,6 +134,51 @@ describe("flushOutbox — relayless mode", () => {
     await flushOutbox();
 
     expect(await getError()).toBeUndefined();
+  });
+
+  test("ingest 401 on a still-fresh token → force-refresh + retry succeeds, outbox cleared", async () => {
+    // Token is NOT stale by the local clock, but the server has revoked it:
+    // the first ingest POST returns 401. The outbox getToken adapter must
+    // honor force:true and refresh via the refresh grant, then the retry POST
+    // (carrying the refreshed token) succeeds. Exactly one real refresh.
+    await seedToken(); // fresh, non-expired
+    await seedResolved();
+    await addToOutbox(makeEvent());
+
+    let ingestCalls = 0;
+    let refreshCalls = 0;
+    const f = mockFetch(async (input, init) => {
+      const url = String(input);
+      if (url === TOKEN_URL) {
+        refreshCalls += 1;
+        return new Response(
+          JSON.stringify({ access_token: "REFRESHED", expires_in: 3600 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === INGEST_BATCH_URL) {
+        ingestCalls += 1;
+        const auth = (init?.headers as Record<string, string>).Authorization;
+        // First POST uses the stale-but-fresh token and is rejected; the
+        // forced refresh swaps it for REFRESHED, which the API accepts.
+        return auth === "Bearer REFRESHED"
+          ? new Response("{}", { status: 200 })
+          : new Response("", { status: 401 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", f);
+
+    await flushOutbox();
+
+    expect(ingestCalls).toBe(2); // 401 then retry
+    expect(refreshCalls).toBe(1); // exactly one real refresh
+    expect(await loadOutbox()).toHaveLength(0); // sent, cleared
+    expect(await getError()).toBeUndefined();
+    // The refreshed token is persisted for next time.
+    const stored = (await chrome.storage.local.get("relaylessTokens"))
+      .relaylessTokens as { accessToken: string };
+    expect(stored.accessToken).toBe("REFRESHED");
   });
 
   test("ensure failure (network) when uncached → unreachable, events retained", async () => {

@@ -125,4 +125,40 @@ describe("getValidAccessToken", () => {
     await ts.set({ accessToken: "OLD", refreshToken: null, expiresAt: NOW - 1 });
     await expect(ts.getValidAccessToken()).rejects.toThrow(/re-authenticate/);
   });
+
+  test("force:true refreshes even when the token is still fresh", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    await ts.set({
+      accessToken: "FRESH-BUT-REVOKED",
+      refreshToken: "RT",
+      expiresAt: NOW + 10 * 60_000, // not stale
+    });
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(200, { access_token: "REFRESHED", expires_in: 3600 }),
+    );
+    const tok = await ts.getValidAccessToken({
+      fetch: fetchFn as unknown as typeof fetch,
+      force: true,
+    });
+    expect(tok).toBe("REFRESHED");
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await ts.get())?.accessToken).toBe("REFRESHED");
+  });
+
+  test("force:true with no stored token returns null (not signed in)", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    expect(await ts.getValidAccessToken({ force: true })).toBeNull();
+  });
+
+  test("force:true with no refresh token throws (re-authenticate)", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    await ts.set({
+      accessToken: "AT",
+      refreshToken: null,
+      expiresAt: NOW + 10 * 60_000,
+    });
+    await expect(ts.getValidAccessToken({ force: true })).rejects.toThrow(
+      /re-authenticate/,
+    );
+  });
 });

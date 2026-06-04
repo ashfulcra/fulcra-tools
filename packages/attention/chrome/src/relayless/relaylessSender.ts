@@ -94,7 +94,10 @@ export async function sendBatch(
 }
 
 /** POST the JSONL body. Returns the HTTP status, or 0 for a transport error
- * or a missing token. */
+ * or a missing token. A forced (post-401) token refresh that THROWS means the
+ * refresh grant was rejected — the refresh token is invalid/revoked, so the
+ * user must re-authenticate; we report that as 401 (→ unauthorized) rather
+ * than 0 (→ unreachable). */
 async function postBatch(
   fetchFn: FetchFn,
   body: string,
@@ -105,7 +108,7 @@ async function postBatch(
   try {
     token = await getToken(force ? { force: true } : undefined);
   } catch {
-    return 0;
+    return force ? 401 : 0;
   }
   if (!token) return 0;
   try {
