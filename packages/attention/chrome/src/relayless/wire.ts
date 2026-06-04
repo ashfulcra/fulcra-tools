@@ -26,10 +26,11 @@ import { pyJsonStringify } from "./pyjson";
 import { sha256Hex } from "./sha256";
 import type { AttentionEvent } from "../types";
 
-// Bumped 2026-05-19 v1 -> v2 (see fulcra_attention/ingest.py). Must stay in
-// lockstep with the Python SOURCE_PREFIX or relayless and daemon events
-// would land under different source-id namespaces.
-export const SOURCE_PREFIX = "com.fulcra.attention.v2.";
+// Bumped 2026-06-04 v2 -> v3: the source_id now also folds in the per-browser
+// identity slug, so the same url+second from two different browsers produces
+// DISTINCT source_ids (the multi-browser distinctness guarantee). The daemon
+// is gone, so this is no longer constrained by Python parity.
+export const SOURCE_PREFIX = "com.fulcra.attention.v3.";
 export const DATA_TYPE = "DurationAnnotation";
 
 /** Parse an ISO-8601 timestamp accepting both trailing 'Z' and explicit
@@ -53,19 +54,25 @@ function toSecondIsoZ(ms: number): string {
 }
 
 /**
- * Deterministic source-id from `key` (scrubbed URL or category) and the
- * second-truncated start time. Mirrors Python:
+ * Deterministic source-id from `key` (scrubbed URL or category), the
+ * second-truncated start time, and the per-browser identity slug:
  *   sec = start_time.replace(microsecond=0).isoformat()   # +00:00 form
- *   sha256(f"{key}|{sec}").hexdigest()[:16]
- * Python's isoformat() on a tz-aware second-truncated UTC datetime yields
- * "...+00:00" (NOT 'Z') — so the hashed string uses the +00:00 form.
+ *   sha256(f"{key}|{sec}|{identitySlug}").hexdigest()[:16]
+ * The +00:00 second-form is kept exactly as before; only the identity slug is
+ * appended (empty string when no identity), so two browsers with different
+ * identity slugs produce DISTINCT source_ids for the same url+second — the
+ * multi-browser distinctness guarantee.
  */
-export async function sourceId(key: string, startTimeIso: string): Promise<string> {
+export async function sourceId(
+  key: string,
+  startTimeIso: string,
+  identitySlug: string,
+): Promise<string> {
   const ms = parseIsoMs(startTimeIso);
   const truncated = Math.floor(ms / 1000) * 1000;
-  // Python isoformat() of a tz-aware UTC datetime → "YYYY-MM-DDTHH:MM:SS+00:00".
+  // Tz-aware UTC second-form → "YYYY-MM-DDTHH:MM:SS+00:00".
   const sec = new Date(truncated).toISOString().replace(".000Z", "+00:00");
-  const hash = await sha256Hex(`${key}|${sec}`);
+  const hash = await sha256Hex(`${key}|${sec}|${identitySlug}`);
   return `${SOURCE_PREFIX}${hash.slice(0, 16)}`;
 }
 
@@ -86,10 +93,17 @@ function hostnameOf(url: string): string | null {
 export interface WireContext {
   /** The bound Attention annotation-definition id. */
   definitionId: string;
-  /** Resolved tag ids, in order. The daemon emits
-   * [attention, web, (machine?), (category?), (identity?)] — the caller is
-   * responsible for that ordering and membership. */
+  /** Resolved tag ids, in order:
+   * [attention, web, (machine:<slug>?)] — the caller is responsible for that
+   * ordering and membership. */
   tagIds: string[];
+  /** The per-browser identity slug (slugifyIdentity of the label), folded into
+   * the source_id so records from distinct browsers are distinct. Empty string
+   * when no identity label is set. */
+  identitySlug: string;
+  /** The raw per-browser identity label, surfaced in external_ids.device_label
+   * for display. Null/absent when no label is set. */
+  identityLabel?: string | null;
 }
 
 /** The result of transforming one event. */
@@ -154,17 +168,20 @@ export async function buildWireRecord(
     Math.floor((Math.floor(endMs / 1000) - Math.floor(startMs / 1000))),
   );
 
-  const sid = await sourceId(sidKey, event.start_time);
+  const sid = await sourceId(sidKey, event.start_time, ctx.identitySlug);
 
-  // external_ids — the daemon always emits this (client is always set), so
-  // it is unconditional here. Key order is irrelevant: pyJsonStringify
-  // sorts.
+  // external_ids — always emitted (client is always set). Key order is
+  // irrelevant: pyJsonStringify sorts. `device` is the per-browser identity
+  // slug (null when none) and `device_label` the raw label, so consumers can
+  // tell which browser a record came from.
   const externalIds: Record<string, unknown> = {
     client: event.client,
     host,
     chrome_identity: event.chrome_identity,
     og_type: event.og_type,
     lang: event.lang,
+    device: ctx.identitySlug || null,
+    device_label: ctx.identityLabel ?? null,
   };
 
   // data_inner — attention's _emit_attention_fields shape. note + title are

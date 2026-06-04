@@ -5,13 +5,14 @@
 // we drop it (permanent failure — usually a bug or stale state). Cap at
 // OUTBOX_CAP entries, dropping the oldest at overflow.
 
-import { loadOutbox, saveOutbox } from "./storage";
+import { loadOutbox, saveOutbox, loadSettings } from "./storage";
 import type { AttentionEvent, OutboxEntry } from "./types";
 import { sendBatch } from "./relayless/relaylessSender";
 import { SentSet } from "./relayless/sentSet";
 import { TokenStore } from "./relayless/tokenStore";
 import {
   ensureAttentionDefinitionAndTags,
+  slugifyIdentity,
   UnauthorizedError,
 } from "./relayless/ensureDefinition";
 
@@ -25,7 +26,7 @@ export const OUTBOX_CAP = 5000;
  *   { kind: "unauthorized" } — the cloud rejected the access token (401)
  *     or we have no token. User needs to sign in.
  *   { kind: "unreachable" }  — repeated network / non-401 failures
- *     reaching Fulcra Cloud.
+ *     reaching the Fulcra API.
  *   null — clear (most-recent POST succeeded).
  */
 export interface IngestError {
@@ -144,12 +145,24 @@ async function doFlushOutbox(): Promise<void> {
     return;
   }
 
+  // The per-browser identity label (chosen at onboarding, editable in the
+  // popup). It both tags every record (machine:<slug>, via ensure) and folds
+  // into each source_id (via the wire context) so two browsers' records stay
+  // distinct. The source_id slug is the raw slug of the label, or "" when no
+  // label — only the TAG falls back to "browser".
+  const settings = await loadSettings();
+  const identityLabel = settings.identityLabel;
+  const identitySlug = identityLabel ? slugifyIdentity(identityLabel) : "";
+
   // Ensure (cached) the Attention definition + tags. A 401 here means the
   // token went bad mid-flight → needs-sign-in; any other failure (network,
   // 5xx) → unreachable. Events are retained in both cases.
-  let context: { definitionId: string; tagIds: string[] };
+  let resolved: { definitionId: string; tagIds: string[] };
   try {
-    context = await ensureAttentionDefinitionAndTags({ getToken });
+    resolved = await ensureAttentionDefinitionAndTags({
+      getToken,
+      identityLabel,
+    });
   } catch (e) {
     if (e instanceof UnauthorizedError) {
       await writeIngestError({ kind: "unauthorized", at: Date.now() });
@@ -165,7 +178,12 @@ async function doFlushOutbox(): Promise<void> {
   const events = entries.map((e) => e.payload);
   const result = await sendBatch(events, {
     getToken,
-    context,
+    context: {
+      definitionId: resolved.definitionId,
+      tagIds: resolved.tagIds,
+      identitySlug,
+      identityLabel,
+    },
     sentSet,
   });
 

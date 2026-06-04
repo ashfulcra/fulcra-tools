@@ -55,7 +55,7 @@ export function Banner() {
   if (err?.kind === "unreachable") {
     return (
       <div className="banner banner-warn">
-        <strong>Fulcra Cloud unreachable.</strong> {queued} event{queued === 1 ? "" : "s"} queued; will retry every minute.
+        <strong>Fulcra API unreachable.</strong> {queued} event{queued === 1 ? "" : "s"} queued; will retry every minute.
         <button onClick={() => void flushNow()} disabled={flushing}
                 style={{ marginLeft: 8 }}>
           {flushing ? "…" : "Retry now"}

@@ -4,7 +4,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../src/popup/App";
 import { SignIn } from "../src/popup/SignIn";
-import { saveSettings } from "../src/storage";
+import { IdentityLabel } from "../src/popup/IdentityLabel";
+import { saveSettings, loadSettings } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";
 
 // React's act() expects this flag in a test environment; without it
@@ -224,5 +225,69 @@ describe("SignIn surface", () => {
     await clickButton(container, "Sign in with Fulcra");
     expect(container.textContent).toContain("Sign-in failed");
     expect(container.textContent).toContain("Try again");
+  });
+});
+
+/** Type a value into the first text input (React-controlled). */
+async function setTextInput(container: HTMLElement, value: string): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+  if (!input) throw new Error("no text input found");
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype, "value",
+  )!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe("IdentityLabel — this browser", () => {
+  const tokenStore = {
+    getValidAccessToken: vi.fn(async () => "ACCESS"),
+    clear: vi.fn(async () => undefined),
+  } as never;
+
+  test("renders the current identity label", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, identityLabel: "Work MBP — Chrome" });
+    const update = vi.fn(async () => null);
+    const { container } = await mount(
+      <IdentityLabel tokenStore={tokenStore} update={update} />,
+    );
+    expect(container.textContent).toContain("This browser");
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(input?.value).toBe("Work MBP — Chrome");
+  });
+
+  test("saving persists the label (saveSettings) and re-tags (updateIdentity)", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, identityLabel: null });
+    const update = vi.fn(async () => ({ definitionId: "d", tagIds: [] }));
+    const { container } = await mount(
+      <IdentityLabel tokenStore={tokenStore} update={update} />,
+    );
+
+    await setTextInput(container, "Home iMac");
+    await clickButton(container, "Save");
+
+    const stored = await loadSettings();
+    expect(stored.identityLabel).toBe("Home iMac");
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith(expect.anything(), "Home iMac");
+  });
+
+  test("not yet onboarded: updateIdentity no-ops (null) but the label still persists", async () => {
+    await saveSettings({ ...DEFAULT_SETTINGS, identityLabel: null });
+    const update = vi.fn(async () => null); // no cached definition
+    const { container } = await mount(
+      <IdentityLabel tokenStore={tokenStore} update={update} />,
+    );
+
+    await setTextInput(container, "Spare Browser");
+    await clickButton(container, "Save");
+
+    const stored = await loadSettings();
+    expect(stored.identityLabel).toBe("Spare Browser");
+    expect(update).toHaveBeenCalledWith(expect.anything(), "Spare Browser");
   });
 });
