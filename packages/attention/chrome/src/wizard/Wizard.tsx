@@ -13,9 +13,19 @@ import type { DomainGroup } from "./history";
 import { backfillHistory } from "./backfill";
 import { setHeartbeatEnabled, hasHeartbeatPermission } from "../heartbeat-control";
 import { SignIn } from "../popup/SignIn";
+import { TokenStore } from "../relayless/tokenStore";
+import {
+  listAttentionDestinations,
+  chooseAttentionDestination,
+  createAttentionDestination,
+  ATTENTION_DEFINITION_NAME,
+  type AttentionDestination,
+  type EnsureOpts,
+} from "../relayless/ensureDefinition";
 import type { TransportMode } from "../types";
 
-type Step = "welcome" | "token" | "scan" | "filter" | "heartbeat" | "ingest" | "done";
+type Step =
+  | "welcome" | "token" | "destination" | "scan" | "filter" | "heartbeat" | "ingest" | "done";
 
 function FulcrumMark() {
   return <img className="logo" src={markUrl} alt="Fulcra" />;
@@ -185,12 +195,13 @@ export function Wizard() {
   // ---- render ----
 
   const tagForStep: Record<Step, string> = {
-    welcome: "Step 1 of 7",
-    token: "Step 2 of 7",
-    scan: "Step 3 of 7",
-    filter: "Step 4 of 7",
-    heartbeat: "Step 5 of 7",
-    ingest: "Step 6 of 7",
+    welcome: "Step 1",
+    token: "Step 2",
+    destination: "Step 3",
+    scan: "Step 4",
+    filter: "Step 5",
+    heartbeat: "Step 6",
+    ingest: "Step 7",
     done: "All set",
   };
 
@@ -210,7 +221,7 @@ export function Wizard() {
       )}
 
       {step === "token" && transportMode === "relayless" && (
-        <SignInStep onSignedIn={() => setStep("scan")} />
+        <SignInStep onSignedIn={() => setStep("destination")} />
       )}
 
       {step === "token" && transportMode === "relay" && (
@@ -219,6 +230,10 @@ export function Wizard() {
           setToken={setToken}
           onNext={() => void saveTokenAndAdvance()}
         />
+      )}
+
+      {step === "destination" && (
+        <ChooseDestinationStep onNext={() => setStep("scan")} />
       )}
 
       {step === "scan" && (
@@ -322,6 +337,186 @@ function SignInStep(props: { onSignedIn: () => void }) {
       <SignIn onSignedIn={props.onSignedIn} />
     </>
   );
+}
+
+/**
+ * Lets the user SEE and CHOOSE where browsing attention is saved, instead of
+ * the destination being resolved silently at first flush. On mount it loads a
+ * valid relayless access token and lists existing "Attention" destinations.
+ * The choice (reuse an existing def, or create a fresh one) is written into the
+ * SAME relaylessResolvedAttention cache the capture/outbox path reads, so
+ * capture uses exactly the selected definition.
+ *
+ * Deps are injectable so the test drives without chrome.* / network: a token
+ * store (defaults to the relayless TokenStore) and the three ensureDefinition
+ * helpers. Lifecycle is logged under [wizard:destination].
+ */
+function ChooseDestinationStep(props: {
+  onNext: () => void;
+  tokenStore?: TokenStore;
+  list?: typeof listAttentionDestinations;
+  choose?: typeof chooseAttentionDestination;
+  create?: typeof createAttentionDestination;
+}) {
+  const tokenStore = useMemo(() => props.tokenStore ?? new TokenStore(), [props.tokenStore]);
+  const list = props.list ?? listAttentionDestinations;
+  const choose = props.choose ?? chooseAttentionDestination;
+  const create = props.create ?? createAttentionDestination;
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [destinations, setDestinations] = useState<AttentionDestination[]>([]);
+  // selection: a destination id, or the sentinel "__create__".
+  const CREATE = "__create__";
+  const [selected, setSelected] = useState<string>(CREATE);
+  const [newName, setNewName] = useState(ATTENTION_DEFINITION_NAME);
+
+  // Build EnsureOpts.getToken from the relayless token accessor. force is
+  // forwarded so a 401-retry path can refresh.
+  const ensureOpts: EnsureOpts = useMemo(
+    () => ({
+      getToken: (o?: { force?: boolean }) =>
+        tokenStore.getValidAccessToken({ force: o?.force }),
+    }),
+    [tokenStore],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    console.info("[wizard:destination] load start");
+    void (async () => {
+      try {
+        const rows = await list(ensureOpts);
+        if (cancelled) return;
+        setDestinations(rows);
+        // Default-select the auto-pick if present, else the create option.
+        const auto = rows.find((d) => d.isAutoPick) ?? rows[0];
+        setSelected(auto ? auto.id : CREATE);
+        console.info("[wizard:destination] load done", { count: rows.length });
+      } catch (e) {
+        if (cancelled) return;
+        const msg = (e as Error).message ?? String(e);
+        console.error("[wizard:destination] load error", msg);
+        setError(msg);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [ensureOpts, list]);
+
+  async function onContinue(): Promise<void> {
+    if (saving || loading) return;
+    setSaving(true);
+    setError(null);
+    try {
+      if (selected === CREATE) {
+        const name = newName.trim() || ATTENTION_DEFINITION_NAME;
+        console.info("[wizard:destination] choice: create", { name });
+        await create(ensureOpts, name);
+      } else {
+        console.info("[wizard:destination] choice: reuse", { id: selected });
+        await choose(ensureOpts, selected);
+      }
+      props.onNext();
+    } catch (e) {
+      const msg = (e as Error).message ?? String(e);
+      console.error("[wizard:destination] save error", msg);
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <h2>Where your attention is saved</h2>
+      <p>Choose where your browsing attention is saved in Fulcra.</p>
+
+      {loading && <p className="muted">Loading your Fulcra annotations…</p>}
+
+      {!loading && (
+        <div style={{ margin: "12px 0" }}>
+          {destinations.map((d) => (
+            <label
+              key={d.id}
+              style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}
+            >
+              <input
+                type="radio"
+                name="attention-destination"
+                value={d.id}
+                checked={selected === d.id}
+                onChange={() => setSelected(d.id)}
+                disabled={saving}
+              />
+              <span>
+                "{d.name}" · created {formatCreatedAt(d.createdAt)}
+                {d.isAutoPick && " (current)"}
+              </span>
+            </label>
+          ))}
+
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}
+          >
+            <input
+              type="radio"
+              name="attention-destination"
+              value={CREATE}
+              checked={selected === CREATE}
+              onChange={() => setSelected(CREATE)}
+              disabled={saving}
+            />
+            <span>Create a new Attention annotation</span>
+          </label>
+          {selected === CREATE && (
+            <div style={{ margin: "0 0 4px 26px" }}>
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                disabled={saving}
+                placeholder={ATTENTION_DEFINITION_NAME}
+                style={{ width: "100%", boxSizing: "border-box" }}
+              />
+              <span className="muted" style={{ display: "block", marginTop: 4 }}>
+                Naming it "{ATTENTION_DEFINITION_NAME}" lets your other devices
+                share it automatically.
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && (
+        <p style={{ color: "var(--fa-danger)" }}>
+          Couldn't save your choice: {error}
+        </p>
+      )}
+
+      <div className="action-row">
+        <div className="spacer" />
+        <button
+          className="primary"
+          onClick={() => void onContinue()}
+          disabled={loading || saving}
+        >
+          {saving ? "Saving…" : "Continue →"}
+        </button>
+      </div>
+    </>
+  );
+}
+
+function formatCreatedAt(iso: string | null): string {
+  if (!iso) return "unknown date";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "unknown date";
+  return new Date(t).toLocaleDateString();
 }
 
 function TokenStep(props: {
