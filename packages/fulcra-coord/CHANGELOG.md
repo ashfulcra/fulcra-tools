@@ -10,6 +10,36 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.6.0] — Operator Digest
+
+**Why:** the human surface was pull-only — you saw "what's blocked on me" / "what
+is everyone doing" only when you started a session or ran needs-me/agents/resume.
+Between sessions you were blind, and the granular per-event annotations were too
+fine-grained to read as a glance. The Operator Digest is the push side: a
+consolidated, human-paced situational-awareness summary delivered to your Fulcra
+timeline twice daily and on demand.
+
+- **`fulcra-coord digest [--window morning|evening] [--format json] [--dry-run]`** —
+  builds a four-block digest from existing bus state + presence (blocked on you,
+  upcoming, what each agent did since the last window, what's stale) and writes it
+  to the timeline. `--dry-run` renders without writing; `--format json` prints the
+  structured digest.
+- **New "Agent Tasks — Digest" timeline track** — a second moment definition,
+  separate from the granular per-event "Agent Tasks" track (which is kept,
+  untouched), so digests filter on their own.
+- **Any-agent, dedup-guarded** — any machine can run the digest; a first-writer-wins
+  marker (`digest/markers/<date>-<window>.json`) collapses concurrent runs to one
+  digest per window (a rare same-second double is accepted as harmless, since
+  Fulcra Files has no compare-and-swap).
+- **`fulcra-coord install-digest`** — schedules the digest twice daily (launchd
+  08:00/18:00 on macOS, cron elsewhere). Safe to install on every machine.
+- **Per-event annotations now carry work substance** — the note reads
+  `[<workstream>/<kind>] <title> — <summary> · next: <action>` instead of just the
+  lifecycle category. Note-body only; backward-compatible.
+
+All digest paths are best-effort: a failed read/marker/emit never raises into a
+scheduled tick. Datetime comparisons (the `since` window + due ranking) parse
+timestamps (consistent with the 0.5.x mixed-precision fix), never lexical compare.
 ## [0.5.6] — Debug sweep, rounds 2-3
 
 **Why:** a second adversarial pass focused on timestamp precision, malformed task

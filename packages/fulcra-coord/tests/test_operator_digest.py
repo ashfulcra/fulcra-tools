@@ -385,3 +385,9 @@ class TestInstallDigestCommand(unittest.TestCase):
             rc = cli.cmd_install_digest(args, backend=["false"])
         self.assertEqual(rc, 0)
         self.assertIn("dry-run", buf.getvalue())
+
+
+class TestVersion(unittest.TestCase):
+    def test_version_is_060(self):
+        from fulcra_coord import __version__
+        self.assertEqual(__version__, "0.6.0")
