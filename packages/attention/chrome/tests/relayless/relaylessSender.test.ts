@@ -6,7 +6,7 @@ import { INGEST_BATCH_URL } from "../../src/relayless/config";
 import { memStorage, mockFetch } from "./memStorage";
 import type { AttentionEvent } from "../../src/types";
 
-const CTX = { definitionId: "def-1", tagIds: ["t-attn", "t-web"] };
+const CTX = { definitionId: "def-1", tagIds: ["t-attn", "t-web"], identitySlug: "" };
 
 function ev(url: string, start = "2026-05-18T14:00:00Z"): AttentionEvent {
   return {

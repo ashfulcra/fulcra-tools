@@ -171,7 +171,7 @@ export function SignIn(props: SignInProps) {
           Sign in with Fulcra
         </button>
         <p className="muted" style={{ marginTop: 8 }}>
-          Connect this browser straight to Fulcra Cloud — no local app needed.
+          Connect this browser straight to the Fulcra API — no local app needed.
         </p>
       </div>
     );
