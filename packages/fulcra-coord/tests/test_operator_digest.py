@@ -282,3 +282,37 @@ class TestDigestCommand(unittest.TestCase):
 
     def test_command_is_wired_into_map(self):
         self.assertIs(entry.COMMAND_MAP["digest"], cli.cmd_digest)
+
+
+class TestDigestMarker(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 4, 18, 0, 0, tzinfo=timezone.utc)
+
+    def test_absent_marker_is_claimed_and_written(self):
+        uploaded = {}
+        def fake_download_json(path, *, backend=None, timeout=None):
+            return None  # marker absent
+        def fake_upload_json(data, path, *, backend=None, timeout=None):
+            uploaded["path"] = path
+            uploaded["data"] = data
+            return True
+        with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download_json), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=fake_upload_json):
+            granted = cli._claim_digest_marker("evening", self.now, backend=["false"])
+        self.assertTrue(granted)
+        self.assertTrue(uploaded["path"].endswith("digest/markers/2026-06-04-evening.json"))
+        self.assertEqual(uploaded["data"]["window"], "evening")
+
+    def test_present_marker_is_noop(self):
+        with patch("fulcra_coord.cli.remote.download_json",
+                   return_value={"window": "evening", "by": "codex:mb:main"}), \
+             patch("fulcra_coord.cli.remote.upload_json") as up:
+            granted = cli._claim_digest_marker("evening", self.now, backend=["false"])
+        self.assertFalse(granted)
+        up.assert_not_called()
+
+    def test_upload_failure_skips(self):
+        with patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.upload_json", return_value=False):
+            granted = cli._claim_digest_marker("evening", self.now, backend=["false"])
+        self.assertFalse(granted)  # don't risk a double on a failed claim
