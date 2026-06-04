@@ -141,10 +141,33 @@ def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]
         remote_ids.update(t["id"] for t in next_view.get("tasks", []) if t.get("id"))
     task_map: dict[str, dict[str, Any]] = {t["id"]: t for t in cached}
 
-    for tid in remote_ids:
-        t = _cache_remote_task(tid, backend=backend)
-        if t:
-            task_map[tid] = t
+    # Fetch each remote task body CONCURRENTLY (PERF). Each fetch is one
+    # independent `fulcra file download` subprocess (~1.3s) writing to a
+    # distinct per-id cache file — there is no shared mutable state, so a thread
+    # pool is safe and collapses N serial round-trips into a single batch's
+    # wall-time. This is the root-cause fix for the reconcile heartbeat blowing
+    # past its 90s timeout (76 sequential fetches measured at ~96s). Semantics
+    # are preserved exactly: a None result (404/error) is skipped, order is
+    # irrelevant (results dedup into task_map by id), and the local-cache base
+    # already seeded above survives any id the index doesn't name.
+    if remote_ids:
+        max_workers = min(16, max(4, len(remote_ids)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_cache_remote_task, tid, backend=backend): tid
+                for tid in remote_ids
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                # Mirror the old loop's best-effort guard: a single failed fetch
+                # must not abort the whole load. _cache_remote_task already
+                # returns None on a missing/empty body; catching here covers an
+                # unexpected raise (network blowup) so it can't escape the pool.
+                try:
+                    t = fut.result()
+                except Exception:
+                    t = None
+                if t:
+                    task_map[t["id"]] = t
 
     return list(task_map.values())
 
@@ -2470,19 +2493,48 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         return 1
 
     all_views = views.build_all_views(all_tasks)
-    failures = []
-    for view_name, view_data in all_views.items():
-        cache.write_cached_view(view_name, view_data)
-        vpath = _view_name_to_remote(view_name)
-        ok = remote.upload_json(view_data, vpath, backend=backend,
-                                timeout=remote._reconcile_timeout())
-        if not ok:
-            failures.append(view_name)
+    view_items = list(all_views.items())
 
-        if time.monotonic() - t0 > timeout:
-            _err("Reconcile timeout exceeded mid-upload.")
-            ops_log.log_op("reconcile", status="timeout")
-            return 1
+    # Cache every view locally regardless of upload outcome — matches the prior
+    # sequential loop, which wrote the cache for each view before attempting its
+    # upload. Done up front (main thread) so the cache write is never racy.
+    for view_name, view_data in view_items:
+        cache.write_cached_view(view_name, view_data)
+
+    # Upload the views CONCURRENTLY (PERF), the same way _write_task_and_views
+    # (P1) does: remote.upload_json is thread-safe (each call writes a unique
+    # tempfile + runs an independent subprocess; remote.py holds no shared
+    # mutable state), so a small pool collapses the ~50 serial uploads into one
+    # round-trip's wall-time — the second half of the reconcile-timeout fix.
+    # Semantics are preserved exactly: per-view success is collected, any
+    # failure (False OR a raise) lands in `failures`, and the partial-upload
+    # handling below is unchanged.
+    failures = []
+
+    def _upload_one(item):
+        view_name, view_data = item
+        vpath = _view_name_to_remote(view_name)
+        # Treat a RAISING upload as a failed view, not an escape hatch: an
+        # unguarded pool.map would re-raise out of cmd_reconcile, bypassing the
+        # failures -> "preserve markers, return 1" path and crashing the
+        # heartbeat. Catching keeps the contract: any failure is a failed view.
+        try:
+            ok = remote.upload_json(view_data, vpath, backend=backend,
+                                    timeout=remote._reconcile_timeout())
+        except Exception:
+            ok = False
+        return view_name, ok
+
+    max_workers = min(8, len(view_items)) or 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for view_name, ok in pool.map(_upload_one, view_items):
+            if not ok:
+                failures.append(view_name)
+
+    if time.monotonic() - t0 > timeout:
+        _err("Reconcile timeout exceeded mid-upload.")
+        ops_log.log_op("reconcile", status="timeout")
+        return 1
 
     # Rebuild the presence aggregate from the durable per-agent presence records,
     # mirroring how the task views self-heal here. Best-effort: a presence rebuild
