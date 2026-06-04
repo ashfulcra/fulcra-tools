@@ -1487,5 +1487,31 @@ class TestDefinitionCacheTTL(unittest.TestCase):
                          "a stale tag cache must read empty so tags re-resolve")
 
 
+class TestBuildAnnotationEnrichment(unittest.TestCase):
+    def _task(self, **over):
+        t = schema.make_task(
+            title="Fix the widget", workstream="devops", agent="claude-code:mb:repo",
+            kind="feature", summary="rewiring the pump", next_action="ship it")
+        t["id"] = "20260604-fix-widget"
+        t.update(over)
+        return t
+
+    def test_desc_carries_work_substance(self):
+        p = annotations.build_annotation(
+            lifecycle="update", task=self._task(), agent="claude-code:mb:repo")
+        self.assertIn("devops", p["desc"])
+        self.assertIn("feature", p["desc"])      # kind from tags
+        self.assertIn("rewiring the pump", p["desc"])
+        self.assertIn("ship it", p["desc"])
+
+    def test_backward_compatible_when_sparse(self):
+        # No summary/next_action -> still produces a non-empty desc, never raises.
+        t = self._task(current_summary="", next_action="")
+        p = annotations.build_annotation(lifecycle="create", task=t,
+                                         agent="claude-code:mb:repo")
+        self.assertTrue(p["desc"])
+        self.assertIn("devops", p["desc"])
+
+
 if __name__ == "__main__":
     unittest.main()
