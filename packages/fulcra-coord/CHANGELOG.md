@@ -10,6 +10,31 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.5.6] — Debug sweep, rounds 2-3
+
+**Why:** a second adversarial pass focused on timestamp precision, malformed task
+bodies, human-blocking tags, annotation cache drift, and hook command hygiene.
+
+- **Timestamp precision:** all new coordination timestamps now emit fixed-width
+  microseconds, and freshness decisions parse datetimes instead of comparing raw
+  strings, so mixed-precision values already on the bus cannot silently drop the
+  newer side of a merge or rebuild.
+- **Malformed task bodies:** a cached task body with missing display fields now
+  surfaces in rebuilt views with empty-string defaults instead of vanishing from
+  every materialized view.
+- **`needs:human` cleanup:** assigning a human-blocked task away from the human
+  strips the stale `needs:human` tag; assigning it back to the human preserves
+  the marker.
+- **Annotation cache TTL:** cached definition/tag ids expire after 24h by
+  default (`FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS` override), bounding drift
+  after server-side deletes or renames while keeping annotation emission
+  best-effort.
+- **Hook command hints:** SessionStart resume hints shell-quote the resolved
+  `fulcra-coord` command and agent id before printing copy-pasteable commands.
+- **Reviewer-caught (codex):** the summaries rebuild path had one remaining raw
+  `updated_at` string compare; it now uses the same parsed timestamp key as the
+  merge path.
+
 ## [0.5.5] — Reconcile performance
 
 **Why:** `reconcile` ran serially — each task's body load and each materialized
