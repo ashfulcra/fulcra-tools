@@ -32,7 +32,7 @@ export async function backfillHistory(
   const rows: ScannedUrl[] = [];
   for (const g of groups) for (const u of g.urls) rows.push(u);
   // Dedup by (scrubbed URL + lastVisitTime-truncated-to-second) — the
-  // exact key that drives the relay's source_id. chrome.history returns
+  // exact key that drives the wire source_id. chrome.history returns
   // one row per URL but the rows that came in via the same browser
   // session frequently share `lastVisitTime`, and the wizard can be
   // re-run, so without this dedup we get hundreds of identical-on-the-
@@ -74,13 +74,13 @@ export async function backfillHistory(
     if (opts.onProgress) opts.onProgress(queued, unique.length);
   }
   // Queueing is done — the progress bar has hit 100%. Kick off a flush
-  // but DO NOT await it: flushOutbox POSTs every queued event one-by-one
-  // through the relay, which for a few-thousand-URL backfill takes
-  // minutes. Awaiting it here froze the wizard at 100% with the advance
-  // button disabled the whole time. The outbox is a write-ahead queue —
-  // the background alarm drains whatever this flush doesn't, and the
-  // relay dedups repeats — so a fire-and-forget flush is safe and lets
-  // the wizard advance the moment queueing finishes.
+  // but DO NOT await it: flushOutbox POSTs the queued events to Fulcra
+  // Cloud, which for a few-thousand-URL backfill takes a while. Awaiting it
+  // here froze the wizard at 100% with the advance button disabled the
+  // whole time. The outbox is a write-ahead queue — the background alarm
+  // drains whatever this flush doesn't, and the SentSet de-dups repeats —
+  // so a fire-and-forget flush is safe and lets the wizard advance the
+  // moment queueing finishes.
   void flushOutbox();
   return queued;
 }

@@ -22,14 +22,14 @@ describe("settings", () => {
   });
   test("saveSettings then loadSettings round-trips", async () => {
     await saveSettings({
-      bearerToken: "x", relayPort: 9292, enabled: false,
+      enabled: false,
       identityLabel: "Work", onboarded: true,
-      pausedUntil: null, heartbeatEnabled: false, transportMode: "relay",
+      pausedUntil: null, heartbeatEnabled: false,
     });
     expect(await loadSettings()).toEqual({
-      bearerToken: "x", relayPort: 9292, enabled: false,
+      enabled: false,
       identityLabel: "Work", onboarded: true,
-      pausedUntil: null, heartbeatEnabled: false, transportMode: "relay",
+      pausedUntil: null, heartbeatEnabled: false,
     });
   });
 });

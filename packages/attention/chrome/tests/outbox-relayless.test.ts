@@ -8,8 +8,7 @@
 
 import { describe, test, expect, beforeEach, vi } from "vitest";
 import { addToOutbox, flushOutbox } from "../src/outbox";
-import { loadOutbox, saveSettings } from "../src/storage";
-import { DEFAULT_SETTINGS } from "../src/types";
+import { loadOutbox } from "../src/storage";
 import { INGEST_BATCH_URL, TOKEN_URL } from "../src/relayless/config";
 import { mockFetch } from "./relayless/memStorage";
 import type { AttentionEvent } from "../src/types";
@@ -52,10 +51,9 @@ async function getError() {
 
 beforeEach(async () => {
   await chrome.storage.local.clear();
-  await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
 });
 
-describe("flushOutbox — relayless mode", () => {
+describe("flushOutbox — relayless ingest", () => {
   test("with a valid token + resolved ids, sends to ingest and clears the outbox", async () => {
     await seedToken();
     await seedResolved();

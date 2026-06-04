@@ -4,9 +4,8 @@
 export const CLIENT = "fulcra-attention-chrome/0.1.0";
 
 /**
- * The POST body sent to http://127.0.0.1:9292/api/extension/attention
- * (the fulcra-collect daemon's extension-events route, formerly a
- * standalone relay on port 8771).
+ * The wire event posted to the Fulcra cloud ingest endpoint
+ * (/ingest/v1/record/batch) by the relayless sender.
  * Exactly one of {url, category} must be non-null.
  * start_time <= end_time <= now + 5min (enforced server-side).
  */
@@ -24,38 +23,21 @@ export interface AttentionEvent {
   client: string;      // CLIENT constant
 }
 
-/**
- * Which transport the outbox flush uses.
- *   "relay"     — POST to the localhost fulcra-collect daemon (the v1
- *                 behavior). The daemon ensures the Attention definition +
- *                 tags and forwards to the cloud.
- *   "relayless" — POST directly to the Fulcra cloud ingest endpoint using
- *                 the relayless core (OIDC device-flow token + the
- *                 extension-side definition/tag ensuring). No daemon needed.
- */
-export type TransportMode = "relay" | "relayless";
-
 /** Persistent settings in chrome.storage.local. */
 export interface Settings {
-  bearerToken: string | null;
-  relayPort: number;       // default 9292 (daemon's stable port)
   enabled: boolean;        // master kill switch
   identityLabel: string | null;  // user override; null means use chrome.identity.getProfileUserInfo
   onboarded: boolean;            // true once the wizard finished (any step beyond Welcome)
   pausedUntil: number | null;    // ms epoch — when null, not paused. Past = auto-resumed (lazy)
   heartbeatEnabled: boolean;     // opt-in content-script AFK watchdog (requires <all_urls>)
-  transportMode: TransportMode;  // default "relayless" (no daemon — device-flow sign-in); switch to "relay" for the local Collect app
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  bearerToken: null,
-  relayPort: 9292,
   enabled: true,
   identityLabel: null,
   onboarded: false,
   pausedUntil: null,
   heartbeatEnabled: false,
-  transportMode: "relayless",
 };
 
 /** How stale a focused visit's lastHeartbeat can be before the heartbeat

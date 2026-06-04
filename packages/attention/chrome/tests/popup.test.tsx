@@ -4,8 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../src/popup/App";
 import { SignIn } from "../src/popup/SignIn";
-import { ConnectionMode } from "../src/popup/ConnectionMode";
-import { saveSettings, loadSettings } from "../src/storage";
+import { saveSettings } from "../src/storage";
 import { DEFAULT_SETTINGS } from "../src/types";
 
 // React's act() expects this flag in a test environment; without it
@@ -59,34 +58,21 @@ describe("popup App", () => {
     expect(container.textContent).toContain("Fulcra Attention");
   });
 
-  test("relay mode shows the paste-token form, not the sign-in surface", async () => {
+  test("signed out shows 'Sign in with Fulcra', no paste-token form", async () => {
     await saveSettings({
       ...DEFAULT_SETTINGS,
       onboarded: true,
-      transportMode: "relay",
-    });
-    const { container } = await mount(<App />);
-    expect(container.textContent).not.toContain("Sign in with Fulcra");
-    expect(container.querySelector('input[type="password"]')).not.toBeNull();
-  });
-
-  test("relayless + signed out shows 'Sign in with Fulcra', not the paste form", async () => {
-    await saveSettings({
-      ...DEFAULT_SETTINGS,
-      onboarded: true,
-      transportMode: "relayless",
     });
     const { container } = await mount(<App />);
     expect(container.textContent).toContain("Sign in with Fulcra");
-    // No daemon paste-token field in relayless mode.
+    // No daemon paste-token field anymore.
     expect(container.querySelector('input[type="password"]')).toBeNull();
   });
 
-  test("relayless unauthorized banner says 'Sign in to Fulcra', not 'Reconnect'", async () => {
+  test("unauthorized banner says 'Sign in to Fulcra', not 'Reconnect'", async () => {
     await saveSettings({
       ...DEFAULT_SETTINGS,
       onboarded: true,
-      transportMode: "relayless",
     });
     await chrome.storage.local.set({
       lastIngestError: { kind: "unauthorized", at: 1 },
@@ -238,37 +224,5 @@ describe("SignIn surface", () => {
     await clickButton(container, "Sign in with Fulcra");
     expect(container.textContent).toContain("Sign-in failed");
     expect(container.textContent).toContain("Try again");
-  });
-});
-
-describe("ConnectionMode toggle", () => {
-  test("persists the chosen mode and notifies onChange", async () => {
-    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relay" });
-    const onChange = vi.fn();
-    const { container } = await mount(<ConnectionMode onChange={onChange} />);
-
-    await clickButton(container, "Fulcra Cloud");
-
-    expect((await loadSettings()).transportMode).toBe("relayless");
-    expect(onChange).toHaveBeenCalledWith("relayless");
-  });
-
-  test("App switches surface when the mode toggles relay → relayless", async () => {
-    await saveSettings({
-      ...DEFAULT_SETTINGS,
-      onboarded: true,
-      transportMode: "relay",
-    });
-    const { container } = await mount(<App />);
-    // Starts in relay: paste form present, no sign-in surface.
-    expect(container.querySelector('input[type="password"]')).not.toBeNull();
-    expect(container.textContent).not.toContain("Sign in with Fulcra");
-
-    await clickButton(container, "Fulcra Cloud");
-
-    // Surface swapped to relayless sign-in.
-    expect(container.textContent).toContain("Sign in with Fulcra");
-    expect(container.querySelector('input[type="password"]')).toBeNull();
-    expect((await loadSettings()).transportMode).toBe("relayless");
   });
 });
