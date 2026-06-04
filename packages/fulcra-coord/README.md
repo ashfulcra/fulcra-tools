@@ -179,7 +179,11 @@ Read commands use local cache when fresh. Full remote sync happens on `status` a
   SessionStart injects and emits a desktop notification — it never runs the
   directive. The native Claude Code mechanism is a scheduled remote agent (the
   harness scheduler); `install-listener` is the harness-free launchd/cron
-  fallback, and OpenClaw folds `notify-inbox` into its heartbeat. See
+  fallback, and OpenClaw folds `notify-inbox` into its heartbeat. The listener is
+  **per-agent**, not per-machine: its launchd label / plist / cron marker are
+  derived from the agent's slug, so co-located agents on one machine each get
+  their own coexisting job and none clobbers another. (A legacy pre-0.5.3
+  machine-global job is migrated to a per-agent job on the next install.) See
   `adapters/claude-code/LISTENER.md`.
 - `fulcra-coord install-openclaw` — Track A of the OpenClaw integration.
   Materializes `BOOT.md` / `HEARTBEAT.md` (agent-driven prompts that run

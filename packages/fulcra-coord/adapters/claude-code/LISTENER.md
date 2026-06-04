@@ -50,10 +50,17 @@ install a system-level schedule that runs the same command:
 fulcra-coord install-listener --agent <me> --interval-min 10
 ```
 
-- **macOS** -> a launchd LaunchAgent (`com.fulcra.coord.listener.plist` under
-  `~/Library/LaunchAgents`), `StartInterval` every N minutes.
-- **everything else** -> a managed crontab line tagged with a marker so
+- **macOS** -> a launchd LaunchAgent (`com.fulcra.coord.listener.<agent-slug>.plist`
+  under `~/Library/LaunchAgents`), `StartInterval` every N minutes.
+- **everything else** -> a managed crontab line tagged with a per-agent marker so
   uninstall is surgical.
+
+The job is **per-agent**: its launchd label / plist basename / cron marker embed
+the agent's slug (the same slug as the inbox view files). So multiple agents
+co-located on one machine each get their own coexisting listener and a second
+agent's install never overwrites the first's. (A legacy un-slugged
+`com.fulcra.coord.listener.plist` from before 0.5.3 is superseded on install only
+when it watched this agent.)
 
 The scheduled command is resolved through `resolve_cli_argv()` so it works under
 `uv tool` / source installs, not just `pip`-on-PATH. Contract mirrors

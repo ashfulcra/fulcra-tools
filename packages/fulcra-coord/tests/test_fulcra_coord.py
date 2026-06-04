@@ -3551,7 +3551,8 @@ class TestInstallerHardening(unittest.TestCase):
              patch("sys.platform", "darwin"):
             listener.install_listener(agent="codex:h:r", target_dir=self.target,
                                       logs_dir=self.logs, interval_min=10)
-        plist = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        plist = os.path.join(self.target,
+                             "com.fulcra.coord.listener.codex-h-r.plist")
         with open(plist, "rb") as f:
             return plistlib.load(f)
 
@@ -3613,14 +3614,15 @@ class TestInstallerHardening(unittest.TestCase):
             listener.install_listener(agent="codex:h:r", target_dir=self.target,
                                       logs_dir=self.logs)
         hb = os.path.join(self.target, "com.fulcra.coord.heartbeat.plist")
-        ln = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        ln = os.path.join(self.target,
+                          "com.fulcra.coord.listener.codex-h-r.plist")
         self.assertTrue(os.path.exists(hb) and os.path.exists(ln))
         with open(hb, "rb") as f:
             self.assertEqual(plistlib.load(f)["Label"],
                              "com.fulcra.coord.heartbeat")
         with open(ln, "rb") as f:
             self.assertEqual(plistlib.load(f)["Label"],
-                             "com.fulcra.coord.listener")
+                             "com.fulcra.coord.listener.codex-h-r")
 
     # --- crontab: PATH= prefix ----------------------------------------------
 
@@ -4528,7 +4530,8 @@ class TestInstallListener(unittest.TestCase):
             plan = listener.install_listener(agent="codex:h:r",
                                              target_dir=self.target,
                                              interval_min=10)
-        plist = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        plist = os.path.join(self.target,
+                             "com.fulcra.coord.listener.codex-h-r.plist")
         self.assertTrue(os.path.exists(plist))
         body = open(plist).read()
         self.assertIn("/opt/bin/fulcra-coord", body)
@@ -4542,7 +4545,8 @@ class TestInstallListener(unittest.TestCase):
             listener.install_listener(agent="codex:h:r", target_dir=self.target)
             listener.install_listener(agent="codex:h:r", target_dir=self.target)
         files = os.listdir(self.target)
-        self.assertEqual(files.count("com.fulcra.coord.listener.plist"), 1)
+        self.assertEqual(
+            files.count("com.fulcra.coord.listener.codex-h-r.plist"), 1)
 
     def test_dry_run_writes_nothing(self):
         from fulcra_coord import listener
@@ -4558,7 +4562,8 @@ class TestInstallListener(unittest.TestCase):
             listener.install_listener(agent="codex:h:r", target_dir=self.target)
             listener.install_listener(agent="codex:h:r", target_dir=self.target,
                                       uninstall=True)
-        plist = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        plist = os.path.join(self.target,
+                             "com.fulcra.coord.listener.codex-h-r.plist")
         self.assertFalse(os.path.exists(plist))
 
     def test_crontab_fallback_on_non_macos(self):
@@ -4588,6 +4593,249 @@ class TestInstallListener(unittest.TestCase):
         self.assertIn("/usr/bin/other-job", body)
         self.assertNotIn("fulcra-coord-listener", body)
 
+    # --- per-agent identity: co-located agents must coexist ----------------
+
+    def test_two_agents_get_distinct_coexisting_plists(self):
+        """install A then B in the same target_dir -> two distinct plist files,
+        each with its own Label and --agent value; neither overwrites the other.
+
+        This is the core bug fix: a machine-global label made install B clobber
+        install A so only one inbox was ever watched."""
+        import plistlib
+        from fulcra_coord import listener
+        with patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]), \
+             patch("sys.platform", "darwin"):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.target)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.target)
+        pa = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-a-h-r.plist")
+        pb = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-b-h-r.plist")
+        self.assertTrue(os.path.exists(pa) and os.path.exists(pb))
+        with open(pa, "rb") as f:
+            da = plistlib.load(f)
+        with open(pb, "rb") as f:
+            db = plistlib.load(f)
+        self.assertEqual(da["Label"], "com.fulcra.coord.listener.agent-a-h-r")
+        self.assertEqual(db["Label"], "com.fulcra.coord.listener.agent-b-h-r")
+        self.assertIn("agent-a:h:r", da["ProgramArguments"])
+        self.assertIn("agent-b:h:r", db["ProgramArguments"])
+
+    def test_uninstall_one_agent_leaves_the_other(self):
+        """uninstall A removes only A's plist; B's stays intact."""
+        from fulcra_coord import listener
+        with patch("sys.platform", "darwin"):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.target)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.target)
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.target,
+                                      uninstall=True)
+        pa = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-a-h-r.plist")
+        pb = os.path.join(self.target,
+                          "com.fulcra.coord.listener.agent-b-h-r.plist")
+        self.assertFalse(os.path.exists(pa))
+        self.assertTrue(os.path.exists(pb))
+
+    def test_plan_reports_per_agent_plist_path(self):
+        """The returned plan's writes path carries the per-agent slug."""
+        from fulcra_coord import listener
+        with patch("sys.platform", "darwin"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target)
+        self.assertEqual(len(plan["writes"]), 1)
+        self.assertTrue(
+            plan["writes"][0].endswith(
+                "com.fulcra.coord.listener.agent-a-h-r.plist"))
+
+    # --- per-agent cron identity -------------------------------------------
+
+    def test_two_agents_get_two_managed_cron_blocks(self):
+        """install A then B (crontab path) -> two managed marker blocks, one
+        per agent; the slug is embedded in each marker so they don't collide."""
+        from fulcra_coord import listener
+        crontab = os.path.join(self.tmp, "crontab.txt")
+        with patch("sys.platform", "linux"), \
+             patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+        body = open(crontab).read()
+        self.assertIn("fulcra-coord-listener:agent-a-h-r", body)
+        self.assertIn("fulcra-coord-listener:agent-b-h-r", body)
+        self.assertIn("agent-a:h:r", body)
+        self.assertIn("agent-b:h:r", body)
+        # two managed command lines (one per agent)
+        self.assertEqual(body.count("notify-inbox"), 2)
+
+    def test_cron_uninstall_one_agent_leaves_the_other(self):
+        """uninstall A strips only A's managed block; B's line remains."""
+        from fulcra_coord import listener
+        crontab = os.path.join(self.tmp, "crontab.txt")
+        with patch("sys.platform", "linux"), \
+             patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+            listener.install_listener(agent="agent-b:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab, uninstall=True)
+        body = open(crontab).read()
+        self.assertNotIn("fulcra-coord-listener:agent-a-h-r", body)
+        self.assertNotIn("agent-a:h:r", body)
+        self.assertIn("fulcra-coord-listener:agent-b-h-r", body)
+        self.assertIn("agent-b:h:r", body)
+
+    def test_strip_managed_cron_is_agent_scoped(self):
+        """_strip_managed_cron / _is_managed_cron_command operate on the GIVEN
+        agent's marker only; another agent's managed block is left intact."""
+        from fulcra_coord import listener
+        marker_a = listener._cron_marker_for("agent-a:h:r")
+        marker_b = listener._cron_marker_for("agent-b:h:r")
+        line_b = ("*/10 * * * * PATH=/x /opt/bin/fulcra-coord notify-inbox "
+                  "--agent agent-b:h:r >/dev/null 2>&1")
+        text = (marker_a + "\n"
+                "*/10 * * * * PATH=/x /opt/bin/fulcra-coord notify-inbox "
+                "--agent agent-a:h:r >/dev/null 2>&1\n"
+                + marker_b + "\n" + line_b + "\n")
+        stripped = listener._strip_managed_cron(text, "agent-a:h:r")
+        self.assertNotIn(marker_a, stripped)
+        self.assertNotIn("agent-a:h:r", stripped)
+        self.assertIn(marker_b, stripped)
+        self.assertIn(line_b, stripped)
+        # The guard only claims this agent's line.
+        self.assertTrue(
+            listener._is_managed_cron_command(line_b, "agent-b:h:r"))
+        self.assertFalse(
+            listener._is_managed_cron_command(line_b, "agent-a:h:r"))
+
+    # --- legacy (un-slugged) plist migration --------------------------------
+
+    def test_install_supersedes_legacy_plist_for_same_agent(self):
+        """A legacy un-slugged com.fulcra.coord.listener.plist that watches
+        agent A is removed when A reinstalls (prevents A double-running)."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-a:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target)
+        self.assertFalse(os.path.exists(legacy))
+        self.assertIn(legacy, plan.get("removes", []))
+        # The new per-agent plist still exists.
+        self.assertTrue(os.path.exists(os.path.join(
+            self.target, "com.fulcra.coord.listener.agent-a-h-r.plist")))
+
+    def test_install_leaves_legacy_plist_for_different_agent(self):
+        """A legacy plist watching agent B is LEFT when agent A installs — B
+        migrates on its own reinstall, not when an unrelated agent installs."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-b:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target)
+        self.assertTrue(os.path.exists(legacy))
+        self.assertNotIn(legacy, plan.get("removes", []))
+
+    def test_uninstall_removes_legacy_plist_for_same_agent_only(self):
+        """Uninstall must also remove a pre-0.5.3 legacy plist when it watches
+        this agent; otherwise upgrading then uninstalling leaves the old listener
+        still polling the target agent. A different agent's legacy plist stays."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-a:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             uninstall=True)
+        self.assertFalse(os.path.exists(legacy))
+        self.assertIn(legacy, plan.get("removes", []))
+
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-b:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.listener._launchctl_unload"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             uninstall=True)
+        self.assertTrue(os.path.exists(legacy))
+        self.assertNotIn(legacy, plan.get("removes", []))
+
+    def test_dry_run_reports_legacy_supersede_without_writing(self):
+        """--dry-run names the per-agent plist and reports it would supersede a
+        matching legacy plist, but writes/removes nothing."""
+        from fulcra_coord import listener
+        legacy = os.path.join(self.target, "com.fulcra.coord.listener.plist")
+        os.makedirs(self.target, exist_ok=True)
+        import plistlib
+        with open(legacy, "wb") as f:
+            plistlib.dump({
+                "Label": "com.fulcra.coord.listener",
+                "ProgramArguments": ["/old/fulcra-coord", "notify-inbox",
+                                     "--agent", "agent-a:h:r"],
+            }, f)
+        with patch("sys.platform", "darwin"):
+            plan = listener.install_listener(agent="agent-a:h:r",
+                                             target_dir=self.target,
+                                             dry_run=True)
+        self.assertTrue(os.path.exists(legacy))  # nothing removed
+        self.assertTrue(plan["writes"][0].endswith(
+            "com.fulcra.coord.listener.agent-a-h-r.plist"))
+        self.assertTrue(plan.get("supersedes_legacy"))
+
+    def test_cron_install_supersedes_legacy_marker_for_same_agent(self):
+        """A legacy un-slugged managed marker line for agent A is superseded
+        when A installs; a legacy marker for B is left."""
+        from fulcra_coord import listener
+        crontab = os.path.join(self.tmp, "crontab.txt")
+        legacy_marker = "# fulcra-coord-listener (managed; do not edit this line)"
+        legacy_cmd = ("*/10 * * * * PATH=/x /old/fulcra-coord notify-inbox "
+                      "--agent agent-a:h:r >/dev/null 2>&1")
+        with open(crontab, "w") as f:
+            f.write(legacy_marker + "\n" + legacy_cmd + "\n")
+        with patch("sys.platform", "linux"), \
+             patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]):
+            listener.install_listener(agent="agent-a:h:r", target_dir=self.tmp,
+                                      crontab_path=crontab)
+        body = open(crontab).read()
+        # legacy un-slugged marker for A is gone; exactly one (slugged) block.
+        self.assertNotIn(legacy_marker + "\n", body)
+        self.assertIn("fulcra-coord-listener:agent-a-h-r", body)
+        self.assertEqual(body.count("notify-inbox"), 1)
+
 
 class TestInstallListenerCmd(unittest.TestCase):
     def setUp(self):
@@ -4604,8 +4852,8 @@ class TestInstallListenerCmd(unittest.TestCase):
                 agent="codex:h:r", interval_min=10, uninstall=False,
                 dry_run=False, target_dir=self.target))
         self.assertEqual(rc, 0)
-        self.assertTrue(os.path.exists(
-            os.path.join(self.target, "com.fulcra.coord.listener.plist")))
+        self.assertTrue(os.path.exists(os.path.join(
+            self.target, "com.fulcra.coord.listener.codex-h-r.plist")))
 
 
 class TestNotifyInbox(unittest.TestCase):
