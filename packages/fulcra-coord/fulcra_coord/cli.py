@@ -223,7 +223,16 @@ def _load_summaries_for_rebuild(
     # so a task this agent knows about that a raced aggregate dropped is recovered
     # — without ever overwriting a newer remote record with a stale local one.
     for t in cache.list_cached_tasks():
-        s = schema.task_summary(t)
+        # BUG 2 (data-loss): a corrupt/partial cached body (missing title/
+        # status/workstream/owner_agent) makes task_summary raise KeyError. That
+        # escaped _write_task_and_views (which only catches Conflict/Reconcile),
+        # crashing AFTER the task body uploaded → stale views with NO
+        # needs_reconcile marker. Guard like the file-listing path below: skip
+        # the bad entry, keep the good ones.
+        try:
+            s = schema.task_summary(t)
+        except Exception:
+            continue
         prev = by_id.get(s["id"])
         if prev is None or s.get("updated_at", "") > prev.get("updated_at", ""):
             by_id[s["id"]] = s
@@ -411,6 +420,14 @@ def _write_task_and_views(
         cache.write_op_marker(op_id, op_marker)
         ops_log.log_op(command, task_id, status="partial",
                        detail=f"Task written, views failed: {view_failures}")
+        # BUG 10: the TASK BODY uploaded successfully — the lifecycle transition
+        # is REAL — so record the annotation BEFORE raising. Previously the emit
+        # was only after a fully-clean write, so a partial view failure dropped
+        # the lifecycle moment forever (reconcile repairs views but never emits).
+        # The emit is best-effort/guarded and its own idempotency marker keeps a
+        # later retry from double-emitting, so it can't change the NeedsReconcile
+        # outcome.
+        _emit_lifecycle(command, task, lifecycle, backend=backend)
         raise schema.NeedsReconcile(
             f"Task {task_id} written, but view upload partial. "
             f"Run 'fulcra-coord reconcile' to repair views."
@@ -421,12 +438,27 @@ def _write_task_and_views(
     cache.clear_op_marker(op_id)
     ops_log.log_op(command, task_id, status="ok")
 
-    # Best-effort lifecycle annotation on the operator's Fulcra timeline. Placed
-    # AFTER the task+views write fully succeeds so we never annotate a write that
-    # didn't land, and intentionally last so a (gated, normally no-op) annotation
-    # can never affect the task op's outcome. emit_lifecycle_annotation is itself
-    # best-effort and never raises, but we still guard the call site so even a
-    # programming error in the hook cannot break a successful task write.
+    _emit_lifecycle(command, task, lifecycle, backend=backend)
+
+    return True
+
+
+def _emit_lifecycle(
+    command: str,
+    task: dict[str, Any],
+    lifecycle: Optional[str],
+    *,
+    backend: Optional[list[str]] = None,
+) -> None:
+    """Best-effort lifecycle annotation on the operator's Fulcra timeline.
+
+    Called once the TASK BODY has landed (success path, or before raising
+    NeedsReconcile on a partial view failure — see BUG 10): the transition is
+    real either way. emit_lifecycle_annotation is itself best-effort and never
+    raises, but the call site is guarded too so even a programming error in the
+    hook cannot break a task write or change a NeedsReconcile outcome. The
+    annotation carries its own idempotency marker, so calling this on a retry of
+    the same transition does not double-emit."""
     try:
         lc = lifecycle if lifecycle is not None else _lifecycle_for(command, task)
         if lc is not None:
@@ -438,8 +470,6 @@ def _write_task_and_views(
             )
     except Exception:
         pass
-
-    return True
 
 
 def _lifecycle_for(command: str, task: dict[str, Any]) -> Optional[str]:
@@ -506,12 +536,11 @@ def _try_merge(
     local_status = local.get("status")
     remote_status = remote_task.get("status")
     local_event_times = {e["at"] for e in local.get("events", [])}
+    remote_event_times = {e["at"] for e in remote_task.get("events", [])}
 
     import copy
 
     if local_status != remote_status:
-        remote_event_times = {e["at"] for e in remote_task.get("events", [])}
-
         local_has_new_status_change = any(
             e.get("type") in schema.VALID_STATUSES and e["at"] not in remote_event_times
             for e in local.get("events", [])
@@ -525,55 +554,92 @@ def _try_merge(
             return None  # Both sides independently changed status → unsafe
 
         if remote_has_new_status_change and not local_has_new_status_change:
-            # Only remote changed status: remote's authoritative state wins.
-            # Merge local's non-status-change events on top and apply local's
-            # field updates (current_summary, next_action) if they are more
-            # recent than remote's last update.
+            # Only remote changed status: remote's status transition is the
+            # authoritative state, so it MUST win regardless of which side has
+            # the more recent updated_at. Use remote as the field base; layer
+            # local's newer non-status field edits on top only when local is
+            # more recent (the symmetric case below covers the same logic for
+            # the local-only-status-change path).
             merged = copy.deepcopy(remote_task)
-            for ev in local.get("events", []):
-                if ev["at"] not in remote_event_times:
-                    merged.setdefault("events", []).append(ev)
             if local.get("updated_at", "") > remote_task.get("updated_at", ""):
-                if local.get("current_summary") is not None:
-                    merged["current_summary"] = local["current_summary"]
-                if local.get("next_action") is not None:
-                    merged["next_action"] = local["next_action"]
-                # A concurrent `assign` sets assignee/owner_agent with a
-                # non-status event. If local is the more recent side, carry those
-                # field edits too — otherwise a reassignment racing a remote
-                # status change is silently dropped (the merge base wins).
-                if local.get("assignee") is not None:
-                    merged["assignee"] = local["assignee"]
-                if local.get("owner_agent") is not None:
-                    merged["owner_agent"] = local["owner_agent"]
-            merged["events"] = sorted(merged["events"], key=lambda e: e["at"])
-            merged["events"] = merged["events"][-schema.MAX_EVENTS_INLINE:]
+                # Carry ALL non-event scalar/dict fields from the more-recent
+                # local side EXCEPT status (remote's transition is authoritative)
+                # — a hardcoded allowlist silently dropped not_before/due/
+                # blocked_on/priority/title/etc. (BUG 1, data-loss).
+                _carry_fields(merged, local, skip_status=True)
+            _union_events_and_acked(merged, local, remote_task,
+                                    local_event_times, remote_event_times)
             return merged
 
-    # Same status, or only local changed status: local is the base.
-    merged = copy.deepcopy(local)
-    for ev in remote_task.get("events", []):
-        if ev["at"] not in local_event_times:
-            merged.setdefault("events", []).append(ev)
-    merged["events"] = sorted(merged["events"], key=lambda e: e["at"])
-    merged["events"] = merged["events"][-schema.MAX_EVENTS_INLINE:]
-
-    # Symmetric with the remote-only-status-change path: if remote's non-status
-    # fields are more recent (concurrent field update by another agent), apply them.
+    # Same status, or only local changed status: pick the more-recent side as
+    # the field base so EVERY non-event field follows the newer write. Status
+    # is taken from the side that changed it: when only local changed status,
+    # local must keep its status even if remote's updated_at is newer.
     if remote_task.get("updated_at", "") > local.get("updated_at", ""):
-        if remote_task.get("current_summary") is not None:
-            merged["current_summary"] = remote_task["current_summary"]
-        if remote_task.get("next_action") is not None:
-            merged["next_action"] = remote_task["next_action"]
-        # Symmetric with the local-newer branch above: a concurrent remote
-        # `assign` (reassignment) racing this side's status change must not be
-        # lost. Carry assignee/owner_agent from the more-recent remote side.
-        if remote_task.get("assignee") is not None:
-            merged["assignee"] = remote_task["assignee"]
-        if remote_task.get("owner_agent") is not None:
-            merged["owner_agent"] = remote_task["owner_agent"]
+        newer, older = remote_task, local
+    else:
+        newer, older = local, remote_task
 
+    merged = copy.deepcopy(newer)
+
+    if local_status != remote_status:
+        # Reaches here only when local changed status and remote did not
+        # (the remote-only branch returned above). Local's status is
+        # authoritative — restore it if remote happened to be the newer base.
+        merged["status"] = local_status
+
+    _union_events_and_acked(merged, local, remote_task,
+                            local_event_times, remote_event_times)
     return merged
+
+
+# Event-only / acked_by-only keys are reconciled by the union helper, never by
+# the wholesale field carry — copying them would clobber the union.
+_MERGE_EVENT_KEYS = {"events", "acked_by"}
+
+
+def _carry_fields(
+    dst: dict[str, Any], src: dict[str, Any], *, skip_status: bool = False
+) -> None:
+    """Copy every non-event scalar/dict field from src onto dst (BUG 1).
+
+    Replaces the old hardcoded allowlist (current_summary/next_action/assignee/
+    owner_agent). Any field the more-recent side carries — not_before, due,
+    blocked_on, priority, title, collaborators, links, etc. — now survives the
+    merge instead of being lost to the merge base.
+
+    skip_status keeps the destination's status intact: used on the
+    remote-only-status-change path, where remote's transition is authoritative
+    and must not be clobbered by the (status-unchanged) newer local side.
+    """
+    for key, value in src.items():
+        if key in _MERGE_EVENT_KEYS:
+            continue
+        if skip_status and key == "status":
+            continue
+        dst[key] = value
+
+
+def _union_events_and_acked(
+    merged: dict[str, Any],
+    local: dict[str, Any],
+    remote_task: dict[str, Any],
+    local_event_times: set,
+    remote_event_times: set,
+) -> None:
+    """Union events from both sides (dedup by `at`, sort, truncate) and union
+    acked_by. Idempotent regardless of which side `merged` started from."""
+    by_time: dict[str, dict[str, Any]] = {}
+    for ev in local.get("events", []):
+        by_time[ev["at"]] = ev
+    for ev in remote_task.get("events", []):
+        by_time.setdefault(ev["at"], ev)
+    events = sorted(by_time.values(), key=lambda e: e["at"])
+    merged["events"] = events[-schema.MAX_EVENTS_INLINE:]
+
+    acked = set(local.get("acked_by") or []) | set(remote_task.get("acked_by") or [])
+    if acked or "acked_by" in local or "acked_by" in remote_task:
+        merged["acked_by"] = sorted(acked)
 
 
 def _now_iso() -> str:
@@ -1385,8 +1451,14 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     # is bypassed and aged-out broadcasts are included; otherwise stale
     # informational broadcasts are hidden and only counted for the note below.
     all_tasks = _load_task_summaries(backend=backend)
-    items = views.inbox_for(me, all_tasks, include_aged=show_all)
-    hidden = 0 if show_all else views.aged_out_inbox_count(me, all_tasks)
+    # BUG 14: pin a single `now` for the whole command. inbox_for and
+    # aged_out_inbox_count each resolve _now() independently (3+ reads per
+    # cmd_inbox), so at the age-out boundary the same broadcast could be SHOWN by
+    # one read and COUNTED HIDDEN by a later one. One timestamp keeps them
+    # consistent — an id is either shown or counted hidden, never both.
+    now = views._now()
+    items = views.inbox_for(me, all_tasks, now=now, include_aged=show_all)
+    hidden = 0 if show_all else views.aged_out_inbox_count(me, all_tasks, now=now)
 
     if out_format == "json":
         _print_json({"agent": me, "count": len(items), "hidden_aged": hidden,
@@ -1482,20 +1554,49 @@ def _upsert_presence_aggregate(
     roster (``views/presence.json``) so ``presence`` / ``agents`` see it
     immediately, without waiting for a reconcile.
 
-    Cheap (1 download + 1 upload) and BEST-EFFORT: it downloads the current
-    aggregate, replaces this agent's entry by id (disjoint keys → trivial union,
-    newest record wins), and re-uploads. Any failure is swallowed — the durable
-    per-agent record is already written, and reconcile self-heals the aggregate,
-    so a transient aggregate write must never surface as an error to connect."""
+    BUG 4 (S2-class self-heal): the per-agent ``presence/<slug>.json`` files are
+    the durable, un-clobberable truth — each owned by one agent. ``_write_presence``
+    has already uploaded THIS agent's durable file before calling here, so we
+    rebuild the aggregate by LISTING ``presence/*.json`` (the same authoritative
+    enumeration ``_reconcile_presence`` uses) and upserting self on top. This
+    recovers any peer that a concurrent last-writer-wins upload dropped from the
+    aggregate — on the very next connect, instead of leaving it invisible until a
+    90s reconcile (the task views already self-heal this way).
+
+    FALLBACK: if the listing fails or is empty (a backend without a working
+    ``list``), fall back to the old download-aggregate + upsert-self path so we
+    never regress below the prior single-file behaviour. Whole thing is
+    BEST-EFFORT: the durable per-agent record is already written and reconcile is
+    the eventual-consistency backstop, so a transient aggregate write must never
+    surface as an error to connect."""
+    def _without_liveness(a: dict[str, Any]) -> dict[str, Any]:
+        # build_presence re-derives liveness; strip any stale annotation so the
+        # rebuilt entry carries a fresh one alongside the others.
+        return {k: v for k, v in a.items() if k != "liveness"}
+
     try:
-        agg = remote.download_json(remote.presence_view_path(), backend=backend)
-        existing = (agg or {}).get("agents", []) if agg else []
-        # Drop any prior entry for this agent, then rebuild from the union so the
-        # entry carries a fresh liveness annotation alongside the others.
-        records = [
-            {k: v for k, v in a.items() if k != "liveness"}
-            for a in existing if a.get("agent") != record["agent"]
-        ]
+        records: list[dict[str, Any]] = []
+        try:
+            prefix = f"{remote.remote_root()}/presence/"
+            for path in remote.list_files(prefix, backend=backend):
+                if not path.endswith(".json"):
+                    continue
+                rec = remote.download_json(path, backend=backend)
+                if rec and rec.get("agent") and rec.get("agent") != record["agent"]:
+                    records.append(_without_liveness(rec))
+        except Exception:
+            records = []  # listing best-effort; fall through to the download path
+
+        if not records:
+            # Fallback: no usable listing → recover peers from the current
+            # aggregate instead, so behaviour never regresses below pre-BUG-4.
+            agg = remote.download_json(remote.presence_view_path(), backend=backend)
+            existing = (agg or {}).get("agents", []) if agg else []
+            records = [
+                _without_liveness(a)
+                for a in existing if a.get("agent") != record["agent"]
+            ]
+
         records.append(record)
         view = views.build_presence(records)
         remote.upload_json(view, remote.presence_view_path(), backend=backend)

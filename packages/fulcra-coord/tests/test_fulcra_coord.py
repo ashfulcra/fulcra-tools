@@ -2728,6 +2728,25 @@ class TestSessionStartBlockedOnYouBanner(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")
 
+    def test_future_only_plate_shows_upcoming_without_headline(self):
+        # BUG 9: due-now empty but upcoming non-empty. The banner must surface
+        # the muted "(+N upcoming)" line (and not exit silently), with NO ⛔
+        # BLOCKED ON YOU headline (the headline counts due-now only).
+        needsme = json.dumps({"human": "ash", "count": 0, "items": [],
+            "upcoming": [
+                {"id": "TASK-future", "title": "reauth window",
+                 "status": "blocked", "owner_agent": "claude-code:h:r",
+                 "not_before": "2099-01-01T00:00:00Z",
+                 "updated_at": "2026-06-01T00:00:00Z"}]})
+        r = self._run(json.dumps({"active": []}), needsme)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotEqual(r.stdout.strip(), "",
+                            "a future-only plate must still emit the upcoming line")
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("(+1 upcoming)", ctx)
+        self.assertNotIn("BLOCKED ON YOU", ctx,
+                         "no due-now items -> no ⛔ headline")
+
     def test_blocked_on_you_with_inflight_both_present(self):
         host = os.uname().nodename.split(".")[0]
         sj = json.dumps({"active": [
@@ -3384,6 +3403,50 @@ class TestStalenessFlag(unittest.TestCase):
         from fulcra_coord import views
         out = views.build_all_views([_stale_task(5)])
         self.assertIn("needs-attention", out)
+
+
+class TestNaiveTimestampNoCrash(unittest.TestCase):
+    """BUG 8: a naive (tz-less) parsed timestamp must not crash the liveness /
+    aging paths. _parse_dt returned a naive datetime; subtracting it from an
+    aware `now` in _age_hours raised TypeError, and the +inf fail-safe contract
+    was violated. _parse_dt now coerces naive -> UTC so every caller is safe."""
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_presence_liveness_with_naive_iso(self):
+        from fulcra_coord.views import presence_liveness
+        # 10 minutes ago, but tz-less -> must classify (assume UTC), not crash.
+        out = presence_liveness("2026-06-03T11:50:00", now=self.now,
+                                stale_hours=2)
+        self.assertEqual(out, "live")
+
+    def test_is_aged_out_broadcast_with_naive_updated_at(self):
+        from fulcra_coord.views import is_aged_out_broadcast
+        t = {"id": "TASK-NB", "title": "t", "status": "proposed",
+             "workstream": "w", "owner_agent": "o", "assignee": "*",
+             "priority": "P2", "tags": [], "events": [],
+             "updated_at": "2026-06-01T12:00:00"}  # naive, 2 days old
+        # Must not raise; with a 1-day cutoff the 2-day-old broadcast ages out.
+        self.assertTrue(is_aged_out_broadcast(t, self.now, age_days=1))
+
+    def test_inbox_for_over_task_with_naive_updated_at(self):
+        from fulcra_coord.views import inbox_for
+        t = {"id": "TASK-NB2", "title": "t", "status": "proposed",
+             "workstream": "w", "owner_agent": "boss", "assignee": "claude-code",
+             "priority": "P2", "tags": [], "events": [],
+             "updated_at": "2026-06-03T11:55:00"}  # naive, recent
+        # Must not raise TypeError out of the aging check.
+        out = inbox_for("claude-code:h:r", [t], now=self.now)
+        self.assertEqual([s["id"] for s in out], ["TASK-NB2"])
+
+    def test_age_hours_naive_does_not_raise(self):
+        from fulcra_coord.views import _age_hours, _parse_dt
+        # Direct: naive parse must be aware-UTC, subtraction must work.
+        self.assertIsNotNone(_parse_dt("2026-06-03T11:00:00").tzinfo)
+        self.assertAlmostEqual(_age_hours("2026-06-03T11:00:00", self.now), 1.0,
+                               places=3)
 
 
 class TestReconcileStaleness(unittest.TestCase):
@@ -4367,6 +4430,56 @@ class TestTellAssignInbox(unittest.TestCase):
             cmd_inbox(list_args, backend=self.fake_backend)
         self.assertEqual(json.loads(buf.getvalue())["inbox"], [])
 
+    def test_inbox_pins_single_now_across_shown_and_hidden(self):
+        # BUG 14: inbox_for (shown) and aged_out_inbox_count (hidden) each
+        # evaluated _now() independently (3+ times per cmd_inbox). At the aging
+        # boundary a broadcast could be SHOWN by one evaluation and COUNTED
+        # HIDDEN by a later one — listed and hidden at once. cmd_inbox must pin a
+        # single `now` and thread it into both so they agree.
+        from fulcra_coord.cli import cmd_inbox
+        from fulcra_coord import views
+        from datetime import datetime, timezone, timedelta
+        import io, contextlib
+
+        # One-day age cutoff; a broadcast right at the boundary.
+        os.environ["FULCRA_COORD_INBOX_AGE_DAYS"] = "1"
+        try:
+            base = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+            # updated_at sits just INSIDE the 1-day window at the first clock
+            # read: at `base` age (~23h59m) < cutoff -> SHOWN. The clock then
+            # advances 1h between reads, so the hidden-count's later read sees
+            # age ~25h >= cutoff -> would count it HIDDEN. The boundary is
+            # crossed purely by the unpinned clock advancing mid-command.
+            bc = _directive("*", owner="boss", status="proposed")
+            bc["updated_at"] = (
+                base - timedelta(days=1) + timedelta(minutes=1)
+            ).isoformat().replace("+00:00", "Z")
+            cache.write_cached_task(bc)
+
+            # A clock that advances 1h per call: the shown read sees `base`
+            # (under cutoff), the hidden-count reads see `base + Nh` (over
+            # cutoff). With the bug this makes the SAME broadcast both shown and
+            # counted hidden; pinning a single `now` makes them agree.
+            ticks = [base + timedelta(hours=i) for i in range(10)]
+            it = iter(ticks)
+            with patch.object(views, "_now", side_effect=lambda: next(it)):
+                args = self._ns(agent="codex:h:r", format="json", ack=None,
+                                all=False)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    cmd_inbox(args, backend=self.fake_backend)
+            out = json.loads(buf.getvalue())
+            shown_ids = {i["id"] for i in out["inbox"]}
+            # The broadcast must be EITHER shown OR counted hidden, never both.
+            # If shown, hidden must be 0; if hidden, it must not be in shown.
+            if bc["id"] in shown_ids:
+                self.assertEqual(out["hidden_aged"], 0,
+                    "a shown broadcast must not also be counted hidden")
+            else:
+                self.assertEqual(out["hidden_aged"], 1)
+        finally:
+            os.environ.pop("FULCRA_COORD_INBOX_AGE_DAYS", None)
+
     def test_inbox_derives_agent_from_env(self):
         from fulcra_coord.cli import cmd_inbox
         os.environ["FULCRA_COORD_AGENT"] = "codex:h:r"
@@ -4913,6 +5026,80 @@ class TestTryMergePreservesAssigneeOwner(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# BUG 1 (data-loss): _try_merge must carry ALL non-event scalar/dict fields
+# from the MORE-RECENT side, not a 4-field allowlist. not_before/due/blocked_on/
+# priority/title/etc. set on the newer side were previously kept from the merge
+# base and silently LOST.
+# ---------------------------------------------------------------------------
+
+class TestTryMergeCarriesAllNewerFields(unittest.TestCase):
+    def test_newer_side_scheduling_fields_survive(self):
+        """Same-status concurrent edits: the more-recent side set not_before/
+        due/blocked_on; the other side is a plain summary update. Merged must
+        keep not_before/due/blocked_on from the newer side."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+        base = _with_status(_sample_task(), "active")
+
+        # Older side: plain summary update.
+        t_old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = apply_update(base, by="agent-a", summary="just a note", dt=t_old)
+
+        # Newer side: a summary update that also sets scheduling fields.
+        t_new = t_old + timedelta(seconds=30)
+        newer = apply_update(base, by="agent-b", summary="scheduled it", dt=t_new)
+        newer["not_before"] = "2026-06-02T09:00:00Z"
+        newer["due"] = "2026-06-03T17:00:00Z"
+        newer["blocked_on"] = "TASK-OTHER"
+
+        result = _try_merge(older, newer)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("not_before"), "2026-06-02T09:00:00Z")
+        self.assertEqual(result.get("due"), "2026-06-03T17:00:00Z")
+        self.assertEqual(result.get("blocked_on"), "TASK-OTHER")
+
+    def test_title_and_priority_edit_survives(self):
+        """A title/priority edit on the newer side must survive the merge."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+        base = _with_status(_sample_task(), "active")
+
+        t_old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = apply_update(base, by="agent-a", summary="note", dt=t_old)
+
+        t_new = t_old + timedelta(seconds=30)
+        newer = apply_update(base, by="agent-b", summary="retitled", dt=t_new)
+        newer["title"] = "Renamed task"
+        newer["priority"] = "P0"
+
+        result = _try_merge(older, newer)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("title"), "Renamed task")
+        self.assertEqual(result.get("priority"), "P0")
+
+    def test_events_still_unioned_and_acked_by_merged(self):
+        """The event-union + acked_by-union must remain intact after the rewrite."""
+        from fulcra_coord.cli import _try_merge
+        from datetime import datetime, timezone, timedelta
+        base = _with_status(_sample_task(), "active")
+
+        t_old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = apply_update(base, by="agent-a", summary="local note", dt=t_old)
+        older["acked_by"] = ["agent-a"]
+
+        t_new = t_old + timedelta(seconds=30)
+        newer = apply_update(base, by="agent-b", summary="remote note", dt=t_new)
+        newer["acked_by"] = ["agent-b"]
+
+        result = _try_merge(older, newer)
+        self.assertIsNotNone(result)
+        summaries = [e.get("summary") for e in result.get("events", [])]
+        self.assertIn("local note", summaries)
+        self.assertIn("remote note", summaries)
+        self.assertEqual(set(result.get("acked_by") or []), {"agent-a", "agent-b"})
+
+
+# ---------------------------------------------------------------------------
 # Feature #1 — agent identity handshake (resolve_agent + agent_matches)
 # ---------------------------------------------------------------------------
 
@@ -5146,6 +5333,57 @@ class TestIdentityCommand(unittest.TestCase):
         data = json.loads(out)
         self.assertEqual(data["agent"], "codex:Mac:main")
         self.assertEqual(data["source"], "config")
+
+
+class TestInboxIndexPrefixOwnershipAgreement(unittest.TestCase):
+    """BUG 3 (HIGH): index.counts.inbox must not over-count vs inbox_for.
+
+    is_open_directive excluded self-owned only via exact owner_agent==assignee;
+    inbox_for / the owner's read path treat a directive whose assignee is a
+    short-id PREFIX of its owner_agent as the owner's own work (hidden). So a
+    directive owner_agent='claude-code:h:r', assignee='claude-code' was hidden
+    by the read path but still counted by the index — they disagreed.
+    """
+
+    def _directive_prefix_owner(self):
+        return {
+            "id": "TASK-PREFIX-OWN", "title": "self-owned via prefix",
+            "status": "proposed", "workstream": "general",
+            "owner_agent": "claude-code:h:r", "assignee": "claude-code",
+            "priority": "P2", "updated_at": "2026-06-03T00:00:00Z",
+            "tags": [], "events": [],
+        }
+
+    def test_inbox_for_hides_owners_own_prefixed_directive(self):
+        from fulcra_coord.views import inbox_for
+        t = self._directive_prefix_owner()
+        # The owner querying its own inbox must NOT see its own directive.
+        self.assertEqual(inbox_for("claude-code:h:r", [t]), [])
+
+    def test_index_does_not_count_owners_own_prefixed_directive(self):
+        from fulcra_coord.views import build_index
+        t = self._directive_prefix_owner()
+        idx = build_index([t])
+        # The read path hides it; the index must agree and not count it.
+        self.assertEqual(idx["counts"]["inbox"], {},
+                         "index must not count a directive the owner's read path hides")
+
+    def test_is_open_directive_excludes_prefix_self_owned(self):
+        from fulcra_coord.views import is_open_directive
+        t = self._directive_prefix_owner()
+        self.assertFalse(is_open_directive(t, "claude-code"),
+                         "prefix-self-owned directive is not an open inbox item")
+
+    def test_normal_case_still_counts_and_shows(self):
+        # A genuine cross-agent directive (owner is a DIFFERENT kind) must still
+        # be counted and shown — the fix must not over-suppress.
+        from fulcra_coord.views import inbox_for, build_index, is_open_directive
+        t = self._directive_prefix_owner()
+        t["owner_agent"] = "openclaw:host:repo"  # not a prefix-relation with assignee
+        self.assertTrue(is_open_directive(t, "claude-code"))
+        self.assertEqual(len(inbox_for("claude-code:h:r", [t])), 1)
+        idx = build_index([t])
+        self.assertEqual(idx["counts"]["inbox"].get("claude-code"), 1)
 
 
 class TestInboxPrefixRegression(unittest.TestCase):
@@ -6642,6 +6880,31 @@ class TestParallelViewUpload(unittest.TestCase):
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
 
+    def test_emit_runs_before_needs_reconcile_on_partial_failure(self):
+        # BUG 10: the task body uploaded successfully, so the lifecycle
+        # transition is REAL and must be recorded — even when a view upload
+        # fails. The emit was AFTER the NeedsReconcile raise, so a partial view
+        # failure permanently dropped the annotation. Assert emit still runs AND
+        # NeedsReconcile is still raised (emit best-effort, can't change outcome).
+        from fulcra_coord.cli import _write_task_and_views
+        task = self._setup_remote()
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                return False  # one view fails -> partial -> NeedsReconcile
+            return True
+
+        with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._load_task_summaries",
+                   return_value=[schema.task_summary(task)]), \
+             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
+             patch("fulcra_coord.cli.lifecycle_annotations.emit_lifecycle_annotation") as emit:
+            with self.assertRaises(schema.NeedsReconcile):
+                _write_task_and_views(task, backend=["false"], command="update")
+        self.assertTrue(emit.called,
+                        "lifecycle annotation must be emitted before NeedsReconcile")
+
     def test_uploads_all_views_on_success(self):
         from fulcra_coord.cli import _write_task_and_views
         task = self._setup_remote()
@@ -6818,6 +7081,35 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         ids = {s["id"] for s in out}
         self.assertIn(good["id"], ids)
         self.assertNotIn(bad_id, ids)
+
+    def test_bug2_corrupt_cached_body_is_skipped_not_raised(self):
+        # BUG 2 (data-loss): a corrupt/partial cached task body (missing
+        # required fields title/status/workstream/owner_agent) must NOT raise
+        # KeyError out of the cache-union loop. It must be skipped, and the
+        # good cached tasks still returned — so _write_task_and_views completes
+        # and never leaves views stale without a needs_reconcile marker.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+
+        good_cached = _sample_task()
+        good_cached["id"] = "TASK-20260603-good-cached-eeeeeeee"
+        good_cached["updated_at"] = "2026-06-03T10:00:00Z"
+        cache.write_cached_task(good_cached)
+
+        # A corrupt body: has an id but is missing title/status/workstream/
+        # owner_agent → schema.task_summary(t) would KeyError without a guard.
+        corrupt = {"id": "TASK-20260603-corrupt-ffffffff",
+                   "updated_at": "2026-06-03T11:00:00Z"}
+        with patch("fulcra_coord.cli.cache.list_cached_tasks",
+                   return_value=[good_cached, corrupt]), \
+             patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)])), \
+             patch("fulcra_coord.cli.remote.list_files", return_value=[]):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        ids = {s["id"] for s in out}
+        self.assertIn(good_cached["id"], ids)   # good entry survives
+        self.assertIn(task_a["id"], ids)
+        self.assertNotIn(corrupt["id"], ids)    # corrupt one skipped, not fatal
 
 
 class TestParallelUploadExceptionSafety(unittest.TestCase):
@@ -7143,6 +7435,40 @@ class TestPresenceReconcile(_PresenceBackendCase):
         self.assertEqual(agents, {a, b})
 
 
+class TestPresenceUpsertSelfHeal(_PresenceBackendCase):
+    """BUG 4 (S2-class): _upsert_presence_aggregate must self-heal by LISTING
+    the durable presence/*.json files (like the task self-heal), so a peer that
+    a concurrent connect clobbered out of the aggregate is recovered on the next
+    connect — not lost until a full reconcile."""
+
+    def test_clobbered_peer_recovered_from_durable_file(self):
+        from fulcra_coord.cli import _write_presence, _upsert_presence_aggregate
+        from fulcra_coord import remote
+        a, b = "agent-a:h:r", "agent-b:h:r"
+
+        # Both agents have written their durable per-agent presence files.
+        rec_a = schema.make_presence(a, workstreams=["wa"], summary="")
+        rec_b = schema.make_presence(b, workstreams=["wb"], summary="")
+        _write_presence(rec_a, backend=self.fake_backend)
+        _write_presence(rec_b, backend=self.fake_backend)
+
+        # Simulate the clobber: a raced last-writer-wins upload left the
+        # aggregate with ONLY b (a was dropped) — but a's durable file survives.
+        clobbered = views.build_presence([rec_b])
+        remote.upload_json(clobbered, remote.presence_view_path(),
+                           backend=self.fake_backend)
+
+        # b connects again → its upsert must rebuild from the durable files and
+        # recover a, not just re-assert b over the clobbered aggregate.
+        _upsert_presence_aggregate(rec_b, backend=self.fake_backend)
+
+        agg = remote.download_json(remote.presence_view_path(),
+                                   backend=self.fake_backend)
+        agents = {x["agent"] for x in agg["agents"]}
+        self.assertEqual(agents, {a, b},
+                         "clobbered peer a must be recovered from its durable file")
+
+
 class TestStartAgentOptional(_PresenceBackendCase):
     def test_start_without_agent_resolves_via_resolve_agent(self):
         from fulcra_coord.cli import cmd_start
@@ -7433,6 +7759,20 @@ class TestNeedsHumanNotBeforeGating(unittest.TestCase):
         out = needs_human([future, plain], "human")
         self.assertEqual([s["title"] for s in out], ["plain"])
 
+    def test_subsecond_past_not_before_is_due_now(self):
+        # BUG 7: now carries fractional seconds (microsecond != 0), not_before
+        # is whole-second and 0.4s in the PAST. A lexical string compare of the
+        # mixed-width ISO-Z strings ('Z' 0x5A vs '.' 0x2E) wrongly gated this as
+        # future. Comparing PARSED datetimes must surface it as due-now.
+        from datetime import datetime, timezone
+        from fulcra_coord.views import needs_human
+        now = datetime(2026, 6, 3, 12, 0, 0, 400000, tzinfo=timezone.utc)
+        tasks = [self._t("just-past", not_before="2026-06-03T12:00:00Z")]
+        self.assertEqual(
+            [s["title"] for s in needs_human(tasks, "human", now=now)],
+            ["just-past"],
+            "a sub-second-past not_before must gate as due-now, not future")
+
 
 class TestUpcomingForHuman(unittest.TestCase):
     """views.upcoming_for_human: future-not_before items (same human-match /
@@ -7506,6 +7846,17 @@ class TestUpcomingForHuman(unittest.TestCase):
         ]
         self.assertEqual([s["title"] for s in upcoming_for_human(
             tasks, "human", now=self.now)], ["real"])
+
+    def test_subsecond_past_not_before_excluded_from_upcoming(self):
+        # BUG 7 (symmetric): a sub-second-past not_before is due-now, NOT
+        # upcoming. The lexical mixed-width compare wrongly treated it as future
+        # and included it here; parsed-datetime compare excludes it.
+        from datetime import datetime, timezone
+        from fulcra_coord.views import upcoming_for_human
+        now = datetime(2026, 6, 3, 12, 0, 0, 400000, tzinfo=timezone.utc)
+        tasks = [self._t("just-past", not_before="2026-06-03T12:00:00Z")]
+        self.assertEqual(upcoming_for_human(tasks, "human", now=now), [],
+                         "a sub-second-past not_before is due-now, not upcoming")
 
 
 class TestNeedsMeDateFormatting(unittest.TestCase):
