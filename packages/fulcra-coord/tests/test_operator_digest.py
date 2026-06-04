@@ -146,3 +146,77 @@ class TestRenderDigest(unittest.TestCase):
         d = {"blocked_on_you": many, "upcoming": [], "per_agent": [], "stale": []}
         _, note = cli._render_digest(d, window="evening")
         self.assertIn("…and 4 more", note)
+
+
+import io
+import urllib.error
+from fulcra_coord import annotations
+
+
+class _FakeResp:
+    def __init__(self, body, status=200):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body).encode()
+        elif isinstance(body, str):
+            body = body.encode()
+        self._body = body or b""
+        self.status = status
+    def read(self): return self._body
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+class TestEmitDigestAnnotation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self._saved = {k: os.environ.get(k) for k in
+                       ("FULCRA_ACCESS_TOKEN", "FULCRA_API_BASE",
+                        "FULCRA_COORD_REMOTE_ROOT", "FULCRA_COORD_ANNOTATIONS")}
+        os.environ["FULCRA_ACCESS_TOKEN"] = "tkn-abc"
+        os.environ["FULCRA_API_BASE"] = "https://api.example.test"
+        os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination-digesttest"
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        for k, v in self._saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def test_writes_against_digest_definition(self):
+        calls = []
+        def fake_urlopen(req, *a, **k):
+            method, url = req.get_method(), req.full_url
+            calls.append((method, url, req.data))
+            if method == "GET" and "/tag/name/" in url:
+                raise urllib.error.HTTPError(url, 404, "nf", None, io.BytesIO(b""))
+            if method == "POST" and url.endswith("/user/v1alpha1/tag"):
+                return _FakeResp({"id": "tag-1"})
+            if method == "GET" and url.endswith("/user/v1alpha1/annotation"):
+                return _FakeResp([])           # no existing defs -> create
+            if method == "POST" and url.endswith("/user/v1alpha1/annotation"):
+                return _FakeResp({"id": "digest-def-1"})
+            if method == "POST" and "/ingest/v1/record/batch" in url:
+                return _FakeResp(b"", status=202)
+            raise AssertionError(f"unrouted: {method} {url}")
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok = annotations.emit_digest_annotation(
+                name="Agent digest — evening (1 on you, 0 upcoming)",
+                note="⛔ Blocked on you (1):\n  • thing",
+                window="evening", agent="claude-code:mb:repo")
+        self.assertTrue(ok)
+        # The definition POST carried the DIGEST definition name, not "Agent Tasks".
+        def_posts = [c for c in calls
+                     if c[0] == "POST" and c[1].endswith("/user/v1alpha1/annotation")]
+        self.assertEqual(len(def_posts), 1)
+        self.assertIn(annotations.DIGEST_DEFINITION_NAME,
+                      def_posts[0][2].decode())
+        # The digest definition id was cached separately from "Agent Tasks".
+        self.assertEqual(annotations._cached_digest_definition_id(), "digest-def-1")
+
+    def test_best_effort_returns_false_on_no_token(self):
+        os.environ.pop("FULCRA_ACCESS_TOKEN", None)
+        with patch.object(annotations, "_resolve_token", return_value=None):
+            ok = annotations.emit_digest_annotation(
+                name="n", note="b", window="morning", agent="claude-code:mb:repo")
+        self.assertFalse(ok)
