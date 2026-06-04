@@ -7273,6 +7273,12 @@ class TestNeedsHumanNotBeforeGating(unittest.TestCase):
         self.assertEqual([s["title"] for s in needs_human([t], "human", now=self.now)],
                          ["emptystr"])
 
+    def test_malformed_not_before_included(self):
+        from fulcra_coord.views import needs_human
+        tasks = [self._t("bad-date", not_before="tomorrow-ish")]
+        self.assertEqual([s["title"] for s in needs_human(tasks, "human", now=self.now)],
+                         ["bad-date"])
+
     def test_existing_broadcast_and_status_behavior_preserved(self):
         from fulcra_coord.views import needs_human
         tasks = [
@@ -7337,6 +7343,11 @@ class TestUpcomingForHuman(unittest.TestCase):
         tasks = [self._t("plain", not_before=None)]
         self.assertEqual(upcoming_for_human(tasks, "human", now=self.now), [])
 
+    def test_excludes_malformed_not_before(self):
+        from fulcra_coord.views import upcoming_for_human
+        tasks = [self._t("bad-date", not_before="tomorrow-ish")]
+        self.assertEqual(upcoming_for_human(tasks, "human", now=self.now), [])
+
     def test_sorted_by_not_before_then_due(self):
         from fulcra_coord.views import upcoming_for_human
         tasks = [
@@ -7360,6 +7371,14 @@ class TestUpcomingForHuman(unittest.TestCase):
         ]
         self.assertEqual([s["title"] for s in upcoming_for_human(
             tasks, "human", now=self.now)], ["real"])
+
+
+class TestNeedsMeDateFormatting(unittest.TestCase):
+    """Small CLI display helpers should stay portable across Python platforms."""
+
+    def test_due_str_uses_unpadded_day_without_platform_specific_strftime(self):
+        from fulcra_coord.cli import _due_str
+        self.assertEqual(_due_str("2026-06-08T18:00:00Z"), "Jun 8")
 
 
 class TestEquivalenceWithScheduleFields(unittest.TestCase):
