@@ -636,27 +636,40 @@ def _tag_cache_path():
 
 
 def _load_tag_cache() -> dict[str, str]:
-    """Return the cached ``name -> id`` map, or {} on any read error."""
+    """Return the cached ``name -> id`` map, or {} on any read error OR expiry.
+
+    The on-disk shape is ``{"written_at": ISO-Z, "tags": {name: id}}``. A whole
+    cache older than the TTL (BUG 4) — or a pre-TTL legacy flat ``{name: id}``
+    file with no ``written_at`` — reads as EMPTY so every tag re-resolves and the
+    cache is re-stamped fresh, instead of returning ids the server may have
+    deleted/renamed and silently failing all future annotations."""
     try:
         path = _tag_cache_path()
         if path.exists():
             data = json.loads(path.read_text())
-            if isinstance(data, dict):
-                return data
+            if isinstance(data, dict) and _is_fresh(data.get("written_at")):
+                tags = data.get("tags")
+                if isinstance(tags, dict):
+                    return tags
     except (OSError, json.JSONDecodeError):
         pass
     return {}
 
 
 def _store_tag_id(name: str, tag_id: str) -> None:
-    """Persist a resolved ``name -> id`` mapping. Best-effort: a cache-write
-    failure just means the next emit re-resolves the tag, never a failed
-    annotation. Read-modify-write so concurrent names accumulate."""
+    """Persist a resolved ``name -> id`` mapping with a write timestamp.
+
+    Best-effort: a cache-write failure just means the next emit re-resolves the
+    tag, never a failed annotation. Read-modify-write so concurrent names
+    accumulate; the ``written_at`` stamp drives TTL expiry on read (BUG 4)."""
     try:
         cache.annotations_dir().mkdir(parents=True, exist_ok=True)
+        # Build on top of any still-fresh entries (expired ones already dropped
+        # by _load_tag_cache), then re-stamp the whole cache as freshly written.
         data = _load_tag_cache()
         data[name] = tag_id
-        _tag_cache_path().write_text(json.dumps(data))
+        _tag_cache_path().write_text(
+            json.dumps({"written_at": _cache_now_iso(), "tags": data}))
     except OSError:
         pass
 
@@ -695,6 +708,55 @@ def _resolve_tag_id(name: str, token: str) -> str:
     return tag_id
 
 
+# BUG 4: the resolved definition-id / tag-id caches had NO expiry, so a
+# server-side definition or tag deletion/rename left the cached id stale FOREVER
+# — and since the id no longer resolves, every subsequent annotation silently
+# failed with no way to self-heal short of manually clearing the cache. A TTL
+# bounds that staleness window: an entry older than the TTL reads as a MISS so
+# the resolver re-runs (and re-stamps a fresh id), while a fresh entry is still a
+# zero-HTTP hit. 24h default keeps the common case HTTP-free while guaranteeing
+# any drift heals within a day; overridable via env for tests / aggressive setups.
+_DEFAULT_ANNOTATION_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def _annotation_cache_ttl_seconds() -> float:
+    """TTL (seconds) for the definition/tag id caches; env-overridable.
+
+    ``FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS`` lets tests force expiry and lets
+    an operator tune the staleness window. A malformed value falls back to the
+    24h default rather than disabling the cache or raising on a best-effort path."""
+    raw = os.environ.get("FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(_DEFAULT_ANNOTATION_CACHE_TTL_SECONDS)
+
+
+def _is_fresh(written_at: Any) -> bool:
+    """True when a stored ``written_at`` ISO-Z stamp is within the current TTL.
+
+    A missing/unparseable stamp (incl. a pre-TTL legacy cache file with no
+    ``written_at``) is treated as STALE so it re-resolves once and gets
+    re-stamped, rather than being trusted forever — the whole point of the TTL."""
+    if not written_at:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(written_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - dt).total_seconds()
+    return age <= _annotation_cache_ttl_seconds()
+
+
+def _cache_now_iso() -> str:
+    """Fixed-width-microsecond UTC stamp for cache-write timestamps (BUG 1)."""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 def _definition_cache_path():
     """Path to the cached ``Agent Tasks`` definition-id json under the cache root.
 
@@ -707,12 +769,17 @@ def _definition_cache_path():
 
 
 def _cached_definition_id() -> Optional[str]:
+    """Return the cached definition id, or None on miss OR expiry (BUG 4).
+
+    An entry older than the TTL (or one with no/garbled ``written_at`` — e.g. a
+    pre-TTL legacy file) reads as a MISS so the resolver re-runs and heals a
+    stale id, instead of returning an id the server may have deleted/renamed."""
     path = _definition_cache_path()
     try:
         if path.exists():
             data = json.loads(path.read_text())
             did = data.get("id")
-            if did:
+            if did and _is_fresh(data.get("written_at")):
                 return did
     except (OSError, json.JSONDecodeError):
         pass
@@ -720,11 +787,13 @@ def _cached_definition_id() -> Optional[str]:
 
 
 def _store_definition_id(def_id: str) -> None:
-    """Persist the resolved definition id. Best-effort: a cache-write failure
-    just means the next call re-resolves, never a failed annotation."""
+    """Persist the resolved definition id with a write timestamp. Best-effort: a
+    cache-write failure just means the next call re-resolves, never a failed
+    annotation. The ``written_at`` stamp drives TTL expiry on read (BUG 4)."""
     try:
         cache.annotations_dir().mkdir(parents=True, exist_ok=True)
-        _definition_cache_path().write_text(json.dumps({"id": def_id}))
+        _definition_cache_path().write_text(
+            json.dumps({"id": def_id, "written_at": _cache_now_iso()}))
     except OSError:
         pass
 
@@ -772,7 +841,7 @@ def _recorded_at(payload: dict[str, Any]) -> str:
         val = payload.get(key)
         if val:
             return str(val).replace("+00:00", "Z")
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:

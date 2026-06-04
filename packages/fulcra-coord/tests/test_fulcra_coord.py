@@ -2700,6 +2700,38 @@ class TestHookScriptsE2E(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(self.calls) and "pause" in open(self.calls).read())
 
+    def test_session_start_resume_hint_quotes_fulcra_coord(self):
+        # BUG 5: the resume-hint line built a command from `$FULCRA_COORD` raw, so
+        # a value carrying a shell metacharacter (the joined argv) embedded an
+        # injectable / broken command into the surfaced resume hint. The value must
+        # be shlex-quoted so the hint is a single safe token. We name the fake CLI
+        # with a literal `;` in its filename: invoked via the quoted bash array it
+        # still runs correctly (so the hint renders), but `${FULCRA_COORD[*]}` —
+        # the value the resume-hint Python reads — carries the raw metacharacter.
+        from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
+        evil_name = "fulcra-coord;evil"
+        evil = os.path.join(self.bin, evil_name)
+        shutil.copy(os.path.join(self.bin, "fulcra-coord"), evil)
+        os.chmod(evil, 0o755)
+        committed = os.path.join(os.path.dirname(__file__), "..", "adapters",
+                                 "claude-code", "hooks")
+        body = open(os.path.join(committed, "session-start.sh")).read()
+        out = os.path.join(self.hooks, "session-start.sh")
+        with open(out, "w") as f:
+            f.write(body.replace(PLACEHOLDER_ARGV, materialize_argv([evil])))
+        os.chmod(out, 0o755)
+        sj = json.dumps({"active": [
+            {"id": "TASK-stale", "title": "Deploy", "status": "active",
+             "owner_agent": "claude-code:other-host:other-repo",
+             "updated_at": "2026-06-01T00:00:00Z"}]})
+        r = self._run("session-start.sh", json.dumps({"cwd": self.tmp}), sj)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("To resume:", r.stdout)
+        # The rendered command must NOT contain the raw `;evil ` injection; the
+        # quoted form keeps the metacharacter inside a single-quoted token.
+        self.assertNotIn(evil_name + " update", r.stdout,
+                         "raw unquoted metacharacter leaked into the resume hint")
+
 
 class TestSessionStartBlockedOnYouBanner(unittest.TestCase):
     """SessionStart leads with a ⛔ BLOCKED ON YOU section (from needs-me) before
@@ -7283,6 +7315,29 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         entry = next(s for s in out if s["id"] == stale_b["id"])
         self.assertEqual(entry["title"], "FRESH")
 
+    def test_s2_newer_local_wins_across_mixed_precision_timestamps(self):
+        # BUG 1 also affects the aggregate-vs-local freshness decision. A local
+        # summary at ...45.000001Z is newer than the aggregate's ...45Z, but a
+        # raw string compare inverts that ordering ('.' < 'Z') and would keep the
+        # stale aggregate entry.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        local_b = _sample_task()
+        local_b["id"] = "TASK-20260603-peer-task-mixedts"
+        local_b["title"] = "LOCAL-NEWER"
+        local_b["updated_at"] = "2026-06-03T12:30:45.000001Z"
+        cache.write_cached_task(local_b)
+        older_aggregate_b = dict(schema.task_summary(local_b))
+        older_aggregate_b["title"] = "AGGREGATE-OLDER"
+        older_aggregate_b["updated_at"] = "2026-06-03T12:30:45Z"
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a),
+                                          older_aggregate_b])):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        entry = next(s for s in out if s["id"] == local_b["id"])
+        self.assertEqual(entry["title"], "LOCAL-NEWER")
+
     def test_selfheal_recovers_dropped_task_via_file_listing(self):
         # The hard case: a peer's task was clobbered out of the aggregate AND this
         # agent never cached it — but its durable FILE exists. Enumerating the
@@ -7364,12 +7419,14 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         self.assertIn(good["id"], ids)
         self.assertNotIn(bad_id, ids)
 
-    def test_bug2_corrupt_cached_body_is_skipped_not_raised(self):
-        # BUG 2 (data-loss): a corrupt/partial cached task body (missing
-        # required fields title/status/workstream/owner_agent) must NOT raise
-        # KeyError out of the cache-union loop. It must be skipped, and the
-        # good cached tasks still returned — so _write_task_and_views completes
-        # and never leaves views stale without a needs_reconcile marker.
+    def test_bug2_corrupt_cached_body_is_surfaced_not_raised(self):
+        # BUG 2 (debug sweep round 2-3): a corrupt/partial cached task body
+        # (missing title/status/workstream/owner_agent) must NOT raise KeyError
+        # out of the cache-union loop. task_summary is now DEFENSIVE — it renders
+        # such a body with empty-string defaults instead of vanishing it — so the
+        # rebuild completes AND the malformed task stays visible (and thus
+        # fixable) rather than being silently dropped from every view. The good
+        # cached tasks are of course still returned.
         from fulcra_coord.cli import _load_summaries_for_rebuild
         task_a = apply_transition(_sample_task(), "active", by="claude-code")
 
@@ -7379,7 +7436,7 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         cache.write_cached_task(good_cached)
 
         # A corrupt body: has an id but is missing title/status/workstream/
-        # owner_agent → schema.task_summary(t) would KeyError without a guard.
+        # owner_agent → task_summary now renders it with "" defaults, no crash.
         corrupt = {"id": "TASK-20260603-corrupt-ffffffff",
                    "updated_at": "2026-06-03T11:00:00Z"}
         with patch("fulcra_coord.cli.cache.list_cached_tasks",
@@ -7388,10 +7445,13 @@ class TestRebuildSourceRobustness(unittest.TestCase):
                    side_effect=self._agg([schema.task_summary(task_a)])), \
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
-        ids = {s["id"] for s in out}
-        self.assertIn(good_cached["id"], ids)   # good entry survives
-        self.assertIn(task_a["id"], ids)
-        self.assertNotIn(corrupt["id"], ids)    # corrupt one skipped, not fatal
+        by_id = {s["id"]: s for s in out}
+        self.assertIn(good_cached["id"], by_id)   # good entry survives
+        self.assertIn(task_a["id"], by_id)
+        # The corrupt one now SURVIVES (rendered, not dropped) — the BUG 2 fix.
+        self.assertIn(corrupt["id"], by_id)
+        self.assertEqual(by_id[corrupt["id"]]["title"], "")
+        self.assertEqual(by_id[corrupt["id"]]["workstream"], "")
 
 
 class TestParallelUploadExceptionSafety(unittest.TestCase):
@@ -7906,27 +7966,30 @@ class TestParseWhen(unittest.TestCase):
         from datetime import datetime, timezone
         self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
 
+    # Emitted timestamps carry fixed-width microseconds (BUG 1) so a same-second
+    # pair never mis-orders under a lexical compare; the .000000 suffix is the
+    # zero-microsecond rendering of isoformat(timespec="microseconds").
     def test_iso_date(self):
         self.assertEqual(schema.parse_when("2026-06-08", now=self.now),
-                         "2026-06-08T00:00:00Z")
+                         "2026-06-08T00:00:00.000000Z")
 
     def test_iso_datetime_z(self):
         self.assertEqual(schema.parse_when("2026-06-08T18:00:00Z", now=self.now),
-                         "2026-06-08T18:00:00Z")
+                         "2026-06-08T18:00:00.000000Z")
 
     def test_relative_days(self):
         # 5 days from 2026-06-03T12:00 -> 2026-06-08T12:00.
         self.assertEqual(schema.parse_when("5d", now=self.now),
-                         "2026-06-08T12:00:00Z")
+                         "2026-06-08T12:00:00.000000Z")
 
     def test_relative_hours(self):
         # 36h from 2026-06-03T12:00 -> 2026-06-05T00:00.
         self.assertEqual(schema.parse_when("36h", now=self.now),
-                         "2026-06-05T00:00:00Z")
+                         "2026-06-05T00:00:00.000000Z")
 
     def test_relative_minutes(self):
         self.assertEqual(schema.parse_when("10m", now=self.now),
-                         "2026-06-03T12:10:00Z")
+                         "2026-06-03T12:10:00.000000Z")
 
     def test_bad_input_returns_none(self):
         for bad in ("", "   ", "tomorrow", "5x", "not-a-date", "5dd", "d5",
@@ -8214,8 +8277,9 @@ class TestBlockOnUserSchedule(unittest.TestCase):
                            not_before="2026-06-08", due="2026-06-08T18:00:00Z"),
                   backend=self.fake_backend)
         t = cache.read_cached_task(tid)
-        self.assertEqual(t["not_before"], "2026-06-08T00:00:00Z")
-        self.assertEqual(t["due"], "2026-06-08T18:00:00Z")
+        # Fixed-width microseconds (BUG 1): parse_when now emits .000000Z.
+        self.assertEqual(t["not_before"], "2026-06-08T00:00:00.000000Z")
+        self.assertEqual(t["due"], "2026-06-08T18:00:00.000000Z")
 
     def test_block_on_user_no_schedule_leaves_none(self):
         from fulcra_coord.cli import cmd_block
@@ -8587,8 +8651,12 @@ class TestReconcileParallelUpload(unittest.TestCase):
                 active_calls -= 1
             return True
 
+        # BUG 6b: the past-deadline guard now skips any worker with <1s of budget
+        # left (not just <=0), so a 2s total timeout is needed for the first batch
+        # to start (remaining ~2s >= 1) while the queued batch — which only gets to
+        # run after the 1.05s sleep, leaving ~0.95s — is correctly skipped.
         old_timeout = os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS")
-        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "1"
+        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "2"
         try:
             with patch("fulcra_coord.cli._load_all_tasks", return_value=[]), \
                  patch("fulcra_coord.cli.views.build_all_views",
@@ -8607,6 +8675,227 @@ class TestReconcileParallelUpload(unittest.TestCase):
         self.assertEqual(max_active, 8, "the first batch should still run in parallel")
         self.assertLessEqual(total_calls, 8,
                              "queued views past the deadline must not start uploads")
+
+
+# ---------------------------------------------------------------------------
+# Debug sweep rounds 2-3 (v0.5.6)
+# ---------------------------------------------------------------------------
+
+class TestTimestampPrecision(unittest.TestCase):
+    """BUG 1: isoformat() omits the fractional part when microseconds==0, so
+    `...:45Z` (µs=0) sorts AFTER `...:45.000001Z` (µs=1, actually newer) under
+    a lexical compare ('.' < 'Z'). Every emitted timestamp must carry 6-digit
+    microseconds, and the merge/sort paths must compare PARSED datetimes so
+    pre-fix mixed-precision data already on the bus still orders correctly."""
+
+    def test_emitted_timestamps_always_have_six_digit_microseconds(self):
+        import re
+        from datetime import datetime, timezone
+        from fulcra_coord import cli as cli_mod
+        from fulcra_coord import cache as cache_mod
+        from fulcra_coord import annotations as ann_mod
+        pat = re.compile(r"\.\d{6}Z$")
+        # A datetime whose microsecond is exactly 0 is the trigger case.
+        zero_us = datetime(2026, 6, 3, 12, 30, 45, 0, tzinfo=timezone.utc)
+        # schema emission helpers (parse_when / make_task / apply_*).
+        self.assertRegex(schema.parse_when("0d", now=zero_us), pat)
+        t = make_task(title="x", workstream="ws", agent="a", dt=zero_us)
+        self.assertRegex(t["updated_at"], pat)
+        # The per-file _now_iso helpers (cache / cli / annotations) — exercised
+        # at runtime when µs happens to be 0, so assert the shape directly.
+        for helper in (cli_mod._now_iso, cache_mod._now_iso, ann_mod._recorded_at):
+            val = helper({}) if helper is ann_mod._recorded_at else helper()
+            self.assertRegex(val, pat, f"{helper.__module__}.{helper.__name__}")
+
+    def test_try_merge_picks_newer_side_across_mixed_precision(self):
+        from fulcra_coord.cli import _try_merge
+        # Same second; local has µs>0 (truly newer) but its string lacks the
+        # fractional part of remote? No — construct the silent-data-loss case:
+        # remote µs=0 -> "...45Z"; local µs=1 -> "...45.000001Z" (newer).
+        # Lexically "...45.000001Z" < "...45Z" so a raw-string compare wrongly
+        # treats REMOTE as newer and drops local's field edit.
+        base_events = [{"at": "2026-06-03T12:00:00.000000Z", "type": "active", "by": "a"}]
+        local = {
+            "id": "T1", "status": "active", "title": "loc",
+            "workstream": "ws", "owner_agent": "a",
+            "updated_at": "2026-06-03T12:30:45.000001Z",
+            "current_summary": "LOCAL-NEWER", "events": list(base_events),
+        }
+        remote = {
+            "id": "T1", "status": "active", "title": "rem",
+            "workstream": "ws", "owner_agent": "a",
+            "updated_at": "2026-06-03T12:30:45Z",
+            "current_summary": "remote-older", "events": list(base_events),
+        }
+        merged = _try_merge(local, remote)
+        self.assertIsNotNone(merged)
+        # Local is genuinely newer, so its field edits must win.
+        self.assertEqual(merged["current_summary"], "LOCAL-NEWER")
+        self.assertEqual(merged["title"], "loc")
+
+    def test_build_presence_sorts_correctly_across_mixed_precision(self):
+        # Newest record carries µs>0; an older record has µs=0. A lexical sort
+        # would put the µs=0 string first ('Z' > '.'), inverting the order.
+        records = [
+            {"agent": "older", "last_seen": "2026-06-03T12:30:45Z"},
+            {"agent": "newer", "last_seen": "2026-06-03T12:30:45.500000Z"},
+        ]
+        out = views.build_presence(records)
+        self.assertEqual(out["agents"][0]["agent"], "newer",
+                         "most-recently-seen agent must sort first")
+
+
+class TestAssignClearsNeedsHuman(unittest.TestCase):
+    """BUG 3: `block --on-user` parks a task on the human (assignee=human +
+    `needs:human` tag). Reassigning it to another agent changed the assignee but
+    LEFT the `needs:human` tag, so views.needs_human (which counts that tag) kept
+    showing it on the human's plate forever. cmd_assign must strip the tag when
+    reassigning AWAY from the human — but keep it when assigning TO the human."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        self.fake_backend = ["false"]
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+        del os.environ["FULCRA_COORD_HUMAN"]
+
+    def _blocked_on_user_task(self):
+        from fulcra_coord import identity
+        task = make_task(title="Needs key", workstream="ops", agent="agent-a")
+        task = apply_transition(task, "active", by="agent-a")
+        task["status"] = "blocked"
+        task["assignee"] = identity.resolve_human()
+        task["tags"] = sorted(set(task.get("tags", []) + ["needs:human"]))
+        cache.write_cached_task(task)
+        return task
+
+    def test_reassign_away_from_human_strips_needs_human(self):
+        from fulcra_coord.cli import cmd_assign
+        from fulcra_coord import identity
+        task = self._blocked_on_user_task()
+        tid = task["id"]
+        human = identity.resolve_human()
+        # Sanity: it's on the human's plate before reassignment.
+        before = views.needs_human([schema.task_summary(task)], human)
+        self.assertTrue(any(s["id"] == tid for s in before))
+
+        args = types.SimpleNamespace(task_id=tid, assignee="agent-b", agent="agent-a")
+        cmd_assign(args, backend=self.fake_backend)
+
+        cached = cache.read_cached_task(tid)
+        self.assertNotIn("needs:human", cached.get("tags", []))
+        self.assertEqual(cached.get("assignee"), "agent-b")
+        after = views.needs_human([schema.task_summary(cached)], human)
+        self.assertFalse(any(s["id"] == tid for s in after),
+                         "task must leave the human's plate after reassignment")
+
+    def test_reassign_to_human_keeps_needs_human(self):
+        from fulcra_coord.cli import cmd_assign
+        from fulcra_coord import identity
+        task = self._blocked_on_user_task()
+        tid = task["id"]
+        human = identity.resolve_human()
+        # Reassigning back TO the human must NOT strip the tag.
+        args = types.SimpleNamespace(task_id=tid, assignee=human, agent="agent-a")
+        cmd_assign(args, backend=self.fake_backend)
+        cached = cache.read_cached_task(tid)
+        self.assertIn("needs:human", cached.get("tags", []))
+
+
+class TestAgeStrNaive(unittest.TestCase):
+    """BUG 6a: _age_str parsed updated_at then subtracted from an AWARE now. A
+    tz-less (naive) stored timestamp made that subtraction raise TypeError — only
+    ValueError/AttributeError were caught — crashing a read-only view. A naive
+    parse must be coerced to UTC (matching views._parse_dt) and yield a sane age."""
+
+    def test_age_str_naive_timestamp_does_not_crash(self):
+        from fulcra_coord.cli import _age_str
+        # A naive (no Z / no offset) timestamp far in the past -> "d" age, not crash.
+        out = _age_str("2000-01-01T00:00:00")
+        self.assertNotEqual(out, "?")
+        self.assertTrue(out.endswith("d"))
+
+
+class TestUploadOneSubSecondDeadline(unittest.TestCase):
+    """BUG 6b: _upload_one used timeout=max(1, int(remaining)); with
+    0<remaining<1 it floored UP to 1s, letting an upload run ~1s past the global
+    reconcile deadline. A sub-1s remaining must be treated as past-deadline
+    (skip, return False) — consistent with the prior `remaining <= 0` guard."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def test_no_upload_starts_with_sub_second_budget(self):
+        import time as _time
+        from fulcra_coord.cli import cmd_reconcile
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+        called = {"n": 0}
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            called["n"] += 1
+            return True
+
+        # Drive time deterministically: cmd_reconcile reads monotonic() once at
+        # t0 (=0.0) to set deadline = 0.0 + 90; every later read returns 89.5, so
+        # each worker sees remaining = 0.5s (< 1) and must SKIP its upload.
+        base = 0.0
+        seq = iter([0.0])
+        def fake_monotonic():
+            try:
+                return next(seq)
+            except StopIteration:
+                return base + 89.5  # 0.5s before the 90s deadline
+
+        with patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._reconcile_presence"), \
+             patch("time.monotonic", side_effect=fake_monotonic):
+            rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+
+        self.assertEqual(called["n"], 0,
+                         "no upload may start with <1s remaining before deadline")
+        self.assertEqual(rc, 1, "all views skipped past-deadline -> partial -> exit 1")
+
+
+class TestTaskSummaryDefensive(unittest.TestCase):
+    """BUG 2: task_summary hard-indexed id/title/status/workstream/owner_agent.
+    It runs inside the best-effort view loader (exceptions swallowed), so a body
+    missing any of those fields raised KeyError and the task SILENTLY VANISHED
+    from every view — the opposite of what the safety-net docstring promises.
+    The summary must render with empty-string defaults instead."""
+
+    def test_task_summary_tolerates_missing_required_fields(self):
+        # A body missing workstream/owner_agent (and even title) must summarize,
+        # not KeyError — so a malformed task still surfaces in views.
+        partial = {"id": "T-orphan", "status": "active"}
+        s = schema.task_summary(partial)
+        self.assertEqual(s["id"], "T-orphan")
+        self.assertEqual(s["workstream"], "")
+        self.assertEqual(s["owner_agent"], "")
+        self.assertEqual(s["title"], "")
+
+    def test_task_summary_empty_dict_does_not_crash(self):
+        s = schema.task_summary({})
+        self.assertEqual(s["id"], "")
+        self.assertEqual(s["title"], "")
+        self.assertEqual(s["status"], "")
+
+    def test_apply_transition_tolerates_missing_tag_fields(self):
+        # apply_transition rebuilds tags from workstream/owner_agent/priority via
+        # bracket-indexing; a slightly-malformed body must not KeyError mid-write.
+        from datetime import datetime, timezone
+        task = {"id": "T1", "status": "proposed", "title": "x", "events": []}
+        out = schema.apply_transition(
+            task, new_status="active", by="a",
+            dt=datetime(2026, 6, 3, tzinfo=timezone.utc))
+        self.assertEqual(out["status"], "active")
 
 
 # ---------------------------------------------------------------------------

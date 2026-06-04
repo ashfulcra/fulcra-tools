@@ -54,7 +54,7 @@ INBOX="$("${FULCRA_COORD[@]}" inbox --format json 2>/dev/null)"
 NEEDSME="$("${FULCRA_COORD[@]}" needs-me --format json 2>/dev/null)"
 
 CONTEXT="$(JSON="$JSON" INBOX="$INBOX" NEEDSME="$NEEDSME" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null
-import sys, json, os, datetime
+import sys, json, os, datetime, shlex
 agent = os.environ.get("AGENT","")
 stale_h = float(os.environ.get("STALE_HOURS","2"))
 try:
@@ -145,7 +145,13 @@ if inbox:
         if it.get("next_action"):
             lines.append(f"          next: {it['next_action']}")
 if mine or stale or inbox:
-    lines.append("  To resume: "+os.environ.get("FULCRA_COORD","fulcra-coord")+" update <id> --status active --agent "+agent)
+    # BUG 5: $FULCRA_COORD is the joined resolved argv (e.g. an interpreter path
+    # under "Application Support", or a path containing shell metacharacters).
+    # Embedding it RAW into a suggested command let a metacharacter break / inject
+    # into the hint a human might copy-paste. shlex.quote keeps it a single safe
+    # token; the agent id is a derived slug but quote it too for symmetry/safety.
+    _fc = shlex.quote(os.environ.get("FULCRA_COORD","fulcra-coord"))
+    lines.append("  To resume: "+_fc+" update <id> --status active --agent "+shlex.quote(agent))
 print("\n".join(lines))
 PY
 )"
