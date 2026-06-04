@@ -24,6 +24,17 @@ export interface AttentionEvent {
   client: string;      // CLIENT constant
 }
 
+/**
+ * Which transport the outbox flush uses.
+ *   "relay"     — POST to the localhost fulcra-collect daemon (the v1
+ *                 behavior). The daemon ensures the Attention definition +
+ *                 tags and forwards to the cloud.
+ *   "relayless" — POST directly to the Fulcra cloud ingest endpoint using
+ *                 the relayless core (OIDC device-flow token + the
+ *                 extension-side definition/tag ensuring). No daemon needed.
+ */
+export type TransportMode = "relay" | "relayless";
+
 /** Persistent settings in chrome.storage.local. */
 export interface Settings {
   bearerToken: string | null;
@@ -33,6 +44,7 @@ export interface Settings {
   onboarded: boolean;            // true once the wizard finished (any step beyond Welcome)
   pausedUntil: number | null;    // ms epoch — when null, not paused. Past = auto-resumed (lazy)
   heartbeatEnabled: boolean;     // opt-in content-script AFK watchdog (requires <all_urls>)
+  transportMode: TransportMode;  // default "relay" — relayless is opt-in until onboarding lands
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -43,6 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
   onboarded: false,
   pausedUntil: null,
   heartbeatEnabled: false,
+  transportMode: "relay",
 };
 
 /** How stale a focused visit's lastHeartbeat can be before the heartbeat
