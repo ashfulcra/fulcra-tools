@@ -1355,6 +1355,7 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     me = getattr(args, "agent", None) or _derive_agent()
     out_format = getattr(args, "format", "table")
     ack_id = getattr(args, "ack", None)
+    show_all = bool(getattr(args, "all", False))
 
     if ack_id:
         task = _load_task(ack_id, backend=backend)
@@ -1379,14 +1380,26 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         _info(f"Acknowledged: {ack_id}")
         return 0
 
-    items = _load_inbox(me, backend=backend)
+    # Load the task set ONCE, then derive both the shown items and the aged-out
+    # count from it — no second backend round-trip. With --all the age-out filter
+    # is bypassed and aged-out broadcasts are included; otherwise stale
+    # informational broadcasts are hidden and only counted for the note below.
+    all_tasks = _load_task_summaries(backend=backend)
+    items = views.inbox_for(me, all_tasks, include_aged=show_all)
+    hidden = 0 if show_all else views.aged_out_inbox_count(me, all_tasks)
 
     if out_format == "json":
-        _print_json({"agent": me, "count": len(items), "inbox": items})
+        _print_json({"agent": me, "count": len(items), "hidden_aged": hidden,
+                     "inbox": items})
         return 0
 
     if not items:
-        _info(f"Inbox empty for {me}.")
+        if hidden:
+            _info(f"Inbox empty for {me} "
+                  f"({hidden} older broadcast{'s' if hidden != 1 else ''} "
+                  f"hidden — --all to show).")
+        else:
+            _info(f"Inbox empty for {me}.")
         return 0
 
     print(f"\n{'='*60}")
@@ -1398,11 +1411,15 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         print(f"        from: {frm}")
         if s.get("next_action"):
             print(f"        next: {s['next_action'][:70]}")
+    if hidden:
+        print(f"\n  ({hidden} older broadcast{'s' if hidden != 1 else ''} "
+              f"hidden — --all to show)")
     print()
     return 0
 
 
-def _load_inbox(me: str, backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
+def _load_inbox(me: str, backend: Optional[list[str]] = None,
+                include_aged: bool = False) -> list[dict[str, Any]]:
     """Open directives for `me`, recomputed authoritatively from the full task set.
 
     Mirrors cmd_agents: inbox_for over the live tasks is the single source of
@@ -1427,7 +1444,10 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None) -> list[dict[str, 
     # ack set, which the summary now carries (acked_by) — no event log / body
     # fetch needed. Falls back to a full load on an older bus.
     all_tasks = _load_task_summaries(backend=backend)
-    return views.inbox_for(me, all_tasks)
+    # include_aged bypasses the broadcast age-out filter (the `inbox --all` path);
+    # the default read hides stale informational broadcasts so they stop
+    # cluttering the inbox / SessionStart, without touching any task.
+    return views.inbox_for(me, all_tasks, include_aged=include_aged)
 
 
 # ---------------------------------------------------------------------------

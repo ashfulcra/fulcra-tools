@@ -5401,6 +5401,101 @@ class TestBroadcastInboxForEveryAgent(unittest.TestCase):
         self.assertNotIn(d["id"], ids)
 
 
+# ---------------------------------------------------------------------------
+# Inbox auto-aging — stale informational broadcasts drop out of the live inbox
+# view after FULCRA_COORD_INBOX_AGE_DAYS, WITHOUT touching the task (non-
+# destructive: status/file unchanged; a peer on an older CLI still sees it).
+# Concrete-assignee directives (real asks) are NEVER aged out, regardless of age.
+# ---------------------------------------------------------------------------
+
+class TestInboxBroadcastAging(unittest.TestCase):
+    from datetime import datetime, timezone
+    NOW = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _aged_broadcast(self, days_old):
+        """A proposed broadcast whose updated_at is `days_old` days before NOW."""
+        from fulcra_coord.views import BROADCAST
+        from datetime import timedelta
+        stamp = (self.NOW - timedelta(days=days_old)).isoformat().replace("+00:00", "Z")
+        return _directive(BROADCAST, owner="boss:h:r", updated_at=stamp)
+
+    def test_old_broadcast_excluded_from_default_inbox(self):
+        # 5 days old > default 3-day cutoff -> aged out of the default inbox.
+        from fulcra_coord.views import inbox_for
+        d = self._aged_broadcast(5)
+        ids = [s["id"] for s in inbox_for("openclaw:host:repo", [d], now=self.NOW)]
+        self.assertNotIn(d["id"], ids,
+                         "a broadcast older than the cutoff must not appear by default")
+
+    def test_recent_broadcast_included_in_default_inbox(self):
+        # 1 day old < default 3-day cutoff -> still in the inbox.
+        from fulcra_coord.views import inbox_for
+        d = self._aged_broadcast(1)
+        ids = [s["id"] for s in inbox_for("openclaw:host:repo", [d], now=self.NOW)]
+        self.assertIn(d["id"], ids,
+                      "a broadcast within the cutoff must still appear")
+
+    def test_concrete_assignee_never_aged_out(self):
+        # A directive addressed to a CONCRETE agent (a real ask) is NEVER aged out,
+        # no matter how old. Only wildcard broadcasts age. 99 days old, still shown.
+        from fulcra_coord.views import inbox_for
+        from datetime import timedelta
+        stamp = (self.NOW - timedelta(days=99)).isoformat().replace("+00:00", "Z")
+        d = _directive("openclaw:host:repo", owner="boss:h:r", updated_at=stamp)
+        ids = [s["id"] for s in inbox_for("openclaw:host:repo", [d], now=self.NOW)]
+        self.assertIn(d["id"], ids,
+                      "a concrete-assignee directive must NEVER be aged out")
+
+    def test_inbox_for_all_includes_aged_broadcast(self):
+        # include_aged=True (the `inbox --all` path) bypasses the age filter.
+        from fulcra_coord.views import inbox_for
+        d = self._aged_broadcast(5)
+        ids = [s["id"] for s in inbox_for("openclaw:host:repo", [d],
+                                          now=self.NOW, include_aged=True)]
+        self.assertIn(d["id"], ids,
+                      "--all must reveal aged-out broadcasts")
+
+    def test_cutoff_respects_env(self):
+        # With FULCRA_COORD_INBOX_AGE_DAYS=10, a 5-day-old broadcast is NOT yet aged.
+        from fulcra_coord.views import inbox_for
+        d = self._aged_broadcast(5)
+        old = os.environ.get("FULCRA_COORD_INBOX_AGE_DAYS")
+        os.environ["FULCRA_COORD_INBOX_AGE_DAYS"] = "10"
+        try:
+            ids = [s["id"] for s in inbox_for("openclaw:host:repo", [d], now=self.NOW)]
+        finally:
+            if old is None:
+                os.environ.pop("FULCRA_COORD_INBOX_AGE_DAYS", None)
+            else:
+                os.environ["FULCRA_COORD_INBOX_AGE_DAYS"] = old
+        self.assertIn(d["id"], ids,
+                      "a larger FULCRA_COORD_INBOX_AGE_DAYS must keep the broadcast visible")
+
+    def test_aging_is_non_destructive(self):
+        # The view filter must NOT mutate the task: status stays proposed, the
+        # dict is unchanged. (A peer on an older CLI still sees it.)
+        from fulcra_coord.views import inbox_for
+        import copy
+        d = self._aged_broadcast(5)
+        before = copy.deepcopy(d)
+        inbox_for("openclaw:host:repo", [d], now=self.NOW)
+        self.assertEqual(d, before, "aging must not mutate the task")
+        self.assertEqual(d["status"], "proposed", "aging must not change task status")
+
+    def test_aged_broadcast_count_helper(self):
+        # The CLI surfaces "N older broadcasts hidden"; the view exposes the count.
+        from fulcra_coord.views import aged_out_inbox_count
+        d = self._aged_broadcast(5)
+        n = aged_out_inbox_count("openclaw:host:repo", [d], now=self.NOW)
+        self.assertEqual(n, 1, "one aged-out broadcast should be counted")
+
+    def test_no_aged_count_for_recent_broadcast(self):
+        from fulcra_coord.views import aged_out_inbox_count
+        d = self._aged_broadcast(1)
+        n = aged_out_inbox_count("openclaw:host:repo", [d], now=self.NOW)
+        self.assertEqual(n, 0, "a recent broadcast is not aged out")
+
+
 class TestBroadcastCommand(unittest.TestCase):
     """`fulcra-coord broadcast <title>` creates an assignee="*" proposed directive."""
 
