@@ -186,7 +186,7 @@ def build_annotation(
           "tags":     ["<lifecycle>", "<agent_kind>", "<session>"],
           "cli_tags": ["agent-tasks", "<lifecycle>", "agent:<kind>", "session:<sess>"],
           "name":  "<lifecycle>: <title> (<id>)",
-          "desc":  "<next_action | current_summary | link>",
+          "desc":  "[<workstream>/<kind>] <title> — <summary> · next: <action>",
           "text":  "<lifecycle>: <title> (<id>) <link>",
           "link":  "https://library.fulcradynamics.com/...",
           "lifecycle": "<lifecycle>",
@@ -206,9 +206,12 @@ def build_annotation(
 
     ``name`` is the CLI annotation NAME — the concise, link-free
     ``<lifecycle>: <title> (<id>)`` (kept short; the deep link lives in ``desc``
-    instead so the timeline label stays readable). ``desc`` prefers the task's
-    ``next_action`` then ``current_summary`` for a one-line detail, falling back
-    to the library link when neither is present.
+    instead so the timeline label stays readable). ``desc`` carries the WORK
+    SUBSTANCE (operator-digest spec §7): ``[<workstream>/<kind>] <title> —
+    <current_summary> · next: <next_action>``, so a per-event moment conveys
+    *what work* it was about, not just the lifecycle category. Every part is
+    optional; a sparse task still yields a non-empty desc (prefix + title), and
+    when nothing substantive is present it falls back to the library link.
 
     Kept separate from the writers so tests (and the API/CLI shaping steps)
     operate on a stable dict regardless of transport."""
@@ -229,9 +232,27 @@ def build_annotation(
     name = f"{lifecycle}: {title} ({task_id})"
     text = f"{name} {link}"
 
-    detail = (task.get("next_action") or "").strip() or \
-        (task.get("current_summary") or "").strip()
-    desc = detail or link
+    # COMPANION (operator-digest spec §7): carry the WORK SUBSTANCE in the note so
+    # a per-event moment conveys *what work*, not just the lifecycle category.
+    # Shape: "[<workstream>/<kind>] <title> — <summary> · next: <next_action>".
+    # Backward-compatible: this only changes the human-readable note body (desc);
+    # tags / name / link / payload shape are unchanged, so existing readers and
+    # the idempotency/transport paths are untouched. Every part is optional —
+    # a sparse task still yields a non-empty desc (at minimum the prefix + title).
+    from .schema import _extract_kind_from_tags
+    workstream = task.get("workstream", "") or ""
+    kind = _extract_kind_from_tags(task.get("tags") or [])
+    prefix = "/".join(p for p in (workstream, kind) if p)
+    summary = (task.get("current_summary") or "").strip()
+    nxt = (task.get("next_action") or "").strip()
+    blurb_parts = []
+    if prefix:
+        blurb_parts.append(f"[{prefix}]")
+    blurb_parts.append(title)
+    tail = " · ".join(
+        x for x in (summary, (f"next: {nxt}" if nxt else "")) if x)
+    blurb = " ".join(blurb_parts) + (f" — {tail}" if tail else "")
+    desc = blurb.strip() or link
 
     return {
         "track": TRACK_NAME,
