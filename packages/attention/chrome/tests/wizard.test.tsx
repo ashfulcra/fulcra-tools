@@ -31,8 +31,17 @@ vi.mock("../src/relayless/tokenStore", () => ({
 vi.mock("../src/relayless/whoami", () => ({
   whoami: vi.fn(async () => ({ label: null })),
 }));
+const ensureImpl = {
+  listAttentionDestinations: vi.fn(async () => [] as unknown[]),
+  chooseAttentionDestination: vi.fn(async () => ({ definitionId: "d", tagIds: [] })),
+  createAttentionDestination: vi.fn(async () => ({ definitionId: "d", tagIds: [] })),
+};
 vi.mock("../src/relayless/ensureDefinition", () => ({
   clearResolvedAttention: vi.fn(async () => undefined),
+  ATTENTION_DEFINITION_NAME: "Attention",
+  listAttentionDestinations: (...a: unknown[]) => ensureImpl.listAttentionDestinations(...(a as [])),
+  chooseAttentionDestination: (...a: unknown[]) => ensureImpl.chooseAttentionDestination(...(a as [])),
+  createAttentionDestination: (...a: unknown[]) => ensureImpl.createAttentionDestination(...(a as [])),
 }));
 
 import { Wizard } from "../src/wizard/Wizard";
@@ -49,6 +58,9 @@ beforeEach(async () => {
   vi.clearAllMocks();
   tokenImpl.getValidAccessToken.mockResolvedValue(null);
   signInImpl.run.mockReset();
+  ensureImpl.listAttentionDestinations.mockResolvedValue([]);
+  ensureImpl.chooseAttentionDestination.mockResolvedValue({ definitionId: "d", tagIds: [] });
+  ensureImpl.createAttentionDestination.mockResolvedValue({ definitionId: "d", tagIds: [] });
 });
 
 async function mount(node: React.ReactElement): Promise<{
@@ -98,7 +110,7 @@ describe("Wizard auth step — relayless (default)", () => {
     expect(container.querySelector('input[type="password"]')).toBeNull();
   });
 
-  test("completing sign-in advances the wizard to the scan step", async () => {
+  test("completing sign-in advances the wizard to the destination step", async () => {
     await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
     // First token check (mount) → null (signed out); after the flow → a token.
     let calls = 0;
@@ -116,12 +128,13 @@ describe("Wizard auth step — relayless (default)", () => {
     await gotoAuthStep(container);
     await clickButton(container, "Sign in with Fulcra");
 
-    // Landed on the scan step.
-    expect(container.textContent).toContain("Scan your history");
+    // Landed on the destination step (NOT scan directly).
+    expect(container.textContent).toContain("Choose where your browsing attention is saved");
+    expect(container.textContent).not.toContain("Scan your history");
     expect(container.textContent).not.toContain("Sign in with Fulcra");
   });
 
-  test("already signed in → 'Continue' advances to scan, no forced re-auth", async () => {
+  test("already signed in → 'Continue' advances to destination, no forced re-auth", async () => {
     await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
     tokenImpl.getValidAccessToken.mockResolvedValue("EXISTING-TOKEN");
 
@@ -135,7 +148,95 @@ describe("Wizard auth step — relayless (default)", () => {
     await clickButton(container, "Continue");
 
     expect(signInImpl.run).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Choose where your browsing attention is saved");
+  });
+});
+
+describe("Wizard destination step — relayless", () => {
+  /** Sign in (already-signed-in path) and land on the destination step. */
+  async function gotoDestinationStep(): Promise<{ container: HTMLElement }> {
+    await saveSettings({ ...DEFAULT_SETTINGS, transportMode: "relayless" });
+    tokenImpl.getValidAccessToken.mockResolvedValue("EXISTING-TOKEN");
+    const { container } = await mount(<Wizard />);
+    await gotoAuthStep(container);
+    await clickButton(container, "Continue");
+    // Let the on-mount listAttentionDestinations settle.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return { container };
+  }
+
+  test("lists existing destinations and marks the auto-pick (current)", async () => {
+    ensureImpl.listAttentionDestinations.mockResolvedValue([
+      { id: "old", name: "Attention", createdAt: "2026-01-01T00:00:00Z", isAutoPick: true },
+      { id: "new", name: "Attention", createdAt: "2026-03-01T00:00:00Z", isAutoPick: false },
+    ]);
+    const { container } = await gotoDestinationStep();
+
+    expect(ensureImpl.listAttentionDestinations).toHaveBeenCalled();
+    expect(container.textContent).toContain('"Attention"');
+    expect(container.textContent).toContain("(current)");
+    // The auto-pick radio is selected by default.
+    const radios = [...container.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+    const checked = radios.find((r) => r.checked);
+    expect(checked?.value).toBe("old");
+  });
+
+  test("Continue with an existing destination selected calls chooseAttentionDestination then advances to scan", async () => {
+    ensureImpl.listAttentionDestinations.mockResolvedValue([
+      { id: "old", name: "Attention", createdAt: "2026-01-01T00:00:00Z", isAutoPick: true },
+    ]);
+    const { container } = await gotoDestinationStep();
+
+    await clickButton(container, "Continue");
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(ensureImpl.chooseAttentionDestination).toHaveBeenCalledWith(
+      expect.anything(),
+      "old",
+    );
+    expect(ensureImpl.createAttentionDestination).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Scan your history");
+  });
+
+  test("empty list defaults to create; Continue calls createAttentionDestination then advances to scan", async () => {
+    ensureImpl.listAttentionDestinations.mockResolvedValue([]);
+    const { container } = await gotoDestinationStep();
+
+    // Create option is the default selection when nothing exists.
+    expect(container.textContent).toContain("Create a new Attention annotation");
+
+    await clickButton(container, "Continue");
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(ensureImpl.createAttentionDestination).toHaveBeenCalledWith(
+      expect.anything(),
+      "Attention",
+    );
+    expect(ensureImpl.chooseAttentionDestination).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Scan your history");
+  });
+
+  test("surfaces a load error instead of swallowing it", async () => {
+    ensureImpl.listAttentionDestinations.mockRejectedValue(new Error("boom-load"));
+    const { container } = await gotoDestinationStep();
+    expect(container.textContent).toContain("boom-load");
+  });
+
+  test("surfaces a save error and stays on the destination step", async () => {
+    ensureImpl.listAttentionDestinations.mockResolvedValue([
+      { id: "old", name: "Attention", createdAt: "2026-01-01T00:00:00Z", isAutoPick: true },
+    ]);
+    ensureImpl.chooseAttentionDestination.mockRejectedValue(new Error("boom-save"));
+    const { container } = await gotoDestinationStep();
+
+    await clickButton(container, "Continue");
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(container.textContent).toContain("boom-save");
+    expect(container.textContent).not.toContain("Scan your history");
   });
 });
 
