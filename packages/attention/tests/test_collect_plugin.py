@@ -1,10 +1,16 @@
-"""The attention fulcra-collect plugin (manual sanity-check kind)."""
+"""The attention fulcra-collect plugin — now an informational pointer.
+
+The browser extension is relayless (device-flow OIDC + direct Fulcra API
+ingest); it no longer posts to the daemon. So this plugin no longer pairs,
+binds a definition, or runs a relay sanity check. It exists only so Collect
+still surfaces an "Attention" entry that points the user at the browser
+extension.
+"""
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 
-from fulcra_attention.collect_plugin import ATTENTION_SPEC, PLUGIN
+from fulcra_attention.collect_plugin import PLUGIN
 from fulcra_collect.plugin import RunContext
 
 
@@ -12,7 +18,7 @@ from fulcra_collect.plugin import RunContext
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ctx(*, factory=None, emit_sink: list | None = None) -> RunContext:
+def _make_ctx(*, emit_sink: list | None = None) -> RunContext:
     """Build a RunContext whose progress() pushes into `emit_sink`."""
     sink = emit_sink if emit_sink is not None else []
     return RunContext(
@@ -22,7 +28,6 @@ def _make_ctx(*, factory=None, emit_sink: list | None = None) -> RunContext:
         state=None,
         log=logging.getLogger("t"),
         _emit=lambda e: sink.append(e),
-        _fulcra_client_factory=factory,
     )
 
 
@@ -30,309 +35,66 @@ def _make_ctx(*, factory=None, emit_sink: list | None = None) -> RunContext:
 # Metadata tests
 # ---------------------------------------------------------------------------
 
-def test_plugin_metadata_is_manual_kind():
-    """Phase 2: the plugin no longer runs a server; it's a manual
-    sanity-check now. The daemon's /api/extension/attention route is
-    what receives extension events."""
+def test_plugin_is_registered_with_attention_id():
+    """Collect still surfaces an Attention entry under the stable id."""
     assert PLUGIN.id == "attention-relay"
+    assert PLUGIN.name == "Attention (browser extension)"
     assert PLUGIN.kind == "manual"
     assert PLUGIN.default_interval is None
 
 
-def test_plugin_declares_canonical_definition_name():
-    """The plugin still opts into the shared resolver via canonical_definition_name."""
-    assert PLUGIN.canonical_definition_name == "Attention"
+def test_plugin_declares_no_credentials():
+    """The relayless extension owns its own auth — the daemon holds no
+    extension-token, so the pointer plugin declares no credentials."""
+    assert PLUGIN.required_credentials == ()
 
 
-def test_plugin_no_longer_declares_loopback_server_permission():
-    """The daemon's own HTTP port is what listens; the plugin needs no
-    extra permission of its own."""
-    perm_ids = {p.id for p in PLUGIN.required_permissions}
-    assert "network-loopback-server" not in perm_ids
+def test_plugin_declares_no_setup_steps():
+    """No pairing, no definition picker — the plugin is purely informational."""
+    assert PLUGIN.setup_steps == ()
 
 
-def test_plugin_requires_extension_token_credential():
-    """The user-level extension-token is the only credential this plugin
-    declares — paired with the daemon-side keychain entry the route
-    checks."""
-    keys = {c.key for c in PLUGIN.required_credentials}
-    assert keys == {"extension-token"}
+def test_plugin_declares_no_definition_binding():
+    """The plugin no longer owns the Attention definition; the extension
+    resolves its own def directly against Fulcra."""
+    assert PLUGIN.canonical_definition_name is None
 
 
-def test_attention_spec_shape():
-    """ATTENTION_SPEC must declare a duration annotation with a full
-    measurement_spec so the resolver can match existing definitions."""
-    assert ATTENTION_SPEC["annotation_type"] == "duration"
-    ms = ATTENTION_SPEC["measurement_spec"]
-    assert ms["measurement_type"] == "duration"
-    assert ms["value_type"] == "duration"
-    assert "unit" in ms
-
-
-def test_setup_steps_have_pair_step_and_avoid_old_relay_port():
-    """The wizard's pairing step replaces the two-paste flow that used
-    to surface the daemon URL. The user no longer needs to see the
-    endpoint at all — the extension's content script handles it. We
-    still guard against the old 8771 relay port leaking into copy."""
-    kinds = [s.kind for s in PLUGIN.setup_steps]
-    assert "extension_pair" in kinds
-    # Old per-step inputs are gone — there should no longer be a
-    # standalone "input" step asking the user to invent a token.
-    assert "input" not in kinds
-    blob = "\n".join(s.body_md for s in PLUGIN.setup_steps)
-    # Old 8771 port should not appear in any user-facing copy.
-    assert "8771" not in blob
+def test_description_points_at_the_browser_extension():
+    """The description must steer the user to install the extension and sign
+    in via the browser — and must not reference the dead relay machinery."""
+    desc = PLUGIN.description.lower()
+    assert "browser extension" in desc
+    assert "packages/attention/chrome" in PLUGIN.description
+    # No residue of the retired relay/pairing machinery.
+    assert "extension-token" not in desc
+    assert "pair" not in desc
+    assert "8771" not in PLUGIN.description
 
 
 # ---------------------------------------------------------------------------
-# run() — sanity checks
+# run() — informational only
 # ---------------------------------------------------------------------------
 
-def test_run_reports_missing_extension_token(monkeypatch, tmp_path):
-    """When the extension-token isn't in the user keychain, the first
-    progress event reports ok=False so the UI can flag it."""
-    # Isolate state to tmp
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.DEFAULT_PATH", tmp_path / "state.json",
-    )
-    from fulcra_attention.state import State
-    attention_state = State(attention_definition_id="def-1")
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
-    )
-
-    # No extension-token in keychain
-    monkeypatch.setattr(
-        "fulcra_collect.credentials.has_user_secret", lambda key: False,
-    )
-
-    sink: list = []
-    ctx = _make_ctx(emit_sink=sink)
-    PLUGIN.run(ctx)
-
-    # First progress event is the extension_token check, ok=False
-    token_check = next(e for e in sink if e.get("check") == "extension_token")
-    assert token_check["ok"] is False
-    assert "missing" in token_check["detail"]
-
-
-def test_run_reports_definition_bound_when_state_has_id(monkeypatch, tmp_path):
-    """When the attention state already has a definition_id, the check
-    reports ok=True with the id."""
-    from fulcra_attention.state import State
-
-    attention_state = State(attention_definition_id="def-existing")
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
-    )
-    monkeypatch.setattr(
-        "fulcra_collect.credentials.has_user_secret", lambda key: True,
-    )
-
-    sink: list = []
-    ctx = _make_ctx(emit_sink=sink)
-    PLUGIN.run(ctx)
-
-    def_check = next(e for e in sink if e.get("check") == "definition_bound")
-    assert def_check["ok"] is True
-    assert "def-existing" in def_check["detail"]
-
-
-def test_run_resolves_definition_when_state_empty(monkeypatch, tmp_path):
-    """When the attention state file has no definition id, run() uses
-    the shared resolver to adopt-or-create one, and persists the result."""
-    from fulcra_attention.state import State
-
-    saved: list = []
-    attention_state = State()
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
-    )
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin._state_save",
-        lambda s: saved.append(s),
-    )
-    monkeypatch.setattr(
-        "fulcra_collect.credentials.has_user_secret", lambda key: True,
-    )
-
-    class _FakeClient:
-        def list_definitions(self, *, name): return []
-        def create_definition(self, *, name, **spec):
-            return {"id": "def-resolver-new"}
-
-    sink: list = []
-    ctx = _make_ctx(factory=lambda: _FakeClient(), emit_sink=sink)
-
-    # Give ctx.state a PluginState-shaped object — resolved_definition_id
-    # writes ctx.state.definition_id.
-    class _PluginState:
-        definition_id: str | None = None
-    ctx.state = _PluginState()
-
-    PLUGIN.run(ctx)
-
-    assert attention_state.attention_definition_id == "def-resolver-new"
-    assert len(saved) == 1
-    def_check = next(e for e in sink if e.get("check") == "definition_bound")
-    assert def_check["ok"] is True
-
-
-def test_run_resolver_create_is_equivalent_to_cli_create(monkeypatch):
-    """Unification: the def the resolver-create path now CREATES is byte-for-
-    byte identical (name, description, tags, annotation_type, measurement_spec)
-    to what the CLI bootstrap's attention_create_payload(...) produces — both
-    derive from definition_spec, the single source. This is the whole point of
-    the change: a wizard-onboarded user gets the same rich def as a CLI user."""
-    from fulcra_attention.definition_spec import (
-        ATTENTION_DEFINITION_TAG_NAMES,
-        attention_create_payload,
-    )
-    from fulcra_attention.state import State
-
-    # Map tag NAMES -> deterministic fake ids, the same way the CLI's
-    # ensure_tag and the daemon's resolve_tag both would on a real account.
-    tag_ids = {"attention": "tag-id-attention", "web": "tag-id-web"}
-
-    attention_state = State()
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
-    )
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin._state_save", lambda s: None,
-    )
-    monkeypatch.setattr(
-        "fulcra_collect.credentials.has_user_secret", lambda key: True,
-    )
-
-    created_bodies: list = []
-
-    class _FakeClient:
-        # No "Attention" def yet -> a fresh CREATE happens.
-        def list_definitions(self, *, name): return []
-        def resolve_tag(self, name): return tag_ids[name]
-        def create_definition(self, *, name, **spec):
-            created_bodies.append({"name": name, **spec})
-            return {"id": "def-new"}
-
-    ctx = _make_ctx(factory=lambda: _FakeClient())
-
-    class _PluginState:
-        definition_id = None
-        override_definition_name = None
-    ctx.state = _PluginState()
-
-    PLUGIN.run(ctx)
-
-    # Exactly one create, and its body equals the CLI create payload built
-    # from the same resolved tag ids.
-    assert len(created_bodies) == 1
-    resolver_body = created_bodies[0]
-    cli_body = attention_create_payload(
-        tags=[tag_ids[n] for n in ATTENTION_DEFINITION_TAG_NAMES]
-    )
-    cli_body_with_name = {"name": "Attention", **cli_body}
-    assert resolver_body == cli_body_with_name
-    # Spell out the rich fields so a regression to the sparse def is obvious.
-    assert resolver_body["description"] == (
-        "What the user paid attention to (browsing)."
-    )
-    assert resolver_body["tags"] == ["tag-id-attention", "tag-id-web"]
-    assert resolver_body["annotation_type"] == "duration"
-    assert resolver_body["measurement_spec"]["measurement_type"] == "duration"
-
-
-def test_run_adopts_existing_attention_def_without_creating(monkeypatch):
-    """Existing-user safety: when a matching 'Attention' def already exists,
-    the resolver ADOPTS it (returns its id) and does NOT create a second one
-    — no duplicate, no mutation — even though the create_extra enrichment is
-    supplied. The change must only affect fresh creates."""
-    from fulcra_attention.definition_spec import attention_resolver_spec
-    from fulcra_attention.state import State
-
-    attention_state = State()
-    saved: list = []
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
-    )
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin._state_save", lambda s: saved.append(s),
-    )
-    monkeypatch.setattr(
-        "fulcra_collect.credentials.has_user_secret", lambda key: True,
-    )
-
-    existing_def = {
-        "id": "existing-attention-def",
-        "name": "Attention",
-        **attention_resolver_spec(),
-    }
-    create_calls: list = []
-
-    class _FakeClient:
-        def list_definitions(self, *, name):
-            return [existing_def] if name == "Attention" else []
-        def resolve_tag(self, name):  # should still work but be irrelevant
-            return f"tag-{name}"
-        def create_definition(self, *, name, **spec):
-            create_calls.append({"name": name, **spec})
-            return {"id": "should-not-happen"}
-
-    ctx = _make_ctx(factory=lambda: _FakeClient())
-
-    class _PluginState:
-        definition_id = None
-        override_definition_name = None
-    ctx.state = _PluginState()
-
-    PLUGIN.run(ctx)
-
-    # Adopted the existing def, created nothing.
-    assert attention_state.attention_definition_id == "existing-attention-def"
-    assert create_calls == []
-
-
-def test_run_reports_recent_activity_present(monkeypatch):
-    """A watermark within the last 24h counts as recent activity."""
-    from fulcra_attention.state import State
-
-    now = datetime.now(timezone.utc)
-    recent = (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
-    attention_state = State(
-        attention_definition_id="def-1",
-        watermarks={"fulcra-attention-chrome/0.1.0": recent},
-    )
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
-    )
-    monkeypatch.setattr(
-        "fulcra_collect.credentials.has_user_secret", lambda key: True,
-    )
-
+def test_run_emits_a_single_informational_message():
+    """run() does no collection — it emits one ok=True progress event that
+    tells the user to install the extension and sign in via the browser."""
     sink: list = []
     PLUGIN.run(_make_ctx(emit_sink=sink))
-    rec_check = next(e for e in sink if e.get("check") == "recent_activity")
-    assert rec_check["ok"] is True
-    assert "fulcra-attention-chrome/0.1.0" in rec_check["detail"]
+
+    assert len(sink) == 1
+    event = sink[0]
+    assert event["ok"] is True
+    detail = event["detail"]
+    assert "browser" in detail.lower()
+    assert "packages/attention/chrome/dist" in detail
 
 
-def test_run_reports_recent_activity_stale(monkeypatch):
-    """All watermarks older than 24h → recent_activity check ok=False."""
-    from fulcra_attention.state import State
-
-    long_ago = "2024-01-01T00:00:00Z"
-    attention_state = State(
-        attention_definition_id="def-1",
-        watermarks={"old-client": long_ago},
-    )
-    monkeypatch.setattr(
-        "fulcra_attention.collect_plugin.load_state", lambda: attention_state,
-    )
-    monkeypatch.setattr(
-        "fulcra_collect.credentials.has_user_secret", lambda key: True,
-    )
-
-    sink: list = []
-    PLUGIN.run(_make_ctx(emit_sink=sink))
-    rec_check = next(e for e in sink if e.get("check") == "recent_activity")
-    assert rec_check["ok"] is False
+def test_run_does_not_touch_credentials_or_fulcra():
+    """The pointer run() must not reach for a Fulcra client or keychain —
+    the RunContext here has no client factory, so any such access would
+    raise. A clean run proves it's purely informational."""
+    ctx = _make_ctx()
+    # _fulcra_client_factory is None by default; a relay sanity check would
+    # have called ctx.resolved_definition_id and blown up here.
+    PLUGIN.run(ctx)

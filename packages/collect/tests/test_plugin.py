@@ -96,20 +96,21 @@ def test_valid_plugins_of_each_kind():
     assert man.kind == "manual"
 
 
-def test_attention_is_the_only_manual_live_continuous_plugin() -> None:
-    """Lock in the SP3 Task 1 invariant: the kind->collect_mode mapping
-    is straightforward (manual->historical, scheduled->live_polled,
-    service->live_continuous) EXCEPT for the Attention extension which
-    is kind='manual' + collect_mode='live_continuous' because the
-    data flow is push-based via the browser extension (run() is a
-    no-op status check).
+def test_kind_to_collect_mode_mapping_has_no_deviations() -> None:
+    """The kind->collect_mode mapping is now uniform across all bundled
+    plugins (manual->historical, scheduled->live_polled,
+    service->live_continuous).
 
-    If a future plugin author copies Attention's pattern without
-    realising it's a special case, this test fails — forcing them
-    to either justify a second case in the registry or fix their
-    plugin's metadata.
+    This used to carry one known deviation: the Attention extension was
+    kind='manual' + collect_mode='live_continuous' because the data flow
+    was push-based via the browser extension posting to the daemon. That
+    relay is retired — the extension is fully relayless now — so the
+    Attention entry is a plain manual/historical informational pointer
+    that follows the default mapping like everything else.
 
-    Originally a SP3 final-review minor that landed as a follow-up.
+    If a future plugin author deviates from the default mapping, this test
+    fails — forcing them to either justify the case in KNOWN_DEVIATIONS or
+    fix their plugin's metadata.
     """
     from fulcra_collect.registry import discover
 
@@ -118,9 +119,7 @@ def test_attention_is_the_only_manual_live_continuous_plugin() -> None:
         "scheduled": "live_polled",
         "service": "live_continuous",
     }
-    KNOWN_DEVIATIONS = {
-        "attention-relay": ("manual", "live_continuous"),
-    }
+    KNOWN_DEVIATIONS: dict[str, tuple[str, str]] = {}
 
     result = discover()
     deviations: dict[str, tuple[str, str]] = {}

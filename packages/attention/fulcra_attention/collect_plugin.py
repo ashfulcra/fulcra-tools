@@ -1,296 +1,78 @@
-"""fulcra-collect plugin: bookkeeping for the browser-extension ingest path.
+"""fulcra-collect plugin: an informational pointer to the browser extension.
 
-The browser extension used to POST events to a standalone HTTP relay on
-127.0.0.1:8771 that this plugin ran as a supervised service. That relay
-is gone — the daemon now hosts a `POST /api/extension/attention` route
-on its own stable port (default 9292), and the extension POSTs there
-directly. See packages/collect/fulcra_collect/web.py.
+The Fulcra Attention browser extension is now fully relayless. It signs in
+via its own browser-based device-flow OIDC and ingests events straight into
+the Fulcra API — it no longer posts to the Fulcra Collect daemon, and there
+is no longer a daemon-side relay route, pairing handshake, or shared
+extension-token.
 
-This plugin now exists for two reasons:
-1. It still owns the Attention definition / canonical_definition_name —
-   the daemon's definition-resolver wizard step needs a Plugin row to
-   bind to.
-2. It exposes a `manual` run() that the user can click in the UI to run
-   a sanity check (token configured? definition bound? extension has
-   posted recently?). It does not produce annotations; the extension
-   does that via the daemon route.
+So this plugin no longer does any work. It exists purely so Collect still
+surfaces an "Attention" entry in its plugin list: a signpost telling the
+user to install the Fulcra Attention browser extension and sign in via the
+browser. It declares no credentials, no setup steps, and no definition
+binding; its run() emits a single informational message.
+
+The rest of the `fulcra_attention` package (CLI / state / ingest /
+definition_spec) is intentionally left in place — retiring it is a later
+phase.
 """
 from __future__ import annotations
 
-from fulcra_collect.plugin import (
-    Credential, Plugin, RunContext, SetupStep,
+from fulcra_collect.plugin import Plugin, RunContext
+
+# Where the browser extension lives in this repo, and the built unpacked
+# output the user loads into their browser. Single-sourced here so the
+# run() message and the description can't drift.
+_EXTENSION_SOURCE_DIR = "packages/attention/chrome"
+_EXTENSION_BUILD_DIR = "packages/attention/chrome/dist"
+
+_POINTER_MESSAGE = (
+    "Attention is captured by the Fulcra Attention browser extension, which "
+    "signs in through your browser and sends data directly to Fulcra — there "
+    "is nothing to configure here in Fulcra Collect.\n\n"
+    "To start collecting attention data:\n"
+    f"1. Build the extension from {_EXTENSION_SOURCE_DIR} (the built, "
+    f"unpacked extension lands in {_EXTENSION_BUILD_DIR}).\n"
+    f"2. Load {_EXTENSION_BUILD_DIR} as an unpacked extension in a Chromium "
+    "browser (chrome://extensions → Developer mode → Load unpacked).\n"
+    "3. Open the extension and sign in via your browser.\n\n"
+    "The extension handles authentication and ingest on its own; the Fulcra "
+    "Collect daemon is not involved."
 )
-
-from .definition_spec import attention_create_extra, attention_resolver_spec
-from .state import DEFAULT_PATH
-from .state import load as _state_load
-from .state import save as _state_save
-
-# The Fulcra annotation definition shape for the Attention DurationAnnotation.
-# Passed to ctx.resolved_definition_id as the expected_spec so the shared
-# resolver can verify an adopted definition has the right structure, or create
-# a new one when none exists.
-#
-# DERIVED, not hand-maintained: this is the canonical create payload (built by
-# the same wire.duration_definition_payload the CLI bootstrap path uses)
-# projected onto exactly the keys _spec_matches compares (annotation_type +
-# measurement_spec). Single-sourcing it in definition_spec.py means the
-# resolver's match-spec can't silently drift from the CLI create payload's
-# measurement structure. See fulcra_attention/definition_spec.py.
-ATTENTION_SPEC: dict = attention_resolver_spec()
-
-
-def load_state():
-    return _state_load(DEFAULT_PATH)
-
-
-def _attention_create_extra(ctx: RunContext) -> dict | None:
-    """Build the resolver create_extra (canonical description + resolved
-    attention/web tag ids) so a wizard-onboarded user gets the SAME rich
-    Attention def the CLI bootstrap creates.
-
-    Resolves tag names through the daemon's own client — the adapter the
-    worker injects exposes ``resolve_tag(name)`` (BaseFulcraClient's tag
-    lookup). Returns None when no client/resolver is available (e.g. a
-    minimal fake in tests), so the resolver falls back to the historical
-    sparse create rather than crashing — the def still gets adopted-or-
-    created with the right structure, just without the enrichment.
-
-    create_extra is applied ONLY on a fresh create (never on adoption), so
-    a user who already has an "Attention" def is unaffected by this path.
-    """
-    factory = ctx._fulcra_client_factory
-    if factory is None:
-        return None
-    client = factory()
-    resolve_tag = getattr(client, "resolve_tag", None)
-    if resolve_tag is None:
-        return None
-    return attention_create_extra(resolve_tag)
 
 
 def run(ctx: RunContext) -> None:
-    """Sanity-check the attention pipeline without producing events.
+    """Emit a single informational message pointing at the browser extension.
 
-    The browser extension itself produces events via the daemon's
-    `/api/extension/attention` route. This callable verifies the user
-    has finished setup so the UI can show a green check (or red flag)
-    instead of nothing.
-
-    Reports three checks via ctx.progress():
-    - extension-token is in the user-level keychain
-    - attention definition is bound in this plugin's state
-    - state.watermarks has at least one entry within the last 24h
-      (i.e. the extension has actually posted something recently)
+    This plugin does no collection. The browser extension is relayless: it
+    authenticates and ingests directly against the Fulcra API. We surface a
+    one-line receipt in the dashboard so a user who clicks "Run now" gets a
+    clear answer rather than silence.
     """
-    from datetime import datetime, timedelta, timezone
-
-    # Check 1: extension-token in keychain
-    from fulcra_collect import credentials as _creds
-    has_token = _creds.has_user_secret("extension-token")
+    ctx.log.info("attention pointer: directing user to the browser extension")
     ctx.progress(
-        check="extension_token",
-        ok=has_token,
-        detail=(
-            "extension-token is set" if has_token
-            else "extension-token is missing — pair the extension in the wizard"
-        ),
+        check="browser_extension",
+        ok=True,
+        detail=_POINTER_MESSAGE,
     )
-
-    # Check 2: attention definition bound
-    state = load_state()
-    if not state.attention_definition_id:
-        # Try the shared resolver — it'll adopt an existing "Attention"
-        # definition on the account, or create one. Keeps the multi-machine
-        # dedup guarantee that bootstrap used to provide.
-        try:
-            def_id = ctx.resolved_definition_id(
-                ATTENTION_SPEC,
-                canonical_name="Attention",
-                create_extra=_attention_create_extra(ctx),
-            )
-            state.attention_definition_id = def_id
-            _state_save(state)
-            ctx.progress(check="definition_bound", ok=True,
-                         detail=f"resolved definition {def_id}")
-        except Exception as exc:
-            ctx.progress(
-                check="definition_bound", ok=False,
-                detail=f"could not resolve definition: {exc}",
-            )
-            return
-    else:
-        ctx.progress(
-            check="definition_bound", ok=True,
-            detail=f"definition bound: {state.attention_definition_id}",
-        )
-
-    # Check 3: extension has posted recently. We look at state.watermarks —
-    # the daemon's extension route updates them on every successful ingest.
-    # A watermark within the last 24h means "the extension is alive and
-    # connected" from this machine's perspective.
-    recent_cutoff = (
-        datetime.now(timezone.utc) - timedelta(hours=24)
-    ).isoformat().replace("+00:00", "Z")
-    recent_clients = [
-        c for c, w in state.watermarks.items() if w >= recent_cutoff
-    ]
-    if recent_clients:
-        ctx.progress(
-            check="recent_activity", ok=True,
-            detail=f"recent posts from: {', '.join(recent_clients)}",
-        )
-    else:
-        ctx.progress(
-            check="recent_activity", ok=False,
-            detail=(
-                "no posts in the last 24h — open a tab in the browser "
-                "extension and check it's pointed at the daemon"
-            ),
-        )
 
 
 PLUGIN = Plugin(
     id="attention-relay",
-    name="Attention",
-    # kind="manual" but collect_mode="live_continuous" — see SP3 mapping
-    # table. The run() callable is a no-op status check; the actual data
-    # flow is push-based from the browser extension to the daemon's
-    # webhook endpoint, which is functionally live_continuous despite the
-    # technical "manual" kind. This is the only plugin where collect_mode
-    # is NOT derivable from kind, and the explicit per-plugin declaration
-    # exists precisely so cases like this can be modelled correctly.
+    name="Attention (browser extension)",
+    # Manual + historical: there is no live data flow through the daemon
+    # anymore. The extension is relayless, so from Collect's perspective
+    # this entry is a static signpost, not a live collector. run() is a
+    # one-shot informational message, fired only when the user clicks it.
     kind="manual",
-    collect_mode="live_continuous",
+    collect_mode="historical",
     run=run,
     description=(
-        "Receives browser activity from the Fulcra Attention extension "
-        "(which tabs you have open, when you're idle in the browser) and "
-        "forwards it to Fulcra. The browser extension posts events directly "
-        "to the Fulcra Collect daemon's HTTP endpoint; this plugin owns the "
-        "Attention annotation definition and verifies the pipeline is "
-        "wired up."
+        "Attention is collected by the Fulcra Attention browser extension, "
+        "which signs in through your browser and sends data directly to "
+        "Fulcra. Install the extension (built from "
+        f"{_EXTENSION_SOURCE_DIR}, loaded unpacked from {_EXTENSION_BUILD_DIR}) "
+        "and sign in via the browser. Nothing to configure in Fulcra Collect."
     ),
     category="activity",
-    canonical_definition_name="Attention",
-    required_credentials=(
-        Credential(
-            key="extension-token",
-            label="Extension token",
-            # Account-scoped, not plugin-scoped: the pair route writes it via
-            # credentials.set_user_secret("extension-token", ...), the ingest
-            # route reads it via get_user_secret, and run() above checks it
-            # via has_user_secret. user_level=True keeps the credential-status
-            # endpoint reading from that same "fulcra-collect:user" store so it
-            # no longer reports a working token as "missing".
-            user_level=True,
-            help=(
-                "Shared secret the browser extension uses to authenticate "
-                "to the daemon. The pairing step in setup generates and "
-                "installs this automatically; manual entry is only needed "
-                "if the one-click handshake doesn't reach the extension."
-            ),
-        ),
-    ),
-    setup_steps=(
-        SetupStep(
-            kind="intro",
-            title="How Attention works",
-            body_md=(
-                "Attention captures what you're doing in your browser — which "
-                "tabs you have open, which one is active, when you're idle. "
-                "It runs in two pieces:\n\n"
-                "- A **browser extension** that watches your tabs and posts "
-                "events to the Fulcra Collect daemon.\n"
-                "- The **daemon's extension endpoint** (this plugin's "
-                "concern) receives those events and forwards them to Fulcra "
-                "as 'Attention' duration annotations.\n\n"
-                "The bearer token below is a shared secret between the "
-                "extension and the daemon — it stops random local pages from "
-                "posting bogus data. It's separate from your Fulcra account."
-            ),
-        ),
-        SetupStep(
-            kind="external_action",
-            title="Install the Fulcra Attention browser extension",
-            body_md=(
-                "**Fulcra Attention is in private beta** — there is no Chrome "
-                "Web Store listing yet, so installation is currently from "
-                "source. The steps below require the `fulcra-tools` repository "
-                "to be checked out on your machine.\n\n"
-                "**Chromium browsers only** (Chrome / Edge / Brave / Arc / "
-                "Vivaldi). Firefox + Safari aren't supported yet.\n\n"
-                "---\n\n"
-                "**If you already have the fulcra-tools source checked out**, "
-                "build the extension from your checkout:\n\n"
-                "```bash\n"
-                "# from the root of your fulcra-tools checkout:\n"
-                "cd packages/attention/chrome\n"
-                "npm install\n"
-                "npm run build\n"
-                "```\n\n"
-                "**If you don't have the source yet**, clone it first:\n\n"
-                "```bash\n"
-                "git clone https://github.com/ashfulcra/fulcra-tools.git "
-                "~/fulcra-tools\n"
-                "cd ~/fulcra-tools/packages/attention/chrome\n"
-                "npm install\n"
-                "npm run build\n"
-                "```\n\n"
-                "The built extension lands in "
-                "`packages/attention/chrome/dist/` — that is the folder you "
-                "will load in the next step.\n\n"
-                "---\n\n"
-                "**Load the built extension in your browser:**\n\n"
-                "- Open `chrome://extensions/` (or `edge://extensions/`, "
-                "`brave://extensions/` — copy/paste the URL; browsers block "
-                "direct navigation to these pages).\n"
-                "- Toggle **Developer mode** ON (top-right corner).\n"
-                "- Click **Load unpacked**.\n"
-                "- Select the **`packages/attention/chrome/dist/`** folder "
-                "(the *built* output, not the `chrome/` source folder — "
-                "loading `chrome/` directly will fail with "
-                "\"Manifest file is missing or unreadable\").\n\n"
-                "**Pin it.** Click the puzzle-piece toolbar icon and pin "
-                "**Fulcra Attention** so its status badge is always "
-                "visible.\n\n"
-                "---\n\n"
-                "*Once Fulcra Attention is on the Chrome Web Store, this step "
-                "becomes a single click. See release notes for updates.*"
-            ),
-        ),
-        SetupStep(
-            kind="extension_pair",
-            title="Pair the extension",
-            body_md=(
-                "Click the button below and the wizard will generate a fresh "
-                "shared secret, hand it to the installed Fulcra Attention "
-                "extension, and verify the handshake — no copy-paste, no "
-                "options page.\n\n"
-                "If the extension doesn't respond within a few seconds (not "
-                "installed yet, paused, or running in a different profile), "
-                "a manual paste-token fallback will appear so you can finish "
-                "setup the old way."
-            ),
-        ),
-        SetupStep(
-            kind="definition_picker",
-            title="Where should we write your attention data?",
-            body_md=(
-                "We can write to your existing 'Attention' annotation or "
-                "create a new one. Attention events are duration "
-                "annotations — one row per active-tab session."
-            ),
-            annotation_type="duration",
-        ),
-        SetupStep(
-            kind="done",
-            title="Attention is set",
-            body_md=(
-                "The daemon is now ready to receive extension events. "
-                "Browse around for a minute, then check the dashboard's "
-                "Recent activity — you should see Attention events landing."
-            ),
-        ),
-    ),
 )
