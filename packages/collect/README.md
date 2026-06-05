@@ -129,7 +129,6 @@ fulcra_collect/
         oauth.py            /api/oauth/{plugin_id}/{start,callback}
         annotations.py      /api/annotations  POST + DELETE  (quick-record write/undo)
         activity.py         /api/activity, /api/quick-record/{definitions,favorites}
-        extension.py        /api/extension/attention  (Chrome MV3 webhook endpoint)
         menubar.py          /api/menubar/{status,launch}
         docs.py             /api/docs/{name}        — serves repo-root docs/
 
@@ -201,10 +200,14 @@ shapes.
   has no hard-delete primitive for events). `GET/PUT
   /api/quick-record/favorites` round-trips the per-machine favorites
   file.
-* **Browser extension** (`routes/extension.py`) — `POST
-  /api/extension/attention` ingests events from the Fulcra Attention
-  Chrome extension. Throttles dashboard-feed entries; revalidates the
-  attention-def cache against the current account every 5 minutes.
+* **Browser extension** — there is no daemon-side route. The Fulcra
+  Attention Chrome extension is fully relayless: it signs in via an
+  Auth0 device flow and POSTs records directly to the Fulcra API
+  (`https://api.fulcradynamics.com/ingest/v1/record/batch`). Collect's
+  only involvement is the `attention-relay` pointer plugin, which tells
+  the user to install the extension and sign in via the browser. The
+  former `routes/extension.py` (`POST /api/extension/attention`) and the
+  `/api/plugin/attention-relay/pair` pairing route have been removed.
 * **Menubar** (`routes/menubar.py`) — status + relaunch endpoints so
   the dashboard can show "Launch menubar app" when the user has
   accidentally quit it.
