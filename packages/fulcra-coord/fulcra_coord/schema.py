@@ -287,6 +287,21 @@ def _normalize_workstreams(workstreams: Optional[list[str]]) -> list[str]:
     return sorted(seen)
 
 
+def _normalize_capabilities(capabilities: Optional[list[str]]) -> list[str]:
+    """Normalize declared capabilities to a sorted, unique list of non-empty
+    trimmed strings.
+
+    WHY: capabilities arrive from merged CLI sources (``--can-review`` sugar
+    plus repeatable ``--role`` values), so the same role can appear twice, with
+    stray whitespace, or as an empty token. Mirroring ``_normalize_workstreams``
+    means the reviewer-pool builder sees a clean, deterministically ordered set
+    and two records declaring the same roles in different orders compare equal.
+    A missing/empty input yields ``[]`` — the backward-compatible default for
+    agents that predate capability declaration."""
+    seen = {c.strip() for c in (capabilities or []) if c and c.strip()}
+    return sorted(seen)
+
+
 def make_presence(
     agent: str,
     *,
@@ -294,6 +309,7 @@ def make_presence(
     summary: str = "",
     last_seen: Optional[str] = None,
     session: Optional[str] = None,
+    capabilities: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Build a validated per-agent presence record (``presence/<slug>.json``).
 
@@ -305,7 +321,10 @@ def make_presence(
 
     ``last_seen`` defaults to now (ISO-Z) so the liveness model in
     views.build_presence can age it; ``session`` is an opaque optional key the
-    connecting surface may pass for traceability."""
+    connecting surface may pass for traceability. ``capabilities`` is the set of
+    declared roles (e.g. ``review``) that liveness-aware routing uses to build a
+    candidate pool; it defaults to ``[]`` so records from agents predating the
+    field stay valid and backward-compatible."""
     if last_seen is None:
         last_seen = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     return {
@@ -315,6 +334,7 @@ def make_presence(
         "summary": summary or "",
         "last_seen": last_seen,
         "session": session,
+        "capabilities": _normalize_capabilities(capabilities),
     }
 
 

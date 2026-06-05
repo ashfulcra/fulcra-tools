@@ -63,6 +63,28 @@ def _stale_hours(stale_hours: Optional[float] = None) -> float:
     return float(STALE_HOURS_DEFAULT)
 
 
+# Wall-clock grace (seconds) the resolver tolerates BEYOND the idle->stale
+# cutoff before treating an agent as below routing floor. A single missed
+# heartbeat or a laptop sleep/wake must not drop a reviewer. Expressed as an
+# ABSOLUTE duration (not a count of listener intervals) because listener
+# cadence differs per machine, while presence last_seen is bus-global, so the
+# grace evaluates identically on every machine (machine-agnostic invariant).
+PRESENCE_GRACE_SECONDS_DEFAULT = 1200.0  # 20 min
+
+
+def _presence_grace_seconds(grace: Optional[float] = None) -> float:
+    """Resolve the routing presence grace (seconds): explicit arg > env > default."""
+    if grace is not None:
+        return grace
+    raw = os.environ.get("FULCRA_COORD_PRESENCE_GRACE_SECONDS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(PRESENCE_GRACE_SECONDS_DEFAULT)
+
+
 def _inbox_age_days(age_days: Optional[float] = None) -> float:
     """Resolve the broadcast inbox age cutoff (days): explicit arg > env > default.
 
@@ -861,6 +883,73 @@ def presence_liveness(last_seen: str, now: Optional[datetime] = None,
     if age < threshold:
         return "idle"
     return "stale"
+
+
+_ROUTING_TIER = {"live": 0, "idle": 1}  # below-floor never appears here
+
+
+def _effective_routing_liveness(last_seen: str, now: datetime,
+                                grace_seconds: float,
+                                stale_hours: Optional[float] = None) -> Optional[str]:
+    """Recompute a candidate's liveness FOR ROUTING from bus-global last_seen.
+
+    Owned entirely by the resolver — it does NOT trust an aggregate's stored
+    `liveness` field, because a stale rebuild could under-report it (codex
+    tightening #1). One consistent judgment, identical on every machine:
+      * within the idle cutoff (presence_liveness live/idle bands) -> that band.
+      * within stale_cutoff + grace_seconds -> 'idle' (the wall-clock grace
+        window: one missed heartbeat / a sleep-wake must not drop a reviewer).
+      * beyond -> None (below floor).
+    A missing/unparseable last_seen ages to +inf -> below floor (None)."""
+    band = presence_liveness(last_seen, now, stale_hours)  # live | idle | stale
+    if band in ("live", "idle"):
+        return band
+    # band == "stale": apply the wall-clock grace before dropping below floor.
+    age_seconds = _age_hours(last_seen, now) * 3600.0
+    cutoff_seconds = _stale_hours(stale_hours) * 3600.0
+    if age_seconds < cutoff_seconds + grace_seconds:
+        return "idle"
+    return None
+
+
+def resolve_live_recipient(candidates: list[str], presence: list[dict[str, Any]],
+                           *, floor: str = "idle", now: Optional[datetime] = None,
+                           exclude: tuple[str, ...] = (),
+                           grace_seconds: Optional[float] = None) -> Optional[str]:
+    """Pick the live/idle candidate minimizing (effective_tier, preference_index).
+
+    Pure + deterministic given `presence` + `now` (both injectable -> testable).
+    `candidates` is in PREFERENCE order (canonical reviewer first). `floor`
+    'idle' accepts live OR idle; 'live' accepts live only. Below-floor and
+    `exclude`d agents are skipped. Returns None when nobody clears the floor
+    (the caller then escalates to the human — never parks on a dead agent).
+
+    Effective liveness is recomputed inside (via _effective_routing_liveness)
+    from each candidate's bus-global last_seen + the wall-clock grace, so the
+    stored aggregate tier is never trusted and the judgment is identical on
+    every machine (machine-agnostic invariant)."""
+    if now is None:
+        now = _now()
+    grace = _presence_grace_seconds(grace_seconds)
+    floor_rank = _ROUTING_TIER.get(floor, 1)  # default to idle floor
+    by_agent = {r.get("agent"): r for r in presence}
+    best: Optional[tuple[int, int, str]] = None
+    for idx, agent in enumerate(candidates):
+        if agent in exclude:
+            continue
+        rec = by_agent.get(agent)
+        if not rec:
+            continue  # never connected -> below floor
+        eff = _effective_routing_liveness(rec.get("last_seen", ""), now, grace)
+        if eff is None:
+            continue
+        tier = _ROUTING_TIER[eff]
+        if tier > floor_rank:
+            continue  # below the requested floor (e.g. idle when floor=live)
+        key = (tier, idx, agent)
+        if best is None or key < best:
+            best = key
+    return best[2] if best else None
 
 
 def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None,

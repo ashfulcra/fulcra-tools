@@ -59,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="One-line 'what I'm currently on'")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="Who is connecting (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--can-review", dest="can_review", action="store_true",
+                    help="Declare this agent can review PRs (sugar for --role review)")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Declare a capability/role (repeatable), e.g. --role review")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- workstream ----
@@ -96,7 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("tell",
                         help="Direct work at another agent: create a proposed "
                              "directive task assigned to them (sugar over start)")
-    sp.add_argument("assignee", metavar="ASSIGNEE", help="Agent to direct the work at")
+    # assignee is OPTIONAL: omit it and use --route-capability to resolve a LIVE
+    # recipient at send time instead of pinning a fixed agent.
+    sp.add_argument("assignee", metavar="ASSIGNEE", nargs="?", default=None,
+                    help="Agent to direct the work at (omit with --route-capability)")
     sp.add_argument("title", metavar="TITLE", help="Short durable task objective")
     sp.add_argument("--next", "-n", default="", metavar="NEXT_ACTION")
     sp.add_argument("--workstream", "-w", default="general", metavar="WS")
@@ -105,6 +112,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
                     help="Directing agent (owner); default: derived/env agent")
     sp.add_argument("--summary", "-s", default="", metavar="SUMMARY")
+    sp.add_argument("--route-capability", dest="route_capability", default=None, metavar="CAP",
+                    help="Resolve a LIVE recipient declaring CAP instead of a fixed assignee")
+    sp.add_argument("--floor", choices=["live", "idle"], default="idle",
+                    help="Minimum liveness for --route-capability resolution (default: idle)")
 
     # ---- broadcast ----
     sp = sub.add_parser("broadcast",
@@ -216,6 +227,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("task_id", metavar="TASK-ID")
     sp.add_argument("--reason", "-r", required=True, metavar="REASON")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
+
+    # ---- request-review ----
+    sp = sub.add_parser(
+        "request-review",
+        help="Route a PR review to a live/idle reviewer (capability-based, "
+             "self-healing); escalates to the human if nobody qualifies")
+    sp.add_argument("pr", metavar="PR", help="PR number/identifier")
+    sp.add_argument("--repo", required=True, metavar="REPO")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="The author (default: derived) — selects the canonical reviewer")
+    sp.add_argument("--candidate-list", dest="candidate_list", default=None, metavar="A,B,C",
+                    help="Explicit preference-ordered pool override (advanced)")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="Print ranked pool / tiers / excluded / winner / reason; write nothing")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- reconcile ----
     sub.add_parser("reconcile", help="Repair views and resolve pending operation markers")
@@ -429,6 +455,7 @@ COMMAND_MAP = {
     "pause": _cli.cmd_pause,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
+    "request-review": _cli.cmd_request_review,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "doctor": _cli.cmd_doctor,
