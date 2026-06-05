@@ -199,10 +199,68 @@ describe("ensureAttentionDefinitionAndTags", () => {
 
   test("throws UnauthorizedError on a 401 from the API", async () => {
     const storage = memStorage();
+    // 401 on every attempt (incl. the forced retry) → still unauthorized.
     const fetchFn = mockFetch(async () => new Response("", { status: 401 }));
+    const forcingToken = vi.fn(async (o?: { force?: boolean }) =>
+      (o?.force ? "FRESH" : "STALE") as string | null,
+    );
     await expect(
-      ensureAttentionDefinitionAndTags({ getToken, fetch: fetchFn, storage }),
+      ensureAttentionDefinitionAndTags({ getToken: forcingToken, fetch: fetchFn, storage }),
     ).rejects.toBeInstanceOf(UnauthorizedError);
+  });
+
+  test("force-refreshes once on a 401 and succeeds when the refreshed token works", async () => {
+    // Repro of Bug A2: the stored access token is fresh by the local clock but
+    // the server has REVOKED it, so the first Data API call 401s. A valid
+    // refresh token recovers in one forced refresh — ensure must retry, not nag
+    // the user to sign in again.
+    const storage = memStorage();
+    const getTok = vi.fn(async (o?: { force?: boolean }) =>
+      (o?.force ? "FRESH" : "STALE") as string | null,
+    );
+    // Every request 401s until the FRESH (forced) token is presented.
+    const seenAuth: string[] = [];
+    const fetchFn = mockFetch(async (input, init) => {
+      const auth = (init?.headers as Record<string, string> | undefined)?.[
+        "Authorization"
+      ];
+      seenAuth.push(auth ?? "");
+      if (auth !== "Bearer FRESH") return new Response("", { status: 401 });
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("/user/v1alpha1/tag/name/")) {
+        const name = decodeURIComponent(url.split("/tag/name/")[1]);
+        return tagRow(`id-${name}`);
+      }
+      if (url.endsWith("/user/v1alpha1/annotation") && method === "GET") {
+        return new Response(
+          JSON.stringify([
+            {
+              id: "def-existing",
+              name: "Attention",
+              annotation_type: "duration",
+              deleted_at: null,
+              created_at: "2026-01-01T00:00:00Z",
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+
+    const res = await ensureAttentionDefinitionAndTags({
+      getToken: getTok,
+      fetch: fetchFn,
+      storage,
+    });
+    expect(res.definitionId).toBe("def-existing");
+    expect(res.tagIds).toEqual(["id-attention", "id-web"]);
+    // A forced refresh was attempted exactly because of the 401.
+    expect(getTok).toHaveBeenCalledWith({ force: true });
+    // The very first request used the stale token, then a forced retry.
+    expect(seenAuth[0]).toBe("Bearer STALE");
+    expect(seenAuth).toContain("Bearer FRESH");
   });
 });
 

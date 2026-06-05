@@ -50,4 +50,18 @@ describe("SentSet", () => {
     await new SentSet({ storage }).add(["x"]);
     expect(await new SentSet({ storage }).has("x")).toBe(true);
   });
+
+  test("clear() empties the set so a previously-sent id can send again", async () => {
+    // Repro of Bug A1: after an account switch the dedup set must be cleared so
+    // a re-queued same source_id is not skipped against the OLD account's ids.
+    const storage = memStorage();
+    const s = new SentSet({ storage });
+    await s.add(["a", "b"]);
+    expect(await s.size()).toBe(2);
+    await s.clear();
+    expect(await s.size()).toBe(0);
+    expect(await s.has("a")).toBe(false);
+    // A fresh instance over the same storage also sees it cleared.
+    expect(await new SentSet({ storage }).has("b")).toBe(false);
+  });
 });
