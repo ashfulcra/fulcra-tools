@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "ash", email = "redacted@users.noreply.github.com"}]
 dependencies = [
-    "click>=8.1",
     "httpx>=0.27",
     # Shared Fulcra API client (sibling package in this monorepo).
     "fulcra-common",
@@ -31,9 +30,6 @@ dev = [
     "pytest-mock>=3.12",
     "ruff>=0.5",
 ]
-
-[project.scripts]
-fulcra-attention = "fulcra_attention.cli:cli"
 
 [project.entry-points."fulcra_collect.plugins"]
 attention-relay = "fulcra_attention.collect_plugin:PLUGIN"
