@@ -1,7 +1,13 @@
 // chrome/tests/backfill.test.ts
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Bug A3: backfill runs in the wizard (page) context, so it must NOT flush
+// the outbox in-context — it asks the SW to flush via requestFlush().
+vi.mock("../src/flushRequest", () => ({ requestFlush: vi.fn() }));
+
 import { backfillHistory, BACKFILL_CLIENT } from "../src/wizard/backfill";
 import { loadOutbox, saveIgnoreList, saveCategoryMap } from "../src/storage";
+import { requestFlush } from "../src/flushRequest";
 import type { DomainGroup } from "../src/wizard/history";
 
 const origFetch = globalThis.fetch;
@@ -9,6 +15,7 @@ const origFetch = globalThis.fetch;
 beforeEach(async () => {
   await chrome.storage.local.clear();
   await chrome.storage.sync.clear();
+  vi.mocked(requestFlush).mockClear();
   (chrome.identity.getProfileUserInfo as unknown as ReturnType<typeof vi.fn>).mockImplementation(
     (_o: chrome.identity.ProfileDetails, cb: (info: chrome.identity.UserInfo) => void) => cb({ email: "", id: "" }),
   );
@@ -88,24 +95,11 @@ describe("backfillHistory", () => {
     expect(ob).toHaveLength(3);
   });
 
-  test("returns after queueing — does not block on the outbox flush", async () => {
-    // Regression: the wizard's backfill step froze at 100% because
-    // backfillHistory awaited flushOutbox(), which POSTs the queued batch
-    // to Fulcra Cloud. A valid relayless token + resolved-attention cache
-    // are seeded so flushOutbox does NOT early-return, and fetch is stubbed
-    // to never resolve (the ingest POST hangs). If backfillHistory awaited
-    // the flush, the line below would hang forever and the test would time out.
-    await chrome.storage.local.set({
-      relaylessTokens: {
-        accessToken: "ACCESS",
-        refreshToken: "REFRESH",
-        expiresAt: Date.now() + 3_600_000,
-      },
-      relaylessResolvedAttention: {
-        definitionId: "def-1",
-        tagIds: ["tag-attn", "tag-web"],
-      },
-    });
+  test("returns after queueing — asks the SW to flush, does not flush in-context", async () => {
+    // Bug A3: backfill runs in the wizard (page) context. It must NOT flush
+    // the outbox itself (a concurrent cross-context flush re-POSTs the same
+    // snapshot). It queues the events, then fire-and-forget asks the SW to
+    // flush via requestFlush() and returns immediately so the wizard advances.
     globalThis.fetch = vi.fn(() => new Promise<Response>(() => {})) as typeof fetch;
     const groups = [fakeGroup("example.com", [
       { url: "https://example.com/a", lastVisitTime: 1 },
@@ -113,8 +107,9 @@ describe("backfillHistory", () => {
     ])];
     const count = await backfillHistory(groups);
     expect(count).toBe(2);
-    // Events are queued; the flush is still in flight (fetch never resolves).
+    // Events are queued and the SW was asked to flush them.
     expect(await loadOutbox()).toHaveLength(2);
+    expect(requestFlush).toHaveBeenCalledTimes(1);
   });
 
   test("reports progress via onProgress callback", async () => {

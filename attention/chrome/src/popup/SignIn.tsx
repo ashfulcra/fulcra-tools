@@ -21,7 +21,7 @@ import { TokenStore } from "../relayless/tokenStore";
 import { clearResolvedAttention } from "../relayless/ensureDefinition";
 import { SentSet } from "../relayless/sentSet";
 import { whoami } from "../relayless/whoami";
-import { flushOutbox } from "../outbox";
+import { requestFlush } from "../flushRequest";
 
 type Phase =
   | { kind: "loading" }
@@ -143,9 +143,11 @@ export function SignIn(props: SignInProps) {
         }
       }
       // A successful sign-in clears a stale "needs sign-in" banner and kicks
-      // a flush so queued events ship right away.
+      // a flush so queued events ship right away. The flush must run in the
+      // service-worker context (Bug A3), so ask the SW rather than flushing
+      // here in the popup.
       await chrome.storage.local.remove("lastIngestError");
-      void flushOutbox();
+      requestFlush();
       // Let an embedder (the onboarding wizard) advance past the auth step.
       // The popup leaves onSignedIn unset, so this is a no-op there.
       if (mounted.current && onSignedIn) onSignedIn();
