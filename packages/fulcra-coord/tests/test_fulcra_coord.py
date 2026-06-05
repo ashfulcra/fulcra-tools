@@ -17,6 +17,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8896,6 +8897,118 @@ class TestTaskSummaryDefensive(unittest.TestCase):
             task, new_status="active", by="a",
             dt=datetime(2026, 6, 3, tzinfo=timezone.utc))
         self.assertEqual(out["status"], "active")
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 1: resolve_live_recipient
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceGraceSeconds(unittest.TestCase):
+    def test_presence_grace_seconds_default(self):
+        from fulcra_coord import views
+        os.environ.pop("FULCRA_COORD_PRESENCE_GRACE_SECONDS", None)
+        self.assertEqual(views._presence_grace_seconds(), 1200.0)
+
+    def test_presence_grace_seconds_env_override(self):
+        from fulcra_coord import views
+        os.environ["FULCRA_COORD_PRESENCE_GRACE_SECONDS"] = "300"
+        try:
+            self.assertEqual(views._presence_grace_seconds(), 300.0)
+        finally:
+            os.environ.pop("FULCRA_COORD_PRESENCE_GRACE_SECONDS", None)
+
+    def test_presence_grace_seconds_bad_value_falls_back(self):
+        from fulcra_coord import views
+        os.environ["FULCRA_COORD_PRESENCE_GRACE_SECONDS"] = "not-a-number"
+        try:
+            self.assertEqual(views._presence_grace_seconds(), 1200.0)
+        finally:
+            os.environ.pop("FULCRA_COORD_PRESENCE_GRACE_SECONDS", None)
+
+
+class TestResolveLiveRecipient(unittest.TestCase):
+    NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _rec(self, agent, minutes_ago, liveness="stale", caps=None):
+        # liveness is DELIBERATELY wrong/stale here to prove the resolver
+        # recomputes from last_seen and ignores the stored field.
+        ls = (self.NOW - timedelta(minutes=minutes_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        r = {"agent": agent, "last_seen": ls, "liveness": liveness}
+        if caps is not None:
+            r["capabilities"] = caps
+        return r
+
+    def test_effective_liveness_recomputed_from_last_seen_not_stored_tier(self):
+        from fulcra_coord import views
+        # Aggregate says 'stale', but last_seen is 90 min old -> within
+        # stale_cutoff (2h) so effectively idle -> qualifies at floor=idle.
+        presence = [self._rec("a", 90, liveness="stale")]
+        self.assertEqual(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW), "a")
+
+    def test_grace_window_keeps_just_stale_agent_eligible(self):
+        from fulcra_coord import views
+        # 2h10m old: past the 2h idle->stale cutoff but within 2h + 1200s grace.
+        presence = [self._rec("a", 130)]
+        self.assertEqual(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW), "a")
+
+    def test_beyond_grace_is_below_floor_returns_none(self):
+        from fulcra_coord import views
+        # 2h21m old: past 2h + 1200s (20m) grace -> below floor.
+        presence = [self._rec("a", 141)]
+        self.assertIsNone(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW))
+
+    def test_tier_dominates_preference_live_noncanonical_beats_idle_canonical(self):
+        from fulcra_coord import views
+        # canonical 'canon' listed first but idle (90m); 'other' second but live.
+        presence = [self._rec("canon", 90), self._rec("other", 10)]
+        self.assertEqual(
+            views.resolve_live_recipient(["canon", "other"], presence, floor="idle", now=self.NOW),
+            "other")
+
+    def test_preference_breaks_ties_within_same_tier(self):
+        from fulcra_coord import views
+        presence = [self._rec("first", 10), self._rec("second", 5)]  # both live
+        self.assertEqual(
+            views.resolve_live_recipient(["first", "second"], presence, floor="idle", now=self.NOW),
+            "first")
+
+    def test_floor_live_excludes_idle(self):
+        from fulcra_coord import views
+        presence = [self._rec("a", 90)]  # idle
+        self.assertIsNone(
+            views.resolve_live_recipient(["a"], presence, floor="live", now=self.NOW))
+        self.assertEqual(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW), "a")
+
+    def test_exclude_skips_tried(self):
+        from fulcra_coord import views
+        presence = [self._rec("a", 10), self._rec("b", 10)]
+        self.assertEqual(
+            views.resolve_live_recipient(["a", "b"], presence, floor="idle", now=self.NOW,
+                                         exclude=("a",)), "b")
+
+    def test_empty_candidates_returns_none(self):
+        from fulcra_coord import views
+        self.assertIsNone(
+            views.resolve_live_recipient([], [], floor="idle", now=self.NOW))
+
+    def test_all_below_floor_returns_none(self):
+        from fulcra_coord import views
+        presence = [self._rec("a", 200), self._rec("b", 300)]
+        self.assertIsNone(
+            views.resolve_live_recipient(["a", "b"], presence, floor="idle", now=self.NOW))
+
+    def test_candidate_missing_from_presence_is_below_floor(self):
+        from fulcra_coord import views
+        # canonical seed that never connected: no presence record -> skipped.
+        presence = [self._rec("b", 10)]
+        self.assertEqual(
+            views.resolve_live_recipient(["a", "b"], presence, floor="idle", now=self.NOW), "b")
 
 
 # ---------------------------------------------------------------------------
