@@ -10,6 +10,33 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.7.0] — Liveness-Aware Reviewer Routing
+
+**Why:** PR-review directives were routed to a FIXED reviewer (canonical, or a
+configured #devops fallback) regardless of whether that agent was online. PRs
+sat unreviewed in a stale fallback's inbox while a capable reviewer was idle the
+whole time, and nothing re-routed a directive once its assignee went dark.
+
+**What:**
+- `request-review <pr> --repo <repo>` routes a PR review to a reviewer presence
+  says is actually live/idle (capability-based pool: canonical reviewer seed +
+  agents that declared `--can-review`), tagging the directive `kind:review` and
+  recording a `routed` event. `--dry-run` shows the ranked pool/tiers/winner.
+- `connect --can-review` / `--role` declare an agent's capabilities on its
+  presence record (default `[]`, backward compatible).
+- `reconcile` now sweeps stalled `kind:review` directives: re-routes a never-
+  acted review whose assignee fell below liveness floor (P1 15m / P2 30m,
+  env-overridable; cap 2; then escalate to the human), and freezes one the
+  assignee explicitly accepted, escalating only after a long stall.
+- `tell --route-capability R [--floor live|idle]` exposes the underlying
+  route-to-live primitive for any directive.
+- Escalation (no live reviewer) lands on the human's plate via the existing
+  `block --on-user` / needs:human surface. New env knobs:
+  `FULCRA_COORD_PRESENCE_GRACE_SECONDS` (1200), `…REVIEW_REROUTE_MINUTES_P1/P2`
+  (15/30), `…REVIEW_REROUTE_MAX` (2), `…ACCEPTED_STALL_HOURS` (2).
+
+---
+
 ## [0.6.0] — Operator Digest
 
 **Why:** the human surface was pull-only — you saw "what's blocked on me" / "what
