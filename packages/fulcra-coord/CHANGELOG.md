@@ -10,6 +10,32 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased]
+
+**Why:** Codex's durable inbox listener only got installed if an operator
+remembered to run `install-listener` by hand, so a fresh machine (or one whose
+LaunchAgent got unloaded) silently stopped noticing directed work. There was no
+single idempotent "make Codex coordination boring" entry point to heal it.
+
+**What:**
+- `ensure-codex-watch` composes the previously-separate steps — `install-codex`
+  hooks, the per-agent `install-listener`, an optional best-effort
+  `launchctl load`, and an optional presence refresh — into one idempotent
+  command that is safe to run on every Codex SessionStart. The Codex
+  `SessionStart` hook now invokes it backgrounded + silenced, so a missing
+  listener self-heals at app start without blocking the UI. Flags:
+  `--agent`, `--set-identity`, `--no-connect`, `--can-review`/`--role`,
+  `--interval-min`, `--no-load`, `--dry-run`, plus target-dir overrides.
+- `connect` now PRESERVES an agent's previously-declared capabilities when
+  called with no `--role`/`--can-review`. The backgrounded SessionStart
+  `connect` runs without role flags, so before this it would have wiped a
+  Codex agent's `review` capability on every app start — silently shrinking the
+  liveness-aware reviewer pool. Explicit roles still replace as before.
+- The Codex `SessionStart` script now uses a `codex:*` fallback identity
+  (instead of `claude-code:*`) when the CLI can't resolve one pre-handshake.
+
+---
+
 ## [0.9.1] — `remote.list_files` normalizes the real CLI output to clean paths
 
 **Why:** `remote.list_files(prefix)` returned the raw `fulcra file list` display
@@ -215,7 +241,6 @@ end-to-end `reconcile` regression test that archives a locally-cached terminal
 task and asserts it does not reappear in the rebuilt summaries.
 
 ---
-
 ## [0.7.0] — Liveness-Aware Reviewer Routing
 
 **Why:** PR-review directives were routed to a FIXED reviewer (canonical, or a
