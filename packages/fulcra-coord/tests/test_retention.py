@@ -203,6 +203,9 @@ class TestArchiveTask(_FakeBus):
 
     def test_idempotent_already_archived_is_noop(self):
         t = self._task()
+        # Seed the hot copy so the FIRST call is a legitimate move (not a
+        # stale-cache phantom, which the B2 guard now correctly skips).
+        self._put("/coordination/tasks/t-1.json", t)
         self.assertTrue(cli._archive_task(t, backend=self.backend))  # first
         self.assertTrue(cli._archive_task(t, backend=self.backend))  # second: no-op, still True
         self.assertTrue(self._exists("/coordination/archive/tasks/2026-05/t-1.json"))
@@ -241,6 +244,37 @@ class TestArchiveTask(_FakeBus):
         self.assertTrue(cli._archive_task(t, backend=self.backend))
         self.assertIsNone(cache.read_cached_task("t-1"),
                           "archived task must be evicted from the local cache")
+
+    def test_stale_cache_phantom_not_archived(self):
+        # B2: a task that exists ONLY in this host's stale LOCAL cache (deleted
+        # remotely by another host, never archived here) must NOT be uploaded as
+        # a phantom archive body+shard. _archive_task must require a positive
+        # stat of the hot tasks/<id>.json before the move, like the reroute
+        # sweep's `if fresh is None: continue` guard. The phantom is skipped and
+        # evicted from the local cache so it stops getting reloaded.
+        from fulcra_coord import cache
+        t = self._task()
+        # NO hot remote copy (self._put NOT called) and NO archive copy: pure
+        # stale-cache phantom.
+        cache.write_cached_task(t)
+        ok = cli._archive_task(t, backend=self.backend)
+        self.assertFalse(ok, "phantom (no hot copy) must not report a successful move")
+        self.assertFalse(self._exists("/coordination/archive/tasks/2026-05/t-1.json"),
+                         "no phantom archive body should be written")
+        self.assertFalse(self._exists("/coordination/archive/index/t-1.json"),
+                         "no phantom shard should be written")
+        self.assertIsNone(cache.read_cached_task("t-1"),
+                          "the stale-cache phantom must be evicted so it stops reloading")
+
+    def test_already_archived_with_hot_copy_still_finishes(self):
+        # B2 regression guard: the idempotent / crash-recovery path (archive body
+        # already present) must STILL complete the move when the hot copy exists.
+        t = self._task()
+        self._put("/coordination/tasks/t-1.json", t)
+        self.assertTrue(cli._archive_task(t, backend=self.backend))  # first move
+        # Re-archiving an already-archived id (hot copy now gone, archive present)
+        # is a no-op that still returns True.
+        self.assertTrue(cli._archive_task(t, backend=self.backend))
 
 
 class TestIndexShards(_FakeBus):
