@@ -6923,10 +6923,10 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_8_0(self):
-        # Bus retention / archival shipped as the 0.8.0 minor.
+    def test_version_is_0_8_1(self):
+        # 0.8.1: build_search_index no longer KeyErrors on a title-less task.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.8.0")
+        self.assertEqual(__version__, "0.8.1")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
