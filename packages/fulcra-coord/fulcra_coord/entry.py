@@ -347,6 +347,34 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--uninstall", action="store_true", help="Remove the listener")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
 
+    # ---- ensure-codex-watch ----
+    sp = sub.add_parser("ensure-codex-watch",
+                        help="Idempotently arm Codex hooks + per-agent inbox listener; "
+                             "safe to run at every Codex SessionStart")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Codex agent to arm (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--set-identity", action="store_true",
+                    help="Persist --agent as this cwd's Fulcra identity")
+    sp.add_argument("--can-review", dest="can_review", action="store_true",
+                    help="Declare this Codex agent can review PRs")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Declare a capability/role (repeatable), e.g. --role review")
+    sp.add_argument("--summary", "-s", default="", metavar="SUMMARY",
+                    help="One-line presence summary to publish unless --no-connect")
+    sp.add_argument("--no-connect", action="store_true",
+                    help="Do not refresh presence; only ensure hooks/listener")
+    sp.add_argument("--interval-min", dest="interval_min", type=int, default=10,
+                    metavar="N", help="Listener poll interval in minutes (default: 10)")
+    sp.add_argument("--codex-target-dir", dest="codex_target_dir", default=None,
+                    metavar="DIR", help="Override Codex config dir (default: ~/.codex)")
+    sp.add_argument("--listener-target-dir", dest="listener_target_dir", default=None,
+                    metavar="DIR", help="Override LaunchAgents/cron target dir")
+    sp.add_argument("--logs-dir", dest="logs_dir", default=None, metavar="DIR",
+                    help="Override listener stdout/stderr log directory")
+    sp.add_argument("--load", action=argparse.BooleanOptionalAction, default=True,
+                    help="Best-effort launchctl load on macOS after writing plist (default: true)")
+    sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+
     # ---- notify-inbox ----
     sp = sub.add_parser("notify-inbox",
                         help="Poll the inbox for an agent and surface+notify if "
@@ -481,6 +509,7 @@ COMMAND_MAP = {
     "install-openclaw": _cli.cmd_install_openclaw,
     "install-heartbeat": _cli.cmd_install_heartbeat,
     "install-listener": _cli.cmd_install_listener,
+    "ensure-codex-watch": _cli.cmd_ensure_codex_watch,
     "notify-inbox": _cli.cmd_notify_inbox,
     "install-codex": _cli.cmd_install_codex,
     "identity": _cli.cmd_identity,
