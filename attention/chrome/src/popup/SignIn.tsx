@@ -19,6 +19,7 @@ import { useEffect, useRef, useState } from "react";
 import { startDeviceSignIn } from "../relayless/signIn";
 import { TokenStore } from "../relayless/tokenStore";
 import { clearResolvedAttention } from "../relayless/ensureDefinition";
+import { SentSet } from "../relayless/sentSet";
 import { whoami } from "../relayless/whoami";
 import { flushOutbox } from "../outbox";
 
@@ -40,6 +41,10 @@ export interface SignInProps {
   openUrl?: (url: string) => void;
   /** Clear the resolved-attention cache on sign-out. */
   clearResolved?: () => Promise<void>;
+  /** Clear the client-side dedup set (relaylessSentIds) on sign-out, so a
+   * re-queued source_id from the prior account isn't skipped against the new
+   * account's definition (Bug A1). Defaults to clearing the real SentSet. */
+  clearSentSet?: () => Promise<void>;
   /**
    * Called when the user is signed in (either freshly, after the device
    * flow completes, or because a valid token already existed on mount).
@@ -66,6 +71,7 @@ export function SignIn(props: SignInProps) {
   const resolveLabel = props.resolveLabel ?? defaultResolveLabel;
   const openUrl = props.openUrl ?? defaultOpenUrl;
   const clearResolved = props.clearResolved ?? clearResolvedDefault;
+  const clearSentSet = props.clearSentSet ?? clearSentSetDefault;
   const onSignedIn = props.onSignedIn;
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -152,6 +158,10 @@ export function SignIn(props: SignInProps) {
   async function signOut(): Promise<void> {
     await tokenStore.clear();
     await clearResolved();
+    // Clear the client-side dedup set too: source_id omits account/definition,
+    // so a re-queued same url+second event from a prior account would be
+    // skipped against the new account otherwise (data loss). Bug A1.
+    await clearSentSet();
     // Re-assert needs-sign-in so the banner routes the user back here.
     await chrome.storage.local.set({
       lastIngestError: { kind: "unauthorized", at: Date.now() },
@@ -234,6 +244,11 @@ function clearResolvedDefaultImpl(): Promise<void> {
 // Bound default so the prop can override it in tests without importing the
 // chrome storage default eagerly at module init.
 const clearResolvedDefault = clearResolvedDefaultImpl;
+
+function clearSentSetDefaultImpl(): Promise<void> {
+  return new SentSet().clear();
+}
+const clearSentSetDefault = clearSentSetDefaultImpl;
 
 function errorMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) {

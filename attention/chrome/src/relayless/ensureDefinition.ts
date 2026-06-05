@@ -284,6 +284,10 @@ export async function clearResolvedAttention(
 interface ApiCtx {
   fetchFn: FetchFn;
   token: string;
+  /** Force-refresh the access token (post-401). Mirrors relaylessSender's
+   * getToken({force:true}) so a server-revoked-but-locally-fresh token can
+   * recover in one refresh instead of surfacing needs-sign-in. */
+  getToken: (opts?: { force?: boolean }) => Promise<string | null>;
 }
 
 /** The injected (or default extension-local) storage area for the cache. */
@@ -297,7 +301,38 @@ async function apiCtx(opts: EnsureOpts): Promise<ApiCtx> {
   const fetchFn = opts.fetch ?? ((...a: Parameters<FetchFn>) => fetch(...a));
   const token = await opts.getToken();
   if (!token) throw new UnauthorizedError("not signed in");
-  return { fetchFn, token };
+  return { fetchFn, token, getToken: opts.getToken };
+}
+
+/**
+ * Authenticated fetch with single force-refresh-retry on a 401 — the
+ * definition-resolution mirror of relaylessSender.sendBatch's posture. The
+ * caller supplies the request via `init` WITHOUT an Authorization header; this
+ * injects `Bearer <ctx.token>`. On a 401 it calls ctx.getToken({force:true}),
+ * swaps the fresh token into ctx (so subsequent requests reuse it), and
+ * retries the request ONCE. A second 401 (or a forced refresh that yields no
+ * token) means the refresh grant is dead → the response is returned for the
+ * caller's assertOk to raise UnauthorizedError.
+ */
+async function authedFetch(
+  ctx: ApiCtx,
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const withAuth = (token: string): RequestInit => ({
+    ...init,
+    headers: { ...(init.headers as Record<string, string>), ...authHeaders(token) },
+  });
+
+  let resp = await ctx.fetchFn(url, withAuth(ctx.token));
+  if (resp.status !== 401) return resp;
+
+  // Server rejected the (locally-fresh) token. Force a refresh and retry once.
+  const fresh = await ctx.getToken({ force: true });
+  if (!fresh) return resp; // refresh failed → keep the 401 for assertOk.
+  ctx.token = fresh;
+  resp = await ctx.fetchFn(url, withAuth(fresh));
+  return resp;
 }
 
 /** Resolve the canonical Attention tag ids, in ATTENTION_DEFINITION_TAG_NAMES
@@ -358,9 +393,10 @@ function assertOk(resp: Response, what: string): void {
  */
 async function resolveTag(ctx: ApiCtx, name: string): Promise<string> {
   const path = encodeURIComponent(name);
-  const getResp = await ctx.fetchFn(
+  const getResp = await authedFetch(
+    ctx,
     `${API_BASE}/user/v1alpha1/tag/name/${path}`,
-    { method: "GET", headers: authHeaders(ctx.token) },
+    { method: "GET" },
   );
   if (getResp.status === 200) {
     const body = (await getResp.json()) as { id?: string };
@@ -369,9 +405,9 @@ async function resolveTag(ctx: ApiCtx, name: string): Promise<string> {
   }
   if (getResp.status === 401) throw new UnauthorizedError("tag lookup: 401");
   // Any non-200, non-401 (typically 404 "not found") → create it.
-  const postResp = await ctx.fetchFn(`${API_BASE}/user/v1alpha1/tag`, {
+  const postResp = await authedFetch(ctx, `${API_BASE}/user/v1alpha1/tag`, {
     method: "POST",
-    headers: { ...authHeaders(ctx.token), "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
   assertOk(postResp, `tag create for ${name}`);
@@ -402,9 +438,8 @@ async function findAttentionDefinition(ctx: ApiCtx): Promise<string | null> {
 async function findAttentionDefinitionRows(
   ctx: ApiCtx,
 ): Promise<DefinitionRow[]> {
-  const resp = await ctx.fetchFn(`${API_BASE}/user/v1alpha1/annotation`, {
+  const resp = await authedFetch(ctx, `${API_BASE}/user/v1alpha1/annotation`, {
     method: "GET",
-    headers: authHeaders(ctx.token),
   });
   assertOk(resp, "list annotation definitions");
   const rows = (await resp.json()) as DefinitionRow[];
@@ -430,9 +465,9 @@ async function createAttentionDefinition(
   tagIds: string[],
   name: string = ATTENTION_DEFINITION_NAME,
 ): Promise<string> {
-  const resp = await ctx.fetchFn(`${API_BASE}/user/v1alpha1/annotation`, {
+  const resp = await authedFetch(ctx, `${API_BASE}/user/v1alpha1/annotation`, {
     method: "POST",
-    headers: { ...authHeaders(ctx.token), "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(attentionCreatePayload(tagIds, name)),
   });
   assertOk(resp, "create annotation definition");

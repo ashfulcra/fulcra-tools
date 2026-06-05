@@ -70,4 +70,11 @@ export class SentSet {
   async size(): Promise<number> {
     return (await this.load()).length;
   }
+
+  /** Drop the entire sent-set. Used on sign-out / account switch so a
+   * re-queued source_id from a prior account is not skipped against the new
+   * account's definition (Bug A1: source_id omits account/definition). */
+  async clear(): Promise<void> {
+    await this.storage.remove(SENT_KEY);
+  }
 }
