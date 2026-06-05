@@ -992,6 +992,20 @@ class TestTryMerge(unittest.TestCase):
         self.assertIn("local note", summaries)
         self.assertIn("remote note", summaries)
 
+    def test_merge_preserves_nonstandard_kind_review_marker(self):
+        """kind:review is a membership marker, not the task's schema kind."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["tags"] = sorted(set(local_v["tags"] + ["kind:review"]))
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+
+        result = _try_merge(local_v, remote_v)
+
+        self.assertIsNotNone(result)
+        self.assertIn("kind:ops", result["tags"])
+        self.assertIn("kind:review", result["tags"])
+
     def test_merge_when_only_remote_changed_status(self):
         """Regression: no ConflictError when only REMOTE changed status.
 
@@ -9127,6 +9141,17 @@ class TestRoutingEvents(unittest.TestCase):
         self.assertEqual(routing.route_attempt_count(task), 2)
         self.assertEqual(routing.tried_agents(task), {"a", "b"})
 
+    def test_route_attempt_count_uses_cumulative_attempt_field(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=7, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=8, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:05:00.000000Z", route_id="r2")
+        task = self._task_with_events([e1, e2])
+        self.assertEqual(routing.route_attempt_count(task), 8)
+
     def test_current_route_none_when_no_route_events(self):
         from fulcra_coord import routing
         self.assertIsNone(routing.current_route(
@@ -9487,6 +9512,15 @@ class TestReviewClassification(unittest.TestCase):
         self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
                          "none")
 
+    def test_blocked_human_escalation_is_not_rerouted_again(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1", attempt=2)
+        t["status"] = "blocked"
+        t["assignee"] = "ash@fulcradynamics.com"
+        t["tags"] = sorted(set(t["tags"] + ["needs:human"]))
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "none")
+
 
 # ---------------------------------------------------------------------------
 # Liveness-aware reviewer routing — Task 5: sweep I/O wrapper
@@ -9529,7 +9563,7 @@ class TestReviewSweep(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._load_task", return_value=t), \
+             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
              patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         out = written["task"]
@@ -9551,10 +9585,12 @@ class TestReviewSweep(unittest.TestCase):
                "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                "capabilities": ["review"]}]}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._load_task", return_value=moved), \
+             patch("fulcra_coord.cli._cache_remote_task", return_value=moved), \
+             patch("fulcra_coord.cli._load_task", return_value=t) as lt, \
              patch("fulcra_coord.cli._write_task_and_views") as wtv:
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()  # another sweeper already moved it
+        lt.assert_not_called()  # the stale-observation check bypasses cache
 
     def test_sweep_ignores_non_review_tasks(self):
         from fulcra_coord.cli import _sweep_review_routes

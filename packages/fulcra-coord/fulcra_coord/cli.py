@@ -699,12 +699,16 @@ def _repair_merged_tags(
     the standard tags from the merged fields and keep non-standard tags from both
     sides, so membership markers like ``needs:human`` survive too.
     """
-    standard_prefixes = ("workstream:", "agent:", "kind:", "status:", "priority:")
+    def is_standard_tag(tag: str) -> bool:
+        if tag.startswith("kind:"):
+            return tag[5:] in schema.VALID_KINDS
+        return tag.startswith(("workstream:", "agent:", "status:", "priority:"))
+
     extra = [
         tag
         for task in (local, remote_task, merged)
         for tag in (task.get("tags") or [])
-        if not any(tag.startswith(prefix) for prefix in standard_prefixes)
+        if not is_standard_tag(tag)
     ]
     merged["tags"] = schema.build_tags(
         status=merged.get("status", ""),
@@ -2983,6 +2987,8 @@ def _classify_review(task, presence, now):
         return "none"
     if task.get("status") in ("done", "abandoned"):
         return "none"
+    if task.get("status") == "blocked" and "needs:human" in (task.get("tags") or []):
+        return "none"
     route = routing.current_route(task)
     if route is None:
         return "none"
@@ -3053,7 +3059,7 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None):
                 continue
             # verdict == "reroute": stale-observation check, then write.
             route = routing.current_route(task)
-            fresh = _load_task(task["id"], backend=backend)
+            fresh = _cache_remote_task(task["id"], backend=backend)
             if fresh is None:
                 continue
             fresh_route = routing.current_route(fresh)
