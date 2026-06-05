@@ -1158,6 +1158,82 @@ class TestRemoteRefreshSemantics(unittest.TestCase):
         self.assertEqual(cache.read_meta(task_path)["version_id"], "remote-v1")
 
 
+class TestLoadAllTasksTolerantOfIdlessBodies(unittest.TestCase):
+    """A2 — _load_all_tasks must not crash on an id-less cached body.
+
+    An older/imperfect bus can leave a cached task file whose JSON lacks an
+    ``id`` key. Building ``{t["id"]: t for t in cached}`` (and the remote-merge
+    ``task_map[t["id"]] = t``) with bracket access raises KeyError, which is
+    uncaught on the no-summaries-aggregate fallback path of
+    _load_summaries_for_rebuild -> _write_task_and_views, crashing EVERY write
+    command (create/update/done/tell/...). The load must skip the malformed body
+    and still surface the well-formed ones."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_idless_cache_file(self):
+        # list_cached_tasks() globs TASK-*.json and parses each; a file named like
+        # a task but whose body lacks "id" is exactly the imperfect-data case.
+        cache.ensure_dirs()
+        bad = cache.tasks_dir() / "TASK-idless.json"
+        bad.write_text(json.dumps({"status": "active", "title": "no id here"}))
+
+    def test_idless_cached_body_no_remote_index_does_not_crash(self):
+        from fulcra_coord.cli import _load_all_tasks
+        good = _sample_task()
+        cache.write_cached_task(good)
+        self._write_idless_cache_file()
+        # No remote index (download returns None) -> early return of `cached`,
+        # which is fine; but the next test exercises the dict-comp path. Here we
+        # at least confirm the cached list itself is loadable.
+        with patch("fulcra_coord.cli.remote.download_json", return_value=None):
+            tasks = _load_all_tasks(backend=["false"])
+        self.assertIn(good["id"], {t.get("id") for t in tasks})
+
+    def test_idless_cached_body_with_remote_index_does_not_crash(self):
+        from fulcra_coord.cli import _load_all_tasks
+        good = _sample_task()
+        cache.write_cached_task(good)
+        self._write_idless_cache_file()
+
+        def fake_download(path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                return {"active": [{"id": good["id"]}], "recent_done": []}
+            return None
+
+        with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download), \
+             patch("fulcra_coord.cli.remote.stat", return_value={"version_id": "v1"}):
+            tasks = _load_all_tasks(backend=["false"])
+
+        ids = {t.get("id") for t in tasks}
+        self.assertIn(good["id"], ids)   # well-formed task survives
+        self.assertNotIn(None, ids)      # the id-less body was skipped, not crashed on
+
+    def test_idless_remote_body_merge_does_not_crash(self):
+        # The second bracket-access (task_map[t["id"]] = t) on a remote body that
+        # came back without an id must also be tolerated.
+        from fulcra_coord.cli import _load_all_tasks
+        good = _sample_task()
+
+        def fake_download(path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                return {"active": [{"id": good["id"]}], "recent_done": []}
+            return None
+
+        # _cache_remote_task returns an id-less body for the indexed id.
+        with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download), \
+             patch("fulcra_coord.cli._cache_remote_task",
+                   return_value={"status": "active", "title": "no id"}):
+            tasks = _load_all_tasks(backend=["false"])
+        self.assertNotIn(None, {t.get("id") for t in tasks})
+
+
 # ---------------------------------------------------------------------------
 # Upload-failure propagation
 # ---------------------------------------------------------------------------
@@ -3604,6 +3680,57 @@ class TestReconcileStaleness(unittest.TestCase):
         climod.cmd_reconcile(types.SimpleNamespace(), backend=self.fake_backend)
         na = cache.read_cached_view("needs-attention")
         self.assertEqual(na["tasks"], [])
+
+
+class TestStaleClaimDetection(unittest.TestCase):
+    """A1 — the stale-claim scan must survive an id-less task body.
+
+    A real bus body with status==active + an expired claim but NO ``id`` field
+    (an imperfect/older write) used to raise KeyError out of the reconcile
+    stale-claim loop (bracket access ``t["id"]``). That KeyError was NOT caught
+    (the inner try only guards ValueError from fromisoformat) and ran BEFORE
+    build_all_views/upload — so the whole reconcile aborted and every heartbeat
+    tick failed. Same class as the build_search_index incident."""
+
+    def _expired_claim_task(self, *, with_id=True, status="active"):
+        from datetime import datetime, timedelta, timezone
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace(
+            "+00:00", "Z")
+        t = {"status": status, "claim": {"claim_expires_at": past}}
+        if with_id:
+            t["id"] = "TASK-good"
+        return t
+
+    def test_idless_active_expired_claim_does_not_raise(self):
+        from fulcra_coord import cli as climod
+        now = datetime.now(timezone.utc)
+        tasks = [self._expired_claim_task(with_id=False)]
+        # Must NOT raise KeyError on the missing id.
+        stale = climod._detect_stale_claims(tasks, now)
+        self.assertEqual(stale, [])  # id-less body contributes nothing
+
+    def test_good_tasks_still_detected_alongside_idless(self):
+        from fulcra_coord import cli as climod
+        now = datetime.now(timezone.utc)
+        tasks = [
+            self._expired_claim_task(with_id=False),   # the poison body
+            self._expired_claim_task(with_id=True),    # a well-formed stale claim
+        ]
+        stale = climod._detect_stale_claims(tasks, now)
+        self.assertEqual(stale, ["TASK-good"])
+
+    def test_non_active_expired_claim_ignored(self):
+        from fulcra_coord import cli as climod
+        now = datetime.now(timezone.utc)
+        t = self._expired_claim_task(status="done")
+        self.assertEqual(climod._detect_stale_claims([t], now), [])
+
+    def test_unparseable_expiry_does_not_raise(self):
+        from fulcra_coord import cli as climod
+        now = datetime.now(timezone.utc)
+        t = {"id": "TASK-x", "status": "active",
+             "claim": {"claim_expires_at": "not-a-date"}}
+        self.assertEqual(climod._detect_stale_claims([t], now), [])
 
 
 class TestInstallHeartbeat(unittest.TestCase):
@@ -6923,10 +7050,12 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_8_2(self):
-        # 0.8.2: hermetic test cache isolation (tests no longer pollute the bus).
+    def test_version_is_0_8_3(self):
+        # 0.8.3: reconcile/write paths survive imperfect bus data (id-less bodies,
+        # agent-less presence entries); review sweep is deadline-bounded; archive
+        # verifies the hot copy before moving.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.8.2")
+        self.assertEqual(__version__, "0.8.3")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
@@ -7801,6 +7930,36 @@ class TestPresenceCommand(_PresenceBackendCase):
         data = json.loads(out)
         self.assertEqual(data["view"], "presence")
         self.assertIn(me, [a["agent"] for a in data["agents"]])
+
+    def test_agentless_aggregate_entry_does_not_crash(self):
+        """A3 — cmd_presence must tolerate an agent-less aggregate entry.
+
+        build_presence carries records through verbatim and does NOT inject an
+        ``agent`` key, so an imperfect aggregate entry lacking ``agent`` made the
+        table render (f"... {a['agent']} [{a['liveness']}] ...") raise KeyError,
+        crashing the single ``presence`` command. The good entries must still
+        print."""
+        from fulcra_coord import remote
+        from fulcra_coord.cli import cmd_presence
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        # Seed the aggregate directly with one agent-less entry + one good entry.
+        agg = {
+            "schema": "fulcra.coordination.presence_view.v1",
+            "view": "presence",
+            "updated_at": now_iso,
+            "agents": [
+                {"workstreams": ["orphan"], "last_seen": now_iso},  # NO 'agent'
+                {"agent": "good:h:r", "workstreams": ["ok"], "last_seen": now_iso},
+            ],
+        }
+        path = remote.presence_view_path()
+        p = Path(self.fake_root) / path.lstrip("/")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(agg))
+        rc, out = self._run(cmd_presence, self._ns(format="table"))
+        self.assertEqual(rc, 0)
+        self.assertIn("good:h:r", out)  # the well-formed agent still renders
 
 
 class TestAgentsIncludesPresenceOnly(_PresenceBackendCase):
@@ -9622,6 +9781,69 @@ class TestReviewSweep(unittest.TestCase):
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()
         lt.assert_not_called()
+
+    def test_sweep_past_deadline_processes_nothing(self):
+        """B1 — the sweep is now deadline-bounded.
+
+        _sweep_review_routes loops O(review-directives) with a per-item network
+        fetch + potential full view-rebuild write and previously had NO time
+        check, so it could run past the reconcile ~90s deadline and starve the
+        retention pass (which DOES gate on deadline). With a deadline already in
+        the past it must process nothing (no reroute write) and not raise."""
+        import time
+        from fulcra_coord.cli import _sweep_review_routes
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
+               "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+               "capabilities": ["review"]}]}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.cli._write_task_and_views") as wtv:
+            # deadline already in the past -> the per-directive loop should break
+            # before doing any work.
+            _sweep_review_routes([t], backend=["false"], now=self.NOW,
+                                 deadline=time.monotonic() - 1)
+        wtv.assert_not_called()
+
+    def test_sweep_ample_deadline_behaves_as_before(self):
+        """B1 — with ample deadline the sweep still reroutes (no regression)."""
+        import time
+        from fulcra_coord.cli import _sweep_review_routes
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
+               "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+               "capabilities": ["review"]}]}
+        written = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            written["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
+            _sweep_review_routes([t], backend=["false"], now=self.NOW,
+                                 deadline=time.monotonic() + 60)
+        self.assertIn("task", written)  # reroute still happened
+
+    def test_sweep_deadline_optional_defaults_unbounded(self):
+        """B1 — deadline is optional; omitting it preserves the old behavior."""
+        from fulcra_coord.cli import _sweep_review_routes
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
+               "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+               "capabilities": ["review"]}]}
+        written = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            written["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
+            _sweep_review_routes([t], backend=["false"], now=self.NOW)
+        self.assertIn("task", written)
 
 
 # ---------------------------------------------------------------------------
