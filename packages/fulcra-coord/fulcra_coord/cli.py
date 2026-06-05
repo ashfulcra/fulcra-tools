@@ -139,7 +139,14 @@ def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]
     next_view = remote.download_json(remote.view_remote_path("next"), backend=backend)
     if next_view:
         remote_ids.update(t["id"] for t in next_view.get("tasks", []) if t.get("id"))
-    task_map: dict[str, dict[str, Any]] = {t["id"]: t for t in cached}
+    # Skip any id-less cached body (A2): an older/imperfect bus can leave a
+    # cached file whose JSON lacks "id". Bracket access here raised KeyError that
+    # propagated uncaught through _load_summaries_for_rebuild ->
+    # _write_task_and_views, crashing every write command. A body with no id has
+    # no stable key anyway, so dropping it is the correct, lossless choice.
+    task_map: dict[str, dict[str, Any]] = {
+        tid: t for t in cached if (tid := t.get("id"))
+    }
 
     # Fetch each remote task body CONCURRENTLY (PERF). Each fetch is one
     # independent `fulcra file download` subprocess (~1.3s) writing to a
@@ -166,8 +173,13 @@ def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]
                     t = fut.result()
                 except Exception:
                     t = None
+                # Same id-less guard as the cached seed above (A2): a remote
+                # body that came back without an id has no stable key and must
+                # not crash the merge.
                 if t:
-                    task_map[t["id"]] = t
+                    rid = t.get("id")
+                    if rid:
+                        task_map[rid] = t
 
     return list(task_map.values())
 
@@ -352,6 +364,15 @@ def _archive_task(task: dict[str, Any], *, backend: Optional[list[str]] = None) 
     upload, still ensure the original is deleted and the shard exists, so
     archiving an already-archived id (or finishing a crashed move) is a no-op.
 
+    PHANTOM GUARD (B2): require the HOT remote copy (tasks/<id>.json) to exist
+    before starting a move — UNLESS the archive body already exists (the
+    idempotent / crash-recovery finish). A task present ONLY in this host's stale
+    LOCAL cache (deleted remotely by another host, never archived here) would
+    otherwise be uploaded as a phantom archive body + shard. The reroute sweep
+    already guards this class with `if fresh is None: continue`; archive does the
+    same: skip the phantom AND evict it from the local cache so it stops getting
+    reloaded by _load_all_tasks (which is cache-seeded).
+
     BEST-EFFORT: any backend error returns False rather than raising; the only
     irreversible step (delete) runs strictly after a positive read-back."""
     tid = task.get("id")
@@ -360,8 +381,15 @@ def _archive_task(task: dict[str, Any], *, backend: Optional[list[str]] = None) 
     try:
         archive_path = remote.archive_task_path(tid, _archive_month(task))
         task_path = remote.task_remote_path(tid)
+        # (0) PHANTOM GUARD: only proceed if the hot copy exists OR the move is
+        # already (partly) done (archive body present). Neither => stale-cache
+        # phantom: evict the local copy and skip — never write a phantom archive.
+        archive_exists = remote.stat(archive_path, backend=backend) is not None
+        if not archive_exists and remote.stat(task_path, backend=backend) is None:
+            cache.delete_cached_task(tid)
+            return False
         # (1) ensure the body is in the archive (idempotent): upload only if absent.
-        if remote.stat(archive_path, backend=backend) is None:
+        if not archive_exists:
             if not remote.upload_json(task, archive_path, backend=backend):
                 return False
         # (2) VERIFY it landed before any delete — the no-loss gate.
@@ -1995,9 +2023,12 @@ def cmd_presence(args: Any, backend: Optional[list[str]] = None) -> int:
     print("  Fulcra Coordination — Presence")
     print(f"{'='*60}")
     for a in view["agents"]:
+        # A3: build_presence carries records through verbatim and never injects
+        # an "agent" key, so an imperfect aggregate entry missing "agent" (or
+        # "liveness") must not KeyError-crash the whole roster. Tolerate the gap.
         ws = ", ".join(a.get("workstreams", [])) or "(none)"
         age = _age_str(a.get("last_seen", ""))
-        print(f"\n  {a['agent']}  [{a['liveness']}]  (seen {age})")
+        print(f"\n  {a.get('agent', '')}  [{a.get('liveness', '')}]  (seen {age})")
         print(f"    workstreams: {ws}")
         if a.get("summary"):
             print(f"    on: {a['summary'][:80]}")
@@ -2344,6 +2375,13 @@ def _retention_max_per_run() -> int:
 # stops once less than this remains, so the view uploads + presence rebuild that
 # already ran keep their result and reconcile returns inside its 90s ceiling.
 _RETENTION_DEADLINE_HEADROOM_SECONDS = 5.0
+
+# Headroom for the review-route sweep's deadline gate (B1). The sweep runs
+# BEFORE retention in cmd_reconcile and does per-directive network fetches +
+# potential full view-rebuild writes, so it must leave enough of the reconcile
+# budget for retention (which gates on the same deadline) to still make
+# progress. Mirrors _RETENTION_DEADLINE_HEADROOM_SECONDS' role.
+_SWEEP_DEADLINE_HEADROOM_SECONDS = 5.0
 
 
 def _prune_markers(now: datetime, *, backend: Optional[list[str]] = None) -> int:
@@ -3288,7 +3326,7 @@ def _classify_review(task, presence, now):
     return "reroute"
 
 
-def _sweep_review_routes(all_tasks, *, backend=None, now=None):
+def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None):
     """Authoritative reconcile-time reroute sweep. Considers ONLY kind:review
     directives. For each: classify; reroute a never-acted below-floor past-
     threshold review (excluding already-tried agents, minting a new route_id),
@@ -3298,17 +3336,35 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None):
     Runs once per reconcile cycle; whichever machine reconciles first wins and
     the others converge via the stale-observation re-read (Files has no CAS) plus
     the optimistic write. Best-effort: one bad task — or the whole presence
-    download — never raises into a reconcile tick (a failure skips, never crashes)."""
+    download — never raises into a reconcile tick (a failure skips, never crashes).
+
+    DEADLINE-BOUNDED (B1): each directive can cost a network re-read plus a full
+    view-rebuild write, and this sweep runs BEFORE the retention pass in
+    cmd_reconcile. With no time check an O(review-directives) backlog could run
+    past reconcile's ~90s ceiling and STARVE retention (which gates on the same
+    deadline). ``deadline`` is reconcile's monotonic deadline; once the budget
+    (minus a small headroom for retention) is spent we stop processing further
+    directives. Best-effort: deferred directives drain on the next tick.
+    ``deadline=None`` keeps the old unbounded behavior for direct callers/tests."""
+    import time
     from . import routing
     if now is None:
         now = datetime.now(timezone.utc)
+    budget_floor = (deadline - _SWEEP_DEADLINE_HEADROOM_SECONDS
+                    if deadline is not None else None)
     try:
         agg = remote.download_json(remote.presence_view_path(), backend=backend)
         presence = (agg or {}).get("agents", []) if agg else []
     except Exception:
         presence = []
+    deferred = 0
     for task in all_tasks:
         try:
+            # Stop early if reconcile's budget is (nearly) spent — leave room for
+            # the retention pass that runs after this sweep. Count, don't crash.
+            if budget_floor is not None and time.monotonic() >= budget_floor:
+                deferred += 1
+                continue
             if not routing.is_review_directive(task):
                 continue
             verdict = _classify_review(task, presence, now)
@@ -3363,6 +3419,9 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None):
                 pass  # optimistic write is the second line of defence; reconverges next cycle
         except Exception:
             continue  # one bad task must never break the sweep / reconcile tick
+    if deferred:
+        _info(f"  Review sweep deferred {deferred} directive(s) "
+              f"(deadline budget spent — drains next tick).")
 
 
 def cmd_pause(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -3538,6 +3597,34 @@ def _reconcile_presence(backend: Optional[list[str]] = None) -> None:
         pass  # presence rebuild is best-effort; task-view reconcile is the contract
 
 
+def _detect_stale_claims(all_tasks: list[dict[str, Any]],
+                         now: datetime) -> list[str]:
+    """Collect the ids of active tasks holding an EXPIRED claim.
+
+    Tolerant of imperfect bus data by construction (A1): a body missing ``id``
+    contributes nothing instead of raising ``KeyError``, and an unparseable
+    ``claim_expires_at`` is skipped instead of raising ``ValueError``. This runs
+    early in cmd_reconcile, BEFORE build_all_views/upload — an uncaught raise
+    here would abort the whole reconcile and fail every heartbeat tick (the
+    heartbeat-outage class of bug). So it must never raise on a real-world body
+    that merely lacks a field."""
+    stale_claims: list[str] = []
+    for t in all_tasks:
+        tid = t.get("id")
+        if not tid:
+            continue  # an id-less body can't be named as a stale claim
+        claim = t.get("claim", {})
+        expires = claim.get("claim_expires_at")
+        if not expires:
+            continue
+        exp_dt = views._parse_dt(expires)
+        if exp_dt is None:
+            continue  # unparseable expiry — skip, never raise
+        if now > exp_dt and t.get("status") == "active":
+            stale_claims.append(tid)
+    return stale_claims
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
     import time
@@ -3560,17 +3647,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     _info(f"  {len(all_tasks)} task(s) loaded.")
 
     now = datetime.now(timezone.utc)
-    stale_claims = []
-    for t in all_tasks:
-        claim = t.get("claim", {})
-        expires = claim.get("claim_expires_at")
-        if expires:
-            try:
-                exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                if now > exp_dt and t.get("status") == "active":
-                    stale_claims.append(t["id"])
-            except ValueError:
-                pass
+    stale_claims = _detect_stale_claims(all_tasks, now)
 
     if stale_claims:
         _warn(f"  Stale claims detected: {stale_claims}")
@@ -3644,7 +3721,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # freezes accepted-then-stalled ones. Whichever machine reconciles first
     # wins; others converge via the stale-observation re-read inside the sweep.
     try:
-        _sweep_review_routes(all_tasks, backend=backend, now=now)
+        _sweep_review_routes(all_tasks, backend=backend, now=now, deadline=deadline)
     except Exception:
         pass
 

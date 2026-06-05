@@ -10,6 +10,63 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.8.3] — Reconcile + write paths survive imperfect bus data; review sweep is deadline-bounded
+
+**Why:** an adversarial sweep of the 0.8.2 bus surfaced a family of crashes that
+all share one root cause — code that bracket-indexes a task/aggregate body for a
+field (`id`, `agent`) that an older or imperfect write can omit. Because several
+of those accesses sit on the **reconcile** and **write** paths (which run on every
+heartbeat tick and every create/update/done/tell), a single malformed body could
+take down the whole tick — the same heartbeat-outage class as the just-fixed
+`build_search_index` incident. This release makes those paths tolerant of a body
+missing a field, and additionally bounds the review-route sweep to the reconcile
+deadline so it can no longer starve the retention pass.
+
+- **reconcile no longer crashes on an id-less active expired-claim body (A1).** The
+  stale-claim scan in `cmd_reconcile` used `t["id"]` with bracket access; a real
+  body with `status=="active"` + an expired `claim.claim_expires_at` but **no
+  `id`** raised an uncaught `KeyError` (the inner `try` only guarded `ValueError`
+  from `fromisoformat`) — and it ran *before* `build_all_views`/upload, so the
+  whole reconcile aborted and every heartbeat tick failed. The loop is now a
+  dedicated `_detect_stale_claims(all_tasks, now)` helper that skips id-less
+  bodies and parses the expiry via `views._parse_dt` (never lexical).
+
+- **every write command no longer crashes on an id-less cached body (A2).**
+  `_load_all_tasks` built `{t["id"]: t for t in cached}` and
+  `task_map[t["id"]] = t` with bracket access; an id-less cached body raised
+  `KeyError` that propagated uncaught through `_load_summaries_for_rebuild` →
+  `_write_task_and_views`, crashing create/update/done/tell/… Both now skip a body
+  with no `id` (it has no stable key anyway) and keep the well-formed tasks.
+
+- **`presence` tolerates an agent-less aggregate entry (A3).** `cmd_presence`
+  rendered `f"... {a['agent']} [{a['liveness']}] ..."` with bracket access, but
+  `build_presence` carries records through verbatim and never injects `agent` — so
+  an agent-less aggregate entry crashed the command. It now uses `.get(...)` and
+  the well-formed entries still render.
+
+- **the review-route sweep is deadline-bounded (B1).** `_sweep_review_routes`
+  loops O(review-directives) with a per-item network fetch + potential full
+  view-rebuild write and had **no** time check, so it could run past reconcile's
+  ~90s deadline and starve the retention pass (which already gates on the
+  deadline). It now threads reconcile's `deadline` through and stops processing
+  further directives once the budget (minus a small headroom) is spent, logging
+  how many were deferred. Best-effort: deferred directives drain next tick;
+  `deadline=None` keeps the old unbounded behavior for direct callers.
+
+- **archive verifies the hot copy before moving (B2).** `_archive_task` would
+  upload a phantom archive body + shard for a task that existed **only** in this
+  host's stale local cache (deleted remotely by another host, never archived
+  here). It now requires a positive stat of the hot `tasks/<id>.json` before the
+  move — unless the archive body already exists (the idempotent / crash-recovery
+  finish) — and otherwise skips the phantom and evicts it from the local cache so
+  it stops being reloaded. Mirrors the reroute sweep's `if fresh is None: continue`
+  guard; idempotency and the crash-safe ordering are unchanged.
+
+All best-effort paths still never raise into a reconcile/scheduled tick. Datetime
+comparisons go through `views._parse_dt` (never a lexical string compare).
+
+---
+
 ## [0.8.2] — Hermetic test cache: tests can no longer pollute the real bus
 
 **Why:** `cache.cache_root()` resolves to `${XDG_CACHE_HOME:-~/.cache}/fulcra-coord`.
