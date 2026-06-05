@@ -111,15 +111,6 @@ class SetupStep:
       oauth              — OAuth flow; the UI drives the redirect/callback cycle
       file_upload        — ask the user to choose a file (path Setting)
       permission_request — prompt the user to grant an OS permission
-      browser_extension  — prompt the user to install a browser extension;
-                           show extension_url as an install link
-      extension_pair     — one-click pairing handshake with the installed
-                           Fulcra Attention browser extension. The wizard
-                           generates a fresh extension-token via the daemon,
-                           postMessages it to the page, and waits for an
-                           ack from the extension's content script. Falls
-                           back to a copy-paste manual paste if no ack
-                           arrives within 3 seconds.
       test_connection    — invoke Plugin.health_check and show the result
       definition_picker  — let the user choose (or confirm) a Fulcra annotation
                            definition for this plugin
@@ -127,14 +118,13 @@ class SetupStep:
     """
     kind: Literal[
         "intro", "external_action", "input", "oauth", "file_upload",
-        "permission_request", "browser_extension", "extension_pair",
+        "permission_request",
         "test_connection", "definition_picker", "done",
     ]
     title: str
     body_md: str = ""
     settings_keys: tuple[str, ...] = ()
     external_link: str = ""
-    extension_url: str = ""
     annotation_type: str = ""
     """Hint for the definition_picker step: which annotation_type to filter
     by (e.g. "duration", "moment"). Emitted in the plugin contract so the

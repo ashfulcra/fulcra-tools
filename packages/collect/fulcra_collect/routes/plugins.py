@@ -391,7 +391,6 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                     "body_md": s.body_md,
                     "settings_keys": list(s.settings_keys),
                     "external_link": s.external_link,
-                    "extension_url": s.extension_url,
                     "annotation_type": s.annotation_type,
                     "condition": (
                         {k: list(v) for k, v in s.condition.items()}
