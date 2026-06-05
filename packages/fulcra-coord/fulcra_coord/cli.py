@@ -2279,6 +2279,128 @@ def _claim_digest_marker(window: str, now: datetime, *,
         return False
 
 
+def _claim_retention_marker(now: datetime, *,
+                            backend: Optional[list[str]] = None) -> bool:
+    """First-host-wins daily throttle for the retention pass — the digest-marker
+    pattern (_claim_digest_marker), one rolling file keyed by date-INSIDE-the-JSON.
+
+    Read retention/last-run.json: if its date == today (UTC) another host already
+    ran today -> return False (skip). Else write {date, by, at} and re-read; if a
+    different host's stamp won the claim, return False (they run, we skip). Files
+    has no CAS, so two hosts can rarely both see today's marker absent and both
+    proceed — ACCEPTED and harmless (mirrors the digest marker): the archive step
+    is idempotent + per-task, so a double-run just re-archives already-archived
+    ids as no-ops. The marker is a THROTTLE, not a lock. Any error -> skip (never
+    risk an unbounded concurrent pass; next tick/day retries). Never raises."""
+    try:
+        path = remote.retention_marker_path(now)
+        today = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        existing = remote.download_json(path, backend=backend)
+        if existing is not None and existing.get("date") == today:
+            return False
+        me = identity.resolve_agent()
+        marker = {
+            "schema": "fulcra.coordination.retention_marker.v1",
+            "date": today, "by": me,
+            "at": now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        }
+        if not remote.upload_json(marker, path, backend=backend):
+            return False
+        # Re-read: if a racing host stamped TODAY's marker instead of ours, yield
+        # to them. Only a same-day, different-host stamp counts as losing the race
+        # — a re-read still showing an OLDER date just means our write isn't
+        # reflected yet (or a stale read), which must NOT make us yield our claim.
+        confirm = remote.download_json(path, backend=backend)
+        if (confirm is not None and confirm.get("date") == today
+                and confirm.get("by") not in (me, None)):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _retention_max_per_run() -> int:
+    """Per-run archive cap: env FULCRA_COORD_RETENTION_MAX_PER_RUN (default 200).
+    A huge first backlog drains over several daily passes rather than blowing
+    reconcile's deadline. Non-numeric -> default (best-effort, never crashes)."""
+    raw = os.environ.get("FULCRA_COORD_RETENTION_MAX_PER_RUN", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 200
+
+
+# Wall-clock seconds of headroom to leave before reconcile's deadline. Archiving
+# stops once less than this remains, so the view uploads + presence rebuild that
+# already ran keep their result and reconcile returns inside its 90s ceiling.
+_RETENTION_DEADLINE_HEADROOM_SECONDS = 5.0
+
+
+def _prune_markers(now: datetime, *, backend: Optional[list[str]] = None) -> int:
+    """Prune spent digest dedup markers (Task 6 fleshes this out). Stubbed to 0."""
+    return 0
+
+
+def _prune_dead_presence(now: datetime, *, backend: Optional[list[str]] = None) -> int:
+    """Prune dead-agent presence records (Task 6 fleshes this out). Stubbed to 0."""
+    return 0
+
+
+def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
+                   deadline: float, backend: Optional[list[str]] = None) -> dict[str, Any]:
+    """The retention pass, folded into reconcile. Best-effort: NEVER raises into
+    the reconcile tick — any failure returns a result dict, logged by the caller.
+    Returns {"skipped": True} when throttled/errored, else
+    {"archived": N, "deferred": D, "pruned_markers": M, "pruned_presence": K}.
+
+    1. THROTTLE: _claim_retention_marker(now) — first host today wins; others skip.
+    2. ARCHIVE up to _retention_max_per_run() archivable tasks (views.
+       is_archivable_task), stopping early when the TIME BUDGET (caller's
+       reconcile `deadline` minus a few seconds' headroom) is nearly spent. The
+       remainder is DEFERRED (counted + logged) and drains next pass.
+    3. PRUNE spent markers + dead presence (Task 6 fills these in; stubbed to 0).
+    Per-item isolation: one task's archive failure is skipped, not fatal. The
+    `deadline` is reconcile's existing deadline local, so the budget COMPOSES with
+    (never double-counts) reconcile's 90s ceiling."""
+    import time
+    # Budget gate FIRST, before any I/O: if reconcile has already spent most of
+    # its deadline (e.g. a slow view-upload phase), don't even attempt the
+    # throttle-marker read/write — that I/O would itself risk overrunning the
+    # ceiling. The next tick (with a fresh budget) picks it up. Composes with,
+    # never double-counts, reconcile's deadline.
+    budget_floor = deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
+    if time.monotonic() >= budget_floor:
+        return {"skipped": True}
+    try:
+        if not _claim_retention_marker(now, backend=backend):
+            return {"skipped": True}
+    except Exception:
+        return {"skipped": True}
+
+    cap = _retention_max_per_run()
+    candidates = [t for t in all_tasks if views.is_archivable_task(t, now)]
+    archived = 0
+    deferred = 0
+    for t in candidates:
+        if archived >= cap or time.monotonic() >= budget_floor:
+            deferred += 1
+            continue
+        try:
+            if _archive_task(t, backend=backend):
+                archived += 1
+            else:
+                deferred += 1  # transient failure; retried next pass
+        except Exception:
+            deferred += 1
+
+    pruned_markers = _prune_markers(now, backend=backend)
+    pruned_presence = _prune_dead_presence(now, backend=backend)
+    return {"archived": archived, "deferred": deferred,
+            "pruned_markers": pruned_markers, "pruned_presence": pruned_presence}
+
+
 def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     """Write the operator's situational-awareness digest to the Fulcra timeline.
 
@@ -3475,6 +3597,18 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     except Exception:
         pass
 
+    # Retention pass (best-effort, throttled to ~once/day, bounded + time-budgeted
+    # against THIS reconcile's deadline so it never double-counts the 90s ceiling).
+    # Never raises into the tick; logs its tally.
+    try:
+        ret = _run_retention(all_tasks, now=now, deadline=deadline, backend=backend)
+        if not ret.get("skipped"):
+            _info(f"  Retention: archived {ret['archived']} task(s) "
+                  f"(deferred {ret['deferred']}), pruned {ret['pruned_markers']} marker(s), "
+                  f"{ret['pruned_presence']} dead presence.")
+    except Exception as e:
+        _warn(f"  Retention pass error (skipped): {e}")
+
     if failures:
         _warn(f"  View upload failures: {failures}")
         ops_log.log_op("reconcile", status="partial", detail=f"failed views: {failures}")
@@ -3516,6 +3650,26 @@ def cmd_search(args: Any, backend: Optional[list[str]] = None) -> int:
         all_tasks = _load_task_summaries(backend=backend)
         results = views.search_tasks(query, all_tasks)
 
+    # --archived (alias --all): additionally scan the cold archive index shards.
+    # Default search stays hot-only (fast); the archive is O(archived) and paid
+    # only when explicitly requested. Matches on the same fields as hot search.
+    if getattr(args, "archived", False):
+        q = query.lower()
+        seen = {r.get("id") for r in results}
+        for shard in _list_index_shards(backend=backend):
+            if shard.get("id") in seen:
+                continue
+            text = " ".join([shard.get("title", ""), shard.get("workstream", ""),
+                             shard.get("owner_agent", "")]).lower()
+            if q in text:
+                results.append({
+                    "id": shard.get("id", ""), "title": shard.get("title", ""),
+                    "status": shard.get("status", ""), "priority": "",
+                    "workstream": shard.get("workstream", ""),
+                    "owner_agent": shard.get("owner_agent", ""),
+                    "archived": True, "archive_path": shard.get("archive_path", ""),
+                })
+
     if out_format == "json":
         _print_json({"query": query, "count": len(results), "results": results})
         return 0
@@ -3537,6 +3691,41 @@ def cmd_search(args: Any, backend: Optional[list[str]] = None) -> int:
         if summary_text:
             print(f"          {summary_text[:80]}")
     print()
+    return 0
+
+
+def cmd_restore(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Restore a cold-archived task back into the hot path.
+
+    Reverses _archive_task: reads the task's archive/index/<id>.json shard for
+    its archive_path, downloads the archived body, uploads it back to
+    tasks/<id>.json, then deletes the index shard. The NEXT reconcile re-includes
+    it in views (the body is back in the tasks/ listing the self-heal enumerates).
+    Nothing is one-way. NOTE this is a bus-level MOVE, independent of the platform
+    'fulcra file restore' (which restores a deleted file's prior VERSION by UUID);
+    archived tasks were moved, not deleted, so we move them back ourselves.
+
+    Order mirrors the archive's no-loss ordering: write the hot copy and VERIFY it
+    landed before deleting the shard, so a crash leaves a recoverable state."""
+    tid = args.task_id
+    shard = _read_index_shard(tid, backend=backend)
+    if not shard:
+        _err(f"No archived task {tid!r} (no archive/index/{tid}.json shard).")
+        return 1
+    archive_path = shard.get("archive_path") or remote.archive_task_path(tid, "")
+    body = remote.download_json(archive_path, backend=backend)
+    if not body:
+        _err(f"Archived body for {tid!r} not found at {archive_path}.")
+        return 1
+    task_path = remote.task_remote_path(tid)
+    if not remote.upload_json(body, task_path, backend=backend):
+        _err(f"Failed to restore body for {tid!r}.")
+        return 1
+    if remote.stat(task_path, backend=backend) is None:
+        _err(f"Restore of {tid!r} did not verify; left archive shard intact.")
+        return 1
+    remote.delete(remote.archive_index_path(tid), backend=backend)
+    _info(f"Restored {tid} to {task_path}. Run reconcile to re-incorporate into views.")
     return 0
 
 
