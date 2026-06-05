@@ -10,6 +10,20 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.8.1] — Reconcile no longer crashes on a malformed task
+
+**Why:** `build_search_index` read `task["id"]` / `task["title"]` with bracket
+access. A single real task body missing `title` (or `id`) raised `KeyError`
+straight out of the aggregate rebuild — aborting the entire `reconcile`: views
+weren't repaired and the new retention pass never ran (its marker was never
+written). Caught by a live smoke of 0.8.0 against the real 140-task bus
+(`ERROR: 'title'`), which a from-scratch test env never exercises.
+
+- `build_search_index` now uses `.get()` defaults for every field (a malformed
+  task surfaces in the search index with empty strings instead of crashing the
+  rebuild) — the same render-don't-crash contract `task_summary` got in the
+  0.5.6 debug sweep. Regression test added.
+
 ## [0.8.0] — Bus Retention / Archival
 
 **Why:** The coordination bus grew without bound. Terminal (done/abandoned)

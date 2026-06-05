@@ -833,16 +833,21 @@ def build_search_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = 
                 if not dt or dt < cutoff_done:
                     continue
 
+        # .get() with defaults (not bracket access): a malformed task body missing
+        # id/title must SURFACE in the search index with empty defaults, never
+        # KeyError out of the rebuild — a single bad task would otherwise abort the
+        # whole reconcile (views unrepaired, retention never runs). Same
+        # render-don't-crash contract as task_summary (debug-sweep round 2-3).
         records.append({
-            "id": t["id"],
-            "title": t["title"],
+            "id": t.get("id", ""),
+            "title": t.get("title", ""),
             "status": status,
             "priority": t.get("priority", ""),
             "workstream": t.get("workstream", ""),
             "owner_agent": t.get("owner_agent", ""),
             "tags": t.get("tags", []),
             "summary": t.get("current_summary", ""),
-            "task_file": task_file_path(t["id"]),
+            "task_file": task_file_path(t.get("id", "")),
             "updated_at": t.get("updated_at", ""),
         })
 
