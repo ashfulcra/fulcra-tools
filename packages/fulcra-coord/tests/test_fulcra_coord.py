@@ -740,6 +740,32 @@ class TestCLIWithFakeBackend(unittest.TestCase):
     def _args(self, **kwargs) -> types.SimpleNamespace:
         return types.SimpleNamespace(**kwargs)
 
+    def test_connect_can_review_sets_review_capability(self):
+        from fulcra_coord.cli import cmd_connect
+        captured = {}
+
+        def fake_write(record, backend=None):
+            captured["rec"] = record
+            return True
+
+        with patch("fulcra_coord.cli._write_presence", side_effect=fake_write), \
+             patch("fulcra_coord.cli._derive_workstreams_from_open_tasks", return_value=[]):
+            args = self._args(agent="claude-code:h:r", workstream=None, summary="",
+                              format="json", can_review=True, role=None)
+            cmd_connect(args, backend=["false"])
+        self.assertIn("review", captured["rec"]["capabilities"])
+
+    def test_connect_role_flag_adds_named_capabilities(self):
+        from fulcra_coord.cli import cmd_connect
+        captured = {}
+        with patch("fulcra_coord.cli._write_presence",
+                   side_effect=lambda record, backend=None: captured.update(rec=record) or True), \
+             patch("fulcra_coord.cli._derive_workstreams_from_open_tasks", return_value=[]):
+            args = self._args(agent="a", workstream=None, summary="", format="json",
+                              can_review=False, role=["review", "deploy"])
+            cmd_connect(args, backend=["false"])
+        self.assertEqual(sorted(captured["rec"]["capabilities"]), ["deploy", "review"])
+
     def test_status_empty_cache(self):
         from fulcra_coord.cli import cmd_status
         args = self._args(workstream=None, agent=None, format="table")
@@ -9009,6 +9035,26 @@ class TestResolveLiveRecipient(unittest.TestCase):
         presence = [self._rec("b", 10)]
         self.assertEqual(
             views.resolve_live_recipient(["a", "b"], presence, floor="idle", now=self.NOW), "b")
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 2: presence capabilities
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceCapabilities(unittest.TestCase):
+    def test_make_presence_default_capabilities_empty(self):
+        rec = schema.make_presence("claude-code:h:r")
+        self.assertEqual(rec["capabilities"], [])
+
+    def test_make_presence_records_capabilities_sorted_unique(self):
+        rec = schema.make_presence("a", capabilities=["review", "review", "deploy"])
+        self.assertEqual(rec["capabilities"], ["deploy", "review"])
+
+    def test_build_presence_carries_capabilities_through(self):
+        rec = schema.make_presence("a", capabilities=["review"])
+        agg = views.build_presence([rec])
+        self.assertEqual(agg["agents"][0]["capabilities"], ["review"])
 
 
 # ---------------------------------------------------------------------------

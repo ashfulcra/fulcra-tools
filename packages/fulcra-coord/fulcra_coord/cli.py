@@ -1741,7 +1741,14 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     derived = _derive_workstreams_from_open_tasks(me, backend=backend)
     workstreams = sorted(set(explicit) | set(derived))
 
+    # Declared capabilities (Task 2): --can-review is sugar for --role review.
+    # These drive liveness-aware reviewer routing's candidate pool. Undeclared
+    # agents stay [] (backward compatible).
+    roles = list(getattr(args, "role", None) or [])
+    if getattr(args, "can_review", False):
+        roles.append("review")
     record = schema.make_presence(me, workstreams=workstreams, summary=summary,
+                                  capabilities=roles or None,
                                   session=os.environ.get("FULCRA_COORD_SESSION") or None)
     _write_presence(record, backend=backend)
 

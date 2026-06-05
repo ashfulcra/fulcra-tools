@@ -59,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="One-line 'what I'm currently on'")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="Who is connecting (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--can-review", dest="can_review", action="store_true",
+                    help="Declare this agent can review PRs (sugar for --role review)")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Declare a capability/role (repeatable), e.g. --role review")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- workstream ----
