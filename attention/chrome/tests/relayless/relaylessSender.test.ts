@@ -151,6 +151,25 @@ describe("sendBatch", () => {
     expect(await sentSet.size()).toBe(0);
   });
 
+  test("post-401 forced refresh returning no token reports unauthorized", async () => {
+    const sentSet = new SentSet({ storage: memStorage() });
+    const fetchFn = mockFetch(async () => new Response(null, { status: 401 }));
+    const getToken = vi.fn(async (opts?: { force?: boolean }) =>
+      opts?.force ? null : "STALE",
+    );
+    const res = await sendBatch([ev("https://a.com/")], {
+      getToken,
+      fetch: fetchFn,
+      context: CTX,
+      sentSet,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.failureStatus).toBe(401);
+    expect(getToken).toHaveBeenCalledWith({ force: true });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(await sentSet.size()).toBe(0);
+  });
+
   test("empty event list is a no-op success", async () => {
     const fetchFn = mockFetch(async () => okResp());
     const res = await sendBatch([], {
