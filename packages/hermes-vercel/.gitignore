@@ -1,0 +1,10 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# node
+node_modules/
+
+# snapshot id written by build-snapshot.js; rebuild produces a new one
+.snapshot.json
