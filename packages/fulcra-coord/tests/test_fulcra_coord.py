@@ -9058,6 +9058,99 @@ class TestPresenceCapabilities(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 3: routing-event vocabulary
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingEvents(unittest.TestCase):
+    def _task_with_events(self, events, assignee=None, tags=None):
+        return {"id": "TASK-20260604-x-00000000", "assignee": assignee,
+                "tags": tags or [], "events": events}
+
+    def test_make_route_event_shape(self):
+        from fulcra_coord import routing
+        ev = routing.make_route_event(kind="routed", to="a", by="b", attempt=1,
+                                      reason="live",
+                                      candidate_snapshot=[{"agent": "a", "tier": "live"}],
+                                      observed_updated_at="2026-06-04T12:00:00.000000Z",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="rid-1")
+        self.assertEqual(ev["type"], "routed")
+        self.assertEqual({"at", "type", "to", "by", "attempt", "reason",
+                          "candidate_snapshot", "observed_updated_at", "route_id"},
+                         set(ev))
+
+    def test_is_review_directive_by_tag(self):
+        from fulcra_coord import routing
+        self.assertTrue(routing.is_review_directive(
+            self._task_with_events([], tags=["kind:review"])))
+        self.assertFalse(routing.is_review_directive(
+            self._task_with_events([], tags=["kind:ops"])))
+
+    def test_current_route_latest_by_at(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=2, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:05:00.000000Z", route_id="r2")
+        task = self._task_with_events([e1, e2])
+        self.assertEqual(routing.current_route(task)["to"], "b")
+
+    def test_current_route_tie_break_by_route_id(self):
+        from fulcra_coord import routing
+        same = "2026-06-04T12:00:00.000000Z"
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at=same, route_id="r-aaa")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=2, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at=same, route_id="r-bbb")
+        # higher route_id wins the tie deterministically (stable across machines).
+        self.assertEqual(
+            routing.current_route(self._task_with_events([e1, e2]))["route_id"], "r-bbb")
+
+    def test_route_attempt_count_and_tried(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=2, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:05:00.000000Z", route_id="r2")
+        task = self._task_with_events([e1, e2])
+        self.assertEqual(routing.route_attempt_count(task), 2)
+        self.assertEqual(routing.tried_agents(task), {"a", "b"})
+
+    def test_current_route_none_when_no_route_events(self):
+        from fulcra_coord import routing
+        self.assertIsNone(routing.current_route(
+            self._task_with_events([{"at": "t", "type": "created", "by": "x"}])))
+
+    def test_latest_route_event_alias(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        task = self._task_with_events([e1])
+        self.assertEqual(routing.latest_route_event(task)["route_id"], "r1")
+
+    def test_make_route_event_rejects_bad_kind(self):
+        from fulcra_coord import routing
+        with self.assertRaises(ValueError):
+            routing.make_route_event(kind="created", to="a", by="b", attempt=1,
+                                     reason="x", candidate_snapshot=[],
+                                     observed_updated_at="t", at="t")
+
+    def test_make_route_event_mints_route_id_when_absent(self):
+        from fulcra_coord import routing
+        ev = routing.make_route_event(kind="routed", to="a", by="b", attempt=1,
+                                      reason="x", candidate_snapshot=[],
+                                      observed_updated_at="t", at="t")
+        self.assertTrue(ev["route_id"])
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
