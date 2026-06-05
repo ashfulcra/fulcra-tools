@@ -57,17 +57,23 @@ export async function sendBatch(
   const sent: string[] = [];
   const skipped: string[] = [];
   const toSend: { record: WireRecord; sourceId: string }[] = [];
+  // Load the sent-set ONCE for this flush: membership checks below run against
+  // this in-memory snapshot rather than hitting storage per event. On a 2xx we
+  // persist the newly-sent ids ONCE at the end. Net: 1 read + 1 write per
+  // sendBatch instead of O(n) of each on a large (history-backfill) flush.
+  const alreadySent = await sentSet.snapshot();
   // De-dup within this flush so a batch carrying the same source_id twice is
-  // claimed once.
-  const claimed = new Set<string>();
+  // claimed once. (Seeded from `alreadySent` so a previously-sent id is both
+  // skipped AND not re-claimed.)
+  const claimed = new Set<string>(alreadySent);
 
   for (const ev of events) {
     const { record, sourceId } = await buildWireRecord(ev, opts.context);
-    if (claimed.has(sourceId)) continue;
-    if (await sentSet.has(sourceId)) {
+    if (alreadySent.has(sourceId)) {
       skipped.push(sourceId);
       continue;
     }
+    if (claimed.has(sourceId)) continue;
     claimed.add(sourceId);
     toSend.push({ record, sourceId });
   }
@@ -86,7 +92,11 @@ export async function sendBatch(
 
   if (status >= 200 && status < 300) {
     const ids = toSend.map((t) => t.sourceId);
-    await sentSet.add(ids);
+    // One write for the whole flush, merged + capped. Reuse the snapshot loaded
+    // above as `known` so this does NOT re-read storage. Only 2xx-sent ids land
+    // here, so a failed POST (below) leaves the sent-set untouched and the ids
+    // retry next flush.
+    await sentSet.addMany(ids, alreadySent);
     sent.push(...ids);
     return { sent, skipped, ok: true };
   }
