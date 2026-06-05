@@ -5,7 +5,8 @@
 // Uses a distinct CLIENT string so backfilled events can be told
 // apart from real-time ones in Fulcra queries.
 
-import { addToOutbox, flushOutbox } from "../outbox";
+import { addToOutbox } from "../outbox";
+import { requestFlush } from "../flushRequest";
 import { categorize } from "../categorize";
 import { isIgnored } from "../ignore";
 import { getChromeIdentity } from "../identity";
@@ -73,15 +74,15 @@ export async function backfillHistory(
     queued += 1;
     if (opts.onProgress) opts.onProgress(queued, unique.length);
   }
-  // Queueing is done — the progress bar has hit 100%. Kick off a flush
-  // but DO NOT await it: flushOutbox POSTs the queued events to the Fulcra
-  // API, which for a few-thousand-URL backfill takes a while. Awaiting it
-  // here froze the wizard at 100% with the advance button disabled the
-  // whole time. The outbox is a write-ahead queue — the background alarm
-  // drains whatever this flush doesn't, and the SentSet de-dups repeats —
-  // so a fire-and-forget flush is safe and lets the wizard advance the
-  // moment queueing finishes.
-  void flushOutbox();
+  // Queueing is done — the progress bar has hit 100%. Ask the service worker
+  // to flush (Bug A3: the flush must run in the SW context, not here in the
+  // wizard page, or it races the SW's alarm-driven flush and double-POSTs).
+  // Fire-and-forget by design: the ingest POST for a few-thousand-URL backfill
+  // takes a while, and awaiting it froze the wizard at 100% with the advance
+  // button disabled. The outbox is a write-ahead queue — the background alarm
+  // drains whatever this flush doesn't, and the SentSet de-dups repeats — so
+  // requesting the flush and returning immediately lets the wizard advance.
+  requestFlush();
   return queued;
 }
 

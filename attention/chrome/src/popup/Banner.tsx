@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { loadOutbox } from "../storage";
-import { flushOutbox } from "../outbox";
+import { requestFlush } from "../flushRequest";
 
 interface IngestError { kind: "unauthorized" | "unreachable"; at: number; }
 
@@ -35,13 +35,14 @@ export function Banner() {
     return () => { stopped = true; clearInterval(id); };
   }, []);
 
-  async function flushNow(): Promise<void> {
+  function flushNow(): void {
+    // Bug A3: the flush must run in the service-worker context, so we ask
+    // the SW (fire-and-forget) rather than flushing here in the popup. There's
+    // no completion signal to await; the banner re-polls outbox depth every
+    // 2s, so flash the spinner briefly then let the next poll settle the UI.
     setFlushing(true);
-    try {
-      await flushOutbox();
-    } finally {
-      setFlushing(false);
-    }
+    requestFlush();
+    setTimeout(() => setFlushing(false), 500);
   }
 
   if (err?.kind === "unauthorized") {
