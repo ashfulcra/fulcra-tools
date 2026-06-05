@@ -623,15 +623,35 @@ Builds the preference-ordered pool, resolves a live recipient, and either routes
       task["last_touched_by"] = by
       return task
 
-  def _escalate_review_to_human(*, pr, repo, tried, backend=None):
+  def _escalate_review_to_human(*, pr, repo, tried, backend=None, existing=None):
       """Escalate a review with no live reviewer to the human via the existing
-      block --on-user primitive (needs:human -> needs-me + digest + banner).
-      Idempotent: a follow-up cmd_assign/needs:human surface updates rather than
-      duplicates. Best-effort: never raises into request-review/reconcile."""
-      ...  # build a blocked task assigned to identity.resolve_human() with a
-           # needs:human tag and an ask "PR #<pr> needs review; no reviewer live
-           # (tried: <tried>). Assign manually." Reuse the cmd_block --on-user path
-           # shape; return True on write success.
+      block --on-user shape (needs:human -> needs-me + digest + banner).
+      Idempotent by caller: the sweep passes `existing` (the review task) to
+      update it in place; a fresh request-review miss passes None and creates a
+      dedicated escalation task. Best-effort: never raises into
+      request-review/reconcile."""
+      try:
+          human = identity.resolve_human()
+          me = identity.resolve_agent(None)
+          ask = (f"PR #{pr} in {repo} needs review; no reviewer is live/idle "
+                 f"(tried: {', '.join(tried) or 'none'}). Assign a reviewer manually.")
+          marker = f"review-escalation:{repo}#{pr}"
+          task = existing
+          if task is None:
+              task = schema.make_task(
+                  title=f"PR #{pr} needs a reviewer ({repo})",
+                  workstream=repo, agent=me, owner_agent=me, assignee=human,
+                  priority="P1")
+          # block --on-user shape: transition to blocked, point at the human,
+          # carry the needs:human marker + a stable per-PR marker for idempotency.
+          task = schema.apply_transition(task, "blocked", by=me, blocked_on=ask)
+          task["assignee"] = human
+          task["tags"] = sorted(set(task.get("tags", [])) | {"needs:human", marker})
+          _write_task_and_views(task, backend=backend, command="block")
+          return True
+      except Exception as e:
+          _warn(f"review escalation failed (non-fatal): {e}")
+          return False
 
   def cmd_request_review(args, backend=None):
       """Route a PR review to a live/idle reviewer, or escalate. Best-effort: a
