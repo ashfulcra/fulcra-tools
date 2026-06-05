@@ -72,9 +72,18 @@ def current_route(task: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 
 def route_attempt_count(task: dict[str, Any]) -> int:
-    """How many route/reroute decisions have been made (the cap is checked
-    against this)."""
-    return len(route_events(task))
+    """Cumulative routing attempt count.
+
+    New routing events carry a durable cumulative ``attempt`` value because the
+    inline event log is bounded and may have dropped older route decisions. Fall
+    back to the visible event count only for legacy/manually-authored events that
+    predate the field.
+    """
+    attempts = [
+        e.get("attempt") for e in route_events(task)
+        if isinstance(e.get("attempt"), int)
+    ]
+    return max(attempts) if attempts else len(route_events(task))
 
 
 def tried_agents(task: dict[str, Any]) -> set[str]:
