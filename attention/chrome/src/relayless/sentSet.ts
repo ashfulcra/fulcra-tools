@@ -50,12 +50,35 @@ export class SentSet {
     return ids.includes(id);
   }
 
+  /** Load the whole sent-set once into an in-memory Set for O(1) membership
+   * checks. Used by batch callers (the relayless sender) so a flush of N events
+   * does ONE storage read instead of N. Insertion order matches the persisted
+   * order, so the same Set can be handed back to {@link addMany} as its `known`
+   * arg to write the merged set WITHOUT a second read (preserving the
+   * cap/trim-oldest semantics). */
+  async snapshot(): Promise<Set<string>> {
+    return new Set(await this.load());
+  }
+
   /** Record one or more ids as sent. De-dupes against existing entries,
    * preserves insertion order, and drops the oldest ids once over the cap. */
   async add(ids: string[]): Promise<void> {
+    return this.addMany(ids);
+  }
+
+  /** Record one or more ids as sent. De-dupes against existing entries,
+   * preserves insertion order, and drops the oldest ids once over the cap. A
+   * no-op (no read, no write) when `ids` is empty.
+   *
+   * Reads the current set once and writes once. Batch callers that already hold
+   * a {@link snapshot} from the same flush can pass it as `known` to skip the
+   * read entirely (so the whole flush is one read + one write); `known` MUST be
+   * the snapshot of THIS set (its insertion order is the persisted order used
+   * for trim-oldest). */
+  async addMany(ids: string[], known?: Set<string>): Promise<void> {
     if (ids.length === 0) return;
-    const cur = await this.load();
-    const seen = new Set(cur);
+    const cur = known ? [...known] : await this.load();
+    const seen = known ?? new Set(cur);
     for (const id of ids) {
       if (!seen.has(id)) {
         cur.push(id);
