@@ -536,3 +536,34 @@ class TestPruneDeadPresence(_FakeBus):
         self.assertEqual(n, 0)
         self.assertTrue(self._exists("/coordination/presence/weird.json"))
 
+
+class TestHotPathExclusion(_FakeBus):
+    def test_archived_task_absent_from_rebuilt_views(self):
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        old = {"id": "old-1", "title": "old", "status": "done", "workstream": "ws",
+               "owner_agent": "a", "done_at": old_ts, "updated_at": old_ts}
+        live = {"id": "live-1", "title": "live", "status": "active", "workstream": "ws",
+                "owner_agent": "a", "updated_at": datetime.now(timezone.utc).isoformat(
+                    timespec="microseconds").replace("+00:00", "Z")}
+        self._put("/coordination/tasks/old-1.json", old)
+        self._put("/coordination/tasks/live-1.json", live)
+        # Seed an EMPTY summaries aggregate so the rebuild takes the self-heal path
+        # (which lists tasks/) rather than the backward-compat _load_all_tasks path
+        # (which seeds ids from index/search/next views absent in this fixture).
+        # The empty aggregate forces the self-heal listing to repopulate from the
+        # durable tasks/ files — exactly the membership a move shrinks.
+        self._put("/coordination/views/summaries.json",
+                  {"schema": "fulcra.coordination.summaries.v1", "summaries": []})
+        # Archive the old one (the move), then rebuild the self-heal source.
+        self.assertTrue(cli._archive_task(old, backend=self.backend))
+        # The self-heal listing (tasks/) must no longer include old-1.
+        listed = remote.list_files("/coordination/tasks/", backend=self.backend)
+        ids = {p.rsplit("/", 1)[-1][:-5] for p in listed if p.endswith(".json")}
+        self.assertNotIn("old-1", ids)
+        self.assertIn("live-1", ids)
+        # And a summaries rebuild over the remaining tasks excludes it with NO filter.
+        rebuilt = cli._load_summaries_for_rebuild(live, backend=self.backend)
+        rebuilt_ids = {s["id"] for s in rebuilt}
+        self.assertNotIn("old-1", rebuilt_ids)
+        self.assertIn("live-1", rebuilt_ids)
