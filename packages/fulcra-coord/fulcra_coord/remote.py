@@ -193,6 +193,30 @@ def upload_json(
     )
 
 
+def delete(remote_path: str, *, backend: Optional[list[str]] = None) -> bool:
+    """Delete remote_path, wrapping ``fulcra file delete <PATH>``. Returns True on
+    success, False on any failure (missing file, timeout, backend error).
+
+    The platform delete is a SOFT-delete (the prior version is recoverable via
+    ``fulcra file restore <VERSION_ID>``), which is what makes the retention
+    prune of regenerable markers / dead presence safe. The archive MOVE relies on
+    this returning honestly: _archive_task only deletes the hot copy AFTER it has
+    verified the archived body landed, and a False here just leaves a recoverable
+    duplicate for the next pass to finish — never a lost task. Best-effort: never
+    raises, so a prune/move failure can't escape into the reconcile tick."""
+    cmd = (backend or _backend_cmd()) + ["delete", remote_path]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_write_timeout(),
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
 def list_files(
     prefix: str,
     *,
@@ -336,6 +360,42 @@ def presence_view_path() -> str:
     read commands (presence/agents/resume) load, rebuilt by reconcile and
     refreshed opportunistically on connect. Mirrors view_remote_path's layout."""
     return f"{remote_root()}/views/presence.json"
+
+
+def archive_task_path(task_id: str, month: str) -> str:
+    """Cold-archive body path: archive/tasks/<YYYY-MM>/<id>.json. Month is the
+    done/abandoned month, so the archive is browsable by when work finished."""
+    return f"{remote_root()}/archive/tasks/{month}/{task_id}.json"
+
+
+def archive_index_path(task_id: str) -> str:
+    """Per-id cold-index SHARD path. Append-only, one distinct path per task —
+    NO shared archive/index.json, because Files has no CAS and a shared mutable
+    index would let concurrent archivers clobber each other's appends."""
+    return f"{remote_root()}/archive/index/{task_id}.json"
+
+
+def archive_index_prefix() -> str:
+    """List prefix for the cold-index shards (search --archived, restore lookup)."""
+    return f"{remote_root()}/archive/index/"
+
+
+def retention_marker_path(now: Any) -> str:
+    """First-host-wins daily throttle marker. ONE path per day (date is INSIDE
+    the JSON, not the filename) so today's run reads a stable path and any host
+    claims the SAME file — the digest-marker first-writer-wins pattern, but a
+    single rolling file rather than per-window."""
+    return f"{remote_root()}/retention/last-run.json"
+
+
+def digest_markers_prefix() -> str:
+    """List prefix for digest dedup markers (marker prune)."""
+    return f"{remote_root()}/digest/markers/"
+
+
+def presence_prefix() -> str:
+    """List prefix for per-agent presence records (dead-presence prune)."""
+    return f"{remote_root()}/presence/"
 
 
 # ---------------------------------------------------------------------------

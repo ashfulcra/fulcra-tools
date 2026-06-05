@@ -6906,10 +6906,10 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_7_0(self):
-        # Liveness-aware reviewer routing shipped as the 0.7.0 minor.
+    def test_version_is_0_8_0(self):
+        # Bus retention / archival shipped as the 0.8.0 minor.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.7.0")
+        self.assertEqual(__version__, "0.8.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):

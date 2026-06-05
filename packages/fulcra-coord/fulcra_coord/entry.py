@@ -250,6 +250,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("search", help="Search tasks by text")
     sp.add_argument("query", metavar="QUERY")
     sp.add_argument("--format", choices=["table", "json"], default="table")
+    sp.add_argument("--archived", "--all", dest="archived", action="store_true",
+                    help="Also search the cold archive (archive/index shards). "
+                         "Default search is hot-only (fast).")
+
+    # ---- restore ----
+    sp = sub.add_parser("restore",
+                        help="Restore a cold-archived task back into the hot path")
+    sp.add_argument("task_id", metavar="TASK-ID")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- doctor ----
     sub.add_parser("doctor", help="Check configuration, CLI availability, and remote access")
@@ -458,6 +467,7 @@ COMMAND_MAP = {
     "request-review": _cli.cmd_request_review,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
+    "restore": _cli.cmd_restore,
     "doctor": _cli.cmd_doctor,
     "capabilities": _cli.cmd_capabilities,
     "install-shim": _cli.cmd_install_shim,
