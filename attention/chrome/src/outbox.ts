@@ -58,13 +58,17 @@ export async function addToOutbox(payload: AttentionEvent): Promise<void> {
 
 // Single-flight guard. flushOutbox loads the outbox snapshot at the top and
 // only writes the remaining entries at the very end (after every POST). If two
-// flushes overlap — e.g. the per-minute FLUSH_ALARM tick and the history
-// backfill's fire-and-forget `void flushOutbox()` — both read the SAME snapshot
-// and both POST every entry before either clears it, producing duplicate
-// ingests (observed: thousands of duplicate annotations per event). We
-// serialize by holding the in-flight flush's promise at module scope: a second
-// concurrent call awaits and returns that same promise instead of starting an
-// overlapping run. The next alarm tick drains whatever the in-flight run left.
+// flushes overlap — all flushes now run in the service-worker context (the
+// per-minute FLUSH_ALARM tick, the post-emit flush, onStartup, and the
+// requestFlush message handler that page contexts dispatch to), so two could
+// fire close together — both would read the SAME snapshot and POST every entry
+// before either clears it, producing duplicate ingests (observed: thousands of
+// duplicate annotations per event). We serialize by holding the in-flight
+// flush's promise at module scope: a second concurrent call awaits and returns
+// that same promise instead of starting an overlapping run. The next alarm tick
+// drains whatever the in-flight run left. (Page contexts never call flushOutbox
+// directly — they use requestFlush() → the SW handler — so this one guard, in
+// the one SW context, now genuinely serializes all flushes.)
 //
 // A dedicated guard (rather than reusing background.ts's withSwLock) is
 // deliberate: flushOutbox touches only the `outbox` storage key, never the
@@ -97,9 +101,10 @@ export function flushOutbox(): Promise<void> {
 //     flush, draining a stale
 //     "unreachable")
 //
-// Single-flight is provided by flushOutbox's module-scope guard, so the
-// per-minute alarm and the backfill's fire-and-forget flush can't run two
-// drains at once.
+// Single-flight is provided by flushOutbox's module-scope guard. All flushes
+// run in the SW context (alarm, post-emit, onStartup, and the requestFlush
+// message handler), so that one guard can't be bypassed across contexts and two
+// drains can't run at once.
 async function doFlushOutbox(): Promise<void> {
   const entries = await loadOutbox();
 
