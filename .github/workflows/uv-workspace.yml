@@ -1,0 +1,55 @@
+name: uv workspace
+
+# Fast, dedicated gate that the uv workspace actually RESOLVES and that
+# fulcra-coord installs the way agents install it. This exists because PR #42
+# added JS packages (packages/hermes-vercel, packages/litellm) under packages/
+# without excluding them from the root [tool.uv.workspace] members glob, which
+# made `uv sync` / `uv run` / `uv tool install` fail repo-wide — breaking the
+# standard agent-update command for every coordination agent. The macOS CI
+# catches this too, but it's slow (~15 min) and skips docs-only PRs, and it is
+# not a required check — so that break merged red and silently.
+#
+# This job is OS-agnostic (workspace resolution + tool install don't need
+# macOS), runs in ~1 min, and deliberately has NO paths-ignore: a workspace
+# break can come from a config-only change or a new directory, so it must run
+# on EVERY push and PR. Make it a *required* status check on main so this class
+# of breakage can never merge silently again.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        # Pinned by series (matches macos.yml) so a uv release can't silently
+        # change resolution behaviour.
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.x"
+          enable-cache: true
+
+      - name: Set up Python (matches .python-version)
+        run: uv python install
+
+      - name: Workspace resolves
+        # THE check: fails if any packages/* workspace member is missing a
+        # pyproject.toml (the #42 break) or otherwise can't be resolved.
+        run: uv sync --all-packages
+
+      - name: fulcra-coord installs (the agent-update command)
+        # Replicates exactly what every coordination agent runs to update:
+        #   cd packages/fulcra-coord && uv tool install --reinstall --force .
+        # If the workspace is broken this fails the same way agents would.
+        run: |
+          cd packages/fulcra-coord
+          uv tool install --reinstall --force .
+          fulcra-coord --version
