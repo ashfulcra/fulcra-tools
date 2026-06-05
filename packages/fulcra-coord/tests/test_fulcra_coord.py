@@ -9298,6 +9298,55 @@ class TestRequestReview(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 6: general tell --route-capability
+# ---------------------------------------------------------------------------
+
+
+class TestTellRouteCapability(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_tell_route_capability_resolves_live_recipient(self):
+        from fulcra_coord.cli import cmd_tell
+        now_ls = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        agg = {"agents": [{"agent": "rev:h:r", "last_seen": now_ls, "capabilities": ["review"]}]}
+        captured = {}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._write_task_and_views",
+                   side_effect=lambda task, backend=None, command="write", lifecycle=None: captured.update(task=task) or True), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="a:b:c"):
+            args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
+                priority="P2", summary="", route_capability="review", floor="idle")
+            setattr(args, "from", None)
+            rc = cmd_tell(args, backend=["false"])
+        self.assertEqual(captured["task"]["assignee"], "rev:h:r")
+
+    def test_tell_route_capability_miss_escalates(self):
+        from fulcra_coord.cli import cmd_tell
+        old_ls = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        agg = {"agents": [{"agent": "rev:h:r", "last_seen": old_ls, "capabilities": ["review"]}]}
+        escalated = {}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._escalate_review_to_human",
+                   side_effect=lambda **kw: escalated.update(kw) or True), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="a:b:c"):
+            args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
+                priority="P2", summary="", route_capability="review", floor="idle")
+            setattr(args, "from", None)
+            rc = cmd_tell(args, backend=["false"])
+        self.assertTrue(escalated)
+
+
+# ---------------------------------------------------------------------------
 # Liveness-aware reviewer routing — Task 5: reroute sweep thresholds
 # ---------------------------------------------------------------------------
 

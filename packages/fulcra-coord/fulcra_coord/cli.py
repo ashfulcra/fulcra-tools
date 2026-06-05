@@ -1377,7 +1377,7 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None) -> int:
     owner_agent = --from (the directing agent) or unset. It lands in the target's
     inbox until they ack or claim it.
     """
-    assignee = args.assignee
+    assignee = getattr(args, "assignee", None)
     title = args.title
     workstream = getattr(args, "workstream", "general") or "general"
     priority = getattr(args, "priority", "P2") or "P2"
@@ -1388,6 +1388,39 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None) -> int:
     # we fall back to make_task's default (agent==assignee would make it self-
     # owned and thus NOT a directive), so we pass the resolved caller as agent.
     caller = from_agent or _derive_agent()
+
+    # --route-capability: resolve a LIVE recipient at send time (the general
+    # route-to-live primitive that request-review is the first consumer of)
+    # instead of a fixed assignee. Pool = every presence agent declaring the
+    # capability; ranked by liveness via the same resolver reviews use. On a
+    # miss we escalate to the human (same surface as request-review) rather than
+    # parking the directive on a dead agent. Best-effort: any failure escalates.
+    route_capability = getattr(args, "route_capability", None)
+    if route_capability:
+        try:
+            agg = remote.download_json(remote.presence_view_path(), backend=backend)
+            presence = (agg or {}).get("agents", []) if agg else []
+        except Exception:
+            presence = []  # treat as no live candidate -> escalate
+        pool = [r["agent"] for r in presence
+                if route_capability in (r.get("capabilities") or []) and r.get("agent")]
+        winner = views.resolve_live_recipient(
+            pool, presence, floor=getattr(args, "floor", "idle") or "idle")
+        if winner is None:
+            # No live agent declares the capability — land it on the human's
+            # plate the same way a review-routing miss does (needs:human surface).
+            _escalate_review_to_human(
+                pr=title, repo=workstream, tried=sorted(pool), backend=backend)
+            _info(f"No live '{route_capability}' agent — escalated to human.")
+            return 0
+        assignee = winner
+        _info(f"Routed to live '{route_capability}' agent: {winner}")
+
+    # Either a fixed assignee or a resolved --route-capability winner is now
+    # required; without one there is no directive to create.
+    if not assignee:
+        _err("tell requires a recipient: pass ASSIGNEE or --route-capability CAP.")
+        return 1
 
     try:
         task = schema.make_task(
