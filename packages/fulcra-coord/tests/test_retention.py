@@ -142,12 +142,21 @@ class _FakeBus(unittest.TestCase):
         os.environ["FULCRA_FAKE_ROOT"] = self.tmp
         os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination"
         os.environ["FULCRA_COORD_BACKEND"] = f"{sys.executable} {_FAKE}"
+        # Isolate the LOCAL cache too: cmd_reconcile falls back to
+        # cache.list_cached_tasks() (XDG_CACHE_HOME-rooted) when the remote index
+        # is empty, which would otherwise read the developer's real ~/.cache.
+        self._xdg_prev = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(Path(self.tmp) / "_xdg_cache")
         self.backend = [sys.executable, _FAKE]
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
         for k in ("FULCRA_FAKE_ROOT", "FULCRA_COORD_REMOTE_ROOT", "FULCRA_COORD_BACKEND"):
             os.environ.pop(k, None)
+        if self._xdg_prev is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._xdg_prev
 
     def _put(self, remote_path, obj):
         p = Path(self.tmp) / remote_path.lstrip("/")
@@ -243,3 +252,249 @@ class TestIndexShards(_FakeBus):
         s = cli._read_index_shard("t-9", backend=self.backend)
         self.assertEqual(s["archive_path"], "/coordination/archive/tasks/2026-05/t-9.json")
         self.assertIsNone(cli._read_index_shard("missing", backend=self.backend))
+
+
+# ----------------------------------------------------------------------------
+# Task 4 — search --archived + restore command + wiring
+# ----------------------------------------------------------------------------
+
+
+class TestSearchArchived(unittest.TestCase):
+    def _args(self, query, archived=False, fmt="json"):
+        ns = type("A", (), {})()
+        ns.query, ns.archived, ns.format = query, archived, fmt
+        return ns
+
+    def test_default_search_does_not_list_archive(self):
+        with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
+             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.cli._list_index_shards") as shards:
+            rc = cli.cmd_search(self._args("anything"), backend=["false"])
+        self.assertEqual(rc, 0)
+        shards.assert_not_called()
+
+    def test_archived_search_finds_shard_match(self):
+        shard = {"id": "t-1", "title": "migrate the widget", "status": "done",
+                 "workstream": "ws", "owner_agent": "a", "done_at": "x",
+                 "archive_path": "/coordination/archive/tasks/2026-05/t-1.json"}
+        out = io.StringIO()
+        with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
+             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.cli._list_index_shards", return_value=[shard]), \
+             contextlib.redirect_stdout(out):
+            rc = cli.cmd_search(self._args("widget", archived=True), backend=["false"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        ids = [r["id"] for r in payload["results"]]
+        self.assertIn("t-1", ids)
+
+    def test_archived_search_marks_results_and_carries_path(self):
+        shard = {"id": "t-1", "title": "migrate the widget", "status": "done",
+                 "workstream": "ws", "owner_agent": "a", "done_at": "x",
+                 "archive_path": "/coordination/archive/tasks/2026-05/t-1.json"}
+        out = io.StringIO()
+        with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
+             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.cli._list_index_shards", return_value=[shard]), \
+             contextlib.redirect_stdout(out):
+            cli.cmd_search(self._args("widget", archived=True), backend=["false"])
+        rec = json.loads(out.getvalue())["results"][0]
+        self.assertTrue(rec["archived"])
+        self.assertEqual(rec["archive_path"], shard["archive_path"])
+
+    def test_archived_search_no_match_returns_only_hot(self):
+        shard = {"id": "t-1", "title": "migrate the widget", "status": "done",
+                 "workstream": "ws", "owner_agent": "a", "done_at": "x",
+                 "archive_path": "/coordination/archive/tasks/2026-05/t-1.json"}
+        out = io.StringIO()
+        with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
+             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.cli._list_index_shards", return_value=[shard]), \
+             contextlib.redirect_stdout(out):
+            cli.cmd_search(self._args("nonexistent-term", archived=True), backend=["false"])
+        self.assertEqual(json.loads(out.getvalue())["results"], [])
+
+
+class TestRestore(_FakeBus):
+    def _args(self, tid, fmt="table"):
+        ns = type("A", (), {})()
+        ns.task_id, ns.format = tid, fmt
+        return ns
+
+    def test_restore_moves_body_back_and_deletes_shard(self):
+        body = {"id": "t-1", "title": "old", "status": "done",
+                "done_at": "2026-05-01T00:00:00Z", "updated_at": "2026-05-01T00:00:00Z"}
+        ap = "/coordination/archive/tasks/2026-05/t-1.json"
+        self._put(ap, body)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        rc = cli.cmd_restore(self._args("t-1"), backend=self.backend)
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"))
+        self.assertFalse(self._exists("/coordination/archive/index/t-1.json"))
+
+    def test_restore_unknown_id_is_error(self):
+        rc = cli.cmd_restore(self._args("nope"), backend=self.backend)
+        self.assertEqual(rc, 1)
+
+    def test_restore_missing_body_keeps_shard(self):
+        # Shard present but archived body gone (corrupt state): error, keep shard.
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": "/coordination/archive/tasks/2026-05/t-1.json"})
+        rc = cli.cmd_restore(self._args("t-1"), backend=self.backend)
+        self.assertEqual(rc, 1)
+        self.assertTrue(self._exists("/coordination/archive/index/t-1.json"))
+
+
+class TestWiring(unittest.TestCase):
+    def test_restore_in_command_map(self):
+        from fulcra_coord import entry
+        self.assertIn("restore", entry.COMMAND_MAP)
+        self.assertIs(entry.COMMAND_MAP["restore"], cli.cmd_restore)
+
+    def test_search_parses_archived_flag(self):
+        from fulcra_coord import entry
+        ns = entry.build_parser().parse_args(["search", "q", "--archived"])
+        self.assertTrue(ns.archived)
+        ns2 = entry.build_parser().parse_args(["search", "q", "--all"])
+        self.assertTrue(ns2.archived)
+        ns3 = entry.build_parser().parse_args(["search", "q"])
+        self.assertFalse(ns3.archived)
+
+    def test_restore_parses_task_id(self):
+        from fulcra_coord import entry
+        ns = entry.build_parser().parse_args(["restore", "t-1"])
+        self.assertEqual(ns.task_id, "t-1")
+        self.assertEqual(ns.command, "restore")
+
+
+# ----------------------------------------------------------------------------
+# Task 5 — _run_retention folded into cmd_reconcile (throttle + bound + loop)
+# ----------------------------------------------------------------------------
+
+
+class TestRetentionMarker(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination"
+
+    def tearDown(self):
+        os.environ.pop("FULCRA_COORD_REMOTE_ROOT", None)
+
+    def test_absent_marker_is_claimed(self):
+        with patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.upload_json", return_value=True):
+            self.assertTrue(cli._claim_retention_marker(self.now, backend=["false"]))
+
+    def test_today_marker_blocks_second_host(self):
+        today = {"date": "2026-06-05", "by": "other-host"}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=today), \
+             patch("fulcra_coord.cli.remote.upload_json") as up:
+            self.assertFalse(cli._claim_retention_marker(self.now, backend=["false"]))
+        up.assert_not_called()
+
+    def test_yesterday_marker_allows_new_claim(self):
+        yest = {"date": "2026-06-04", "by": "x"}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=yest), \
+             patch("fulcra_coord.cli.remote.upload_json", return_value=True):
+            self.assertTrue(cli._claim_retention_marker(self.now, backend=["false"]))
+
+    def test_claim_error_skips(self):
+        with patch("fulcra_coord.cli.remote.download_json", side_effect=RuntimeError):
+            self.assertFalse(cli._claim_retention_marker(self.now, backend=["false"]))
+
+
+class TestRunRetention(_FakeBus):
+    def _terminal(self, tid, days_ago=40):
+        ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        return {"id": tid, "title": tid, "status": "done", "workstream": "ws",
+                "owner_agent": "a", "done_at": ts, "updated_at": ts}
+
+    def _active(self, tid):
+        ts = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        return {"id": tid, "title": tid, "status": "active", "workstream": "ws",
+                "owner_agent": "a", "updated_at": ts}
+
+    def test_archives_only_terminal_aged(self):
+        tasks = [self._terminal("old-1"), self._terminal("old-2"), self._active("live-1")]
+        for t in tasks:
+            self._put(f"/coordination/tasks/{t['id']}.json", t)
+        now = datetime.now(timezone.utc)
+        with patch("fulcra_coord.cli._claim_retention_marker", return_value=True):
+            res = cli._run_retention(tasks, now=now, deadline=time.monotonic() + 60, backend=self.backend)
+        self.assertEqual(res["archived"], 2)
+        self.assertFalse(self._exists("/coordination/tasks/old-1.json"))
+        self.assertTrue(self._exists("/coordination/tasks/live-1.json"))
+
+    def test_throttle_skips_when_already_ran(self):
+        tasks = [self._terminal("old-1")]
+        self._put("/coordination/tasks/old-1.json", tasks[0])
+        with patch("fulcra_coord.cli._claim_retention_marker", return_value=False):
+            res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() + 60, backend=self.backend)
+        self.assertEqual(res, {"skipped": True})
+        self.assertTrue(self._exists("/coordination/tasks/old-1.json"))  # untouched
+
+    def test_cap_defers_remainder(self):
+        tasks = [self._terminal(f"old-{i}") for i in range(5)]
+        for t in tasks:
+            self._put(f"/coordination/tasks/{t['id']}.json", t)
+        os.environ["FULCRA_COORD_RETENTION_MAX_PER_RUN"] = "2"
+        try:
+            with patch("fulcra_coord.cli._claim_retention_marker", return_value=True):
+                res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
+                                         deadline=time.monotonic() + 60, backend=self.backend)
+        finally:
+            del os.environ["FULCRA_COORD_RETENTION_MAX_PER_RUN"]
+        self.assertEqual(res["archived"], 2)
+        self.assertEqual(res["deferred"], 3)
+
+    def test_time_budget_skips_when_deadline_gone(self):
+        # An already-passed deadline skips the WHOLE pass before any I/O (incl. the
+        # throttle-marker read/write) so retention never overruns reconcile's
+        # ceiling; the next tick with a fresh budget picks it up. Never raises,
+        # nothing archived.
+        tasks = [self._terminal(f"old-{i}") for i in range(3)]
+        for t in tasks:
+            self._put(f"/coordination/tasks/{t['id']}.json", t)
+        with patch("fulcra_coord.cli._claim_retention_marker", return_value=True) as claim:
+            res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() - 1, backend=self.backend)
+        self.assertEqual(res, {"skipped": True})
+        claim.assert_not_called()  # budget gate is BEFORE the marker I/O
+        self.assertTrue(self._exists("/coordination/tasks/old-0.json"))  # untouched
+
+
+    def test_per_item_failure_does_not_block_others(self):
+        tasks = [self._terminal("good-1"), self._terminal("good-2")]
+        for t in tasks:
+            self._put(f"/coordination/tasks/{t['id']}.json", t)
+        calls = {"n": 0}
+        real = cli._archive_task
+        def flaky(task, *, backend=None):
+            calls["n"] += 1
+            if task["id"] == "good-1":
+                return False  # simulate a transient failure on one item
+            return real(task, backend=backend)
+        with patch("fulcra_coord.cli._claim_retention_marker", return_value=True), \
+             patch("fulcra_coord.cli._archive_task", side_effect=flaky):
+            res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() + 60, backend=self.backend)
+        self.assertEqual(res["archived"], 1)  # good-2 still archived
+
+    def test_never_raises(self):
+        with patch("fulcra_coord.cli._claim_retention_marker", side_effect=RuntimeError):
+            res = cli._run_retention([], now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() + 60, backend=self.backend)
+        self.assertEqual(res, {"skipped": True})
+
+    def test_reconcile_calls_run_retention(self):
+        with patch("fulcra_coord.cli._run_retention",
+                   return_value={"archived": 0, "deferred": 0,
+                                 "pruned_markers": 0, "pruned_presence": 0}) as rr:
+            ns = type("A", (), {})()
+            cli.cmd_reconcile(ns, backend=self.backend)
+        rr.assert_called_once()
+        # deadline kwarg must be the reconcile deadline (composes, not double-counts).
+        self.assertIn("deadline", rr.call_args.kwargs)
