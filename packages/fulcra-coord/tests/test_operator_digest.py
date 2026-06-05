@@ -421,6 +421,6 @@ class TestInstallDigestCommand(unittest.TestCase):
 
 
 class TestVersion(unittest.TestCase):
-    def test_version_is_080(self):
+    def test_version_is_081(self):
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.8.0")
+        self.assertEqual(__version__, "0.8.1")
