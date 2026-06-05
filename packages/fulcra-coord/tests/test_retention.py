@@ -229,6 +229,19 @@ class TestArchiveTask(_FakeBus):
         self.assertFalse(ok)
         self.assertTrue(self._exists("/coordination/tasks/t-1.json"))
 
+    def test_archive_evicts_local_cache(self):
+        # A successful move must also drop the LOCAL cache copy, else the
+        # archiving host's _load_all_tasks (cache-seeded) would rebuild the task
+        # straight back into views on its next reconcile (resurrection).
+        from fulcra_coord import cache
+        t = self._task()
+        self._put("/coordination/tasks/t-1.json", t)
+        cache.write_cached_task(t)
+        self.assertIsNotNone(cache.read_cached_task("t-1"))
+        self.assertTrue(cli._archive_task(t, backend=self.backend))
+        self.assertIsNone(cache.read_cached_task("t-1"),
+                          "archived task must be evicted from the local cache")
+
 
 class TestIndexShards(_FakeBus):
     def _shard(self, tid):
@@ -567,3 +580,28 @@ class TestHotPathExclusion(_FakeBus):
         rebuilt_ids = {s["id"] for s in rebuilt}
         self.assertNotIn("old-1", rebuilt_ids)
         self.assertIn("live-1", rebuilt_ids)
+
+    def test_reconcile_does_not_resurrect_archived_via_local_cache(self):
+        # REGRESSION: the host that finished a task has its body in the LOCAL
+        # cache. cmd_reconcile -> _load_all_tasks seeds task_map from
+        # cache.list_cached_tasks() and only ADDS remote ids (never removes), so
+        # before the fix the archived task was rebuilt straight back into the
+        # authoritative summaries.json on the archiving host's next reconcile,
+        # then propagated fleet-wide. The archive MOVE must evict the local cache.
+        from fulcra_coord import cache
+        import contextlib, io
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        old = {"id": "TASK-old", "title": "old", "status": "done", "workstream": "ws",
+               "owner_agent": "a", "done_at": old_ts, "updated_at": old_ts}
+        self._put("/coordination/tasks/TASK-old.json", old)
+        cache.write_cached_task(old)  # the finishing host's local copy
+        self.assertTrue(cli._archive_task(old, backend=self.backend))
+        ns = type("A", (), {})()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            cli.cmd_reconcile(ns, backend=self.backend)
+        summaries = self._read("/coordination/views/summaries.json")
+        ids = {s["id"] for s in summaries.get("summaries", [])}
+        self.assertNotIn("TASK-old", ids,
+                         "reconcile resurrected the archived task via the local cache")

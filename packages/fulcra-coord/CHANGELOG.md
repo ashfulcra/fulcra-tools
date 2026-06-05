@@ -44,6 +44,19 @@ crash-mid-move completion, idempotency), append-only shards, `search --archived`
 and a VERIFIED automatic-hot-path-exclusion test that archives a terminal task
 and asserts it leaves the rebuilt `tasks/` listing and summaries with no filter.
 
+**Fix (local-cache resurrection):** the archive MOVE deleted the remote
+`tasks/<id>.json` but left the body in the *local* cache of the host that ran the
+archive. Because `_load_all_tasks` (the reconcile load path) seeds its task map
+from `cache.list_cached_tasks()` and only ever ADDS remote ids — never removes —
+that host's very next `reconcile` rebuilt the archived task straight back into the
+authoritative `views/summaries.json`, re-surfacing it across the fleet (and it
+stayed an archive candidate forever, re-archived as an idempotent no-op each day).
+The hot-path exclusion held for *other* hosts but not the archiving one.
+`_archive_task` now evicts the local cache entry (`cache.delete_cached_task`) as
+the final step of a verified move. Covered by a unit test (eviction) and an
+end-to-end `reconcile` regression test that archives a locally-cached terminal
+task and asserts it does not reappear in the rebuilt summaries.
+
 ---
 
 ## [0.7.0] — Liveness-Aware Reviewer Routing

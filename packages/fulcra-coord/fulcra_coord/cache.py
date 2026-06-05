@@ -140,6 +140,22 @@ def write_cached_task(task: dict[str, Any]) -> None:
     path.write_text(json.dumps(task, indent=2))
 
 
+def delete_cached_task(task_id: str) -> None:
+    """Evict a task from the local cache. Best-effort and idempotent (a missing
+    entry is a no-op). Used by retention's archive MOVE: once a terminal task's
+    body has left the remote tasks/ tree, the archiving host MUST also drop its
+    local copy. Otherwise _load_all_tasks — which seeds task_map from
+    list_cached_tasks() and only ever ADDS remote ids — would keep re-including
+    the archived task and rebuild it straight back into the authoritative
+    summaries.json/views (resurrecting it fleet-wide), the exact hot-path
+    exclusion the move exists to achieve."""
+    path = tasks_dir() / f"{task_id}.json"
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def read_cached_view(name: str) -> Optional[dict[str, Any]]:
     """name e.g. 'index', 'active', 'next', 'recently-done', 'search-index'"""
     path = views_dir() / f"{name}.json"
