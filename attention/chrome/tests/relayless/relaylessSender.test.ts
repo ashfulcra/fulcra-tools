@@ -3,7 +3,7 @@ import { describe, test, expect, vi } from "vitest";
 import { sendBatch } from "../../src/relayless/relaylessSender";
 import { SentSet } from "../../src/relayless/sentSet";
 import { INGEST_BATCH_URL } from "../../src/relayless/config";
-import { memStorage, mockFetch } from "./memStorage";
+import { memStorage, spyStorage, mockFetch } from "./memStorage";
 import type { AttentionEvent } from "../../src/types";
 
 const CTX = { definitionId: "def-1", tagIds: ["t-attn", "t-web"], identitySlug: "" };
@@ -161,6 +161,79 @@ describe("sendBatch", () => {
     });
     expect(res.ok).toBe(true);
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  test("reads the sent-set once and writes once regardless of event count", async () => {
+    const storage = spyStorage();
+    const sentSet = new SentSet({ storage });
+    const fetchFn = mockFetch(async () => okResp());
+    const events = Array.from({ length: 50 }, (_, i) =>
+      ev(`https://e${i}.com/`),
+    );
+    const res = await sendBatch(events, {
+      getToken: async () => "TOK",
+      fetch: fetchFn,
+      context: CTX,
+      sentSet,
+    });
+    expect(res.sent).toHaveLength(50);
+    // O(1) storage access on the hot path: exactly one read, one write.
+    expect(storage.get).toHaveBeenCalledTimes(1);
+    expect(storage.set).toHaveBeenCalledTimes(1);
+  });
+
+  test("no successful send => no storage write (nothing to record)", async () => {
+    const storage = spyStorage();
+    const sentSet = new SentSet({ storage });
+    const fetchFn = mockFetch(async () => new Response(null, { status: 502 }));
+    const res = await sendBatch(
+      [ev("https://a.com/"), ev("https://b.com/")],
+      { getToken: async () => "TOK", fetch: fetchFn, context: CTX, sentSet },
+    );
+    expect(res.ok).toBe(false);
+    // Failed POST must not persist anything (ids retry next flush).
+    expect(storage.set).not.toHaveBeenCalled();
+    expect(await sentSet.size()).toBe(0);
+  });
+
+  test("a failed id is retried on the next batch (not marked sent)", async () => {
+    const storage = spyStorage();
+    const sentSet = new SentSet({ storage });
+    // First flush 5xx -> nothing recorded.
+    const fail = mockFetch(async () => new Response(null, { status: 503 }));
+    const r1 = await sendBatch([ev("https://a.com/")], {
+      getToken: async () => "TOK",
+      fetch: fail,
+      context: CTX,
+      sentSet,
+    });
+    expect(r1.ok).toBe(false);
+    expect(await sentSet.has("")).toBe(false); // (sanity) set is empty
+    expect(await sentSet.size()).toBe(0);
+    // Second flush with the SAME event succeeds -> it is sent (not skipped).
+    const ok = mockFetch(async () => okResp());
+    const r2 = await sendBatch([ev("https://a.com/")], {
+      getToken: async () => "TOK",
+      fetch: ok,
+      context: CTX,
+      sentSet,
+    });
+    expect(r2.ok).toBe(true);
+    expect(r2.sent).toHaveLength(1);
+    expect(r2.skipped).toHaveLength(0);
+    expect(ok).toHaveBeenCalledTimes(1);
+  });
+
+  test("only 2xx-sent ids are persisted; cap/trim-oldest still bounds the set", async () => {
+    const sentSet = new SentSet({ storage: memStorage(), cap: 2 });
+    const fetchFn = mockFetch(async () => okResp());
+    const res = await sendBatch(
+      [ev("https://a.com/"), ev("https://b.com/"), ev("https://c.com/")],
+      { getToken: async () => "TOK", fetch: fetchFn, context: CTX, sentSet },
+    );
+    expect(res.sent).toHaveLength(3);
+    // Cap=2 trims the oldest: only the last two survive in storage.
+    expect(await sentSet.size()).toBe(2);
   });
 
   test("transport error reports ok=false without recording", async () => {
