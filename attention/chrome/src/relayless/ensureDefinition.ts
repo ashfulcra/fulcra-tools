@@ -48,23 +48,38 @@ export const ATTENTION_DEFINITION_DESCRIPTION =
  * (attention, web) as the leading tagIds. */
 export const ATTENTION_DEFINITION_TAG_NAMES = ["attention", "web"] as const;
 
+/** The prefix on every per-browser machine tag. */
+export const MACHINE_TAG_PREFIX = "machine:";
+/** The Fulcra API caps tag names at 30 chars (HTTP 422 "String should have at
+ * most 30 characters" otherwise). machineTagName must never exceed this. */
+export const MAX_TAG_NAME_LEN = 30;
+/** The slug budget: how many chars the slug may use so that
+ * MACHINE_TAG_PREFIX + slug stays within MAX_TAG_NAME_LEN (= 22). */
+export const MACHINE_SLUG_BUDGET = MAX_TAG_NAME_LEN - MACHINE_TAG_PREFIX.length;
+
 /**
  * Slugify a per-browser identity label into a tag-safe token: lowercase,
  * collapse any run of characters outside [a-z0-9] into a single "-", trim
- * leading/trailing "-". An empty (or all-separator) label slugs to "browser"
- * so the machine tag is never literally "machine:".
+ * leading/trailing "-", then TRUNCATE to MACHINE_SLUG_BUDGET chars and re-trim
+ * any trailing "-" left by the cut (so the slug never ends on a dash). The cap
+ * keeps machineTagName within the API's 30-char tag-name limit. An empty (or
+ * all-separator) label slugs to "browser" so the machine tag is never literally
+ * "machine:".
  */
 export function slugifyIdentity(label: string): string {
   const slug = label
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MACHINE_SLUG_BUDGET)
+    .replace(/-+$/g, "");
   return slug === "" ? "browser" : slug;
 }
 
-/** The per-browser machine tag name for an identity label: "machine:<slug>". */
+/** The per-browser machine tag name for an identity label: "machine:<slug>".
+ * Always ≤ MAX_TAG_NAME_LEN (30) chars — slugifyIdentity caps the slug. */
 export function machineTagName(label: string): string {
-  return `machine:${slugifyIdentity(label)}`;
+  return `${MACHINE_TAG_PREFIX}${slugifyIdentity(label)}`;
 }
 
 /** The FULL create body for the Attention duration definition. Mirrors

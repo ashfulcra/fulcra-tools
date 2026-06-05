@@ -401,9 +401,11 @@ function ChooseDestinationStep(props: {
     return () => { cancelled = true; };
   }, [ensureOpts, list]);
 
-  // Prefill the identity label from the signed-in email. Best-effort: if
-  // whoami fails (offline, no email claim) the field stays empty and the
-  // placeholder guides the user. Runs once on mount.
+  // Prefill the identity label from the signed-in email. Best-effort: only
+  // prefill "<email> browser" when whoami returns an email-looking label
+  // (contains "@"); otherwise (e.g. whoami fell back to the bare userid) leave
+  // the field empty so the placeholder guides the user to type a real name.
+  // This avoids defaulting to the ugly userid. Runs once on mount.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -411,7 +413,7 @@ function ChooseDestinationStep(props: {
         const token = await tokenStore.getValidAccessToken();
         if (!token || cancelled) return;
         const { label } = await whoamiFn(token);
-        if (cancelled || !label) return;
+        if (cancelled || !label || !label.includes("@")) return;
         setIdentityLabel((cur) => (cur === "" ? `${label} browser` : cur));
         console.info("[wizard:destination] identity prefilled from whoami");
       } catch {
