@@ -498,3 +498,41 @@ class TestRunRetention(_FakeBus):
         rr.assert_called_once()
         # deadline kwarg must be the reconcile deadline (composes, not double-counts).
         self.assertIn("deadline", rr.call_args.kwargs)
+
+
+class TestPruneMarkers(_FakeBus):
+    def test_prunes_old_keeps_recent(self):
+        now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        self._put("/coordination/digest/markers/2026-05-20-morning.json", {"x": 1})  # old
+        self._put("/coordination/digest/markers/2026-06-03-evening.json", {"x": 1})  # recent
+        pruned = cli._prune_markers(now, backend=self.backend)
+        self.assertEqual(pruned, 1)
+        self.assertFalse(self._exists("/coordination/digest/markers/2026-05-20-morning.json"))
+        self.assertTrue(self._exists("/coordination/digest/markers/2026-06-03-evening.json"))
+
+    def test_empty_dir_prunes_nothing(self):
+        self.assertEqual(cli._prune_markers(datetime.now(timezone.utc), backend=self.backend), 0)
+
+
+class TestPruneDeadPresence(_FakeBus):
+    def _put_presence(self, slug, days_ago):
+        ls = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        self._put(f"/coordination/presence/{slug}.json", {"agent": slug, "last_seen": ls})
+
+    def test_prunes_dead_keeps_live(self):
+        self._put_presence("dead-agent", 40)
+        self._put_presence("live-agent", 1)
+        n = cli._prune_dead_presence(datetime.now(timezone.utc), backend=self.backend)
+        self.assertEqual(n, 1)
+        self.assertFalse(self._exists("/coordination/presence/dead-agent.json"))
+        self.assertTrue(self._exists("/coordination/presence/live-agent.json"))
+
+    def test_skips_presence_aggregate_view(self):
+        # The aggregate lives under views/, not presence/, so it's never listed
+        # here — but guard that a malformed record without last_seen is kept.
+        self._put("/coordination/presence/weird.json", {"agent": "weird"})
+        n = cli._prune_dead_presence(datetime.now(timezone.utc), backend=self.backend)
+        self.assertEqual(n, 0)
+        self.assertTrue(self._exists("/coordination/presence/weird.json"))
+
