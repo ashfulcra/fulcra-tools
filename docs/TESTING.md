@@ -353,32 +353,41 @@ If `access_token` shows `"missing"`, re-run the OAuth step.
 
 ## Attention browser extension
 
-The Attention plugin used to run its own loopback HTTP server on port
-8771 to receive events from the browser extension. That standalone relay
-is gone — the daemon now hosts the extension endpoint directly at:
+Browsing-attention capture is **fully relayless**. The extension used to
+POST to a daemon relay route; both the standalone loopback relay and the
+later daemon-hosted route are gone. The Chrome extension now signs in
+through your browser with an Auth0 device flow and POSTs records
+**directly to the Fulcra API**:
 
 ```
-http://127.0.0.1:9292/api/extension/attention
+https://api.fulcradynamics.com/ingest/v1/record/batch
 ```
 
-(swap 9292 for your custom `web_port` if you set one).
+There is no daemon involvement, no `127.0.0.1` endpoint, no pairing
+handshake, and no shared extension token. The `attention-relay` entry in
+Fulcra Collect is just a pointer plugin telling you to install the
+extension and sign in; nothing is configured there.
 
-To wire up the extension:
+To wire up and test the extension:
 
-1. In the Fulcra Collect web UI, open the **Attention** plugin and click
-   **Pair extension**. The daemon issues a bearer token (the
-   `extension-token`) and shows it for you to paste into the extension —
-   either the onboarding wizard's "Connect to Fulcra Collect" step or the
-   popup's token field. The extension already targets the endpoint URL
-   above; you only paste the token. Re-running **Pair extension** re-issues
-   the token if you ever need a fresh one.
-2. The daemon validates each POST against the `extension-token` it stored
-   in the keychain during pairing; mismatched or missing tokens return 401.
-3. Use `fulcra-attention status` to inspect the per-machine state file
-   (definition id, hostname tag, per-client watermarks). The
-   `fulcra-attention relay` subcommand and the launchd-install half of
-   `fulcra-attention setup` are gone. The `setup` subcommand still exists
-   but now only tags this machine's events with its hostname.
+1. Build it: `npm run build` in `attention/chrome/`, then load
+   `attention/chrome/dist/` as an unpacked extension
+   (`chrome://extensions` → Developer mode → Load unpacked).
+2. Open the extension and click **Connect to Fulcra**. Approve the
+   browser sign-in page (the Auth0 device flow). You're returned to the
+   wizard — choose the **destination** (the Attention annotation
+   definition to save into, or create a new one) and **name this browser**
+   (its per-browser `machine:<slug>` identity label).
+3. Browse a couple of HTTP(S) pages, then confirm the events reached
+   Fulcra:
+   ```bash
+   fulcra get-records --type DurationAnnotation --start "5 minutes ago" \
+     | jq '.[] | select(.data.service == "web")'
+   ```
+   Records carry source ids under `com.fulcra.attention.v3.<hash>` and the
+   `attention` + `web` tags (plus `machine:<slug>` when a label is set).
+   A 401 from the API means the device-flow token is missing or expired —
+   re-run **Connect to Fulcra** from the popup.
 
 ## What the sync does
 

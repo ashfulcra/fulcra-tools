@@ -187,17 +187,24 @@ worth a look when nothing else matches.
 
 ## Browser activity (Fulcra Attention)
 
-- **Live (browser extension)** — plugin `attention-relay` plus the
-  Fulcra Attention browser extension. The extension watches your tabs
-  (which are open, which is active, when you're idle) and POSTs events
-  to the daemon's `POST /api/extension/attention` route directly. The
-  plugin itself owns the Attention annotation definition and exposes a
-  manual run that sanity-checks the pipeline (token present?
-  definition bound? extension posted in the last 24h?). **Chromium
-  browsers only** (Chrome / Edge / Brave / Arc / Vivaldi); Firefox and
-  Safari are not supported yet. Build with `npm run build` in
-  `attention/chrome/` and load `dist/` as an unpacked
-  extension; pair through the wizard.
+- **Live (browser extension)** — the Fulcra Attention browser
+  extension, which is fully relayless: it watches your tabs (which are
+  open, which is active, when you're idle) and POSTs events **directly
+  to the Fulcra API** (`https://api.fulcradynamics.com/ingest/v1/record/batch`).
+  There is no localhost daemon, no pairing, and no shared token. The
+  extension signs you in through your browser with an Auth0 device flow
+  and ingests on its own. **Chromium browsers only** (Chrome / Edge /
+  Brave / Arc / Vivaldi); Firefox and Safari are not supported yet.
+
+  To set it up: build with `npm run build` in `attention/chrome/`, load
+  `dist/` as an unpacked extension (`chrome://extensions` → Developer
+  mode → Load unpacked), then open the extension and click **Connect to
+  Fulcra**. Approve the browser sign-in page, choose the **destination**
+  (the Attention annotation definition to save into, or create a new
+  one) and **name this browser** (its per-browser identity label), and
+  you're done — records flow straight to Fulcra. The `attention-relay`
+  entry in Fulcra Collect is now just a pointer to these steps; nothing
+  is configured there.
 
 ## Generic RSS / Atom feed
 
