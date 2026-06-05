@@ -6923,10 +6923,10 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_8_1(self):
-        # 0.8.1: build_search_index no longer KeyErrors on a title-less task.
+    def test_version_is_0_8_2(self):
+        # 0.8.2: hermetic test cache isolation (tests no longer pollute the bus).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.8.1")
+        self.assertEqual(__version__, "0.8.2")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
@@ -9622,6 +9622,76 @@ class TestReviewSweep(unittest.TestCase):
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()
         lt.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test-harness hermeticity — proves the autouse conftest cache isolation works
+# ---------------------------------------------------------------------------
+
+
+class TestCacheIsolationHermetic(unittest.TestCase):
+    """Regression guard for the 'tests pollute the operator's real bus' bug.
+
+    The conftest autouse fixture redirects XDG_CACHE_HOME to a throwaway dir for
+    every test. These tests prove it: cache.cache_root() must resolve UNDER that
+    temp dir, never under the operator's real ~/.cache, and a real cache write
+    from inside a test must NOT land in ~/.cache/fulcra-coord. Without the
+    fixture, a routing/reconcile test's fixtures leaked into the real cache and
+    reconcile pushed them to the live coordination bus."""
+
+    def test_cache_root_is_redirected_away_from_real_home(self):
+        # Cache root must be under a temp XDG dir, not the developer's ~/.cache.
+        root = cache.cache_root()
+        real_home_cache = Path.home() / ".cache" / "fulcra-coord"
+        self.assertNotEqual(
+            root.resolve(), real_home_cache.resolve(),
+            "cache_root() resolved to the REAL ~/.cache/fulcra-coord — the "
+            "hermetic conftest fixture is not active; tests can pollute the bus.",
+        )
+        # And it must sit under the redirected XDG_CACHE_HOME the fixture set.
+        xdg = os.environ.get("XDG_CACHE_HOME", "")
+        self.assertTrue(xdg, "XDG_CACHE_HOME not set by the hermetic fixture")
+        self.assertTrue(
+            str(root.resolve()).startswith(str(Path(xdg).resolve())),
+            f"cache_root() {root} is not under XDG_CACHE_HOME {xdg}",
+        )
+
+    def test_cache_write_does_not_touch_real_home_cache(self):
+        # Snapshot the real home cache, write a task through the normal cache
+        # API, and assert the write landed in the temp dir, NOT the real cache.
+        real_home_cache = Path.home() / ".cache" / "fulcra-coord"
+        before = set()
+        if real_home_cache.exists():
+            before = {p for p in real_home_cache.rglob("*") if p.is_file()}
+
+        sentinel_id = "TASK-99999999-isolation-probe-deadbeef"
+        cache.write_cached_task({
+            "id": sentinel_id,
+            "title": "isolation probe — must never reach the real cache",
+            "status": "proposed",
+        })
+
+        # The write must be readable back through the (redirected) cache...
+        self.assertIsNotNone(cache.read_cached_task(sentinel_id))
+        # ...and must live under the temp XDG dir.
+        written = cache.tasks_dir() / f"{sentinel_id}.json"
+        self.assertTrue(written.exists())
+        self.assertTrue(str(written.resolve()).startswith(
+            str(Path(os.environ["XDG_CACHE_HOME"]).resolve())))
+
+        # The real home cache must be byte-for-byte unchanged: no new files, and
+        # specifically not our sentinel anywhere under it.
+        after = set()
+        if real_home_cache.exists():
+            after = {p for p in real_home_cache.rglob("*") if p.is_file()}
+        self.assertEqual(
+            after - before, set(),
+            "a cache write from inside a test created files in the REAL "
+            "~/.cache/fulcra-coord — isolation is broken.",
+        )
+        leaked = list(real_home_cache.rglob(f"{sentinel_id}.json")) if \
+            real_home_cache.exists() else []
+        self.assertEqual(leaked, [], "sentinel task leaked into the real home cache.")
 
 
 # ---------------------------------------------------------------------------
