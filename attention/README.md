@@ -2,41 +2,30 @@
 
 Capture what takes your attention while browsing — every page you read, with title and time-on-page — into your own [Fulcra](https://fulcradynamics.com) account, so you can later recall *"what was that article I read on Tuesday?"*
 
-The attention plugin owns the Fulcra "Attention" annotation definition and verifies the pipeline is wired up. Browser events are received by the fulcra-collect daemon on its stable port (default `9292`) at `POST /api/extension/attention`, then forwarded to Fulcra.
+The capture pipeline is **fully relayless**: the Chrome extension signs in through your browser with an Auth0 device flow and POSTs records **directly to the Fulcra API** (`https://api.fulcradynamics.com/ingest/v1/record/batch`). There is no localhost daemon involvement, no pairing, no per-extension token, and no relay route. The Python package in this repo is now just the Fulcra Collect *pointer* plugin — a static signpost that tells the user to install the browser extension and sign in.
 
 This package holds:
 
-- **`fulcra_attention/`** — the Python plugin: bootstraps the Attention annotation definition + tags, owns this machine's hostname tag, and exposes a small CLI for catalog inspection. No relay, no launchd unit — the daemon's web port is the ingest surface now.
-- **`chrome/`** — Chrome MV3 extension. Foreground-only capture, optional sharper-AFK content script, onboarding wizard, right-click context menu, branded UI. See [chrome/README.md](chrome/README.md) for build + load instructions.
+- **`fulcra_attention/`** — the Fulcra Collect pointer plugin (`collect_plugin.py`). It does no collection: it exists only so Collect still surfaces an "Attention" entry whose `run()` emits one informational message directing the user to build/load the extension and sign in via the browser. No credentials, no setup steps, no definition binding.
+- **`chrome/`** — Chrome MV3 extension. Foreground-only capture, optional sharper-AFK content script, onboarding wizard, right-click context menu, branded UI. This is where all the real work happens — sign-in, definition resolution, and direct-to-Fulcra ingest. See [chrome/README.md](chrome/README.md) for build + load instructions.
 
 ## Setup
 
-Setup is via the daemon's onboarding wizard:
+Setup happens entirely in the browser extension — there is nothing to configure in Fulcra Collect.
 
-1. Install / start the fulcra-collect daemon (`pipx install -e packages/collect`, then launch the menubar app).
-2. Open **Preferences → Plugins → Attention**. The wizard guides you through:
-   - Bootstrapping the Attention annotation definition (idempotent).
-   - Installing the Chrome extension (links to the release zip or `chrome/dist/`).
-   - **Pair extension** — one click hands the extension its bearer token and the daemon's port. Stored in `chrome.storage.local`.
-3. (Optional) Run `fulcra-attention setup` once to tag this machine's events with its hostname.
+1. Build the extension: `npm run build` in [`chrome/`](chrome/) (the unpacked output lands in `chrome/dist/`).
+2. Load `chrome/dist/` as an unpacked extension (`chrome://extensions` → Developer mode → Load unpacked).
+3. Open the extension and click **Connect to Fulcra**. Approve the browser sign-in page (Auth0 device flow); you're returned to the wizard.
+4. Choose the **destination** — the Fulcra "Attention" annotation definition to save into, or create a fresh one — and **name this browser** (its per-browser identity label). Finish the wizard.
 
-### Two paths, one definition
-
-The daemon's wizard above (**Attention → Pair extension**, plus the auto-resolver
-that bootstraps the definition on first use) is the **interactive** path. The
-`fulcra-attention` CLI (`bootstrap` / `setup` / `status` / `defs` / `adopt` /
-`reset`, see `pyproject.toml` entry points) is the **headless / scriptable /
-multi-machine** path for managing the Attention definition, tags, and local
-state. Both operate on the same Fulcra "Attention" definition — use whichever
-fits the context.
+From then on the extension captures and ingests on its own, straight to the Fulcra API.
 
 ## Architecture
 
-- Daemon hosts the ingest endpoint on its configured `[daemon] web_port` (default `9292`) — loopback only.
-- Single endpoint: `POST /api/extension/attention`, bearer-token authenticated against the per-extension token issued by the pair flow.
-- Payload: `{url|category, title, og_description, favicon_url, chrome_identity, og_type, lang, start_time, end_time, client}` — exactly one of `url` or `category` non-null
-- Each accepted ping becomes one `DurationAnnotation` under the `Attention` def, tagged `attention` + `web`
-- Source-id idempotency: `com.fulcra.attention.v1.<sha256(url_or_category|start_time_to_second)[:16]>` — re-posts are silent no-ops
+- **Relayless, direct-to-cloud.** The extension POSTs batches to `https://api.fulcradynamics.com/ingest/v1/record/batch` with a Bearer token obtained from its own Auth0 device-flow sign-in. No daemon, no loopback endpoint, no pairing handshake. See `chrome/src/relayless/` (`oidc.ts`, `signIn.ts`, `relaylessSender.ts`, `ensureDefinition.ts`, `wire.ts`, `config.ts`).
+- **Per-browser identity.** Each browser is named with an identity label that slugifies into a `machine:<slug>` tag appended to its records, so events from different browsers stay distinguishable. The label is prefilled from the signed-in email (`<email> browser`) and editable in the wizard / popup.
+- **Each accepted event** becomes one `DurationAnnotation` under the resolved `Attention` definition, tagged `attention` + `web` (plus the `machine:<slug>` tag when a label is set).
+- **Source-id namespace.** `com.fulcra.attention.v3.<sha256(scrubbed_key|start_time_second|identitySlug)[:16]>`. Folding the per-browser identity slug into the hash makes the same url+second from two different browsers produce **distinct** source_ids (the multi-browser distinctness guarantee). Dedup is server-side on source_id; the extension also keeps a client-side sent-set to avoid re-POSTing.
 
 Three-tier privacy posture (Tier 1 always-on, Tiers 2 + 3 user-driven from the extension popup):
 
@@ -48,52 +37,24 @@ Three-tier privacy posture (Tier 1 always-on, Tiers 2 + 3 user-driven from the e
 
 ## Multi-machine + multi-identity
 
-Each machine runs its own daemon, with its own extension pair token. The extension's user-managed ignore list propagates across Chrome profiles via Chrome sync (`chrome.storage.sync`).
+Each browser signs in independently and carries its own `machine:<slug>` tag, so records from different browsers stay distinguishable at query time. The extension's user-managed ignore list propagates across Chrome profiles via Chrome sync (`chrome.storage.sync`).
 
 Users with multiple Chrome profiles (one per company / client / personal) have their `chrome_identity` carried through to `external_ids` on every annotation, so you can group by `external_ids.chrome_identity` at query time. The identity is captured from `chrome.identity.getProfileUserInfo()` (the Google account email signed into that Chrome profile) or a free-text user-set label.
-
-## Manual smoke test
-
-After bootstrap + pair, with the daemon running:
-
-```bash
-# Token is whatever the pair flow issued; you can re-read it from the
-# extension popup's "Reveal token" debug control or re-pair to mint a new one.
-TOKEN="<pair-token>"
-NOW=$(date -u +%FT%TZ)
-FIVE_MIN_AGO=$(date -u -v-5M +%FT%TZ 2>/dev/null || date -u -d '5 min ago' +%FT%TZ)
-
-curl -X POST http://127.0.0.1:9292/api/extension/attention \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"url\":\"https://example.com/article\",\"title\":\"Smoke test\",\"category\":null,\"start_time\":\"$FIVE_MIN_AGO\",\"end_time\":\"$NOW\",\"client\":\"curl/0.1\",\"chrome_identity\":\"redacted@users.noreply.github.com\",\"og_type\":\"article\",\"lang\":\"en\"}"
-```
-
-Expected: `{"posted":1,"dropped":0}`. Confirm the annotation appears in Fulcra:
-
-```bash
-fulcra get-records --type DurationAnnotation --start "1 hour ago" \
-  | jq '.[] | select(.data.service == "web")'
-```
 
 ## Development
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest -q                  # 102 tests as of v0.1.0
+.venv/bin/pytest -q
 ```
 
-Architecture references (in the sibling repo):
-- Design spec: `FulcraMediaHelpers/docs/superpowers/specs/2026-05-18-fulcra-attention-v1-design.md`
-- Auth0 app spec (for v2 distribution): `FulcraMediaHelpers/docs/superpowers/specs/2026-05-18-fulcra-browse-extension-auth0-app.md`
-- Plan A (this repo's build): `FulcraMediaHelpers/docs/superpowers/plans/2026-05-18-fulcra-attention-plan-a-python.md`
+The browser extension is built and tested under [`chrome/`](chrome/) — see [chrome/README.md](chrome/README.md).
 
 ## Status
 
-- **Plan A (this repo):** Python backend complete. 102 tests passing.
-- Chrome extension: shipped, lives under [chrome/](chrome/). Foreground-only attention, AFK detection, pause control, onboarding wizard, right-click context menu, branded UI.
-- **v2:** Direct-to-cloud via Auth0 OAuth (extension posts straight to Fulcra instead of through the local daemon); needs the dedicated Auth0 app provisioned per the spec above.
+- **Relayless extension:** shipped, lives under [chrome/](chrome/). Direct-to-Fulcra ingest via Auth0 device flow. Foreground-only attention, AFK detection, pause control, onboarding wizard, right-click context menu, branded UI.
+- **Python package:** reduced to the Fulcra Collect pointer plugin (`collect_plugin.py`). The relay-era backend (CLI, `ingest.py`, `fulcra.py`, `state.py`) has been retired.
 
 ## License
 
