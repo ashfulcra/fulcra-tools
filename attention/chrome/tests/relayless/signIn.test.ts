@@ -70,6 +70,53 @@ describe("startDeviceSignIn", () => {
     expect(pollCount).toBe(2);
   });
 
+  test("awaits the Auth0 Origin-strip DNR registration before the device-code POST — Bug A4", async () => {
+    const storage = memStorage();
+    const order: string[] = [];
+    let releaseRegister!: () => void;
+    const registerGate = new Promise<void>((r) => {
+      releaseRegister = r;
+    });
+    const registerOriginStrip = vi.fn(async () => {
+      await registerGate; // stays pending until we release it
+      order.push("registered");
+    });
+
+    const fetchFn = mockFetch(async (input) => {
+      const url = String(input);
+      if (url === DEVICE_CODE_URL) {
+        order.push("device-code");
+        return new Response(JSON.stringify(DEVICE_RESP), { status: 200 });
+      }
+      if (url === TOKEN_URL) {
+        return new Response(JSON.stringify(TOKEN_RESP), { status: 200 });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+
+    const promise = startDeviceSignIn({
+      onPrompt: vi.fn(),
+      fetch: fetchFn,
+      storage,
+      sleep: async () => undefined,
+      registerOriginStrip,
+    });
+
+    // Let any microtasks run: the device-code POST must NOT have fired yet
+    // because the (still-pending) registration is awaited first.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(registerOriginStrip).toHaveBeenCalledTimes(1);
+    expect(order).not.toContain("device-code");
+
+    // Release the registration → the flow proceeds.
+    releaseRegister();
+    await promise;
+
+    // Registration completed strictly before the device-code request.
+    expect(order).toEqual(["registered", "device-code"]);
+  });
+
   test("rejects when the user denies", async () => {
     const storage = memStorage();
     const fetchFn = mockFetch(async (input) => {

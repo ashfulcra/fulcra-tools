@@ -9,6 +9,7 @@
 
 import { FulcraOidc, type FetchFn } from "./oidc";
 import { TokenStore } from "./tokenStore";
+import { registerAuth0OriginStrip } from "./authOriginFix";
 import type { StorageArea } from "./storageArea";
 
 export interface StartDeviceSignInOpts {
@@ -23,6 +24,10 @@ export interface StartDeviceSignInOpts {
   sleep?: (ms: number) => Promise<void>;
   /** Cap on poll attempts (tests). */
   maxAttempts?: number;
+  /** Register the Auth0 Origin-strip DNR rule. Awaited before the first Auth0
+   * request so a cold-woken SW can't race the rule (Bug A4). Idempotent;
+   * injectable for tests. Defaults to the real registerAuth0OriginStrip. */
+  registerOriginStrip?: () => Promise<void>;
 }
 
 export interface SignInResult {
@@ -40,6 +45,14 @@ export interface SignInResult {
 export async function startDeviceSignIn(
   opts: StartDeviceSignInOpts,
 ): Promise<SignInResult> {
+  // Ensure the Auth0 Origin-strip DNR rule is LIVE before the first Auth0
+  // request. On a cold-woken SW the boot-time fire-and-forget registration may
+  // not have settled yet; awaiting here (registration is idempotent) prevents
+  // the device-code POST from racing it and getting a 403. Bug A4.
+  const registerOriginStrip =
+    opts.registerOriginStrip ?? (() => registerAuth0OriginStrip());
+  await registerOriginStrip();
+
   const oidc = new FulcraOidc({ fetch: opts.fetch });
   const device = await oidc.requestDeviceCode();
 
