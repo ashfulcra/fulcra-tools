@@ -1,11 +1,20 @@
 // chrome/src/content.ts
 //
-// Content script. Runs inside the page (injected via
-// chrome.scripting.executeScript) to read DOM metadata that's not visible
-// to the service worker.
+// The page-meta extractor. This is the single source of truth for the
+// metadata we read out of a page's DOM.
 //
-// Self-contained: no imports of other src/ files. crxjs builds this as a
-// separate bundle that gets injected.
+// It is injected into the page by background.ts via
+//   chrome.scripting.executeScript({ func: extractPageMeta, args: [url] })
+// which serializes the function to source and runs it IN the page. That
+// imposes a hard constraint: extractPageMeta must be SELF-CONTAINED — no
+// imports, no references to any module-level binding. It may only touch:
+//   * its `pageUrl` argument (passed through executeScript `args`)
+//   * page globals that exist in the page context (`document`, `URL`)
+//
+// Because it reads the page's global `document` rather than a passed-in
+// node, the unit test exercises the EXACT function injected at runtime by
+// installing fixture HTML into the (jsdom) global document — so the test
+// fails if this real extraction path ever drifts.
 
 export interface PageMeta {
   title: string | null;
@@ -15,36 +24,36 @@ export interface PageMeta {
   lang: string | null;
 }
 
-function metaContent(doc: Document, prop: string): string | null {
-  const el = doc.querySelector(`meta[property="${prop}"]`) as HTMLMetaElement | null;
-  const c = el?.content?.trim();
-  return c && c !== "" ? c : null;
-}
+export function extractPageMeta(pageUrl: string): PageMeta {
+  // Self-contained: everything below references only `pageUrl`, `document`,
+  // and `URL`. Do NOT factor any part of this out to a module-level helper
+  // — that would survive bundling as an out-of-scope reference and throw
+  // once injected into the page.
+  const metaContent = (prop: string): string | null =>
+    (document.querySelector(`meta[property="${prop}"]`) as HTMLMetaElement | null)
+      ?.content?.trim() || null;
 
-function findFavicon(doc: Document, pageUrl: string): string {
-  const candidates: HTMLLinkElement[] = Array.from(
-    doc.querySelectorAll('link[rel="icon"], link[rel="shortcut icon"]'),
-  ) as HTMLLinkElement[];
-  const href = candidates[0]?.getAttribute("href");
-  if (href && href !== "") {
-    try {
-      return new URL(href, pageUrl).toString();
-    } catch {
-      // fall through
-    }
+  const linkIcon = document.querySelector(
+    'link[rel="icon"], link[rel="shortcut icon"]',
+  ) as HTMLLinkElement | null;
+  const href = linkIcon?.getAttribute("href");
+  let favicon_url: string;
+  try {
+    favicon_url = href
+      ? new URL(href, pageUrl).toString()
+      : new URL("/favicon.ico", pageUrl).toString();
+  } catch {
+    favicon_url = new URL("/favicon.ico", pageUrl).toString();
   }
-  return new URL("/favicon.ico", pageUrl).toString();
-}
 
-export function extractPageMeta(doc: Document, pageUrl: string): PageMeta {
-  const titleEl = doc.querySelector("title");
-  const title = titleEl?.textContent?.trim() || null;
-  const lang = doc.documentElement.getAttribute("lang");
+  const title = document.title?.trim() || null;
+  const lang = document.documentElement.getAttribute("lang");
+
   return {
     title: title === "" ? null : title,
-    og_description: metaContent(doc, "og:description"),
-    og_type: metaContent(doc, "og:type"),
-    favicon_url: findFavicon(doc, pageUrl),
+    og_description: metaContent("og:description"),
+    og_type: metaContent("og:type"),
+    favicon_url,
     lang: lang && lang !== "" ? lang : null,
   };
 }

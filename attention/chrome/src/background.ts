@@ -21,7 +21,7 @@ import { scrubUrl } from "./scrub";
 import { isIgnored } from "./ignore";
 import { categorize } from "./categorize";
 import { getChromeIdentity } from "./identity";
-import type { PageMeta } from "./content";
+import { extractPageMeta, type PageMeta } from "./content";
 import { addToOutbox, flushOutbox } from "./outbox";
 import { loadVisits, saveVisits, loadSettings, saveSettings } from "./storage";
 import type { AttentionEvent, Visit, Counts } from "./types";
@@ -147,27 +147,11 @@ async function fetchPageMeta(tabId: number): Promise<PageMeta> {
     const url = tab.url ?? "";
     const results = await chrome.scripting.executeScript({
       target: { tabId },
-      func: (pageUrl: string) => {
-        const m = (prop: string) =>
-          (document.querySelector(`meta[property="${prop}"]`) as HTMLMetaElement | null)?.content?.trim() || null;
-        const linkIcon = document.querySelector('link[rel="icon"], link[rel="shortcut icon"]') as HTMLLinkElement | null;
-        const href = linkIcon?.getAttribute("href");
-        let favicon: string;
-        try {
-          favicon = href ? new URL(href, pageUrl).toString() : new URL("/favicon.ico", pageUrl).toString();
-        } catch {
-          favicon = new URL("/favicon.ico", pageUrl).toString();
-        }
-        const title = document.title?.trim() || null;
-        const lang = document.documentElement.getAttribute("lang");
-        return {
-          title: title === "" ? null : title,
-          og_description: m("og:description"),
-          og_type: m("og:type"),
-          favicon_url: favicon,
-          lang: lang && lang !== "" ? lang : null,
-        };
-      },
+      // extractPageMeta is self-contained (see content.ts): executeScript
+      // serializes it to source and runs it in the page, reading the page's
+      // global `document`. The unit test in tests/content.test.ts exercises
+      // this exact function, so this injection path can't drift untested.
+      func: extractPageMeta,
       args: [url],
     });
     return (results[0]?.result as PageMeta) ?? {
