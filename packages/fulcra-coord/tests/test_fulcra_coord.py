@@ -9151,6 +9151,153 @@ class TestRoutingEvents(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 4: request-review pool builder
+# ---------------------------------------------------------------------------
+
+
+class TestReviewPool(unittest.TestCase):
+    def test_canonical_reviewer_for_arc_author(self):
+        from fulcra_coord import cli
+        self.assertEqual(cli._canonical_reviewer("claude-code:ArcBot:something"),
+                         "claude-code:ArcBot:Arc-Code-Review")
+
+    def test_canonical_reviewer_for_everyone_else(self):
+        from fulcra_coord import cli
+        self.assertEqual(cli._canonical_reviewer("codex:Mac.localdomain:main"),
+                         "codex:Mac.localdomain:main")
+        self.assertEqual(cli._canonical_reviewer("openclaw:discord:devops"),
+                         "codex:Mac.localdomain:main")
+
+    def test_pool_seeds_canonical_even_when_undeclared(self):
+        from fulcra_coord import cli
+        presence = [{"agent": "x:y:z", "last_seen": "...", "capabilities": ["review"]}]
+        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
+        self.assertEqual(pool[0], "codex:Mac.localdomain:main")  # canonical first
+        self.assertIn("x:y:z", pool)
+
+    def test_pool_excludes_non_review_capable_and_devops(self):
+        from fulcra_coord import cli
+        presence = [
+            {"agent": "openclaw:discord:devops", "last_seen": "...", "capabilities": []},
+            {"agent": "rev:h:r", "last_seen": "...", "capabilities": ["review"]},
+        ]
+        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
+        self.assertNotIn("openclaw:discord:devops", pool)
+        self.assertIn("rev:h:r", pool)
+
+    def test_pool_no_duplicate_when_canonical_also_declares(self):
+        from fulcra_coord import cli
+        presence = [{"agent": "codex:Mac.localdomain:main", "last_seen": "...",
+                     "capabilities": ["review"]}]
+        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
+        self.assertEqual(pool.count("codex:Mac.localdomain:main"), 1)
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 4: request-review command
+# ---------------------------------------------------------------------------
+
+
+class TestRequestReview(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _presence_agg(self, agents):
+        return {"agents": agents}
+
+    def test_dry_run_prints_pool_and_writes_nothing(self):
+        from fulcra_coord.cli import cmd_request_review
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": now_ls, "capabilities": ["review"]}])
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._write_task_and_views") as wtv, \
+             patch("fulcra_coord.cli.identity.resolve_agent",
+                   return_value="codex:Mac.localdomain:main"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=True,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        wtv.assert_not_called()  # dry-run writes nothing
+
+    def test_hit_routes_tagged_review_with_routed_event_and_assignee(self):
+        from fulcra_coord.cli import cmd_request_review
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": now_ls, "capabilities": ["review"]}])
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        t = captured["task"]
+        self.assertEqual(rc, 0)
+        self.assertEqual(t["assignee"], "codex:Mac.localdomain:main")
+        self.assertIn("kind:review", t["tags"])
+        routed = [e for e in t["events"] if e["type"] == "routed"]
+        self.assertEqual(len(routed), 1)
+        self.assertIn("route_id", routed[0])
+        self.assertEqual(routed[0]["to"], "codex:Mac.localdomain:main")
+
+    def test_miss_escalates_via_block_on_user(self):
+        from fulcra_coord.cli import cmd_request_review
+        old_ls = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": old_ls, "capabilities": ["review"]}])
+        escalated = {}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._escalate_review_to_human",
+                   side_effect=lambda **kw: escalated.update(kw) or True), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertIn("42", escalated.get("pr", ""))
+
+    def test_escalate_to_human_lands_blocked_needs_human(self):
+        # _escalate_review_to_human must actually land a blocked, human-assigned
+        # task carrying needs:human, even though make_task starts at 'proposed'
+        # (proposed -> blocked is not a direct allowed transition).
+        from fulcra_coord.cli import _escalate_review_to_human
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_human", return_value="ash@fulcradynamics.com"), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="codex:m:main"):
+            ok = _escalate_review_to_human(pr="42", repo="fulcra-tools",
+                                           tried=["dead:h:r"], backend=["false"])
+        self.assertTrue(ok)
+        t = captured["task"]
+        self.assertEqual(t["status"], "blocked")
+        self.assertEqual(t["assignee"], "ash@fulcradynamics.com")
+        self.assertIn("needs:human", t["tags"])
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
