@@ -48,9 +48,12 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-/** Pull an email-ish label out of a decoded JWT payload, if present. */
-function emailFromClaims(claims: Record<string, unknown>): string | null {
-  for (const key of ["email", "https://fulcradynamics.com/email", "name"]) {
+/** Pull a human display label out of a decoded JWT payload, if present.
+ * Prefers `name` (most readable — e.g. "Ash Kalb"), then `email`, then the
+ * Fulcra-namespaced email claim. Intended to run against the OIDC id_token,
+ * which (unlike the API-audience access token) carries name/email. */
+function labelFromClaims(claims: Record<string, unknown>): string | null {
+  for (const key of ["name", "email", "https://fulcradynamics.com/email"]) {
     const v = claims[key];
     if (typeof v === "string" && v.length > 0) return v;
   }
@@ -58,19 +61,24 @@ function emailFromClaims(claims: Record<string, unknown>): string | null {
 }
 
 /**
- * Best-effort identity for the signed-in user. Tries the JWT email claim
- * first (no network), then falls back to GET /user/v1alpha1/info for a userid
- * label. Always resolves — never throws — returning { label: null } when
- * nothing usable is found.
+ * Best-effort identity for the signed-in user. Decodes display claims from the
+ * passed JWT first (no network), preferring `name`, then `email`. Callers
+ * should hand it the OIDC **id_token** (which carries those claims); the
+ * API-audience access token does NOT. Falls back to GET /user/v1alpha1/info
+ * for a userid label. Always resolves — never throws — returning
+ * { label: null } when nothing usable is found.
+ *
+ * `token` is whatever JWT the caller has (id_token preferred, access token as
+ * a fallback); it is also used as the Bearer for the /info request.
  */
 export async function whoami(
-  accessToken: string,
+  token: string,
   opts: { fetch?: FetchFn } = {},
 ): Promise<WhoAmI> {
-  // 1. JWT claim — cheapest, most reliable for the email.
-  const claims = decodeJwtPayload(accessToken);
+  // 1. JWT display claim — cheapest, most reliable when the id_token is given.
+  const claims = decodeJwtPayload(token);
   if (claims) {
-    const fromJwt = emailFromClaims(claims);
+    const fromJwt = labelFromClaims(claims);
     if (fromJwt) return { label: fromJwt };
   }
 
@@ -79,13 +87,13 @@ export async function whoami(
   try {
     const resp = await fetchFn(`${API_BASE}/user/v1alpha1/info`, {
       method: "GET",
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (resp.status >= 200 && resp.status < 300) {
       const body = (await resp.json()) as Record<string, unknown>;
-      // Prefer an email-ish field if the deployment exposes one, else the
-      // userid so we render *something* identifying.
-      for (const key of ["email", "name"]) {
+      // Prefer a human field if the deployment exposes one (name first for
+      // readability), else the userid so we render *something* identifying.
+      for (const key of ["name", "email"]) {
         const v = body[key];
         if (typeof v === "string" && v.length > 0) return { label: v };
       }

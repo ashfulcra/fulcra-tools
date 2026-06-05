@@ -60,15 +60,30 @@ function defaultOpenUrl(url: string): void {
   void chrome.tabs.create({ url });
 }
 
-async function defaultResolveLabel(accessToken: string): Promise<string | null> {
-  const r = await whoami(accessToken);
-  return r.label;
+/** Default label resolver, bound to a TokenStore so it can prefer the OIDC
+ * id_token (which carries name/email) over the API-audience access token
+ * (which carries neither). Falls back to the access token when no id_token is
+ * stored — e.g. a session signed in before id_token plumbing existed — which
+ * preserves the prior /info → userid behavior. */
+function makeDefaultResolveLabel(tokenStore: TokenStore) {
+  return async function defaultResolveLabel(
+    accessToken: string,
+  ): Promise<string | null> {
+    let idToken: string | null = null;
+    try {
+      idToken = await tokenStore.getIdToken();
+    } catch {
+      idToken = null;
+    }
+    const r = await whoami(idToken ?? accessToken);
+    return r.label;
+  };
 }
 
 export function SignIn(props: SignInProps) {
   const tokenStore = props.tokenStore ?? new TokenStore();
   const runSignIn = props.runSignIn ?? startDeviceSignIn;
-  const resolveLabel = props.resolveLabel ?? defaultResolveLabel;
+  const resolveLabel = props.resolveLabel ?? makeDefaultResolveLabel(tokenStore);
   const openUrl = props.openUrl ?? defaultOpenUrl;
   const clearResolved = props.clearResolved ?? clearResolvedDefault;
   const clearSentSet = props.clearSentSet ?? clearSentSetDefault;

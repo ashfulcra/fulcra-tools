@@ -19,10 +19,14 @@ vi.mock("../src/relayless/signIn", () => ({
 }));
 
 // Mock the TokenStore so "already signed in" vs "signed out" is controllable.
-const tokenImpl = { getValidAccessToken: vi.fn(async () => null as string | null) };
+const tokenImpl = {
+  getValidAccessToken: vi.fn(async () => null as string | null),
+  getIdToken: vi.fn(async () => null as string | null),
+};
 vi.mock("../src/relayless/tokenStore", () => ({
   TokenStore: class {
     getValidAccessToken = (...a: unknown[]) => tokenImpl.getValidAccessToken(...(a as []));
+    getIdToken = (...a: unknown[]) => tokenImpl.getIdToken(...(a as []));
     clear = vi.fn(async () => undefined);
   },
 }));
@@ -58,6 +62,7 @@ beforeEach(async () => {
   await chrome.storage.session.clear();
   vi.clearAllMocks();
   tokenImpl.getValidAccessToken.mockResolvedValue(null);
+  tokenImpl.getIdToken.mockResolvedValue(null);
   signInImpl.run.mockReset();
   whoamiImpl.whoami.mockResolvedValue({ label: null });
   ensureImpl.listAttentionDestinations.mockResolvedValue([]);
@@ -210,6 +215,30 @@ describe("Wizard destination step — relayless", () => {
     expect(container.textContent).toContain("Name this browser");
     const input = container.querySelector<HTMLInputElement>('input[type="text"]');
     expect(input?.value).toBe("user@example.com browser");
+  });
+
+  test("prefills the name from a human NAME label (whoami via id_token)", async () => {
+    // With the id_token carrying a `name` claim, whoami returns "Ash Kalb".
+    // A name (has a space, not a bare UUID) is a real human label, so it
+    // should prefill "<name> browser" just like an email does.
+    whoamiImpl.whoami.mockResolvedValue({ label: "Ash Kalb" });
+    ensureImpl.listAttentionDestinations.mockResolvedValue([]);
+    const { container } = await gotoDestinationStep();
+
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(input?.value).toBe("Ash Kalb browser");
+  });
+
+  test("resolves the prefill label via the stored id_token, not the access token", async () => {
+    // The destination step should hand whoami the id_token (which carries the
+    // name/email claims), preferring it over the access token.
+    tokenImpl.getIdToken.mockResolvedValue("ID-TOKEN");
+    tokenImpl.getValidAccessToken.mockResolvedValue("ACCESS-TOKEN");
+    whoamiImpl.whoami.mockResolvedValue({ label: "Ash Kalb" });
+    ensureImpl.listAttentionDestinations.mockResolvedValue([]);
+    await gotoDestinationStep();
+
+    expect(whoamiImpl.whoami).toHaveBeenCalledWith("ID-TOKEN");
   });
 
   test("does NOT prefill the name from a userid-like whoami label (no '@')", async () => {

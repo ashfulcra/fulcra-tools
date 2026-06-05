@@ -41,6 +41,10 @@ export interface DeviceCodeResponse {
 export interface TokenSet {
   access_token: string;
   refresh_token?: string | null;
+  /** The OIDC id_token JWT. Auth0 returns this whenever the scope includes
+   * `openid` (ours does); unlike the API-audience access token it carries the
+   * `name`/`email` display claims. A refresh response may omit it. */
+  id_token?: string | null;
   expires_in: number;
   token_type?: string;
   scope?: string;
