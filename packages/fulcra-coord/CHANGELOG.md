@@ -10,6 +10,36 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.8.2] — Hermetic test cache: tests can no longer pollute the real bus
+
+**Why:** `cache.cache_root()` resolves to `${XDG_CACHE_HOME:-~/.cache}/fulcra-coord`.
+Any test that hit a cache-writing path (`write_cached_task`, `_write_task_and_views`,
+`cmd_reconcile`, `_sweep_review_routes`, …) *without* first redirecting
+`XDG_CACHE_HOME` wrote straight into the **operator's real** `~/.cache/fulcra-coord`.
+Most test classes set `XDG_CACHE_HOME` by hand in `setUp`, but several did not —
+notably the reviewer-routing sweep tests — and their fixtures (`author:h:r`,
+`dead:h:r`, a title-less `TASK-20260604-rev-00000000`) leaked into the real cache.
+`reconcile` then read that polluted local cache and **pushed the junk tasks to the
+live coordination bus**, where they crashed reconcile. A prior run left 127 stray
+tasks in a developer's real `~/.cache` the same way. This is a correctness fix:
+the test suite must never touch the operator's cache or bus.
+
+- New `tests/conftest.py` with an **autouse, function-scoped** fixture that points
+  `XDG_CACHE_HOME` at a fresh per-test temp dir for **every** test and restores the
+  prior value afterward. The cache is now hermetic by default — no test can write to
+  the real `~/.cache/fulcra-coord` regardless of whether it remembered to isolate.
+  Function scope (not session) so tests never share cache state, matching the
+  per-test isolation the careful tests already did manually.
+- The same fixture defaults `FULCRA_COORD_BACKEND` to `false` when unset, so a test
+  that reaches an unmocked remote file-op can't shell out to the real `fulcra` CLI
+  and touch the live account. Tests that inject their own backend (the stateful fake,
+  or an explicit `backend=` arg) override this freely — no existing test changed.
+- Added `TestCacheIsolationHermetic`: proves `cache_root()` resolves under the temp
+  dir (never the real `~/.cache`) and that a cache write from inside a test leaves the
+  real home cache byte-for-byte unchanged.
+- Existing per-`setUp` `XDG_CACHE_HOME` juggling is left in place — it's now harmless
+  (it runs inside the fixture's redirected world) and removing it would be churn.
+
 ## [0.8.1] — Reconcile no longer crashes on a malformed task
 
 **Why:** `build_search_index` read `task["id"]` / `task["title"]` with bracket
