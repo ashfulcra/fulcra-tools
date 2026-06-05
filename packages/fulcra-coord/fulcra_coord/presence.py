@@ -179,6 +179,10 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     roles = list(getattr(args, "role", None) or [])
     if getattr(args, "can_review", False):
         roles.append("review")
+    if not roles:
+        existing = _load_own_presence(me, backend=backend)
+        if isinstance(existing, dict):
+            roles = list(existing.get("capabilities") or [])
     record = schema.make_presence(me, workstreams=workstreams, summary=summary,
                                   capabilities=roles or None,
                                   session=os.environ.get("FULCRA_COORD_SESSION") or None)

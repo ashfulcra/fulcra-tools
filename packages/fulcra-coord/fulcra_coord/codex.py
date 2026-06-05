@@ -40,14 +40,24 @@ from typing import Any
 from . import claude_code, cli_invocation
 from .cli_invocation import PLACEHOLDER_ARGV
 
-# SessionStart mostly matches Claude Code's (same stdin shape, cwd-driven), but
-# Codex is the canonical reviewer in the review-router seed pool. If its startup
-# hook publishes ordinary presence without the review capability, the router
-# sees the right identity but rates it below-floor. Keep Codex findable for PR
-# review requests by declaring review capability on every connect.
-SESSION_START_SH = claude_code.SESSION_START_SH.replace(
-    '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
-    '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+# SessionStart mostly reuses Claude Code's stdin/body, but Codex needs two
+# Codex-specific behaviours: a codex:* fallback identity and a background
+# self-heal that re-arms hooks + the durable inbox listener on every app start.
+# Codex is also the canonical reviewer in the review-router seed pool, so its
+# startup hook declares review capability on every connect.
+SESSION_START_SH = (
+    claude_code.SESSION_START_SH
+    .replace(
+        '[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"',
+        '[ -z "$AGENT" ] && AGENT="codex:${HOST}:${REPO}"',
+    )
+    .replace(
+        '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+        '# Re-arm Codex hooks + the per-agent inbox listener on every app start.\n'
+        '# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.\n'
+        '"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+        '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+    )
 )
 
 # PreCompact reuses the CC body but keys the session-id env fallback on the

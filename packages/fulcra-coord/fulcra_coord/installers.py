@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from . import claude_code, openclaw, codex, heartbeat, listener, identity
 from .output import info as _info, warn as _warn
+from .presence import cmd_connect
 
 
 def _derive_agent() -> str:
@@ -238,6 +239,80 @@ def cmd_install_listener(args: Any, backend: Optional[list[str]] = None) -> int:
     else:
         _info("Apply it now: crontab " + plan["writes"][0])
     _info(f"Scheduled command: {plan['cli_command']} notify-inbox --agent {agent}")
+    return 0
+
+
+def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Idempotently arm Codex hooks, listener, identity, and presence.
+
+    Codex SessionStart runs this best-effort in the background so app starts heal
+    missing hooks/listeners without blocking the user-visible session boot.
+    """
+    explicit_agent = getattr(args, "agent", None)
+    agent = identity.resolve_agent(explicit_agent)
+    dry_run = getattr(args, "dry_run", False)
+
+    if getattr(args, "set_identity", False):
+        if dry_run:
+            _info(f"[dry-run] Would set identity: {agent}")
+        else:
+            identity.set_identity(agent)
+            _info(f"Identity set: {agent}")
+            _info(f"  Persisted to: {identity.identity_path()}")
+
+    cplan = codex.install_codex(
+        dry_run=dry_run,
+        target_dir=getattr(args, "codex_target_dir", None),
+    )
+    lplan = listener.install_listener(
+        agent=agent,
+        interval_min=getattr(args, "interval_min", listener.INTERVAL_MIN_DEFAULT),
+        dry_run=dry_run,
+        target_dir=getattr(args, "listener_target_dir", None),
+        logs_dir=getattr(args, "logs_dir", None),
+    )
+
+    if dry_run:
+        _info(f"[dry-run] Would install Codex hooks -> {cplan['hooks_file']}")
+        _info(f"[dry-run] Would install listener for {agent} "
+              f"({lplan['mechanism']}, every {lplan['interval_min']} min)")
+        for w in lplan.get("writes", []):
+            _info(f"  + would write {w}")
+        if not getattr(args, "no_connect", False):
+            _info(f"[dry-run] Would refresh presence for {agent}")
+        return 0
+
+    _info(f"Ensured Codex hooks -> {cplan['hooks_file']}")
+    _info(f"Ensured listener for {agent} ({lplan['mechanism']})")
+    for w in lplan.get("writes", []):
+        _info(f"  + {w}")
+
+    if getattr(args, "load", True) and lplan.get("mechanism") == "launchd" \
+       and lplan.get("writes"):
+        try:
+            import subprocess
+            subprocess.run(
+                ["launchctl", "load", "-w", lplan["writes"][0]],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            _info("LaunchAgent load attempted (already-loaded is OK).")
+        except Exception:
+            pass
+
+    if not getattr(args, "no_connect", False):
+        roles = list(getattr(args, "role", None) or [])
+        cmd_connect(
+            type("Args", (), {
+                "agent": agent,
+                "workstream": None,
+                "summary": getattr(args, "summary", "") or "",
+                "can_review": getattr(args, "can_review", False),
+                "role": roles,
+                "format": "table",
+            })(),
+            backend=backend,
+        )
     return 0
 
 

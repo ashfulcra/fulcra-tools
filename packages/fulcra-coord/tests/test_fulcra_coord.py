@@ -4099,19 +4099,18 @@ class TestAgentsDigest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCodexTemplates(unittest.TestCase):
-    def test_reuses_claude_code_script_bodies_with_codex_review_capability(self):
+    def test_codex_session_start_adds_codex_specific_self_heal_and_review_capability(self):
         from fulcra_coord import codex, claude_code as cc
-        # SessionStart mostly shares the Claude Code body (same stdin shape), but
-        # Codex is the canonical review target, so its hook must publish the
-        # review capability or request-review cannot find it after app startup.
-        self.assertEqual(
-            codex.SESSION_START_SH,
-            cc.SESSION_START_SH.replace(
-                '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
-                '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
-            ),
-        )
+        # SessionStart mostly tracks Claude Code's stdin/body, but Codex needs a
+        # codex:* fallback identity, app-start listener self-healing, and review
+        # capability so request-review can find it after app startup.
+        self.assertIn('AGENT="codex:${HOST}:${REPO}"', codex.SESSION_START_SH)
+        self.assertNotIn('AGENT="codex:${HOST}:${REPO}"', cc.SESSION_START_SH)
+        self.assertIn("ensure-codex-watch --agent \"$AGENT\" --no-connect",
+                      codex.SESSION_START_SH)
+        self.assertNotIn("ensure-codex-watch", cc.SESSION_START_SH)
         self.assertIn("connect --can-review", codex.SESSION_START_SH)
+        self.assertNotIn("connect --can-review", cc.SESSION_START_SH)
         # PreCompact reuses the CC body but keys the session-id env fallback on
         # FULCRA_COORD_SESSION_KEY (Codex's session id env differs).
         self.assertIn("FULCRA_COORD_SESSION_KEY", codex.PRE_COMPACT_SH)
@@ -4219,6 +4218,31 @@ class TestInstallCodexCmd(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(
             os.path.join(self.home, ".codex", "hooks.json")))
+
+    def test_ensure_codex_watch_composes_hooks_listener_identity_and_presence(self):
+        from fulcra_coord import cli as climod
+        calls = {}
+        with patch("fulcra_coord.installers.identity.resolve_agent", return_value="codex:h:r"), \
+             patch("fulcra_coord.installers.identity.set_identity",
+                   side_effect=lambda agent: calls.update(identity=agent)), \
+             patch("fulcra_coord.installers.codex.install_codex",
+                   return_value={"hooks_file": "/tmp/hooks.json"}), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value={"mechanism": "launchd", "interval_min": 10,
+                                 "writes": ["/tmp/listener.plist"]}), \
+             patch("subprocess.run") as run, \
+             patch("fulcra_coord.installers.cmd_connect",
+                   side_effect=lambda args, backend=None: calls.update(connect=args) or 0):
+            rc = climod.cmd_ensure_codex_watch(types.SimpleNamespace(
+                agent="codex:h:r", set_identity=True, can_review=True,
+                role=None, summary="online", no_connect=False,
+                interval_min=10, codex_target_dir=None, listener_target_dir=None,
+                logs_dir=None, load=True, dry_run=False), backend=["false"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls["identity"], "codex:h:r")
+        self.assertTrue(calls["connect"].can_review)
+        run.assert_called_once()
 
 
 class TestCodexHookParity(unittest.TestCase):
@@ -9272,6 +9296,23 @@ class TestPresenceCapabilities(unittest.TestCase):
         rec = schema.make_presence("a", capabilities=["review"])
         agg = views.build_presence([rec])
         self.assertEqual(agg["agents"][0]["capabilities"], ["review"])
+
+    def test_connect_without_roles_preserves_existing_capabilities(self):
+        from fulcra_coord import cli
+        captured = {}
+
+        with patch("fulcra_coord.presence.identity.resolve_agent", return_value="codex:h:r"), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]), \
+             patch("fulcra_coord.presence._load_own_presence",
+                   return_value={"agent": "codex:h:r", "capabilities": ["review"]}), \
+             patch("fulcra_coord.presence._write_presence",
+                   side_effect=lambda record, backend=None: captured.update(record=record) or True):
+            rc = cli.cmd_connect(types.SimpleNamespace(
+                agent=None, workstream=None, summary="", role=None,
+                can_review=False, format="table"), backend=["false"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["record"]["capabilities"], ["review"])
 
 
 # ---------------------------------------------------------------------------

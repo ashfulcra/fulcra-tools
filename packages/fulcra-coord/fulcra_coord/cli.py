@@ -103,6 +103,7 @@ from .inbox import (
 from .installers import (
     _report_resolved_cli, cmd_install_claude_code, cmd_install_openclaw,
     cmd_install_codex, cmd_install_heartbeat, cmd_install_listener, cmd_install_shim,
+    cmd_ensure_codex_watch,
 )
 # Diagnostics (capabilities + doctor) extracted from this file. Re-exported so the
 # dispatch (entry.py) and test imports resolve. doctor.py never imports cli.
@@ -375,5 +376,4 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
-
 
