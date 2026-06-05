@@ -2881,6 +2881,184 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0 if ok else 1
 
 
+# --- reconcile reroute sweep: thresholds + classification + I/O wrapper -----
+
+def _env_float(name: str, default: float) -> float:
+    """Read an env var as a float, falling back to `default` on absent/blank/
+    unparseable — mirrors views._stale_hours' tolerance so a typo never breaks
+    a reconcile tick."""
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(default)
+
+
+def _reroute_minutes(priority: str) -> float:
+    """Minutes a never-acted review may sit on a below-floor assignee before the
+    sweep reroutes it. P1 is more urgent (15m) than P2/P3 (30m); both are
+    wall-clock durations (bus-global, machine-agnostic) and env-overridable."""
+    if (priority or "P2") == "P1":
+        return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", 15.0)
+    return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", 30.0)
+
+
+def _reroute_max() -> int:
+    """Max route attempts (the initial route + reroutes) before the sweep gives
+    up and escalates to the human instead of cycling reviewers forever."""
+    return int(_env_float("FULCRA_COORD_REVIEW_REROUTE_MAX", 2.0))
+
+
+def _accepted_stall_hours() -> float:
+    """Hours an ACCEPTED-then-silent review may stall before the sweep escalates
+    it to the human (it is never rerouted once accepted — we don't yank work out
+    from under a reviewer mid-flight; we only nudge the human after a long stall)."""
+    return _env_float("FULCRA_COORD_ACCEPTED_STALL_HOURS", 2.0)
+
+
+def _review_accepted_by_assignee(task, assignee, routed_dt):
+    """The timestamp at which `assignee` explicitly ACCEPTED this review after
+    routed_dt, or None.
+
+    Acceptance is an explicit `review-accepted` event OR a status-transition-to-
+    active authored by the assignee (claiming the work). A bare `inbox_ack` is a
+    READ receipt, NOT acceptance — excluded here, so a reviewer that only opened
+    its inbox then went dark still gets rerouted rather than freezing the PR."""
+    for e in task.get("events", []):
+        if e.get("by") != assignee:
+            continue
+        at = views._parse_dt(e.get("at", ""))
+        if at is None or routed_dt is None or at < routed_dt:
+            continue
+        if e.get("type") == "review-accepted":
+            return at
+        if e.get("type") == "active":  # claim/transition-to-active is acceptance
+            return at
+    return None
+
+
+def _classify_review(task, presence, now):
+    """Pure classifier for the reroute sweep. Returns one of reroute | escalate |
+    freeze | freeze-escalate | none. Never reroutes a non-kind:review task.
+
+    Pure + deterministic given `task` + `presence` + `now` (all injected), so it
+    evaluates identically on every machine that reads the same bus snapshot."""
+    from . import routing
+    if not routing.is_review_directive(task):
+        return "none"
+    if task.get("status") in ("done", "abandoned"):
+        return "none"
+    route = routing.current_route(task)
+    if route is None:
+        return "none"
+    assignee = route.get("to")
+    routed_dt = views._parse_dt(route.get("at", ""))
+    accepted_at = _review_accepted_by_assignee(task, assignee, routed_dt)
+    if accepted_at is not None:
+        # Accepted-then-stalled: FREEZE (don't yank mid-work). Escalate only
+        # after a long stall measured from acceptance.
+        stall_h = _accepted_stall_hours()
+        if (now - accepted_at).total_seconds() / 3600.0 >= stall_h:
+            return "freeze-escalate"
+        return "freeze"
+    # Never-acted path: only reroute if assignee is below floor AND past threshold.
+    eff = views._effective_routing_liveness(
+        next((r.get("last_seen", "") for r in presence if r.get("agent") == assignee), ""),
+        now, views._presence_grace_seconds())
+    if eff is not None:  # assignee still live/idle -> give it time, no reroute
+        return "none"
+    threshold_min = _reroute_minutes(task.get("priority", "P2"))
+    if routed_dt is None or (now - routed_dt).total_seconds() / 60.0 < threshold_min:
+        return "none"
+    # Cap check uses the CURRENT route's attempt counter (cumulative attempt
+    # number), not the inline event count: the events list is truncated to the
+    # last MAX_EVENTS_INLINE, so counting route events would under-count attempts
+    # on a long-lived task. The attempt field is the durable cumulative count.
+    current_attempt = route.get("attempt") or routing.route_attempt_count(task)
+    if current_attempt >= _reroute_max():
+        return "escalate"  # cap reached
+    return "reroute"
+
+
+def _sweep_review_routes(all_tasks, *, backend=None, now=None):
+    """Authoritative reconcile-time reroute sweep. Considers ONLY kind:review
+    directives. For each: classify; reroute a never-acted below-floor past-
+    threshold review (excluding already-tried agents, minting a new route_id),
+    escalate on cap/miss, freeze an accepted-then-stalled one (escalate after
+    ACCEPTED_STALL_HOURS).
+
+    Runs once per reconcile cycle; whichever machine reconciles first wins and
+    the others converge via the stale-observation re-read (Files has no CAS) plus
+    the optimistic write. Best-effort: one bad task — or the whole presence
+    download — never raises into a reconcile tick (a failure skips, never crashes)."""
+    from . import routing
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        agg = remote.download_json(remote.presence_view_path(), backend=backend)
+        presence = (agg or {}).get("agents", []) if agg else []
+    except Exception:
+        presence = []
+    for task in all_tasks:
+        try:
+            if not routing.is_review_directive(task):
+                continue
+            verdict = _classify_review(task, presence, now)
+            if verdict in ("none", "freeze"):
+                continue
+            if verdict in ("escalate", "freeze-escalate"):
+                # Escalate IN PLACE on the review task itself (existing=task) so
+                # the human's plate points at the task the agents already track,
+                # not a duplicate.
+                _escalate_review_to_human(
+                    pr=task.get("pr", task.get("id")),
+                    repo=task.get("repo", task.get("workstream", "")),
+                    tried=sorted(routing.tried_agents(task)),
+                    backend=backend, existing=task)
+                continue
+            # verdict == "reroute": stale-observation check, then write.
+            route = routing.current_route(task)
+            fresh = _load_task(task["id"], backend=backend)
+            if fresh is None:
+                continue
+            fresh_route = routing.current_route(fresh)
+            # Abort if the task moved since we computed the decision: another
+            # sweeper or the assignee changed the latest route or updated_at.
+            # Two machines racing from the same snapshot thus converge to one
+            # reroute (multi-sweeper convergence without a compare-and-swap).
+            if (fresh_route or {}).get("route_id") != (route or {}).get("route_id") \
+               or fresh.get("updated_at") != task.get("updated_at"):
+                continue
+            pool = _review_pool(task.get("owner_agent", ""), presence)
+            winner = views.resolve_live_recipient(
+                pool, presence, floor="idle", now=now,
+                exclude=tuple(routing.tried_agents(task)))
+            if winner is None:
+                _escalate_review_to_human(
+                    pr=task.get("pr", task.get("id")),
+                    repo=task.get("repo", task.get("workstream", "")),
+                    tried=sorted(routing.tried_agents(task)),
+                    backend=backend, existing=fresh)
+                continue
+            snapshot = [{"agent": a} for a in pool]
+            prev_attempt = (fresh_route or {}).get("attempt") \
+                or routing.route_attempt_count(fresh)
+            updated = _append_route_event_and_assignee(
+                fresh, kind="rerouted", to=winner, by="reconcile-sweep",
+                attempt=prev_attempt + 1,
+                reason="assignee below floor, never acted",
+                candidate_snapshot=snapshot,
+                observed_updated_at=fresh.get("updated_at", ""))
+            try:
+                _write_task_and_views(updated, backend=backend, command="reroute-review")
+            except (schema.ConflictError, schema.NeedsReconcile):
+                pass  # optimistic write is the second line of defence; reconverges next cycle
+        except Exception:
+            continue  # one bad task must never break the sweep / reconcile tick
+
+
 def cmd_pause(args: Any, backend: Optional[list[str]] = None) -> int:
     """Pause a task (set to waiting with a next_action)."""
     task_id = args.task_id
@@ -3152,6 +3330,17 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # failure must not fail a task-view reconcile, so it is reported but does not
     # count toward `failures`.
     _reconcile_presence(backend=backend)
+
+    # Liveness-aware reroute sweep (best-effort; never fails a reconcile tick).
+    # Runs AFTER the presence rebuild so it reads the freshly-reconciled
+    # aggregate. Considers only kind:review directives; reroutes never-acted
+    # reviews whose assignee fell below liveness floor, escalates on cap/miss,
+    # freezes accepted-then-stalled ones. Whichever machine reconciles first
+    # wins; others converge via the stale-observation re-read inside the sweep.
+    try:
+        _sweep_review_routes(all_tasks, backend=backend, now=now)
+    except Exception:
+        pass
 
     if failures:
         _warn(f"  View upload failures: {failures}")
