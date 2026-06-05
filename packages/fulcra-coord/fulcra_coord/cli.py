@@ -310,6 +310,100 @@ def _load_task(task_id: str, *, backend: Optional[list[str]] = None) -> Optional
     return _cache_remote_task(task_id, backend=backend)
 
 
+# ---------------------------------------------------------------------------
+# Retention / archival: crash-safe move + cold-index shards
+# ---------------------------------------------------------------------------
+
+def _archive_month(task: dict[str, Any]) -> str:
+    """The <YYYY-MM> the task is archived under: the done/abandoned month, or the
+    current month as a fallback. Parsed via views._parse_dt (never lexical)."""
+    dt = views._parse_dt(views._done_at(task))
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m")
+
+
+def _archive_index_shard(task: dict[str, Any], archive_path: str) -> dict[str, Any]:
+    """The append-only cold-index shard body for an archived task. Fields are a
+    subset of task_summary plus the archive bookkeeping; written once, never
+    mutated (one distinct path per id => concurrency-safe, no CAS)."""
+    return {
+        "schema": "fulcra.coordination.archive_index.v1",
+        "id": task.get("id", ""),
+        "title": task.get("title", ""),
+        "status": task.get("status", ""),
+        "workstream": task.get("workstream", ""),
+        "owner_agent": task.get("owner_agent", ""),
+        "done_at": views._done_at(task),
+        "archived_at": _now_iso(),
+        "archive_path": archive_path,
+    }
+
+
+def _archive_task(task: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
+    """Crash-safely MOVE a terminal+aged task out of the hot path into the cold
+    archive. Returns True on a completed (or already-complete) move, False if the
+    move could not be safely completed (caller logs + retries next pass).
+
+    ORDER (no-loss by construction): upload archive body -> VERIFY it landed
+    (stat) -> only THEN delete tasks/<id>.json -> write the per-id index shard.
+    A crash anywhere leaves the body in BOTH places (a recoverable duplicate),
+    never lost. IDEMPOTENT: if the archive body already exists we skip the
+    upload, still ensure the original is deleted and the shard exists, so
+    archiving an already-archived id (or finishing a crashed move) is a no-op.
+
+    BEST-EFFORT: any backend error returns False rather than raising; the only
+    irreversible step (delete) runs strictly after a positive read-back."""
+    tid = task.get("id")
+    if not tid:
+        return False
+    try:
+        archive_path = remote.archive_task_path(tid, _archive_month(task))
+        task_path = remote.task_remote_path(tid)
+        # (1) ensure the body is in the archive (idempotent): upload only if absent.
+        if remote.stat(archive_path, backend=backend) is None:
+            if not remote.upload_json(task, archive_path, backend=backend):
+                return False
+        # (2) VERIFY it landed before any delete — the no-loss gate.
+        if remote.stat(archive_path, backend=backend) is None:
+            return False
+        # (3) only now remove the hot copy (idempotent: a missing original is fine).
+        if remote.stat(task_path, backend=backend) is not None:
+            remote.delete(task_path, backend=backend)
+        # (4) write the append-only index shard if absent (idempotent).
+        if remote.stat(remote.archive_index_path(tid), backend=backend) is None:
+            remote.upload_json(_archive_index_shard(task, archive_path),
+                               remote.archive_index_path(tid), backend=backend)
+        return True
+    except Exception:
+        return False
+
+
+def _read_index_shard(task_id: str, *, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+    """Read one archived task's cold-index shard, or None if not archived."""
+    return remote.download_json(remote.archive_index_path(task_id), backend=backend)
+
+
+def _list_index_shards(*, backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """List every cold-index shard (archive/index/<id>.json) as parsed dicts.
+
+    Best-effort: a failed listing or a single unreadable shard contributes
+    nothing rather than raising. O(archived) — paid ONLY on the opt-in cold path
+    (search --archived), never on hot reads. Reuses remote.list_files; the fake
+    backend's recursive list returns exactly the shard files under the prefix."""
+    out: list[dict[str, Any]] = []
+    try:
+        for path in remote.list_files(remote.archive_index_prefix(), backend=backend):
+            if not path.endswith(".json"):
+                continue
+            shard = remote.download_json(path, backend=backend)
+            if shard and shard.get("id"):
+                out.append(shard)
+    except Exception:
+        pass
+    return out
+
+
 def _write_task_and_views(
     task: dict[str, Any],
     *,
