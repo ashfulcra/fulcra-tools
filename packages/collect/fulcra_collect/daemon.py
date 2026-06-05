@@ -232,14 +232,12 @@ class Daemon:
                     logger.exception("invalidate: failed for %s", plugin_id)
         except Exception:
             logger.exception("invalidate: failed to enumerate plugin_state")
-        # Per-package state files (media, attention). Deferred import
-        # tolerates either being absent.
+        # Per-package state files (media). Deferred import tolerates the
+        # module being absent.
         for label, module_name, attrs in (
             ("media", "fulcra_media.state",
              ("listened_definition_id", "watched_definition_id",
               "read_definition_id", "activity_definition_id", "tag_ids")),
-            ("attention", "fulcra_attention.state",
-             ("attention_definition_id", "tag_ids")),
         ):
             try:
                 mod = importlib.import_module(module_name)

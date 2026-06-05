@@ -670,7 +670,6 @@ name = "fulcra-attention"
 version = "0.1.0"
 source = { editable = "attention" }
 dependencies = [
-    { name = "click" },
     { name = "fulcra-collect" },
     { name = "fulcra-common" },
     { name = "httpx" },
@@ -688,7 +687,6 @@ fulcra-cli = [
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.1" },
     { name = "fulcra-api", marker = "extra == 'fulcra-cli'", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
     { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
