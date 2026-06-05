@@ -100,7 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("tell",
                         help="Direct work at another agent: create a proposed "
                              "directive task assigned to them (sugar over start)")
-    sp.add_argument("assignee", metavar="ASSIGNEE", help="Agent to direct the work at")
+    # assignee is OPTIONAL: omit it and use --route-capability to resolve a LIVE
+    # recipient at send time instead of pinning a fixed agent.
+    sp.add_argument("assignee", metavar="ASSIGNEE", nargs="?", default=None,
+                    help="Agent to direct the work at (omit with --route-capability)")
     sp.add_argument("title", metavar="TITLE", help="Short durable task objective")
     sp.add_argument("--next", "-n", default="", metavar="NEXT_ACTION")
     sp.add_argument("--workstream", "-w", default="general", metavar="WS")
@@ -109,6 +112,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
                     help="Directing agent (owner); default: derived/env agent")
     sp.add_argument("--summary", "-s", default="", metavar="SUMMARY")
+    sp.add_argument("--route-capability", dest="route_capability", default=None, metavar="CAP",
+                    help="Resolve a LIVE recipient declaring CAP instead of a fixed assignee")
+    sp.add_argument("--floor", choices=["live", "idle"], default="idle",
+                    help="Minimum liveness for --route-capability resolution (default: idle)")
 
     # ---- broadcast ----
     sp = sub.add_parser("broadcast",
