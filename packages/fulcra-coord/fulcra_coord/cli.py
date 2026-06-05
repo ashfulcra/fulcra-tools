@@ -2339,13 +2339,56 @@ _RETENTION_DEADLINE_HEADROOM_SECONDS = 5.0
 
 
 def _prune_markers(now: datetime, *, backend: Optional[list[str]] = None) -> int:
-    """Prune spent digest dedup markers (Task 6 fleshes this out). Stubbed to 0."""
-    return 0
+    """Delete spent digest dedup markers older than the marker-retention window.
+
+    Lists digest/markers/, deletes each path views.is_prunable_marker flags.
+    Markers are regenerable guards with NO history value, so they are deleted
+    (platform soft-delete keeps them restorable), not archived. is_prunable_marker
+    FAILS SAFE: a path it can't date (no embedded YYYY-MM-DD) is KEPT, never
+    pruned. Best-effort: a failed listing prunes nothing; one failed delete is
+    skipped, not fatal. Returns the count deleted."""
+    n = 0
+    try:
+        for path in remote.list_files(remote.digest_markers_prefix(), backend=backend):
+            if not path.endswith(".json"):
+                continue
+            if views.is_prunable_marker(path, now):
+                try:
+                    if remote.delete(path, backend=backend):
+                        n += 1
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return n
 
 
 def _prune_dead_presence(now: datetime, *, backend: Optional[list[str]] = None) -> int:
-    """Prune dead-agent presence records (Task 6 fleshes this out). Stubbed to 0."""
-    return 0
+    """Delete per-agent presence records for long-departed agents.
+
+    Lists presence/, downloads each record, deletes those
+    views.is_prunable_presence flags (last_seen older than the presence-retention
+    window). is_prunable_presence FAILS SAFE: a record with a missing/unparseable
+    last_seen is KEPT, never pruned. Presence is a live SNAPSHOT, not history, so
+    it's deleted (platform soft-delete keeps it restorable), not archived; a
+    pruned agent also drops from the presence aggregate on the next rebuild
+    (already a derived view — no extra code). Best-effort, per-item isolated.
+    Returns the count deleted."""
+    n = 0
+    try:
+        for path in remote.list_files(remote.presence_prefix(), backend=backend):
+            if not path.endswith(".json"):
+                continue
+            try:
+                rec = remote.download_json(path, backend=backend)
+                if rec and views.is_prunable_presence(rec, now):
+                    if remote.delete(path, backend=backend):
+                        n += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return n
 
 
 def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
