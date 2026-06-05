@@ -379,6 +379,23 @@ class TestBuildSearchIndex(unittest.TestCase):
             for field in ("id", "title", "status", "priority", "workstream", "tags", "task_file"):
                 self.assertIn(field, r, f"Missing {field} in search record")
 
+    def test_malformed_task_missing_title_does_not_crash_rebuild(self):
+        """Regression (live incident): a real task body missing 'title'/'id' must NOT
+        KeyError out of build_search_index — that aborts the whole reconcile rebuild
+        (views not repaired, retention never runs). Same render-don't-crash contract
+        as task_summary: surface the malformed task with empty-string defaults."""
+        tasks = [
+            {"status": "active", "workstream": "ws", "owner_agent": "a:b:c"},  # no id, no title
+            {"id": "TASK-20260101-x-00000000", "status": "waiting"},          # no title
+        ]
+        idx = build_search_index(tasks)  # must not raise
+        recs = idx["records"]
+        self.assertEqual(len(recs), 2)
+        for r in recs:
+            self.assertIn("title", r)
+            self.assertIn("id", r)
+            self.assertIn("task_file", r)
+
     def test_priority_field_preserved_in_search_index(self):
         """Regression: build_search_index must carry priority so table display works."""
         tasks = _make_tasks_set()
@@ -6906,10 +6923,10 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_8_0(self):
-        # Bus retention / archival shipped as the 0.8.0 minor.
+    def test_version_is_0_8_1(self):
+        # 0.8.1: build_search_index no longer KeyErrors on a title-less task.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.8.0")
+        self.assertEqual(__version__, "0.8.1")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
