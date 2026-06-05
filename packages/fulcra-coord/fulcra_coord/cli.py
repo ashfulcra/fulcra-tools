@@ -374,6 +374,14 @@ def _archive_task(task: dict[str, Any], *, backend: Optional[list[str]] = None) 
         if remote.stat(remote.archive_index_path(tid), backend=backend) is None:
             remote.upload_json(_archive_index_shard(task, archive_path),
                                remote.archive_index_path(tid), backend=backend)
+        # (5) Evict the local cache copy. The body has left the remote tasks/
+        # tree, but _load_all_tasks seeds task_map from the LOCAL cache (and only
+        # ever ADDS remote ids, never removes), so the archiving host would
+        # otherwise rebuild this id straight back into the authoritative
+        # summaries.json/views on its very next reconcile — resurrecting the
+        # archived task fleet-wide and defeating the hot-path exclusion the move
+        # exists to provide. Best-effort: never affects the move's success.
+        cache.delete_cached_task(tid)
         return True
     except Exception:
         return False
