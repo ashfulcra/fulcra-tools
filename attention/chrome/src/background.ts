@@ -760,6 +760,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;  // tells Chrome we'll call sendResponse asynchronously
 });
 
+// Bug A3: the service worker is the ONE context allowed to drain the outbox.
+// Page contexts (popup SignIn/Banner, wizard backfill) ask us to flush via
+// requestFlush() → { type: "flushOutbox" }. Running flushOutbox() HERE keeps
+// every real flush in this single context, where outbox.ts's module-scope
+// single-flight guard can actually serialize against the alarm-driven flush.
+// (The alarm handler still calls flushOutbox() directly — same context.)
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type !== "flushOutbox") return false;
+  // Keep the message channel open until the flush settles (async handler).
+  flushOutbox()
+    .catch((e) => {
+      console.error("[background] flushOutbox: requested flush failed", e);
+    })
+    .finally(() => {
+      try { sendResponse({ ok: true }); } catch { /* channel may be closed */ }
+    });
+  return true;  // we'll call sendResponse asynchronously
+});
+
 // Auto-open the onboarding wizard on first install. Skipped on
 // update/upgrade so existing users don't get spammed with a tab on
 // every refresh.
