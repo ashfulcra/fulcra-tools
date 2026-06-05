@@ -35,3 +35,21 @@ export function memStorage(): StorageArea {
     },
   };
 }
+
+/** A StorageArea backed by memStorage whose get/set/remove are vi.fn spies, so
+ * tests can assert call counts (e.g. the relayless sender does exactly one read
+ * + one write per batch regardless of event count). */
+export interface SpyStorageArea extends StorageArea {
+  get: Mock<StorageArea["get"]>;
+  set: Mock<StorageArea["set"]>;
+  remove: Mock<StorageArea["remove"]>;
+}
+
+export function spyStorage(): SpyStorageArea {
+  const base = memStorage();
+  return {
+    get: vi.fn(base.get) as unknown as Mock<StorageArea["get"]>,
+    set: vi.fn(base.set) as unknown as Mock<StorageArea["set"]>,
+    remove: vi.fn(base.remove) as unknown as Mock<StorageArea["remove"]>,
+  };
+}
