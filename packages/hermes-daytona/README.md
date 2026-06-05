@@ -1,5 +1,17 @@
 # fulcra-hermes-daytona
 
+> **⚠️ DEPRECATED — superseded by [`hermes-vercel`](../hermes-vercel).**
+>
+> Daytona's Tier 1/2 egress allowlist blocks `api.fulcradynamics.com` (verified
+> live: TLS reset), which kills the demo's data path. We ported the same
+> system to Vercel Sandbox + Firecracker with open egress.
+>
+> **New operators: start at [`../hermes-vercel/docs/HANDOFF.md`](../hermes-vercel/docs/HANDOFF.md).**
+>
+> This package is retained as a reference for the shape of the boot script,
+> snapshot config, and skill-fetch pattern — all of which carried forward to
+> the Vercel port. Do not invest more here unless we revisit Daytona Tier 3.
+
 Operator tooling for the **Fulcra "press play" demo**: give a small, hand-picked
 set of people their own isolated, ephemeral [Hermes](https://hermes-agent.nousresearch.com)
 agent on [Daytona](https://www.daytona.io) that onboards each of them into their
