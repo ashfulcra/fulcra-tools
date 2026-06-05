@@ -12,10 +12,10 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity
+from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity, digest_schedule
 # Imported under an alias because ``from __future__ import annotations`` above
 # binds the bare name ``annotations`` to the __future__ feature, which would
 # otherwise shadow this module on the cli namespace.
@@ -246,18 +246,20 @@ def _load_summaries_for_rebuild(
     # so a task this agent knows about that a raced aggregate dropped is recovered
     # — without ever overwriting a newer remote record with a stale local one.
     for t in cache.list_cached_tasks():
-        # BUG 2 (data-loss): a corrupt/partial cached body (missing title/
-        # status/workstream/owner_agent) makes task_summary raise KeyError. That
-        # escaped _write_task_and_views (which only catches Conflict/Reconcile),
-        # crashing AFTER the task body uploaded → stale views with NO
-        # needs_reconcile marker. Guard like the file-listing path below: skip
-        # the bad entry, keep the good ones.
+        # task_summary is now defensive (renders a partial body with "" defaults
+        # rather than KeyError-ing), so a corrupt cached body is SURFACED, not
+        # dropped. This try/except is kept as belt-and-suspenders: any OTHER
+        # unexpected failure summarizing one entry must not crash the whole
+        # rebuild AFTER the task body uploaded (which would leave stale views with
+        # no needs_reconcile marker) — skip the offending entry, keep the rest.
         try:
             s = schema.task_summary(t)
         except Exception:
             continue
+        if not s.get("id"):
+            continue  # a body with no id can't key the aggregate; skip safely
         prev = by_id.get(s["id"])
-        if prev is None or s.get("updated_at", "") > prev.get("updated_at", ""):
+        if prev is None or _updated_at_key(s) > _updated_at_key(prev):
             by_id[s["id"]] = s
 
     # S2 layer 2 — SELF-HEAL: the per-task FILES are the durable, un-clobberable
@@ -540,6 +542,23 @@ def _view_name_to_remote(name: str) -> str:
     return remote.view_remote_path(name)
 
 
+def _updated_at_key(task: dict[str, Any]) -> datetime:
+    """Parsed, tz-aware ``updated_at`` for newer/older comparison, epoch on miss.
+
+    BUG 1 (mixed-precision data loss): a raw STRING compare of two ``updated_at``
+    values mis-orders timestamps in the same second when one was emitted with
+    microsecond=0 (``...:45Z``) and the other with microseconds>0
+    (``...:45.000001Z``) — lexically ``.`` < ``Z`` so the truly-newer fractional
+    timestamp wrongly sorts BEFORE the whole-second one, and the merge would
+    silently drop the newer side's field edits. The emission fix gives all NEW
+    timestamps fixed-width microseconds, but mixed-precision data already on the
+    bus must still compare correctly, so the merge compares PARSED datetimes via
+    the shared ``views._parse_dt`` (which coerces naive->UTC). A missing or
+    unparseable timestamp sorts oldest (epoch) so a clock-less side never wins."""
+    dt = views._parse_dt(task.get("updated_at", ""))
+    return dt if dt is not None else datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _try_merge(
     local: dict[str, Any], remote_task: dict[str, Any]
 ) -> Optional[dict[str, Any]]:
@@ -584,7 +603,7 @@ def _try_merge(
             # more recent (the symmetric case below covers the same logic for
             # the local-only-status-change path).
             merged = copy.deepcopy(remote_task)
-            if local.get("updated_at", "") > remote_task.get("updated_at", ""):
+            if _updated_at_key(local) > _updated_at_key(remote_task):
                 # Carry ALL non-event scalar/dict fields from the more-recent
                 # local side EXCEPT status (remote's transition is authoritative)
                 # — a hardcoded allowlist silently dropped not_before/due/
@@ -599,7 +618,7 @@ def _try_merge(
     # the field base so EVERY non-event field follows the newer write. Status
     # is taken from the side that changed it: when only local changed status,
     # local must keep its status even if remote's updated_at is newer.
-    if remote_task.get("updated_at", "") > local.get("updated_at", ""):
+    if _updated_at_key(remote_task) > _updated_at_key(local):
         newer, older = remote_task, local
     else:
         newer, older = local, remote_task
@@ -680,12 +699,16 @@ def _repair_merged_tags(
     the standard tags from the merged fields and keep non-standard tags from both
     sides, so membership markers like ``needs:human`` survive too.
     """
-    standard_prefixes = ("workstream:", "agent:", "kind:", "status:", "priority:")
+    def is_standard_tag(tag: str) -> bool:
+        if tag.startswith("kind:"):
+            return tag[5:] in schema.VALID_KINDS
+        return tag.startswith(("workstream:", "agent:", "status:", "priority:"))
+
     extra = [
         tag
         for task in (local, remote_task, merged)
         for tag in (task.get("tags") or [])
-        if not any(tag.startswith(prefix) for prefix in standard_prefixes)
+        if not is_standard_tag(tag)
     ]
     merged["tags"] = schema.build_tags(
         status=merged.get("status", ""),
@@ -698,7 +721,7 @@ def _repair_merged_tags(
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -1358,7 +1381,7 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None) -> int:
     owner_agent = --from (the directing agent) or unset. It lands in the target's
     inbox until they ack or claim it.
     """
-    assignee = args.assignee
+    assignee = getattr(args, "assignee", None)
     title = args.title
     workstream = getattr(args, "workstream", "general") or "general"
     priority = getattr(args, "priority", "P2") or "P2"
@@ -1369,6 +1392,39 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None) -> int:
     # we fall back to make_task's default (agent==assignee would make it self-
     # owned and thus NOT a directive), so we pass the resolved caller as agent.
     caller = from_agent or _derive_agent()
+
+    # --route-capability: resolve a LIVE recipient at send time (the general
+    # route-to-live primitive that request-review is the first consumer of)
+    # instead of a fixed assignee. Pool = every presence agent declaring the
+    # capability; ranked by liveness via the same resolver reviews use. On a
+    # miss we escalate to the human (same surface as request-review) rather than
+    # parking the directive on a dead agent. Best-effort: any failure escalates.
+    route_capability = getattr(args, "route_capability", None)
+    if route_capability:
+        try:
+            agg = remote.download_json(remote.presence_view_path(), backend=backend)
+            presence = (agg or {}).get("agents", []) if agg else []
+        except Exception:
+            presence = []  # treat as no live candidate -> escalate
+        pool = [r["agent"] for r in presence
+                if route_capability in (r.get("capabilities") or []) and r.get("agent")]
+        winner = views.resolve_live_recipient(
+            pool, presence, floor=getattr(args, "floor", "idle") or "idle")
+        if winner is None:
+            # No live agent declares the capability — land it on the human's
+            # plate the same way a review-routing miss does (needs:human surface).
+            _escalate_review_to_human(
+                pr=title, repo=workstream, tried=sorted(pool), backend=backend)
+            _info(f"No live '{route_capability}' agent — escalated to human.")
+            return 0
+        assignee = winner
+        _info(f"Routed to live '{route_capability}' agent: {winner}")
+
+    # Either a fixed assignee or a resolved --route-capability winner is now
+    # required; without one there is no directive to create.
+    if not assignee:
+        _err("tell requires a recipient: pass ASSIGNEE or --route-capability CAP.")
+        return 1
 
     try:
         task = schema.make_task(
@@ -1449,6 +1505,15 @@ def cmd_assign(args: Any, backend: Optional[list[str]] = None) -> int:
         summary=f"Assigned to {assignee} by {agent}.",
     )
     task["assignee"] = assignee
+    # BUG 3: a `block --on-user` task carries a ``needs:human`` tag so it shows on
+    # the human's plate (views.needs_human counts that tag, not just the assignee).
+    # When it is REASSIGNED to a non-human agent, the assignee changes but the
+    # stale tag persisted — so the human kept seeing it as "blocked on you" forever.
+    # Strip the tag whenever we reassign AWAY from the human; keep it when the new
+    # assignee IS the human (a no-op / re-park must not drop the marker). Resolve
+    # the human handle the same way cmd_block / needs-me do (identity.resolve_human).
+    if not views.agent_matches(identity.resolve_human(), assignee):
+        task["tags"] = [t for t in task.get("tags", []) if t != "needs:human"]
     cache.write_cached_task(task)
 
     ok = False
@@ -1713,7 +1778,14 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     derived = _derive_workstreams_from_open_tasks(me, backend=backend)
     workstreams = sorted(set(explicit) | set(derived))
 
+    # Declared capabilities (Task 2): --can-review is sugar for --role review.
+    # These drive liveness-aware reviewer routing's candidate pool. Undeclared
+    # agents stay [] (backward compatible).
+    roles = list(getattr(args, "role", None) or [])
+    if getattr(args, "can_review", False):
+        roles.append("review")
     record = schema.make_presence(me, workstreams=workstreams, summary=summary,
+                                  capabilities=roles or None,
                                   session=os.environ.get("FULCRA_COORD_SESSION") or None)
     _write_presence(record, backend=backend)
 
@@ -1927,6 +1999,12 @@ def _age_str(updated_at: str) -> str:
         dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return "?"
+    # BUG 6a: a tz-less stored timestamp parses NAIVE, and subtracting it from the
+    # AWARE now raised TypeError (not caught above) — crashing a read-only view.
+    # Coerce a naive parse to UTC, matching views._parse_dt, so any stored shape
+    # yields a sane age instead of a crash.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     secs = (datetime.now(timezone.utc) - dt).total_seconds()
     if secs < 60:
         return "just now"
@@ -1967,6 +2045,239 @@ def _due_str(due: str) -> str:
     except (ValueError, AttributeError):
         return ""
     return f"{dt:%b} {dt.day}"
+
+
+#: Max items rendered per digest block before collapsing the tail into "+N more".
+#: Keeps the timeline note bounded (a 284-event-in-two-days bus could otherwise
+#: produce a wall of text) while always showing the most-salient head of each list.
+_DIGEST_BLOCK_CAP = 8
+
+
+def _digest_lines(items: list[dict[str, Any]], fmt) -> list[str]:
+    """Render up to _DIGEST_BLOCK_CAP items via ``fmt`` (item -> str), appending a
+    '+N more' tail when the list is longer. Bounds every block identically."""
+    head = items[:_DIGEST_BLOCK_CAP]
+    lines = [fmt(s) for s in head]
+    extra = len(items) - len(head)
+    if extra > 0:
+        lines.append(f"  …and {extra} more")
+    return lines
+
+
+def _render_digest(digest: dict[str, Any], *, window: str) -> tuple[str, str]:
+    """Render the structured digest into a timeline (name, note). Pure, no I/O.
+
+    ``name`` is the concise timeline label carrying the headline counts
+    (``Agent digest — <window> (N on you, M upcoming)``); ``note`` is the body —
+    compact markdown-ish text, one block per non-empty section, each line who /
+    what / when. Empty blocks are SKIPPED entirely (no empty headers). Long lists
+    are capped via ``_digest_lines`` ('+N more'). Every field is read with
+    ``.get`` defaults so a summary missing an optional key renders instead of
+    raising — this feeds a best-effort scheduled writer that must never crash."""
+    blocked = digest.get("blocked_on_you") or []
+    upcoming = digest.get("upcoming") or []
+    per_agent = digest.get("per_agent") or []
+    stale = digest.get("stale") or []
+
+    name = (f"Agent digest — {window} "
+            f"({len(blocked)} on you, {len(upcoming)} upcoming)")
+
+    sections: list[str] = []
+
+    if blocked:
+        def _b(s):
+            ask = (s.get("blocked_on") or s.get("next_action") or "").strip()
+            who = s.get("owner_agent", "?")
+            tail = f" — {ask}" if ask else ""
+            return (f"  • [{(s.get('status') or '?').upper()}] "
+                    f"{(s.get('title') or '')[:60]} (from {who}){tail}")
+        sections.append("⛔ Blocked on you (" + str(len(blocked)) + "):")
+        sections.extend(_digest_lines(blocked, _b))
+
+    if upcoming:
+        def _u(s):
+            when = (s.get("not_before") or "").strip()
+            return f"  • {(s.get('title') or '')[:60]}" + (f" (not before {when})" if when else "")
+        sections.append("")
+        sections.append("Upcoming (next 7d) (" + str(len(upcoming)) + "):")
+        sections.extend(_digest_lines(upcoming, _u))
+
+    if per_agent:
+        sections.append("")
+        sections.append("Per agent:")
+        for a in per_agent:
+            ws = ", ".join(a.get("workstreams", [])) or "(none)"
+            sections.append(f"  {a.get('agent', '?')} [{a.get('liveness', '?')}] — {ws}")
+            if a.get("summary"):
+                sections.append(f"    on: {a['summary'][:80]}")
+            done = a.get("finished_since") or []
+            for s in done[:_DIGEST_BLOCK_CAP]:
+                sections.append(f"    ✓ {(s.get('title') or '')[:60]}")
+            if len(done) > _DIGEST_BLOCK_CAP:
+                sections.append(f"    …and {len(done) - _DIGEST_BLOCK_CAP} more done")
+
+    if stale:
+        def _s(s):
+            return f"  • {(s.get('title') or '')[:60]} (from {s.get('owner_agent', '?')})"
+        sections.append("")
+        sections.append("Stale (no update past threshold) (" + str(len(stale)) + "):")
+        sections.extend(_digest_lines(stale, _s))
+
+    note = "\n".join(sections).strip()
+    return name, note
+
+
+def _digest_window_since(window: str, now: datetime) -> datetime:
+    """The lookback boundary for a digest window (returns a tz-aware UTC datetime).
+
+    morning → since the previous evening (~last 14h, so an overnight run still
+    reports yesterday-evening's work); evening → since this morning (~last 10h);
+    any other value (on-demand) → last 12h. Approximations on purpose: the digest
+    is a human-paced glance, not an exact ledger, and the per_agent completion
+    filter is a >= compare against this instant. Always parsed datetimes."""
+    hours = {"morning": 14, "evening": 10}.get(window, 12)
+    return now - timedelta(hours=hours)
+
+
+def _digest_marker_path(window: str, now: datetime) -> str:
+    """Files-bus path of the per-window digest dedup marker:
+    ``<remote_root>/digest/markers/<YYYY-MM-DD>-<window>.json``. Keyed by the UTC
+    DATE + window so morning and evening each get one marker per day, and any
+    agent on any machine claims the SAME path (the whole point of the any-agent
+    guard). ``now`` is injected for deterministic tests."""
+    from . import remote_root
+    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    return f"{remote_root()}/digest/markers/{day}-{window}.json"
+
+
+def _claim_digest_marker(window: str, now: datetime, *,
+                         backend: Optional[list[str]] = None) -> bool:
+    """Any-agent first-writer-wins claim for one window's digest. Returns True
+    when THIS caller won the claim and should write the digest; False to skip.
+
+    Protocol (spec §5): download the marker — if it exists, another agent already
+    wrote this window, so NO-OP (return False). If absent, upload a marker
+    stamping this agent + timestamp; on a successful upload, grant the claim.
+
+    RACE (accepted): Fulcra Files has no compare-and-swap, so two agents firing
+    in the same ~second can both see 'absent' and both write → a rare double
+    digest. Harmless on a timeline; logged, not prevented (a single-owner schedule
+    would remove the race but add a single point of failure — rejected per the
+    any-agent decision). MARKER-CLAIM FAILURE (download or upload error) → return
+    False (skip) so a transient bus error never risks a double; the next window
+    retries. Never raises — best-effort like the rest of the digest path."""
+    try:
+        path = _digest_marker_path(window, now)
+        existing = remote.download_json(path, backend=backend)
+        if existing is not None:
+            return False  # already claimed this window
+        marker = {
+            "schema": "fulcra.coordination.digest_marker.v1",
+            "window": window,
+            "date": now.astimezone(timezone.utc).strftime("%Y-%m-%d"),
+            "by": identity.resolve_agent(),
+            "claimed_at": now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        }
+        return bool(remote.upload_json(marker, path, backend=backend))
+    except Exception:
+        # Best-effort: a marker error must never raise into a scheduled tick, and
+        # must skip (not write) so we never risk a double on an uncertain claim.
+        return False
+
+
+def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Write the operator's situational-awareness digest to the Fulcra timeline.
+
+    Loads the compact summaries aggregate + the presence roster (the same reads
+    needs-me / presence use — one download each, no body fetch), computes the
+    window's ``since``/``now``, builds the four-block digest, and renders it to a
+    timeline (name, note). ``--dry-run`` prints the rendered text and writes
+    NOTHING. ``--format json`` prints the structured digest (for tooling/tests).
+    Otherwise it claims the per-window dedup marker (first writer wins; others
+    no-op) and emits the moment on the ``Agent Tasks — Digest`` track.
+
+    BEST-EFFORT end to end: a failed marker claim or a failed emit is logged and
+    returns 0 — a scheduled tick must never error out."""
+    window = getattr(args, "window", None) or "ondemand"
+    out_format = getattr(args, "format", "table")
+    dry_run = getattr(args, "dry_run", False)
+    human = getattr(args, "human", None) or identity.resolve_human()
+
+    now = datetime.now(timezone.utc)
+    since = _digest_window_since(window, now)
+
+    summaries = _load_task_summaries(backend=backend)
+    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+    presence = (agg or {}).get("agents", []) if agg else []
+
+    digest = views.build_operator_digest(
+        summaries, presence, human=human, now=now, since=since)
+
+    if out_format == "json":
+        _print_json(digest)
+        return 0
+
+    name, note = _render_digest(digest, window=window)
+
+    if dry_run:
+        _info(f"[dry-run] {name}")
+        _info(note or "(nothing to report)")
+        return 0
+
+    # Any-agent dedup: claim the per-window marker first; if another agent
+    # already wrote this window (or the claim errored), skip — never risk a
+    # double, and never raise into a scheduled tick.
+    if not _claim_digest_marker(window, now, backend=backend):
+        _info(f"Digest for {window} already written (or marker claim failed) — skipping.")
+        return 0
+
+    wrote = False
+    try:
+        wrote = lifecycle_annotations.emit_digest_annotation(
+            name=name, note=note, window=window,
+            agent=identity.resolve_agent(), backend=backend)
+    except Exception:
+        wrote = False
+    _info(f"Digest ({window}): {'written' if wrote else 'not written (annotations off or error)'}.")
+    return 0
+
+
+def cmd_install_digest(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Install/uninstall the twice-daily scheduled ``fulcra-coord digest`` jobs.
+
+    Calendar-scheduled (08:00 morning + 18:00 evening), unlike the interval
+    heartbeat/listener: launchd StartCalendarInterval on macOS, fixed cron lines
+    elsewhere. Installable on every machine — the any-agent dedup marker collapses
+    concurrent ticks to one digest per window. Mirrors install-heartbeat's CLI
+    contract (dry-run prints the plan, surgical uninstall)."""
+    plan = digest_schedule.install_digest(
+        uninstall=args.uninstall,
+        dry_run=args.dry_run,
+        target_dir=getattr(args, "target_dir", None),
+        logs_dir=getattr(args, "logs_dir", None),
+    )
+    if args.dry_run:
+        _info(f"[dry-run] Digest mechanism: {plan['mechanism']}")
+        _info(f"[dry-run] Scheduled command: {plan['cli_command']} digest "
+              f"--window {{morning@08:00, evening@18:00}}")
+        for w in plan.get("writes", []):
+            _info(f"  + would write {w}")
+        for r in plan.get("removes", []):
+            _info(f"  - would remove {r}")
+        return 0
+    if args.uninstall:
+        _info(f"Removed fulcra-coord digest schedule ({plan['mechanism']}).")
+        return 0
+    _info(f"Installed fulcra-coord digest schedule ({plan['mechanism']}) — "
+          f"morning 08:00 + evening 18:00.")
+    for w in plan.get("writes", []):
+        _info(f"  + {w}")
+    if plan["mechanism"] == "launchd":
+        for w in plan.get("writes", []):
+            _info(f"Load it now (or at next login): launchctl load -w {w}")
+    else:
+        _info("Apply it now: crontab " + (plan["writes"][0] if plan["writes"] else ""))
+    return 0
 
 
 def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -2415,6 +2726,378 @@ def cmd_block(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing (request-review + reconcile reroute sweep)
+# ---------------------------------------------------------------------------
+
+# Canonical-reviewer identities are bus-global IDENTITIES, not locations — a
+# reviewer may run on any machine (machine-agnostic invariant). Arc sessions
+# route to the Arc reviewer; everyone else to the codex main reviewer.
+ARC_REVIEWER = "claude-code:ArcBot:Arc-Code-Review"
+DEFAULT_REVIEWER = "codex:Mac.localdomain:main"
+
+
+def _canonical_reviewer(author: str) -> str:
+    """The seeded, preference-first reviewer for an author. Seeded even if it
+    never declared --can-review (day-one works before agents update). #devops/
+    openclaw is deliberately NOT canonical — it qualifies only if actually
+    live/idle AND review-capable."""
+    if (author or "").startswith("claude-code:ArcBot:"):
+        return ARC_REVIEWER
+    return DEFAULT_REVIEWER
+
+
+def _review_pool(author: str, presence: list[dict[str, Any]]) -> list[str]:
+    """Preference-ordered candidate pool: canonical reviewer first (seeded,
+    tie-break only — a live non-canonical reviewer still wins), then every
+    review-capable agent in presence order. De-duplicated, canonical kept first."""
+    canonical = _canonical_reviewer(author)
+    pool = [canonical]
+    for rec in presence:
+        agent = rec.get("agent")
+        if not agent or agent == canonical:
+            continue
+        if "review" in (rec.get("capabilities") or []):
+            pool.append(agent)
+    # de-dup preserving first occurrence (canonical stays index 0)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for a in pool:
+        if a not in seen:
+            seen.add(a)
+            ordered.append(a)
+    return ordered
+
+
+def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
+                                     candidate_snapshot, observed_updated_at,
+                                     dt=None):
+    """Append a routing event AND sync task.assignee to its `to`, so the event
+    log (audit + sweep input) and the assignee (inbox/tell machinery) never
+    disagree. Mutates + returns a deep copy of the task."""
+    import copy
+    from . import routing
+    task = copy.deepcopy(task)
+    at = (dt or datetime.now(timezone.utc)).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+    ev = routing.make_route_event(kind=kind, to=to, by=by, attempt=attempt,
+                                  reason=reason, candidate_snapshot=candidate_snapshot,
+                                  observed_updated_at=observed_updated_at, at=at)
+    task.setdefault("events", []).append(ev)
+    task["events"] = task["events"][-schema.MAX_EVENTS_INLINE:]
+    task["assignee"] = to
+    task["updated_at"] = at
+    task["last_touched_by"] = by
+    return task
+
+
+def _force_block_for_human(task, *, by, ask, human):
+    """Transition a task to `blocked` on the human's plate, tolerating the
+    `proposed -> blocked` gap.
+
+    `make_task` (and an as-yet-unacted review directive) starts at `proposed`,
+    and schema.STATUS_TRANSITIONS does NOT allow `proposed -> blocked` directly
+    (only proposed -> {active,waiting,abandoned}). The block --on-user primitive
+    assumes an already-active task. So when the task is `proposed`, first step it
+    through `active` (claim it for the escalating agent) before blocking, which
+    is a legal path. Returns the blocked task copy carrying needs:human."""
+    if task.get("status") == "proposed":
+        task = schema.apply_transition(task, "active", by=by,
+                                       summary="Escalating to human for manual routing.")
+    task = schema.apply_transition(task, "blocked", by=by, blocked_on=ask)
+    task["assignee"] = human
+    if "needs:human" not in task.get("tags", []):
+        task["tags"] = sorted(set(task.get("tags", []) + ["needs:human"]))
+    return task
+
+
+def _escalate_review_to_human(*, pr, repo, tried, backend=None, existing=None):
+    """Escalate a review with no live reviewer to the human via the existing
+    block --on-user shape (needs:human -> needs-me plate + digest + banner).
+
+    Idempotent by caller: the sweep passes `existing` (the review task) to
+    update IT in place (so the escalation lands on the same task the agents are
+    already tracking, not a duplicate); a fresh request-review miss passes None
+    and creates a dedicated escalation task. Best-effort: never raises into
+    request-review / reconcile — a failure is warned and reported False."""
+    try:
+        human = identity.resolve_human()
+        me = identity.resolve_agent(None)
+        ask = (f"PR #{pr} in {repo} needs review; no reviewer is live/idle "
+               f"(tried: {', '.join(tried) or 'none'}). Assign a reviewer manually.")
+        marker = f"review-escalation:{repo}#{pr}"
+        task = existing
+        if task is None:
+            task = schema.make_task(
+                title=f"PR #{pr} needs a reviewer ({repo})",
+                workstream=repo, agent=me, owner_agent=me, assignee=human,
+                priority="P1",
+                summary=ask)
+        task = _force_block_for_human(task, by=me, ask=ask, human=human)
+        # Stable per-PR marker for idempotency / dedup across cycles.
+        task["tags"] = sorted(set(task.get("tags", [])) | {marker})
+        _write_task_and_views(task, backend=backend, command="block")
+        return True
+    except Exception as e:  # noqa: BLE001 — best-effort; never crash the caller
+        _warn(f"review escalation failed (non-fatal): {e}")
+        return False
+
+
+def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Route a PR review to a live/idle reviewer, or escalate to the human.
+
+    Builds a preference-ordered pool (canonical reviewer seed + capability:review
+    agents), resolves the best live/idle recipient via the liveness-aware
+    resolver, and either tells them a kind:review-tagged directive (appending a
+    `routed` event + syncing assignee) or escalates via block --on-user. --dry-run
+    prints the ranked pool / tiers / excluded / winner / reason and writes
+    nothing. Best-effort: a presence/resolve failure escalates rather than
+    crashing (a review must never silently vanish)."""
+    from . import routing
+    pr = args.pr
+    repo = args.repo
+    dry_run = getattr(args, "dry_run", False)
+    out_format = getattr(args, "format", "table")
+    author = identity.resolve_agent(getattr(args, "agent", None))
+    try:
+        agg = remote.download_json(remote.presence_view_path(), backend=backend)
+        presence = (agg or {}).get("agents", []) if agg else []
+    except Exception:
+        presence = []  # treat as no live candidate -> escalate
+    override = getattr(args, "candidate_list", None)
+    if override:
+        pool = [a.strip() for a in override.split(",") if a.strip()]
+    else:
+        pool = _review_pool(author, presence)
+    now = datetime.now(timezone.utc)
+    snapshot = [
+        {"agent": a,
+         "tier": views._effective_routing_liveness(
+             next((r.get("last_seen", "") for r in presence if r.get("agent") == a), ""),
+             now, views._presence_grace_seconds()) or "below-floor"}
+        for a in pool
+    ]
+    winner = views.resolve_live_recipient(pool, presence, floor="idle", now=now)
+    excluded = [s for s in snapshot if s["tier"] == "below-floor"]
+    if dry_run:
+        report = {"pr": pr, "repo": repo, "pool": pool, "snapshot": snapshot,
+                  "excluded": [e["agent"] for e in excluded], "winner": winner,
+                  "reason": "live/idle reviewer found" if winner
+                            else "no live reviewer — would escalate"}
+        if out_format == "json":
+            _print_json(report)
+        else:
+            _info(f"[dry-run] pool={pool} winner={winner}")
+        return 0
+    if winner is None:
+        _escalate_review_to_human(pr=pr, repo=repo,
+                                  tried=[s["agent"] for s in snapshot], backend=backend)
+        _info(f"PR #{pr}: no reviewer live — escalated to human.")
+        return 0
+    # HIT: build the directive, tag kind:review, append routed event + assignee.
+    title = f"Review PR #{pr} — assume bugs, claim the review before working"
+    task = schema.make_task(
+        title=title, workstream=repo, agent=author,
+        owner_agent=author, assignee=winner, priority="P1",
+        summary=(f"PR #{pr} in {repo} needs review. Claim it (transition active / "
+                 f"emit review-accepted) before working."))
+    task["tags"] = sorted(set(task.get("tags", []) + [routing.REVIEW_TAG]))
+    task["pr"] = pr
+    task["repo"] = repo  # carried for the sweep + audit
+    tier = next((s["tier"] for s in snapshot if s["agent"] == winner), "idle")
+    task = _append_route_event_and_assignee(
+        task, kind="routed", to=winner, by=author, attempt=1,
+        reason=f"live/idle reviewer ({tier})", candidate_snapshot=snapshot,
+        observed_updated_at=task.get("updated_at", ""))
+    cache.write_cached_task(task)
+    try:
+        ok = _write_task_and_views(task, backend=backend, command="request-review")
+    except (schema.ConflictError, schema.NeedsReconcile):
+        ok = True
+    _info(f"PR #{pr} routed to {winner} ({tier}).")
+    return 0 if ok else 1
+
+
+# --- reconcile reroute sweep: thresholds + classification + I/O wrapper -----
+
+def _env_float(name: str, default: float) -> float:
+    """Read an env var as a float, falling back to `default` on absent/blank/
+    unparseable — mirrors views._stale_hours' tolerance so a typo never breaks
+    a reconcile tick."""
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(default)
+
+
+def _reroute_minutes(priority: str) -> float:
+    """Minutes a never-acted review may sit on a below-floor assignee before the
+    sweep reroutes it. P1 is more urgent (15m) than P2/P3 (30m); both are
+    wall-clock durations (bus-global, machine-agnostic) and env-overridable."""
+    if (priority or "P2") == "P1":
+        return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", 15.0)
+    return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", 30.0)
+
+
+def _reroute_max() -> int:
+    """Max route attempts (the initial route + reroutes) before the sweep gives
+    up and escalates to the human instead of cycling reviewers forever."""
+    return int(_env_float("FULCRA_COORD_REVIEW_REROUTE_MAX", 2.0))
+
+
+def _accepted_stall_hours() -> float:
+    """Hours an ACCEPTED-then-silent review may stall before the sweep escalates
+    it to the human (it is never rerouted once accepted — we don't yank work out
+    from under a reviewer mid-flight; we only nudge the human after a long stall)."""
+    return _env_float("FULCRA_COORD_ACCEPTED_STALL_HOURS", 2.0)
+
+
+def _review_accepted_by_assignee(task, assignee, routed_dt):
+    """The timestamp at which `assignee` explicitly ACCEPTED this review after
+    routed_dt, or None.
+
+    Acceptance is an explicit `review-accepted` event OR a status-transition-to-
+    active authored by the assignee (claiming the work). A bare `inbox_ack` is a
+    READ receipt, NOT acceptance — excluded here, so a reviewer that only opened
+    its inbox then went dark still gets rerouted rather than freezing the PR."""
+    for e in task.get("events", []):
+        if e.get("by") != assignee:
+            continue
+        at = views._parse_dt(e.get("at", ""))
+        if at is None or routed_dt is None or at < routed_dt:
+            continue
+        if e.get("type") == "review-accepted":
+            return at
+        if e.get("type") == "active":  # claim/transition-to-active is acceptance
+            return at
+    return None
+
+
+def _classify_review(task, presence, now):
+    """Pure classifier for the reroute sweep. Returns one of reroute | escalate |
+    freeze | freeze-escalate | none. Never reroutes a non-kind:review task.
+
+    Pure + deterministic given `task` + `presence` + `now` (all injected), so it
+    evaluates identically on every machine that reads the same bus snapshot."""
+    from . import routing
+    if not routing.is_review_directive(task):
+        return "none"
+    if task.get("status") in ("done", "abandoned"):
+        return "none"
+    if task.get("status") == "blocked" and "needs:human" in (task.get("tags") or []):
+        return "none"
+    route = routing.current_route(task)
+    if route is None:
+        return "none"
+    assignee = route.get("to")
+    routed_dt = views._parse_dt(route.get("at", ""))
+    accepted_at = _review_accepted_by_assignee(task, assignee, routed_dt)
+    if accepted_at is not None:
+        # Accepted-then-stalled: FREEZE (don't yank mid-work). Escalate only
+        # after a long stall measured from acceptance.
+        stall_h = _accepted_stall_hours()
+        if (now - accepted_at).total_seconds() / 3600.0 >= stall_h:
+            return "freeze-escalate"
+        return "freeze"
+    # Never-acted path: only reroute if assignee is below floor AND past threshold.
+    eff = views._effective_routing_liveness(
+        next((r.get("last_seen", "") for r in presence if r.get("agent") == assignee), ""),
+        now, views._presence_grace_seconds())
+    if eff is not None:  # assignee still live/idle -> give it time, no reroute
+        return "none"
+    threshold_min = _reroute_minutes(task.get("priority", "P2"))
+    if routed_dt is None or (now - routed_dt).total_seconds() / 60.0 < threshold_min:
+        return "none"
+    # Cap check uses the CURRENT route's attempt counter (cumulative attempt
+    # number), not the inline event count: the events list is truncated to the
+    # last MAX_EVENTS_INLINE, so counting route events would under-count attempts
+    # on a long-lived task. The attempt field is the durable cumulative count.
+    current_attempt = route.get("attempt") or routing.route_attempt_count(task)
+    if current_attempt >= _reroute_max():
+        return "escalate"  # cap reached
+    return "reroute"
+
+
+def _sweep_review_routes(all_tasks, *, backend=None, now=None):
+    """Authoritative reconcile-time reroute sweep. Considers ONLY kind:review
+    directives. For each: classify; reroute a never-acted below-floor past-
+    threshold review (excluding already-tried agents, minting a new route_id),
+    escalate on cap/miss, freeze an accepted-then-stalled one (escalate after
+    ACCEPTED_STALL_HOURS).
+
+    Runs once per reconcile cycle; whichever machine reconciles first wins and
+    the others converge via the stale-observation re-read (Files has no CAS) plus
+    the optimistic write. Best-effort: one bad task — or the whole presence
+    download — never raises into a reconcile tick (a failure skips, never crashes)."""
+    from . import routing
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        agg = remote.download_json(remote.presence_view_path(), backend=backend)
+        presence = (agg or {}).get("agents", []) if agg else []
+    except Exception:
+        presence = []
+    for task in all_tasks:
+        try:
+            if not routing.is_review_directive(task):
+                continue
+            verdict = _classify_review(task, presence, now)
+            if verdict in ("none", "freeze"):
+                continue
+            if verdict in ("escalate", "freeze-escalate"):
+                # Escalate IN PLACE on the review task itself (existing=task) so
+                # the human's plate points at the task the agents already track,
+                # not a duplicate.
+                _escalate_review_to_human(
+                    pr=task.get("pr", task.get("id")),
+                    repo=task.get("repo", task.get("workstream", "")),
+                    tried=sorted(routing.tried_agents(task)),
+                    backend=backend, existing=task)
+                continue
+            # verdict == "reroute": stale-observation check, then write.
+            route = routing.current_route(task)
+            fresh = _cache_remote_task(task["id"], backend=backend)
+            if fresh is None:
+                continue
+            fresh_route = routing.current_route(fresh)
+            # Abort if the task moved since we computed the decision: another
+            # sweeper or the assignee changed the latest route or updated_at.
+            # Two machines racing from the same snapshot thus converge to one
+            # reroute (multi-sweeper convergence without a compare-and-swap).
+            if (fresh_route or {}).get("route_id") != (route or {}).get("route_id") \
+               or fresh.get("updated_at") != task.get("updated_at"):
+                continue
+            pool = _review_pool(task.get("owner_agent", ""), presence)
+            winner = views.resolve_live_recipient(
+                pool, presence, floor="idle", now=now,
+                exclude=tuple(routing.tried_agents(task)))
+            if winner is None:
+                _escalate_review_to_human(
+                    pr=task.get("pr", task.get("id")),
+                    repo=task.get("repo", task.get("workstream", "")),
+                    tried=sorted(routing.tried_agents(task)),
+                    backend=backend, existing=fresh)
+                continue
+            snapshot = [{"agent": a} for a in pool]
+            prev_attempt = (fresh_route or {}).get("attempt") \
+                or routing.route_attempt_count(fresh)
+            updated = _append_route_event_and_assignee(
+                fresh, kind="rerouted", to=winner, by="reconcile-sweep",
+                attempt=prev_attempt + 1,
+                reason="assignee below floor, never acted",
+                candidate_snapshot=snapshot,
+                observed_updated_at=fresh.get("updated_at", ""))
+            try:
+                _write_task_and_views(updated, backend=backend, command="reroute-review")
+            except (schema.ConflictError, schema.NeedsReconcile):
+                pass  # optimistic write is the second line of defence; reconverges next cycle
+        except Exception:
+            continue  # one bad task must never break the sweep / reconcile tick
+
+
 def cmd_pause(args: Any, backend: Optional[list[str]] = None) -> int:
     """Pause a task (set to waiting with a next_action)."""
     task_id = args.task_id
@@ -2651,7 +3334,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     def _upload_one(item):
         view_name, view_data = item
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        # BUG 6b: the old guard was `remaining <= 0` with `timeout=max(1, int(
+        # remaining))`. With 0<remaining<1 that floored the per-view timeout UP to
+        # 1s, letting an upload run up to ~1s PAST the global reconcile deadline.
+        # Treat any sub-1s budget as past-deadline (skip, count as a failed view)
+        # so the deadline is a hard ceiling — consistent with the `<= 0` guard.
+        if remaining < 1:
             return view_name, False
         vpath = _view_name_to_remote(view_name)
         # Treat a RAISING upload as a failed view, not an escape hatch: an
@@ -2660,7 +3348,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # heartbeat. Catching keeps the contract: any failure is a failed view.
         try:
             ok = remote.upload_json(view_data, vpath, backend=backend,
-                                    timeout=max(1, int(remaining)))
+                                    timeout=int(remaining))
         except Exception:
             ok = False
         return view_name, ok
@@ -2681,6 +3369,17 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # failure must not fail a task-view reconcile, so it is reported but does not
     # count toward `failures`.
     _reconcile_presence(backend=backend)
+
+    # Liveness-aware reroute sweep (best-effort; never fails a reconcile tick).
+    # Runs AFTER the presence rebuild so it reads the freshly-reconciled
+    # aggregate. Considers only kind:review directives; reroutes never-acted
+    # reviews whose assignee fell below liveness floor, escalates on cap/miss,
+    # freezes accepted-then-stalled ones. Whichever machine reconciles first
+    # wins; others converge via the stale-observation re-read inside the sweep.
+    try:
+        _sweep_review_routes(all_tasks, backend=backend, now=now)
+    except Exception:
+        pass
 
     if failures:
         _warn(f"  View upload failures: {failures}")

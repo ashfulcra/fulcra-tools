@@ -75,8 +75,10 @@ fulcra-coord done TASK-... \
 | `inbox` | List open directives addressed to you (`--agent`, `--format json`); `--ack <task-id>` marks one seen without claiming it. Stale informational broadcasts (older than `FULCRA_COORD_INBOX_AGE_DAYS`, default 3) are hidden by default and noted as a count; `--all` shows them too. Matching is prefix-aware: a directive addressed to a short id (`claude-code`) reaches the full-id agent (`claude-code:<host>:<repo>`) it prefixes |
 | `identity` | Show, set, clear, or migrate this host's declared agent id — the identity handshake reused by every bus op. `identity` shows the resolved id + its source (and hints if a stale legacy global exists); `identity set <agent-id>` persists it; `identity clear` removes it; `identity migrate` copies a legacy global identity into the current repo's entry (`--format json`). **Scoped per working directory** so sibling sessions in different repos no longer clobber each other's identity |
 | `human` | Show, set, or clear the human operator's handle — the addressable identity tasks are "blocked on ME" against. Defaults to the neutral `human`; personalize with `human set <name>` (e.g. `human set ash`). `human clear` reverts (`--format json`). Global per machine |
-| `annotations` | Enable/disable/inspect the **Agent Tasks** timeline annotations writer. `annotations on` persists `http` to `<XDG_CONFIG_HOME>/fulcra-coord/annotations` so **every agent on the machine emits** without a per-shell `FULCRA_COORD_ANNOTATIONS` export; `annotations off` removes it; bare `annotations`/`annotations status` reports the resolved mode + its source (env/config/default) and whether a token resolves — the token value is never printed (`--format json`). `FULCRA_COORD_ANNOTATIONS` still overrides per shell |
+| `annotations` | Enable/disable/inspect the **Agent Tasks** timeline annotations writer. `annotations on` persists `http` to `<XDG_CONFIG_HOME>/fulcra-coord/annotations` so **every agent on the machine emits** without a per-shell `FULCRA_COORD_ANNOTATIONS` export; `annotations off` removes it; bare `annotations`/`annotations status` reports the resolved mode + its source (env/config/default) and whether a token resolves — the token value is never printed (`--format json`). `FULCRA_COORD_ANNOTATIONS` still overrides per shell. Per-event notes now carry work substance — `[<workstream>/<kind>] <title> — <summary> · next: <action>` — so a single moment conveys what the task is and what's next |
 | `needs-me` | **What's blocked on YOU** (the human): every open task assigned to / blocked on you across all agents, showing who's waiting, the ask, and how long it's been (`--human <handle>`, `--format json`). The "what's on my plate from my agents" glance. Asks with a future `not_before` (see `block`) are split off into a compact **Upcoming (next 7d)** section instead of the DUE-NOW plate, so a task you can't act on yet doesn't clutter it; `--all` lists each upcoming item inline. JSON returns `{human, count, items, upcoming}` — `count` reflects DUE-NOW only |
+| `digest` | Write the **operator digest** — a consolidated twice-daily situational-awareness summary — to the Fulcra timeline on its own **Agent Tasks — Digest** track. Four blocks: blocked-on-you, upcoming, per-agent activity, stale (`--window morning\|evening` sets the lookback + label, omit for on-demand; `--human <handle>`; `--format table\|json`; `--dry-run`). `--dry-run` renders + prints without writing; `--format json` emits the structured digest for tooling. An any-agent dedup guard means it's safe to run from multiple machines — only the first writer per window lands a moment |
+| `install-digest` | Install the twice-daily scheduled `digest` jobs (launchd 08:00 + 18:00 on macOS, fixed cron lines elsewhere) — the push side of the operator digest. Safe to install on **every** machine: the any-agent dedup guard collapses concurrent ticks to one digest per window. `--uninstall` to remove, `--dry-run` to print the plan |
 | `resume` | Pick-up-where-you-left-off briefing for an agent: your active/waiting work, what's blocked on you, what you owe others, and what's blocked on the human (`--agent`, `--format json`). Read-only — run after a restart to reload context |
 | `start` | Create a new task |
 | `update` | Update summary / next_action / status |
@@ -134,6 +136,9 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
   workstreams/{ws}.json     ← per-workstream active view
   agents/{agent}.json       ← per-agent active view
   tasks/TASK-*.json         ← individual task files
+  digest/
+    markers/{date}-{window}.json ← per-window operator-digest dedup marker
+                                   (first-writer-wins; any agent, any machine)
 ```
 
 `index.json`'s `counts.inbox` folds a per-assignee directive count so a hook can see "you have N directives" without loading every inbox view.
@@ -185,6 +190,24 @@ Read commands use local cache when fresh. Full remote sync happens on `status` a
   their own coexisting job and none clobbers another. (A legacy pre-0.5.3
   machine-global job is migrated to a per-agent job on the next install.) See
   `adapters/claude-code/LISTENER.md`.
+- `fulcra-coord install-digest` — the push side of the **operator digest**.
+  Where `install-heartbeat` / `install-listener` are *interval*-scheduled
+  ("every N min"), the digest is *calendar*-scheduled: two jobs, `digest
+  --window morning` at 08:00 and `digest --window evening` at 18:00, local
+  (launchd `StartCalendarInterval` on macOS, fixed `M H * * *` cron lines
+  elsewhere). The digest itself is a single consolidated situational-awareness
+  summary written to the Fulcra timeline on its **own** track — `Agent Tasks —
+  Digest`, separate from and independent of the granular per-event `Agent
+  Tasks` track (which is unchanged) — so the human-paced twice-daily moments
+  filter apart from the per-event lifecycle stream. It folds four blocks:
+  **blocked-on-you**, **upcoming**, **per-agent activity**, and **stale**.
+  Unlike the per-agent listener, `install-digest` is safe to install on
+  **every** machine: an any-agent **dedup guard** claims a per-window marker at
+  `<remote_root>/digest/markers/<YYYY-MM-DD>-<window>.json` (first writer wins;
+  every machine targets the same UTC-date-keyed path), so concurrent ticks
+  collapse to exactly one digest per window. Like the rest of the digest path
+  it's best-effort end to end — a failed marker claim or emit is logged and the
+  tick still exits 0, so it never blocks a scheduled run.
 - `fulcra-coord install-openclaw` — Track A of the OpenClaw integration.
   Materializes `BOOT.md` / `HEARTBEAT.md` (agent-driven prompts that run
   `fulcra-coord status` at gateway boot and on heartbeats) plus three file-based

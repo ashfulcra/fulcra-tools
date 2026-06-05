@@ -17,6 +17,7 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -739,6 +740,32 @@ class TestCLIWithFakeBackend(unittest.TestCase):
     def _args(self, **kwargs) -> types.SimpleNamespace:
         return types.SimpleNamespace(**kwargs)
 
+    def test_connect_can_review_sets_review_capability(self):
+        from fulcra_coord.cli import cmd_connect
+        captured = {}
+
+        def fake_write(record, backend=None):
+            captured["rec"] = record
+            return True
+
+        with patch("fulcra_coord.cli._write_presence", side_effect=fake_write), \
+             patch("fulcra_coord.cli._derive_workstreams_from_open_tasks", return_value=[]):
+            args = self._args(agent="claude-code:h:r", workstream=None, summary="",
+                              format="json", can_review=True, role=None)
+            cmd_connect(args, backend=["false"])
+        self.assertIn("review", captured["rec"]["capabilities"])
+
+    def test_connect_role_flag_adds_named_capabilities(self):
+        from fulcra_coord.cli import cmd_connect
+        captured = {}
+        with patch("fulcra_coord.cli._write_presence",
+                   side_effect=lambda record, backend=None: captured.update(rec=record) or True), \
+             patch("fulcra_coord.cli._derive_workstreams_from_open_tasks", return_value=[]):
+            args = self._args(agent="a", workstream=None, summary="", format="json",
+                              can_review=False, role=["review", "deploy"])
+            cmd_connect(args, backend=["false"])
+        self.assertEqual(sorted(captured["rec"]["capabilities"]), ["deploy", "review"])
+
     def test_status_empty_cache(self):
         from fulcra_coord.cli import cmd_status
         args = self._args(workstream=None, agent=None, format="table")
@@ -964,6 +991,20 @@ class TestTryMerge(unittest.TestCase):
         summaries = [e.get("summary") for e in result.get("events", [])]
         self.assertIn("local note", summaries)
         self.assertIn("remote note", summaries)
+
+    def test_merge_preserves_nonstandard_kind_review_marker(self):
+        """kind:review is a membership marker, not the task's schema kind."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["tags"] = sorted(set(local_v["tags"] + ["kind:review"]))
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+
+        result = _try_merge(local_v, remote_v)
+
+        self.assertIsNotNone(result)
+        self.assertIn("kind:ops", result["tags"])
+        self.assertIn("kind:review", result["tags"])
 
     def test_merge_when_only_remote_changed_status(self):
         """Regression: no ConflictError when only REMOTE changed status.
@@ -2699,6 +2740,38 @@ class TestHookScriptsE2E(unittest.TestCase):
         r = self._run("session-end.sh", json.dumps({"session_id": "s"}), sj)
         self.assertEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(self.calls) and "pause" in open(self.calls).read())
+
+    def test_session_start_resume_hint_quotes_fulcra_coord(self):
+        # BUG 5: the resume-hint line built a command from `$FULCRA_COORD` raw, so
+        # a value carrying a shell metacharacter (the joined argv) embedded an
+        # injectable / broken command into the surfaced resume hint. The value must
+        # be shlex-quoted so the hint is a single safe token. We name the fake CLI
+        # with a literal `;` in its filename: invoked via the quoted bash array it
+        # still runs correctly (so the hint renders), but `${FULCRA_COORD[*]}` —
+        # the value the resume-hint Python reads — carries the raw metacharacter.
+        from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
+        evil_name = "fulcra-coord;evil"
+        evil = os.path.join(self.bin, evil_name)
+        shutil.copy(os.path.join(self.bin, "fulcra-coord"), evil)
+        os.chmod(evil, 0o755)
+        committed = os.path.join(os.path.dirname(__file__), "..", "adapters",
+                                 "claude-code", "hooks")
+        body = open(os.path.join(committed, "session-start.sh")).read()
+        out = os.path.join(self.hooks, "session-start.sh")
+        with open(out, "w") as f:
+            f.write(body.replace(PLACEHOLDER_ARGV, materialize_argv([evil])))
+        os.chmod(out, 0o755)
+        sj = json.dumps({"active": [
+            {"id": "TASK-stale", "title": "Deploy", "status": "active",
+             "owner_agent": "claude-code:other-host:other-repo",
+             "updated_at": "2026-06-01T00:00:00Z"}]})
+        r = self._run("session-start.sh", json.dumps({"cwd": self.tmp}), sj)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("To resume:", r.stdout)
+        # The rendered command must NOT contain the raw `;evil ` injection; the
+        # quoted form keeps the metacharacter inside a single-quoted token.
+        self.assertNotIn(evil_name + " update", r.stdout,
+                         "raw unquoted metacharacter leaked into the resume hint")
 
 
 class TestSessionStartBlockedOnYouBanner(unittest.TestCase):
@@ -6833,6 +6906,11 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
+    def test_version_is_0_7_0(self):
+        # Liveness-aware reviewer routing shipped as the 0.7.0 minor.
+        from fulcra_coord import __version__
+        self.assertEqual(__version__, "0.7.0")
+
 
 class TestCapabilitiesProbe(unittest.TestCase):
     """`capabilities` reports the version + supported commands so onboarding can
@@ -7283,6 +7361,29 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         entry = next(s for s in out if s["id"] == stale_b["id"])
         self.assertEqual(entry["title"], "FRESH")
 
+    def test_s2_newer_local_wins_across_mixed_precision_timestamps(self):
+        # BUG 1 also affects the aggregate-vs-local freshness decision. A local
+        # summary at ...45.000001Z is newer than the aggregate's ...45Z, but a
+        # raw string compare inverts that ordering ('.' < 'Z') and would keep the
+        # stale aggregate entry.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        local_b = _sample_task()
+        local_b["id"] = "TASK-20260603-peer-task-mixedts"
+        local_b["title"] = "LOCAL-NEWER"
+        local_b["updated_at"] = "2026-06-03T12:30:45.000001Z"
+        cache.write_cached_task(local_b)
+        older_aggregate_b = dict(schema.task_summary(local_b))
+        older_aggregate_b["title"] = "AGGREGATE-OLDER"
+        older_aggregate_b["updated_at"] = "2026-06-03T12:30:45Z"
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a),
+                                          older_aggregate_b])):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        entry = next(s for s in out if s["id"] == local_b["id"])
+        self.assertEqual(entry["title"], "LOCAL-NEWER")
+
     def test_selfheal_recovers_dropped_task_via_file_listing(self):
         # The hard case: a peer's task was clobbered out of the aggregate AND this
         # agent never cached it — but its durable FILE exists. Enumerating the
@@ -7364,12 +7465,14 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         self.assertIn(good["id"], ids)
         self.assertNotIn(bad_id, ids)
 
-    def test_bug2_corrupt_cached_body_is_skipped_not_raised(self):
-        # BUG 2 (data-loss): a corrupt/partial cached task body (missing
-        # required fields title/status/workstream/owner_agent) must NOT raise
-        # KeyError out of the cache-union loop. It must be skipped, and the
-        # good cached tasks still returned — so _write_task_and_views completes
-        # and never leaves views stale without a needs_reconcile marker.
+    def test_bug2_corrupt_cached_body_is_surfaced_not_raised(self):
+        # BUG 2 (debug sweep round 2-3): a corrupt/partial cached task body
+        # (missing title/status/workstream/owner_agent) must NOT raise KeyError
+        # out of the cache-union loop. task_summary is now DEFENSIVE — it renders
+        # such a body with empty-string defaults instead of vanishing it — so the
+        # rebuild completes AND the malformed task stays visible (and thus
+        # fixable) rather than being silently dropped from every view. The good
+        # cached tasks are of course still returned.
         from fulcra_coord.cli import _load_summaries_for_rebuild
         task_a = apply_transition(_sample_task(), "active", by="claude-code")
 
@@ -7379,7 +7482,7 @@ class TestRebuildSourceRobustness(unittest.TestCase):
         cache.write_cached_task(good_cached)
 
         # A corrupt body: has an id but is missing title/status/workstream/
-        # owner_agent → schema.task_summary(t) would KeyError without a guard.
+        # owner_agent → task_summary now renders it with "" defaults, no crash.
         corrupt = {"id": "TASK-20260603-corrupt-ffffffff",
                    "updated_at": "2026-06-03T11:00:00Z"}
         with patch("fulcra_coord.cli.cache.list_cached_tasks",
@@ -7388,10 +7491,13 @@ class TestRebuildSourceRobustness(unittest.TestCase):
                    side_effect=self._agg([schema.task_summary(task_a)])), \
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
-        ids = {s["id"] for s in out}
-        self.assertIn(good_cached["id"], ids)   # good entry survives
-        self.assertIn(task_a["id"], ids)
-        self.assertNotIn(corrupt["id"], ids)    # corrupt one skipped, not fatal
+        by_id = {s["id"]: s for s in out}
+        self.assertIn(good_cached["id"], by_id)   # good entry survives
+        self.assertIn(task_a["id"], by_id)
+        # The corrupt one now SURVIVES (rendered, not dropped) — the BUG 2 fix.
+        self.assertIn(corrupt["id"], by_id)
+        self.assertEqual(by_id[corrupt["id"]]["title"], "")
+        self.assertEqual(by_id[corrupt["id"]]["workstream"], "")
 
 
 class TestParallelUploadExceptionSafety(unittest.TestCase):
@@ -7906,27 +8012,30 @@ class TestParseWhen(unittest.TestCase):
         from datetime import datetime, timezone
         self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
 
+    # Emitted timestamps carry fixed-width microseconds (BUG 1) so a same-second
+    # pair never mis-orders under a lexical compare; the .000000 suffix is the
+    # zero-microsecond rendering of isoformat(timespec="microseconds").
     def test_iso_date(self):
         self.assertEqual(schema.parse_when("2026-06-08", now=self.now),
-                         "2026-06-08T00:00:00Z")
+                         "2026-06-08T00:00:00.000000Z")
 
     def test_iso_datetime_z(self):
         self.assertEqual(schema.parse_when("2026-06-08T18:00:00Z", now=self.now),
-                         "2026-06-08T18:00:00Z")
+                         "2026-06-08T18:00:00.000000Z")
 
     def test_relative_days(self):
         # 5 days from 2026-06-03T12:00 -> 2026-06-08T12:00.
         self.assertEqual(schema.parse_when("5d", now=self.now),
-                         "2026-06-08T12:00:00Z")
+                         "2026-06-08T12:00:00.000000Z")
 
     def test_relative_hours(self):
         # 36h from 2026-06-03T12:00 -> 2026-06-05T00:00.
         self.assertEqual(schema.parse_when("36h", now=self.now),
-                         "2026-06-05T00:00:00Z")
+                         "2026-06-05T00:00:00.000000Z")
 
     def test_relative_minutes(self):
         self.assertEqual(schema.parse_when("10m", now=self.now),
-                         "2026-06-03T12:10:00Z")
+                         "2026-06-03T12:10:00.000000Z")
 
     def test_bad_input_returns_none(self):
         for bad in ("", "   ", "tomorrow", "5x", "not-a-date", "5dd", "d5",
@@ -8214,8 +8323,9 @@ class TestBlockOnUserSchedule(unittest.TestCase):
                            not_before="2026-06-08", due="2026-06-08T18:00:00Z"),
                   backend=self.fake_backend)
         t = cache.read_cached_task(tid)
-        self.assertEqual(t["not_before"], "2026-06-08T00:00:00Z")
-        self.assertEqual(t["due"], "2026-06-08T18:00:00Z")
+        # Fixed-width microseconds (BUG 1): parse_when now emits .000000Z.
+        self.assertEqual(t["not_before"], "2026-06-08T00:00:00.000000Z")
+        self.assertEqual(t["due"], "2026-06-08T18:00:00.000000Z")
 
     def test_block_on_user_no_schedule_leaves_none(self):
         from fulcra_coord.cli import cmd_block
@@ -8587,8 +8697,12 @@ class TestReconcileParallelUpload(unittest.TestCase):
                 active_calls -= 1
             return True
 
+        # BUG 6b: the past-deadline guard now skips any worker with <1s of budget
+        # left (not just <=0), so a 2s total timeout is needed for the first batch
+        # to start (remaining ~2s >= 1) while the queued batch — which only gets to
+        # run after the 1.05s sleep, leaving ~0.95s — is correctly skipped.
         old_timeout = os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS")
-        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "1"
+        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "2"
         try:
             with patch("fulcra_coord.cli._load_all_tasks", return_value=[]), \
                  patch("fulcra_coord.cli.views.build_all_views",
@@ -8607,6 +8721,890 @@ class TestReconcileParallelUpload(unittest.TestCase):
         self.assertEqual(max_active, 8, "the first batch should still run in parallel")
         self.assertLessEqual(total_calls, 8,
                              "queued views past the deadline must not start uploads")
+
+
+# ---------------------------------------------------------------------------
+# Debug sweep rounds 2-3 (v0.5.6)
+# ---------------------------------------------------------------------------
+
+class TestTimestampPrecision(unittest.TestCase):
+    """BUG 1: isoformat() omits the fractional part when microseconds==0, so
+    `...:45Z` (µs=0) sorts AFTER `...:45.000001Z` (µs=1, actually newer) under
+    a lexical compare ('.' < 'Z'). Every emitted timestamp must carry 6-digit
+    microseconds, and the merge/sort paths must compare PARSED datetimes so
+    pre-fix mixed-precision data already on the bus still orders correctly."""
+
+    def test_emitted_timestamps_always_have_six_digit_microseconds(self):
+        import re
+        from datetime import datetime, timezone
+        from fulcra_coord import cli as cli_mod
+        from fulcra_coord import cache as cache_mod
+        from fulcra_coord import annotations as ann_mod
+        pat = re.compile(r"\.\d{6}Z$")
+        # A datetime whose microsecond is exactly 0 is the trigger case.
+        zero_us = datetime(2026, 6, 3, 12, 30, 45, 0, tzinfo=timezone.utc)
+        # schema emission helpers (parse_when / make_task / apply_*).
+        self.assertRegex(schema.parse_when("0d", now=zero_us), pat)
+        t = make_task(title="x", workstream="ws", agent="a", dt=zero_us)
+        self.assertRegex(t["updated_at"], pat)
+        # The per-file _now_iso helpers (cache / cli / annotations) — exercised
+        # at runtime when µs happens to be 0, so assert the shape directly.
+        for helper in (cli_mod._now_iso, cache_mod._now_iso, ann_mod._recorded_at):
+            val = helper({}) if helper is ann_mod._recorded_at else helper()
+            self.assertRegex(val, pat, f"{helper.__module__}.{helper.__name__}")
+
+    def test_try_merge_picks_newer_side_across_mixed_precision(self):
+        from fulcra_coord.cli import _try_merge
+        # Same second; local has µs>0 (truly newer) but its string lacks the
+        # fractional part of remote? No — construct the silent-data-loss case:
+        # remote µs=0 -> "...45Z"; local µs=1 -> "...45.000001Z" (newer).
+        # Lexically "...45.000001Z" < "...45Z" so a raw-string compare wrongly
+        # treats REMOTE as newer and drops local's field edit.
+        base_events = [{"at": "2026-06-03T12:00:00.000000Z", "type": "active", "by": "a"}]
+        local = {
+            "id": "T1", "status": "active", "title": "loc",
+            "workstream": "ws", "owner_agent": "a",
+            "updated_at": "2026-06-03T12:30:45.000001Z",
+            "current_summary": "LOCAL-NEWER", "events": list(base_events),
+        }
+        remote = {
+            "id": "T1", "status": "active", "title": "rem",
+            "workstream": "ws", "owner_agent": "a",
+            "updated_at": "2026-06-03T12:30:45Z",
+            "current_summary": "remote-older", "events": list(base_events),
+        }
+        merged = _try_merge(local, remote)
+        self.assertIsNotNone(merged)
+        # Local is genuinely newer, so its field edits must win.
+        self.assertEqual(merged["current_summary"], "LOCAL-NEWER")
+        self.assertEqual(merged["title"], "loc")
+
+    def test_build_presence_sorts_correctly_across_mixed_precision(self):
+        # Newest record carries µs>0; an older record has µs=0. A lexical sort
+        # would put the µs=0 string first ('Z' > '.'), inverting the order.
+        records = [
+            {"agent": "older", "last_seen": "2026-06-03T12:30:45Z"},
+            {"agent": "newer", "last_seen": "2026-06-03T12:30:45.500000Z"},
+        ]
+        out = views.build_presence(records)
+        self.assertEqual(out["agents"][0]["agent"], "newer",
+                         "most-recently-seen agent must sort first")
+
+
+class TestAssignClearsNeedsHuman(unittest.TestCase):
+    """BUG 3: `block --on-user` parks a task on the human (assignee=human +
+    `needs:human` tag). Reassigning it to another agent changed the assignee but
+    LEFT the `needs:human` tag, so views.needs_human (which counts that tag) kept
+    showing it on the human's plate forever. cmd_assign must strip the tag when
+    reassigning AWAY from the human — but keep it when assigning TO the human."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        os.environ["FULCRA_COORD_HUMAN"] = "ash"
+        self.fake_backend = ["false"]
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+        del os.environ["FULCRA_COORD_HUMAN"]
+
+    def _blocked_on_user_task(self):
+        from fulcra_coord import identity
+        task = make_task(title="Needs key", workstream="ops", agent="agent-a")
+        task = apply_transition(task, "active", by="agent-a")
+        task["status"] = "blocked"
+        task["assignee"] = identity.resolve_human()
+        task["tags"] = sorted(set(task.get("tags", []) + ["needs:human"]))
+        cache.write_cached_task(task)
+        return task
+
+    def test_reassign_away_from_human_strips_needs_human(self):
+        from fulcra_coord.cli import cmd_assign
+        from fulcra_coord import identity
+        task = self._blocked_on_user_task()
+        tid = task["id"]
+        human = identity.resolve_human()
+        # Sanity: it's on the human's plate before reassignment.
+        before = views.needs_human([schema.task_summary(task)], human)
+        self.assertTrue(any(s["id"] == tid for s in before))
+
+        args = types.SimpleNamespace(task_id=tid, assignee="agent-b", agent="agent-a")
+        cmd_assign(args, backend=self.fake_backend)
+
+        cached = cache.read_cached_task(tid)
+        self.assertNotIn("needs:human", cached.get("tags", []))
+        self.assertEqual(cached.get("assignee"), "agent-b")
+        after = views.needs_human([schema.task_summary(cached)], human)
+        self.assertFalse(any(s["id"] == tid for s in after),
+                         "task must leave the human's plate after reassignment")
+
+    def test_reassign_to_human_keeps_needs_human(self):
+        from fulcra_coord.cli import cmd_assign
+        from fulcra_coord import identity
+        task = self._blocked_on_user_task()
+        tid = task["id"]
+        human = identity.resolve_human()
+        # Reassigning back TO the human must NOT strip the tag.
+        args = types.SimpleNamespace(task_id=tid, assignee=human, agent="agent-a")
+        cmd_assign(args, backend=self.fake_backend)
+        cached = cache.read_cached_task(tid)
+        self.assertIn("needs:human", cached.get("tags", []))
+
+
+class TestAgeStrNaive(unittest.TestCase):
+    """BUG 6a: _age_str parsed updated_at then subtracted from an AWARE now. A
+    tz-less (naive) stored timestamp made that subtraction raise TypeError — only
+    ValueError/AttributeError were caught — crashing a read-only view. A naive
+    parse must be coerced to UTC (matching views._parse_dt) and yield a sane age."""
+
+    def test_age_str_naive_timestamp_does_not_crash(self):
+        from fulcra_coord.cli import _age_str
+        # A naive (no Z / no offset) timestamp far in the past -> "d" age, not crash.
+        out = _age_str("2000-01-01T00:00:00")
+        self.assertNotEqual(out, "?")
+        self.assertTrue(out.endswith("d"))
+
+
+class TestUploadOneSubSecondDeadline(unittest.TestCase):
+    """BUG 6b: _upload_one used timeout=max(1, int(remaining)); with
+    0<remaining<1 it floored UP to 1s, letting an upload run ~1s past the global
+    reconcile deadline. A sub-1s remaining must be treated as past-deadline
+    (skip, return False) — consistent with the prior `remaining <= 0` guard."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def test_no_upload_starts_with_sub_second_budget(self):
+        import time as _time
+        from fulcra_coord.cli import cmd_reconcile
+        task = apply_transition(_sample_task(), "active", by="claude-code")
+        called = {"n": 0}
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            called["n"] += 1
+            return True
+
+        # Drive time deterministically: cmd_reconcile reads monotonic() once at
+        # t0 (=0.0) to set deadline = 0.0 + 90; every later read returns 89.5, so
+        # each worker sees remaining = 0.5s (< 1) and must SKIP its upload.
+        base = 0.0
+        seq = iter([0.0])
+        def fake_monotonic():
+            try:
+                return next(seq)
+            except StopIteration:
+                return base + 89.5  # 0.5s before the 90s deadline
+
+        with patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli._reconcile_presence"), \
+             patch("time.monotonic", side_effect=fake_monotonic):
+            rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+
+        self.assertEqual(called["n"], 0,
+                         "no upload may start with <1s remaining before deadline")
+        self.assertEqual(rc, 1, "all views skipped past-deadline -> partial -> exit 1")
+
+
+class TestTaskSummaryDefensive(unittest.TestCase):
+    """BUG 2: task_summary hard-indexed id/title/status/workstream/owner_agent.
+    It runs inside the best-effort view loader (exceptions swallowed), so a body
+    missing any of those fields raised KeyError and the task SILENTLY VANISHED
+    from every view — the opposite of what the safety-net docstring promises.
+    The summary must render with empty-string defaults instead."""
+
+    def test_task_summary_tolerates_missing_required_fields(self):
+        # A body missing workstream/owner_agent (and even title) must summarize,
+        # not KeyError — so a malformed task still surfaces in views.
+        partial = {"id": "T-orphan", "status": "active"}
+        s = schema.task_summary(partial)
+        self.assertEqual(s["id"], "T-orphan")
+        self.assertEqual(s["workstream"], "")
+        self.assertEqual(s["owner_agent"], "")
+        self.assertEqual(s["title"], "")
+
+    def test_task_summary_empty_dict_does_not_crash(self):
+        s = schema.task_summary({})
+        self.assertEqual(s["id"], "")
+        self.assertEqual(s["title"], "")
+        self.assertEqual(s["status"], "")
+
+    def test_apply_transition_tolerates_missing_tag_fields(self):
+        # apply_transition rebuilds tags from workstream/owner_agent/priority via
+        # bracket-indexing; a slightly-malformed body must not KeyError mid-write.
+        from datetime import datetime, timezone
+        task = {"id": "T1", "status": "proposed", "title": "x", "events": []}
+        out = schema.apply_transition(
+            task, new_status="active", by="a",
+            dt=datetime(2026, 6, 3, tzinfo=timezone.utc))
+        self.assertEqual(out["status"], "active")
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 1: resolve_live_recipient
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceGraceSeconds(unittest.TestCase):
+    def test_presence_grace_seconds_default(self):
+        from fulcra_coord import views
+        os.environ.pop("FULCRA_COORD_PRESENCE_GRACE_SECONDS", None)
+        self.assertEqual(views._presence_grace_seconds(), 1200.0)
+
+    def test_presence_grace_seconds_env_override(self):
+        from fulcra_coord import views
+        os.environ["FULCRA_COORD_PRESENCE_GRACE_SECONDS"] = "300"
+        try:
+            self.assertEqual(views._presence_grace_seconds(), 300.0)
+        finally:
+            os.environ.pop("FULCRA_COORD_PRESENCE_GRACE_SECONDS", None)
+
+    def test_presence_grace_seconds_bad_value_falls_back(self):
+        from fulcra_coord import views
+        os.environ["FULCRA_COORD_PRESENCE_GRACE_SECONDS"] = "not-a-number"
+        try:
+            self.assertEqual(views._presence_grace_seconds(), 1200.0)
+        finally:
+            os.environ.pop("FULCRA_COORD_PRESENCE_GRACE_SECONDS", None)
+
+
+class TestResolveLiveRecipient(unittest.TestCase):
+    NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _rec(self, agent, minutes_ago, liveness="stale", caps=None):
+        # liveness is DELIBERATELY wrong/stale here to prove the resolver
+        # recomputes from last_seen and ignores the stored field.
+        ls = (self.NOW - timedelta(minutes=minutes_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        r = {"agent": agent, "last_seen": ls, "liveness": liveness}
+        if caps is not None:
+            r["capabilities"] = caps
+        return r
+
+    def test_effective_liveness_recomputed_from_last_seen_not_stored_tier(self):
+        from fulcra_coord import views
+        # Aggregate says 'stale', but last_seen is 90 min old -> within
+        # stale_cutoff (2h) so effectively idle -> qualifies at floor=idle.
+        presence = [self._rec("a", 90, liveness="stale")]
+        self.assertEqual(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW), "a")
+
+    def test_grace_window_keeps_just_stale_agent_eligible(self):
+        from fulcra_coord import views
+        # 2h10m old: past the 2h idle->stale cutoff but within 2h + 1200s grace.
+        presence = [self._rec("a", 130)]
+        self.assertEqual(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW), "a")
+
+    def test_beyond_grace_is_below_floor_returns_none(self):
+        from fulcra_coord import views
+        # 2h21m old: past 2h + 1200s (20m) grace -> below floor.
+        presence = [self._rec("a", 141)]
+        self.assertIsNone(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW))
+
+    def test_tier_dominates_preference_live_noncanonical_beats_idle_canonical(self):
+        from fulcra_coord import views
+        # canonical 'canon' listed first but idle (90m); 'other' second but live.
+        presence = [self._rec("canon", 90), self._rec("other", 10)]
+        self.assertEqual(
+            views.resolve_live_recipient(["canon", "other"], presence, floor="idle", now=self.NOW),
+            "other")
+
+    def test_preference_breaks_ties_within_same_tier(self):
+        from fulcra_coord import views
+        presence = [self._rec("first", 10), self._rec("second", 5)]  # both live
+        self.assertEqual(
+            views.resolve_live_recipient(["first", "second"], presence, floor="idle", now=self.NOW),
+            "first")
+
+    def test_floor_live_excludes_idle(self):
+        from fulcra_coord import views
+        presence = [self._rec("a", 90)]  # idle
+        self.assertIsNone(
+            views.resolve_live_recipient(["a"], presence, floor="live", now=self.NOW))
+        self.assertEqual(
+            views.resolve_live_recipient(["a"], presence, floor="idle", now=self.NOW), "a")
+
+    def test_exclude_skips_tried(self):
+        from fulcra_coord import views
+        presence = [self._rec("a", 10), self._rec("b", 10)]
+        self.assertEqual(
+            views.resolve_live_recipient(["a", "b"], presence, floor="idle", now=self.NOW,
+                                         exclude=("a",)), "b")
+
+    def test_empty_candidates_returns_none(self):
+        from fulcra_coord import views
+        self.assertIsNone(
+            views.resolve_live_recipient([], [], floor="idle", now=self.NOW))
+
+    def test_all_below_floor_returns_none(self):
+        from fulcra_coord import views
+        presence = [self._rec("a", 200), self._rec("b", 300)]
+        self.assertIsNone(
+            views.resolve_live_recipient(["a", "b"], presence, floor="idle", now=self.NOW))
+
+    def test_candidate_missing_from_presence_is_below_floor(self):
+        from fulcra_coord import views
+        # canonical seed that never connected: no presence record -> skipped.
+        presence = [self._rec("b", 10)]
+        self.assertEqual(
+            views.resolve_live_recipient(["a", "b"], presence, floor="idle", now=self.NOW), "b")
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 2: presence capabilities
+# ---------------------------------------------------------------------------
+
+
+class TestPresenceCapabilities(unittest.TestCase):
+    def test_make_presence_default_capabilities_empty(self):
+        rec = schema.make_presence("claude-code:h:r")
+        self.assertEqual(rec["capabilities"], [])
+
+    def test_make_presence_records_capabilities_sorted_unique(self):
+        rec = schema.make_presence("a", capabilities=["review", "review", "deploy"])
+        self.assertEqual(rec["capabilities"], ["deploy", "review"])
+
+    def test_build_presence_carries_capabilities_through(self):
+        rec = schema.make_presence("a", capabilities=["review"])
+        agg = views.build_presence([rec])
+        self.assertEqual(agg["agents"][0]["capabilities"], ["review"])
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 3: routing-event vocabulary
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingEvents(unittest.TestCase):
+    def _task_with_events(self, events, assignee=None, tags=None):
+        return {"id": "TASK-20260604-x-00000000", "assignee": assignee,
+                "tags": tags or [], "events": events}
+
+    def test_make_route_event_shape(self):
+        from fulcra_coord import routing
+        ev = routing.make_route_event(kind="routed", to="a", by="b", attempt=1,
+                                      reason="live",
+                                      candidate_snapshot=[{"agent": "a", "tier": "live"}],
+                                      observed_updated_at="2026-06-04T12:00:00.000000Z",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="rid-1")
+        self.assertEqual(ev["type"], "routed")
+        self.assertEqual({"at", "type", "to", "by", "attempt", "reason",
+                          "candidate_snapshot", "observed_updated_at", "route_id"},
+                         set(ev))
+
+    def test_is_review_directive_by_tag(self):
+        from fulcra_coord import routing
+        self.assertTrue(routing.is_review_directive(
+            self._task_with_events([], tags=["kind:review"])))
+        self.assertFalse(routing.is_review_directive(
+            self._task_with_events([], tags=["kind:ops"])))
+
+    def test_current_route_latest_by_at(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=2, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:05:00.000000Z", route_id="r2")
+        task = self._task_with_events([e1, e2])
+        self.assertEqual(routing.current_route(task)["to"], "b")
+
+    def test_current_route_tie_break_by_route_id(self):
+        from fulcra_coord import routing
+        same = "2026-06-04T12:00:00.000000Z"
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at=same, route_id="r-aaa")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=2, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at=same, route_id="r-bbb")
+        # higher route_id wins the tie deterministically (stable across machines).
+        self.assertEqual(
+            routing.current_route(self._task_with_events([e1, e2]))["route_id"], "r-bbb")
+
+    def test_route_attempt_count_and_tried(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=2, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:05:00.000000Z", route_id="r2")
+        task = self._task_with_events([e1, e2])
+        self.assertEqual(routing.route_attempt_count(task), 2)
+        self.assertEqual(routing.tried_agents(task), {"a", "b"})
+
+    def test_route_attempt_count_uses_cumulative_attempt_field(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=7, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        e2 = routing.make_route_event(kind="rerouted", to="b", by="s", attempt=8, reason="y",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:05:00.000000Z", route_id="r2")
+        task = self._task_with_events([e1, e2])
+        self.assertEqual(routing.route_attempt_count(task), 8)
+
+    def test_current_route_none_when_no_route_events(self):
+        from fulcra_coord import routing
+        self.assertIsNone(routing.current_route(
+            self._task_with_events([{"at": "t", "type": "created", "by": "x"}])))
+
+    def test_latest_route_event_alias(self):
+        from fulcra_coord import routing
+        e1 = routing.make_route_event(kind="routed", to="a", by="s", attempt=1, reason="x",
+                                      candidate_snapshot=[], observed_updated_at="t",
+                                      at="2026-06-04T12:00:00.000000Z", route_id="r1")
+        task = self._task_with_events([e1])
+        self.assertEqual(routing.latest_route_event(task)["route_id"], "r1")
+
+    def test_make_route_event_rejects_bad_kind(self):
+        from fulcra_coord import routing
+        with self.assertRaises(ValueError):
+            routing.make_route_event(kind="created", to="a", by="b", attempt=1,
+                                     reason="x", candidate_snapshot=[],
+                                     observed_updated_at="t", at="t")
+
+    def test_make_route_event_mints_route_id_when_absent(self):
+        from fulcra_coord import routing
+        ev = routing.make_route_event(kind="routed", to="a", by="b", attempt=1,
+                                      reason="x", candidate_snapshot=[],
+                                      observed_updated_at="t", at="t")
+        self.assertTrue(ev["route_id"])
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 4: request-review pool builder
+# ---------------------------------------------------------------------------
+
+
+class TestReviewPool(unittest.TestCase):
+    def test_canonical_reviewer_for_arc_author(self):
+        from fulcra_coord import cli
+        self.assertEqual(cli._canonical_reviewer("claude-code:ArcBot:something"),
+                         "claude-code:ArcBot:Arc-Code-Review")
+
+    def test_canonical_reviewer_for_everyone_else(self):
+        from fulcra_coord import cli
+        self.assertEqual(cli._canonical_reviewer("codex:Mac.localdomain:main"),
+                         "codex:Mac.localdomain:main")
+        self.assertEqual(cli._canonical_reviewer("openclaw:discord:devops"),
+                         "codex:Mac.localdomain:main")
+
+    def test_pool_seeds_canonical_even_when_undeclared(self):
+        from fulcra_coord import cli
+        presence = [{"agent": "x:y:z", "last_seen": "...", "capabilities": ["review"]}]
+        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
+        self.assertEqual(pool[0], "codex:Mac.localdomain:main")  # canonical first
+        self.assertIn("x:y:z", pool)
+
+    def test_pool_excludes_non_review_capable_and_devops(self):
+        from fulcra_coord import cli
+        presence = [
+            {"agent": "openclaw:discord:devops", "last_seen": "...", "capabilities": []},
+            {"agent": "rev:h:r", "last_seen": "...", "capabilities": ["review"]},
+        ]
+        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
+        self.assertNotIn("openclaw:discord:devops", pool)
+        self.assertIn("rev:h:r", pool)
+
+    def test_pool_no_duplicate_when_canonical_also_declares(self):
+        from fulcra_coord import cli
+        presence = [{"agent": "codex:Mac.localdomain:main", "last_seen": "...",
+                     "capabilities": ["review"]}]
+        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
+        self.assertEqual(pool.count("codex:Mac.localdomain:main"), 1)
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 4: request-review command
+# ---------------------------------------------------------------------------
+
+
+class TestRequestReview(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _presence_agg(self, agents):
+        return {"agents": agents}
+
+    def test_dry_run_prints_pool_and_writes_nothing(self):
+        from fulcra_coord.cli import cmd_request_review
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": now_ls, "capabilities": ["review"]}])
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._write_task_and_views") as wtv, \
+             patch("fulcra_coord.cli.identity.resolve_agent",
+                   return_value="codex:Mac.localdomain:main"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=True,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        wtv.assert_not_called()  # dry-run writes nothing
+
+    def test_hit_routes_tagged_review_with_routed_event_and_assignee(self):
+        from fulcra_coord.cli import cmd_request_review
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": now_ls, "capabilities": ["review"]}])
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        t = captured["task"]
+        self.assertEqual(rc, 0)
+        self.assertEqual(t["assignee"], "codex:Mac.localdomain:main")
+        self.assertIn("kind:review", t["tags"])
+        routed = [e for e in t["events"] if e["type"] == "routed"]
+        self.assertEqual(len(routed), 1)
+        self.assertIn("route_id", routed[0])
+        self.assertEqual(routed[0]["to"], "codex:Mac.localdomain:main")
+
+    def test_miss_escalates_via_block_on_user(self):
+        from fulcra_coord.cli import cmd_request_review
+        old_ls = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": old_ls, "capabilities": ["review"]}])
+        escalated = {}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._escalate_review_to_human",
+                   side_effect=lambda **kw: escalated.update(kw) or True), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertIn("42", escalated.get("pr", ""))
+
+    def test_escalate_to_human_lands_blocked_needs_human(self):
+        # _escalate_review_to_human must actually land a blocked, human-assigned
+        # task carrying needs:human, even though make_task starts at 'proposed'
+        # (proposed -> blocked is not a direct allowed transition).
+        from fulcra_coord.cli import _escalate_review_to_human
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_human", return_value="ash@fulcradynamics.com"), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="codex:m:main"):
+            ok = _escalate_review_to_human(pr="42", repo="fulcra-tools",
+                                           tried=["dead:h:r"], backend=["false"])
+        self.assertTrue(ok)
+        t = captured["task"]
+        self.assertEqual(t["status"], "blocked")
+        self.assertEqual(t["assignee"], "ash@fulcradynamics.com")
+        self.assertIn("needs:human", t["tags"])
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 6: general tell --route-capability
+# ---------------------------------------------------------------------------
+
+
+class TestTellRouteCapability(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_tell_route_capability_resolves_live_recipient(self):
+        from fulcra_coord.cli import cmd_tell
+        now_ls = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        agg = {"agents": [{"agent": "rev:h:r", "last_seen": now_ls, "capabilities": ["review"]}]}
+        captured = {}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._write_task_and_views",
+                   side_effect=lambda task, backend=None, command="write", lifecycle=None: captured.update(task=task) or True), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="a:b:c"):
+            args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
+                priority="P2", summary="", route_capability="review", floor="idle")
+            setattr(args, "from", None)
+            rc = cmd_tell(args, backend=["false"])
+        self.assertEqual(captured["task"]["assignee"], "rev:h:r")
+
+    def test_tell_route_capability_miss_escalates(self):
+        from fulcra_coord.cli import cmd_tell
+        old_ls = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        agg = {"agents": [{"agent": "rev:h:r", "last_seen": old_ls, "capabilities": ["review"]}]}
+        escalated = {}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._escalate_review_to_human",
+                   side_effect=lambda **kw: escalated.update(kw) or True), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="a:b:c"):
+            args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
+                priority="P2", summary="", route_capability="review", floor="idle")
+            setattr(args, "from", None)
+            rc = cmd_tell(args, backend=["false"])
+        self.assertTrue(escalated)
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 5: reroute sweep thresholds
+# ---------------------------------------------------------------------------
+
+
+class TestReviewSweepThresholds(unittest.TestCase):
+    def test_reroute_minutes_defaults(self):
+        from fulcra_coord import cli
+        os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", None)
+        os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", None)
+        self.assertEqual(cli._reroute_minutes("P1"), 15.0)
+        self.assertEqual(cli._reroute_minutes("P2"), 30.0)
+
+    def test_reroute_minutes_env_override(self):
+        from fulcra_coord import cli
+        os.environ["FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1"] = "5"
+        try:
+            self.assertEqual(cli._reroute_minutes("P1"), 5.0)
+        finally:
+            os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", None)
+
+    def test_reroute_max_default(self):
+        from fulcra_coord import cli
+        os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MAX", None)
+        self.assertEqual(cli._reroute_max(), 2)
+
+    def test_accepted_stall_hours_default(self):
+        from fulcra_coord import cli
+        os.environ.pop("FULCRA_COORD_ACCEPTED_STALL_HOURS", None)
+        self.assertEqual(cli._accepted_stall_hours(), 2.0)
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 5: review classification
+# ---------------------------------------------------------------------------
+
+
+class TestReviewClassification(unittest.TestCase):
+    NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _routed_review(self, assignee, routed_minutes_ago, priority="P1", attempt=1,
+                       extra_events=None, last_seen_min_ago=300):
+        from fulcra_coord import routing
+        routed_at = (self.NOW - timedelta(minutes=routed_minutes_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        ev = routing.make_route_event(kind="routed", to=assignee, by="s", attempt=attempt,
+                                      reason="x", candidate_snapshot=[],
+                                      observed_updated_at=routed_at,
+                                      at=routed_at, route_id=f"r{attempt}")
+        events = [{"at": routed_at, "type": "created", "by": "s"}, ev] + (extra_events or [])
+        return {"id": "TASK-20260604-rev-00000000", "status": "proposed",
+                "priority": priority, "assignee": assignee, "tags": ["kind:review"],
+                "events": events, "updated_at": routed_at, "workstream": "fulcra-tools"}
+
+    def _presence(self, agent, min_ago):
+        ls = (self.NOW - timedelta(minutes=min_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        return [{"agent": agent, "last_seen": ls, "capabilities": ["review"]}]
+
+    def test_never_acted_below_floor_past_p1_threshold_reroutes(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")  # >15m
+        pres = self._presence("dead:h:r", 300)  # assignee long stale -> below floor
+        self.assertEqual(cli._classify_review(t, pres, self.NOW), "reroute")
+
+    def test_before_threshold_is_none(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=5, priority="P1")  # <15m
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW), "none")
+
+    def test_p2_uses_30m_threshold(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P2")  # <30m
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW), "none")
+
+    def test_bare_inbox_ack_does_not_count_as_acceptance(self):
+        from fulcra_coord import cli
+        ack = {"at": (self.NOW - timedelta(minutes=18)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "inbox_ack", "by": "dead:h:r"}
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1",
+                                extra_events=[ack])
+        # a read receipt is NOT acceptance -> still eligible to reroute.
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "reroute")
+
+    def test_explicit_review_accepted_freezes(self):
+        from fulcra_coord import cli
+        acc = {"at": (self.NOW - timedelta(minutes=18)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "review-accepted", "by": "dead:h:r"}
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1",
+                                extra_events=[acc])
+        # accepted but not yet past ACCEPTED_STALL_HOURS -> freeze.
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "freeze")
+
+    def test_accepted_then_long_stall_escalates(self):
+        from fulcra_coord import cli
+        acc = {"at": (self.NOW - timedelta(hours=3)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "review-accepted", "by": "dead:h:r"}
+        t = self._routed_review("dead:h:r", routed_minutes_ago=200, priority="P1",
+                                extra_events=[acc])
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "freeze-escalate")
+
+    def test_claim_transition_by_assignee_counts_as_acceptance(self):
+        from fulcra_coord import cli
+        active = {"at": (self.NOW - timedelta(minutes=18)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "active", "by": "dead:h:r"}  # status transition by assignee
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1",
+                                extra_events=[active])
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "freeze")
+
+    def test_assignee_above_floor_is_none(self):
+        from fulcra_coord import cli
+        t = self._routed_review("alive:h:r", routed_minutes_ago=20, priority="P1")
+        self.assertEqual(cli._classify_review(t, self._presence("alive:h:r", 5), self.NOW),
+                         "none")  # live, give it time
+
+    def test_cap_reached_escalates(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1", attempt=2)
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "escalate")
+
+    def test_non_review_task_is_none(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        t["tags"] = ["kind:ops"]  # NOT a review directive
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "none")
+
+    def test_blocked_human_escalation_is_not_rerouted_again(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1", attempt=2)
+        t["status"] = "blocked"
+        t["assignee"] = "ash@fulcradynamics.com"
+        t["tags"] = sorted(set(t["tags"] + ["needs:human"]))
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "none")
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 5: sweep I/O wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestReviewSweep(unittest.TestCase):
+    NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _routed_review(self, assignee, routed_minutes_ago, priority="P1", attempt=1):
+        from fulcra_coord import routing
+        routed_at = (self.NOW - timedelta(minutes=routed_minutes_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        ev = routing.make_route_event(kind="routed", to=assignee, by="s", attempt=attempt,
+                                      reason="x", candidate_snapshot=[],
+                                      observed_updated_at=routed_at,
+                                      at=routed_at, route_id=f"r{attempt}")
+        events = [{"at": routed_at, "type": "created", "by": "s"}, ev]
+        return {"id": "TASK-20260604-rev-00000000", "status": "proposed",
+                "priority": priority, "assignee": assignee, "tags": ["kind:review"],
+                "events": events, "updated_at": routed_at, "workstream": "fulcra-tools",
+                "owner_agent": "author:h:r"}
+
+    def _presence(self, agent, min_ago):
+        ls = (self.NOW - timedelta(minutes=min_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        return [{"agent": agent, "last_seen": ls, "capabilities": ["review"]}]
+
+    def test_sweep_reroutes_and_writes_rerouted_event(self):
+        from fulcra_coord.cli import _sweep_review_routes
+        from fulcra_coord import remote
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
+               "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+               "capabilities": ["review"]}]}
+        written = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            written["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
+            _sweep_review_routes([t], backend=["false"], now=self.NOW)
+        out = written["task"]
+        rer = [e for e in out["events"] if e["type"] == "rerouted"]
+        self.assertEqual(len(rer), 1)
+        self.assertEqual(out["assignee"], rer[0]["to"])
+        self.assertNotEqual(rer[0]["to"], "dead:h:r")  # excluded as tried
+        self.assertTrue(rer[0]["route_id"])  # new route_id minted
+
+    def test_sweep_stale_observation_aborts_when_task_moved(self):
+        from fulcra_coord.cli import _sweep_review_routes
+        from fulcra_coord import remote
+        # The re-read task's latest route event differs from the snapshot the
+        # decision was computed from -> abort (no competing reroute).
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        moved = self._routed_review("someoneelse:h:r", routed_minutes_ago=1,
+                                    priority="P1", attempt=2)
+        agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
+               "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+               "capabilities": ["review"]}]}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._cache_remote_task", return_value=moved), \
+             patch("fulcra_coord.cli._load_task", return_value=t) as lt, \
+             patch("fulcra_coord.cli._write_task_and_views") as wtv:
+            _sweep_review_routes([t], backend=["false"], now=self.NOW)
+        wtv.assert_not_called()  # another sweeper already moved it
+        lt.assert_not_called()  # the stale-observation check bypasses cache
+
+    def test_sweep_ignores_non_review_tasks(self):
+        from fulcra_coord.cli import _sweep_review_routes
+        from fulcra_coord import remote
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        t["tags"] = ["kind:ops"]
+        agg = {"agents": self._presence("dead:h:r", 300)}
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=lambda p, backend=None: agg), \
+             patch("fulcra_coord.cli._write_task_and_views") as wtv, \
+             patch("fulcra_coord.cli._load_task") as lt:
+            _sweep_review_routes([t], backend=["false"], now=self.NOW)
+        wtv.assert_not_called()
+        lt.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

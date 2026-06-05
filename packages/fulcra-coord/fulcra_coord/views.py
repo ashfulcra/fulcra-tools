@@ -63,6 +63,28 @@ def _stale_hours(stale_hours: Optional[float] = None) -> float:
     return float(STALE_HOURS_DEFAULT)
 
 
+# Wall-clock grace (seconds) the resolver tolerates BEYOND the idle->stale
+# cutoff before treating an agent as below routing floor. A single missed
+# heartbeat or a laptop sleep/wake must not drop a reviewer. Expressed as an
+# ABSOLUTE duration (not a count of listener intervals) because listener
+# cadence differs per machine, while presence last_seen is bus-global, so the
+# grace evaluates identically on every machine (machine-agnostic invariant).
+PRESENCE_GRACE_SECONDS_DEFAULT = 1200.0  # 20 min
+
+
+def _presence_grace_seconds(grace: Optional[float] = None) -> float:
+    """Resolve the routing presence grace (seconds): explicit arg > env > default."""
+    if grace is not None:
+        return grace
+    raw = os.environ.get("FULCRA_COORD_PRESENCE_GRACE_SECONDS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(PRESENCE_GRACE_SECONDS_DEFAULT)
+
+
 def _inbox_age_days(age_days: Optional[float] = None) -> float:
     """Resolve the broadcast inbox age cutoff (days): explicit arg > env > default.
 
@@ -194,7 +216,7 @@ def _acked_by(t: dict[str, Any], who: str) -> bool:
 def build_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Global compact index with counts and active summaries."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     counts_by_status: dict[str, int] = {}
     counts_by_workstream: dict[str, int] = {}
@@ -262,7 +284,7 @@ def build_active(tasks: list[dict[str, Any]], updated_at: Optional[str] = None,
     """All active, waiting, and blocked tasks. Active summaries carry a `stale`
     flag (Gap 2) so the status view can mark possibly-forgotten work."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     now = _now()
     sh = _stale_hours(stale_hours)
     active = [
@@ -287,7 +309,7 @@ def build_needs_attention(tasks: list[dict[str, Any]], updated_at: Optional[str]
     stale=true (it would not be here otherwise) for symmetry with the active view.
     """
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     now = _now()
     sh = _stale_hours(stale_hours)
     stale = []
@@ -526,7 +548,7 @@ def _schedule_iso_z(value: Any) -> Optional[str]:
     dt = _schedule_dt(value)
     if dt is None:
         return None
-    return dt.isoformat().replace("+00:00", "Z")
+    return dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _schedule_dt(value: Any) -> Optional[datetime]:
@@ -631,7 +653,7 @@ def upcoming_for_human(tasks: list[dict[str, Any]], human: str, *,
 def build_next(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Proposed and waiting tasks — candidates for starting next."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     candidates = [
         task_summary(t) for t in tasks if t.get("status") in ("proposed", "waiting")
     ]
@@ -650,7 +672,7 @@ def build_recently_done(
 ) -> dict[str, Any]:
     """Done and abandoned tasks within retention window."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     cutoff = _now() - timedelta(days=days)
     recent = []
     for t in tasks:
@@ -673,7 +695,7 @@ def build_recently_done(
 def build_search_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Compact tag/title/summary records for search."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     cutoff_done = _now() - timedelta(days=SEARCH_INDEX_DONE_DAYS)
     records = []
@@ -714,7 +736,7 @@ def build_workstream_view(
 ) -> dict[str, Any]:
     """Per-workstream view: active/waiting/blocked + recent done."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     cutoff = _now() - timedelta(days=done_days)
     ws_tasks = [t for t in tasks if t.get("workstream") == workstream]
     active = [
@@ -747,7 +769,7 @@ def build_agent_view(
 ) -> dict[str, Any]:
     """Per-agent view: tasks owned or recently touched by agent."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     cutoff = _now() - timedelta(days=done_days)
     agent_tasks = [
         t for t in tasks
@@ -821,7 +843,7 @@ def build_summaries(tasks: list[dict[str, Any]],
     A LIST (not a map) of summaries, for consistency with the other views' task
     lists and so it round-trips as plain JSON without key-ordering concerns."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     return {
         "schema": "fulcra.coordination.summaries.v1",
         "view": "summaries",
@@ -863,6 +885,73 @@ def presence_liveness(last_seen: str, now: Optional[datetime] = None,
     return "stale"
 
 
+_ROUTING_TIER = {"live": 0, "idle": 1}  # below-floor never appears here
+
+
+def _effective_routing_liveness(last_seen: str, now: datetime,
+                                grace_seconds: float,
+                                stale_hours: Optional[float] = None) -> Optional[str]:
+    """Recompute a candidate's liveness FOR ROUTING from bus-global last_seen.
+
+    Owned entirely by the resolver — it does NOT trust an aggregate's stored
+    `liveness` field, because a stale rebuild could under-report it (codex
+    tightening #1). One consistent judgment, identical on every machine:
+      * within the idle cutoff (presence_liveness live/idle bands) -> that band.
+      * within stale_cutoff + grace_seconds -> 'idle' (the wall-clock grace
+        window: one missed heartbeat / a sleep-wake must not drop a reviewer).
+      * beyond -> None (below floor).
+    A missing/unparseable last_seen ages to +inf -> below floor (None)."""
+    band = presence_liveness(last_seen, now, stale_hours)  # live | idle | stale
+    if band in ("live", "idle"):
+        return band
+    # band == "stale": apply the wall-clock grace before dropping below floor.
+    age_seconds = _age_hours(last_seen, now) * 3600.0
+    cutoff_seconds = _stale_hours(stale_hours) * 3600.0
+    if age_seconds < cutoff_seconds + grace_seconds:
+        return "idle"
+    return None
+
+
+def resolve_live_recipient(candidates: list[str], presence: list[dict[str, Any]],
+                           *, floor: str = "idle", now: Optional[datetime] = None,
+                           exclude: tuple[str, ...] = (),
+                           grace_seconds: Optional[float] = None) -> Optional[str]:
+    """Pick the live/idle candidate minimizing (effective_tier, preference_index).
+
+    Pure + deterministic given `presence` + `now` (both injectable -> testable).
+    `candidates` is in PREFERENCE order (canonical reviewer first). `floor`
+    'idle' accepts live OR idle; 'live' accepts live only. Below-floor and
+    `exclude`d agents are skipped. Returns None when nobody clears the floor
+    (the caller then escalates to the human — never parks on a dead agent).
+
+    Effective liveness is recomputed inside (via _effective_routing_liveness)
+    from each candidate's bus-global last_seen + the wall-clock grace, so the
+    stored aggregate tier is never trusted and the judgment is identical on
+    every machine (machine-agnostic invariant)."""
+    if now is None:
+        now = _now()
+    grace = _presence_grace_seconds(grace_seconds)
+    floor_rank = _ROUTING_TIER.get(floor, 1)  # default to idle floor
+    by_agent = {r.get("agent"): r for r in presence}
+    best: Optional[tuple[int, int, str]] = None
+    for idx, agent in enumerate(candidates):
+        if agent in exclude:
+            continue
+        rec = by_agent.get(agent)
+        if not rec:
+            continue  # never connected -> below floor
+        eff = _effective_routing_liveness(rec.get("last_seen", ""), now, grace)
+        if eff is None:
+            continue
+        tier = _ROUTING_TIER[eff]
+        if tier > floor_rank:
+            continue  # below the requested floor (e.g. idle when floor=live)
+        key = (tier, idx, agent)
+        if best is None or key < best:
+            best = key
+    return best[2] if best else None
+
+
 def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None,
                    updated_at: Optional[str] = None) -> dict[str, Any]:
     """Build the aggregate presence roster from per-agent presence records.
@@ -873,7 +962,7 @@ def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None
     sees who is actively working at the top. This is the read-side aggregate the
     ``presence`` / ``agents`` / ``resume`` surfaces consume in one download."""
     if updated_at is None:
-        updated_at = _now().isoformat().replace("+00:00", "Z")
+        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     if now is None:
         now = _now()
     agents = []
@@ -881,9 +970,15 @@ def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None
         entry = dict(rec)
         entry["liveness"] = presence_liveness(rec.get("last_seen", ""), now)
         agents.append(entry)
-    # Most-recently-seen first (descending last_seen). A missing timestamp sorts
-    # last (empty string is < any real ISO timestamp).
-    agents.sort(key=lambda a: a.get("last_seen", ""), reverse=True)
+    # Most-recently-seen first (descending last_seen). Sort by the PARSED
+    # datetime, not the raw string (BUG 1): a same-second pair where one record
+    # was stamped with microsecond=0 ("...45Z") and the other with µs>0
+    # ("...45.5Z") would mis-order under a lexical compare ('.' < 'Z'), putting
+    # a STALER agent on top. A missing/unparseable timestamp coerces to epoch
+    # (datetime.min) so it sorts LAST under reverse — matching the prior intent.
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    agents.sort(key=lambda a: _parse_dt(a.get("last_seen", "")) or _epoch,
+                reverse=True)
     return {
         "schema": PRESENCE_VIEW_SCHEMA,
         "view": "presence",
@@ -905,7 +1000,7 @@ def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     were added there for exactly this reason), so the write path can rebuild views
     from the summaries aggregate instead of re-fetching task bodies. The
     equivalence test (TestBuildAllViewsEquivalence) guards this property."""
-    now = _now().isoformat().replace("+00:00", "Z")
+    now = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     result: dict[str, dict[str, Any]] = {
         "index": build_index(tasks, now),
         "active": build_active(tasks, now),
@@ -947,3 +1042,98 @@ def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         }
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Operator digest (situational-awareness fold, piece 7)
+# ---------------------------------------------------------------------------
+
+def _digest_due_key(s: dict[str, Any]) -> tuple:
+    """Ranking key for the blocked-on-you block: due soonest first, then oldest.
+
+    Both components are PARSED via _parse_dt (BUG 7 / PR #39): a missing/malformed
+    ``due`` sorts LAST (datetime.max) so dated asks lead, and the age tiebreak is
+    the parsed ``updated_at`` (oldest first) so the longest-waiting ask wins ties.
+    We compare parsed datetimes, never the mixed-precision ISO-Z strings."""
+    due = _parse_dt(s.get("due") or "")
+    upd = _parse_dt(s.get("updated_at") or "")
+    return (
+        due or datetime.max.replace(tzinfo=timezone.utc),
+        upd or datetime.max.replace(tzinfo=timezone.utc),
+    )
+
+
+def build_operator_digest(summaries: list[dict[str, Any]],
+                          presence: list[dict[str, Any]], *,
+                          human: str,
+                          now: Optional[datetime] = None,
+                          since: Optional[datetime] = None) -> dict[str, Any]:
+    """Fold bus state into the operator's situational-awareness digest (pure).
+
+    Four blocks, derived ONLY from task_summary dicts + presence records (no I/O,
+    no body fetch). Deterministic given injected ``now``/``since`` (both injected
+    for tests). Reuses the existing read-model so the digest can never disagree
+    with ``needs-me`` / ``presence`` / ``needs-attention``:
+
+      * ``blocked_on_you`` — ``needs_human`` (due-now only), RE-RANKED by due
+        soonest then oldest updated_at (the human reads the most-urgent ask
+        first). ``needs_human`` returns oldest-first; we re-sort by _digest_due_key.
+      * ``upcoming`` — ``upcoming_for_human`` (future not_before within 7d).
+      * ``per_agent`` — one entry per presence record: its agent id, workstreams,
+        liveness, summary, and the tasks it FINISHED/transitioned since ``since``
+        (done/abandoned with done_at >= since). Parsed-datetime ``since`` compare.
+      * ``stale`` — active tasks past the stale threshold (``is_stale``), the same
+        needs-attention safety-net set, sorted oldest-first.
+
+    ``now``/``since`` default to wall-clock / (now - 12h) so a bare call still
+    works, but the command always injects them explicitly."""
+    now_dt = (now or _now()).astimezone(timezone.utc)
+    since_dt = (since or (now_dt - timedelta(hours=12))).astimezone(timezone.utc)
+
+    blocked = sorted(needs_human(summaries, human, now=now_dt), key=_digest_due_key)
+    upcoming = upcoming_for_human(summaries, human, now=now_dt)
+
+    # Index finished/transitioned-since tasks by the owning/touching agent, so a
+    # per_agent entry can list what that agent wrapped up this window. A summary
+    # carries done_at (flattened) — gate on a PARSED compare against since.
+    by_agent_done: dict[str, list[dict[str, Any]]] = {}
+    for s in summaries:
+        if s.get("status") not in ("done", "abandoned"):
+            continue
+        done_dt = _parse_dt(s.get("done_at") or s.get("updated_at") or "")
+        if done_dt is None or done_dt < since_dt:
+            continue
+        for who in {s.get("owner_agent"), s.get("last_touched_by")}:
+            if who:
+                by_agent_done.setdefault(who, []).append(s)
+
+    per_agent = []
+    for rec in presence:
+        agent = rec.get("agent", "")
+        per_agent.append({
+            "agent": agent,
+            "workstreams": list(rec.get("workstreams", [])),
+            "summary": rec.get("summary", ""),
+            "liveness": presence_liveness(rec.get("last_seen", ""), now_dt),
+            "finished_since": sorted(
+                by_agent_done.get(agent, []),
+                key=lambda x: _parse_dt(x.get("done_at") or x.get("updated_at") or "")
+                or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True),
+        })
+
+    stale = sorted(
+        (s for s in summaries if is_stale(s, now_dt)),
+        key=lambda x: _parse_dt(x.get("updated_at") or "")
+        or datetime.min.replace(tzinfo=timezone.utc))
+
+    return {
+        "schema": "fulcra.coordination.operator_digest.v1",
+        "human": human,
+        "now": now_dt.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "since": since_dt.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "blocked_on_you": blocked,
+        "upcoming": upcoming,
+        "per_agent": per_agent,
+        "stale": stale,
+    }
