@@ -87,3 +87,38 @@ def test_snapshot_permission_denied_gives_actionable_fda_message(
 
     with pytest.raises(PermissionError, match="Full Disk Access"):
         read_local_db(db)
+
+
+def test_snapshot_cp_timeout_surfaces_fda_without_falling_through(
+    tmp_path: Path, monkeypatch
+):
+    """A `cp -c` that TIMES OUT means macOS is blocking the read for lack of
+    Full Disk Access (the syscall hangs on first touch of the TCC-protected
+    container). The snapshot must surface the actionable FDA message
+    *immediately* and must NOT fall through to the unbounded shutil.copy2 —
+    that fall-through is what hung the daemon worker for its full wall-clock
+    budget and made Day One look like it silently did nothing.
+    """
+    import subprocess as _sp
+
+    from fulcra_dayone.readers import local_db as _ldb
+
+    db = tmp_path / "DayOne.sqlite"
+    build_dayone_db(db)
+
+    def _cp_times_out(*args, **kwargs):
+        raise _sp.TimeoutExpired(cmd=["cp", "-c"], timeout=_ldb._COPY_TIMEOUT_S)
+
+    # The copy2 fallback is exactly what hangs under a TCC denial; reaching it
+    # is the bug. Make it fail the test loudly instead of (in production)
+    # hanging the worker.
+    def _copy2_must_not_run(*args, **kwargs):
+        raise AssertionError(
+            "copy2 fallback must NOT run on a cp timeout — that path hangs"
+        )
+
+    monkeypatch.setattr(_ldb.subprocess, "run", _cp_times_out)
+    monkeypatch.setattr(_ldb.shutil, "copy2", _copy2_must_not_run)
+
+    with pytest.raises(PermissionError, match="Full Disk Access"):
+        read_local_db(db)

@@ -53,6 +53,13 @@ _FDA_ERROR = (
     "to the one-time JSON-export mode, which doesn't need access.)"
 )
 
+# Hard cap on the DB snapshot copy. A clone/copy of a local ~15MB SQLite file
+# completes in well under a second; the only way it reaches this bound is macOS
+# blocking the read for lack of Full Disk Access. So a timeout here is treated
+# as an FDA denial (see _snapshot), turning a silent multi-minute worker hang
+# into a fast, actionable error.
+_COPY_TIMEOUT_S = 30
+
 
 def find_database() -> Path:
     """Locate the Day One SQLite database under the user's home directory."""
@@ -77,21 +84,33 @@ def _snapshot(db: Path) -> Path:
       user gets a recovery instruction instead of a raw
       ``PermissionError: [Errno 1]`` traceback.
     - **A hung copy.** The first time a sandboxed/launchd process touches
-      the protected path, macOS can block the syscall (a TCC prompt that
+      the protected path, macOS can block the syscall (a TCC check that
       never resolves in a headless context) — which previously let the
       run sit until the worker's 900s wall-clock timeout. ``cp`` gets a
-      bounded ``timeout`` so it can never eat that whole budget; a
-      ``TimeoutExpired`` falls through to the copy2 path, and if that
-      also stalls/EPERMs we surface ``_FDA_ERROR`` fast.
+      bounded ``timeout``; because a bounded copy of a LOCAL file can only
+      time out when the syscall is being blocked, a ``TimeoutExpired`` is
+      treated as a Full Disk Access denial and surfaces ``_FDA_ERROR``
+      immediately. It must NOT fall through to an unbounded ``shutil.copy2``
+      — that is exactly what hung the worker (Day One "silently doing
+      nothing") before this fix.
     """
     dest = Path(tempfile.mkdtemp()) / "dayone-snapshot.sqlite"
     try:
         subprocess.run(
             ["cp", "-c", str(db), str(dest)], check=True, capture_output=True,
-            timeout=30,
+            timeout=_COPY_TIMEOUT_S,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError,
-            subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired as exc:
+        # A bounded copy of a LOCAL file timing out means macOS is blocking
+        # the read for lack of Full Disk Access — not slowness. Surface the
+        # recovery instruction now; do NOT fall through to the unbounded
+        # copy2 below (which would hang the worker for its full wall-clock
+        # budget — the original silent-hang bug).
+        raise PermissionError(_FDA_ERROR) from exc
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # cp returned an error PROMPTLY (APFS clone unsupported, or cp
+        # absent). This branch only runs when cp did not hang, so the plain
+        # copy either succeeds or raises EPERM cleanly — it won't hang.
         try:
             shutil.copy2(db, dest)
         except PermissionError as exc:
