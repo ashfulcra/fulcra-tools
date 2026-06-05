@@ -9298,6 +9298,226 @@ class TestRequestReview(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 5: reroute sweep thresholds
+# ---------------------------------------------------------------------------
+
+
+class TestReviewSweepThresholds(unittest.TestCase):
+    def test_reroute_minutes_defaults(self):
+        from fulcra_coord import cli
+        os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", None)
+        os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", None)
+        self.assertEqual(cli._reroute_minutes("P1"), 15.0)
+        self.assertEqual(cli._reroute_minutes("P2"), 30.0)
+
+    def test_reroute_minutes_env_override(self):
+        from fulcra_coord import cli
+        os.environ["FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1"] = "5"
+        try:
+            self.assertEqual(cli._reroute_minutes("P1"), 5.0)
+        finally:
+            os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", None)
+
+    def test_reroute_max_default(self):
+        from fulcra_coord import cli
+        os.environ.pop("FULCRA_COORD_REVIEW_REROUTE_MAX", None)
+        self.assertEqual(cli._reroute_max(), 2)
+
+    def test_accepted_stall_hours_default(self):
+        from fulcra_coord import cli
+        os.environ.pop("FULCRA_COORD_ACCEPTED_STALL_HOURS", None)
+        self.assertEqual(cli._accepted_stall_hours(), 2.0)
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 5: review classification
+# ---------------------------------------------------------------------------
+
+
+class TestReviewClassification(unittest.TestCase):
+    NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _routed_review(self, assignee, routed_minutes_ago, priority="P1", attempt=1,
+                       extra_events=None, last_seen_min_ago=300):
+        from fulcra_coord import routing
+        routed_at = (self.NOW - timedelta(minutes=routed_minutes_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        ev = routing.make_route_event(kind="routed", to=assignee, by="s", attempt=attempt,
+                                      reason="x", candidate_snapshot=[],
+                                      observed_updated_at=routed_at,
+                                      at=routed_at, route_id=f"r{attempt}")
+        events = [{"at": routed_at, "type": "created", "by": "s"}, ev] + (extra_events or [])
+        return {"id": "TASK-20260604-rev-00000000", "status": "proposed",
+                "priority": priority, "assignee": assignee, "tags": ["kind:review"],
+                "events": events, "updated_at": routed_at, "workstream": "fulcra-tools"}
+
+    def _presence(self, agent, min_ago):
+        ls = (self.NOW - timedelta(minutes=min_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        return [{"agent": agent, "last_seen": ls, "capabilities": ["review"]}]
+
+    def test_never_acted_below_floor_past_p1_threshold_reroutes(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")  # >15m
+        pres = self._presence("dead:h:r", 300)  # assignee long stale -> below floor
+        self.assertEqual(cli._classify_review(t, pres, self.NOW), "reroute")
+
+    def test_before_threshold_is_none(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=5, priority="P1")  # <15m
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW), "none")
+
+    def test_p2_uses_30m_threshold(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P2")  # <30m
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW), "none")
+
+    def test_bare_inbox_ack_does_not_count_as_acceptance(self):
+        from fulcra_coord import cli
+        ack = {"at": (self.NOW - timedelta(minutes=18)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "inbox_ack", "by": "dead:h:r"}
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1",
+                                extra_events=[ack])
+        # a read receipt is NOT acceptance -> still eligible to reroute.
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "reroute")
+
+    def test_explicit_review_accepted_freezes(self):
+        from fulcra_coord import cli
+        acc = {"at": (self.NOW - timedelta(minutes=18)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "review-accepted", "by": "dead:h:r"}
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1",
+                                extra_events=[acc])
+        # accepted but not yet past ACCEPTED_STALL_HOURS -> freeze.
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "freeze")
+
+    def test_accepted_then_long_stall_escalates(self):
+        from fulcra_coord import cli
+        acc = {"at": (self.NOW - timedelta(hours=3)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "review-accepted", "by": "dead:h:r"}
+        t = self._routed_review("dead:h:r", routed_minutes_ago=200, priority="P1",
+                                extra_events=[acc])
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "freeze-escalate")
+
+    def test_claim_transition_by_assignee_counts_as_acceptance(self):
+        from fulcra_coord import cli
+        active = {"at": (self.NOW - timedelta(minutes=18)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+            "type": "active", "by": "dead:h:r"}  # status transition by assignee
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1",
+                                extra_events=[active])
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "freeze")
+
+    def test_assignee_above_floor_is_none(self):
+        from fulcra_coord import cli
+        t = self._routed_review("alive:h:r", routed_minutes_ago=20, priority="P1")
+        self.assertEqual(cli._classify_review(t, self._presence("alive:h:r", 5), self.NOW),
+                         "none")  # live, give it time
+
+    def test_cap_reached_escalates(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1", attempt=2)
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "escalate")
+
+    def test_non_review_task_is_none(self):
+        from fulcra_coord import cli
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        t["tags"] = ["kind:ops"]  # NOT a review directive
+        self.assertEqual(cli._classify_review(t, self._presence("dead:h:r", 300), self.NOW),
+                         "none")
+
+
+# ---------------------------------------------------------------------------
+# Liveness-aware reviewer routing — Task 5: sweep I/O wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestReviewSweep(unittest.TestCase):
+    NOW = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _routed_review(self, assignee, routed_minutes_ago, priority="P1", attempt=1):
+        from fulcra_coord import routing
+        routed_at = (self.NOW - timedelta(minutes=routed_minutes_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        ev = routing.make_route_event(kind="routed", to=assignee, by="s", attempt=attempt,
+                                      reason="x", candidate_snapshot=[],
+                                      observed_updated_at=routed_at,
+                                      at=routed_at, route_id=f"r{attempt}")
+        events = [{"at": routed_at, "type": "created", "by": "s"}, ev]
+        return {"id": "TASK-20260604-rev-00000000", "status": "proposed",
+                "priority": priority, "assignee": assignee, "tags": ["kind:review"],
+                "events": events, "updated_at": routed_at, "workstream": "fulcra-tools",
+                "owner_agent": "author:h:r"}
+
+    def _presence(self, agent, min_ago):
+        ls = (self.NOW - timedelta(minutes=min_ago)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        return [{"agent": agent, "last_seen": ls, "capabilities": ["review"]}]
+
+    def test_sweep_reroutes_and_writes_rerouted_event(self):
+        from fulcra_coord.cli import _sweep_review_routes
+        from fulcra_coord import remote
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
+               "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+               "capabilities": ["review"]}]}
+        written = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            written["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._load_task", return_value=t), \
+             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
+            _sweep_review_routes([t], backend=["false"], now=self.NOW)
+        out = written["task"]
+        rer = [e for e in out["events"] if e["type"] == "rerouted"]
+        self.assertEqual(len(rer), 1)
+        self.assertEqual(out["assignee"], rer[0]["to"])
+        self.assertNotEqual(rer[0]["to"], "dead:h:r")  # excluded as tried
+        self.assertTrue(rer[0]["route_id"])  # new route_id minted
+
+    def test_sweep_stale_observation_aborts_when_task_moved(self):
+        from fulcra_coord.cli import _sweep_review_routes
+        from fulcra_coord import remote
+        # The re-read task's latest route event differs from the snapshot the
+        # decision was computed from -> abort (no competing reroute).
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        moved = self._routed_review("someoneelse:h:r", routed_minutes_ago=1,
+                                    priority="P1", attempt=2)
+        agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
+               "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+               "capabilities": ["review"]}]}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.cli._load_task", return_value=moved), \
+             patch("fulcra_coord.cli._write_task_and_views") as wtv:
+            _sweep_review_routes([t], backend=["false"], now=self.NOW)
+        wtv.assert_not_called()  # another sweeper already moved it
+
+    def test_sweep_ignores_non_review_tasks(self):
+        from fulcra_coord.cli import _sweep_review_routes
+        from fulcra_coord import remote
+        t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
+        t["tags"] = ["kind:ops"]
+        agg = {"agents": self._presence("dead:h:r", 300)}
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=lambda p, backend=None: agg), \
+             patch("fulcra_coord.cli._write_task_and_views") as wtv, \
+             patch("fulcra_coord.cli._load_task") as lt:
+            _sweep_review_routes([t], backend=["false"], now=self.NOW)
+        wtv.assert_not_called()
+        lt.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
