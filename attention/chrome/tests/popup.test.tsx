@@ -203,6 +203,31 @@ describe("SignIn surface", () => {
     expect(container.textContent).toContain("Connect to Fulcra");
   });
 
+  test("sign-out also clears the client-side sent-set (dedup) — Bug A1", async () => {
+    // After signing out of account A into account B the SentSet must be cleared
+    // so a re-queued same source_id is not skipped against A's ids (data loss).
+    const clearSentSet = vi.fn(async () => undefined);
+    const tokenStore = {
+      getValidAccessToken: vi.fn(async () => "ACCESS"),
+      clear: vi.fn(async () => undefined),
+    } as never;
+
+    const { container } = await mount(
+      <SignIn
+        runSignIn={(async () => ({ ok: true })) as never}
+        tokenStore={tokenStore}
+        resolveLabel={async () => "a@example.com"}
+        openUrl={vi.fn()}
+        clearResolved={async () => undefined}
+        clearSentSet={clearSentSet}
+      />,
+    );
+
+    expect(container.textContent).toContain("Signed in");
+    await clickButton(container, "Sign out");
+    expect(clearSentSet).toHaveBeenCalledTimes(1);
+  });
+
   test("device-flow failure shows an error + Try again", async () => {
     const runSignIn = vi.fn(async () => {
       throw new Error("device authorization failed: access_denied");
