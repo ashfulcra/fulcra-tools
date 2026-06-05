@@ -221,6 +221,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--reason", "-r", required=True, metavar="REASON")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
+    # ---- request-review ----
+    sp = sub.add_parser(
+        "request-review",
+        help="Route a PR review to a live/idle reviewer (capability-based, "
+             "self-healing); escalates to the human if nobody qualifies")
+    sp.add_argument("pr", metavar="PR", help="PR number/identifier")
+    sp.add_argument("--repo", required=True, metavar="REPO")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="The author (default: derived) — selects the canonical reviewer")
+    sp.add_argument("--candidate-list", dest="candidate_list", default=None, metavar="A,B,C",
+                    help="Explicit preference-ordered pool override (advanced)")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="Print ranked pool / tiers / excluded / winner / reason; write nothing")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- reconcile ----
     sub.add_parser("reconcile", help="Repair views and resolve pending operation markers")
 
@@ -433,6 +448,7 @@ COMMAND_MAP = {
     "pause": _cli.cmd_pause,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
+    "request-review": _cli.cmd_request_review,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "doctor": _cli.cmd_doctor,
