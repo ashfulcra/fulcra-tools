@@ -11,6 +11,7 @@ Mirrors the subcommands the package uses:
   * ``download <remote_path> -``    -> file contents or exit 1
   * ``upload <local_tmp> <remote>`` -> copy bytes
   * ``list <prefix>``               -> matching remote paths
+  * ``delete <remote_path>``        -> unlink the file (exit 1 if absent)
   * ``--help``                      -> exit 0
 
 State root comes from ``FULCRA_FAKE_ROOT`` (a real local directory). Remote
@@ -88,6 +89,17 @@ def main(argv: list[str]) -> int:
         for p in sorted(target.rglob("*")):
             if p.is_file():
                 print("/" + str(p.relative_to(root)))
+        return 0
+
+    if cmd == "delete":
+        # Soft-delete in the real CLI; here a plain unlink is enough for the
+        # archive move's write-then-delete to be observable. Absent file -> exit 1
+        # (mirrors the real CLI erroring on a missing path), so remote.delete
+        # returns False and _archive_task's idempotent stat-gate stays honest.
+        local = _local_for(root, argv[1])
+        if not local.exists():
+            return 1
+        local.unlink()
         return 0
 
     sys.stderr.write(f"fake backend: unknown command {cmd!r}\n")

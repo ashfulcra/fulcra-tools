@@ -13,6 +13,7 @@ Generates materialized JSON views from a list of task dicts:
 from __future__ import annotations
 
 import os
+import re as _re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -192,6 +193,130 @@ def _done_at(t: dict[str, Any]) -> str:
     which returned None for a summary that has no nested ``done`` block) is what
     makes build_all_views(summaries) == build_all_views(full_bodies)."""
     return (t.get("done") or {}).get("done_at") or t.get("done_at") or t.get("updated_at", "")
+
+
+# ---------------------------------------------------------------------------
+# Retention / archival policy predicates (pure, zero-I/O) — live here beside
+# the other age predicates (is_stale / is_aged_out_broadcast). Every gate goes
+# through _parse_dt; NONE compares ISO strings lexically.
+# ---------------------------------------------------------------------------
+
+# Default age (days) after which a TERMINAL (done/abandoned) task is moved out
+# of the hot path into the cold archive. 30d keeps a month of finished work
+# instantly visible in recently-done/search before it cold-stores. Tunable via
+# FULCRA_COORD_RETENTION_DAYS for a fleet that wants a longer/shorter hot window.
+RETENTION_DAYS_DEFAULT = 30
+# Spent digest dedup markers older than this are pruned (deleted). They are
+# regenerable guards with no history value; 7d is ample slack past the daily
+# windows that could still consult them.
+MARKER_RETENTION_DAYS_DEFAULT = 7
+# Dead-agent presence records older than this are pruned. Presence is a live
+# snapshot, not history; a record untouched for 30d is a long-departed agent.
+PRESENCE_RETENTION_DAYS_DEFAULT = 30
+
+
+def _retention_days(days=None):
+    """Resolve the task archive age (days): explicit arg > env > default (mirrors
+    _stale_hours). A non-numeric FULCRA_COORD_RETENTION_DAYS falls back to the
+    default rather than crashing the best-effort retention pass."""
+    if days is not None:
+        return float(days)
+    raw = os.environ.get("FULCRA_COORD_RETENTION_DAYS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(RETENTION_DAYS_DEFAULT)
+
+
+def _marker_retention_days(days=None):
+    """Resolve the digest-marker prune age (days): explicit arg > env > default."""
+    if days is not None:
+        return float(days)
+    raw = os.environ.get("FULCRA_COORD_MARKER_RETENTION_DAYS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(MARKER_RETENTION_DAYS_DEFAULT)
+
+
+def _presence_retention_days(days=None):
+    """Resolve the dead-presence prune age (days): explicit arg > env > default."""
+    if days is not None:
+        return float(days)
+    raw = os.environ.get("FULCRA_COORD_PRESENCE_RETENTION_DAYS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(PRESENCE_RETENTION_DAYS_DEFAULT)
+
+
+def is_archivable_task(task, now=None, retention_days=None):
+    """True when a task is terminal (done/abandoned) AND aged past the retention
+    window, so it should be cold-archived out of the hot path.
+
+    Aged is measured from the done/abandoned timestamp (_done_at: nested
+    done.done_at OR flat done_at, falling back to updated_at), PARSED via
+    _parse_dt (never lexical). Non-terminal statuses (active/waiting/blocked/
+    proposed) are live work and NEVER qualify regardless of age.
+
+    SAFE DIRECTION on a missing/unparseable timestamp: unlike is_stale (which
+    fails toward SURFACING a clockless task), archiving is a destructive MOVE, so
+    a clockless terminal task is NOT archived — we never move what we can't date.
+    Boundary: age >= retention_days qualifies (a task done exactly N days ago is
+    archivable), matching the recently-done cutoff's >= semantics."""
+    if task.get("status") not in ("done", "abandoned"):
+        return False
+    if now is None:
+        now = _now()
+    dt = _parse_dt(_done_at(task))
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _retention_days(retention_days)
+
+
+_MARKER_DATE_RE = _re.compile(r"/(\d{4}-\d{2}-\d{2})-[^/]+\.json$")
+
+
+def is_prunable_marker(path, now=None, marker_days=None):
+    """True when a digest dedup marker file is older than the marker-retention
+    window and should be pruned (deleted).
+
+    The marker path is digest/markers/<YYYY-MM-DD>-<window>.json (see
+    cli._digest_marker_path). We extract the embedded UTC DATE and parse it via
+    _parse_dt — never a lexical compare. A path that doesn't match the expected
+    shape (no parseable date) is KEPT, not pruned: we never delete what we can't
+    date. Boundary: age >= marker_days prunes."""
+    if now is None:
+        now = _now()
+    m = _MARKER_DATE_RE.search(path)
+    if not m:
+        return False
+    dt = _parse_dt(m.group(1) + "T00:00:00Z")
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _marker_retention_days(marker_days)
+
+
+def is_prunable_presence(record, now=None, presence_days=None):
+    """True when a presence record's last_seen is older than the presence-
+    retention window — a long-departed agent whose live snapshot is now noise.
+
+    last_seen parsed via _parse_dt (never lexical). A missing/unparseable
+    last_seen is KEPT (safe direction: don't delete an undatable record).
+    Boundary: age >= presence_days prunes. Presence is a derived view, so a
+    pruned record also drops from the presence aggregate on the next rebuild."""
+    if now is None:
+        now = _now()
+    dt = _parse_dt(record.get("last_seen", ""))
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _presence_retention_days(presence_days)
 
 
 def _acked_by(t: dict[str, Any], who: str) -> bool:
