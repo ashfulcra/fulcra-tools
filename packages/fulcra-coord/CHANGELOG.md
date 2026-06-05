@@ -10,6 +10,42 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.8.0] — Bus Retention / Archival
+
+**Why:** The coordination bus grew without bound. Terminal (done/abandoned)
+tasks stayed under `tasks/` forever — bloating `views/summaries.json` (the
+aggregate behind the read perf win), growing the `tasks/` listing self-heal
+enumerates on every write, and swelling recently-done/search. Digest markers and
+dead-agent presence records also accumulated. Reads and reconcile slowly
+degraded and the operator surfaces got noisier; nothing removed anything.
+
+**What:**
+- Terminal tasks aged past `FULCRA_COORD_RETENTION_DAYS` (default 30) are
+  crash-safely MOVED to `archive/tasks/<YYYY-MM>/<id>.json` with an append-only
+  per-id cold-index shard `archive/index/<id>.json` (no shared mutable index —
+  Files has no CAS). Moving the body out of `tasks/` removes it from the
+  aggregate, views, and self-heal automatically — zero read-path filter code.
+- `search --archived` (alias `--all`) scans the cold index; default search stays
+  hot-only and fast. `restore <id>` moves an archived body back into `tasks/`.
+- Spent digest markers (>`FULCRA_COORD_MARKER_RETENTION_DAYS`, default 7) and
+  dead-agent presence (>`FULCRA_COORD_PRESENCE_RETENTION_DAYS`, default 30) are
+  soft-deleted via `fulcra file delete` (platform-restorable). Both prune gates
+  fail SAFE: an undatable marker or presence record is kept, never deleted.
+- The pass is folded into `reconcile`, self-throttled to ~once/day via a
+  first-host-wins `retention/last-run.json` marker (the digest-marker pattern) —
+  no new scheduler. Bounded by `FULCRA_COORD_RETENTION_MAX_PER_RUN` (default 200)
+  + a time budget that composes with reconcile's deadline; best-effort
+  (never raises into a tick). No data loss by construction (write→verify→delete).
+
+**How tested:** new `tests/test_retention.py` — policy predicates (cutoff
+boundaries, non-terminal exclusion), crash-safe move (write→verify→delete order,
+crash-mid-move completion, idempotency), append-only shards, `search --archived`
+/ `restore`, throttle + cap + time-budget + best-effort, marker/presence prune,
+and a VERIFIED automatic-hot-path-exclusion test that archives a terminal task
+and asserts it leaves the rebuilt `tasks/` listing and summaries with no filter.
+
+---
+
 ## [0.7.0] — Liveness-Aware Reviewer Routing
 
 **Why:** PR-review directives were routed to a FIXED reviewer (canonical, or a
