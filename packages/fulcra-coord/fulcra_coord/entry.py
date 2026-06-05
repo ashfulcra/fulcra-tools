@@ -59,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="One-line 'what I'm currently on'")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="Who is connecting (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--can-review", dest="can_review", action="store_true",
+                    help="Declare this agent can review PRs (sugar for --role review)")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Declare a capability/role (repeatable), e.g. --role review")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- workstream ----
@@ -96,7 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("tell",
                         help="Direct work at another agent: create a proposed "
                              "directive task assigned to them (sugar over start)")
-    sp.add_argument("assignee", metavar="ASSIGNEE", help="Agent to direct the work at")
+    # assignee is OPTIONAL: omit it and use --route-capability to resolve a LIVE
+    # recipient at send time instead of pinning a fixed agent.
+    sp.add_argument("assignee", metavar="ASSIGNEE", nargs="?", default=None,
+                    help="Agent to direct the work at (omit with --route-capability)")
     sp.add_argument("title", metavar="TITLE", help="Short durable task objective")
     sp.add_argument("--next", "-n", default="", metavar="NEXT_ACTION")
     sp.add_argument("--workstream", "-w", default="general", metavar="WS")
@@ -105,6 +112,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
                     help="Directing agent (owner); default: derived/env agent")
     sp.add_argument("--summary", "-s", default="", metavar="SUMMARY")
+    sp.add_argument("--route-capability", dest="route_capability", default=None, metavar="CAP",
+                    help="Resolve a LIVE recipient declaring CAP instead of a fixed assignee")
+    sp.add_argument("--floor", choices=["live", "idle"], default="idle",
+                    help="Minimum liveness for --route-capability resolution (default: idle)")
 
     # ---- broadcast ----
     sp = sub.add_parser("broadcast",
@@ -217,6 +228,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--reason", "-r", required=True, metavar="REASON")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
+    # ---- request-review ----
+    sp = sub.add_parser(
+        "request-review",
+        help="Route a PR review to a live/idle reviewer (capability-based, "
+             "self-healing); escalates to the human if nobody qualifies")
+    sp.add_argument("pr", metavar="PR", help="PR number/identifier")
+    sp.add_argument("--repo", required=True, metavar="REPO")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="The author (default: derived) — selects the canonical reviewer")
+    sp.add_argument("--candidate-list", dest="candidate_list", default=None, metavar="A,B,C",
+                    help="Explicit preference-ordered pool override (advanced)")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="Print ranked pool / tiers / excluded / winner / reason; write nothing")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- reconcile ----
     sub.add_parser("reconcile", help="Repair views and resolve pending operation markers")
 
@@ -314,6 +340,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="Whose inbox (default: $FULCRA_COORD_AGENT or derived)")
 
+    # ---- digest ----
+    sp = sub.add_parser("digest",
+                        help="Write the operator situational-awareness digest "
+                             "(blocked on you / upcoming / per-agent / stale) to "
+                             "the Fulcra timeline on its own 'Agent Tasks — Digest' track")
+    sp.add_argument("--window", choices=["morning", "evening"], default=None,
+                    help="Cadence window (sets the lookback + label); omit for on-demand")
+    sp.add_argument("--human", default=None, metavar="HANDLE",
+                    help="Whose plate (default: $FULCRA_COORD_HUMAN or persisted handle)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="Render + print the digest, write nothing to the timeline")
+
+    # ---- install-digest ----
+    sp = sub.add_parser("install-digest",
+                        help="Install the twice-daily scheduled `fulcra-coord digest` "
+                             "jobs (launchd 08:00/18:00 on macOS, cron elsewhere) — "
+                             "the push side of the operator digest")
+    sp.add_argument("--target-dir", dest="target_dir", default=None, metavar="DIR",
+                    help="Override the LaunchAgents/cron target dir (for testing)")
+    sp.add_argument("--logs-dir", dest="logs_dir", default=None, metavar="DIR",
+                    help="Override the directory for digest stdout/stderr logs")
+    sp.add_argument("--uninstall", action="store_true", help="Remove the digest schedule")
+    sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+
     # ---- identity ----
     sp = sub.add_parser("identity",
                         help="Show, set, or clear this host's declared agent id "
@@ -404,6 +455,7 @@ COMMAND_MAP = {
     "pause": _cli.cmd_pause,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
+    "request-review": _cli.cmd_request_review,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "doctor": _cli.cmd_doctor,
@@ -419,6 +471,8 @@ COMMAND_MAP = {
     "human": _cli.cmd_human,
     "annotations": _cli.cmd_annotations,
     "needs-me": _cli.cmd_needs_me,
+    "digest": _cli.cmd_digest,
+    "install-digest": _cli.cmd_install_digest,
     "resume": _cli.cmd_resume,
     "__session-task": _cli.cmd_session_task,
 }

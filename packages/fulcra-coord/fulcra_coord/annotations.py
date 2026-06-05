@@ -186,7 +186,7 @@ def build_annotation(
           "tags":     ["<lifecycle>", "<agent_kind>", "<session>"],
           "cli_tags": ["agent-tasks", "<lifecycle>", "agent:<kind>", "session:<sess>"],
           "name":  "<lifecycle>: <title> (<id>)",
-          "desc":  "<next_action | current_summary | link>",
+          "desc":  "[<workstream>/<kind>] <title> — <summary> · next: <action>",
           "text":  "<lifecycle>: <title> (<id>) <link>",
           "link":  "https://library.fulcradynamics.com/...",
           "lifecycle": "<lifecycle>",
@@ -206,9 +206,12 @@ def build_annotation(
 
     ``name`` is the CLI annotation NAME — the concise, link-free
     ``<lifecycle>: <title> (<id>)`` (kept short; the deep link lives in ``desc``
-    instead so the timeline label stays readable). ``desc`` prefers the task's
-    ``next_action`` then ``current_summary`` for a one-line detail, falling back
-    to the library link when neither is present.
+    instead so the timeline label stays readable). ``desc`` carries the WORK
+    SUBSTANCE (operator-digest spec §7): ``[<workstream>/<kind>] <title> —
+    <current_summary> · next: <next_action>``, so a per-event moment conveys
+    *what work* it was about, not just the lifecycle category. Every part is
+    optional; a sparse task still yields a non-empty desc (prefix + title), and
+    when nothing substantive is present it falls back to the library link.
 
     Kept separate from the writers so tests (and the API/CLI shaping steps)
     operate on a stable dict regardless of transport."""
@@ -229,9 +232,27 @@ def build_annotation(
     name = f"{lifecycle}: {title} ({task_id})"
     text = f"{name} {link}"
 
-    detail = (task.get("next_action") or "").strip() or \
-        (task.get("current_summary") or "").strip()
-    desc = detail or link
+    # COMPANION (operator-digest spec §7): carry the WORK SUBSTANCE in the note so
+    # a per-event moment conveys *what work*, not just the lifecycle category.
+    # Shape: "[<workstream>/<kind>] <title> — <summary> · next: <next_action>".
+    # Backward-compatible: this only changes the human-readable note body (desc);
+    # tags / name / link / payload shape are unchanged, so existing readers and
+    # the idempotency/transport paths are untouched. Every part is optional —
+    # a sparse task still yields a non-empty desc (at minimum the prefix + title).
+    from .schema import _extract_kind_from_tags
+    workstream = task.get("workstream", "") or ""
+    kind = _extract_kind_from_tags(task.get("tags") or [])
+    prefix = "/".join(p for p in (workstream, kind) if p)
+    summary = (task.get("current_summary") or "").strip()
+    nxt = (task.get("next_action") or "").strip()
+    blurb_parts = []
+    if prefix:
+        blurb_parts.append(f"[{prefix}]")
+    blurb_parts.append(title)
+    tail = " · ".join(
+        x for x in (summary, (f"next: {nxt}" if nxt else "")) if x)
+    blurb = " ".join(blurb_parts) + (f" — {tail}" if tail else "")
+    desc = blurb.strip() or link
 
     return {
         "track": TRACK_NAME,
@@ -636,27 +657,40 @@ def _tag_cache_path():
 
 
 def _load_tag_cache() -> dict[str, str]:
-    """Return the cached ``name -> id`` map, or {} on any read error."""
+    """Return the cached ``name -> id`` map, or {} on any read error OR expiry.
+
+    The on-disk shape is ``{"written_at": ISO-Z, "tags": {name: id}}``. A whole
+    cache older than the TTL (BUG 4) — or a pre-TTL legacy flat ``{name: id}``
+    file with no ``written_at`` — reads as EMPTY so every tag re-resolves and the
+    cache is re-stamped fresh, instead of returning ids the server may have
+    deleted/renamed and silently failing all future annotations."""
     try:
         path = _tag_cache_path()
         if path.exists():
             data = json.loads(path.read_text())
-            if isinstance(data, dict):
-                return data
+            if isinstance(data, dict) and _is_fresh(data.get("written_at")):
+                tags = data.get("tags")
+                if isinstance(tags, dict):
+                    return tags
     except (OSError, json.JSONDecodeError):
         pass
     return {}
 
 
 def _store_tag_id(name: str, tag_id: str) -> None:
-    """Persist a resolved ``name -> id`` mapping. Best-effort: a cache-write
-    failure just means the next emit re-resolves the tag, never a failed
-    annotation. Read-modify-write so concurrent names accumulate."""
+    """Persist a resolved ``name -> id`` mapping with a write timestamp.
+
+    Best-effort: a cache-write failure just means the next emit re-resolves the
+    tag, never a failed annotation. Read-modify-write so concurrent names
+    accumulate; the ``written_at`` stamp drives TTL expiry on read (BUG 4)."""
     try:
         cache.annotations_dir().mkdir(parents=True, exist_ok=True)
+        # Build on top of any still-fresh entries (expired ones already dropped
+        # by _load_tag_cache), then re-stamp the whole cache as freshly written.
         data = _load_tag_cache()
         data[name] = tag_id
-        _tag_cache_path().write_text(json.dumps(data))
+        _tag_cache_path().write_text(
+            json.dumps({"written_at": _cache_now_iso(), "tags": data}))
     except OSError:
         pass
 
@@ -695,6 +729,55 @@ def _resolve_tag_id(name: str, token: str) -> str:
     return tag_id
 
 
+# BUG 4: the resolved definition-id / tag-id caches had NO expiry, so a
+# server-side definition or tag deletion/rename left the cached id stale FOREVER
+# — and since the id no longer resolves, every subsequent annotation silently
+# failed with no way to self-heal short of manually clearing the cache. A TTL
+# bounds that staleness window: an entry older than the TTL reads as a MISS so
+# the resolver re-runs (and re-stamps a fresh id), while a fresh entry is still a
+# zero-HTTP hit. 24h default keeps the common case HTTP-free while guaranteeing
+# any drift heals within a day; overridable via env for tests / aggressive setups.
+_DEFAULT_ANNOTATION_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def _annotation_cache_ttl_seconds() -> float:
+    """TTL (seconds) for the definition/tag id caches; env-overridable.
+
+    ``FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS`` lets tests force expiry and lets
+    an operator tune the staleness window. A malformed value falls back to the
+    24h default rather than disabling the cache or raising on a best-effort path."""
+    raw = os.environ.get("FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(_DEFAULT_ANNOTATION_CACHE_TTL_SECONDS)
+
+
+def _is_fresh(written_at: Any) -> bool:
+    """True when a stored ``written_at`` ISO-Z stamp is within the current TTL.
+
+    A missing/unparseable stamp (incl. a pre-TTL legacy cache file with no
+    ``written_at``) is treated as STALE so it re-resolves once and gets
+    re-stamped, rather than being trusted forever — the whole point of the TTL."""
+    if not written_at:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(written_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - dt).total_seconds()
+    return age <= _annotation_cache_ttl_seconds()
+
+
+def _cache_now_iso() -> str:
+    """Fixed-width-microsecond UTC stamp for cache-write timestamps (BUG 1)."""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 def _definition_cache_path():
     """Path to the cached ``Agent Tasks`` definition-id json under the cache root.
 
@@ -707,12 +790,17 @@ def _definition_cache_path():
 
 
 def _cached_definition_id() -> Optional[str]:
+    """Return the cached definition id, or None on miss OR expiry (BUG 4).
+
+    An entry older than the TTL (or one with no/garbled ``written_at`` — e.g. a
+    pre-TTL legacy file) reads as a MISS so the resolver re-runs and heals a
+    stale id, instead of returning an id the server may have deleted/renamed."""
     path = _definition_cache_path()
     try:
         if path.exists():
             data = json.loads(path.read_text())
             did = data.get("id")
-            if did:
+            if did and _is_fresh(data.get("written_at")):
                 return did
     except (OSError, json.JSONDecodeError):
         pass
@@ -720,11 +808,13 @@ def _cached_definition_id() -> Optional[str]:
 
 
 def _store_definition_id(def_id: str) -> None:
-    """Persist the resolved definition id. Best-effort: a cache-write failure
-    just means the next call re-resolves, never a failed annotation."""
+    """Persist the resolved definition id with a write timestamp. Best-effort: a
+    cache-write failure just means the next call re-resolves, never a failed
+    annotation. The ``written_at`` stamp drives TTL expiry on read (BUG 4)."""
     try:
         cache.annotations_dir().mkdir(parents=True, exist_ok=True)
-        _definition_cache_path().write_text(json.dumps({"id": def_id}))
+        _definition_cache_path().write_text(
+            json.dumps({"id": def_id, "written_at": _cache_now_iso()}))
     except OSError:
         pass
 
@@ -761,6 +851,92 @@ def _resolve_definition_id(token: str, tag_ids: list[str]) -> str:
     return def_id
 
 
+#: The digest track's own moment definition — distinct from DEFINITION_NAME
+#: ("Agent Tasks") so the human-paced digest moments filter SEPARATELY from the
+#: granular per-event lifecycle moments (the per-event track is kept, untouched).
+DIGEST_DEFINITION_NAME = "Agent Tasks — Digest"
+DIGEST_DEFINITION_DESCRIPTION = (
+    "Twice-daily + on-demand operator situational-awareness digests "
+    "(what's blocked on you, upcoming, what each agent did, what's stale)."
+)
+#: Track tag shared by every digest moment, so the operator can pull up exactly
+#: their digests on the Fulcra timeline.
+DIGEST_TRACK_TAG = "agent-digest"
+
+
+def _digest_definition_cache_path():
+    """Path to the cached ``Agent Tasks — Digest`` definition-id json.
+
+    A SEPARATE file from ``_definition_cache_path`` (which caches the per-event
+    "Agent Tasks" def): the two tracks are independent definitions, so caching
+    both ids in one file would let one clobber the other. Same per-root cache
+    dir so it's isolated per remote root like every other annotation handle."""
+    return cache.annotations_dir() / "digest-definition.json"
+
+
+def _cached_digest_definition_id() -> Optional[str]:
+    """Return the cached digest definition id, or None on miss OR expiry.
+
+    Mirrors _cached_definition_id but uses the digest-specific cache file so the
+    "Agent Tasks" and "Agent Tasks — Digest" tracks cannot clobber each other
+    while still sharing the same TTL self-heal behavior.
+    """
+    path = _digest_definition_cache_path()
+    try:
+        if path.exists():
+            data = json.loads(path.read_text())
+            did = data.get("id")
+            if did and _is_fresh(data.get("written_at")):
+                return did
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _store_digest_definition_id(def_id: str) -> None:
+    """Persist the resolved digest definition id with a TTL stamp.
+
+    Best-effort: a write failure just re-resolves next time, never a failed
+    annotation.
+    """
+    try:
+        cache.annotations_dir().mkdir(parents=True, exist_ok=True)
+        _digest_definition_cache_path().write_text(
+            json.dumps({"id": def_id, "written_at": _cache_now_iso()}))
+    except OSError:
+        pass
+
+
+def _resolve_digest_definition_id(token: str, tag_ids: list[str]) -> str:
+    """Return the ``Agent Tasks — Digest`` moment-definition id (resolve once + cache).
+
+    Same resolve/create dance as ``_resolve_definition_id`` but matched on
+    ``DIGEST_DEFINITION_NAME`` and cached in the digest-specific file, so the two
+    tracks converge on two distinct definitions across machines."""
+    cached = _cached_digest_definition_id()
+    if cached:
+        return cached
+    base = _api_base()
+    _, raw = _request("GET", f"{base}/user/v1alpha1/annotation", token)
+    for d in json.loads(raw) or []:
+        if d.get("name") == DIGEST_DEFINITION_NAME and not d.get("deleted_at"):
+            _store_digest_definition_id(d["id"])
+            return d["id"]
+    # ensure_ascii=False so the em-dash in DIGEST_DEFINITION_NAME goes on the
+    # wire as real UTF-8 (encoded utf-8 below), not an escaped \uXXXX sequence —
+    # the definition name must match byte-for-byte across machines to converge.
+    body = json.dumps({
+        "annotation_type": "moment",
+        "name": DIGEST_DEFINITION_NAME,
+        "description": DIGEST_DEFINITION_DESCRIPTION,
+        "tags": tag_ids,
+    }, ensure_ascii=False).encode("utf-8")
+    _, raw = _request("POST", f"{base}/user/v1alpha1/annotation", token, body=body)
+    def_id = json.loads(raw)["id"]
+    _store_digest_definition_id(def_id)
+    return def_id
+
+
 def _recorded_at(payload: dict[str, Any]) -> str:
     """ISO-8601 Z timestamp for the annotation, from the payload anchor else now.
 
@@ -772,7 +948,7 @@ def _recorded_at(payload: dict[str, Any]) -> str:
         val = payload.get(key)
         if val:
             return str(val).replace("+00:00", "Z")
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
@@ -950,4 +1126,59 @@ def emit_needs_user_annotation(
             _record_annotated(NEEDS_USER_TAG, task)
         return bool(wrote)
     except Exception:
+        return False
+
+
+def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
+                           backend: Optional[list[str]] = None) -> bool:
+    """Emit ONE operator-digest moment on the ``Agent Tasks — Digest`` track.
+
+    BEST-EFFORT, NEVER RAISES (same contract as emit_lifecycle_annotation): a
+    slow/missing/broken timeline write must never break — or even slow — the
+    scheduled digest tick. Returns True only when a moment was actually written.
+
+    Reuses the proven HTTP path (tag resolve/create -> definition resolve/create
+    -> JSONL record POST) but against ``_resolve_digest_definition_id`` so the
+    digest lands on its OWN track, never the per-event "Agent Tasks" one. Tags:
+    ``[agent-digest, <window>, agent:<kind>]``. Honours the same gating as the
+    lifecycle writer (off unless FULCRA_COORD_ANNOTATIONS / persisted mode is on)
+    so a machine that hasn't opted in stays inert. No idempotency marker here —
+    the per-window DEDUP GUARD (cli, Task 5) is what prevents a double digest."""
+    try:
+        if _mode() == "off":
+            return False
+        token = _resolve_token()
+        if not token:
+            return False
+        kind = agent_kind(agent)
+        tag_names = [DIGEST_TRACK_TAG, window, f"agent:{kind}"]
+        tag_ids = [_resolve_tag_id(n, token) for n in tag_names if n]
+        def_id = _resolve_digest_definition_id(token, tag_ids)
+
+        inner: dict[str, Any] = {}
+        if name.strip():
+            inner["title"] = name.strip()
+        if note.strip():
+            inner["note"] = note.strip()
+        source = [
+            f"com.fulcradynamics.fulcra-coord.digest.{uuid.uuid4()}",
+            f"com.fulcradynamics.annotation.{def_id}",
+        ]
+        record = {
+            "specversion": 1,
+            "data": json.dumps(inner, sort_keys=True),
+            "metadata": {
+                "data_type": "MomentAnnotation",
+                "recorded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                "tags": tag_ids,
+                "source": source,
+                "content_type": "application/json",
+            },
+        }
+        body = (json.dumps(record, sort_keys=True) + "\n").encode()
+        _request("POST", f"{_api_base()}/ingest/v1/record/batch", token,
+                 body=body, content_type="application/x-jsonl")
+        return True
+    except Exception:
+        # Best-effort: a timeline write must be invisible to the scheduled tick.
         return False

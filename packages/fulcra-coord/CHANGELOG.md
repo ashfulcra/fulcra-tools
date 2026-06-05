@@ -10,6 +10,149 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.7.0] — Liveness-Aware Reviewer Routing
+
+**Why:** PR-review directives were routed to a FIXED reviewer (canonical, or a
+configured #devops fallback) regardless of whether that agent was online. PRs
+sat unreviewed in a stale fallback's inbox while a capable reviewer was idle the
+whole time, and nothing re-routed a directive once its assignee went dark.
+
+**What:**
+- `request-review <pr> --repo <repo>` routes a PR review to a reviewer presence
+  says is actually live/idle (capability-based pool: canonical reviewer seed +
+  agents that declared `--can-review`), tagging the directive `kind:review` and
+  recording a `routed` event. `--dry-run` shows the ranked pool/tiers/winner.
+- `connect --can-review` / `--role` declare an agent's capabilities on its
+  presence record (default `[]`, backward compatible).
+- `reconcile` now sweeps stalled `kind:review` directives: re-routes a never-
+  acted review whose assignee fell below liveness floor (P1 15m / P2 30m,
+  env-overridable; cap 2; then escalate to the human), and freezes one the
+  assignee explicitly accepted, escalating only after a long stall.
+- `tell --route-capability R [--floor live|idle]` exposes the underlying
+  route-to-live primitive for any directive.
+- Escalation (no live reviewer) lands on the human's plate via the existing
+  `block --on-user` / needs:human surface. New env knobs:
+  `FULCRA_COORD_PRESENCE_GRACE_SECONDS` (1200), `…REVIEW_REROUTE_MINUTES_P1/P2`
+  (15/30), `…REVIEW_REROUTE_MAX` (2), `…ACCEPTED_STALL_HOURS` (2).
+
+---
+
+## [0.6.0] — Operator Digest
+
+**Why:** the human surface was pull-only — you saw "what's blocked on me" / "what
+is everyone doing" only when you started a session or ran needs-me/agents/resume.
+Between sessions you were blind, and the granular per-event annotations were too
+fine-grained to read as a glance. The Operator Digest is the push side: a
+consolidated, human-paced situational-awareness summary delivered to your Fulcra
+timeline twice daily and on demand.
+
+- **`fulcra-coord digest [--window morning|evening] [--format json] [--dry-run]`** —
+  builds a four-block digest from existing bus state + presence (blocked on you,
+  upcoming, what each agent did since the last window, what's stale) and writes it
+  to the timeline. `--dry-run` renders without writing; `--format json` prints the
+  structured digest.
+- **New "Agent Tasks — Digest" timeline track** — a second moment definition,
+  separate from the granular per-event "Agent Tasks" track (which is kept,
+  untouched), so digests filter on their own.
+- **Any-agent, dedup-guarded** — any machine can run the digest; a first-writer-wins
+  marker (`digest/markers/<date>-<window>.json`) collapses concurrent runs to one
+  digest per window (a rare same-second double is accepted as harmless, since
+  Fulcra Files has no compare-and-swap).
+- **`fulcra-coord install-digest`** — schedules the digest twice daily (launchd
+  08:00/18:00 on macOS, cron elsewhere). Safe to install on every machine.
+- **Per-event annotations now carry work substance** — the note reads
+  `[<workstream>/<kind>] <title> — <summary> · next: <action>` instead of just the
+  lifecycle category. Note-body only; backward-compatible.
+
+All digest paths are best-effort: a failed read/marker/emit never raises into a
+scheduled tick. Datetime comparisons (the `since` window + due ranking) parse
+timestamps (consistent with the 0.5.x mixed-precision fix), never lexical compare.
+## [0.5.6] — Debug sweep, rounds 2-3
+
+**Why:** a second adversarial pass focused on timestamp precision, malformed task
+bodies, human-blocking tags, annotation cache drift, and hook command hygiene.
+
+- **Timestamp precision:** all new coordination timestamps now emit fixed-width
+  microseconds, and freshness decisions parse datetimes instead of comparing raw
+  strings, so mixed-precision values already on the bus cannot silently drop the
+  newer side of a merge or rebuild.
+- **Malformed task bodies:** a cached task body with missing display fields now
+  surfaces in rebuilt views with empty-string defaults instead of vanishing from
+  every materialized view.
+- **`needs:human` cleanup:** assigning a human-blocked task away from the human
+  strips the stale `needs:human` tag; assigning it back to the human preserves
+  the marker.
+- **Annotation cache TTL:** cached definition/tag ids expire after 24h by
+  default (`FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS` override), bounding drift
+  after server-side deletes or renames while keeping annotation emission
+  best-effort.
+- **Hook command hints:** SessionStart resume hints shell-quote the resolved
+  `fulcra-coord` command and agent id before printing copy-pasteable commands.
+- **Reviewer-caught (codex):** the summaries rebuild path had one remaining raw
+  `updated_at` string compare; it now uses the same parsed timestamp key as the
+  merge path.
+
+## [0.5.5] — Reconcile performance
+
+**Why:** `reconcile` ran serially — each task's body load and each materialized
+view upload happened one round-trip at a time — taking ~96s end to end. That
+overran the heartbeat's timeout, so the heartbeat kept dying and presence/views
+went stale.
+
+- Per-task body loads and view uploads now run in parallel
+  (`ThreadPoolExecutor`), cutting reconcile from **~96s to ~23s** and
+  un-breaking the timing-out heartbeat. Partial-failure, timeout, and exit
+  semantics are preserved — a failed leg still degrades gracefully rather than
+  aborting the whole pass.
+- **Deadline fix (reviewer-caught, codex):** each parallel view upload was
+  handed the full per-call timeout instead of the *remaining* budget, so an
+  upload starting near the limit could still block for the full timeout and
+  blow the overall reconcile deadline. Now a global deadline
+  (`t0 + timeout`) is computed once and each upload gets `max(1, remaining)`,
+  skipping outright once the deadline has passed.
+
+*(0.5.2 was not released standalone — the branch version bumped to 0.5.5 during
+the stacked merges below.)*
+
+## [0.5.4] — Debug sweep, round 1
+
+**Why:** a focused audit of the merge / optimistic-concurrency and self-heal
+paths turned up 12 confirmed bugs where state could be silently dropped,
+misclassified, or mis-timed.
+
+- **Merge / optimistic concurrency:** `_try_merge` now carries forward fields it
+  was dropping and unions the `event` / `acked` collections instead of letting
+  one side overwrite the other.
+- **Summaries aggregate:** the rebuild self-heals a dropped directive rather than
+  persisting the loss.
+- **needs_human / scheduling gates:** datetime comparisons now parse before
+  comparing and coerce naive timestamps to UTC, so `not_before` / `due` gates
+  fire on the right boundary instead of throwing or comparing apples to oranges.
+- **Inbox auto-aging, presence:** both self-heal correctly under the cases the
+  sweep exercised.
+- **Annotations HTTP writer:** the tag-id cache and `recorded_at` anchoring were
+  corrected so timeline moments land at the right time with the right tags.
+- **Stale derived-tag repair (reviewer-caught, codex):** a safe merge that
+  combines local status with newer remote fields left behind a stale
+  `status:<old>` tag, misclassifying the task in tag-filtered views.
+  **`_repair_merged_tags`** rebuilds the standard tags from the merged fields
+  while preserving non-standard ones (e.g. `needs:human`).
+
+## [0.5.3] — Per-agent listener
+
+**Why:** the listener's launchd/cron identity was machine-global
+(`com.fulcra.coord.listener`), so two agents co-located on one host clobbered
+each other's listener job — installing one tore down the other's.
+
+- The listener label / plist / cron-marker now derive from the agent slug
+  (`com.fulcra.coord.listener.<slug>`), so each co-located agent gets its own
+  job. Install, uninstall, and the cron strip are all agent-scoped.
+- A legacy un-slugged plist is **superseded only for the agent it watched**, and
+  symmetrically on both install **and** uninstall — a reviewer-caught (codex)
+  install/uninstall asymmetry that would otherwise have left an orphaned legacy
+  job behind.
+- The **heartbeat stays a singleton** — only the listener is per-agent.
+
 ## [0.5.1] — Inbox auto-aging
 
 **Why:** informational broadcasts ("X joined the mesh", "identities live") linger
