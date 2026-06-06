@@ -482,14 +482,22 @@ class TestBuildAllViews(unittest.TestCase):
         handed_off = _with_status(_sample_task(), "done")
         handed_off["owner_agent"] = "agent-a"
         handed_off["last_touched_by"] = "agent-b"
+        # RELATIVE to now (not a hardcoded date): build_agent_view's recent_done
+        # uses cutoff = _now() - RECENTLY_DONE_DAYS (7d). A fixed absolute date is a
+        # time-bomb — it silently crossed the window as wall-clock advanced and this
+        # assertion began failing. One day old keeps the task comfortably inside the
+        # window forever, so the test exercises the recent-toucher path, not the calendar.
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         handed_off["done"] = {
-            "done_at": "2026-05-30T10:00:00Z",
+            "done_at": recent,
             "done_by": "agent-b",
             "evidence": "Smoke test passed",
             "verification_level": "agent-verified",
             "confidence": None,
         }
-        handed_off["updated_at"] = "2026-05-30T10:00:00Z"
+        handed_off["updated_at"] = recent
 
         all_v = build_all_views([*tasks, handed_off])
 
