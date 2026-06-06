@@ -17,30 +17,16 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity, digest_schedule
 from . import env_float, env_int
+# Leaf-utility modules extracted from this file. Re-exported under the historical
+# underscore-prefixed names so every internal call site AND the test patch targets
+# (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
+# timeutil.py do not import cli, so there is no import cycle.
+from .output import print_json as _print_json, err as _err, warn as _warn, info as _info
+from .timeutil import iso_z as _iso_z, now_iso as _now_iso
 # Imported under an alias because ``from __future__ import annotations`` above
 # binds the bare name ``annotations`` to the __future__ feature, which would
 # otherwise shadow this module on the cli namespace.
 from . import annotations as lifecycle_annotations
-
-
-# ---------------------------------------------------------------------------
-# Output helpers
-# ---------------------------------------------------------------------------
-
-def _print_json(data: Any) -> None:
-    print(json.dumps(data, indent=2))
-
-
-def _err(msg: str) -> None:
-    print(f"ERROR: {msg}", file=sys.stderr)
-
-
-def _warn(msg: str) -> None:
-    print(f"WARN: {msg}", file=sys.stderr)
-
-
-def _info(msg: str) -> None:
-    print(msg)
 
 
 #: A title that LOOKS like a task id (``TASK-YYYYMMDD-…``). When ``start`` is
@@ -847,19 +833,6 @@ def _repair_merged_tags(
         priority=merged.get("priority", ""),
         extra=extra or None,
     )
-
-
-def _iso_z(dt: datetime) -> str:
-    """Format a datetime as the bus timestamp convention: UTC, microsecond
-    precision, trailing ``Z`` (not ``+00:00``). The single source of truth for
-    that convention — used by _now_iso and by the marker/health writers that must
-    stamp an INJECTED ``now`` (kept testable) rather than wall-clock."""
-    return dt.astimezone(timezone.utc).isoformat(
-        timespec="microseconds").replace("+00:00", "Z")
-
-
-def _now_iso() -> str:
-    return _iso_z(datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
