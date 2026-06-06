@@ -1415,7 +1415,7 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None,
 
 
 # ---------------------------------------------------------------------------
-# Presence (workstream-on-connect) — best-effort, never raises into a task op
+# Listener inbox surface + per-host health record assembly
 # ---------------------------------------------------------------------------
 
 def _inbox_surface_path(agent: str):
