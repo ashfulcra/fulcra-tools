@@ -370,10 +370,22 @@ def _health_outage_seconds(seconds=None):
     return float(HEALTH_OUTAGE_SECONDS_DEFAULT)
 
 
-# The max inter-window gap (evening->morning) is ~14h; add slack so a normal
-# overnight gap is never read as a miss. ~20h: a true miss means BOTH a morning
-# and an evening window elapsed with no marker.
-HEALTH_DIGEST_MISS_HOURS = 20
+# `digest_last_emit` is DATE-only (the freshest YYYY-MM-DD in digest/markers/),
+# normalized to that date's MIDNIGHT UTC — so its age is measured from midnight,
+# not from the actual emit instant. That date-granularity is the trap: a healthy
+# fleet's freshest marker, as seen at the next morning run, is yesterday's date.
+#
+# Two facts pin the threshold (both verified by enumerating every run instant):
+#   * `_assess_fleet` runs at the TOP of cmd_digest, BEFORE the current window
+#     claims its own marker — so at the 08:00 morning run the freshest marker is
+#     YESTERDAY's (today's morning marker doesn't exist yet).
+#   * Worst HEALTHY staleness is the 08:00 morning run vs. yesterday-midnight =
+#     32h. The earliest a TRUE miss can show (a whole day's BOTH windows skipped,
+#     first observed at the next 08:00) is day-2-midnight -> 56h.
+# So the miss threshold must sit strictly between 32h and 56h or it either
+# cries wolf every single morning (the old 20h did exactly this — < 32h) or
+# misses a real outage. 44h is the midpoint, robust to clock skew either way.
+HEALTH_DIGEST_MISS_HOURS = 44
 
 
 def assess_infra_health(health_records, *, now=None, degraded_after_s=None,
@@ -389,10 +401,12 @@ def assess_infra_health(health_records, *, now=None, degraded_after_s=None,
     surfaced as METRICS, never gated (no baselined thresholds in v1).
 
     Bus block: missed_digest_window is True only on a TRUE miss — no marker, or a
-    last emit older than HEALTH_DIGEST_MISS_HOURS (~20h, > the max inter-window
-    gap + slack) so a normal overnight gap is healthy. digest_last_emit /
-    retention_last_run are bus-GLOBAL (any-agent, dedup'd) so they live here, not
-    in the per-host record. All datetime gates use _parse_dt; never lexical."""
+    last emit older than HEALTH_DIGEST_MISS_HOURS (44h; see the constant — it must
+    clear the 32h worst-case healthy staleness of a DATE-only marker at the next
+    morning run, while still catching a 56h full-day-skipped miss). A normal
+    overnight gap is healthy. digest_last_emit / retention_last_run are bus-GLOBAL
+    (any-agent, dedup'd) so they live here, not in the per-host record. All
+    datetime gates use _parse_dt; never lexical."""
     if now is None:
         now = _now()
     deg = _health_degraded_seconds(degraded_after_s)
