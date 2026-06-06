@@ -1235,8 +1235,11 @@ class TestLoadAllTasksTolerantOfIdlessBodies(unittest.TestCase):
             return None
 
         # _cache_remote_task returns an id-less body for the indexed id.
+        # Patched in io's namespace: _load_all_tasks lives in io and calls
+        # _cache_remote_task there, so a cli-namespace patch would be bypassed and
+        # the id-less body would never reach the A2 merge guard (vacuous pass).
         with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download), \
-             patch("fulcra_coord.cli._cache_remote_task",
+             patch("fulcra_coord.io._cache_remote_task",
                    return_value={"status": "active", "title": "no id"}):
             tasks = _load_all_tasks(backend=["false"])
         self.assertNotIn(None, {t.get("id") for t in tasks})
@@ -7351,7 +7354,7 @@ class TestReadsSourcedFromSummaries(unittest.TestCase):
         from contextlib import redirect_stdout
         buf = io.StringIO()
         with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download), \
-             patch("fulcra_coord.cli._cache_remote_task", side_effect=boom), \
+             patch("fulcra_coord.io._cache_remote_task", side_effect=boom), \
              redirect_stdout(buf):
             args = types.SimpleNamespace(human="ash", format="json")
             rc = cmd_needs_me(args, backend=["false"])
@@ -7559,7 +7562,7 @@ class TestRebuildSourceRobustness(unittest.TestCase):
                    side_effect=self._agg([schema.task_summary(task_a)])), \
              patch("fulcra_coord.cli.remote.list_files",
                    return_value=[remote.task_remote_path(task_a["id"]), droppath]), \
-             patch("fulcra_coord.cli._cache_remote_task",
+             patch("fulcra_coord.io._cache_remote_task",
                    side_effect=lambda tid, backend=None: dropped if tid == dropped["id"] else None):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
         ids = {s["id"] for s in out}
@@ -7581,7 +7584,7 @@ class TestRebuildSourceRobustness(unittest.TestCase):
                    side_effect=self._agg([schema.task_summary(task_a), schema.task_summary(task_b)])), \
              patch("fulcra_coord.cli.remote.list_files",
                    return_value=[remote.task_remote_path(task_a["id"]), remote.task_remote_path(task_b["id"])]), \
-             patch("fulcra_coord.cli._cache_remote_task", side_effect=boom):
+             patch("fulcra_coord.io._cache_remote_task", side_effect=boom):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
         self.assertEqual({s["id"] for s in out}, {task_a["id"], task_b["id"]})
 
@@ -7618,7 +7621,7 @@ class TestRebuildSourceRobustness(unittest.TestCase):
              patch("fulcra_coord.cli.remote.list_files",
                    return_value=[remote.task_remote_path(bad_id),
                                  remote.task_remote_path(good["id"])]), \
-             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_cache):
+             patch("fulcra_coord.io._cache_remote_task", side_effect=fake_cache):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
         ids = {s["id"] for s in out}
         self.assertIn(good["id"], ids)
@@ -8700,7 +8703,7 @@ class TestLoadAllTasksParallelFetch(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.download_json",
                    side_effect=self._index_only_download(ids)), \
-             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+             patch("fulcra_coord.io._cache_remote_task", side_effect=fake_fetch):
             tasks = _load_all_tasks(backend=["false"])
 
         got = {t["id"] for t in tasks}
@@ -8719,7 +8722,7 @@ class TestLoadAllTasksParallelFetch(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.download_json",
                    side_effect=self._index_only_download(ids)), \
-             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+             patch("fulcra_coord.io._cache_remote_task", side_effect=fake_fetch):
             tasks = _load_all_tasks(backend=["false"])
 
         self.assertEqual({t["id"] for t in tasks}, set(ids[:3]))
@@ -8738,7 +8741,7 @@ class TestLoadAllTasksParallelFetch(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.download_json",
                    side_effect=self._index_only_download(remote_ids)), \
-             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+             patch("fulcra_coord.io._cache_remote_task", side_effect=fake_fetch):
             tasks = _load_all_tasks(backend=["false"])
 
         ids = {t["id"] for t in tasks}
@@ -8775,7 +8778,7 @@ class TestLoadAllTasksParallelFetch(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.download_json",
                    side_effect=self._index_only_download(ids)), \
-             patch("fulcra_coord.cli._cache_remote_task", side_effect=fake_fetch):
+             patch("fulcra_coord.io._cache_remote_task", side_effect=fake_fetch):
             tasks = _load_all_tasks(backend=["false"])
 
         self.assertEqual({t["id"] for t in tasks}, set(ids))
