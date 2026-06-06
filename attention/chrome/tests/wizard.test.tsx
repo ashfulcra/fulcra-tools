@@ -202,7 +202,7 @@ describe("Wizard destination step — relayless", () => {
     expect(checked?.value).toBe("old");
   });
 
-  test("shows the 'Name this browser' field defaulting from whoami", async () => {
+  test("shows the 'Name this browser' field defaulting from whoami when it's an email", async () => {
     whoamiImpl.whoami.mockResolvedValue({ label: "user@example.com" });
     ensureImpl.listAttentionDestinations.mockResolvedValue([]);
     const { container } = await gotoDestinationStep();
@@ -210,6 +210,21 @@ describe("Wizard destination step — relayless", () => {
     expect(container.textContent).toContain("Name this browser");
     const input = container.querySelector<HTMLInputElement>('input[type="text"]');
     expect(input?.value).toBe("user@example.com browser");
+  });
+
+  test("does NOT prefill the name from a userid-like whoami label (no '@')", async () => {
+    // whoami can fall back to the bare Fulcra userid (a UUID, no "@"). Prefilling
+    // "<userid> browser" is ugly AND used to overflow the 30-char tag limit, so
+    // a non-email label leaves the field empty for the placeholder to guide.
+    whoamiImpl.whoami.mockResolvedValue({
+      label: "12345678-9abc-def0-1234-56789abcdef0",
+    });
+    ensureImpl.listAttentionDestinations.mockResolvedValue([]);
+    const { container } = await gotoDestinationStep();
+
+    expect(container.textContent).toContain("Name this browser");
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(input?.value).toBe("");
   });
 
   test("Continue is blocked while the label is blank, enabled once filled", async () => {

@@ -422,6 +422,52 @@ describe("slugifyIdentity", () => {
   });
 });
 
+describe("machineTagName / slugifyIdentity — 30-char cap (API max_length)", () => {
+  // The Fulcra API rejects tag names > 30 chars with HTTP 422. "machine:" is
+  // 8 chars, so the slug budget is 22. machineTagName must NEVER exceed 30.
+
+  test("caps a very long label so the tag is ≤ 30 chars, no trailing dash", () => {
+    const longLabel =
+      "this is a really really long browser label that exceeds the limit";
+    const slug = slugifyIdentity(longLabel);
+    expect(slug.length).toBeLessThanOrEqual(22);
+    expect(slug.endsWith("-")).toBe(false);
+    const tag = machineTagName(longLabel);
+    expect(tag.length).toBeLessThanOrEqual(30);
+    expect(tag.endsWith("-")).toBe(false);
+    expect(tag.startsWith("machine:")).toBe(true);
+  });
+
+  test("re-trims a trailing dash left by truncation at the budget boundary", () => {
+    // Engineered so the 22nd char (the truncation boundary) lands on a "-":
+    // "aaaaaaaaaaaaaaaaaaaaa b..." → 21 a's, then a separator at index 21.
+    const label = "aaaaaaaaaaaaaaaaaaaaa bbbb";
+    const slug = slugifyIdentity(label);
+    expect(slug.length).toBeLessThanOrEqual(22);
+    expect(slug.endsWith("-")).toBe(false);
+  });
+
+  test("the userid default-label case produces a ≤ 30 tag", () => {
+    // whoami can fall back to the Fulcra userid (a 36-char UUID), making the
+    // onboarding default label "<userid> browser" — the 422 worst case.
+    const userid = "12345678-9abc-def0-1234-56789abcdef0"; // 36 chars
+    const label = `${userid} browser`; // 44 chars
+    const tag = machineTagName(label);
+    expect(tag.length).toBeLessThanOrEqual(30);
+    expect(tag.endsWith("-")).toBe(false);
+  });
+
+  test("short labels are unchanged (no truncation when under budget)", () => {
+    expect(machineTagName("Work MBP — Chrome")).toBe("machine:work-mbp-chrome");
+    expect(slugifyIdentity("home imac")).toBe("home-imac");
+  });
+
+  test("empty label still falls back to machine:browser", () => {
+    expect(machineTagName("")).toBe("machine:browser");
+    expect(machineTagName("   ")).toBe("machine:browser");
+  });
+});
+
 describe("ensureAttentionDefinitionAndTags — identity label", () => {
   test("appends the machine tag when identityLabel is set", async () => {
     const storage = memStorage();
