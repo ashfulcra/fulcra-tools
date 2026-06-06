@@ -7050,12 +7050,13 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_8_3(self):
-        # 0.8.3: reconcile/write paths survive imperfect bus data (id-less bodies,
-        # agent-less presence entries); review sweep is deadline-bounded; archive
-        # verifies the hot copy before moving.
+    def test_version_is_0_9_0(self):
+        # 0.9.0: coordination-system health surface — a silently-failing reconcile
+        # becomes visible. Each host writes a per-host health record on a
+        # successful reconcile; a `health` command + doctor fold + a digest infra
+        # line surface staleness; retention prunes dead health records.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.8.3")
+        self.assertEqual(__version__, "0.9.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
@@ -9914,6 +9915,80 @@ class TestCacheIsolationHermetic(unittest.TestCase):
         leaked = list(real_home_cache.rglob(f"{sentinel_id}.json")) if \
             real_home_cache.exists() else []
         self.assertEqual(leaked, [], "sentinel task leaked into the real home cache.")
+
+
+class TestBuildHealthRecord(unittest.TestCase):
+    def test_record_shape_from_locals(self):
+        from fulcra_coord import cli
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        rec = cli._build_health_record(
+            now=now, duration_s=1.5, tasks_loaded=5, views_refreshed=7,
+            repair_backlog=2, retention_last_run="2026-06-05",
+            listener_last_fire=None, bus_task_count=5)
+        self.assertEqual(rec["schema"], "fulcra.coordination.health.v1")
+        self.assertEqual(rec["tasks_loaded"], 5)
+        self.assertEqual(rec["views_refreshed"], 7)
+        self.assertEqual(rec["repair_backlog"], 2)
+        self.assertEqual(rec["bus_task_count"], 5)
+        self.assertTrue(rec["reconcile_at"].endswith("Z"))
+        self.assertIn("host", rec)
+        self.assertIn("agent", rec)
+        self.assertIn("version", rec)
+
+
+class TestReconcileHealthWrite(unittest.TestCase):
+    """The success contract: health/<slug>.json is written on the failures==[]
+    path, NOT when a view upload fails (return 1 first), and NOT suppressed by a
+    raising best-effort sub-pass."""
+
+    def setUp(self):
+        import types
+        self.types = types
+
+    def _run_capturing_uploads(self, upload_side_effect):
+        from fulcra_coord.cli import cmd_reconcile
+        uploaded = []
+
+        def _capture(data, path, **kw):
+            uploaded.append(path)
+            return upload_side_effect(data, path, **kw)
+
+        with patch("fulcra_coord.cli.remote.upload_json", side_effect=_capture), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.list_files", return_value=[]):
+            rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
+        return rc, uploaded
+
+    def test_health_written_on_success(self):
+        rc, uploaded = self._run_capturing_uploads(lambda *a, **k: True)
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("/health/" in p for p in uploaded),
+                        f"health record must be uploaded on success; got {uploaded}")
+
+    def test_health_not_written_when_view_upload_fails(self):
+        # Views fail -> failures != [] -> return 1 BEFORE the health write.
+        def _side(data, path, **kw):
+            return "/health/" not in path and False  # all uploads fail
+        rc, uploaded = self._run_capturing_uploads(_side)
+        self.assertEqual(rc, 1)
+        self.assertFalse(any("/health/" in p for p in uploaded),
+                         "a failing reconcile must NOT write a fresh health record")
+
+    def test_health_write_failure_does_not_fail_the_tick(self):
+        # Views succeed; the health upload itself raises -> still return 0.
+        from fulcra_coord.cli import cmd_reconcile
+
+        def _side(data, path, **kw):
+            if "/health/" in path:
+                raise RuntimeError("boom")
+            return True
+
+        with patch("fulcra_coord.cli.remote.upload_json", side_effect=_side), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.list_files", return_value=[]):
+            rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
+        self.assertEqual(rc, 0, "a health-write failure must never fail the tick")
 
 
 # ---------------------------------------------------------------------------

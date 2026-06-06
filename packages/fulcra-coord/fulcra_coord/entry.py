@@ -270,6 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
                              "installed CLI has a given subcommand before using it)")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- health ----
+    sp = sub.add_parser("health",
+                        help="Fleet coordination-system health dashboard")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- install-shim ----
     sub.add_parser("install-shim", help="Install fulcra-coord shim to ~/.local/bin/")
 
@@ -470,6 +475,7 @@ COMMAND_MAP = {
     "restore": _cli.cmd_restore,
     "doctor": _cli.cmd_doctor,
     "capabilities": _cli.cmd_capabilities,
+    "health": _cli.cmd_health,
     "install-shim": _cli.cmd_install_shim,
     "install-claude-code": _cli.cmd_install_claude_code,
     "install-openclaw": _cli.cmd_install_openclaw,

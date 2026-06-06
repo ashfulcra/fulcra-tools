@@ -10,6 +10,36 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.9.0] — Coordination-system health surface: a silently-failing reconcile becomes visible
+
+**Why:** the operator had rich awareness of *task* state but ZERO awareness of
+whether the coordination machinery itself was healthy. A real incident: reconcile
+failed on every heartbeat (a `KeyError` on a malformed bus task), views silently
+went stale, retention never ran — and nothing surfaced it. It was caught only by
+a manual live smoke. This release makes a degraded bus visible.
+
+- **Self-reported per-host health record.** On a SUCCESSFUL reconcile (views
+  rebuilt + uploaded with `failures == []`), each host writes
+  `health/<slug>.json`. Staleness of that self-report IS the degradation signal
+  (the same mechanism as presence liveness). The write is a separate,
+  failure-isolated upload placed AFTER reconcile's `if failures: return 1` guard —
+  so a failed reconcile leaves its record stale (the contract), and a flaky
+  best-effort sub-pass can't suppress a healthy heartbeat.
+- **`views.assess_infra_health` (pure).** Judges newest `reconcile_at` per host:
+  healthy / degraded (default = heartbeat interval × 3) / outage (default ~3h).
+  A host with no record = "not reporting" (informational, never a false alarm).
+  Duration / repair-backlog / bus-size are surfaced as metrics, NOT gated.
+- **`fulcra-coord health [--format table|json]`** dashboard + a fleet-health fold
+  into `doctor` + a one-line infra summary in the twice-daily operator digest
+  (the digest scheduler is independent of reconcile, so it reports a broken
+  reconcile even on a single-host box — v1's push surface).
+- **Retention prunes `health/`** on the dead-presence window, so a decommissioned
+  host's records disappear in lockstep with its presence record.
+- **Knobs:** `FULCRA_COORD_HEALTH_DEGRADED_SECONDS`,
+  `FULCRA_COORD_HEALTH_OUTAGE_SECONDS`.
+
+---
+
 ## [0.8.3] — Reconcile + write paths survive imperfect bus data; review sweep is deadline-bounded
 
 **Why:** an adversarial sweep of the 0.8.2 bus surfaced a family of crashes that
