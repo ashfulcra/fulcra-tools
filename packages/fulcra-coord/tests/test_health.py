@@ -126,21 +126,37 @@ class TestAssessInfraHealth(unittest.TestCase):
 
     def test_bus_missed_digest_only_on_true_miss(self):
         recs = [_rec("a", "a", 60, self.now)]
-        # last emit ~9h ago (same UTC day as noon `now`) -> a normal overnight
-        # gap, NOT a miss. A date-only marker parses to that date's midnight,
-        # which is 12h before noon -> < the 20h slack window.
-        recent = (self.now - timedelta(hours=9)).strftime("%Y-%m-%d")
+        # Today's marker (date == now's date) -> midnight is 12h before noon ->
+        # well within the slack window. Not a miss.
+        recent = self.now.strftime("%Y-%m-%d")
         out = views.assess_infra_health(
             recs, now=self.now, degraded_after_s=3600, outage_after_s=10800,
             digest_last_emit=recent)
         self.assertFalse(out["bus"]["missed_digest_window"])
-        # last emit 30h ago -> the prior day's midnight is 36h before noon ->
-        # beyond the ~20h max inter-window gap -> a true miss
-        old = (self.now - timedelta(hours=30)).strftime("%Y-%m-%d")
+        # A TRUE miss: a whole day's BOTH windows skipped. The freshest marker is
+        # then 2 days back; its midnight is ~60h before noon -> beyond the 44h
+        # threshold. (One full day skipped, observed the next day.)
+        old = (self.now - timedelta(days=2, hours=12)).strftime("%Y-%m-%d")
         out2 = views.assess_infra_health(
             recs, now=self.now, degraded_after_s=3600, outage_after_s=10800,
             digest_last_emit=old)
         self.assertTrue(out2["bus"]["missed_digest_window"])
+
+    def test_bus_morning_run_with_yesterday_marker_is_not_a_miss(self):
+        """Regression: the 08:00 morning digest, on a HEALTHY fleet, must NOT
+        report a missed window. `_assess_fleet` runs before the morning marker is
+        claimed, so the freshest marker is YESTERDAY's date; against a date-only
+        (midnight-normalized) marker that is 32h stale at 08:00. The old 20h
+        threshold flagged this every single morning (a daily false alarm). The
+        44h threshold clears the 32h healthy worst-case while still catching a
+        56h full-day-skipped miss."""
+        morning = datetime(2026, 6, 5, 8, 0, 0, tzinfo=timezone.utc)
+        recs = [_rec("a", "a", 60, morning)]
+        yesterday = (morning - timedelta(days=1)).strftime("%Y-%m-%d")  # 32h old
+        out = views.assess_infra_health(
+            recs, now=morning, degraded_after_s=3600, outage_after_s=10800,
+            digest_last_emit=yesterday)
+        self.assertFalse(out["bus"]["missed_digest_window"])
 
     def test_bus_no_digest_marker_is_missed(self):
         recs = [_rec("a", "a", 60, self.now)]
