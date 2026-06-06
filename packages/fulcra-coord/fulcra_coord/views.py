@@ -12,12 +12,11 @@ Generates materialized JSON views from a list of task dicts:
 
 from __future__ import annotations
 
-import os
 import re as _re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import task_file_path
+from . import env_float, task_file_path
 from .schema import task_summary
 
 # Statuses at which a directive is "open" in someone's inbox: proposed (not yet
@@ -53,15 +52,7 @@ def _stale_hours(stale_hours: Optional[float] = None) -> float:
     Centralizing this (Gap 2) means hooks, the status view, and the reconciler
     all agree on what "stale" means instead of recomputing it ad-hoc.
     """
-    if stale_hours is not None:
-        return stale_hours
-    raw = os.environ.get("FULCRA_COORD_STALE_HOURS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(STALE_HOURS_DEFAULT)
+    return env_float("FULCRA_COORD_STALE_HOURS", STALE_HOURS_DEFAULT, override=stale_hours)
 
 
 # Wall-clock grace (seconds) the resolver tolerates BEYOND the idle->stale
@@ -75,15 +66,8 @@ PRESENCE_GRACE_SECONDS_DEFAULT = 1200.0  # 20 min
 
 def _presence_grace_seconds(grace: Optional[float] = None) -> float:
     """Resolve the routing presence grace (seconds): explicit arg > env > default."""
-    if grace is not None:
-        return grace
-    raw = os.environ.get("FULCRA_COORD_PRESENCE_GRACE_SECONDS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(PRESENCE_GRACE_SECONDS_DEFAULT)
+    return env_float("FULCRA_COORD_PRESENCE_GRACE_SECONDS",
+                     PRESENCE_GRACE_SECONDS_DEFAULT, override=grace)
 
 
 def _inbox_age_days(age_days: Optional[float] = None) -> float:
@@ -94,15 +78,8 @@ def _inbox_age_days(age_days: Optional[float] = None) -> float:
     broadcasts linger; a non-numeric value falls back to the default rather than
     crashing a read path.
     """
-    if age_days is not None:
-        return age_days
-    raw = os.environ.get("FULCRA_COORD_INBOX_AGE_DAYS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(INBOX_AGE_DAYS_DEFAULT)
+    return env_float("FULCRA_COORD_INBOX_AGE_DAYS", INBOX_AGE_DAYS_DEFAULT,
+                     override=age_days)
 
 
 def is_aged_out_broadcast(task: dict[str, Any], now: Optional[datetime] = None,
@@ -219,41 +196,20 @@ def _retention_days(days=None):
     """Resolve the task archive age (days): explicit arg > env > default (mirrors
     _stale_hours). A non-numeric FULCRA_COORD_RETENTION_DAYS falls back to the
     default rather than crashing the best-effort retention pass."""
-    if days is not None:
-        return float(days)
-    raw = os.environ.get("FULCRA_COORD_RETENTION_DAYS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(RETENTION_DAYS_DEFAULT)
+    return env_float("FULCRA_COORD_RETENTION_DAYS", RETENTION_DAYS_DEFAULT,
+                     override=days)
 
 
 def _marker_retention_days(days=None):
     """Resolve the digest-marker prune age (days): explicit arg > env > default."""
-    if days is not None:
-        return float(days)
-    raw = os.environ.get("FULCRA_COORD_MARKER_RETENTION_DAYS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(MARKER_RETENTION_DAYS_DEFAULT)
+    return env_float("FULCRA_COORD_MARKER_RETENTION_DAYS",
+                     MARKER_RETENTION_DAYS_DEFAULT, override=days)
 
 
 def _presence_retention_days(days=None):
     """Resolve the dead-presence prune age (days): explicit arg > env > default."""
-    if days is not None:
-        return float(days)
-    raw = os.environ.get("FULCRA_COORD_PRESENCE_RETENTION_DAYS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(PRESENCE_RETENTION_DAYS_DEFAULT)
+    return env_float("FULCRA_COORD_PRESENCE_RETENTION_DAYS",
+                     PRESENCE_RETENTION_DAYS_DEFAULT, override=days)
 
 
 def is_archivable_task(task, now=None, retention_days=None):
@@ -344,30 +300,20 @@ def _health_degraded_seconds(seconds=None):
     so one slow or skipped tick can't flap a host to degraded. interval has no env
     override; INTERVAL_MIN_DEFAULT (minutes) is the only source. Env
     FULCRA_COORD_HEALTH_DEGRADED_SECONDS overrides; non-numeric -> default."""
-    if seconds is not None:
-        return float(seconds)
-    raw = os.environ.get("FULCRA_COORD_HEALTH_DEGRADED_SECONDS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    from . import heartbeat  # lazy: keep views import-light, avoid any cycle
-    return float(heartbeat.INTERVAL_MIN_DEFAULT * 60 * 3)
+    # Default ties to the heartbeat interval (interval x 3). Computed here and
+    # passed AS env_float's default so a non-numeric env value falls back to it
+    # too (env_float's contract). The function-level import keeps views
+    # import-light (no module-load cycle) — it's a cached dict lookup per call.
+    from . import heartbeat
+    default = heartbeat.INTERVAL_MIN_DEFAULT * 60 * 3
+    return env_float("FULCRA_COORD_HEALTH_DEGRADED_SECONDS", default, override=seconds)
 
 
 def _health_outage_seconds(seconds=None):
     """Age (s) past which a host is 'outage' (default ~3h). Env
     FULCRA_COORD_HEALTH_OUTAGE_SECONDS overrides; non-numeric -> default."""
-    if seconds is not None:
-        return float(seconds)
-    raw = os.environ.get("FULCRA_COORD_HEALTH_OUTAGE_SECONDS", "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(HEALTH_OUTAGE_SECONDS_DEFAULT)
+    return env_float("FULCRA_COORD_HEALTH_OUTAGE_SECONDS",
+                     HEALTH_OUTAGE_SECONDS_DEFAULT, override=seconds)
 
 
 # `digest_last_emit` is DATE-only (the freshest YYYY-MM-DD in digest/markers/),

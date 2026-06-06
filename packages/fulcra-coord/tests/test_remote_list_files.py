@@ -103,5 +103,103 @@ class ListFilesNormalizationTests(unittest.TestCase):
         self.assertEqual(recs, [rec])
 
 
+class ListJsonTests(unittest.TestCase):
+    """remote.list_json = list_files + parallel download_json, order-preserving,
+    dict-guarded, best-effort. It is the shared primitive behind presence/health
+    load+prune and the archive cold-index."""
+
+    PREFIX = "/coordination/health/"
+
+    def test_returns_path_record_pairs_in_list_order(self):
+        paths = [
+            "/coordination/health/a.json",
+            "/coordination/health/b.json",
+            "/coordination/health/c.json",
+        ]
+        records = {
+            "/coordination/health/a.json": {"host": "a"},
+            "/coordination/health/b.json": {"host": "b"},
+            "/coordination/health/c.json": {"host": "c"},
+        }
+        with mock.patch("fulcra_coord.remote.list_files", return_value=paths), \
+             mock.patch("fulcra_coord.remote.download_json",
+                        side_effect=lambda p, *, backend=None: records.get(p)):
+            out = remote.list_json(self.PREFIX)
+        # Order MUST mirror list_files order despite concurrent completion.
+        self.assertEqual(
+            out,
+            [(p, records[p]) for p in paths],
+        )
+
+    def test_order_is_list_order_not_completion_order(self):
+        """The load-bearing claim: results follow list_files order even when a
+        LATER-listed path's download completes FIRST. Make the earlier paths sleep
+        so, under the thread pool, completion order is the REVERSE of list order;
+        the output must still be list order (the synchronous-mock test above can't
+        distinguish the two)."""
+        import time
+        paths = [
+            "/coordination/health/a.json",
+            "/coordination/health/b.json",
+            "/coordination/health/c.json",
+        ]
+        # a sleeps longest, c returns immediately → completion order c, b, a.
+        delays = {paths[0]: 0.06, paths[1]: 0.03, paths[2]: 0.0}
+
+        def dl(p, *, backend=None):
+            time.sleep(delays[p])
+            return {"host": p[-6]}  # 'a'/'b'/'c' marker char
+
+        with mock.patch("fulcra_coord.remote.list_files", return_value=paths), \
+             mock.patch("fulcra_coord.remote.download_json", side_effect=dl):
+            out = remote.list_json(self.PREFIX)
+        self.assertEqual([p for p, _ in out], paths)
+
+    def test_non_json_paths_are_skipped(self):
+        paths = ["/coordination/health/a.json", "/coordination/health/notes.txt"]
+        with mock.patch("fulcra_coord.remote.list_files", return_value=paths), \
+             mock.patch("fulcra_coord.remote.download_json",
+                        side_effect=lambda p, *, backend=None: {"p": p}):
+            out = remote.list_json(self.PREFIX)
+        self.assertEqual(out, [("/coordination/health/a.json", {"p": "/coordination/health/a.json"})])
+
+    def test_none_and_non_dict_records_are_dropped(self):
+        paths = [
+            "/coordination/health/ok.json",
+            "/coordination/health/missing.json",  # download → None
+            "/coordination/health/list.json",     # download → a list (non-dict)
+        ]
+
+        def dl(p, *, backend=None):
+            if p.endswith("ok.json"):
+                return {"host": "ok"}
+            if p.endswith("list.json"):
+                return ["not", "a", "dict"]
+            return None
+
+        with mock.patch("fulcra_coord.remote.list_files", return_value=paths), \
+             mock.patch("fulcra_coord.remote.download_json", side_effect=dl):
+            out = remote.list_json(self.PREFIX)
+        self.assertEqual(out, [("/coordination/health/ok.json", {"host": "ok"})])
+
+    def test_failed_listing_yields_empty(self):
+        with mock.patch("fulcra_coord.remote.list_files", return_value=[]):
+            self.assertEqual(remote.list_json(self.PREFIX), [])
+
+    def test_download_raise_is_isolated_not_fatal(self):
+        paths = ["/coordination/health/boom.json", "/coordination/health/ok.json"]
+
+        def dl(p, *, backend=None):
+            if p.endswith("boom.json"):
+                raise RuntimeError("network blew up")
+            return {"host": "ok"}
+
+        with mock.patch("fulcra_coord.remote.list_files", return_value=paths), \
+             mock.patch("fulcra_coord.remote.download_json", side_effect=dl):
+            out = remote.list_json(self.PREFIX)
+        # The raising item is dropped; the healthy one survives. Never propagates.
+        self.assertEqual(out, [("/coordination/health/ok.json", {"host": "ok"})])
+
+
 if __name__ == "__main__":
     unittest.main()

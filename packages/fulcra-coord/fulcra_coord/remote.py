@@ -16,6 +16,7 @@ Timeout env vars:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -25,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-from . import remote_root
+from . import env_int, remote_root
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +73,9 @@ def _backend_cmd() -> list[str]:
 
 
 def _read_timeout() -> int:
-    return int(os.environ.get("FULCRA_COORD_TIMEOUT_SECONDS", "5"))
+    # env_int (not a bare int()): a non-numeric override falls back to 5 instead
+    # of raising and crashing every read op on a typo'd value.
+    return env_int("FULCRA_COORD_TIMEOUT_SECONDS", 5)
 
 
 def _write_timeout() -> int:
@@ -80,7 +83,7 @@ def _write_timeout() -> int:
 
 
 def _reconcile_timeout() -> int:
-    return int(os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "90"))
+    return env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +275,63 @@ def list_files(
         return normalized
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return []
+
+
+def list_json(
+    prefix: str,
+    *,
+    backend: Optional[list[str]] = None,
+    suffix: str = ".json",
+    max_workers: int = 8,
+) -> list[tuple[str, dict[str, Any]]]:
+    """List ``prefix`` and PARALLEL-download every file ending in ``suffix``,
+    returning ``[(path, record), ...]`` for each path whose JSON parsed to a dict.
+
+    This is the shared "enumerate a bus directory and read each record" primitive
+    behind self-reported per-host/per-agent state (presence reconcile + prune,
+    health load + prune, the archive cold-index). Before this helper each consumer
+    open-coded the same ``for path in list_files(...): download_json(...)`` loop
+    SERIALLY — N+1 round-trips per call, on the reconcile hot path.
+
+    PERF: downloads run in a ThreadPoolExecutor, the exact pattern proven in
+    cli._load_all_tasks — each ``download`` is one independent subprocess with no
+    shared mutable state, so the pool is safe and collapses N serial ~1.3s
+    round-trips into a single batch's wall-time. This is the per-tick win for
+    presence reconcile, health load, and the retention prunes.
+
+    ORDER-PRESERVING: results are returned in ``list_files`` order (not completion
+    order), so the helper is a behavior-exact drop-in for the serial loops it
+    replaces — a caller that aggregates/dedups, and any test that asserts on the
+    sequence, both see the identical ordering they did before.
+
+    BEST-EFFORT, per-item isolated: a failed listing yields ``[]``; a single
+    download/parse failure (or an unexpected raise inside the pool) drops just that
+    item; a non-dict payload is dropped. Never raises into the caller — the same
+    contract every existing consumer relied on. Each consumer keeps its OWN record
+    predicate (``rec.get("agent")``, ``is_prunable_*``, ...); this helper only owns
+    the list + parallel-read + dict-guard.
+    """
+    try:
+        paths = [p for p in list_files(prefix, backend=backend) if p.endswith(suffix)]
+    except Exception:
+        return []
+    if not paths:
+        return []
+    results: dict[str, dict[str, Any]] = {}
+    workers = min(max_workers, max(2, len(paths)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(download_json, path, backend=backend): path for path in paths
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            path = futures[fut]
+            try:
+                rec = fut.result()
+            except Exception:
+                rec = None
+            if isinstance(rec, dict):
+                results[path] = rec
+    return [(path, results[path]) for path in paths if path in results]
 
 
 # ---------------------------------------------------------------------------

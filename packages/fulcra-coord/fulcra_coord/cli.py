@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity, digest_schedule
+from . import env_float, env_int
 # Imported under an alias because ``from __future__ import annotations`` above
 # binds the bare name ``annotations`` to the __future__ feature, which would
 # otherwise shadow this module on the cli namespace.
@@ -425,15 +426,13 @@ def _list_index_shards(*, backend: Optional[list[str]] = None) -> list[dict[str,
 
     Best-effort: a failed listing or a single unreadable shard contributes
     nothing rather than raising. O(archived) — paid ONLY on the opt-in cold path
-    (search --archived), never on hot reads. Reuses remote.list_files; the fake
-    backend's recursive list returns exactly the shard files under the prefix."""
+    (search --archived), never on hot reads. Uses remote.list_json (parallel
+    list+download); the fake backend's recursive list returns exactly the shard
+    files under the prefix."""
     out: list[dict[str, Any]] = []
     try:
-        for path in remote.list_files(remote.archive_index_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
-            shard = remote.download_json(path, backend=backend)
-            if shard and shard.get("id"):
+        for _, shard in remote.list_json(remote.archive_index_prefix(), backend=backend):
+            if shard.get("id"):
                 out.append(shard)
     except Exception:
         pass
@@ -850,8 +849,17 @@ def _repair_merged_tags(
     )
 
 
+def _iso_z(dt: datetime) -> str:
+    """Format a datetime as the bus timestamp convention: UTC, microsecond
+    precision, trailing ``Z`` (not ``+00:00``). The single source of truth for
+    that convention — used by _now_iso and by the marker/health writers that must
+    stamp an INJECTED ``now`` (kept testable) rather than wall-clock."""
+    return dt.astimezone(timezone.utc).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+
+
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return _iso_z(datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -1830,12 +1838,8 @@ def _upsert_presence_aggregate(
     try:
         records: list[dict[str, Any]] = []
         try:
-            prefix = f"{remote.remote_root()}/presence/"
-            for path in remote.list_files(prefix, backend=backend):
-                if not path.endswith(".json"):
-                    continue
-                rec = remote.download_json(path, backend=backend)
-                if rec and rec.get("agent") and rec.get("agent") != record["agent"]:
+            for _, rec in remote.list_json(remote.presence_prefix(), backend=backend):
+                if rec.get("agent") and rec.get("agent") != record["agent"]:
                     records.append(_without_liveness(rec))
         except Exception:
             records = []  # listing best-effort; fall through to the download path
@@ -2061,8 +2065,7 @@ def _build_health_record(*, now, duration_s, tasks_loaded, views_refreshed,
         "host": host,
         "agent": identity.resolve_agent(),
         "version": __version__,
-        "reconcile_at": now.astimezone(timezone.utc).isoformat(
-            timespec="microseconds").replace("+00:00", "Z"),
+        "reconcile_at": _iso_z(now),
         "duration_s": duration_s,
         "tasks_loaded": tasks_loaded,
         "views_refreshed": views_refreshed,
@@ -2077,20 +2080,7 @@ def _load_health_records(*, backend: Optional[list[str]] = None) -> list[dict]:
     """List health/*.json and download each, tolerating a missing/garbage file
     (None is skipped) and a non-json listing entry. Best-effort: a failed list
     yields []. Per the 0.8.x hardening, never raises into a caller."""
-    recs: list[dict] = []
-    try:
-        for path in remote.list_files(remote.health_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
-            try:
-                rec = remote.download_json(path, backend=backend)
-            except Exception:
-                rec = None
-            if isinstance(rec, dict):
-                recs.append(rec)
-    except Exception:
-        pass
-    return recs
+    return [rec for _, rec in remote.list_json(remote.health_prefix(), backend=backend)]
 
 
 def _freshest_digest_emit(*, backend: Optional[list[str]] = None):
@@ -2451,7 +2441,7 @@ def _claim_digest_marker(window: str, now: datetime, *,
             "window": window,
             "date": now.astimezone(timezone.utc).strftime("%Y-%m-%d"),
             "by": identity.resolve_agent(),
-            "claimed_at": now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            "claimed_at": _iso_z(now),
         }
         return bool(remote.upload_json(marker, path, backend=backend))
     except Exception:
@@ -2483,7 +2473,7 @@ def _claim_retention_marker(now: datetime, *,
         marker = {
             "schema": "fulcra.coordination.retention_marker.v1",
             "date": today, "by": me,
-            "at": now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            "at": _iso_z(now),
         }
         if not remote.upload_json(marker, path, backend=backend):
             return False
@@ -2504,13 +2494,9 @@ def _retention_max_per_run() -> int:
     """Per-run archive cap: env FULCRA_COORD_RETENTION_MAX_PER_RUN (default 200).
     A huge first backlog drains over several daily passes rather than blowing
     reconcile's deadline. Non-numeric -> default (best-effort, never crashes)."""
-    raw = os.environ.get("FULCRA_COORD_RETENTION_MAX_PER_RUN", "").strip()
-    if raw:
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            pass
-    return 200
+    # env_int already falls back to the default on a non-numeric value; the
+    # max(0, ...) clamp keeps a negative override from disabling archival silently.
+    return max(0, env_int("FULCRA_COORD_RETENTION_MAX_PER_RUN", 200))
 
 
 # Wall-clock seconds of headroom to leave before reconcile's deadline. Archiving
@@ -2564,12 +2550,9 @@ def _prune_dead_presence(now: datetime, *, backend: Optional[list[str]] = None) 
     Returns the count deleted."""
     n = 0
     try:
-        for path in remote.list_files(remote.presence_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
+        for path, rec in remote.list_json(remote.presence_prefix(), backend=backend):
             try:
-                rec = remote.download_json(path, backend=backend)
-                if rec and views.is_prunable_presence(rec, now):
+                if views.is_prunable_presence(rec, now):
                     if remote.delete(path, backend=backend):
                         n += 1
             except Exception:
@@ -2587,12 +2570,9 @@ def _prune_dead_health(now: datetime, *, backend: Optional[list[str]] = None) ->
     platform soft-delete keeps a pruned record restorable. Returns count deleted."""
     n = 0
     try:
-        for path in remote.list_files(remote.health_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
+        for path, rec in remote.list_json(remote.health_prefix(), backend=backend):
             try:
-                rec = remote.download_json(path, backend=backend)
-                if rec and views.is_prunable_health(rec, now):
+                if views.is_prunable_health(rec, now):
                     if remote.delete(path, backend=backend):
                         n += 1
             except Exception:
@@ -3261,8 +3241,7 @@ def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
     import copy
     from . import routing
     task = copy.deepcopy(task)
-    at = (dt or datetime.now(timezone.utc)).isoformat(
-        timespec="microseconds").replace("+00:00", "Z")
+    at = _iso_z(dt or datetime.now(timezone.utc))
     ev = routing.make_route_event(kind=kind, to=to, by=by, attempt=attempt,
                                   reason=reason, candidate_snapshot=candidate_snapshot,
                                   observed_updated_at=observed_updated_at, at=at)
@@ -3403,39 +3382,28 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
 
 # --- reconcile reroute sweep: thresholds + classification + I/O wrapper -----
 
-def _env_float(name: str, default: float) -> float:
-    """Read an env var as a float, falling back to `default` on absent/blank/
-    unparseable — mirrors views._stale_hours' tolerance so a typo never breaks
-    a reconcile tick."""
-    raw = os.environ.get(name, "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(default)
-
-
 def _reroute_minutes(priority: str) -> float:
     """Minutes a never-acted review may sit on a below-floor assignee before the
     sweep reroutes it. P1 is more urgent (15m) than P2/P3 (30m); both are
     wall-clock durations (bus-global, machine-agnostic) and env-overridable."""
     if (priority or "P2") == "P1":
-        return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", 15.0)
-    return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", 30.0)
+        return env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", 15.0)
+    return env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", 30.0)
 
 
 def _reroute_max() -> int:
     """Max route attempts (the initial route + reroutes) before the sweep gives
     up and escalates to the human instead of cycling reviewers forever."""
-    return int(_env_float("FULCRA_COORD_REVIEW_REROUTE_MAX", 2.0))
+    # int(env_float(...)) — NOT env_int — to preserve float-parse-then-truncate:
+    # a configured "2.9" must read as 2, not fall back to the default.
+    return int(env_float("FULCRA_COORD_REVIEW_REROUTE_MAX", 2.0))
 
 
 def _accepted_stall_hours() -> float:
     """Hours an ACCEPTED-then-silent review may stall before the sweep escalates
     it to the human (it is never rerouted once accepted — we don't yank work out
     from under a reviewer mid-flight; we only nudge the human after a long stall)."""
-    return _env_float("FULCRA_COORD_ACCEPTED_STALL_HOURS", 2.0)
+    return env_float("FULCRA_COORD_ACCEPTED_STALL_HOURS", 2.0)
 
 
 def _review_accepted_by_assignee(task, assignee, routed_dt):
@@ -3746,26 +3714,22 @@ def cmd_abandon(args: Any, backend: Optional[list[str]] = None) -> int:
 def _reconcile_presence(backend: Optional[list[str]] = None) -> None:
     """Rebuild ``views/presence.json`` from the durable ``presence/*.json`` files.
 
-    Lists ``<root>/presence/`` (remote.list_files), downloads each per-agent
-    record, and rebuilds the aggregate roster — the presence analogue of the task
-    view self-heal. This is what makes the opportunistic connect-time aggregate
-    merge eventually-consistent: even if a connect's best-effort upsert was lost,
-    reconcile reconstructs the roster from the authoritative per-agent records.
+    Lists ``<root>/presence/`` and downloads each per-agent record in parallel
+    (remote.list_json), then rebuilds the aggregate roster — the presence analogue
+    of the task view self-heal. This is what makes the opportunistic connect-time
+    aggregate merge eventually-consistent: even if a connect's best-effort upsert
+    was lost, reconcile reconstructs the roster from the authoritative per-agent
+    records.
 
-    LISTING REQUIREMENT: relies on remote.list_files being able to enumerate the
+    LISTING REQUIREMENT: relies on remote.list_json being able to enumerate the
     presence dir. If listing returns nothing (empty dir, or a backend without a
     working list), no aggregate is written — the existing one is left intact
     rather than clobbered to empty. Best-effort: never raises into reconcile."""
     try:
-        prefix = f"{remote.remote_root()}/presence/"
-        paths = remote.list_files(prefix, backend=backend)
-        records = []
-        for path in paths:
-            if not path.endswith(".json"):
-                continue
-            rec = remote.download_json(path, backend=backend)
-            if rec and rec.get("agent"):
-                records.append(rec)
+        records = [
+            rec for _, rec in remote.list_json(remote.presence_prefix(), backend=backend)
+            if rec.get("agent")
+        ]
         if not records:
             return
         view = views.build_presence(records)
@@ -3808,7 +3772,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     import time
     _info("Reconciling coordination views...")
     t0 = time.monotonic()
-    timeout = int(os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "90"))
+    timeout = env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
     deadline = t0 + timeout
 
     markers = cache.list_op_markers()
@@ -3942,9 +3906,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         try:
             surface = _inbox_surface_path(identity.resolve_agent())
             if surface.exists():
-                listener_last_fire = datetime.fromtimestamp(
-                    surface.stat().st_mtime, tz=timezone.utc).isoformat(
-                    timespec="microseconds").replace("+00:00", "Z")
+                listener_last_fire = _iso_z(datetime.fromtimestamp(
+                    surface.stat().st_mtime, tz=timezone.utc))
         except Exception:
             listener_last_fire = None
         record = _build_health_record(

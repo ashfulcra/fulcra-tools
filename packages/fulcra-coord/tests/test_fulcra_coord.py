@@ -482,14 +482,22 @@ class TestBuildAllViews(unittest.TestCase):
         handed_off = _with_status(_sample_task(), "done")
         handed_off["owner_agent"] = "agent-a"
         handed_off["last_touched_by"] = "agent-b"
+        # RELATIVE to now (not a hardcoded date): build_agent_view's recent_done
+        # uses cutoff = _now() - RECENTLY_DONE_DAYS (7d). A fixed absolute date is a
+        # time-bomb — it silently crossed the window as wall-clock advanced and this
+        # assertion began failing. One day old keeps the task comfortably inside the
+        # window forever, so the test exercises the recent-toucher path, not the calendar.
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         handed_off["done"] = {
-            "done_at": "2026-05-30T10:00:00Z",
+            "done_at": recent,
             "done_by": "agent-b",
             "evidence": "Smoke test passed",
             "verification_level": "agent-verified",
             "confidence": None,
         }
-        handed_off["updated_at"] = "2026-05-30T10:00:00Z"
+        handed_off["updated_at"] = recent
 
         all_v = build_all_views([*tasks, handed_off])
 
@@ -7050,15 +7058,17 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_9_1(self):
-        # 0.9.1: remote.list_files normalizes the real `fulcra file list`
-        # formatted output to clean full paths — it was returning raw display
-        # lines, silently breaking every list-based consumer in live (self-heal,
-        # presence reconcile/prune, retention pruning, search --archived, the
-        # new health command) while tests passed on the fake backend's clean
-        # output. (0.9.0: coordination-system health surface.)
+    def test_version_is_0_10_0(self):
+        # 0.10.0: optimization + simplification pass. remote.list_json collapses
+        # six open-coded list+serial-download loops into one parallel primitive
+        # (presence/health load+prune, archive cold-index) — buying reconcile
+        # hot-path headroom; ~10 copy-pasted env-knob readers consolidated into
+        # env_float/env_int (a non-numeric override now falls back to the default
+        # uniformly, hardening the remote read timeouts that used to crash on a
+        # typo); bus-timestamp formatting centralized in _iso_z. Behavior-
+        # preserving. (0.9.1: remote.list_files real-CLI-format normalization.)
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.9.1")
+        self.assertEqual(__version__, "0.10.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
