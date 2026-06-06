@@ -420,6 +420,67 @@ class TestInstallDigestCommand(unittest.TestCase):
         self.assertIn("dry-run", buf.getvalue())
 
 
+class TestDigestInfraLine(unittest.TestCase):
+    def test_infra_key_present_when_assessment_given(self):
+        assessment = {"hosts": [{"host": "mac", "status": "healthy",
+                                 "reasons": [], "metrics": {}}],
+                      "bus": {"missed_digest_window": False},
+                      "worst_status": "healthy"}
+        d = views.build_operator_digest([], [], human="ash",
+                                        infra=assessment)
+        self.assertEqual(d["infra"], assessment)
+
+    def test_infra_defaults_none_when_absent(self):
+        d = views.build_operator_digest([], [], human="ash")
+        self.assertIsNone(d.get("infra"))
+
+
+class TestRenderInfraLine(unittest.TestCase):
+    def test_degraded_infra_renders_a_warning_line(self):
+        digest = {"blocked_on_you": [], "upcoming": [], "per_agent": [],
+                  "stale": [],
+                  "infra": {"hosts": [{"host": "mac", "status": "degraded",
+                                       "reasons": ["reconcile stale 120m"],
+                                       "metrics": {}}],
+                            "bus": {"missed_digest_window": False},
+                            "worst_status": "degraded"}}
+        name, note = cli._render_digest(digest, window="evening")
+        self.assertIn("infra", note)
+        self.assertIn("mac", note)
+
+    def test_all_healthy_infra_is_affirmative_or_brief(self):
+        digest = {"blocked_on_you": [], "upcoming": [], "per_agent": [],
+                  "stale": [],
+                  "infra": {"hosts": [{"host": "a", "status": "healthy",
+                                       "reasons": [], "metrics": {}},
+                                      {"host": "b", "status": "healthy",
+                                       "reasons": [], "metrics": {}}],
+                            "bus": {"missed_digest_window": False},
+                            "worst_status": "healthy"}}
+        name, note = cli._render_digest(digest, window="evening")
+        self.assertIn("2 hosts healthy", note)
+
+    def test_no_infra_renders_nothing_extra(self):
+        digest = {"blocked_on_you": [], "upcoming": [], "per_agent": [],
+                  "stale": [], "infra": None}
+        name, note = cli._render_digest(digest, window="evening")
+        self.assertNotIn("infra", note)
+
+    def test_single_host_reconcile_down_still_reports(self):
+        # The v1 push surface: a single-host box with reconcile down but the
+        # digest scheduler alive still emits this line.
+        digest = {"blocked_on_you": [], "upcoming": [], "per_agent": [],
+                  "stale": [],
+                  "infra": {"hosts": [{"host": "solo", "status": "outage",
+                                       "reasons": ["reconcile stale 400m (outage)"],
+                                       "metrics": {}}],
+                            "bus": {"missed_digest_window": False},
+                            "worst_status": "outage"}}
+        name, note = cli._render_digest(digest, window="morning")
+        self.assertIn("solo", note)
+        self.assertIn("infra", note)
+
+
 class TestVersion(unittest.TestCase):
     def test_version_is_083(self):
         from fulcra_coord import __version__

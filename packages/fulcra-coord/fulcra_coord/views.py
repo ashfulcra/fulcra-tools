@@ -1315,7 +1315,8 @@ def build_operator_digest(summaries: list[dict[str, Any]],
                           presence: list[dict[str, Any]], *,
                           human: str,
                           now: Optional[datetime] = None,
-                          since: Optional[datetime] = None) -> dict[str, Any]:
+                          since: Optional[datetime] = None,
+                          infra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Fold bus state into the operator's situational-awareness digest (pure).
 
     Four blocks, derived ONLY from task_summary dicts + presence records (no I/O,
@@ -1332,6 +1333,9 @@ def build_operator_digest(summaries: list[dict[str, Any]],
         (done/abandoned with done_at >= since). Parsed-datetime ``since`` compare.
       * ``stale`` — active tasks past the stale threshold (``is_stale``), the same
         needs-attention safety-net set, sorted oldest-first.
+      * ``infra`` — a pre-computed ``assess_infra_health`` dict (passed in; the
+        pure builder does no I/O), rendered as one compact line by
+        ``_render_digest``. None when not supplied.
 
     ``now``/``since`` default to wall-clock / (now - 12h) so a bare call still
     works, but the command always injects them explicitly."""
@@ -1384,4 +1388,5 @@ def build_operator_digest(summaries: list[dict[str, Any]],
         "upcoming": upcoming,
         "per_agent": per_agent,
         "stale": stale,
+        "infra": infra,  # pre-computed assess_infra_health dict, or None (v1 push surface)
     }
