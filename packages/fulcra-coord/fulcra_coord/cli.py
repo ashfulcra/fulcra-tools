@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, log as ops_log, session_link, claude_code, openclaw, heartbeat, codex, listener, identity, digest_schedule
+from . import env_float, env_int
 # Imported under an alias because ``from __future__ import annotations`` above
 # binds the bare name ``annotations`` to the __future__ feature, which would
 # otherwise shadow this module on the cli namespace.
@@ -2485,13 +2486,9 @@ def _retention_max_per_run() -> int:
     """Per-run archive cap: env FULCRA_COORD_RETENTION_MAX_PER_RUN (default 200).
     A huge first backlog drains over several daily passes rather than blowing
     reconcile's deadline. Non-numeric -> default (best-effort, never crashes)."""
-    raw = os.environ.get("FULCRA_COORD_RETENTION_MAX_PER_RUN", "").strip()
-    if raw:
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            pass
-    return 200
+    # env_int already falls back to the default on a non-numeric value; the
+    # max(0, ...) clamp keeps a negative override from disabling archival silently.
+    return max(0, env_int("FULCRA_COORD_RETENTION_MAX_PER_RUN", 200))
 
 
 # Wall-clock seconds of headroom to leave before reconcile's deadline. Archiving
@@ -3378,39 +3375,28 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
 
 # --- reconcile reroute sweep: thresholds + classification + I/O wrapper -----
 
-def _env_float(name: str, default: float) -> float:
-    """Read an env var as a float, falling back to `default` on absent/blank/
-    unparseable — mirrors views._stale_hours' tolerance so a typo never breaks
-    a reconcile tick."""
-    raw = os.environ.get(name, "").strip()
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    return float(default)
-
-
 def _reroute_minutes(priority: str) -> float:
     """Minutes a never-acted review may sit on a below-floor assignee before the
     sweep reroutes it. P1 is more urgent (15m) than P2/P3 (30m); both are
     wall-clock durations (bus-global, machine-agnostic) and env-overridable."""
     if (priority or "P2") == "P1":
-        return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", 15.0)
-    return _env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", 30.0)
+        return env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1", 15.0)
+    return env_float("FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2", 30.0)
 
 
 def _reroute_max() -> int:
     """Max route attempts (the initial route + reroutes) before the sweep gives
     up and escalates to the human instead of cycling reviewers forever."""
-    return int(_env_float("FULCRA_COORD_REVIEW_REROUTE_MAX", 2.0))
+    # int(env_float(...)) — NOT env_int — to preserve float-parse-then-truncate:
+    # a configured "2.9" must read as 2, not fall back to the default.
+    return int(env_float("FULCRA_COORD_REVIEW_REROUTE_MAX", 2.0))
 
 
 def _accepted_stall_hours() -> float:
     """Hours an ACCEPTED-then-silent review may stall before the sweep escalates
     it to the human (it is never rerouted once accepted — we don't yank work out
     from under a reviewer mid-flight; we only nudge the human after a long stall)."""
-    return _env_float("FULCRA_COORD_ACCEPTED_STALL_HOURS", 2.0)
+    return env_float("FULCRA_COORD_ACCEPTED_STALL_HOURS", 2.0)
 
 
 def _review_accepted_by_assignee(task, assignee, routed_dt):
@@ -3779,7 +3765,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     import time
     _info("Reconciling coordination views...")
     t0 = time.monotonic()
-    timeout = int(os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "90"))
+    timeout = env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
     deadline = t0 + timeout
 
     markers = cache.list_op_markers()

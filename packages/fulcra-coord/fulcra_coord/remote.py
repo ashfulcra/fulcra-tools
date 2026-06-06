@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-from . import remote_root
+from . import env_int, remote_root
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,9 @@ def _backend_cmd() -> list[str]:
 
 
 def _read_timeout() -> int:
-    return int(os.environ.get("FULCRA_COORD_TIMEOUT_SECONDS", "5"))
+    # env_int (not a bare int()): a non-numeric override falls back to 5 instead
+    # of raising and crashing every read op on a typo'd value.
+    return env_int("FULCRA_COORD_TIMEOUT_SECONDS", 5)
 
 
 def _write_timeout() -> int:
@@ -81,7 +83,7 @@ def _write_timeout() -> int:
 
 
 def _reconcile_timeout() -> int:
-    return int(os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "90"))
+    return env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
 
 
 # ---------------------------------------------------------------------------
