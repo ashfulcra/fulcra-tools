@@ -1716,7 +1716,7 @@ class TestDoctorFileCapabilityCheck(unittest.TestCase):
              patch("fulcra_coord.cli.remote.check_file_commands", return_value=(file_ok, file_msg)), \
              patch("fulcra_coord.cli.remote.check_remote_access",
                    return_value=(True, "Remote accessible")), \
-             patch("fulcra_coord.cli._info",
+             patch("fulcra_coord.doctor._info",
                    side_effect=lambda *a, **kw: lines.append(" ".join(str(x) for x in a))):
             rc = cmd_doctor(types.SimpleNamespace(), backend=["false"])
         return rc, "\n".join(lines)
