@@ -10,8 +10,9 @@
 
 
 Port of the Fulcra "press play" demo from Daytona to **Vercel Sandbox**, plus a
-**LiteLLM AI-gateway** so the agent never carries a real provider key. Sibling to
-[`fulcra-hermes-daytona`](https://github.com/fulcradynamics/fulcra-hermes-daytona).
+**LiteLLM AI-gateway** so the agent never carries a real provider key. Successor to
+the original Daytona port, now a standalone repo at
+[`ashfulcra/fulcra-hermes-daytona`](https://github.com/ashfulcra/fulcra-hermes-daytona).
 
 ## Why move
 

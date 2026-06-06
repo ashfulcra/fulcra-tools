@@ -126,7 +126,7 @@ The user's GitHub is `ashfulcra` (org `fulcradynamics`).
 |---|---|---|
 | **`packages/hermes-vercel`** | The active demo runtime. Build/spawn/teardown scripts for Vercel Sandbox + bake of the snapshot. **This is the one a new operator runs.** | Working end-to-end on baseline path. Gateway path coded but blocked on (4) below. |
 | **`packages/litellm`** | The LiteLLM proxy as a deployable Docker app. Configured for Fly.io. | Deployed (`fulcra-litellm.fly.dev`) but machines are stop-cycling on the Fly trial — needs payment method to stay up. |
-| **`packages/hermes-daytona`** | The original Daytona port. **Deprecated.** Kept as a reference for the shape of the boot script and the snapshot config — the Vercel port uses the same shape, ported to Amazon Linux 2023 and the `vercel-sandbox` user. | Do not invest more here. See § 8.4 for why we left Daytona. |
+| **`ashfulcra/fulcra-hermes-daytona`** (standalone repo) | The original Daytona port. **Deprecated** and extracted out of this monorepo into its own archived repo. Kept as a reference for the shape of the boot script and the snapshot config — the Vercel port uses the same shape, ported to Amazon Linux 2023 and the `vercel-sandbox` user. | Do not invest more here. See § 8.4 for why we left Daytona. |
 
 The Fulcra onboarding skill itself lives in
 [`fulcradynamics/agent-skills`](https://github.com/fulcradynamics/agent-skills),
@@ -447,9 +447,9 @@ Daytona was the first runtime. We left it because:
 - Vercel Sandbox uses Firecracker too and has open egress out of the box, on
   a self-serve Pro plan.
 
-The Daytona repo (`packages/hermes-daytona`) still works on Daytona's network
-for what it can reach — Apple Health and GitHub flows work fine. It just
-can't talk to Fulcra. Kept as a reference for the boot script shape.
+The Daytona repo (standalone at `ashfulcra/fulcra-hermes-daytona`) still works
+on Daytona's network for what it can reach — Apple Health and GitHub flows work
+fine. It just can't talk to Fulcra. Kept as a reference for the boot script shape.
 
 ### 8.5 Node 26 + @vercel/sandbox compatibility (technical debt)
 
@@ -535,7 +535,7 @@ In priority order for the new operator:
    sandbox lifetime distributions, etc.
 
 7. **(Product)** The skill is in active iteration. The current branch
-   targeted from `packages/hermes-daytona` (`fix/preconfigured-env-and-reliable-auth`)
+   targeted from the Daytona repo (`ashfulcra/fulcra-hermes-daytona`, `fix/preconfigured-env-and-reliable-auth`)
    on `agent-skills` should be re-evaluated — is its PR merged? If yes,
    point `FULCRA_SKILL_BRANCH` back at `main` (it'll be `main` by default if
    unset).
@@ -612,13 +612,14 @@ All three packages live in the **`ashfulcra/fulcra-tools`** private monorepo:
 
 | Package | Path | Notes |
 |---|---|---|
-| `hermes-daytona` | `packages/hermes-daytona/` | Deprecated; kept as reference. See README banner. |
+| `fulcra-hermes-daytona` | standalone repo `ashfulcra/fulcra-hermes-daytona` | Deprecated; extracted out of this monorepo into its own archived repo. Kept as reference. See its README banner. |
 | `hermes-vercel` | `packages/hermes-vercel/` | Active demo runtime. |
 | `litellm` | `packages/litellm/` | LiteLLM gateway, deployable to Fly. |
 
-The standalone `github.com/fulcradynamics/fulcra-hermes-daytona` repo
-predates the monorepo migration; treat the in-monorepo `packages/hermes-daytona/`
-as canonical going forward.
+The Daytona port now lives in the standalone repo
+`github.com/ashfulcra/fulcra-hermes-daytona` (extracted from this monorepo with
+its full history preserved). Treat that repo as canonical for the deprecated
+Daytona version; the active demo is the in-monorepo `packages/hermes-vercel/`.
 
 The `.env` files in each package contain real secrets and are gitignored;
 `.env.example` files are committed checklists. Operator-side state
