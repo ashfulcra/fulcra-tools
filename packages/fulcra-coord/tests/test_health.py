@@ -254,5 +254,53 @@ class TestDoctorHealthFold(unittest.TestCase):
         self.assertIn(rc, (0, 1))
 
 
+class TestIsPrunableHealth(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_aged_record_is_prunable(self):
+        rec = {"reconcile_at": (self.now - timedelta(days=40)).isoformat().replace("+00:00", "Z")}
+        self.assertTrue(views.is_prunable_health(rec, self.now))  # > 30d default
+
+    def test_fresh_record_is_kept(self):
+        rec = {"reconcile_at": (self.now - timedelta(days=1)).isoformat().replace("+00:00", "Z")}
+        self.assertFalse(views.is_prunable_health(rec, self.now))
+
+    def test_undatable_record_is_kept(self):
+        self.assertFalse(views.is_prunable_health({"reconcile_at": "nope"}, self.now))
+        self.assertFalse(views.is_prunable_health({}, self.now))
+
+
+class TestPruneDeadHealth(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _rec(self, days_ago):
+        return {"reconcile_at": (self.now - timedelta(days=days_ago)).isoformat().replace("+00:00", "Z")}
+
+    def test_prunes_aged_keeps_fresh_keeps_undatable(self):
+        paths = ["/coordination/health/old.json",
+                 "/coordination/health/fresh.json",
+                 "/coordination/health/bad.json"]
+        bodies = {"/coordination/health/old.json": self._rec(40),
+                  "/coordination/health/fresh.json": self._rec(1),
+                  "/coordination/health/bad.json": {"reconcile_at": "nope"}}
+        deleted = []
+        with mock.patch("fulcra_coord.cli.remote.list_files", return_value=paths), \
+             mock.patch("fulcra_coord.cli.remote.download_json",
+                        side_effect=lambda p, **k: bodies.get(p)), \
+             mock.patch("fulcra_coord.cli.remote.delete",
+                        side_effect=lambda p, **k: deleted.append(p) or True):
+            n = cli._prune_dead_health(self.now, backend=["false"])
+        self.assertEqual(n, 1)
+        self.assertEqual(deleted, ["/coordination/health/old.json"])
+
+    def test_failsafe_on_list_error(self):
+        with mock.patch("fulcra_coord.cli.remote.list_files",
+                        side_effect=RuntimeError("boom")):
+            n = cli._prune_dead_health(self.now, backend=["false"])
+        self.assertEqual(n, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
