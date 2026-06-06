@@ -7050,12 +7050,13 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_8_3(self):
-        # 0.8.3: reconcile/write paths survive imperfect bus data (id-less bodies,
-        # agent-less presence entries); review sweep is deadline-bounded; archive
-        # verifies the hot copy before moving.
+    def test_version_is_0_9_0(self):
+        # 0.9.0: coordination-system health surface — a silently-failing reconcile
+        # becomes visible. Each host writes a per-host health record on a
+        # successful reconcile; a `health` command + doctor fold + a digest infra
+        # line surface staleness; retention prunes dead health records.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.8.3")
+        self.assertEqual(__version__, "0.9.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
