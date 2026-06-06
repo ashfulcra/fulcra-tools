@@ -10,6 +10,32 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.9.1] — `remote.list_files` normalizes the real CLI output to clean paths
+
+**Why:** `remote.list_files(prefix)` returned the raw `fulcra file list` display
+lines verbatim. The real `fulcra file` CLI formats each line for humans as
+`"383B    2026-06-06 01:52AM UTC  claude-code-mac-fulcra-coord.json"` (size +
+date + FILENAME-only) — that string is not a path. Every list-based consumer then
+fed it straight into `remote.download_json` / `remote.delete`, which silently
+returned None / no-op in LIVE: self-heal (`_load_summaries_for_rebuild`'s
+vanishing-directive recovery, `_reconcile_presence`), presence prune/reconcile,
+retention pruning of dead health/presence records and digest markers,
+`search --archived`'s archive index, and the new 0.9.0 health command all read
+nothing. The whole test suite stayed green because the fake backend emits clean
+full paths, never the real formatted shape — so the bug was invisible to tests
+and only surfaced by live-smoking the 0.9.0 health command.
+
+- **`remote.list_files` now normalizes each output line to a clean full remote
+  path**, robust to BOTH the real CLI's formatted line and an already-clean path.
+  It takes the last whitespace-delimited token as the filename (safe because
+  filenames are slug/id-based with no spaces), passes through anything already a
+  full path or already prefixed, and otherwise joins the bare filename onto the
+  prefix. The real CLI and the fake backend now converge on identical clean paths.
+  Best-effort contract preserved (returns `[]` on error). No consumer changed —
+  they were all already correct given clean paths.
+
+---
+
 ## [0.9.0] — Coordination-system health surface: a silently-failing reconcile becomes visible
 
 **Why:** the operator had rich awareness of *task* state but ZERO awareness of

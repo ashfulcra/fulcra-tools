@@ -7050,13 +7050,15 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_9_0(self):
-        # 0.9.0: coordination-system health surface — a silently-failing reconcile
-        # becomes visible. Each host writes a per-host health record on a
-        # successful reconcile; a `health` command + doctor fold + a digest infra
-        # line surface staleness; retention prunes dead health records.
+    def test_version_is_0_9_1(self):
+        # 0.9.1: remote.list_files normalizes the real `fulcra file list`
+        # formatted output to clean full paths — it was returning raw display
+        # lines, silently breaking every list-based consumer in live (self-heal,
+        # presence reconcile/prune, retention pruning, search --archived, the
+        # new health command) while tests passed on the fake backend's clean
+        # output. (0.9.0: coordination-system health surface.)
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.9.0")
+        self.assertEqual(__version__, "0.9.1")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
