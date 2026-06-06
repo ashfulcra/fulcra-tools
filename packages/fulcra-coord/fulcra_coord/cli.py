@@ -849,8 +849,17 @@ def _repair_merged_tags(
     )
 
 
+def _iso_z(dt: datetime) -> str:
+    """Format a datetime as the bus timestamp convention: UTC, microsecond
+    precision, trailing ``Z`` (not ``+00:00``). The single source of truth for
+    that convention — used by _now_iso and by the marker/health writers that must
+    stamp an INJECTED ``now`` (kept testable) rather than wall-clock."""
+    return dt.astimezone(timezone.utc).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+
+
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return _iso_z(datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -2056,8 +2065,7 @@ def _build_health_record(*, now, duration_s, tasks_loaded, views_refreshed,
         "host": host,
         "agent": identity.resolve_agent(),
         "version": __version__,
-        "reconcile_at": now.astimezone(timezone.utc).isoformat(
-            timespec="microseconds").replace("+00:00", "Z"),
+        "reconcile_at": _iso_z(now),
         "duration_s": duration_s,
         "tasks_loaded": tasks_loaded,
         "views_refreshed": views_refreshed,
@@ -2433,7 +2441,7 @@ def _claim_digest_marker(window: str, now: datetime, *,
             "window": window,
             "date": now.astimezone(timezone.utc).strftime("%Y-%m-%d"),
             "by": identity.resolve_agent(),
-            "claimed_at": now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            "claimed_at": _iso_z(now),
         }
         return bool(remote.upload_json(marker, path, backend=backend))
     except Exception:
@@ -2465,7 +2473,7 @@ def _claim_retention_marker(now: datetime, *,
         marker = {
             "schema": "fulcra.coordination.retention_marker.v1",
             "date": today, "by": me,
-            "at": now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+            "at": _iso_z(now),
         }
         if not remote.upload_json(marker, path, backend=backend):
             return False
