@@ -3241,8 +3241,7 @@ def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
     import copy
     from . import routing
     task = copy.deepcopy(task)
-    at = (dt or datetime.now(timezone.utc)).isoformat(
-        timespec="microseconds").replace("+00:00", "Z")
+    at = _iso_z(dt or datetime.now(timezone.utc))
     ev = routing.make_route_event(kind=kind, to=to, by=by, attempt=attempt,
                                   reason=reason, candidate_snapshot=candidate_snapshot,
                                   observed_updated_at=observed_updated_at, at=at)
@@ -3907,9 +3906,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         try:
             surface = _inbox_surface_path(identity.resolve_agent())
             if surface.exists():
-                listener_last_fire = datetime.fromtimestamp(
-                    surface.stat().st_mtime, tz=timezone.utc).isoformat(
-                    timespec="microseconds").replace("+00:00", "Z")
+                listener_last_fire = _iso_z(datetime.fromtimestamp(
+                    surface.stat().st_mtime, tz=timezone.utc))
         except Exception:
             listener_last_fire = None
         record = _build_health_record(

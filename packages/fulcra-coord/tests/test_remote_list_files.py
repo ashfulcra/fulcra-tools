@@ -131,6 +131,30 @@ class ListJsonTests(unittest.TestCase):
             [(p, records[p]) for p in paths],
         )
 
+    def test_order_is_list_order_not_completion_order(self):
+        """The load-bearing claim: results follow list_files order even when a
+        LATER-listed path's download completes FIRST. Make the earlier paths sleep
+        so, under the thread pool, completion order is the REVERSE of list order;
+        the output must still be list order (the synchronous-mock test above can't
+        distinguish the two)."""
+        import time
+        paths = [
+            "/coordination/health/a.json",
+            "/coordination/health/b.json",
+            "/coordination/health/c.json",
+        ]
+        # a sleeps longest, c returns immediately → completion order c, b, a.
+        delays = {paths[0]: 0.06, paths[1]: 0.03, paths[2]: 0.0}
+
+        def dl(p, *, backend=None):
+            time.sleep(delays[p])
+            return {"host": p[-6]}  # 'a'/'b'/'c' marker char
+
+        with mock.patch("fulcra_coord.remote.list_files", return_value=paths), \
+             mock.patch("fulcra_coord.remote.download_json", side_effect=dl):
+            out = remote.list_json(self.PREFIX)
+        self.assertEqual([p for p, _ in out], paths)
+
     def test_non_json_paths_are_skipped(self):
         paths = ["/coordination/health/a.json", "/coordination/health/notes.txt"]
         with mock.patch("fulcra_coord.remote.list_files", return_value=paths), \
