@@ -1,4 +1,4 @@
-# fulcra-tools
+# Fulcra Tools
 
 WARNING: Everything in this repo was vibe coded by Fulcra's lawyer, 
 using Fulcra's file and data stream primitives. 
@@ -28,7 +28,7 @@ and tests; this README is the index that points you to them.
 |---|---|---|
 | **Fulcra Collect** | The main project — a local-ingest daemon + plugins that import your personal-data streams into [Fulcra](https://fulcradynamics.com). Spans the daemon ([`packages/collect`](packages/collect)), its web wizard, the macOS menu-bar companion, the shared API client, and the data-source plugins. | [`docs/collect.md`](docs/collect.md) |
 | **Hermes Daytona demo** | Operator tooling for the Fulcra "press play" demo — spawn per-guest ephemeral [Hermes](https://hermes-agent.nousresearch.com) agents on [Daytona](https://www.daytona.io) that onboard each person into their own Fulcra account. | [`packages/hermes-daytona/README.md`](packages/hermes-daytona/README.md) |
-| **fulcra-coord** | Shared agent-coordination layer — independent agents (Claude Code, Codex, OpenClaw, ChatGPT, CI) coordinate durable tasks over Fulcra Files as a bus, with no shared memory or direct calls. Lifecycle hooks, cross-agent inbox + broadcast directives, a `fulcra-coord agents` status digest, and a durable per-agent listener.|
+| **Fulcra Coord** | Shared agent-coordination layer — independent agents (Claude Code, Codex, OpenClaw, ChatGPT, CI) coordinate durable tasks over Fulcra Files as a bus, with no shared memory or direct calls. Lifecycle hooks, cross-agent inbox + broadcast directives, a `fulcra-coord agents` status digest, and a durable per-agent listener.|
 
 > **More coming.** Other Fulcra projects will be added here as the team
 > consolidates them into this repo — each as its own row above, linking to
