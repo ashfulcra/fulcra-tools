@@ -155,6 +155,42 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 
 Read commands use local cache when fresh. Full remote sync happens on `status` and `reconcile`.
 
+## Module architecture
+
+The package is layered: leaf utilities at the bottom, feature subsystems above
+them, and `cli.py` at the top as the reconcile-orchestration core plus a thin
+re-export layer that aggregates every command for the dispatcher (`entry.py`).
+Each feature module depends only on lower layers and **never imports `cli`**, so
+there are no import cycles.
+
+| layer | module | responsibility |
+|-------|--------|----------------|
+| leaf utils | `output.py` | stdout/stderr formatting (`print_json`/`err`/`warn`/`info`) |
+| | `timeutil.py` | the UTC/microsecond/`Z` bus-timestamp convention |
+| | `textfmt.py` | human relative-time formatters (`age`/`until`/`due`) |
+| core | `__init__.py` | `remote_root`, `task_file_path`, `env_float`/`env_int` |
+| | `remote.py` | Fulcra Files I/O (upload/download/list/`list_json`/stat/delete) |
+| | `schema.py` | task schema + state transitions |
+| | `views.py` | materialized-view generation + pure judgments |
+| | `io.py` | task load/cache layer (parallel fetch, summaries fast-path, self-heal) |
+| | `writepipe.py` | the single write path: optimistic-concurrency upload + merge + view fan-out |
+| subsystems | `retention.py` | cold-archive + cold-index + prune + `search`/`restore` |
+| | `presence.py` | per-agent presence + reconcile rebuild |
+| | `routing_ops.py` | liveness-aware reviewer routing + reroute sweep |
+| | `digest.py` | operator digest (push) + fleet-health dashboard (pull) |
+| | `lifecycle.py` | mutation commands (start/update/block/pause/done/abandon/tell/broadcast/assign) |
+| | `query.py` | read commands (status/agents/needs-me/resume) |
+| | `inbox.py` | directive inbox + blocked-on-you notification |
+| | `installers.py` | hook + scheduler installers |
+| | `doctor.py` | `capabilities` + `doctor` diagnostics |
+| | `config.py` | local config commands (identity/human/annotations/session-task) |
+| top | `cli.py` | the reconcile tick (`cmd_reconcile` + health-record write + stale-claim detection) and the re-export aggregation surface |
+| entry | `entry.py` | argparse + the `COMMAND_MAP` dispatcher |
+
+Commands are re-exported from `cli` under their historical names so the dispatch
+table and the test patch surface (`fulcra_coord.cli.<name>`) keep resolving — the
+extraction is behavior-preserving end to end.
+
 ## Adapters
 
 - `adapters/claude-code/CLAUDE.md` — paste into project CLAUDE.md files
