@@ -4099,10 +4099,19 @@ class TestAgentsDigest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCodexTemplates(unittest.TestCase):
-    def test_reuses_claude_code_script_bodies(self):
+    def test_reuses_claude_code_script_bodies_with_codex_review_capability(self):
         from fulcra_coord import codex, claude_code as cc
-        # SessionStart body is shared verbatim with Claude Code (same stdin shape).
-        self.assertEqual(codex.SESSION_START_SH, cc.SESSION_START_SH)
+        # SessionStart mostly shares the Claude Code body (same stdin shape), but
+        # Codex is the canonical review target, so its hook must publish the
+        # review capability or request-review cannot find it after app startup.
+        self.assertEqual(
+            codex.SESSION_START_SH,
+            cc.SESSION_START_SH.replace(
+                '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+                '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+            ),
+        )
+        self.assertIn("connect --can-review", codex.SESSION_START_SH)
         # PreCompact reuses the CC body but keys the session-id env fallback on
         # FULCRA_COORD_SESSION_KEY (Codex's session id env differs).
         self.assertIn("FULCRA_COORD_SESSION_KEY", codex.PRE_COMPACT_SH)

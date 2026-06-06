@@ -40,8 +40,15 @@ from typing import Any
 from . import claude_code, cli_invocation
 from .cli_invocation import PLACEHOLDER_ARGV
 
-# SessionStart is identical to Claude Code's (same stdin shape, cwd-driven).
-SESSION_START_SH = claude_code.SESSION_START_SH
+# SessionStart mostly matches Claude Code's (same stdin shape, cwd-driven), but
+# Codex is the canonical reviewer in the review-router seed pool. If its startup
+# hook publishes ordinary presence without the review capability, the router
+# sees the right identity but rates it below-floor. Keep Codex findable for PR
+# review requests by declaring review capability on every connect.
+SESSION_START_SH = claude_code.SESSION_START_SH.replace(
+    '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+    '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+)
 
 # PreCompact reuses the CC body but keys the session-id env fallback on the
 # generic FULCRA_COORD_SESSION_KEY rather than Claude Code's native env var.

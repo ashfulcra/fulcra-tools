@@ -34,7 +34,7 @@ JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
 # when it owns no active task. `connect` auto-derives workstreams from this
 # agent's open tasks. Backgrounded + silenced — best-effort, never blocks or
 # delays session start; a missing/old CLI without `connect` simply no-ops.
-"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &
+"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &
 
 # Directives addressed to this agent. status JSON may not carry `assignee`, so
 # we ask the inbox command directly (fail-safe: empty/missing -> no section).
