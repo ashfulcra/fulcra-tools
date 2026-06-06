@@ -17,7 +17,7 @@ from . import env_int
 # underscore-prefixed names so every internal call site AND the test patch targets
 # (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
 # timeutil.py do not import cli, so there is no import cycle.
-from .output import print_json as _print_json, err as _err, warn as _warn, info as _info
+from .output import err as _err, warn as _warn, info as _info
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
 # Retention / archival subsystem extracted from this file. Re-exported under the
