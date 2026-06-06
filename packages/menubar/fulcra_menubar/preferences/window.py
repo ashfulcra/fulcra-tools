@@ -18,7 +18,7 @@ from __future__ import annotations
 from AppKit import (  # type: ignore[import-not-found]
     NSAppearance, NSBackingStoreBuffered, NSTabView, NSTabViewItem, NSTitledWindowMask,
     NSWindow, NSWindowController, NSClosableWindowMask, NSMiniaturizableWindowMask,
-    NSMakeRect,
+    NSMakeRect, NSViewWidthSizable, NSViewHeightSizable,
 )
 
 from ..daemon_client import DaemonClient
@@ -32,6 +32,19 @@ HEIGHT = 480.0
 # Tab name -> NSTabView index, in the exact order tabs are added below.
 # Used by the "open Preferences to Annotations" deep link from the popover.
 _TAB_INDEX = {"plugins": 0, "annotations": 1, "notifications": 2, "about": 3}
+
+
+def tabview_frame(width: float, height: float) -> tuple[float, float, float, float]:
+    """Frame (x, y, w, h) for the Preferences NSTabView.
+
+    The tab view must FILL the entire content view so AppKit renders its tab
+    strip (Plugins/Annotations/Notifications/About) at the top, flush under the
+    title bar and clickable. The old value — ``height - 22`` pinned at ``y=0`` —
+    bottom-anchored the view and pushed the tab strip up out of the visible
+    region, leaving an empty grey band and no clickable tabs. Pure so it's
+    unit-tested without AppKit.
+    """
+    return (0.0, 0.0, width, height)
 
 
 def tab_index(name: str | None) -> int | None:
@@ -90,7 +103,15 @@ def make_preferences_controller(
     # on the brand-mandated white background regardless of system Dark Mode.
     window.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameAqua"))
 
-    tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, HEIGHT - 22))
+    # Fill the entire content view (0,0,WIDTH,HEIGHT). NSTabView reserves its
+    # own ~24pt tab strip at the TOP of this frame, so the Plugins/Annotations/
+    # Notifications/About buttons render flush under the title bar and stay
+    # clickable. (Previously this was `HEIGHT - 22` pinned at y=0, which
+    # bottom-anchored the tab view and shoved the tab strip up out of the
+    # visible region — the user saw an empty grey band and no tabs.) The
+    # autoresizing mask keeps it filling the content view defensively.
+    tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(*tabview_frame(WIDTH, HEIGHT)))
+    tabs.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
 
     from .plugins_tab import make_plugins_tab
     from .annotations_tab import make_annotations_tab
