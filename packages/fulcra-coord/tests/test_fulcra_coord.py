@@ -9443,7 +9443,7 @@ class TestRequestReview(unittest.TestCase):
         agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
                                    "last_seen": now_ls, "capabilities": ["review"]}])
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._write_task_and_views") as wtv, \
+             patch("fulcra_coord.routing_ops._write_task_and_views") as wtv, \
              patch("fulcra_coord.cli.identity.resolve_agent",
                    return_value="codex:Mac.localdomain:main"):
             args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=True,
@@ -9465,7 +9465,7 @@ class TestRequestReview(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write), \
              patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
             args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
                                          candidate_list=None, format="json", agent=None)
@@ -9487,7 +9487,7 @@ class TestRequestReview(unittest.TestCase):
                                    "last_seen": old_ls, "capabilities": ["review"]}])
         escalated = {}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._escalate_review_to_human",
+             patch("fulcra_coord.routing_ops._escalate_review_to_human",
                    side_effect=lambda **kw: escalated.update(kw) or True), \
              patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
             args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
@@ -9507,7 +9507,7 @@ class TestRequestReview(unittest.TestCase):
             captured["task"] = task
             return True
 
-        with patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write), \
+        with patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write), \
              patch("fulcra_coord.cli.identity.resolve_human", return_value="ash@fulcradynamics.com"), \
              patch("fulcra_coord.cli.identity.resolve_agent", return_value="codex:m:main"):
             ok = _escalate_review_to_human(pr="42", repo="fulcra-tools",
@@ -9755,8 +9755,8 @@ class TestReviewSweep(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
-             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
+             patch("fulcra_coord.routing_ops._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write):
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         out = written["task"]
         rer = [e for e in out["events"] if e["type"] == "rerouted"]
@@ -9777,9 +9777,9 @@ class TestReviewSweep(unittest.TestCase):
                "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                "capabilities": ["review"]}]}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._cache_remote_task", return_value=moved), \
+             patch("fulcra_coord.routing_ops._cache_remote_task", return_value=moved), \
              patch("fulcra_coord.cli._load_task", return_value=t) as lt, \
-             patch("fulcra_coord.cli._write_task_and_views") as wtv:
+             patch("fulcra_coord.routing_ops._write_task_and_views") as wtv:
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()  # another sweeper already moved it
         lt.assert_not_called()  # the stale-observation check bypasses cache
@@ -9792,7 +9792,7 @@ class TestReviewSweep(unittest.TestCase):
         agg = {"agents": self._presence("dead:h:r", 300)}
         with patch("fulcra_coord.cli.remote.download_json",
                    side_effect=lambda p, backend=None: agg), \
-             patch("fulcra_coord.cli._write_task_and_views") as wtv, \
+             patch("fulcra_coord.routing_ops._write_task_and_views") as wtv, \
              patch("fulcra_coord.cli._load_task") as lt:
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()
@@ -9813,8 +9813,8 @@ class TestReviewSweep(unittest.TestCase):
                "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                "capabilities": ["review"]}]}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
-             patch("fulcra_coord.cli._write_task_and_views") as wtv:
+             patch("fulcra_coord.routing_ops._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.routing_ops._write_task_and_views") as wtv:
             # deadline already in the past -> the per-directive loop should break
             # before doing any work.
             _sweep_review_routes([t], backend=["false"], now=self.NOW,
@@ -9836,8 +9836,8 @@ class TestReviewSweep(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
-             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
+             patch("fulcra_coord.routing_ops._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write):
             _sweep_review_routes([t], backend=["false"], now=self.NOW,
                                  deadline=time.monotonic() + 60)
         self.assertIn("task", written)  # reroute still happened
@@ -9856,8 +9856,8 @@ class TestReviewSweep(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._cache_remote_task", return_value=t), \
-             patch("fulcra_coord.cli._write_task_and_views", side_effect=fake_write):
+             patch("fulcra_coord.routing_ops._cache_remote_task", return_value=t), \
+             patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write):
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         self.assertIn("task", written)
 
