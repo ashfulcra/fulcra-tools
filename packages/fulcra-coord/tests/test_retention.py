@@ -314,8 +314,8 @@ class TestSearchArchived(unittest.TestCase):
 
     def test_default_search_does_not_list_archive(self):
         with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
-             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
-             patch("fulcra_coord.cli._list_index_shards") as shards:
+             patch("fulcra_coord.retention._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.retention._list_index_shards") as shards:
             rc = cli.cmd_search(self._args("anything"), backend=["false"])
         self.assertEqual(rc, 0)
         shards.assert_not_called()
@@ -326,8 +326,8 @@ class TestSearchArchived(unittest.TestCase):
                  "archive_path": "/coordination/archive/tasks/2026-05/t-1.json"}
         out = io.StringIO()
         with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
-             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
-             patch("fulcra_coord.cli._list_index_shards", return_value=[shard]), \
+             patch("fulcra_coord.retention._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.retention._list_index_shards", return_value=[shard]), \
              contextlib.redirect_stdout(out):
             rc = cli.cmd_search(self._args("widget", archived=True), backend=["false"])
         self.assertEqual(rc, 0)
@@ -341,8 +341,8 @@ class TestSearchArchived(unittest.TestCase):
                  "archive_path": "/coordination/archive/tasks/2026-05/t-1.json"}
         out = io.StringIO()
         with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
-             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
-             patch("fulcra_coord.cli._list_index_shards", return_value=[shard]), \
+             patch("fulcra_coord.retention._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.retention._list_index_shards", return_value=[shard]), \
              contextlib.redirect_stdout(out):
             cli.cmd_search(self._args("widget", archived=True), backend=["false"])
         rec = json.loads(out.getvalue())["results"][0]
@@ -355,8 +355,8 @@ class TestSearchArchived(unittest.TestCase):
                  "archive_path": "/coordination/archive/tasks/2026-05/t-1.json"}
         out = io.StringIO()
         with patch("fulcra_coord.cli.cache.read_cached_view", return_value=None), \
-             patch("fulcra_coord.cli._load_task_summaries", return_value=[]), \
-             patch("fulcra_coord.cli._list_index_shards", return_value=[shard]), \
+             patch("fulcra_coord.retention._load_task_summaries", return_value=[]), \
+             patch("fulcra_coord.retention._list_index_shards", return_value=[shard]), \
              contextlib.redirect_stdout(out):
             cli.cmd_search(self._args("nonexistent-term", archived=True), backend=["false"])
         self.assertEqual(json.loads(out.getvalue())["results"], [])

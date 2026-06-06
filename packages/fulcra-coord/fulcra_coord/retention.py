@@ -21,6 +21,8 @@ from typing import Any, Optional
 
 from . import cache, remote, views, identity
 from . import env_int
+from .io import _load_task_summaries
+from .output import info as _info, print_json as _print_json, err as _err
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
 
 
@@ -321,3 +323,114 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     return {"archived": archived, "deferred": deferred,
             "pruned_markers": pruned_markers, "pruned_presence": pruned_presence,
             "pruned_health": pruned_health}
+
+
+
+# ---------------------------------------------------------------------------
+# Archive query / restore commands (search --archived, restore)
+# ---------------------------------------------------------------------------
+
+def cmd_search(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Search tasks by text across title, summary, tags."""
+    query = args.query
+    out_format = getattr(args, "format", "table")
+
+    idx = cache.read_cached_view("search-index")
+    if idx:
+        records = idx.get("records", [])
+        q = query.lower()
+        results = []
+        for r in records:
+            text = " ".join([
+                r.get("title", ""),
+                r.get("summary", ""),
+                r.get("workstream", ""),
+                r.get("owner_agent", ""),
+                " ".join(r.get("tags", [])),
+            ]).lower()
+            if q in text:
+                results.append(r)
+    else:
+        # No cached search-index — search the summaries aggregate. search_tasks
+        # reads title/current_summary/workstream/owner_agent/tags, all present on
+        # a summary; no task body fetch. Falls back to a full load on an older bus.
+        all_tasks = _load_task_summaries(backend=backend)
+        results = views.search_tasks(query, all_tasks)
+
+    # --archived (alias --all): additionally scan the cold archive index shards.
+    # Default search stays hot-only (fast); the archive is O(archived) and paid
+    # only when explicitly requested. Matches on the same fields as hot search.
+    if getattr(args, "archived", False):
+        q = query.lower()
+        seen = {r.get("id") for r in results}
+        for shard in _list_index_shards(backend=backend):
+            if shard.get("id") in seen:
+                continue
+            text = " ".join([shard.get("title", ""), shard.get("workstream", ""),
+                             shard.get("owner_agent", "")]).lower()
+            if q in text:
+                results.append({
+                    "id": shard.get("id", ""), "title": shard.get("title", ""),
+                    "status": shard.get("status", ""), "priority": "",
+                    "workstream": shard.get("workstream", ""),
+                    "owner_agent": shard.get("owner_agent", ""),
+                    "archived": True, "archive_path": shard.get("archive_path", ""),
+                })
+
+    if out_format == "json":
+        _print_json({"query": query, "count": len(results), "results": results})
+        return 0
+
+    if not results:
+        _info(f"No tasks found matching {query!r}.")
+        return 0
+
+    _info(f"\n{len(results)} task(s) matching {query!r}:\n")
+    for r in results:
+        status = r.get("status", "?")
+        task_id = r.get("id", "?")
+        title = r.get("title", "")[:60]
+        priority = r.get("priority", "??")
+        print(f"  [{status}] [{priority}] {task_id[:28]}  {title}")
+        # Search results may come from cached search-index ("summary") or
+        # from task_summary() dicts ("current_summary") — handle both.
+        summary_text = (r.get("summary") or r.get("current_summary") or "").strip()
+        if summary_text:
+            print(f"          {summary_text[:80]}")
+    print()
+    return 0
+
+
+def cmd_restore(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Restore a cold-archived task back into the hot path.
+
+    Reverses _archive_task: reads the task's archive/index/<id>.json shard for
+    its archive_path, downloads the archived body, uploads it back to
+    tasks/<id>.json, then deletes the index shard. The NEXT reconcile re-includes
+    it in views (the body is back in the tasks/ listing the self-heal enumerates).
+    Nothing is one-way. NOTE this is a bus-level MOVE, independent of the platform
+    'fulcra file restore' (which restores a deleted file's prior VERSION by UUID);
+    archived tasks were moved, not deleted, so we move them back ourselves.
+
+    Order mirrors the archive's no-loss ordering: write the hot copy and VERIFY it
+    landed before deleting the shard, so a crash leaves a recoverable state."""
+    tid = args.task_id
+    shard = _read_index_shard(tid, backend=backend)
+    if not shard:
+        _err(f"No archived task {tid!r} (no archive/index/{tid}.json shard).")
+        return 1
+    archive_path = shard.get("archive_path") or remote.archive_task_path(tid, "")
+    body = remote.download_json(archive_path, backend=backend)
+    if not body:
+        _err(f"Archived body for {tid!r} not found at {archive_path}.")
+        return 1
+    task_path = remote.task_remote_path(tid)
+    if not remote.upload_json(body, task_path, backend=backend):
+        _err(f"Failed to restore body for {tid!r}.")
+        return 1
+    if remote.stat(task_path, backend=backend) is None:
+        _err(f"Restore of {tid!r} did not verify; left archive shard intact.")
+        return 1
+    remote.delete(remote.archive_index_path(tid), backend=backend)
+    _info(f"Restored {tid} to {task_path}. Run reconcile to re-incorporate into views.")
+    return 0
