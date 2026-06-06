@@ -425,15 +425,13 @@ def _list_index_shards(*, backend: Optional[list[str]] = None) -> list[dict[str,
 
     Best-effort: a failed listing or a single unreadable shard contributes
     nothing rather than raising. O(archived) — paid ONLY on the opt-in cold path
-    (search --archived), never on hot reads. Reuses remote.list_files; the fake
-    backend's recursive list returns exactly the shard files under the prefix."""
+    (search --archived), never on hot reads. Uses remote.list_json (parallel
+    list+download); the fake backend's recursive list returns exactly the shard
+    files under the prefix."""
     out: list[dict[str, Any]] = []
     try:
-        for path in remote.list_files(remote.archive_index_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
-            shard = remote.download_json(path, backend=backend)
-            if shard and shard.get("id"):
+        for _, shard in remote.list_json(remote.archive_index_prefix(), backend=backend):
+            if shard.get("id"):
                 out.append(shard)
     except Exception:
         pass
@@ -1830,12 +1828,8 @@ def _upsert_presence_aggregate(
     try:
         records: list[dict[str, Any]] = []
         try:
-            prefix = f"{remote.remote_root()}/presence/"
-            for path in remote.list_files(prefix, backend=backend):
-                if not path.endswith(".json"):
-                    continue
-                rec = remote.download_json(path, backend=backend)
-                if rec and rec.get("agent") and rec.get("agent") != record["agent"]:
+            for _, rec in remote.list_json(remote.presence_prefix(), backend=backend):
+                if rec.get("agent") and rec.get("agent") != record["agent"]:
                     records.append(_without_liveness(rec))
         except Exception:
             records = []  # listing best-effort; fall through to the download path
@@ -2077,20 +2071,7 @@ def _load_health_records(*, backend: Optional[list[str]] = None) -> list[dict]:
     """List health/*.json and download each, tolerating a missing/garbage file
     (None is skipped) and a non-json listing entry. Best-effort: a failed list
     yields []. Per the 0.8.x hardening, never raises into a caller."""
-    recs: list[dict] = []
-    try:
-        for path in remote.list_files(remote.health_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
-            try:
-                rec = remote.download_json(path, backend=backend)
-            except Exception:
-                rec = None
-            if isinstance(rec, dict):
-                recs.append(rec)
-    except Exception:
-        pass
-    return recs
+    return [rec for _, rec in remote.list_json(remote.health_prefix(), backend=backend)]
 
 
 def _freshest_digest_emit(*, backend: Optional[list[str]] = None):
@@ -2564,12 +2545,9 @@ def _prune_dead_presence(now: datetime, *, backend: Optional[list[str]] = None) 
     Returns the count deleted."""
     n = 0
     try:
-        for path in remote.list_files(remote.presence_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
+        for path, rec in remote.list_json(remote.presence_prefix(), backend=backend):
             try:
-                rec = remote.download_json(path, backend=backend)
-                if rec and views.is_prunable_presence(rec, now):
+                if views.is_prunable_presence(rec, now):
                     if remote.delete(path, backend=backend):
                         n += 1
             except Exception:
@@ -2587,12 +2565,9 @@ def _prune_dead_health(now: datetime, *, backend: Optional[list[str]] = None) ->
     platform soft-delete keeps a pruned record restorable. Returns count deleted."""
     n = 0
     try:
-        for path in remote.list_files(remote.health_prefix(), backend=backend):
-            if not path.endswith(".json"):
-                continue
+        for path, rec in remote.list_json(remote.health_prefix(), backend=backend):
             try:
-                rec = remote.download_json(path, backend=backend)
-                if rec and views.is_prunable_health(rec, now):
+                if views.is_prunable_health(rec, now):
                     if remote.delete(path, backend=backend):
                         n += 1
             except Exception:
@@ -3746,26 +3721,22 @@ def cmd_abandon(args: Any, backend: Optional[list[str]] = None) -> int:
 def _reconcile_presence(backend: Optional[list[str]] = None) -> None:
     """Rebuild ``views/presence.json`` from the durable ``presence/*.json`` files.
 
-    Lists ``<root>/presence/`` (remote.list_files), downloads each per-agent
-    record, and rebuilds the aggregate roster — the presence analogue of the task
-    view self-heal. This is what makes the opportunistic connect-time aggregate
-    merge eventually-consistent: even if a connect's best-effort upsert was lost,
-    reconcile reconstructs the roster from the authoritative per-agent records.
+    Lists ``<root>/presence/`` and downloads each per-agent record in parallel
+    (remote.list_json), then rebuilds the aggregate roster — the presence analogue
+    of the task view self-heal. This is what makes the opportunistic connect-time
+    aggregate merge eventually-consistent: even if a connect's best-effort upsert
+    was lost, reconcile reconstructs the roster from the authoritative per-agent
+    records.
 
-    LISTING REQUIREMENT: relies on remote.list_files being able to enumerate the
+    LISTING REQUIREMENT: relies on remote.list_json being able to enumerate the
     presence dir. If listing returns nothing (empty dir, or a backend without a
     working list), no aggregate is written — the existing one is left intact
     rather than clobbered to empty. Best-effort: never raises into reconcile."""
     try:
-        prefix = f"{remote.remote_root()}/presence/"
-        paths = remote.list_files(prefix, backend=backend)
-        records = []
-        for path in paths:
-            if not path.endswith(".json"):
-                continue
-            rec = remote.download_json(path, backend=backend)
-            if rec and rec.get("agent"):
-                records.append(rec)
+        records = [
+            rec for _, rec in remote.list_json(remote.presence_prefix(), backend=backend)
+            if rec.get("agent")
+        ]
         if not records:
             return
         view = views.build_presence(records)
