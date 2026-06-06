@@ -2073,6 +2073,92 @@ def _build_health_record(*, now, duration_s, tasks_loaded, views_refreshed,
     }
 
 
+def _load_health_records(*, backend: Optional[list[str]] = None) -> list[dict]:
+    """List health/*.json and download each, tolerating a missing/garbage file
+    (None is skipped) and a non-json listing entry. Best-effort: a failed list
+    yields []. Per the 0.8.x hardening, never raises into a caller."""
+    recs: list[dict] = []
+    try:
+        for path in remote.list_files(remote.health_prefix(), backend=backend):
+            if not path.endswith(".json"):
+                continue
+            try:
+                rec = remote.download_json(path, backend=backend)
+            except Exception:
+                rec = None
+            if isinstance(rec, dict):
+                recs.append(rec)
+    except Exception:
+        pass
+    return recs
+
+
+def _freshest_digest_emit(*, backend: Optional[list[str]] = None):
+    """The bus-GLOBAL digest_last_emit: the freshest YYYY-MM-DD embedded in a
+    digest/markers/<date>-<window>.json path. None if no marker. Dated from the
+    PATH (no download) via views._MARKER_DATE_RE — the same date model the marker
+    prune uses. Best-effort."""
+    best = None
+    try:
+        for path in remote.list_files(remote.digest_markers_prefix(), backend=backend):
+            m = views._MARKER_DATE_RE.search(path)
+            if m and (best is None or m.group(1) > best):
+                best = m.group(1)
+    except Exception:
+        pass
+    return best
+
+
+def _assess_fleet(*, now: datetime, backend: Optional[list[str]] = None) -> dict:
+    """Load all health inputs (records + bus markers) and run the pure judgment.
+    Shared by cmd_health, the doctor fold, and the digest (which passes the result
+    into the pure builder). Best-effort reads — a missing marker leaves its field
+    None, never an exception into the caller."""
+    recs = _load_health_records(backend=backend)
+    digest_emit = _freshest_digest_emit(backend=backend)
+    retention_last_run = None
+    try:
+        rmark = remote.download_json(remote.retention_marker_path(now), backend=backend)
+        if isinstance(rmark, dict):
+            retention_last_run = rmark.get("at") or rmark.get("date")
+    except Exception:
+        retention_last_run = None
+    return views.assess_infra_health(
+        recs, now=now, digest_last_emit=digest_emit,
+        retention_last_run=retention_last_run, task_count=len(recs) or None)
+
+
+def cmd_health(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Fleet coordination-health dashboard: load health/*.json, judge via
+    views.assess_infra_health (reconcile-staleness gating only, v1), print per
+    host status + reasons + metrics and the bus block. --format json for tooling.
+    Read-only; tolerant of a missing/garbage record (the 0.8.x hardening)."""
+    out_format = getattr(args, "format", "table")
+    now = datetime.now(timezone.utc)
+    result = _assess_fleet(now=now, backend=backend)
+
+    if out_format == "json":
+        _print_json(result)
+        return 0
+
+    worst = result["worst_status"]
+    _info(f"\nfleet health: {worst}")
+    if not result["hosts"]:
+        _info("  (no hosts reporting health records yet)")
+    for h in result["hosts"]:
+        reasons = ("; ".join(h["reasons"])) if h["reasons"] else "ok"
+        _info(f"  [{h['status']}] {h['host']} — {reasons}")
+        m = h["metrics"]
+        _info(f"      reconcile_at={m.get('reconcile_at')} "
+              f"duration_s={m.get('duration_s')} tasks={m.get('tasks_loaded')} "
+              f"views={m.get('views_refreshed')} backlog={m.get('repair_backlog')}")
+    b = result["bus"]
+    miss = " (MISSED window)" if b["missed_digest_window"] else ""
+    _info(f"  bus: digest_last_emit={b['digest_last_emit']}{miss} "
+          f"retention_last_run={b['retention_last_run']} task_count={b['task_count']}")
+    return 0
+
+
 def _needs_me_seen_path(human: str):
     """Seen-set surface for blocked-on-you notifications, keyed by the HUMAN
     handle (not the polling agent): the "has the operator already been alerted
@@ -4068,6 +4154,24 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
             _info("  Token:         FAIL (no FULCRA_ACCESS_TOKEN and "
                   "`fulcra auth print-access-token` did not yield one)")
             _info("  -> Run: fulcra auth login   (or set FULCRA_ACCESS_TOKEN)")
+
+    # Fleet health (the per-host coordination-machinery self-reports). Local
+    # on-host checks above + fleet health here = the full picture. Wrapped
+    # defensively: a fleet-health read error must degrade to a noted line, never
+    # crash doctor (mirrors the file-probe guard above).
+    _info(f"\n[Fleet health]")
+    try:
+        result = _assess_fleet(now=datetime.now(timezone.utc), backend=backend)
+        _info(f"  Worst status: {result['worst_status']}")
+        for h in result["hosts"]:
+            reasons = ("; ".join(h["reasons"])) if h["reasons"] else "ok"
+            _info(f"  [{h['status']}] {h['host']} — {reasons}")
+        if not result["hosts"]:
+            _info("  (no hosts reporting health records yet)")
+        if result["bus"]["missed_digest_window"]:
+            _info("  -> digest window appears MISSED (no recent digest marker)")
+    except Exception as e:
+        _info(f"  Fleet health: unavailable ({e})")
 
     _info(f"\n{'='*50}")
     _info("OK" if ok_all else "Issues detected — see above.")
