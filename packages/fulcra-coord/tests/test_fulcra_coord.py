@@ -773,8 +773,8 @@ class TestCLIWithFakeBackend(unittest.TestCase):
             captured["rec"] = record
             return True
 
-        with patch("fulcra_coord.cli._write_presence", side_effect=fake_write), \
-             patch("fulcra_coord.cli._derive_workstreams_from_open_tasks", return_value=[]):
+        with patch("fulcra_coord.presence._write_presence", side_effect=fake_write), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]):
             args = self._args(agent="claude-code:h:r", workstream=None, summary="",
                               format="json", can_review=True, role=None)
             cmd_connect(args, backend=["false"])
@@ -783,9 +783,9 @@ class TestCLIWithFakeBackend(unittest.TestCase):
     def test_connect_role_flag_adds_named_capabilities(self):
         from fulcra_coord.cli import cmd_connect
         captured = {}
-        with patch("fulcra_coord.cli._write_presence",
+        with patch("fulcra_coord.presence._write_presence",
                    side_effect=lambda record, backend=None: captured.update(rec=record) or True), \
-             patch("fulcra_coord.cli._derive_workstreams_from_open_tasks", return_value=[]):
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]):
             args = self._args(agent="a", workstream=None, summary="", format="json",
                               can_review=False, role=["review", "deploy"])
             cmd_connect(args, backend=["false"])
