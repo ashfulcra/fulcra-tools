@@ -9543,7 +9543,7 @@ class TestTellRouteCapability(unittest.TestCase):
         agg = {"agents": [{"agent": "rev:h:r", "last_seen": now_ls, "capabilities": ["review"]}]}
         captured = {}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._write_task_and_views",
+             patch("fulcra_coord.lifecycle._write_task_and_views",
                    side_effect=lambda task, backend=None, command="write", lifecycle=None: captured.update(task=task) or True), \
              patch("fulcra_coord.cli.identity.resolve_agent", return_value="a:b:c"):
             args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
@@ -9558,7 +9558,7 @@ class TestTellRouteCapability(unittest.TestCase):
         agg = {"agents": [{"agent": "rev:h:r", "last_seen": old_ls, "capabilities": ["review"]}]}
         escalated = {}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.cli._escalate_review_to_human",
+             patch("fulcra_coord.lifecycle._escalate_review_to_human",
                    side_effect=lambda **kw: escalated.update(kw) or True), \
              patch("fulcra_coord.cli.identity.resolve_agent", return_value="a:b:c"):
             args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
