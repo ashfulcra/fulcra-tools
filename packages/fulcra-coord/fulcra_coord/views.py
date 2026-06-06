@@ -319,6 +319,21 @@ def is_prunable_presence(record, now=None, presence_days=None):
     return (now - dt).total_seconds() / 86400.0 >= _presence_retention_days(presence_days)
 
 
+def is_prunable_health(record, now=None, presence_days=None):
+    """True when a health record's reconcile_at is older than the dead-presence
+    retention window — a decommissioned host's record that would otherwise linger
+    stale-forever. Reuses _presence_retention_days so health and dead presence
+    prune in LOCKSTEP. reconcile_at parsed via _parse_dt (never lexical); a
+    missing/unparseable reconcile_at is KEPT (fail-safe: never delete what we
+    can't date)."""
+    if now is None:
+        now = _now()
+    dt = _parse_dt(record.get("reconcile_at", ""))
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _presence_retention_days(presence_days)
+
+
 HEALTH_OUTAGE_SECONDS_DEFAULT = 3 * 3600  # ~3h
 
 

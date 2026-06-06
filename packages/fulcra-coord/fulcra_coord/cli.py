@@ -2579,19 +2579,45 @@ def _prune_dead_presence(now: datetime, *, backend: Optional[list[str]] = None) 
     return n
 
 
+def _prune_dead_health(now: datetime, *, backend: Optional[list[str]] = None) -> int:
+    """Delete per-host health records for long-departed hosts — in lockstep with
+    _prune_dead_presence (same window), so a decommissioned host's presence AND
+    health records disappear together. views.is_prunable_health FAILS SAFE: an
+    undatable record is KEPT, never pruned. Best-effort, per-item isolated;
+    platform soft-delete keeps a pruned record restorable. Returns count deleted."""
+    n = 0
+    try:
+        for path in remote.list_files(remote.health_prefix(), backend=backend):
+            if not path.endswith(".json"):
+                continue
+            try:
+                rec = remote.download_json(path, backend=backend)
+                if rec and views.is_prunable_health(rec, now):
+                    if remote.delete(path, backend=backend):
+                        n += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return n
+
+
 def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
                    deadline: float, backend: Optional[list[str]] = None) -> dict[str, Any]:
     """The retention pass, folded into reconcile. Best-effort: NEVER raises into
     the reconcile tick — any failure returns a result dict, logged by the caller.
     Returns {"skipped": True} when throttled/errored, else
-    {"archived": N, "deferred": D, "pruned_markers": M, "pruned_presence": K}.
+    {"archived": N, "deferred": D, "pruned_markers": M, "pruned_presence": K,
+    "pruned_health": H}.
 
     1. THROTTLE: _claim_retention_marker(now) — first host today wins; others skip.
     2. ARCHIVE up to _retention_max_per_run() archivable tasks (views.
        is_archivable_task), stopping early when the TIME BUDGET (caller's
        reconcile `deadline` minus a few seconds' headroom) is nearly spent. The
        remainder is DEFERRED (counted + logged) and drains next pass.
-    3. PRUNE spent markers + dead presence (Task 6 fills these in; stubbed to 0).
+    3. PRUNE spent markers + dead presence + dead health records (the last two on
+       the same presence-retention window, so a decommissioned host's presence and
+       health records drop in lockstep).
     Per-item isolation: one task's archive failure is skipped, not fatal. The
     `deadline` is reconcile's existing deadline local, so the budget COMPOSES with
     (never double-counts) reconcile's 90s ceiling."""
@@ -2628,8 +2654,10 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
 
     pruned_markers = _prune_markers(now, backend=backend)
     pruned_presence = _prune_dead_presence(now, backend=backend)
+    pruned_health = _prune_dead_health(now, backend=backend)
     return {"archived": archived, "deferred": deferred,
-            "pruned_markers": pruned_markers, "pruned_presence": pruned_presence}
+            "pruned_markers": pruned_markers, "pruned_presence": pruned_presence,
+            "pruned_health": pruned_health}
 
 
 def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -3883,7 +3911,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         if not ret.get("skipped"):
             _info(f"  Retention: archived {ret['archived']} task(s) "
                   f"(deferred {ret['deferred']}), pruned {ret['pruned_markers']} marker(s), "
-                  f"{ret['pruned_presence']} dead presence.")
+                  f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health.")
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
