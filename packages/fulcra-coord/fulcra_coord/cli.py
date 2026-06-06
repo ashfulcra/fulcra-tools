@@ -9,7 +9,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
-import re
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
