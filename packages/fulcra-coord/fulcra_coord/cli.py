@@ -2043,6 +2043,36 @@ def _inbox_surface_path(agent: str):
     return cache.cache_root() / f"inbox-pending-{listener.agent_slug(agent)}.json"
 
 
+def _build_health_record(*, now, duration_s, tasks_loaded, views_refreshed,
+                         repair_backlog, retention_last_run, listener_last_fire,
+                         bus_task_count) -> dict:
+    """Assemble the per-host health record from a SUCCESSFUL reconcile's locals
+    plus cheap reads. Pure given its args; identity/version read here so the
+    caller stays a one-liner. host = short hostname (matches identity.derived_agent);
+    agent = resolve_agent(). reconcile_at is the success instant."""
+    import socket
+    from . import __version__
+    try:
+        host = socket.gethostname().split(".")[0]
+    except Exception:
+        host = "host"
+    return {
+        "schema": "fulcra.coordination.health.v1",
+        "host": host,
+        "agent": identity.resolve_agent(),
+        "version": __version__,
+        "reconcile_at": now.astimezone(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+        "duration_s": duration_s,
+        "tasks_loaded": tasks_loaded,
+        "views_refreshed": views_refreshed,
+        "repair_backlog": repair_backlog,
+        "retention_last_run": retention_last_run,
+        "listener_last_fire": listener_last_fire,
+        "bus_task_count": bus_task_count,
+    }
+
+
 def _needs_me_seen_path(human: str):
     """Seen-set surface for blocked-on-you notifications, keyed by the HUMAN
     handle (not the polling agent): the "has the operator already been alerted
@@ -3742,6 +3772,49 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         ops_log.log_op("reconcile", status="partial", detail=f"failed views: {failures}")
         # Do NOT clear op markers — views are still broken and need another reconcile run.
         return 1
+
+    # --- Self-reported per-host health record (spec v2 §1) -------------------
+    # SUCCESS POINT: we are PAST the `if failures: return 1` guard above, so
+    # failures == [] here. The health write is its OWN failure-isolated upload —
+    # NOT a member of the parallel view-upload batch (which completes BEFORE the
+    # failure verdict, so a batched health file would upload even on a FAILING
+    # reconcile and falsely read healthy). It is also NOT gated on the best-effort
+    # sub-passes (_sweep_review_routes / _run_retention ran above and never fail
+    # the tick); gating on their flakiness would suppress a healthy heartbeat. A
+    # health-write failure logs and NEVER changes this tick's return code.
+    try:
+        retention_last_run = None
+        try:
+            rmark = remote.download_json(remote.retention_marker_path(now), backend=backend)
+            if isinstance(rmark, dict):
+                retention_last_run = rmark.get("at") or rmark.get("date")
+        except Exception:
+            retention_last_run = None
+        listener_last_fire = None
+        try:
+            surface = _inbox_surface_path(identity.resolve_agent())
+            if surface.exists():
+                listener_last_fire = datetime.fromtimestamp(
+                    surface.stat().st_mtime, tz=timezone.utc).isoformat(
+                    timespec="microseconds").replace("+00:00", "Z")
+        except Exception:
+            listener_last_fire = None
+        record = _build_health_record(
+            now=now,
+            duration_s=round(time.monotonic() - t0, 3),
+            tasks_loaded=len(all_tasks),
+            views_refreshed=len(all_views),
+            repair_backlog=len(needs_repair),
+            retention_last_run=retention_last_run,
+            listener_last_fire=listener_last_fire,
+            bus_task_count=len(all_tasks),
+        )
+        slug = views.agent_slug(identity.resolve_agent())
+        if not remote.upload_json(record, remote.health_remote_path(slug), backend=backend):
+            _warn("  Health record upload failed (best-effort; tick unaffected).")
+    except Exception as e:
+        _warn(f"  Health record write error (skipped): {e}")
+    # ------------------------------------------------------------------------
 
     for m in needs_repair:
         cache.clear_op_marker(m["op_id"])
