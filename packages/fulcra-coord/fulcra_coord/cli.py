@@ -2043,6 +2043,122 @@ def _inbox_surface_path(agent: str):
     return cache.cache_root() / f"inbox-pending-{listener.agent_slug(agent)}.json"
 
 
+def _build_health_record(*, now, duration_s, tasks_loaded, views_refreshed,
+                         repair_backlog, retention_last_run, listener_last_fire,
+                         bus_task_count) -> dict:
+    """Assemble the per-host health record from a SUCCESSFUL reconcile's locals
+    plus cheap reads. Pure given its args; identity/version read here so the
+    caller stays a one-liner. host = short hostname (matches identity.derived_agent);
+    agent = resolve_agent(). reconcile_at is the success instant."""
+    import socket
+    from . import __version__
+    try:
+        host = socket.gethostname().split(".")[0]
+    except Exception:
+        host = "host"
+    return {
+        "schema": "fulcra.coordination.health.v1",
+        "host": host,
+        "agent": identity.resolve_agent(),
+        "version": __version__,
+        "reconcile_at": now.astimezone(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+        "duration_s": duration_s,
+        "tasks_loaded": tasks_loaded,
+        "views_refreshed": views_refreshed,
+        "repair_backlog": repair_backlog,
+        "retention_last_run": retention_last_run,
+        "listener_last_fire": listener_last_fire,
+        "bus_task_count": bus_task_count,
+    }
+
+
+def _load_health_records(*, backend: Optional[list[str]] = None) -> list[dict]:
+    """List health/*.json and download each, tolerating a missing/garbage file
+    (None is skipped) and a non-json listing entry. Best-effort: a failed list
+    yields []. Per the 0.8.x hardening, never raises into a caller."""
+    recs: list[dict] = []
+    try:
+        for path in remote.list_files(remote.health_prefix(), backend=backend):
+            if not path.endswith(".json"):
+                continue
+            try:
+                rec = remote.download_json(path, backend=backend)
+            except Exception:
+                rec = None
+            if isinstance(rec, dict):
+                recs.append(rec)
+    except Exception:
+        pass
+    return recs
+
+
+def _freshest_digest_emit(*, backend: Optional[list[str]] = None):
+    """The bus-GLOBAL digest_last_emit: the freshest YYYY-MM-DD embedded in a
+    digest/markers/<date>-<window>.json path. None if no marker. Dated from the
+    PATH (no download) via views._MARKER_DATE_RE — the same date model the marker
+    prune uses. Best-effort."""
+    best = None
+    try:
+        for path in remote.list_files(remote.digest_markers_prefix(), backend=backend):
+            m = views._MARKER_DATE_RE.search(path)
+            if m and (best is None or m.group(1) > best):
+                best = m.group(1)
+    except Exception:
+        pass
+    return best
+
+
+def _assess_fleet(*, now: datetime, backend: Optional[list[str]] = None) -> dict:
+    """Load all health inputs (records + bus markers) and run the pure judgment.
+    Shared by cmd_health, the doctor fold, and the digest (which passes the result
+    into the pure builder). Best-effort reads — a missing marker leaves its field
+    None, never an exception into the caller."""
+    recs = _load_health_records(backend=backend)
+    digest_emit = _freshest_digest_emit(backend=backend)
+    retention_last_run = None
+    try:
+        rmark = remote.download_json(remote.retention_marker_path(now), backend=backend)
+        if isinstance(rmark, dict):
+            retention_last_run = rmark.get("at") or rmark.get("date")
+    except Exception:
+        retention_last_run = None
+    return views.assess_infra_health(
+        recs, now=now, digest_last_emit=digest_emit,
+        retention_last_run=retention_last_run, task_count=len(recs) or None)
+
+
+def cmd_health(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Fleet coordination-health dashboard: load health/*.json, judge via
+    views.assess_infra_health (reconcile-staleness gating only, v1), print per
+    host status + reasons + metrics and the bus block. --format json for tooling.
+    Read-only; tolerant of a missing/garbage record (the 0.8.x hardening)."""
+    out_format = getattr(args, "format", "table")
+    now = datetime.now(timezone.utc)
+    result = _assess_fleet(now=now, backend=backend)
+
+    if out_format == "json":
+        _print_json(result)
+        return 0
+
+    worst = result["worst_status"]
+    _info(f"\nfleet health: {worst}")
+    if not result["hosts"]:
+        _info("  (no hosts reporting health records yet)")
+    for h in result["hosts"]:
+        reasons = ("; ".join(h["reasons"])) if h["reasons"] else "ok"
+        _info(f"  [{h['status']}] {h['host']} — {reasons}")
+        m = h["metrics"]
+        _info(f"      reconcile_at={m.get('reconcile_at')} "
+              f"duration_s={m.get('duration_s')} tasks={m.get('tasks_loaded')} "
+              f"views={m.get('views_refreshed')} backlog={m.get('repair_backlog')}")
+    b = result["bus"]
+    miss = " (MISSED window)" if b["missed_digest_window"] else ""
+    _info(f"  bus: digest_last_emit={b['digest_last_emit']}{miss} "
+          f"retention_last_run={b['retention_last_run']} task_count={b['task_count']}")
+    return 0
+
+
 def _needs_me_seen_path(human: str):
     """Seen-set surface for blocked-on-you notifications, keyed by the HUMAN
     handle (not the polling agent): the "has the operator already been alerted
@@ -2256,6 +2372,32 @@ def _render_digest(digest: dict[str, Any], *, window: str) -> tuple[str, str]:
         sections.append("Stale (no update past threshold) (" + str(len(stale)) + "):")
         sections.extend(_digest_lines(stale, _s))
 
+    # Infra line (v1 PUSH surface): one compact line from a pre-computed
+    # assess_infra_health dict. The digest scheduler runs independently of
+    # reconcile, so this reports a broken reconcile even on a single-host box.
+    # All-healthy -> a brief affirmative ("N hosts healthy"); any unhealthy host
+    # or a missed digest window -> "infra: ⚠ host reason · …".
+    infra = digest.get("infra")
+    if infra:
+        hosts = infra.get("hosts") or []
+        worst = infra.get("worst_status", "healthy")
+        if worst == "healthy" and not infra.get("bus", {}).get("missed_digest_window"):
+            healthy_n = sum(1 for h in hosts if h.get("status") == "healthy")
+            if healthy_n:
+                sections.append("")
+                sections.append(f"infra: {healthy_n} hosts healthy")
+        else:
+            bad = [h for h in hosts if h.get("status") in ("degraded", "outage", "not_reporting")]
+            parts = []
+            for h in bad:
+                reason = (h.get("reasons") or ["?"])[0]
+                parts.append(f"{h.get('host', '?')} {reason}")
+            if infra.get("bus", {}).get("missed_digest_window"):
+                parts.append("digest window missed")
+            sections.append("")
+            sections.append("infra: ⚠ " + " · ".join(parts) if parts
+                            else f"infra: {worst}")
+
     note = "\n".join(sections).strip()
     return name, note
 
@@ -2437,19 +2579,45 @@ def _prune_dead_presence(now: datetime, *, backend: Optional[list[str]] = None) 
     return n
 
 
+def _prune_dead_health(now: datetime, *, backend: Optional[list[str]] = None) -> int:
+    """Delete per-host health records for long-departed hosts — in lockstep with
+    _prune_dead_presence (same window), so a decommissioned host's presence AND
+    health records disappear together. views.is_prunable_health FAILS SAFE: an
+    undatable record is KEPT, never pruned. Best-effort, per-item isolated;
+    platform soft-delete keeps a pruned record restorable. Returns count deleted."""
+    n = 0
+    try:
+        for path in remote.list_files(remote.health_prefix(), backend=backend):
+            if not path.endswith(".json"):
+                continue
+            try:
+                rec = remote.download_json(path, backend=backend)
+                if rec and views.is_prunable_health(rec, now):
+                    if remote.delete(path, backend=backend):
+                        n += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return n
+
+
 def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
                    deadline: float, backend: Optional[list[str]] = None) -> dict[str, Any]:
     """The retention pass, folded into reconcile. Best-effort: NEVER raises into
     the reconcile tick — any failure returns a result dict, logged by the caller.
     Returns {"skipped": True} when throttled/errored, else
-    {"archived": N, "deferred": D, "pruned_markers": M, "pruned_presence": K}.
+    {"archived": N, "deferred": D, "pruned_markers": M, "pruned_presence": K,
+    "pruned_health": H}.
 
     1. THROTTLE: _claim_retention_marker(now) — first host today wins; others skip.
     2. ARCHIVE up to _retention_max_per_run() archivable tasks (views.
        is_archivable_task), stopping early when the TIME BUDGET (caller's
        reconcile `deadline` minus a few seconds' headroom) is nearly spent. The
        remainder is DEFERRED (counted + logged) and drains next pass.
-    3. PRUNE spent markers + dead presence (Task 6 fills these in; stubbed to 0).
+    3. PRUNE spent markers + dead presence + dead health records (the last two on
+       the same presence-retention window, so a decommissioned host's presence and
+       health records drop in lockstep).
     Per-item isolation: one task's archive failure is skipped, not fatal. The
     `deadline` is reconcile's existing deadline local, so the budget COMPOSES with
     (never double-counts) reconcile's 90s ceiling."""
@@ -2486,8 +2654,10 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
 
     pruned_markers = _prune_markers(now, backend=backend)
     pruned_presence = _prune_dead_presence(now, backend=backend)
+    pruned_health = _prune_dead_health(now, backend=backend)
     return {"archived": archived, "deferred": deferred,
-            "pruned_markers": pruned_markers, "pruned_presence": pruned_presence}
+            "pruned_markers": pruned_markers, "pruned_presence": pruned_presence,
+            "pruned_health": pruned_health}
 
 
 def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -2515,8 +2685,16 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     agg = remote.download_json(remote.presence_view_path(), backend=backend)
     presence = (agg or {}).get("agents", []) if agg else []
 
+    # v1 push surface: compute the fleet assessment once (best-effort; a read
+    # failure leaves infra=None and the digest renders without the line) and pass
+    # it into the pure builder so the builder stays I/O-free.
+    try:
+        infra = _assess_fleet(now=now, backend=backend)
+    except Exception:
+        infra = None
+
     digest = views.build_operator_digest(
-        summaries, presence, human=human, now=now, since=since)
+        summaries, presence, human=human, now=now, since=since, infra=infra)
 
     if out_format == "json":
         _print_json(digest)
@@ -3733,7 +3911,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         if not ret.get("skipped"):
             _info(f"  Retention: archived {ret['archived']} task(s) "
                   f"(deferred {ret['deferred']}), pruned {ret['pruned_markers']} marker(s), "
-                  f"{ret['pruned_presence']} dead presence.")
+                  f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health.")
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
@@ -3742,6 +3920,49 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         ops_log.log_op("reconcile", status="partial", detail=f"failed views: {failures}")
         # Do NOT clear op markers — views are still broken and need another reconcile run.
         return 1
+
+    # --- Self-reported per-host health record (spec v2 §1) -------------------
+    # SUCCESS POINT: we are PAST the `if failures: return 1` guard above, so
+    # failures == [] here. The health write is its OWN failure-isolated upload —
+    # NOT a member of the parallel view-upload batch (which completes BEFORE the
+    # failure verdict, so a batched health file would upload even on a FAILING
+    # reconcile and falsely read healthy). It is also NOT gated on the best-effort
+    # sub-passes (_sweep_review_routes / _run_retention ran above and never fail
+    # the tick); gating on their flakiness would suppress a healthy heartbeat. A
+    # health-write failure logs and NEVER changes this tick's return code.
+    try:
+        retention_last_run = None
+        try:
+            rmark = remote.download_json(remote.retention_marker_path(now), backend=backend)
+            if isinstance(rmark, dict):
+                retention_last_run = rmark.get("at") or rmark.get("date")
+        except Exception:
+            retention_last_run = None
+        listener_last_fire = None
+        try:
+            surface = _inbox_surface_path(identity.resolve_agent())
+            if surface.exists():
+                listener_last_fire = datetime.fromtimestamp(
+                    surface.stat().st_mtime, tz=timezone.utc).isoformat(
+                    timespec="microseconds").replace("+00:00", "Z")
+        except Exception:
+            listener_last_fire = None
+        record = _build_health_record(
+            now=now,
+            duration_s=round(time.monotonic() - t0, 3),
+            tasks_loaded=len(all_tasks),
+            views_refreshed=len(all_views),
+            repair_backlog=len(needs_repair),
+            retention_last_run=retention_last_run,
+            listener_last_fire=listener_last_fire,
+            bus_task_count=len(all_tasks),
+        )
+        slug = views.agent_slug(identity.resolve_agent())
+        if not remote.upload_json(record, remote.health_remote_path(slug), backend=backend):
+            _warn("  Health record upload failed (best-effort; tick unaffected).")
+    except Exception as e:
+        _warn(f"  Health record write error (skipped): {e}")
+    # ------------------------------------------------------------------------
 
     for m in needs_repair:
         cache.clear_op_marker(m["op_id"])
@@ -3995,6 +4216,24 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
             _info("  Token:         FAIL (no FULCRA_ACCESS_TOKEN and "
                   "`fulcra auth print-access-token` did not yield one)")
             _info("  -> Run: fulcra auth login   (or set FULCRA_ACCESS_TOKEN)")
+
+    # Fleet health (the per-host coordination-machinery self-reports). Local
+    # on-host checks above + fleet health here = the full picture. Wrapped
+    # defensively: a fleet-health read error must degrade to a noted line, never
+    # crash doctor (mirrors the file-probe guard above).
+    _info(f"\n[Fleet health]")
+    try:
+        result = _assess_fleet(now=datetime.now(timezone.utc), backend=backend)
+        _info(f"  Worst status: {result['worst_status']}")
+        for h in result["hosts"]:
+            reasons = ("; ".join(h["reasons"])) if h["reasons"] else "ok"
+            _info(f"  [{h['status']}] {h['host']} — {reasons}")
+        if not result["hosts"]:
+            _info("  (no hosts reporting health records yet)")
+        if result["bus"]["missed_digest_window"]:
+            _info("  -> digest window appears MISSED (no recent digest marker)")
+    except Exception as e:
+        _info(f"  Fleet health: unavailable ({e})")
 
     _info(f"\n{'='*50}")
     _info("OK" if ok_all else "Issues detected — see above.")

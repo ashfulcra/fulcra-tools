@@ -319,6 +319,153 @@ def is_prunable_presence(record, now=None, presence_days=None):
     return (now - dt).total_seconds() / 86400.0 >= _presence_retention_days(presence_days)
 
 
+def is_prunable_health(record, now=None, presence_days=None):
+    """True when a health record's reconcile_at is older than the dead-presence
+    retention window — a decommissioned host's record that would otherwise linger
+    stale-forever. Reuses _presence_retention_days so health and dead presence
+    prune in LOCKSTEP. reconcile_at parsed via _parse_dt (never lexical); a
+    missing/unparseable reconcile_at is KEPT (fail-safe: never delete what we
+    can't date)."""
+    if now is None:
+        now = _now()
+    dt = _parse_dt(record.get("reconcile_at", ""))
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _presence_retention_days(presence_days)
+
+
+HEALTH_OUTAGE_SECONDS_DEFAULT = 3 * 3600  # ~3h
+
+
+def _health_degraded_seconds(seconds=None):
+    """Age (s) past which a host's newest reconcile_at is 'degraded'.
+
+    Default ties to the heartbeat interval (interval x 3) — not bare wall-clock —
+    so one slow or skipped tick can't flap a host to degraded. interval has no env
+    override; INTERVAL_MIN_DEFAULT (minutes) is the only source. Env
+    FULCRA_COORD_HEALTH_DEGRADED_SECONDS overrides; non-numeric -> default."""
+    if seconds is not None:
+        return float(seconds)
+    raw = os.environ.get("FULCRA_COORD_HEALTH_DEGRADED_SECONDS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    from . import heartbeat  # lazy: keep views import-light, avoid any cycle
+    return float(heartbeat.INTERVAL_MIN_DEFAULT * 60 * 3)
+
+
+def _health_outage_seconds(seconds=None):
+    """Age (s) past which a host is 'outage' (default ~3h). Env
+    FULCRA_COORD_HEALTH_OUTAGE_SECONDS overrides; non-numeric -> default."""
+    if seconds is not None:
+        return float(seconds)
+    raw = os.environ.get("FULCRA_COORD_HEALTH_OUTAGE_SECONDS", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return float(HEALTH_OUTAGE_SECONDS_DEFAULT)
+
+
+# `digest_last_emit` is DATE-only (the freshest YYYY-MM-DD in digest/markers/),
+# normalized to that date's MIDNIGHT UTC — so its age is measured from midnight,
+# not from the actual emit instant. That date-granularity is the trap: a healthy
+# fleet's freshest marker, as seen at the next morning run, is yesterday's date.
+#
+# Two facts pin the threshold (both verified by enumerating every run instant):
+#   * `_assess_fleet` runs at the TOP of cmd_digest, BEFORE the current window
+#     claims its own marker — so at the 08:00 morning run the freshest marker is
+#     YESTERDAY's (today's morning marker doesn't exist yet).
+#   * Worst HEALTHY staleness is the 08:00 morning run vs. yesterday-midnight =
+#     32h. The earliest a TRUE miss can show (a whole day's BOTH windows skipped,
+#     first observed at the next 08:00) is day-2-midnight -> 56h.
+# So the miss threshold must sit strictly between 32h and 56h or it either
+# cries wolf every single morning (the old 20h did exactly this — < 32h) or
+# misses a real outage. 44h is the midpoint, robust to clock skew either way.
+HEALTH_DIGEST_MISS_HOURS = 44
+
+
+def assess_infra_health(health_records, *, now=None, degraded_after_s=None,
+                        outage_after_s=None, digest_last_emit=None,
+                        retention_last_run=None, task_count=None):
+    """Judge fleet infra health from per-host health records (PURE, no I/O).
+
+    Status gates on RECONCILE-STALENESS ONLY (v1): newest reconcile_at within
+    degraded_after_s -> healthy; older -> degraded; older than outage_after_s ->
+    outage. A record whose reconcile_at can't be parsed is 'not_reporting' —
+    informational, never escalates worst_status (an un-upgraded / heartbeat-less
+    host must not raise a false alarm). Duration / repair_backlog / bus size are
+    surfaced as METRICS, never gated (no baselined thresholds in v1).
+
+    Bus block: missed_digest_window is True only on a TRUE miss — no marker, or a
+    last emit older than HEALTH_DIGEST_MISS_HOURS (44h; see the constant — it must
+    clear the 32h worst-case healthy staleness of a DATE-only marker at the next
+    morning run, while still catching a 56h full-day-skipped miss). A normal
+    overnight gap is healthy. digest_last_emit / retention_last_run are bus-GLOBAL
+    (any-agent, dedup'd) so they live here, not in the per-host record. All
+    datetime gates use _parse_dt; never lexical."""
+    if now is None:
+        now = _now()
+    deg = _health_degraded_seconds(degraded_after_s)
+    out = _health_outage_seconds(outage_after_s)
+
+    hosts = []
+    worst_rank = 0  # 0 healthy, 1 degraded, 2 outage; not_reporting does NOT raise it
+    rank = {"healthy": 0, "degraded": 1, "outage": 2}
+    for rec in health_records:
+        dt = _parse_dt(rec.get("reconcile_at") or "")
+        metrics = {
+            "duration_s": rec.get("duration_s"),
+            "tasks_loaded": rec.get("tasks_loaded"),
+            "views_refreshed": rec.get("views_refreshed"),
+            "repair_backlog": rec.get("repair_backlog"),
+            "bus_task_count": rec.get("bus_task_count"),
+            "retention_last_run": rec.get("retention_last_run"),
+            "listener_last_fire": rec.get("listener_last_fire"),
+            "reconcile_at": rec.get("reconcile_at"),
+        }
+        if dt is None:
+            hosts.append({"host": rec.get("host") or rec.get("agent") or "?",
+                          "agent": rec.get("agent"), "status": "not_reporting",
+                          "reasons": ["no parseable reconcile_at"], "metrics": metrics})
+            continue
+        age = (now - dt).total_seconds()
+        if age >= out:
+            status, reasons = "outage", [f"reconcile stale {int(age // 60)}m (outage)"]
+        elif age >= deg:
+            status, reasons = "degraded", [f"reconcile stale {int(age // 60)}m"]
+        else:
+            status, reasons = "healthy", []
+        worst_rank = max(worst_rank, rank[status])
+        hosts.append({"host": rec.get("host") or rec.get("agent") or "?",
+                      "agent": rec.get("agent"), "status": status,
+                      "reasons": reasons, "metrics": metrics})
+
+    # Bus-level digest miss: True if no marker OR last emit older than the slack
+    # window. Datetime parse via _parse_dt (digest_last_emit is a YYYY-MM-DD date
+    # string from the freshest digest/markers/ path, normalized to midnight UTC).
+    missed = True
+    if digest_last_emit:
+        dt = _parse_dt(digest_last_emit) or _parse_dt(f"{digest_last_emit}T00:00:00Z")
+        if dt is not None:
+            missed = (now - dt).total_seconds() >= HEALTH_DIGEST_MISS_HOURS * 3600
+
+    worst = {0: "healthy", 1: "degraded", 2: "outage"}[worst_rank]
+    return {
+        "hosts": hosts,
+        "bus": {
+            "digest_last_emit": digest_last_emit,
+            "retention_last_run": retention_last_run,
+            "task_count": task_count,
+            "missed_digest_window": missed,
+        },
+        "worst_status": worst,
+    }
+
+
 def _acked_by(t: dict[str, Any], who: str) -> bool:
     """True when ``who`` has inbox-acked this task, resolved from EITHER a full
     body (an inbox_ack event whose ``by`` is who) OR a summary's flat ``acked_by``
@@ -1197,7 +1344,8 @@ def build_operator_digest(summaries: list[dict[str, Any]],
                           presence: list[dict[str, Any]], *,
                           human: str,
                           now: Optional[datetime] = None,
-                          since: Optional[datetime] = None) -> dict[str, Any]:
+                          since: Optional[datetime] = None,
+                          infra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Fold bus state into the operator's situational-awareness digest (pure).
 
     Four blocks, derived ONLY from task_summary dicts + presence records (no I/O,
@@ -1214,6 +1362,9 @@ def build_operator_digest(summaries: list[dict[str, Any]],
         (done/abandoned with done_at >= since). Parsed-datetime ``since`` compare.
       * ``stale`` — active tasks past the stale threshold (``is_stale``), the same
         needs-attention safety-net set, sorted oldest-first.
+      * ``infra`` — a pre-computed ``assess_infra_health`` dict (passed in; the
+        pure builder does no I/O), rendered as one compact line by
+        ``_render_digest``. None when not supplied.
 
     ``now``/``since`` default to wall-clock / (now - 12h) so a bare call still
     works, but the command always injects them explicitly."""
@@ -1266,4 +1417,5 @@ def build_operator_digest(summaries: list[dict[str, Any]],
         "upcoming": upcoming,
         "per_agent": per_agent,
         "stale": stale,
+        "infra": infra,  # pre-computed assess_infra_health dict, or None (v1 push surface)
     }

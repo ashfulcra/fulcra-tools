@@ -398,6 +398,18 @@ def presence_prefix() -> str:
     return f"{remote_root()}/presence/"
 
 
+def health_remote_path(host_slug: str) -> str:
+    """Per-host self-reported health record path. Takes an ALREADY-SLUGGED id
+    (views.agent_slug). Only that host writes its own file -> zero cross-host
+    write contention (the no-CAS-safe per-file pattern, same as presence)."""
+    return f"{remote_root()}/health/{host_slug}.json"
+
+
+def health_prefix() -> str:
+    """List prefix for per-host health records (health command + retention prune)."""
+    return f"{remote_root()}/health/"
+
+
 # ---------------------------------------------------------------------------
 # Auth / doctor helpers
 # ---------------------------------------------------------------------------
