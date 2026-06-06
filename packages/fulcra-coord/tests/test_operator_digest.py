@@ -280,7 +280,7 @@ class TestDigestCommand(unittest.TestCase):
         return ns
 
     def test_dry_run_writes_nothing(self):
-        with patch("fulcra_coord.cli._load_task_summaries", return_value=self.summaries), \
+        with patch("fulcra_coord.digest._load_task_summaries", return_value=self.summaries), \
              patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
              patch("fulcra_coord.cli.lifecycle_annotations.emit_digest_annotation") as emit:
             rc = cli.cmd_digest(self._args(dry_run=True), backend=["false"])
@@ -288,9 +288,9 @@ class TestDigestCommand(unittest.TestCase):
         emit.assert_not_called()
 
     def test_real_run_emits(self):
-        with patch("fulcra_coord.cli._load_task_summaries", return_value=self.summaries), \
+        with patch("fulcra_coord.digest._load_task_summaries", return_value=self.summaries), \
              patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
-             patch("fulcra_coord.cli._claim_digest_marker", return_value=True), \
+             patch("fulcra_coord.digest._claim_digest_marker", return_value=True), \
              patch("fulcra_coord.cli.lifecycle_annotations.emit_digest_annotation",
                    return_value=True) as emit:
             rc = cli.cmd_digest(self._args(), backend=["false"])
@@ -303,7 +303,7 @@ class TestDigestCommand(unittest.TestCase):
     def test_json_format_prints_structured_digest(self):
         import io, contextlib
         buf = io.StringIO()
-        with patch("fulcra_coord.cli._load_task_summaries", return_value=self.summaries), \
+        with patch("fulcra_coord.digest._load_task_summaries", return_value=self.summaries), \
              patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
              contextlib.redirect_stdout(buf):
             rc = cli.cmd_digest(self._args(format="json"), backend=["false"])
