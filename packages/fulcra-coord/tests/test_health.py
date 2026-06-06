@@ -241,7 +241,7 @@ class TestDoctorHealthFold(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch("fulcra_coord.cli.remote.list_files", return_value=[]), \
              mock.patch("fulcra_coord.cli.remote.download_json", return_value=None), \
-             mock.patch("fulcra_coord.cli._assess_fleet",
+             mock.patch("fulcra_coord.doctor._assess_fleet",
                         return_value={"hosts": [{"host": "mac", "status": "healthy",
                                                  "reasons": [], "metrics": {}}],
                                       "bus": {"missed_digest_window": False,
@@ -255,7 +255,7 @@ class TestDoctorHealthFold(unittest.TestCase):
 
     def test_doctor_fleet_health_never_crashes_doctor(self):
         buf = io.StringIO()
-        with mock.patch("fulcra_coord.cli._assess_fleet",
+        with mock.patch("fulcra_coord.doctor._assess_fleet",
                         side_effect=RuntimeError("boom")), \
              mock.patch("fulcra_coord.cli.remote.check_cli_available",
                         return_value=(True, "ok")), \
