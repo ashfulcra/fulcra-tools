@@ -24,6 +24,11 @@ from .output import info as _info, warn as _warn
 
 
 def _derive_agent() -> str:
+    """Resolve the caller's agent id — the local copy of cli's identical one-liner.
+
+    Duplicated (not imported from cli) so installers.py stays a leaf module with no
+    back-import of cli; it is a thin stateless alias over identity.resolve_agent(),
+    so the duplication carries no state or drift risk."""
     return identity.resolve_agent()
 
 def _report_resolved_cli(plan: dict[str, Any]) -> None:
