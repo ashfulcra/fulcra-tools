@@ -2,25 +2,52 @@ name: macOS CI
 
 # Runs the full Python test suite on macOS so the macOS-only code paths
 # (PyObjC menubar, UserNotifications bundle guard, fulcra-CLI resolution
-# under launchd's restricted PATH) are exercised on every push + PR. The
-# two regressions the other-machine onboarding session hit
-# (`bundleProxyForCurrentProcess is nil` crash, sign-in path resolving
-# `shutil.which("fulcra")` to None) both merged because nothing tested
-# those paths on a clean macOS runner.
+# under launchd's restricted PATH) are exercised. The two regressions the
+# other-machine onboarding session hit (`bundleProxyForCurrentProcess is
+# nil` crash, sign-in path resolving `shutil.which("fulcra")` to None) both
+# merged because nothing tested those paths on a clean macOS runner.
+#
+# COST: macOS runners bill at 10x on this PRIVATE repo, and this job runs the
+# WHOLE workspace (incl. PyObjC, which can't even install on Linux), so it
+# cannot simply move to ubuntu. To stop draining the Actions free tier on
+# changes with no macOS-specific content, the triggers are PATH-FILTERED to
+# the files that actually carry macOS behaviour: the menubar package and the
+# fulcra-coord launchd / notification / CLI-resolution modules, plus this
+# workflow and the dependency manifests (a dep bump can break the macOS
+# build). A change outside this set (e.g. a pure fulcra-coord refactor) skips
+# this job and is gated by the local test suite + review; `workflow_dispatch`
+# reruns it on demand. If you add a new macOS-specific path, list it in BOTH
+# the push and pull_request blocks below.
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'attention/chrome/**'
+    paths:
+      - 'packages/fulcra-menubar/**'
+      - 'packages/fulcra-coord/fulcra_coord/remote.py'
+      - 'packages/fulcra-coord/fulcra_coord/installers.py'
+      - 'packages/fulcra-coord/fulcra_coord/listener.py'
+      - 'packages/fulcra-coord/fulcra_coord/heartbeat.py'
+      - 'packages/fulcra-coord/fulcra_coord/claude_code.py'
+      - 'packages/fulcra-coord/fulcra_coord/openclaw.py'
+      - 'packages/fulcra-coord/fulcra_coord/codex.py'
+      - '.github/workflows/macos.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'attention/chrome/**'
+    paths:
+      - 'packages/fulcra-menubar/**'
+      - 'packages/fulcra-coord/fulcra_coord/remote.py'
+      - 'packages/fulcra-coord/fulcra_coord/installers.py'
+      - 'packages/fulcra-coord/fulcra_coord/listener.py'
+      - 'packages/fulcra-coord/fulcra_coord/heartbeat.py'
+      - 'packages/fulcra-coord/fulcra_coord/claude_code.py'
+      - 'packages/fulcra-coord/fulcra_coord/openclaw.py'
+      - 'packages/fulcra-coord/fulcra_coord/codex.py'
+      - '.github/workflows/macos.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
   workflow_dispatch:
 
 jobs:
