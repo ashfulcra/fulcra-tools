@@ -26,6 +26,12 @@ export const EXPIRY_SKEW_MS = 60_000;
 export interface StoredTokens {
   accessToken: string;
   refreshToken: string | null;
+  /** The OIDC id_token JWT, which carries the human display claims
+   * (name/email) the API-audience access token lacks. `toStored` always writes
+   * this (null when the token set omitted it). Optional on the type because a
+   * record persisted before id_token plumbing existed has no such field —
+   * those read back as `undefined`, which callers treat as null. */
+  idToken?: string | null;
   /** Absolute expiry, ms epoch. */
   expiresAt: number;
 }
@@ -37,15 +43,18 @@ export interface TokenStoreOpts {
 
 /** Convert an OIDC token response into the persisted shape, anchoring the
  * relative expires_in to an absolute timestamp. `existingRefresh` is kept
- * when the response omits a rotated refresh token. */
+ * when the response omits a rotated refresh token; `existingIdToken` is kept
+ * when the response omits an id_token (e.g. a refresh that returns none). */
 export function toStored(
   token: TokenSet,
   now: number,
   existingRefresh: string | null = null,
+  existingIdToken: string | null = null,
 ): StoredTokens {
   return {
     accessToken: token.access_token,
     refreshToken: token.refresh_token ?? existingRefresh,
+    idToken: token.id_token ?? existingIdToken,
     expiresAt: now + Math.max(0, token.expires_in) * 1000,
   };
 }
@@ -70,12 +79,25 @@ export class TokenStore {
     await this.storage.set({ [TOKEN_KEY]: tokens });
   }
 
+  /** Read the stored OIDC id_token, or null if not signed in / never
+   * captured (legacy record or a refresh that omitted it). Best-effort source
+   * of the human display claims (name/email) for the popup. */
+  async getIdToken(): Promise<string | null> {
+    const t = await this.get();
+    return t?.idToken ?? null;
+  }
+
   /** Persist a fresh OIDC token response (e.g. right after the device flow
-   * completes), anchoring its expiry. Keeps the prior refresh token if the
-   * new response omits one. */
+   * completes), anchoring its expiry. Keeps the prior refresh token and
+   * id_token if the new response omits either. */
   async setFromTokenSet(token: TokenSet): Promise<StoredTokens> {
     const existing = await this.get();
-    const stored = toStored(token, this.now(), existing?.refreshToken ?? null);
+    const stored = toStored(
+      token,
+      this.now(),
+      existing?.refreshToken ?? null,
+      existing?.idToken ?? null,
+    );
     await this.set(stored);
     return stored;
   }
@@ -117,7 +139,12 @@ export class TokenStore {
     }
     const oidc = new FulcraOidc({ fetch: opts.fetch });
     const refreshed = await oidc.refresh(tokens.refreshToken);
-    const stored = toStored(refreshed, this.now(), tokens.refreshToken);
+    const stored = toStored(
+      refreshed,
+      this.now(),
+      tokens.refreshToken,
+      tokens.idToken,
+    );
     await this.set(stored);
     return stored.accessToken;
   }

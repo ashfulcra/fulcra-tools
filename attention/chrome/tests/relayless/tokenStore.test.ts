@@ -15,10 +15,16 @@ const NOW = 1_000_000_000_000;
 describe("get/set/clear", () => {
   test("set then get round-trips; clear removes", async () => {
     const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
-    await ts.set({ accessToken: "AT", refreshToken: "RT", expiresAt: NOW + 1000 });
+    await ts.set({
+      accessToken: "AT",
+      refreshToken: "RT",
+      idToken: "IT",
+      expiresAt: NOW + 1000,
+    });
     expect(await ts.get()).toEqual({
       accessToken: "AT",
       refreshToken: "RT",
+      idToken: "IT",
       expiresAt: NOW + 1000,
     });
     await ts.clear();
@@ -44,6 +50,62 @@ describe("get/set/clear", () => {
       expires_in: 3600,
     });
     expect(stored.refreshToken).toBe("RT-keep");
+  });
+
+  test("setFromTokenSet stores the id_token from the token set", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    const stored = await ts.setFromTokenSet({
+      access_token: "AT",
+      refresh_token: "RT",
+      id_token: "ID-TOK",
+      expires_in: 3600,
+    });
+    expect(stored.idToken).toBe("ID-TOK");
+    expect((await ts.get())?.idToken).toBe("ID-TOK");
+  });
+
+  test("setFromTokenSet keeps prior id_token when a refresh omits it", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    await ts.set({
+      accessToken: "old",
+      refreshToken: "RT",
+      idToken: "ID-keep",
+      expiresAt: NOW,
+    });
+    const stored = await ts.setFromTokenSet({
+      access_token: "new",
+      expires_in: 3600,
+    });
+    expect(stored.idToken).toBe("ID-keep");
+  });
+});
+
+describe("getIdToken", () => {
+  test("returns the stored id_token", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    await ts.set({
+      accessToken: "AT",
+      refreshToken: "RT",
+      idToken: "ID-TOK",
+      expiresAt: NOW + 1000,
+    });
+    expect(await ts.getIdToken()).toBe("ID-TOK");
+  });
+
+  test("returns null when never signed in", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    expect(await ts.getIdToken()).toBeNull();
+  });
+
+  test("returns null for a legacy stored token with no idToken field", async () => {
+    const ts = new TokenStore({ storage: memStorage(), now: () => NOW });
+    // Simulate a pre-existing record written before idToken existed.
+    await ts.set({
+      accessToken: "AT",
+      refreshToken: "RT",
+      expiresAt: NOW + 1000,
+    });
+    expect(await ts.getIdToken()).toBeNull();
   });
 });
 

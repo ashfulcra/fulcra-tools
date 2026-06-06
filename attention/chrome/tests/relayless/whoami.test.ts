@@ -13,14 +13,33 @@ function jwt(payload: Record<string, unknown>): string {
 }
 
 describe("whoami", () => {
-  test("reads the email claim from the access-token JWT (no network)", async () => {
+  test("prefers the name claim over email in the id_token JWT (no network)", async () => {
+    const f = mockFetch(async () => new Response("{}", { status: 200 }));
+    const r = await whoami(jwt({ name: "Ash Kalb", email: "a@b.com", sub: "x" }), {
+      fetch: f,
+    });
+    expect(r.label).toBe("Ash Kalb");
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  test("reads the email claim when there is no name claim (no network)", async () => {
     const f = mockFetch(async () => new Response("{}", { status: 200 }));
     const r = await whoami(jwt({ email: "a@b.com", sub: "x" }), { fetch: f });
     expect(r.label).toBe("a@b.com");
     expect(f).not.toHaveBeenCalled();
   });
 
-  test("falls back to GET /user/v1alpha1/info when the JWT has no email", async () => {
+  test("falls back to the namespaced email claim when name/email absent", async () => {
+    const f = mockFetch(async () => new Response("{}", { status: 200 }));
+    const r = await whoami(
+      jwt({ "https://fulcradynamics.com/email": "ns@b.com", sub: "x" }),
+      { fetch: f },
+    );
+    expect(r.label).toBe("ns@b.com");
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  test("falls back to GET /user/v1alpha1/info when the JWT has no name/email", async () => {
     const f = mockFetch(async (input) => {
       expect(String(input)).toBe(`${API_BASE}/user/v1alpha1/info`);
       return new Response(JSON.stringify({ userid: "uid-123" }), {
