@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from fulcra_coord import cli, remote, views
+from fulcra_coord import cli, remote, views, retention
 
 _FAKE = str(Path(__file__).parent / "fake_fulcra_backend.py")
 
@@ -468,7 +468,7 @@ class TestRunRetention(_FakeBus):
         for t in tasks:
             self._put(f"/coordination/tasks/{t['id']}.json", t)
         now = datetime.now(timezone.utc)
-        with patch("fulcra_coord.cli._claim_retention_marker", return_value=True):
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=True):
             res = cli._run_retention(tasks, now=now, deadline=time.monotonic() + 60, backend=self.backend)
         self.assertEqual(res["archived"], 2)
         self.assertFalse(self._exists("/coordination/tasks/old-1.json"))
@@ -477,7 +477,7 @@ class TestRunRetention(_FakeBus):
     def test_throttle_skips_when_already_ran(self):
         tasks = [self._terminal("old-1")]
         self._put("/coordination/tasks/old-1.json", tasks[0])
-        with patch("fulcra_coord.cli._claim_retention_marker", return_value=False):
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=False):
             res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
                                      deadline=time.monotonic() + 60, backend=self.backend)
         self.assertEqual(res, {"skipped": True})
@@ -489,7 +489,7 @@ class TestRunRetention(_FakeBus):
             self._put(f"/coordination/tasks/{t['id']}.json", t)
         os.environ["FULCRA_COORD_RETENTION_MAX_PER_RUN"] = "2"
         try:
-            with patch("fulcra_coord.cli._claim_retention_marker", return_value=True):
+            with patch("fulcra_coord.retention._claim_retention_marker", return_value=True):
                 res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
                                          deadline=time.monotonic() + 60, backend=self.backend)
         finally:
@@ -505,7 +505,7 @@ class TestRunRetention(_FakeBus):
         tasks = [self._terminal(f"old-{i}") for i in range(3)]
         for t in tasks:
             self._put(f"/coordination/tasks/{t['id']}.json", t)
-        with patch("fulcra_coord.cli._claim_retention_marker", return_value=True) as claim:
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=True) as claim:
             res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
                                      deadline=time.monotonic() - 1, backend=self.backend)
         self.assertEqual(res, {"skipped": True})
@@ -518,20 +518,20 @@ class TestRunRetention(_FakeBus):
         for t in tasks:
             self._put(f"/coordination/tasks/{t['id']}.json", t)
         calls = {"n": 0}
-        real = cli._archive_task
+        real = retention._archive_task
         def flaky(task, *, backend=None):
             calls["n"] += 1
             if task["id"] == "good-1":
                 return False  # simulate a transient failure on one item
             return real(task, backend=backend)
-        with patch("fulcra_coord.cli._claim_retention_marker", return_value=True), \
-             patch("fulcra_coord.cli._archive_task", side_effect=flaky):
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=True), \
+             patch("fulcra_coord.retention._archive_task", side_effect=flaky):
             res = cli._run_retention(tasks, now=datetime.now(timezone.utc),
                                      deadline=time.monotonic() + 60, backend=self.backend)
         self.assertEqual(res["archived"], 1)  # good-2 still archived
 
     def test_never_raises(self):
-        with patch("fulcra_coord.cli._claim_retention_marker", side_effect=RuntimeError):
+        with patch("fulcra_coord.retention._claim_retention_marker", side_effect=RuntimeError):
             res = cli._run_retention([], now=datetime.now(timezone.utc),
                                      deadline=time.monotonic() + 60, backend=self.backend)
         self.assertEqual(res, {"skipped": True})
