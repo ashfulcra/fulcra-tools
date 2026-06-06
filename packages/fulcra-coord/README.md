@@ -91,7 +91,7 @@ fulcra-coord done TASK-... \
 | `doctor` | Check configuration and connectivity |
 | `install-shim` | Install CLI shim to `~/.local/bin/` |
 | `install-claude-code` | Install Claude Code lifecycle hooks (global by default) |
-| `install-openclaw` | Install OpenClaw Track A artifacts (boot/heartbeat prompts + shutdown/bootstrap hooks); add `--with-plugin` to also materialize the Track B Plugin-SDK plugin |
+| `install-openclaw` | Install OpenClaw Track A artifacts (boot/heartbeat prompts + shutdown/bootstrap hooks); add `--with-heartbeat --with-listener --agent <id>` to install the durable pickup path in the same command, and `--with-plugin` to also materialize the Track B Plugin-SDK plugin |
 | `install-codex` | Install Codex lifecycle hooks (SessionStart + PreCompact) into `~/.codex/hooks.json`. No Stop hook by design — Codex end-parking is delegated to the heartbeat |
 | `install-heartbeat` | Install a scheduled `reconcile` heartbeat (launchd on macOS, crontab elsewhere) — the safety net that sweeps stale tasks for crashed / end-hook-less agents (`--interval-min N`) |
 | `install-listener` | Install a scheduled `notify-inbox` listener (launchd on macOS, crontab elsewhere) — the durable, per-agent way to notice directed work while idle (`--agent`, `--interval-min N`, default 10). See `adapters/claude-code/LISTENER.md` |
@@ -223,6 +223,18 @@ Read commands use local cache when fresh. Full remote sync happens on `status` a
   the session's active task as `waiting`; and an `agent:bootstrap` handler that
   folds surfaced in-flight work into the session's `MEMORY.md` bootstrap slot via
   the mutable `event.context.bootstrapFiles` array. The three `handler.ts`
+  hooks make OpenClaw lifecycle-aware, but they are not by themselves an idle
+  listener. For a full install that can actually pick up bus directives while
+  OpenClaw is idle, run:
+
+  ```bash
+  fulcra-coord install-openclaw --agent openclaw:<host>:<role> --with-heartbeat --with-listener
+  ```
+
+  That single command installs the hooks, the singleton machine heartbeat, and
+  the per-agent listener. Use `--schedule-target-dir` / `--logs-dir` in tests or
+  managed deployments where launchd/crontab artifacts and logs must land outside
+  the defaults.
   templates are written to the real OpenClaw automation-hook API (verified
   against `docs.openclaw.ai/automation/hooks` and the `openclaw/openclaw` source
   — event shape, the `WorkspaceBootstrapFile` object type, and recognized

@@ -3286,6 +3286,57 @@ class TestInstallOpenClawCmd(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(os.path.join(self.root, "fulcra-coord-shutdown")))
 
+    def test_cmd_can_bundle_heartbeat_and_listener(self):
+        from fulcra_coord import cli as climod
+        from types import SimpleNamespace
+        schedule_dir = os.path.join(self.tmp, "LaunchAgents")
+        logs_dir = os.path.join(self.tmp, "Logs")
+        with patch("sys.platform", "darwin"):
+            rc = climod.cmd_install_openclaw(SimpleNamespace(
+                hooks_root=self.root,
+                agent="openclaw:test:infra",
+                with_heartbeat=True,
+                with_listener=True,
+                heartbeat_interval_min=20,
+                listener_interval_min=10,
+                schedule_target_dir=schedule_dir,
+                logs_dir=logs_dir,
+                uninstall=False,
+                dry_run=False,
+            ))
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "BOOT.md")))
+        self.assertTrue(os.path.exists(os.path.join(
+            schedule_dir, "com.fulcra.coord.heartbeat.plist")))
+        self.assertTrue(os.path.exists(os.path.join(
+            schedule_dir, "com.fulcra.coord.listener.openclaw-test-infra.plist")))
+
+    def test_cmd_bundle_uninstall_removes_scheduler_jobs(self):
+        from fulcra_coord import cli as climod
+        from types import SimpleNamespace
+        schedule_dir = os.path.join(self.tmp, "LaunchAgents")
+        logs_dir = os.path.join(self.tmp, "Logs")
+        args = dict(
+            hooks_root=self.root,
+            agent="openclaw:test:infra",
+            with_heartbeat=True,
+            with_listener=True,
+            heartbeat_interval_min=20,
+            listener_interval_min=10,
+            schedule_target_dir=schedule_dir,
+            logs_dir=logs_dir,
+            dry_run=False,
+        )
+        with patch("sys.platform", "darwin"):
+            climod.cmd_install_openclaw(SimpleNamespace(**args, uninstall=False))
+            rc = climod.cmd_install_openclaw(SimpleNamespace(**args, uninstall=True))
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "fulcra-coord-shutdown")))
+        self.assertFalse(os.path.exists(os.path.join(
+            schedule_dir, "com.fulcra.coord.heartbeat.plist")))
+        self.assertFalse(os.path.exists(os.path.join(
+            schedule_dir, "com.fulcra.coord.listener.openclaw-test-infra.plist")))
+
 
 class TestOpenClawPluginSource(unittest.TestCase):
     """The Track B plugin source tree is well-formed and on the real SDK API."""
@@ -7061,17 +7112,15 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_10_0(self):
+    def test_version_is_0_10_1(self):
+        # 0.10.1: OpenClaw installs can bundle heartbeat + per-agent listener,
+        # so "OpenClaw is installed" can mean "this agent actually hears the
+        # bus" instead of merely "lifecycle hook files were written."
         # 0.10.0: optimization + simplification pass. remote.list_json collapses
-        # six open-coded list+serial-download loops into one parallel primitive
-        # (presence/health load+prune, archive cold-index) — buying reconcile
-        # hot-path headroom; ~10 copy-pasted env-knob readers consolidated into
-        # env_float/env_int (a non-numeric override now falls back to the default
-        # uniformly, hardening the remote read timeouts that used to crash on a
-        # typo); bus-timestamp formatting centralized in _iso_z. Behavior-
-        # preserving. (0.9.1: remote.list_files real-CLI-format normalization.)
+        # six open-coded list+serial-download loops into one parallel primitive;
+        # env_float/env_int consolidated ~10 copy-pasted env-knob readers.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.10.0")
+        self.assertEqual(__version__, "0.10.1")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):

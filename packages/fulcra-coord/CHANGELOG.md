@@ -10,6 +10,25 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.10.1] — OpenClaw install can bundle the durable bus pickup path
+
+**Why:** installing OpenClaw Track A hooks alone does not guarantee an agent will
+notice directed work while idle. A real rollout missed directives because the
+hooks were present, but heartbeat/listener scheduling was still a separate
+operator step.
+
+- **`install-openclaw --with-heartbeat --with-listener --agent <id>` now installs
+  the complete pickup path in one idempotent command:** OpenClaw hooks/prompts,
+  the machine heartbeat reconciler, and the per-agent inbox listener.
+- **Bundled scheduler flags share the hardened heartbeat/listener installers**
+  rather than duplicating launchd/crontab logic:
+  `--heartbeat-interval-min`, `--listener-interval-min`,
+  `--schedule-target-dir`, and `--logs-dir`.
+- **Uninstall/dry-run cover the bundle too,** so operators can preview or remove
+  the hooks, heartbeat, and listener together.
+
+---
+
 ## [0.9.1] — `remote.list_files` normalizes the real CLI output to clean paths
 
 **Why:** `remote.list_files(prefix)` returned the raw `fulcra file list` display

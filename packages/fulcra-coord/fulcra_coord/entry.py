@@ -296,6 +296,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--hooks-root", dest="hooks_root", default=None, metavar="DIR",
                     help="Explicit OpenClaw hooks dir (default: ~/.openclaw/hooks, "
                          "or $FULCRA_OPENCLAW_HOOKS_ROOT)")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="OpenClaw agent identity for bundled listener install "
+                         "(default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--with-listener", dest="with_listener", action="store_true",
+                    help="Also install the per-agent inbox listener, so this "
+                         "OpenClaw install can hear directed bus work while idle")
+    sp.add_argument("--with-heartbeat", dest="with_heartbeat", action="store_true",
+                    help="Also install the machine heartbeat reconciler")
+    sp.add_argument("--listener-interval-min", dest="listener_interval_min",
+                    type=int, default=10, metavar="N",
+                    help="Listener poll interval for --with-listener (default: 10)")
+    sp.add_argument("--heartbeat-interval-min", dest="heartbeat_interval_min",
+                    type=int, default=20, metavar="N",
+                    help="Heartbeat reconcile interval for --with-heartbeat (default: 20)")
+    sp.add_argument("--schedule-target-dir", dest="schedule_target_dir",
+                    default=None, metavar="DIR",
+                    help="Override LaunchAgents/cron target dir for bundled "
+                         "heartbeat/listener installs")
+    sp.add_argument("--logs-dir", dest="logs_dir", default=None, metavar="DIR",
+                    help="Override log dir for bundled heartbeat/listener installs")
     sp.add_argument("--uninstall", action="store_true", help="Remove the managed artifacts")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
     sp.add_argument("--with-plugin", dest="with_plugin", action="store_true",

@@ -762,26 +762,83 @@ def cmd_install_claude_code(args: Any, backend: Optional[list[str]] = None) -> i
 def cmd_install_openclaw(args: Any, backend: Optional[list[str]] = None) -> int:
     """Install/uninstall OpenClaw Track A coordination artifacts."""
     hooks_root = getattr(args, "hooks_root", None)
+    with_heartbeat = bool(getattr(args, "with_heartbeat", False))
+    with_listener = bool(getattr(args, "with_listener", False))
+    schedule_target_dir = getattr(args, "schedule_target_dir", None)
+    logs_dir = getattr(args, "logs_dir", None)
+    agent = getattr(args, "agent", None) or (_derive_agent() if with_listener else None)
     plan = openclaw.install_openclaw(
         hooks_root=hooks_root, uninstall=args.uninstall, dry_run=args.dry_run)
+    heartbeat_plan = None
+    listener_plan = None
+    if with_heartbeat:
+        heartbeat_plan = heartbeat.install_heartbeat(
+            interval_min=getattr(args, "heartbeat_interval_min",
+                                 heartbeat.INTERVAL_MIN_DEFAULT),
+            uninstall=args.uninstall,
+            dry_run=args.dry_run,
+            target_dir=schedule_target_dir,
+            logs_dir=logs_dir,
+        )
+    if with_listener:
+        listener_plan = listener.install_listener(
+            agent=agent,
+            interval_min=getattr(args, "listener_interval_min",
+                                 listener.INTERVAL_MIN_DEFAULT),
+            uninstall=args.uninstall,
+            dry_run=args.dry_run,
+            target_dir=schedule_target_dir,
+            logs_dir=logs_dir,
+        )
     if args.dry_run:
         _info("[dry-run] OpenClaw hooks root: " + plan["hooks_root"])
         for w in plan.get("writes", []):
             _info(f"  + would write {w}")
         for r in plan.get("removes", []):
             _info(f"  - would remove {r}")
+        if heartbeat_plan:
+            _info(f"[dry-run] Bundled heartbeat: {heartbeat_plan['mechanism']} "
+                  f"every {heartbeat_plan['interval_min']} min")
+            for w in heartbeat_plan.get("writes", []):
+                _info(f"  + would write {w}")
+            for r in heartbeat_plan.get("removes", []):
+                _info(f"  - would remove {r}")
+        if listener_plan:
+            _info(f"[dry-run] Bundled listener: {listener_plan['mechanism']} "
+                  f"for {agent} every {listener_plan['interval_min']} min")
+            for w in listener_plan.get("writes", []):
+                _info(f"  + would write {w}")
+            for r in listener_plan.get("removes", []):
+                _info(f"  - would remove {r}")
         return 0
     if args.uninstall:
         _info(f"Removed fulcra-coord OpenClaw artifacts from {plan['hooks_root']}")
+        if heartbeat_plan:
+            _info(f"Removed bundled heartbeat ({heartbeat_plan['mechanism']}).")
+        if listener_plan:
+            _info(f"Removed bundled listener ({listener_plan['mechanism']}) for {agent}.")
         return 0
     _info(f"Installed OpenClaw Track A artifacts -> {plan['hooks_root']}")
     for d in plan.get("hook_dirs", []):
         _info(f"  + hook {d}")
     for f in plan.get("prompt_files", []):
         _info(f"  + prompt {f}")
+    if heartbeat_plan:
+        _info(f"Installed bundled heartbeat ({heartbeat_plan['mechanism']}) — "
+              f"reconcile every {heartbeat_plan['interval_min']} min.")
+        for w in heartbeat_plan.get("writes", []):
+            _info(f"  + {w}")
+    if listener_plan:
+        _info(f"Installed bundled listener ({listener_plan['mechanism']}) for {agent} — "
+              f"notify-inbox every {listener_plan['interval_min']} min.")
+        for w in listener_plan.get("writes", []):
+            _info(f"  + {w}")
     _report_resolved_cli(plan)
     _info("New OpenClaw sessions will surface in-flight work at boot and park "
           "active tasks on gateway shutdown.")
+    if heartbeat_plan or listener_plan:
+        _info("Bundled scheduler installs mean this OpenClaw agent has a durable "
+              "bus pickup path, not just lifecycle hooks.")
     _info("The handler.ts templates are written to the real OpenClaw "
           "automation-hook API (verified against the SDK source); they still "
           "can't be run in this repo.")
