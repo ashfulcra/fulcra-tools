@@ -7,15 +7,20 @@ I/O — the hermetic conftest defaults FULCRA_COORD_BACKEND=false.
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import sys
+import types
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fulcra_coord import views, heartbeat, remote
+from fulcra_coord import views, heartbeat, remote, cli
 
 
 class TestHealthKnobs(unittest.TestCase):
@@ -153,6 +158,100 @@ class TestHealthPaths(unittest.TestCase):
 
     def test_health_prefix(self):
         self.assertTrue(remote.health_prefix().endswith("/health/"))
+
+
+class TestCmdHealth(unittest.TestCase):
+    def _records(self):
+        now = datetime.now(timezone.utc)
+        fresh = {"schema": "fulcra.coordination.health.v1", "host": "mac",
+                 "agent": "claude-code:mac:repo", "version": "0.9.0",
+                 "reconcile_at": now.isoformat().replace("+00:00", "Z"),
+                 "duration_s": 1.0, "tasks_loaded": 3, "views_refreshed": 5,
+                 "repair_backlog": 0, "retention_last_run": None,
+                 "listener_last_fire": None, "bus_task_count": 3}
+        return fresh
+
+    def test_health_json_format(self):
+        rec = self._records()
+        with mock.patch("fulcra_coord.cli.remote.list_files",
+                        return_value=["/coordination/health/claude-code-mac-repo.json"]), \
+             mock.patch("fulcra_coord.cli.remote.download_json", return_value=rec):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli.cmd_health(types.SimpleNamespace(format="json"), backend=["false"])
+        self.assertEqual(rc, 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["worst_status"], "healthy")
+        self.assertEqual(len(out["hosts"]), 1)
+
+    def test_health_table_format_runs(self):
+        rec = self._records()
+        with mock.patch("fulcra_coord.cli.remote.list_files",
+                        return_value=["/coordination/health/claude-code-mac-repo.json"]), \
+             mock.patch("fulcra_coord.cli.remote.download_json", return_value=rec):
+            rc = cli.cmd_health(types.SimpleNamespace(format="table"), backend=["false"])
+        self.assertEqual(rc, 0)
+
+    def test_health_tolerates_missing_and_garbage(self):
+        # One path lists but download returns None (garbage/missing) -> no crash.
+        with mock.patch("fulcra_coord.cli.remote.list_files",
+                        return_value=["/coordination/health/x.json", "/coordination/health/dir-not-json"]), \
+             mock.patch("fulcra_coord.cli.remote.download_json", return_value=None):
+            rc = cli.cmd_health(types.SimpleNamespace(format="json"), backend=["false"])
+        self.assertEqual(rc, 0)
+
+    def test_health_empty_bus_is_healthy(self):
+        with mock.patch("fulcra_coord.cli.remote.list_files", return_value=[]), \
+             mock.patch("fulcra_coord.cli.remote.download_json", return_value=None):
+            rc = cli.cmd_health(types.SimpleNamespace(format="json"), backend=["false"])
+        self.assertEqual(rc, 0)
+
+
+class TestHealthWiring(unittest.TestCase):
+    def test_health_in_command_map(self):
+        from fulcra_coord.entry import COMMAND_MAP
+        self.assertIs(COMMAND_MAP["health"], cli.cmd_health)
+
+    def test_health_parses_format(self):
+        from fulcra_coord.entry import build_parser
+        args = build_parser().parse_args(["health", "--format", "json"])
+        self.assertEqual(args.command, "health")
+        self.assertEqual(args.format, "json")
+
+
+class TestDoctorHealthFold(unittest.TestCase):
+    def test_doctor_includes_fleet_health(self):
+        now = datetime.now(timezone.utc)
+        buf = io.StringIO()
+        with mock.patch("fulcra_coord.cli.remote.list_files", return_value=[]), \
+             mock.patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             mock.patch("fulcra_coord.cli._assess_fleet",
+                        return_value={"hosts": [{"host": "mac", "status": "healthy",
+                                                 "reasons": [], "metrics": {}}],
+                                      "bus": {"missed_digest_window": False,
+                                              "digest_last_emit": None,
+                                              "retention_last_run": None,
+                                              "task_count": 1},
+                                      "worst_status": "healthy"}), \
+             redirect_stdout(buf):
+            cli.cmd_doctor(types.SimpleNamespace(), backend=["false"])
+        self.assertIn("Fleet health", buf.getvalue())
+
+    def test_doctor_fleet_health_never_crashes_doctor(self):
+        buf = io.StringIO()
+        with mock.patch("fulcra_coord.cli._assess_fleet",
+                        side_effect=RuntimeError("boom")), \
+             mock.patch("fulcra_coord.cli.remote.check_cli_available",
+                        return_value=(True, "ok")), \
+             mock.patch("fulcra_coord.cli.remote.check_file_commands",
+                        return_value=(True, "ok")), \
+             mock.patch("fulcra_coord.cli.remote.check_remote_access",
+                        return_value=(True, "ok")), \
+             redirect_stdout(buf):
+            rc = cli.cmd_doctor(types.SimpleNamespace(), backend=["false"])
+        # doctor must still return its own verdict; a fleet-health error degrades
+        # to a noted line, never a crash.
+        self.assertIn(rc, (0, 1))
 
 
 if __name__ == "__main__":
