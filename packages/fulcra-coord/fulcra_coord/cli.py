@@ -2372,6 +2372,32 @@ def _render_digest(digest: dict[str, Any], *, window: str) -> tuple[str, str]:
         sections.append("Stale (no update past threshold) (" + str(len(stale)) + "):")
         sections.extend(_digest_lines(stale, _s))
 
+    # Infra line (v1 PUSH surface): one compact line from a pre-computed
+    # assess_infra_health dict. The digest scheduler runs independently of
+    # reconcile, so this reports a broken reconcile even on a single-host box.
+    # All-healthy -> a brief affirmative ("N hosts healthy"); any unhealthy host
+    # or a missed digest window -> "infra: ⚠ host reason · …".
+    infra = digest.get("infra")
+    if infra:
+        hosts = infra.get("hosts") or []
+        worst = infra.get("worst_status", "healthy")
+        if worst == "healthy" and not infra.get("bus", {}).get("missed_digest_window"):
+            healthy_n = sum(1 for h in hosts if h.get("status") == "healthy")
+            if healthy_n:
+                sections.append("")
+                sections.append(f"infra: {healthy_n} hosts healthy")
+        else:
+            bad = [h for h in hosts if h.get("status") in ("degraded", "outage", "not_reporting")]
+            parts = []
+            for h in bad:
+                reason = (h.get("reasons") or ["?"])[0]
+                parts.append(f"{h.get('host', '?')} {reason}")
+            if infra.get("bus", {}).get("missed_digest_window"):
+                parts.append("digest window missed")
+            sections.append("")
+            sections.append("infra: ⚠ " + " · ".join(parts) if parts
+                            else f"infra: {worst}")
+
     note = "\n".join(sections).strip()
     return name, note
 
@@ -2631,8 +2657,16 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     agg = remote.download_json(remote.presence_view_path(), backend=backend)
     presence = (agg or {}).get("agents", []) if agg else []
 
+    # v1 push surface: compute the fleet assessment once (best-effort; a read
+    # failure leaves infra=None and the digest renders without the line) and pass
+    # it into the pure builder so the builder stays I/O-free.
+    try:
+        infra = _assess_fleet(now=now, backend=backend)
+    except Exception:
+        infra = None
+
     digest = views.build_operator_digest(
-        summaries, presence, human=human, now=now, since=since)
+        summaries, presence, human=human, now=now, since=since, infra=infra)
 
     if out_format == "json":
         _print_json(digest)
