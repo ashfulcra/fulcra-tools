@@ -7,7 +7,7 @@ members = ["packages/*", "attention"]
 # members (no pyproject.toml). web-ui is a frontend; hermes-vercel is a JS/Node
 # package and litellm is a config/Docker deploy dir — globbing them as members
 # breaks `uv sync`/`uv run`/`uv tool install` workspace resolution.
-exclude = ["packages/web-ui", "packages/hermes-vercel", "packages/litellm"]
+exclude = ["packages/web-ui", "packages/hermes-vercel", "packages/litellm", "packages/attention"]
 
 # Workspace-wide pytest settings — applied when running `pytest packages/`
 # from the monorepo root.  Each package also has its own [tool.pytest.ini_options]

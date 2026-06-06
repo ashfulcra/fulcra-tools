@@ -295,6 +295,22 @@ pytest tests/ -v
 
 No live Fulcra account required — tests use a fake backend.
 
+### Pre-push hook (local CI gate)
+
+A shared `pre-push` hook runs the fulcra-coord suite before any push that
+changes fulcra-coord, so a red suite is caught locally. (GitHub Actions' macOS
+job is path-filtered to macOS-specific changes only — see `.github/workflows/macos.yml`
+— so a pure fulcra-coord change otherwise has no automated test gate.) The hook
+is version-controlled in `.githooks/`, but `core.hooksPath` is per-clone config,
+so **enable it once in each clone**:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It only runs when `packages/fulcra-coord/` changed; bypass a single push with
+`git push --no-verify`. Requires `uv` on PATH.
+
 ## Live smoke test
 
 ```bash
