@@ -401,19 +401,23 @@ function ChooseDestinationStep(props: {
     return () => { cancelled = true; };
   }, [ensureOpts, list]);
 
-  // Prefill the identity label from the signed-in email. Best-effort: only
-  // prefill "<email> browser" when whoami returns an email-looking label
-  // (contains "@"); otherwise (e.g. whoami fell back to the bare userid) leave
-  // the field empty so the placeholder guides the user to type a real name.
-  // This avoids defaulting to the ugly userid. Runs once on mount.
+  // Prefill the identity label from the signed-in identity. Best-effort: we
+  // resolve the label via the OIDC id_token (which carries the name/email
+  // claims), falling back to the access token when no id_token is stored. We
+  // only prefill "<label> browser" when the label is a real HUMAN label — a
+  // name (has a space) or email (has "@") — and NOT a bare 36-char UUID (the
+  // Fulcra userid /info falls back to). A bare UUID leaves the field empty so
+  // the placeholder guides the user. Runs once on mount.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const token = await tokenStore.getValidAccessToken();
+        const idToken = await tokenStore.getIdToken();
+        const accessToken = await tokenStore.getValidAccessToken();
+        const token = idToken ?? accessToken;
         if (!token || cancelled) return;
         const { label } = await whoamiFn(token);
-        if (cancelled || !label || !label.includes("@")) return;
+        if (cancelled || !label || !isHumanLabel(label)) return;
         setIdentityLabel((cur) => (cur === "" ? `${label} browser` : cur));
         console.info("[wizard:destination] identity prefilled from whoami");
       } catch {
@@ -553,6 +557,20 @@ function ChooseDestinationStep(props: {
       </div>
     </>
   );
+}
+
+/** A canonical (8-4-4-4-12 hex) UUID, e.g. the bare Fulcra userid whoami
+ * falls back to. We never want to prefill the browser name from one. */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True when `label` looks like a real human label (a name or an email) and
+ * NOT a bare userid UUID. Used to decide whether to prefill the browser name.
+ * A name has a space, an email has "@"; anything that isn't a 36-char UUID is
+ * treated as human (errs toward prefilling something useful). */
+function isHumanLabel(label: string): boolean {
+  if (label.includes("@") || label.includes(" ")) return true;
+  return !UUID_RE.test(label);
 }
 
 function formatCreatedAt(iso: string | null): string {
