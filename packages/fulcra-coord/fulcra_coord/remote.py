@@ -223,7 +223,29 @@ def list_files(
     backend: Optional[list[str]] = None,
     timeout: Optional[int] = None,
 ) -> list[str]:
-    """List remote files under prefix. Returns list of paths."""
+    """List remote files under prefix. Returns NORMALIZED full remote paths
+    (e.g. ``/coordination/health/<id>.json``) that ``download_json`` / ``delete``
+    accept directly — never the CLI's raw display lines.
+
+    Why this normalization exists: the real ``fulcra file list`` formats each
+    line for humans as ``"<size>  <date> <tz>  <FILENAME>"`` (size + date +
+    FILENAME-only, no path). Returning those lines verbatim — as 0.9.0 did —
+    silently broke every list-based consumer in live (self-heal, presence
+    reconcile/prune, retention pruning, ``search --archived``, the health
+    command): they each fed the formatted string straight into
+    ``download_json`` / ``delete``, which is not a path, so it resolved to
+    None / a no-op. Tests stayed green only because the fake backend emits
+    clean full paths. We reconstruct the path here so the two formats converge.
+
+    Robust to BOTH shapes: take the filename as the LAST whitespace-delimited
+    token (for the formatted line that's the trailing filename; for an
+    already-clean path it's the whole path, since these are slug/id-based names
+    with NO spaces — that no-spaces assumption is what makes last-token
+    extraction safe). If that token is already a full path (starts with "/")
+    or already begins with the prefix, pass it through unchanged; otherwise it's
+    a bare filename from the real CLI, so join it onto the prefix.
+
+    Best-effort: returns [] on any error (non-zero exit, timeout, missing CLI)."""
     cmd = (backend or _backend_cmd()) + ["list", prefix]
     try:
         result = subprocess.run(
@@ -234,7 +256,20 @@ def list_files(
         )
         if result.returncode != 0:
             return []
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        normalized: list[str] = []
+        for raw in result.stdout.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            # Filenames are slug/id-based with no spaces, so the trailing
+            # whitespace-delimited token is the filename (real CLI) or the
+            # whole clean path (fake / already-normalized).
+            name = line.split()[-1]
+            if name.startswith("/") or name.startswith(prefix):
+                normalized.append(name)
+            else:
+                normalized.append(prefix.rstrip("/") + "/" + name)
+        return normalized
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return []
 
