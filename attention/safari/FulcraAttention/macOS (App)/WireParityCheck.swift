@@ -217,6 +217,51 @@ struct WireParityCheck {
             check("non-ASCII parity", "threw \(error)", "no-throw")
         }
 
+        // ---- WHATWG URL scrub parity edge cases ----
+
+        let idnEvent = AttentionEvent(
+            url: "https://例え.テスト/path?q=a b&utm_source=z#frag",
+            title: nil, ogDescription: nil, faviconURL: nil, category: nil,
+            chromeIdentity: nil, ogType: nil, lang: nil,
+            startTime: "1969-12-31T23:59:59.999Z",
+            endTime: "1970-01-01T00:00:00.001Z",
+            client: "c"
+        )
+        do {
+            let r = try Wire.buildWireRecord(event: idnEvent, context: CTX)
+            check("WHATWG scrub: IDN host punycoded + query space as plus",
+                  r.record.data.contains("\"url\": \"https://xn--r8jz45g.xn--zckzah/path?q=a+b\"") ? "yes" : "no",
+                  "yes")
+            check("WHATWG scrub: IDN host external_id",
+                  r.record.data.contains("\"host\": \"xn--r8jz45g.xn--zckzah\"") ? "yes" : "no",
+                  "yes")
+            check("WHATWG scrub: IDN source_id",
+                  r.sourceId,
+                  "com.fulcra.attention.v3.cd88486424c6ac2b")
+        } catch {
+            check("WHATWG scrub: IDN edge", "threw \(error)", "no-throw")
+        }
+
+        let escapedEvent = AttentionEvent(
+            url: "https://example.com/%7Euser?q=%7E&keep=a%2Bb&email=x@y",
+            title: nil, ogDescription: nil, faviconURL: nil, category: nil,
+            chromeIdentity: nil, ogType: nil, lang: nil,
+            startTime: "1969-12-31T23:59:59.999Z",
+            endTime: "1970-01-01T00:00:00.001Z",
+            client: "c"
+        )
+        do {
+            let r = try Wire.buildWireRecord(event: escapedEvent, context: CTX)
+            check("WHATWG scrub: preserves encoded path and literal plus",
+                  r.record.data.contains("\"url\": \"https://example.com/%7Euser?q=%7E&keep=a%2Bb\"") ? "yes" : "no",
+                  "yes")
+            check("WHATWG scrub: encoded source_id",
+                  r.sourceId,
+                  "com.fulcra.attention.v3.c85b4e764d17f2c3")
+        } catch {
+            check("WHATWG scrub: encoded edge", "threw \(error)", "no-throw")
+        }
+
         // ---- encodeBatch ----
 
         do {

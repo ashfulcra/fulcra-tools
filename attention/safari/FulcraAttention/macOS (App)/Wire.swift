@@ -400,20 +400,24 @@ enum WireScrub {
     /// Port of scrub.ts:scrubUrl. Drops denylisted query params (preserving
     /// the order of survivors) and the fragment entirely.
     static func scrubURL(_ input: String) -> String {
-        guard let comps = URLComponents(string: input) else { return input }
-        var out = comps
-        out.fragment = nil
-        if let items = comps.queryItems {
-            let kept = items.filter { !denylist.contains($0.name.lowercased()) }
-            out.queryItems = kept.isEmpty ? nil : kept
-        }
-        // Rebuild base "scheme://host[:port]/path" and append the kept query.
+        guard let url = URL(string: input),
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return input }
+
         let scheme = comps.scheme ?? ""
-        var host = comps.host ?? ""
+        var host = url.host ?? comps.host ?? ""
         if let port = comps.port { host += ":\(port)" }
-        let base = "\(scheme)://\(host)\(comps.path)"
-        // out.percentEncodedQuery preserves the surviving params' raw encoding.
-        if let q = out.percentEncodedQuery, !q.isEmpty {
+        let path = comps.percentEncodedPath.isEmpty && !host.isEmpty ? "/" : comps.percentEncodedPath
+        let base = "\(scheme)://\(host)\(path)"
+
+        if let rawQuery = comps.percentEncodedQuery {
+            let kept = formQueryItems(rawQuery).filter {
+                !denylist.contains($0.name.lowercased())
+            }
+            let q = kept.map {
+                "\(formEncode($0.name))=\(formEncode($0.value))"
+            }.joined(separator: "&")
+            guard !q.isEmpty else { return base }
             return "\(base)?\(q)"
         }
         return base
@@ -422,10 +426,40 @@ enum WireScrub {
     /// Lowercased hostname of a URL, matching scrub/host derivation. Returns
     /// nil for a URL without a host. Mirrors wire.ts:hostnameOf.
     static func hostname(_ url: String) -> String? {
-        guard let comps = URLComponents(string: url), let h = comps.host, !h.isEmpty else {
+        guard let parsed = URL(string: url), let h = parsed.host, !h.isEmpty else {
             return nil
         }
         return h.lowercased()
+    }
+
+    private static func formQueryItems(_ rawQuery: String) -> [(name: String, value: String)] {
+        rawQuery.split(separator: "&", omittingEmptySubsequences: false).map { part in
+            let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let rawName = pieces.first.map(String.init) ?? ""
+            let rawValue = pieces.count > 1 ? String(pieces[1]) : ""
+            return (formDecode(rawName), formDecode(rawValue))
+        }
+    }
+
+    private static func formDecode(_ value: String) -> String {
+        value.replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? value
+    }
+
+    private static func formEncode(_ value: String) -> String {
+        var out = ""
+        for byte in value.utf8 {
+            let isAlphaNum = (byte >= 0x30 && byte <= 0x39)
+                || (byte >= 0x41 && byte <= 0x5A)
+                || (byte >= 0x61 && byte <= 0x7A)
+            if isAlphaNum || byte == 0x2A || byte == 0x2D || byte == 0x2E || byte == 0x5F {
+                out.append(Character(UnicodeScalar(byte)))
+            } else if byte == 0x20 {
+                out.append("+")
+            } else {
+                out += String(format: "%%%02X", byte)
+            }
+        }
+        return out
     }
 }
 
