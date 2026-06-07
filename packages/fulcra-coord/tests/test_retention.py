@@ -639,3 +639,136 @@ class TestHotPathExclusion(_FakeBus):
         ids = {s["id"] for s in summaries.get("summaries", [])}
         self.assertNotIn("TASK-old", ids,
                          "reconcile resurrected the archived task via the local cache")
+
+
+# ----------------------------------------------------------------------------
+# Broadcast auto-expiry — stale never-claimed broadcasts age out of the bus.
+# ----------------------------------------------------------------------------
+
+def _broadcast(created_days_ago, now, status="proposed", assignee=views.BROADCAST,
+               tid="TASK-bcast"):
+    """A broadcast-shaped task created `created_days_ago` before `now`. created_at
+    drives expiry (not updated_at), so updated_at is set fresh to prove it's ignored."""
+    created = (now - timedelta(days=created_days_ago)).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+    return {"id": tid, "title": tid, "status": status, "assignee": assignee,
+            "workstream": "ws", "owner_agent": "",
+            "created_at": created,
+            # updated_at deliberately FRESH (now): a view rebuild can bump it, but
+            # expiry must measure from created_at, so a fresh updated_at must NOT
+            # save an old broadcast from expiring.
+            "updated_at": now.isoformat(timespec="microseconds").replace("+00:00", "Z")}
+
+
+class TestIsExpirableBroadcast(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_old_proposed_broadcast_is_expirable(self):
+        # assignee="*", proposed, created 20d ago, default 14d window => expirable.
+        t = _broadcast(20, self.now)
+        self.assertTrue(views.is_expirable_broadcast(t, self.now))
+
+    def test_concrete_assignee_never_expirable(self):
+        # A directive addressed to a REAL agent is a concrete ask — never expired,
+        # however old (mirrors is_aged_out_broadcast's concrete-assignee guarantee).
+        t = _broadcast(20, self.now, assignee="claude-code:host:repo")
+        self.assertFalse(views.is_expirable_broadcast(t, self.now))
+
+    def test_non_proposed_broadcast_never_expirable(self):
+        # A broadcast deliberately parked (waiting) or already picked up (active)
+        # is not un-acted-on noise — only `proposed` broadcasts expire.
+        for status in ("waiting", "active"):
+            t = _broadcast(20, self.now, status=status)
+            self.assertFalse(views.is_expirable_broadcast(t, self.now), status)
+
+    def test_missing_or_garbage_created_at_fails_safe(self):
+        # SAFETY: expiry drives a DESTRUCTIVE abandon->archive. Unlike
+        # is_aged_out_broadcast (a read filter that fails toward aging a clockless
+        # broadcast OUT via _age_hours -> +inf), is_expirable_broadcast must FAIL
+        # SAFE: a missing/unparseable created_at => False (never expire what we
+        # can't date), exactly like is_archivable_task.
+        missing = {"id": "x", "status": "proposed", "assignee": views.BROADCAST}
+        self.assertFalse(views.is_expirable_broadcast(missing, self.now))
+        garbage = {"id": "x", "status": "proposed", "assignee": views.BROADCAST,
+                   "created_at": "not-a-timestamp"}
+        self.assertFalse(views.is_expirable_broadcast(garbage, self.now))
+        # Contrast: the read-only age-out predicate WOULD age the clockless
+        # broadcast out (fail-toward-cleanup) — opposite direction, by design.
+        self.assertTrue(views.is_aged_out_broadcast(missing, self.now))
+
+    def test_recent_broadcast_within_window_not_expirable(self):
+        # created 5d ago, default 14d window => still inside the window.
+        t = _broadcast(5, self.now)
+        self.assertFalse(views.is_expirable_broadcast(t, self.now))
+
+    def test_exactly_at_cutoff_is_expirable(self):
+        # >= boundary matches is_archivable_task: created exactly N days ago expires.
+        t = _broadcast(14, self.now)
+        self.assertTrue(views.is_expirable_broadcast(t, self.now))
+
+    def test_env_override_shrinks_window(self):
+        os.environ["FULCRA_COORD_BROADCAST_EXPIRY_DAYS"] = "2"
+        try:
+            t = _broadcast(5, self.now)  # 5d > 2d window
+            self.assertTrue(views.is_expirable_broadcast(t, self.now))
+        finally:
+            del os.environ["FULCRA_COORD_BROADCAST_EXPIRY_DAYS"]
+
+    def test_env_default_is_14(self):
+        self.assertEqual(views._broadcast_expiry_days(), 14.0)
+
+
+class TestExpireStaleBroadcasts(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_expires_only_stale_broadcasts(self):
+        stale = _broadcast(20, self.now, tid="TASK-stale")
+        fresh = _broadcast(1, self.now, tid="TASK-fresh")
+        concrete = _broadcast(20, self.now, assignee="claude-code:h:r",
+                              tid="TASK-concrete")
+        written = []
+        with patch("fulcra_coord.retention._write_task_and_views",
+                   return_value=True) as wtv, \
+             patch("fulcra_coord.retention.cache.write_cached_task") as wct:
+            wtv.side_effect = lambda task, **kw: written.append(task) or True
+            n = retention._expire_stale_broadcasts(
+                [stale, fresh, concrete], self.now, backend=["false"])
+        self.assertEqual(n, 1)
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0]["id"], "TASK-stale")
+        self.assertEqual(written[0]["status"], "abandoned")
+        wct.assert_called_once()
+        # the fresh broadcast and the concrete ask were never written/abandoned.
+        self.assertEqual({t["id"] for t in written}, {"TASK-stale"})
+
+    def test_per_run_cap_honored(self):
+        b1 = _broadcast(20, self.now, tid="TASK-b1")
+        b2 = _broadcast(20, self.now, tid="TASK-b2")
+        with patch("fulcra_coord.retention._write_task_and_views", return_value=True), \
+             patch("fulcra_coord.retention.cache.write_cached_task"), \
+             patch("fulcra_coord.retention._retention_max_per_run", return_value=1):
+            n = retention._expire_stale_broadcasts(
+                [b1, b2], self.now, backend=["false"])
+        self.assertEqual(n, 1)
+
+    def test_needs_reconcile_counts_as_expired(self):
+        # NeedsReconcile means the task BODY was written (views lagged) — count it.
+        from fulcra_coord import schema
+        stale = _broadcast(20, self.now, tid="TASK-nr")
+        with patch("fulcra_coord.retention._write_task_and_views",
+                   side_effect=schema.NeedsReconcile("views lagged")), \
+             patch("fulcra_coord.retention.cache.write_cached_task"):
+            n = retention._expire_stale_broadcasts([stale], self.now, backend=["false"])
+        self.assertEqual(n, 1)
+
+    def test_conflict_does_not_count(self):
+        # ConflictError => the body was NOT written; skip and don't count.
+        from fulcra_coord import schema
+        stale = _broadcast(20, self.now, tid="TASK-cf")
+        with patch("fulcra_coord.retention._write_task_and_views",
+                   side_effect=schema.ConflictError("racing writer")), \
+             patch("fulcra_coord.retention.cache.write_cached_task"):
+            n = retention._expire_stale_broadcasts([stale], self.now, backend=["false"])
+        self.assertEqual(n, 0)
