@@ -201,6 +201,39 @@ def _detect_stale_claims(all_tasks: list[dict[str, Any]],
     return stale_claims
 
 
+def _reconcile_rebuild_source_preserving_acks(
+    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Summarize loaded bodies while preserving summary-only inbox acks.
+
+    ``inbox --ack`` can suppress a visible directive by writing only the summaries
+    aggregate when the task body is temporarily unloadable. A later reconcile may
+    successfully load that body, but the body still lacks the ``inbox_ack`` event.
+    If reconcile rebuilt views from raw bodies alone, the ack would disappear and
+    the directive would re-notify. Treat the current aggregate's ``acked_by`` as a
+    durable prior fact, matching ``_load_summaries_for_rebuild`` on normal writes.
+    """
+    prior_acks: dict[str, set[str]] = {}
+    try:
+        for summary in _load_task_summaries(backend=backend):
+            tid = summary.get("id")
+            if tid:
+                prior_acks[tid] = set(summary.get("acked_by") or [])
+    except Exception:
+        prior_acks = {}
+
+    rebuild_source: list[dict[str, Any]] = []
+    for task in all_tasks:
+        summary = schema.task_summary(task)
+        tid = summary.get("id")
+        if tid in prior_acks:
+            summary["acked_by"] = sorted(
+                set(summary.get("acked_by") or []) | prior_acks[tid]
+            )
+        rebuild_source.append(summary)
+    return rebuild_source
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
     import time
@@ -232,7 +265,9 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         _err("Reconcile timeout exceeded.")
         return 1
 
-    all_views = views.build_all_views(all_tasks)
+    all_views = views.build_all_views(
+        _reconcile_rebuild_source_preserving_acks(all_tasks, backend=backend)
+    )
     view_items = list(all_views.items())
 
     # Cache every view locally regardless of upload outcome — matches the prior

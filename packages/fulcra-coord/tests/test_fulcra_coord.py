@@ -5689,6 +5689,69 @@ class TestInboxClearsAfterAckOrClaim(unittest.TestCase):
         self.assertEqual(recomputed, [],
                          "build_inbox over the task set must also be empty")
 
+    def test_ack_visible_summary_when_task_body_missing(self):
+        """A directive visible via summaries must be ackable even if body load fails.
+
+        This matches a cross-agent stale/dangling view case: ``inbox`` lists the
+        summary, but ``inbox --ack`` cannot load ``tasks/<id>.json`` to append an
+        event. The fallback records the ack in the summaries aggregate and
+        rebuilds views so the listener stops re-notifying.
+        """
+        from fulcra_coord.cli import cmd_inbox
+        from fulcra_coord import remote
+        import io, contextlib
+
+        me = "codex:h:r"
+        d = _directive(me)
+        summary = schema.task_summary(d)
+        summaries = views.build_all_views([summary])["summaries"]
+        remote.upload_json(summaries, remote.view_remote_path("summaries"),
+                           backend=self.fake_backend)
+
+        self.assertEqual([item["id"] for item in self._inbox_json(me)], [d["id"]])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cmd_inbox(self._ns(agent=me, format="json", ack=d["id"]),
+                           backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._inbox_json(me), [])
+
+        saved = remote.download_json(remote.view_remote_path("summaries"),
+                                     backend=self.fake_backend)
+        acked = [item for item in saved["summaries"] if item["id"] == d["id"]][0]
+        self.assertEqual(acked["acked_by"], [me])
+
+    def test_reconcile_preserves_summary_only_ack_when_body_returns(self):
+        """A transient body-load miss must not resurrect an already-acked inbox item."""
+        from fulcra_coord.cli import cmd_reconcile, cmd_tell
+        from fulcra_coord import remote
+        import io, contextlib
+
+        me = "codex:h:r"
+        tell_args = self._ns(assignee=me, title="durable ack", workstream="general",
+                             priority="P2", next="", summary="",
+                             **{"from": "boss:h:r"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_tell(tell_args, backend=self.fake_backend)
+        summary = self._inbox_json(me)[0]
+        summary["acked_by"] = [me]
+
+        # Body is now loadable again, but it lacks the inbox_ack event that the
+        # summary-only fallback could not append during the transient miss.
+        remote.upload_json({"summaries": [summary]},
+                           remote.view_remote_path("summaries"),
+                           backend=self.fake_backend)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cmd_reconcile(self._ns(), backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+
+        saved = remote.download_json(remote.view_remote_path("summaries"),
+                                     backend=self.fake_backend)
+        acked = [item for item in saved["summaries"] if item["id"] == summary["id"]][0]
+        self.assertEqual(acked["acked_by"], [me])
+        self.assertEqual(self._inbox_json(me), [])
+
     def test_claim_clears_inbox_even_with_stale_cached_view(self):
         """tell -> update --status active --agent me (claim) -> inbox EMPTY."""
         from fulcra_coord.cli import cmd_tell, cmd_update
