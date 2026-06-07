@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import cache, remote, views, identity, schema
-from . import env_int
+from . import env_int, remote_root
 from .io import _load_task_summaries
 from .writepipe import _write_task_and_views
 from .output import info as _info, print_json as _print_json, err as _err
@@ -268,6 +268,156 @@ def _prune_dead_health(now: datetime, *, backend: Optional[list[str]] = None) ->
     return n
 
 
+# Max directory depth the continuity walk will descend before giving up on a
+# subtree. The real tree is exactly 4 levels under continuity/
+# (ws / agent / task / checkpoints), so 6 leaves slack for a future nesting
+# tweak while still hard-bounding a malformed / self-referential tree so the
+# recursive walk can never infinite-loop or blow the Python recursion limit.
+_CONTINUITY_WALK_MAX_DEPTH = 6
+
+
+def _continuity_keep() -> int:
+    """How many of the NEWEST checkpoints to keep per task: env
+    FULCRA_COORD_CONTINUITY_KEEP (default 10), floored at 1.
+
+    The floor is load-bearing: a 0 / negative override must NEVER delete the only
+    (newest) checkpoint — continuity always keeps at least the latest archive so a
+    resuming agent has something to read. env_int already falls back to the default
+    on a non-numeric value; max(1, ...) clamps the explicit-but-too-small case."""
+    return max(1, env_int("FULCRA_COORD_CONTINUITY_KEEP", 10))
+
+
+def _walk_continuity_checkpoint_dirs(backend: Optional[list[str]], *,
+                                     deadline: Optional[float] = None) -> list[str]:
+    """Enumerate every ``.../checkpoints/`` directory under the continuity tree.
+
+    remote.list_files is NON-RECURSIVE: it returns only the IMMEDIATE children of
+    a prefix, with subdirectories suffixed by a trailing slash and files without
+    one. So the 4-level continuity tree (continuity/{ws}/{agent}/{task}/
+    checkpoints/) MUST be walked by descending into each trailing-slash child.
+
+    Iterative DFS (explicit stack, not recursion) bounded by
+    _CONTINUITY_WALK_MAX_DEPTH so a malformed / self-referential listing can't
+    infinite-loop. Best-effort: a list_files failure for any subtree is swallowed
+    — that subtree contributes nothing rather than aborting the whole walk. The
+    caller is wrapped too, so nothing here escapes into reconcile.
+
+    When reconcile supplies a deadline, the walk checks the same budget floor
+    before each remote listing. This is load-bearing: a huge malformed
+    continuity tree must not spend the whole reconcile budget before the prune
+    loop gets its first chance to stop."""
+    import time
+    budget_floor = (deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
+                    if deadline is not None else None)
+    root = f"{remote_root()}/continuity"
+    found: list[str] = []
+    # Stack of (dir_path_without_trailing_slash, depth).
+    stack: list[tuple[str, int]] = [(root, 0)]
+    while stack:
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            break
+        current, depth = stack.pop()
+        if depth > _CONTINUITY_WALK_MAX_DEPTH:
+            continue
+        try:
+            children = remote.list_files(current, backend=backend)
+        except Exception:
+            continue
+        for child in children:
+            if not child.endswith("/"):
+                continue  # a file at this level; not a directory to descend
+            sub = child.rstrip("/")
+            # A self-referential listing (dir lists itself) would otherwise loop
+            # forever; the depth bound below terminates it, but skipping the exact
+            # self-pointer also avoids wasted round-trips.
+            if sub == current:
+                continue
+            if sub.rsplit("/", 1)[-1] == "checkpoints":
+                found.append(sub)
+            else:
+                stack.append((sub, depth + 1))
+    return found
+
+
+def _prune_continuity_checkpoints(now: datetime, *,
+                                  backend: Optional[list[str]] = None,
+                                  deadline: Optional[float] = None) -> int:
+    """Prune old continuity checkpoint archives: keep the newest
+    _continuity_keep() per task's ``checkpoints/`` dir, delete the rest.
+
+    WHY this exists: continuity.write_checkpoint writes an immutable, uniquely
+    named archive (CHK-<stamp>-<task>-<hex>.json) on EVERY snapshot (every
+    SessionEnd + PreCompact + openclaw compaction since #92). ``latest.json``
+    overwrites in place and is fine; it's ``checkpoints/`` that grows UNBOUNDED.
+    The other pruners never touch continuity/**, so this is the GC that bounds it.
+
+    HOW:
+      * RECURSIVE WALK (_walk_continuity_checkpoint_dirs) finds every
+        ``checkpoints/`` dir — remote.list_files is non-recursive, so the 4-level
+        tree must be descended explicitly. Depth-bounded so a malformed tree can't
+        loop.
+      * Per dir, list its ``CHK-*.json`` files and sort by filename DESCENDING.
+        The <stamp> is a zero-padded lexically-sortable timestamp, so filename
+        sort == chronological sort: index 0 is NEWEST. Keep the first `keep`,
+        delete the rest (oldest-first).
+      * NEVER deletes ``latest.json`` (or anything not matching ``CHK-``) — only
+        immutable checkpoint archives are prunable; latest.json is the live
+        pointer a resuming agent reads.
+      * BUDGET/CAP, mirroring the other prune steps: stop deleting AND stop
+        walking once the wall-clock budget is nearly spent (when a `deadline` is
+        supplied), and cap total deletions per run at _retention_max_per_run()
+        (reusing the same knob — no second cap). Soft-deletes are recoverable, so
+        a partial pass is safe; the remainder drains next run.
+
+    BEST-EFFORT: the whole body is wrapped so it NEVER raises into _run_retention
+    (which must never raise into the reconcile tick). A single delete failure is
+    skipped, not fatal. Returns the count deleted."""
+    import time
+    deleted = 0
+    try:
+        keep = _continuity_keep()
+        cap = _retention_max_per_run()
+        budget_floor = (deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
+                        if deadline is not None else None)
+        if cap <= 0:
+            return 0
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            return 0
+        for chk_dir in _walk_continuity_checkpoint_dirs(backend, deadline=deadline):
+            if deleted >= cap:
+                break
+            if budget_floor is not None and time.monotonic() >= budget_floor:
+                break
+            try:
+                entries = remote.list_files(chk_dir, backend=backend)
+            except Exception:
+                continue
+            # Only immutable checkpoint archives are prunable. A bare ``latest.json``
+            # (or any non-CHK file) is excluded HERE so it can never enter the
+            # delete set — the load-bearing safety property.
+            archives = [p for p in entries
+                        if p.endswith(".json")
+                        and p.rsplit("/", 1)[-1].startswith("CHK-")]
+            if len(archives) <= keep:
+                continue
+            # Newest first: filename (= padded stamp) sorts chronologically.
+            archives.sort(reverse=True)
+            stale = archives[keep:]  # everything past the newest `keep`
+            for path in stale:
+                if deleted >= cap:
+                    break
+                if budget_floor is not None and time.monotonic() >= budget_floor:
+                    break
+                try:
+                    if remote.delete(path, backend=backend):
+                        deleted += 1
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return deleted
+
+
 def _expire_stale_broadcasts(all_tasks: list[dict[str, Any]], now: datetime, *,
                              backend: Optional[list[str]] = None,
                              deadline: Optional[float] = None) -> int:
@@ -330,7 +480,7 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     the reconcile tick — any failure returns a result dict, logged by the caller.
     Returns {"skipped": True} when throttled/errored, else
     {"archived": N, "deferred": D, "expired_broadcasts": E, "pruned_markers": M,
-    "pruned_presence": K, "pruned_health": H}.
+    "pruned_presence": K, "pruned_health": H, "pruned_continuity": C}.
 
     1. THROTTLE: _claim_retention_marker(now) — first host today wins; others skip.
     2. ARCHIVE up to _retention_max_per_run() archivable tasks (views.
@@ -339,7 +489,9 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
        remainder is DEFERRED (counted + logged) and drains next pass.
     3. PRUNE spent markers + dead presence + dead health records (the last two on
        the same presence-retention window, so a decommissioned host's presence and
-       health records drop in lockstep).
+       health records drop in lockstep), plus old continuity checkpoint archives
+       (keep the newest _continuity_keep() per task; the recursive sweep that
+       bounds the unbounded checkpoints/ growth).
     Per-item isolation: one task's archive failure is skipped, not fatal. The
     `deadline` is reconcile's existing deadline local, so the budget COMPOSES with
     (never double-counts) reconcile's 90s ceiling."""
@@ -385,10 +537,16 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     pruned_markers = _prune_markers(now, backend=backend)
     pruned_presence = _prune_dead_presence(now, backend=backend)
     pruned_health = _prune_dead_health(now, backend=backend)
+    # Continuity checkpoint sweep: threads the SAME `deadline` through so the
+    # recursive walk + deletes compose with reconcile's budget instead of
+    # overrunning it. Best-effort; never raises into this pass.
+    pruned_continuity = _prune_continuity_checkpoints(
+        now, backend=backend, deadline=deadline)
     return {"archived": archived, "deferred": deferred,
             "expired_broadcasts": expired_broadcasts,
             "pruned_markers": pruned_markers, "pruned_presence": pruned_presence,
-            "pruned_health": pruned_health}
+            "pruned_health": pruned_health,
+            "pruned_continuity": pruned_continuity}
 
 
 

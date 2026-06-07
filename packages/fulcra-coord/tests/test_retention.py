@@ -781,3 +781,266 @@ class TestExpireStaleBroadcasts(unittest.TestCase):
             n = retention._expire_stale_broadcasts([stale], self.now, backend=["false"])
         self.assertEqual(n, 0)
         wct.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Continuity-checkpoint retention: recursive prune of checkpoints/ archives
+# ---------------------------------------------------------------------------
+
+# Continuity tree root used by the pruner: remote_root() + "/continuity".
+# The conftest defaults FULCRA_COORD_REMOTE_ROOT to "/coordination" only inside
+# _FakeBus subclasses; the classes below set it explicitly so the mocked
+# list_files keys are deterministic regardless of the ambient env.
+_CONT_ROOT = "/coordination/continuity"
+
+
+def _chk(stamp, *, task="task-1", hex_="abcdef0123"):
+    """Build a CHK-<stamp>-<task>-<hex>.json filename. <stamp> is the
+    zero-padded lexically-sortable timestamp so filename sort == chrono sort."""
+    return f"CHK-{stamp}-{task}-{hex_}.json"
+
+
+class _ContTree(unittest.TestCase):
+    """Base for the continuity pruner tests. Models the NON-RECURSIVE
+    remote.list_files as a {prefix: [immediate children]} map: subdirs come back
+    with a trailing slash, files do not — exactly the live contract. Patches
+    remote.list_files + remote.delete on the retention module."""
+
+    def setUp(self):
+        os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination"
+        self._prev_keep = os.environ.pop("FULCRA_COORD_CONTINUITY_KEEP", None)
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        self.deleted: list[str] = []
+
+    def tearDown(self):
+        os.environ.pop("FULCRA_COORD_REMOTE_ROOT", None)
+        if self._prev_keep is None:
+            os.environ.pop("FULCRA_COORD_CONTINUITY_KEEP", None)
+        else:
+            os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = self._prev_keep
+
+    def _list_factory(self, tree):
+        """Return a side_effect for list_files that reads `tree` (a
+        {prefix: [children]} dict). Unknown prefixes -> [] (best-effort)."""
+        def _list(prefix, *, backend=None, timeout=None):
+            return list(tree.get(prefix, []))
+        return _list
+
+    def _delete_factory(self, raise_on=()):
+        def _delete(path, *, backend=None):
+            if path in raise_on:
+                raise RuntimeError("boom")
+            self.deleted.append(path)
+            return True
+        return _delete
+
+    def _run(self, tree, *, raise_on=(), list_side_effect=None, deadline=None):
+        list_se = list_side_effect or self._list_factory(tree)
+        with patch("fulcra_coord.retention.remote.list_files", side_effect=list_se), \
+             patch("fulcra_coord.retention.remote.delete",
+                   side_effect=self._delete_factory(raise_on)):
+            return retention._prune_continuity_checkpoints(
+                self.now, backend=["false"], deadline=deadline)
+
+
+class TestPruneContinuityCheckpoints(_ContTree):
+    def test_recursive_walk_descends_to_checkpoints(self):
+        # ws/ -> agent/ -> task/ -> checkpoints/ : 4 levels of trailing-slash dirs,
+        # each only an IMMEDIATE child of the level above. The pruner must descend.
+        ws = f"{_CONT_ROOT}/ws-hash"
+        agent = f"{ws}/agent-a"
+        task = f"{agent}/task-1"
+        chk = f"{task}/checkpoints"
+        files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 5)]  # 4 files
+        tree = {
+            _CONT_ROOT: [f"{ws}/"],
+            ws: [f"{agent}/"],
+            agent: [f"{task}/"],
+            task: [f"{chk}/", f"{task}/latest.json"],
+            chk: files,
+        }
+        # keep=2 -> the 2 oldest of the 4 are deleted.
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "2"
+        n = self._run(tree)
+        self.assertEqual(n, 2)
+        # The two OLDEST (lexically smallest) are deleted.
+        self.assertEqual(sorted(self.deleted), sorted(files[:2]))
+
+    def test_keep_newest_n_deletes_oldest(self):
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        # 15 files, stamps chosen so lexical sort == chronological order.
+        stamps = [f"20260101T{h:02d}0000z" for h in range(15)]
+        files = [f"{chk}/{_chk(s)}" for s in stamps]
+        tree = {
+            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
+            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
+            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
+            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/", f"{_CONT_ROOT}/ws/a/t/latest.json"],
+            chk: files,
+        }
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "10"
+        n = self._run(tree)
+        self.assertEqual(n, 5)
+        oldest_5 = files[:5]   # smallest stamps
+        newest_10 = files[5:]
+        self.assertEqual(sorted(self.deleted), sorted(oldest_5))
+        for keep in newest_10:
+            self.assertNotIn(keep, self.deleted)
+        # latest.json is never in the delete set.
+        self.assertNotIn(f"{_CONT_ROOT}/ws/a/t/latest.json", self.deleted)
+
+    def test_latest_json_never_deleted(self):
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        files = [f"{chk}/{_chk(f'202601{d:02d}T000000z')}" for d in range(1, 13)]
+        # A latest.json INSIDE the checkpoints dir as well — must survive.
+        latest_in_chk = f"{chk}/latest.json"
+        tree = {
+            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
+            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
+            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
+            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/", f"{_CONT_ROOT}/ws/a/t/latest.json"],
+            chk: files + [latest_in_chk],
+        }
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "10"
+        self._run(tree)
+        self.assertNotIn(latest_in_chk, self.deleted)
+        self.assertNotIn(f"{_CONT_ROOT}/ws/a/t/latest.json", self.deleted)
+
+    def test_keep_ge_count_no_deletions(self):
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 4)]  # 3
+        tree = {
+            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
+            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
+            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
+            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
+            chk: files,
+        }
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "10"
+        n = self._run(tree)
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+
+    def test_keep_floor_is_one(self):
+        # _continuity_keep clamps a 0/negative env to 1: never delete the only/newest.
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "0"
+        self.assertEqual(retention._continuity_keep(), 1)
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        older = f"{chk}/{_chk('20260101T000000z')}"
+        newer = f"{chk}/{_chk('20260102T000000z')}"
+        tree = {
+            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
+            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
+            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
+            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
+            chk: [older, newer],
+        }
+        n = self._run(tree)
+        self.assertEqual(n, 1)
+        self.assertEqual(self.deleted, [older])  # oldest deleted, newest kept
+
+    def test_keep_default_is_ten(self):
+        self.assertEqual(retention._continuity_keep(), 10)
+
+    def test_per_run_cap_limits_deletions(self):
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        files = [f"{chk}/{_chk(f'202601{d:02d}T000000z')}" for d in range(1, 12)]  # 11
+        tree = {
+            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
+            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
+            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
+            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
+            chk: files,
+        }
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "1"  # 10 deletable
+        with patch("fulcra_coord.retention._retention_max_per_run", return_value=2):
+            n = self._run(tree)
+        self.assertEqual(n, 2)
+        self.assertEqual(len(self.deleted), 2)
+
+    def test_list_files_raises_returns_zero(self):
+        def _boom(prefix, *, backend=None, timeout=None):
+            raise RuntimeError("list blew up")
+        n = self._run({}, list_side_effect=_boom)
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+
+    def test_one_delete_raises_others_still_deleted(self):
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 6)]  # 5
+        tree = {
+            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
+            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
+            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
+            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
+            chk: files,
+        }
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "1"  # 4 deletable (files[:4])
+        # Make the SECOND-oldest deletion raise; the others must still proceed.
+        n = self._run(tree, raise_on=(files[1],))
+        # 4 deletable, one raised -> 3 counted, no exception escapes.
+        self.assertEqual(n, 3)
+        self.assertNotIn(files[1], self.deleted)
+        self.assertIn(files[0], self.deleted)
+        self.assertIn(files[2], self.deleted)
+        self.assertIn(files[3], self.deleted)
+
+    def test_empty_tree_zero_deletions(self):
+        n = self._run({_CONT_ROOT: []})
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+
+    def test_deadline_stops_walk(self):
+        # A deadline already past -> the budget gate stops before any delete.
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 6)]
+        tree = {
+            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
+            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
+            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
+            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
+            chk: files,
+        }
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "1"
+        n = self._run(tree, deadline=time.monotonic() - 1)
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+
+    def test_expired_deadline_skips_tree_listing(self):
+        # The walk itself must respect the budget, not just the delete loop.
+        # Otherwise a giant continuity tree could burn reconcile's deadline before
+        # the pruner ever reaches its first delete.
+        with patch("fulcra_coord.retention.remote.list_files") as lf, \
+             patch("fulcra_coord.retention.remote.delete") as delete:
+            n = retention._prune_continuity_checkpoints(
+                self.now, backend=["false"], deadline=time.monotonic() - 1)
+        self.assertEqual(n, 0)
+        lf.assert_not_called()
+        delete.assert_not_called()
+
+    def test_malformed_deep_tree_is_depth_bounded(self):
+        # A pathological self-referential tree (a dir that lists itself as a child)
+        # must NOT infinite-loop: the depth bound terminates the walk. We assert the
+        # call returns (no hang / no RecursionError) and prunes nothing.
+        loop = f"{_CONT_ROOT}/loop"
+        tree = {
+            _CONT_ROOT: [f"{loop}/"],
+            loop: [f"{loop}/"],  # points back at itself forever
+        }
+        n = self._run(tree)
+        self.assertEqual(n, 0)
+
+
+class TestRunRetentionContinuityWiring(_FakeBus):
+    def test_result_includes_pruned_continuity(self):
+        # Patch the pruner to a sentinel and assert _run_retention surfaces it in
+        # the result dict (the other prune steps run against the empty fake bus).
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=True), \
+             patch("fulcra_coord.retention._prune_continuity_checkpoints",
+                   return_value=7) as pcc:
+            res = cli._run_retention([], now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() + 60, backend=self.backend)
+        self.assertEqual(res.get("pruned_continuity"), 7)
+        pcc.assert_called_once()
+        # deadline must be threaded through so the pruner composes with the budget.
+        self.assertIn("deadline", pcc.call_args.kwargs)
