@@ -54,8 +54,13 @@ fulcra-coord start "Deploy search service" \
 # 5. Update progress
 fulcra-coord update TASK-... --summary "Terraform done." --next "Run smoke tests."
 
-# 6. Pause (session ending)
-fulcra-coord pause TASK-... --next "Run GET /search?q=test smoke test."
+# 6. Pause (session ending), optionally writing a Continuity checkpoint
+fulcra-coord pause TASK-... \
+  --next "Run GET /search?q=test smoke test." \
+  --snapshot
+
+# 6b. Resume with latest Continuity checkpoints included
+fulcra-coord resume --with-continuity
 
 # 7. Mark done
 fulcra-coord done TASK-... \
@@ -79,11 +84,11 @@ fulcra-coord done TASK-... \
 | `needs-me` | **What's blocked on YOU** (the human): every open task assigned to / blocked on you across all agents, showing who's waiting, the ask, and how long it's been (`--human <handle>`, `--format json`). The "what's on my plate from my agents" glance. Asks with a future `not_before` (see `block`) are split off into a compact **Upcoming (next 7d)** section instead of the DUE-NOW plate, so a task you can't act on yet doesn't clutter it; `--all` lists each upcoming item inline. JSON returns `{human, count, items, upcoming}` — `count` reflects DUE-NOW only |
 | `digest` | Write the **operator digest** — a consolidated twice-daily situational-awareness summary — to the Fulcra timeline on its own **Agent Tasks — Digest** track. Four blocks: blocked-on-you, upcoming, per-agent activity, stale (`--window morning\|evening` sets the lookback + label, omit for on-demand; `--human <handle>`; `--format table\|json`; `--dry-run`). `--dry-run` renders + prints without writing; `--format json` emits the structured digest for tooling. An any-agent dedup guard means it's safe to run from multiple machines — only the first writer per window lands a moment |
 | `install-digest` | Install the twice-daily scheduled `digest` jobs (launchd 08:00 + 18:00 on macOS, fixed cron lines elsewhere) — the push side of the operator digest. Safe to install on **every** machine: the any-agent dedup guard collapses concurrent ticks to one digest per window. `--uninstall` to remove, `--dry-run` to print the plan |
-| `resume` | Pick-up-where-you-left-off briefing for an agent: your active/waiting work, what's blocked on you, what you owe others, and what's blocked on the human (`--agent`, `--format json`). Read-only — run after a restart to reload context |
+| `resume` | Pick-up-where-you-left-off briefing for an agent: your active/waiting work, what's blocked on you, what you owe others, and what's blocked on the human (`--agent`, `--format json`). Add `--with-continuity` to include latest Fulcra Continuity checkpoints for active/waiting tasks. Read-only — run after a restart to reload context |
 | `start` | Create a new task |
 | `update` | Update summary / next_action / status |
 | `block` | Mark as blocked. `--blocked-on "<reason>"` for an agent/external blocker; **`--on-user "<ask>"`** to block on the human — assigns the task to the resolved human handle, tags `needs:human`, and lands it on `needs-me` + the human's next SessionStart. Optional scheduling on an `--on-user` ask: **`--not-before <when>`** gates when it surfaces as DUE-NOW (it stays under `needs-me`'s Upcoming until then), and **`--due <when>`** is the informational deadline (drives upcoming ordering/urgency, does not gate). `<when>` is an ISO date/datetime (`2026-06-08`, `2026-06-08T18:00:00Z`) or a relative offset (`5d`, `36h`, `10m`) |
-| `pause` | Set to waiting with a next_action |
+| `pause` | Set to waiting with a next_action. Add `--snapshot` to write a Fulcra Continuity-compatible checkpoint at the durable pause point without writing snapshots on every task update |
 | `done` | Mark done (requires evidence) |
 | `abandon` | Mark abandoned |
 | `reconcile` | Repair views and resolve pending markers |
