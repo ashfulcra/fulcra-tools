@@ -113,3 +113,17 @@ def test_resume_bad_json_reports_clean_error(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "error:" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_resume_non_dict_json_reports_clean_error(tmp_path: Path) -> None:
+    # Valid JSON that is not an object (list / null / scalar) must produce a
+    # clean error, not an AttributeError traceback. (PR #82 review: B1.)
+    for payload in ("[1, 2, 3]", "null", "42", '"x"', "true"):
+        checkpoint = tmp_path / "nondict.json"
+        checkpoint.write_text(payload, encoding="utf-8")
+
+        result = run_cli("resume", str(checkpoint))
+
+        assert result.returncode == 1, payload
+        assert "error:" in result.stderr, payload
+        assert "Traceback" not in result.stderr, payload

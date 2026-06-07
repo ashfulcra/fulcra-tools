@@ -155,6 +155,14 @@ def _coerce_str_list(value: Any) -> list[str]:
 
 
 def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
+    # Valid JSON that isn't an object (a list, null, or a scalar) would
+    # otherwise reach `data.get(...)` below and raise AttributeError/TypeError
+    # — an uncaught traceback out of the CLI. Reject it with a clean ValueError
+    # (which main() turns into an `error:` line + exit 1). (PR #82 review: B1.)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"checkpoint must be a JSON object, got {type(data).__name__}"
+        )
     artifacts = [
         Artifact(
             path=str(item.get("path", "")) if isinstance(item, dict) else str(item),
