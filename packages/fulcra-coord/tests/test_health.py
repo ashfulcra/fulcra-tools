@@ -233,7 +233,9 @@ class TestCmdHealth(unittest.TestCase):
         rec = self._records()
         with mock.patch("fulcra_coord.cli.remote.list_files",
                         return_value=["/coordination/health/claude-code-mac-repo.json"]), \
-             mock.patch("fulcra_coord.cli.remote.download_json", return_value=rec):
+             mock.patch("fulcra_coord.cli.remote.download_json", return_value=rec), \
+             mock.patch("fulcra_coord.digest._load_task_summaries",
+                        return_value=[{"id": "TASK-1"}, {"id": "TASK-2"}]):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = cli.cmd_health(types.SimpleNamespace(format="json"), backend=["false"])
@@ -241,6 +243,7 @@ class TestCmdHealth(unittest.TestCase):
         out = json.loads(buf.getvalue())
         self.assertEqual(out["worst_status"], "healthy")
         self.assertEqual(len(out["hosts"]), 1)
+        self.assertEqual(out["bus"]["task_count"], 2)
 
     def test_health_table_format_runs(self):
         rec = self._records()
