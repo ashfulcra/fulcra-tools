@@ -207,6 +207,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("task_id", metavar="TASK-ID")
     sp.add_argument("--next", "-n", required=True, metavar="NEXT_ACTION")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    sp.add_argument("--snapshot", action="store_true",
+                    help="Also write a Fulcra Continuity checkpoint for this pause")
 
     # ---- done ----
     sp = sub.add_parser("done", help="Mark a task as done (requires evidence)")
@@ -404,6 +406,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "what you owe others, and what's blocked on the human")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="Whose briefing (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--with-continuity", action="store_true",
+                    help="Include latest Fulcra Continuity checkpoint summaries for active/waiting tasks")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- needs-me ----

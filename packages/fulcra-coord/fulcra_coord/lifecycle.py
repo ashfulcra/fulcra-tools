@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity
+from . import cache, remote, schema, views, identity, continuity
 from . import annotations as lifecycle_annotations
 from .io import _load_task
 from .output import info as _info, warn as _warn, err as _err
@@ -487,6 +487,20 @@ def cmd_pause(args: Any, backend: Optional[list[str]] = None) -> int:
             "Run 'fulcra-coord reconcile' after Fulcra access recovers."
         )
         return 1
+
+    if getattr(args, "snapshot", False):
+        checkpoint = continuity.make_checkpoint(
+            task,
+            agent=agent,
+            reason="pause",
+            next_actions=[next_action],
+        )
+        snap_ok, snap_path = continuity.write_checkpoint(checkpoint, backend=backend)
+        if snap_ok:
+            _info(f"  Continuity snapshot: {checkpoint['checkpoint_id']}")
+            _info(f"  Snapshot path: {snap_path}")
+        else:
+            _warn("Task paused, but continuity snapshot upload failed.")
 
     _info(f"Paused: {task_id}")
     _info(f"  Next: {next_action}")
