@@ -134,6 +134,36 @@ def test_checkpoint_from_dict_ignores_invalid_context_percent() -> None:
     assert checkpoint.context_used_percent is None
 
 
+def test_checkpoint_from_dict_tolerates_scalar_and_malformed_lists() -> None:
+    checkpoint = checkpoint_from_dict(
+        {
+            "task_id": "TASK-1",
+            "title": "x",
+            "objective": "y",
+            "created_at": "2026-06-06T14:00:00Z",
+            "decisions": "single decision",
+            "artifacts": ["README.md", {"path": "plan.md", "note": "draft"}],
+            "open_questions": "one question",
+            "next_actions": "continue",
+            "memory_writes": ["remember this", {"claim": "structured", "scope": "project"}],
+            "tags": "handoff",
+        }
+    )
+
+    assert checkpoint.decisions == ["single decision"]
+    assert checkpoint.artifacts == [
+        Artifact(path="README.md"),
+        Artifact(path="plan.md", note="draft"),
+    ]
+    assert checkpoint.open_questions == ["one question"]
+    assert checkpoint.next_actions == ["continue"]
+    assert checkpoint.memory_writes == [
+        MemoryWrite(claim="remember this"),
+        MemoryWrite(claim="structured", scope="project"),
+    ]
+    assert checkpoint.tags == ["handoff"]
+
+
 def test_parse_memory_write_supports_optional_fields() -> None:
     memory = parse_memory_write("claim|project:fulcra|90d|old-claim")
 

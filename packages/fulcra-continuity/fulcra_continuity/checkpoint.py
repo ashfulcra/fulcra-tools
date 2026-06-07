@@ -142,20 +142,39 @@ def make_checkpoint(
     )
 
 
+def _coerce_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    return [str(item) for item in _coerce_list(value)]
+
+
 def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
     artifacts = [
-        Artifact(path=str(item.get("path", "")), note=str(item.get("note", "")))
-        for item in data.get("artifacts", [])
+        Artifact(
+            path=str(item.get("path", "")) if isinstance(item, dict) else str(item),
+            note=str(item.get("note", "")) if isinstance(item, dict) else "",
+        )
+        for item in _coerce_list(data.get("artifacts"))
     ]
     memory_writes = [
-        MemoryWrite(
-            claim=str(item.get("claim", "")),
-            scope=str(item.get("scope", "task")),
-            source=str(item.get("source", "checkpoint")),
-            ttl=str(item.get("ttl", "")),
-            supersedes=str(item.get("supersedes", "")),
+        (
+            MemoryWrite(
+                claim=str(item.get("claim", "")),
+                scope=str(item.get("scope", "task")),
+                source=str(item.get("source", "checkpoint")),
+                ttl=str(item.get("ttl", "")),
+                supersedes=str(item.get("supersedes", "")),
+            )
+            if isinstance(item, dict)
+            else MemoryWrite(claim=str(item))
         )
-        for item in data.get("memory_writes", [])
+        for item in _coerce_list(data.get("memory_writes"))
     ]
     identity_data = data.get("identity", {})
     if not isinstance(identity_data, dict):
@@ -178,12 +197,12 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
         source=str(data.get("source", "manual")),
         transcript_path=str(data.get("transcript_path", "")),
         context_used_percent=_optional_int(data.get("context_used_percent")),
-        decisions=[str(item) for item in data.get("decisions", [])],
+        decisions=_coerce_str_list(data.get("decisions")),
         artifacts=artifacts,
-        open_questions=[str(item) for item in data.get("open_questions", [])],
-        next_actions=[str(item) for item in data.get("next_actions", [])],
+        open_questions=_coerce_str_list(data.get("open_questions")),
+        next_actions=_coerce_str_list(data.get("next_actions")),
         memory_writes=memory_writes,
-        tags=[str(item) for item in data.get("tags", [])],
+        tags=_coerce_str_list(data.get("tags")),
     )
 
 
