@@ -353,7 +353,16 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             listener_last_fire=listener_last_fire,
             bus_task_count=len(all_tasks),
         )
-        slug = views.agent_slug(identity.resolve_agent())
+        # Key the health record by the stable MACHINE host, not the per-cwd agent:
+        # the health surface is per-host ("is this machine reconciling?"), and every
+        # worktree/clone on a machine runs the same reconcile against the same bus.
+        # Per-cwd keying made each worktree write its own health/<agent>.json, so a
+        # deleted worktree left an orphan that dragged fleet status to a false
+        # "outage" until the 30-day prune. One record per machine fixes that at the
+        # source (and assess_infra_health also judges freshest-per-host, so legacy
+        # per-cwd orphans already on the bus are superseded too). Fall back to the
+        # agent id only if host is somehow absent.
+        slug = views.agent_slug(record.get("host") or identity.resolve_agent())
         if not remote.upload_json(record, remote.health_remote_path(slug), backend=backend):
             _warn("  Health record upload failed (best-effort; tick unaffected).")
     except Exception as e:

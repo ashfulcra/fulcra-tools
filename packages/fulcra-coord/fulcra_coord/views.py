@@ -361,8 +361,25 @@ def assess_infra_health(health_records, *, now=None, degraded_after_s=None,
     hosts = []
     worst_rank = 0  # 0 healthy, 1 degraded, 2 outage; not_reporting does NOT raise it
     rank = {"healthy": 0, "degraded": 1, "outage": 2}
+
+    # Dedup by host, freshest reconcile_at wins. A machine accrues several health
+    # records over time — multiple worktrees, plus ORPHANS from now-deleted ones —
+    # because the record is keyed per-cwd agent, not per-machine. Judging the
+    # FRESHEST record per host means a live machine's current reconcile supersedes
+    # its own stale/dead-worktree orphans, instead of one orphan pinning
+    # worst_status to "outage" until the 30-day prune (the false-alarm bug). The
+    # real signal is preserved: a host whose EVERY record is stale (genuinely not
+    # reconciling) still reads outage, because its freshest is still stale. A
+    # datable record always beats an undatable one for the same host.
+    freshest = {}  # host_key -> (record, parsed_dt_or_None)
     for rec in health_records:
+        key = rec.get("host") or rec.get("agent") or "?"
         dt = _parse_dt(rec.get("reconcile_at") or "")
+        prev = freshest.get(key)
+        if prev is None or (dt is not None and (prev[1] is None or dt > prev[1])):
+            freshest[key] = (rec, dt)
+
+    for rec, dt in freshest.values():
         metrics = {
             "duration_s": rec.get("duration_s"),
             "tasks_loaded": rec.get("tasks_loaded"),
