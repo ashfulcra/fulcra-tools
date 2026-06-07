@@ -1,6 +1,8 @@
 # Relayless attention + mobile Safari
 
-**Status:** design (approved direction; pending spec review)
+**Status:** design — Chrome track approved/shipping; Safari/iOS track revised by
+the [2026-06-07 addendum](#addendum-2026-06-07--confirmed-safari-blocker--native-architecture)
+(native-owns-auth/tokens/ingest after the Origin blocker was proven on-device)
 **Date:** 2026-06-04
 **Author:** Claude (with Ash)
 
@@ -157,6 +159,11 @@ background. So:
 - No backfill (history API absent).
 
 ### Auth on iOS
+> **⚠️ Superseded — see the [2026-06-07 addendum](#addendum-2026-06-07--confirmed-safari-blocker--native-architecture).**
+> The browser-only device flow below was **disproven on Safari** (Auth0 403s the
+> extension `Origin`, which Safari cannot strip). Auth must run in the **native
+> app**, and tokens live in the **Keychain**, not `browser.storage.local`.
+
 The **same device flow** — open `verification_uri_complete` in a Safari tab,
 poll `/oauth/token`. No native `ASWebAuthenticationSession` needed (device flow
 is browser-only). Tokens in the extension's `browser.storage.local` (App Group
@@ -219,93 +226,112 @@ the iOS shell reuses.
 
 ---
 
-## Addendum (2026-06-07): Safari/iOS — empirically confirmed blocker + refined native architecture
+## Addendum (2026-06-07) — confirmed Safari blocker + native architecture
 
-This addendum supersedes the original "Auth on iOS" section, based on a live
-test plus a peer review on the coordination bus.
+The original Sub-project 2 above assumed the iOS/Safari shell could run the
+**same browser-only device flow** from the extension (open
+`verification_uri_complete`, poll `/oauth/token`, store tokens in the
+extension's `browser.storage.local`). **That assumption was disproven by a live
+test.** This addendum records the proven blocker and the architecture that
+replaces the stale parts of "Sub-project 2 — Mobile Safari shell" and "Auth on
+iOS" above.
 
-### Empirically confirmed: the extension cannot do the Auth0 sign-in on Safari
+### The Origin blocker (proven live, not assumed)
 
-We converted the relayless Chrome extension with
-`xcrun safari-web-extension-converter`, built the macOS app target, loaded it in
-Safari, and clicked "Connect to Fulcra". Result: **`device code request failed:
-HTTP 403`** — the exact failure Chrome had before the declarativeNetRequest
-Origin-strip.
+Auth0 **403s the request when it carries the extension's `Origin` header.**
+- **Chrome** strips `Origin` from the extension's auth requests via
+  `declarativeNetRequest` (`modifyHeaders`), so the device flow works from the
+  background service worker.
+- **Safari cannot.** `Origin`/`Host` are *disallowed sensitive headers* a web
+  extension may not set or remove; Safari's `declarativeNetRequest`
+  `modifyHeaders` does **not** apply to extension-initiated (fetch) requests;
+  and `chrome.identity` is unsupported. There is no extension-side path to send
+  the Auth0 request without the rejected `Origin`.
+- **Verified both directions on-device:** a converted Safari extension `fetch`
+  to `/oauth/device/code` → **403**; the identical request from native Swift
+  `URLSession` (no extension `Origin`) → **200**.
 
-Root cause (Apple docs + this live test):
-- The extension's `POST /oauth/device/code` carries the extension `Origin`;
-  Auth0 rejects any non-allowlisted Origin ("Allowed Web Origins" check).
-- On Chrome we strip that Origin via `declarativeNetRequest`. **Safari refuses:**
-  `Origin`/`Host` are disallowed *sensitive* headers, and DNR `modifyHeaders`
-  does not apply to *extension-initiated* requests. `chrome.identity` is also
-  unsupported (so the redirect/`launchWebAuthFlow` path is out too).
-- The converter additionally flags `idle` and `history` as unsupported → no idle
-  detection, no backfill.
+**Consequence:** on Safari, **auth cannot live in the extension's JS.** It must
+live in the **native app**, which is the one process that can talk to Auth0
+without a rejected `Origin`.
 
-Conclusion: **the relayless extension's JS-side auth is not portable to Safari.**
-Auth must move into the native app.
+### Native-owns-auth/tokens/ingest (the chosen architecture)
 
-### Refined architecture — native owns auth + tokens [+ ingest]; JS only captures
+This supersedes "Auth on iOS" and the `browser.storage.local` token note above.
 
-Apple's Safari Web Extension model is native app + extension JS + native
-extension in separate sandboxes, with **App Groups** for shared native data and
-**nativeMessaging** for JS↔native. The Safari/iOS build is therefore a different
-shape than Chrome:
+1. **Native owns auth.** The containing app runs the Auth0 device flow via
+   `URLSession` (no callback URL, no new Auth0 app needed). Chosen over
+   `ASWebAuthenticationSession` + PKCE precisely because device flow needs no
+   redirect URI. *(Shipped: `AuthManager.swift`, PR #91.)*
+2. **Tokens in the Keychain, device-local.** `kSecAttrAccessibleAfterFirstUnlock
+   ThisDeviceOnly` (NOT iCloud-synced). *(Shipped: `KeychainStore.swift`,
+   PR #91.)*
+3. **Native does ingest** so tokens never enter JS. The native side ports the
+   wire transform and the def/tag resolver:
+   - wire byte-parity transform → `Wire.swift` *(PR #93, 25/25 golden vectors)*;
+   - def/tag resolver → `EnsureDefinition.swift` *(PR #94, 71/71 parity)*.
+4. **Capture stays in JS** (visibility-based content script, `visibility.ts`,
+   PR #87) and hands `AttentionEvent` batches to native via
+   `sendNativeMessage` → `SafariWebExtensionHandler.swift`, which builds the
+   wire record (Wire.swift), resolves the destination (EnsureDefinition.swift),
+   and POSTs `ingest/v1/record/batch` with the Keychain token. The handler
+   returns auth state (signed-in? which account?) so the popup can prompt
+   sign-in without ever holding a token.
+5. Safari uses **event pages**, not service workers; no `chrome.idle` /
+   `chrome.windows` focus / `chrome.history` → **no backfill**, visibility +
+   opportunistic `pagehide` flush only.
 
-- **Auth — native app.** `ASWebAuthenticationSession` + Auth0 **native PKCE**
-  (cleaner UX than the device flow; or device-flow-via-`URLSession` to avoid
-  registering a callback URI). Native HTTP carries no browser Origin → no 403.
-- **Tokens — native, in the Keychain (access group).** Refresh + access tokens
-  live in the Keychain, NOT in `browser.storage.local` or App Group
-  `UserDefaults`. JS never holds the refresh token.
-- **Ingest — native (preferred).** Native POSTs to the Fulcra ingest API via
-  `URLSession`; JS forwards captured events to native and native builds the wire
-  record + POSTs. (Alternative: native hands JS a *short-lived access token* and
-  JS reuses `relayless/wire` + `relaylessSender` — only if avoiding a Swift
-  wire-port is worth a short-lived token in JS.)
-- **Wiring.** Content scripts can't talk to native directly:
-  `content script → background/event-page → sendNativeMessage(native)`. On iOS,
-  the extension JS requests/reads via the native extension, not containing-app
-  push.
-- **Background.** Safari prefers an **event page** over a service worker → add
-  `background.scripts` / `preferred_environment`; event-page lifetime is
-  undependable.
-- **Capture.** The page-visibility capture
-  (`attention/chrome/src/capture/visibility.ts`, shipped on this branch) detects
-  visits and emits `AttentionEvent`s; flush **opportunistically** (on
-  `pagehide`) because the event page can be killed at any time. No backfill.
+### Sharing layer — App Group + Keychain access group (spec, not yet built)
 
-### Native-layer implementation spec (the remaining Swift work)
+The extension process (where `SafariWebExtensionHandler` runs) must read what
+the app stored. Two **separate** entitlements are required — an App Group
+identifier *cannot* double as a keychain access group:
 
-In `attention/safari/` (converter scaffold, then hand-built):
-1. **Auth (Swift):** `ASWebAuthenticationSession` PKCE against the Auth0 public
-   client `48p3VbMnr5kMuJAUe9gJ9vjmdWLdnqZt` (audience
-   `https://api.fulcradynamics.com/`). Store refresh+access tokens in a Keychain
-   access group shared by app + native extension; refresh on 401/expiry.
-2. **Ingest (Swift):** a `URLSession` poster to
-   `POST https://api.fulcradynamics.com/ingest/v1/record/batch` with the Keychain
-   access token; build the same wire record as `relayless/wire.ts` (port
-   `source_id`, the data-inner shape, the def/tag binding incl. the
-   `machine:<slug>` identity tag — port `ensureDefinition`).
-3. **Native messaging bridge (Swift `NSExtensionRequestHandling`):** receives
-   `AttentionEvent` batches from the extension JS (`sendNativeMessage`), hands
-   them to the ingest poster; returns auth state (signed-in? identity label?) to
-   JS for the popup.
-4. **Extension JS (reuse):** visibility capture (this branch) →
-   background/event-page batches → `sendNativeMessage`. The popup shows auth
-   state from native (no token in JS).
-5. **Onboarding:** the native app screen drives sign-in (PKCE) + "name this
-   browser"; the extension popup shows status.
+| Shared thing | Mechanism | Identifier | Why |
+|---|---|---|---|
+| Resolved `{definitionId, tagIds}` (non-secret) | **App Group** shared `UserDefaults` suite | `group.com.fulcra.attention` | `EnsureDefinition`'s cache already takes a `UserDefaults(suiteName:)` hook; resolve once, both processes read it. |
+| Access **token** (secret) | **Keychain access group** | `$(TeamIdentifierPrefix)com.fulcra.attention.shared` | Shared `UserDefaults` is **unencrypted** — secrets must go in a shared Keychain group, same team, exact-same string on both targets. |
 
-Distribution: **TestFlight** — Apple Developer account, App ID + App Group +
-Keychain-access-group entitlements, App Store Connect record, signed build.
-(Needs Ash's Apple Developer account; not automatable from this repo.)
+Both capabilities go on **both** targets (`com.fulcra.attention` app +
+`com.fulcra.attention.Extension`). Concretely:
+- Add `keychain-access-groups` (value
+  `$(TeamIdentifierPrefix)com.fulcra.attention.shared`) to both targets'
+  entitlements; set `KeychainStore`'s `kSecAttrAccessGroup` to that group.
+- Add `com.apple.security.application-groups`
+  (`group.com.fulcra.attention`) to both; point the resolved-id cache at
+  `UserDefaults(suiteName: "group.com.fulcra.attention")`.
 
-### Sequencing (Safari/iOS)
-1. ✅ Visibility capture content-script (this branch) — platform-agnostic, tested.
-2. Convert + commit the Xcode scaffold (`attention/safari/`); add the event-page
-   `background.scripts` config; wire the visibility capture as the iOS content
-   script.
-3. Native auth (PKCE → Keychain) + the nativeMessaging bridge.
-4. Native ingest (`URLSession` + wire port), or short-lived-token-to-JS.
-5. TestFlight signed build (Ash's Apple account).
+**Human step / why this isn't a headless PR:** both identifiers must be
+registered in the Apple Developer portal. With Automatic signing, Xcode
+auto-registers them and regenerates the provisioning profiles **on the first
+GUI build after the capability is enabled** — but a headless `xcodebuild` build
+**fails code-signing** until that profile exists. So the entitlements change
+can't be verified by the author's `xcodebuild`/`swiftc` discipline the way
+`Wire.swift`/`EnsureDefinition.swift` were. It needs Ash to enable the two
+capabilities once in Xcode (Signing & Capabilities → + App Groups, + Keychain
+Sharing) so automatic signing registers them, then it builds headlessly
+thereafter. Team: `CWH48N2H7F`.
+
+> Sources for the sharing mechanics: Apple,
+> [Sharing access to keychain items among a collection of apps](https://developer.apple.com/documentation/security/sharing-access-to-keychain-items-among-a-collection-of-apps)
+> (keychain-access-groups entitlement, `$(TeamIdentifierPrefix)` value format,
+> App-Group-≠-keychain-group); App Groups give a shared, **unencrypted**
+> `UserDefaults`/container, so secrets belong in the shared Keychain group.
+
+### Revised sequencing (native track)
+
+1. ✅ Native auth (device flow via URLSession) + device-local Keychain — **PR #91 (merged)**.
+2. ✅ Wire byte-parity transform → `Wire.swift` — **PR #93 (in review)**.
+3. ✅ Def/tag resolver → `EnsureDefinition.swift` — **PR #94 (in review)**.
+4. ✅ JS visibility capture → `visibility.ts` — **PR #87 (in review)**.
+5. ⏳ **Sharing layer** (App Group + Keychain access group) — spec above;
+   **needs Ash's one-time Xcode capability registration** (the only true
+   blocker on this track).
+6. ⏳ **Native ingest poster** (URLSession → `ingest/v1/record/batch`, refresh
+   on 401) — composes Wire.swift + EnsureDefinition.swift + Keychain token;
+   build after #93/#94 merge.
+7. ⏳ **nativeMessaging bridge** — wire `SafariWebExtensionHandler.swift` to
+   receive `AttentionEvent` batches from `visibility.ts`, ingest, return auth
+   state; needs the sharing layer (5) + ingest (6).
+8. ⏳ **iOS target** + content-script wiring + TestFlight (Ash's App Store
+   Connect; paid Individual account exists).
