@@ -2552,7 +2552,9 @@ class TestHookTemplates(unittest.TestCase):
             self.assertIn("exit 0", body)  # always exits clean
         self.assertIn("status", cc.SESSION_START_SH)
         self.assertIn("update", cc.PRE_COMPACT_SH)
+        self.assertIn("snapshot", cc.PRE_COMPACT_SH)
         self.assertIn("pause", cc.SESSION_END_SH)
+        self.assertIn("--snapshot", cc.SESSION_END_SH)
 
 
 class TestSessionTaskCmd(unittest.TestCase):
@@ -2818,7 +2820,10 @@ class TestHookScriptsE2E(unittest.TestCase):
     def test_pre_compact_calls_update(self):
         r = self._run("pre-compact.sh", json.dumps({"session_id": "s", "transcript_path": "/t.json"}))
         self.assertEqual(r.returncode, 0)
-        self.assertIn("update TASK-live", open(self.calls).read())
+        calls = open(self.calls).read()
+        self.assertIn("update TASK-live", calls)
+        self.assertIn("snapshot TASK-live", calls)
+        self.assertIn("--reason pre-compact", calls)
 
     def test_session_start_flags_active_task_with_missing_timestamp(self):
         # M-4: an active task NOT owned by this agent whose updated_at is missing
@@ -2837,7 +2842,9 @@ class TestHookScriptsE2E(unittest.TestCase):
         sj = json.dumps({"active": [{"id": "TASK-live", "status": "active"}]})
         r = self._run("session-end.sh", json.dumps({"session_id": "s"}), sj)
         self.assertEqual(r.returncode, 0)
-        self.assertIn("pause TASK-live", open(self.calls).read())
+        calls = open(self.calls).read()
+        self.assertIn("pause TASK-live", calls)
+        self.assertIn("--snapshot", calls)
 
     def test_session_end_noop_when_not_active(self):
         sj = json.dumps({"active": [{"id": "TASK-live", "status": "waiting"}]})
@@ -3119,6 +3126,7 @@ class TestOpenClawTemplates(unittest.TestCase):
         self.assertIn("fulcra-coord status", oc.HEARTBEAT_MD_BODY)
         # Shutdown handler pauses; bootstrap handler injects via bootstrapFiles.
         self.assertIn("pause", oc.SHUTDOWN_HANDLER_TS)
+        self.assertIn("--snapshot", oc.SHUTDOWN_HANDLER_TS)
         self.assertIn("bootstrapFiles", oc.BOOTSTRAP_HANDLER_TS)
         # HOOK.md frontmatter declares the right events + the bin requirement.
         self.assertIn("gateway:shutdown", oc.SHUTDOWN_HOOK_MD)
@@ -3182,6 +3190,8 @@ class TestInstallOpenClaw(unittest.TestCase):
         self.assertIn("compact:before", handler)
         self.assertIn("__session-task", handler)
         self.assertIn("update", handler)
+        self.assertIn("snapshot", handler)
+        self.assertIn("openclaw-before-compaction", handler)
 
     def test_boot_md_carries_marker_block(self):
         from fulcra_coord import openclaw as oc
@@ -3343,8 +3353,11 @@ class TestOpenClawPluginSource(unittest.TestCase):
         self.assertIn('api.on("session_end"', ts)
         # before_compaction ALWAYS checkpoints via `update` (the Track A gap).
         self.assertIn("update", ts)
+        self.assertIn("snapshot", ts)
+        self.assertIn("openclaw-before-compaction", ts)
         # session_end parks via `pause`, and must skip `compaction` (continues).
         self.assertIn("pause", ts)
+        self.assertIn("--snapshot", ts)
         self.assertNotIn('"compaction"', _park_reasons_line(ts))
         # Uses the FULCRA_COORD_SESSION_KEY pointer fallback Track A added.
         self.assertIn("FULCRA_COORD_SESSION_KEY", ts)
@@ -7301,13 +7314,12 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_11_0(self):
-        # 0.11.0: additive Fulcra Continuity bridge. coord can write an explicit
-        # pause checkpoint and resume can surface the latest continuity snapshot
-        # for a shared workstream/agent/task identity, while both packages remain
-        # independently useful.
+    def test_version_is_0_12_0(self):
+        # 0.12.0: additive low-noise Continuity trigger layer. coord can write a
+        # snapshot without changing task state, and lifecycle hooks write
+        # checkpoints at compaction/session-end boundaries.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.11.0")
+        self.assertEqual(__version__, "0.12.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
