@@ -41,6 +41,15 @@ SEARCH_INDEX_DONE_DAYS = 30
 # it), and `inbox --all` bypasses it. CONCRETE-assignee directives (real asks)
 # are NEVER aged out regardless of this threshold.
 INBOX_AGE_DAYS_DEFAULT = 3
+# Default age (days) after which a still-`proposed` BROADCAST is auto-EXPIRED
+# (transitioned proposed->abandoned by the retention pass, then cold-archived on a
+# later sweep; recoverable via `restore`). Distinct from INBOX_AGE_DAYS, which is a
+# READ filter only: inbox age-out (3d) hides a broadcast from the live view but
+# leaves it on the bus; expiry (14d) is the DESTRUCTIVE garbage-collection that
+# finally clears never-claimed fan-out off the bus so `status` stops drowning in
+# stale "X is LIVE — UPDATE NOW" directives. The wider window is deliberate: a
+# broadcast must survive well past its inbox-relevance before we abandon it.
+BROADCAST_EXPIRY_DAYS_DEFAULT = 14
 # Default staleness threshold (hours). An `active` task whose updated_at is older
 # than this is "possibly forgotten" and surfaced in views/needs-attention.json.
 STALE_HOURS_DEFAULT = 2
@@ -110,6 +119,58 @@ def is_aged_out_broadcast(task: dict[str, Any], now: Optional[datetime] = None,
         now = _now()
     cutoff_hours = _inbox_age_days(age_days) * 24.0
     return _age_hours(task.get("updated_at", ""), now) >= cutoff_hours
+
+
+def _broadcast_expiry_days(expiry_days: Optional[float] = None) -> float:
+    """Resolve the broadcast auto-expiry cutoff (days): explicit arg > env > default.
+
+    Mirrors _inbox_age_days so the knob is read in exactly one place. The env var
+    FULCRA_COORD_BROADCAST_EXPIRY_DAYS lets a fleet tune how long a never-claimed
+    broadcast survives before it's abandoned; a non-numeric value falls back to the
+    default rather than crashing the best-effort retention pass.
+    """
+    return env_float("FULCRA_COORD_BROADCAST_EXPIRY_DAYS",
+                     BROADCAST_EXPIRY_DAYS_DEFAULT, override=expiry_days)
+
+
+def is_expirable_broadcast(task: dict[str, Any], now: Optional[datetime] = None,
+                           expiry_days: Optional[float] = None) -> bool:
+    """True when `task` is a stale never-claimed BROADCAST that should be auto-
+    EXPIRED (abandoned, then cold-archived on a later sweep, recoverable via
+    `restore`).
+
+    A broadcast expires ONLY when ALL of these hold:
+      * assignee == BROADCAST ("*") — it is fan-out, not a personal ask. A
+        directive addressed to a CONCRETE agent is a real ask and is NEVER expired,
+        regardless of age (the same concrete-assignee guarantee is_aged_out_broadcast
+        makes).
+      * status == "proposed" — still un-acted-on. A waiting/active/terminal
+        broadcast was deliberately picked up or parked; we never garbage-collect it.
+      * its created_at is older than the expiry cutoff (now - expiry_days).
+
+    Age is measured from `created_at`, NOT `updated_at`: a broadcast's created date
+    is its true age, whereas updated_at can be bumped by view rebuilds — measuring
+    from updated_at would keep resetting the expiry clock and never collect it.
+
+    SAFE DIRECTION on a missing/unparseable created_at — the OPPOSITE of
+    is_aged_out_broadcast: that predicate is a read-only filter, so a clockless
+    broadcast fails toward aging OUT (via _age_hours -> +inf). This predicate drives
+    a DESTRUCTIVE abandon->archive, so a clockless broadcast must FAIL SAFE: we
+    return False and never expire what we can't date (exactly like is_archivable_task,
+    via _parse_dt + `if dt is None: return False`). Boundary: age >= expiry_days
+    qualifies (a broadcast created exactly N days ago expires), matching
+    is_archivable_task's >= semantics.
+    """
+    if task.get("assignee") != BROADCAST:
+        return False
+    if task.get("status") != "proposed":
+        return False
+    if now is None:
+        now = _now()
+    dt = _parse_dt(task.get("created_at"))
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _broadcast_expiry_days(expiry_days)
 
 
 def _age_hours(updated_at: str, now: datetime) -> float:
