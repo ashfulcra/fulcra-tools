@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import remote, views, schema, identity, cache
+from . import remote, views, schema, identity, cache, continuity
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
@@ -329,6 +329,7 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     me = identity.resolve_agent(getattr(args, "agent", None))
     human = identity.resolve_human()
     out_format = getattr(args, "format", "table")
+    with_continuity = bool(getattr(args, "with_continuity", False))
 
     # Summaries fast-path: resume reads owner_agent/status/assignee and re-wraps
     # entries with task_summary (now idempotent, so summarizing a summary is a
@@ -390,6 +391,13 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
         other_agents = []
 
     if out_format == "json":
+        continuity_snapshots = []
+        if with_continuity:
+            for task in active:
+                checkpoint = continuity.read_latest_for_task(task, agent=me, backend=backend)
+                summary = continuity.summarize_checkpoint(checkpoint)
+                if summary:
+                    continuity_snapshots.append(summary)
         _print_json({
             "agent": me,
             "human": human,
@@ -398,6 +406,7 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
             "owed_to_others": owed_to_others,
             "blocked_on_human": blocked_on_human,
             "other_agents": other_agents,
+            "continuity_snapshots": continuity_snapshots,
         })
         return 0
 
@@ -422,6 +431,26 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     _section("Blocked on YOU", blocked_on_me, ask_field=True)
     _section("You owe others", owed_to_others)
     _section(f"Blocked on the human ({human})", blocked_on_human, ask_field=True)
+
+    if with_continuity:
+        snapshots = []
+        for task in active:
+            checkpoint = continuity.read_latest_for_task(task, agent=me, backend=backend)
+            summary = continuity.summarize_checkpoint(checkpoint)
+            if summary:
+                snapshots.append(summary)
+        print(f"\n  Continuity snapshots ({len(snapshots)})")
+        for s in snapshots:
+            print(f"    {s.get('checkpoint_id','')}  {s.get('title','')[:50]}")
+            when = s.get("created_at") or ""
+            path = s.get("path") or ""
+            if when:
+                print(f"          at: {when}")
+            if path:
+                print(f"          path: {path}")
+            nexts = s.get("next_actions") or []
+            if nexts:
+                print(f"          next: {str(nexts[0])[:70]}")
 
     # Concise team-state footer so a resuming agent sees what the others are on.
     if other_agents:

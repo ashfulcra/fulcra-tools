@@ -7070,17 +7070,13 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_10_0(self):
-        # 0.10.0: optimization + simplification pass. remote.list_json collapses
-        # six open-coded list+serial-download loops into one parallel primitive
-        # (presence/health load+prune, archive cold-index) — buying reconcile
-        # hot-path headroom; ~10 copy-pasted env-knob readers consolidated into
-        # env_float/env_int (a non-numeric override now falls back to the default
-        # uniformly, hardening the remote read timeouts that used to crash on a
-        # typo); bus-timestamp formatting centralized in _iso_z. Behavior-
-        # preserving. (0.9.1: remote.list_files real-CLI-format normalization.)
+    def test_version_is_0_11_0(self):
+        # 0.11.0: additive Fulcra Continuity bridge. coord can write an explicit
+        # pause checkpoint and resume can surface the latest continuity snapshot
+        # for a shared workstream/agent/task identity, while both packages remain
+        # independently useful.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.10.0")
+        self.assertEqual(__version__, "0.11.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
