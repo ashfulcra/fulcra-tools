@@ -30,6 +30,7 @@ from .retention import (
     _archive_month, _archive_index_shard, _archive_task, _read_index_shard,
     _list_index_shards, _retention_max_per_run, _claim_retention_marker,
     _prune_markers, _prune_dead_presence, _prune_dead_health, _run_retention,
+    _prune_continuity_checkpoints, _continuity_keep,
     _expire_stale_broadcasts, _RETENTION_DEADLINE_HEADROOM_SECONDS,
     cmd_search, cmd_restore,
 )
@@ -345,7 +346,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             _info(f"  Retention: archived {ret['archived']} task(s) "
                   f"(deferred {ret['deferred']}), expired {ret.get('expired_broadcasts', 0)} "
                   f"broadcast(s), pruned {ret['pruned_markers']} marker(s), "
-                  f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health.")
+                  f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health, "
+                  f"{ret.get('pruned_continuity', 0)} continuity.")
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
