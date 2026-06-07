@@ -53,6 +53,7 @@ def _hermetic_cache_and_backend():
     and default the file-ops backend to a safe no-op. Restores prior env after."""
     prev_xdg = os.environ.get("XDG_CACHE_HOME")
     prev_backend = os.environ.get("FULCRA_COORD_BACKEND")
+    prev_annotations = os.environ.get("FULCRA_COORD_ANNOTATIONS")
 
     tmp = tempfile.mkdtemp(prefix="fulcra-coord-test-cache-")
     os.environ["XDG_CACHE_HOME"] = tmp
@@ -63,6 +64,25 @@ def _hermetic_cache_and_backend():
     # backend of its own.
     if prev_backend is None:
         os.environ["FULCRA_COORD_BACKEND"] = "false"
+
+    # Safety net for the OTHER live-write path: annotations. The annotation mode
+    # resolves from FULCRA_COORD_ANNOTATIONS (env) > a persisted file under
+    # ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/annotations > off. The HTTP
+    # transport writes over urllib DIRECTLY — it does NOT go through
+    # FULCRA_COORD_BACKEND, and the persisted file lives under XDG_CONFIG_HOME
+    # (which this fixture does not isolate). So on a machine where the operator
+    # ran ``fulcra-coord annotations on`` (persisting ``http``), an end-to-end
+    # command test that emits a lifecycle annotation as a side effect resolved
+    # mode ``http``, obtained a real bearer token, and POSTed fixture titles
+    # ("Fix the widget pipeline", "do x", "t1", "resolve me", …) to the
+    # operator's LIVE Agent-Tasks timeline — the very surface their
+    # situational-awareness reports read from. The pre-push hook runs the whole
+    # suite, so every fulcra-coord push re-polluted it. Defaulting the env to
+    # ``off`` here (env wins over the persisted file) makes the live path
+    # unreachable for every test by default; tests that exercise annotation
+    # modes set FULCRA_COORD_ANNOTATIONS themselves and still override this.
+    if prev_annotations is None:
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "off"
 
     try:
         yield tmp
@@ -76,5 +96,10 @@ def _hermetic_cache_and_backend():
             os.environ.pop("FULCRA_COORD_BACKEND", None)
         else:
             os.environ["FULCRA_COORD_BACKEND"] = prev_backend
+
+        if prev_annotations is None:
+            os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
+        else:
+            os.environ["FULCRA_COORD_ANNOTATIONS"] = prev_annotations
 
         shutil.rmtree(tmp, ignore_errors=True)
