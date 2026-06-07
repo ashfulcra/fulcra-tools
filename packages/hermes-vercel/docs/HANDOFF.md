@@ -126,7 +126,7 @@ The user's GitHub is `ashfulcra` (org `fulcradynamics`).
 |---|---|---|
 | **`packages/hermes-vercel`** | The active demo runtime. Build/spawn/teardown scripts for Vercel Sandbox + bake of the snapshot. **This is the one a new operator runs.** | Working end-to-end on baseline path. Gateway path coded but blocked on (4) below. |
 | **`packages/litellm`** | The LiteLLM proxy as a deployable Docker app. Configured for Fly.io. | Deployed (`fulcra-litellm.fly.dev`) but machines are stop-cycling on the Fly trial — needs payment method to stay up. |
-| **`ashfulcra/fulcra-hermes-daytona`** (standalone repo) | The original Daytona port. **Deprecated** and extracted out of this monorepo into its own archived repo. Kept as a reference for the shape of the boot script and the snapshot config — the Vercel port uses the same shape, ported to Amazon Linux 2023 and the `vercel-sandbox` user. | Do not invest more here. See § 8.4 for why we left Daytona. |
+| **`ashfulcra/fulcra-hermes-daytona`** (standalone repo) | The original Daytona port. **Deprecated** and extracted out of this monorepo into its own standalone repo. Kept as a reference for the shape of the boot script and the snapshot config — the Vercel port uses the same shape, ported to Amazon Linux 2023 and the `vercel-sandbox` user. | Do not invest more here. See § 8.4 for why we left Daytona. |
 
 The Fulcra onboarding skill itself lives in
 [`fulcradynamics/agent-skills`](https://github.com/fulcradynamics/agent-skills),
@@ -612,7 +612,7 @@ All three packages live in the **`ashfulcra/fulcra-tools`** private monorepo:
 
 | Package | Path | Notes |
 |---|---|---|
-| `fulcra-hermes-daytona` | standalone repo `ashfulcra/fulcra-hermes-daytona` | Deprecated; extracted out of this monorepo into its own archived repo. Kept as reference. See its README banner. |
+| `fulcra-hermes-daytona` | standalone repo `ashfulcra/fulcra-hermes-daytona` | Deprecated; extracted out of this monorepo into its own standalone repo. Kept as reference. See its README banner. |
 | `hermes-vercel` | `packages/hermes-vercel/` | Active demo runtime. |
 | `litellm` | `packages/litellm/` | LiteLLM gateway, deployable to Fly. |
 

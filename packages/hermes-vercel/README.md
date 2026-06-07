@@ -37,7 +37,7 @@ npm run teardown -- --all
 - [`ashfulcra/fulcra-hermes-daytona`](https://github.com/ashfulcra/fulcra-hermes-daytona)
   — the original Daytona port. **Deprecated** (Daytona's egress allowlist blocks
   `api.fulcradynamics.com`) and extracted out of this monorepo into its own
-  standalone (archived) repo. Kept as a reference. See `docs/HANDOFF.md` § 8.4.
+  standalone repo. Kept as a reference. See `docs/HANDOFF.md` § 8.4.
 
 ## File map
 
