@@ -5240,6 +5240,201 @@ class TestInstallListenerCmd(unittest.TestCase):
             self.target, "com.fulcra.coord.listener.codex-h-r.plist")))
 
 
+class TestWebhookNotifier(unittest.TestCase):
+    """Cross-platform push notifier: webhook (ntfy/slack/discord/json) + native
+    desktop, both best-effort and independent. Network + subprocess fully mocked.
+    """
+
+    def setUp(self):
+        for k in ("FULCRA_COORD_NOTIFY_WEBHOOK", "FULCRA_COORD_NOTIFY_FORMAT",
+                  "FULCRA_COORD_NOTIFY_TIMEOUT"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k in ("FULCRA_COORD_NOTIFY_WEBHOOK", "FULCRA_COORD_NOTIFY_FORMAT",
+                  "FULCRA_COORD_NOTIFY_TIMEOUT"):
+            os.environ.pop(k, None)
+
+    # -- _webhook_format -----------------------------------------------------
+    def test_format_autodetect_discord(self):
+        from fulcra_coord import listener
+        self.assertEqual(
+            listener._webhook_format(
+                "https://discord.com/api/webhooks/1/abc"), "discord")
+
+    def test_format_autodetect_slack(self):
+        from fulcra_coord import listener
+        self.assertEqual(
+            listener._webhook_format(
+                "https://hooks.slack.com/services/T/B/x"), "slack")
+
+    def test_format_autodetect_ntfy_default(self):
+        from fulcra_coord import listener
+        self.assertEqual(
+            listener._webhook_format("https://ntfy.sh/mytopic"), "ntfy")
+
+    def test_format_explicit_env_overrides_host(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "json"
+        self.assertEqual(
+            listener._webhook_format("https://hooks.slack.com/x"), "json")
+
+    def test_format_bogus_explicit_falls_back_to_autodetect(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "carrier-pigeon"
+        self.assertEqual(
+            listener._webhook_format("https://discord.com/api/webhooks/1"),
+            "discord")
+
+    # -- _build_webhook_request ----------------------------------------------
+    def test_build_ntfy_request(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "ntfy"
+        req = listener._build_webhook_request(
+            "https://ntfy.sh/t", "fulcra-coord", "hello world")
+        self.assertEqual(req.full_url, "https://ntfy.sh/t")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.data, b"hello world")
+        # urllib title-cases header keys.
+        self.assertEqual(req.headers["Title"], "fulcra-coord")
+        self.assertIn("text/plain", req.headers["Content-type"])
+
+    def test_build_ntfy_request_sanitizes_nonascii_title(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "ntfy"
+        req = listener._build_webhook_request(
+            "https://ntfy.sh/t", "⛔ needs you", "msg")
+        # Non-ascii title is not header-safe -> falls back to plain marker.
+        self.assertEqual(req.headers["Title"], "fulcra-coord")
+        # Body is still the raw message.
+        self.assertEqual(req.data, b"msg")
+
+    def test_build_slack_request(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "slack"
+        req = listener._build_webhook_request(
+            "https://hooks.slack.com/x", "T", "M")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertIn("application/json", req.headers["Content-type"])
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["text"], "T: M")
+
+    def test_build_discord_request_and_truncates(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "discord"
+        req = listener._build_webhook_request(
+            "https://discord.com/api/webhooks/1", "Title", "x" * 5000)
+        self.assertEqual(req.get_method(), "POST")
+        self.assertIn("application/json", req.headers["Content-type"])
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertTrue(body["content"].startswith("**Title**\n"))
+        self.assertLessEqual(len(body["content"]), 1900)
+
+    def test_build_json_request(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "json"
+        req = listener._build_webhook_request(
+            "https://example.com/hook", "T", "M")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertIn("application/json", req.headers["Content-type"])
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["title"], "T")
+        self.assertEqual(body["message"], "M")
+
+    # -- _post_webhook -------------------------------------------------------
+    def test_post_webhook_success(self):
+        from fulcra_coord import listener
+        import contextlib
+        cm = contextlib.nullcontext(types.SimpleNamespace(status=200))
+        with patch("fulcra_coord.listener.urllib.request.urlopen",
+                   return_value=cm) as uo:
+            ok = listener._post_webhook(
+                "https://ntfy.sh/t", "fulcra-coord", "hi")
+        self.assertTrue(ok)
+        uo.assert_called_once()
+        # The first positional arg is the built Request.
+        sent = uo.call_args[0][0]
+        self.assertEqual(sent.full_url, "https://ntfy.sh/t")
+
+    def test_post_webhook_failure_swallowed(self):
+        from fulcra_coord import listener
+        import urllib.error
+        with patch("fulcra_coord.listener.urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("boom")):
+            ok = listener._post_webhook(
+                "https://ntfy.sh/t", "fulcra-coord", "hi")
+        self.assertFalse(ok)
+
+    # -- _deliver orchestration ----------------------------------------------
+    def test_deliver_calls_both_when_webhook_set(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_WEBHOOK"] = "https://ntfy.sh/t"
+        with patch("fulcra_coord.listener._post_webhook") as pw, \
+             patch("fulcra_coord.listener._emit_native") as en:
+            listener._deliver("msg", title="t")
+        pw.assert_called_once()
+        en.assert_called_once_with("msg", "t")
+
+    def test_deliver_skips_webhook_when_unset(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener._post_webhook") as pw, \
+             patch("fulcra_coord.listener._emit_native") as en:
+            listener._deliver("msg", title="t")
+        pw.assert_not_called()
+        en.assert_called_once()
+
+    def test_deliver_native_runs_even_if_webhook_raises(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_WEBHOOK"] = "https://ntfy.sh/t"
+        with patch("fulcra_coord.listener._post_webhook",
+                   side_effect=Exception("explode")), \
+             patch("fulcra_coord.listener._emit_native") as en:
+            listener._deliver("msg", title="t")  # must not raise
+        en.assert_called_once()
+
+    # -- public surface routes through _deliver ------------------------------
+    def test_emit_notification_routes_through_deliver(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener._deliver") as dl:
+            listener.emit_notification("codex:h:r", 3)
+        dl.assert_called_once()
+        msg = dl.call_args[0][0]
+        self.assertIn("3 directive(s)", msg)
+        self.assertEqual(dl.call_args[1]["title"], "fulcra-coord")
+
+    def test_emit_message_routes_through_deliver(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener._deliver") as dl:
+            listener.emit_message("hello", title="alert")
+        dl.assert_called_once_with("hello", title="alert")
+
+    # -- _emit_native Linux branch -------------------------------------------
+    def test_emit_native_linux_uses_notify_send(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener.scheduler_env.is_macos",
+                   return_value=False), \
+             patch("fulcra_coord.listener.sys.platform", "linux"), \
+             patch("fulcra_coord.listener.shutil.which",
+                   return_value="/usr/bin/notify-send"), \
+             patch("fulcra_coord.listener.subprocess.run") as run:
+            listener._emit_native("body", "title")
+        run.assert_called_once()
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[0], "notify-send")
+        self.assertEqual(argv[1], "title")
+        self.assertEqual(argv[2], "body")
+
+    def test_emit_native_linux_falls_back_to_stderr(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener.scheduler_env.is_macos",
+                   return_value=False), \
+             patch("fulcra_coord.listener.sys.platform", "linux"), \
+             patch("fulcra_coord.listener.shutil.which", return_value=None), \
+             patch("fulcra_coord.listener.subprocess.run") as run:
+            listener._emit_native("body", "title")  # must not raise
+        run.assert_not_called()
+
+
 class TestNotifyInbox(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -5280,6 +5475,42 @@ class TestNotifyInbox(unittest.TestCase):
         # No directives -> surface file is empty/absent (no stale notification)
         if sf.exists():
             self.assertEqual(json.loads(sf.read_text())["inbox"], [])
+
+    def _seen_path(self, agent):
+        from fulcra_coord import cache, listener
+        return cache.cache_root() / f"inbox-notified-{listener.agent_slug(agent)}.json"
+
+    def test_inbox_notify_dedups_across_ticks(self):
+        """Agent-inbox notify fires once for NEW ids: a re-tick over the SAME
+        items does not re-alert, a genuinely new id does, and the seen-set on
+        disk tracks the current ids (so resolved items drop and can re-alert)."""
+        from fulcra_coord.cli import cmd_notify_inbox
+        a, b = _directive("codex:h:r"), _directive("codex:h:r")
+        cache.write_cached_task(a)
+        cache.write_cached_task(b)
+        ns = types.SimpleNamespace(agent="codex:h:r")
+        with patch("fulcra_coord.listener.emit_notification") as emit:
+            # First tick: two new items -> one emit with count 2.
+            cmd_notify_inbox(ns, backend=self.fake_backend)
+            self.assertEqual(emit.call_count, 1)
+            self.assertEqual(emit.call_args[0][1], 2)
+            seen = set(json.loads(self._seen_path("codex:h:r").read_text()))
+            self.assertEqual(seen, {a["id"], b["id"]})
+
+            # Second identical tick: nothing new -> no emit.
+            emit.reset_mock()
+            cmd_notify_inbox(ns, backend=self.fake_backend)
+            emit.assert_not_called()
+
+            # Third tick adds one NEW directive -> emit once with count 1.
+            emit.reset_mock()
+            c = _directive("codex:h:r")
+            cache.write_cached_task(c)
+            cmd_notify_inbox(ns, backend=self.fake_backend)
+            self.assertEqual(emit.call_count, 1)
+            self.assertEqual(emit.call_args[0][1], 1)
+            seen = set(json.loads(self._seen_path("codex:h:r").read_text()))
+            self.assertEqual(seen, {a["id"], b["id"], c["id"]})
 
 
 class TestNotifyBlockedOnYou(unittest.TestCase):
