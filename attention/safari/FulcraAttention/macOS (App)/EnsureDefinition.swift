@@ -552,18 +552,16 @@ public final class EnsureAttention: @unchecked Sendable {
             !(d.deleted_at != nil && !(d.deleted_at!.isEmpty)) && // !deleted_at (null/absent/"" are falsy)
             d.id != nil
         }
-        // Sort by created_at ascending using plain lexicographic String
-        // comparison of the raw ISO strings (mirrors the TS
-        // `(a.created_at || "").localeCompare(b.created_at || "")`; ISO-8601
-        // UTC strings sort lexicographically by instant). Swift's `<` on String
-        // is Unicode-scalar lexicographic, which for the ASCII ISO timestamps
-        // here is the same total order as JS localeCompare. Use a stable sort to
-        // preserve input order on ties (JS Array.sort is stable in V8/JSC).
+        // Sort by created_at ascending with Foundation localized comparison,
+        // matching the TS `(a.created_at || "").localeCompare(b.created_at ||
+        // "")` better than raw Swift `<` for punctuation and non-ASCII edge
+        // cases. Keep a stable tie-break because JS Array.sort is stable in
+        // modern V8/JSC.
         matches = matches.enumerated().sorted { lhs, rhs in
             let a = lhs.element.created_at ?? ""
             let b = rhs.element.created_at ?? ""
             if a == b { return lhs.offset < rhs.offset }
-            return a < b
+            return a.localizedCompare(b) == .orderedAscending
         }.map { $0.element }
         return matches
     }

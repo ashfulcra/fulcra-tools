@@ -192,6 +192,15 @@ final class EnsureAttentionTests: XCTestCase {
         XCTAssertEqual(api.defPosts.count, 0)
     }
 
+    func testCreatedAtSortMatchesJSLocaleCompare() async throws {
+        let api = FakeApi(tags: ["attention": "a", "web": "w"], defs: [
+            defRow("plus", created: "2026-01-01T00:00:00+01:00"),
+            defRow("minus", created: "2026-01-01T00:00:00-05:00"),
+        ])
+        let res = try await makeEnsure(api).ensureAttentionDefinitionAndTags()
+        XCTAssertEqual(res.definitionId, "minus")
+    }
+
     func testCachesSecondCallNoNetwork() async throws {
         let api = FakeApi(tags: ["attention": "tag-attn", "web": "tag-web"],
                           defs: [defRow("def-existing", created: "2026-01-01T00:00:00Z")])

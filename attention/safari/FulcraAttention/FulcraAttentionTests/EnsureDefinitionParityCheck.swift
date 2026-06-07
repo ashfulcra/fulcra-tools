@@ -250,6 +250,17 @@ struct ParityMain {
             c.eq(api.defPosts.count, 0, "ensure-oldest: no def POST")
         } catch { c.ok(false, "ensure-oldest threw: \(error)") }
 
+        // ---- created_at sort must match JS localeCompare, not raw Swift `<` ----
+        do {
+            let api = FakeApi(tags: ["attention": "a", "web": "w"], defs: [
+                defRow("plus", created: "2026-01-01T00:00:00+01:00"),
+                defRow("minus", created: "2026-01-01T00:00:00-05:00"),
+            ])
+            let (e, _) = makeEnsure(api)
+            let res = try await e.ensureAttentionDefinitionAndTags()
+            c.eq(res.definitionId, "minus", "ensure-localeCompare: '-' offset sorts before '+'")
+        } catch { c.ok(false, "ensure-localeCompare threw: \(error)") }
+
         // ---- ensure: cache → second call makes NO new requests ----
         do {
             let api = FakeApi(tags: ["attention": "tag-attn", "web": "tag-web"],
