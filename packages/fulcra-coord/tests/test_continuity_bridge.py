@@ -66,6 +66,37 @@ def test_pause_snapshot_writes_latest_and_archived_checkpoint(capsys) -> None:
     assert checkpoint["next_actions"] == ["Resume from checkpoint"]
 
 
+def test_snapshot_writes_checkpoint_without_task_transition(capsys) -> None:
+    task = _task()
+    args = argparse.Namespace(
+        task_id=task["id"],
+        reason="pre-compact",
+        next=None,
+        transcript_path="/tmp/session.jsonl",
+        agent="arc",
+    )
+    uploaded = []
+
+    def upload_json(data, path, **_kwargs):
+        uploaded.append((data, path))
+        return True
+
+    with patch("fulcra_coord.lifecycle._load_task", return_value=task), \
+         patch("fulcra_coord.lifecycle._write_task_and_views") as write_task, \
+         patch("fulcra_coord.continuity.remote.upload_json", side_effect=upload_json):
+        rc = cli.cmd_snapshot(args)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Continuity snapshot:" in out
+    write_task.assert_not_called()
+    assert len(uploaded) == 2
+    checkpoint = uploaded[0][0]
+    assert checkpoint["source"] == "fulcra-coord:pre-compact"
+    assert checkpoint["transcript_path"] == "/tmp/session.jsonl"
+    assert checkpoint["next_actions"] == ["Pick up from latest checkpoint"]
+
+
 def test_resume_json_can_include_latest_continuity_snapshot(capsys) -> None:
     task = _task()
     checkpoint = continuity.make_checkpoint(
