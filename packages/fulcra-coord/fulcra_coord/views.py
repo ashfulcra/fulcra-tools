@@ -371,6 +371,15 @@ def assess_infra_health(health_records, *, now=None, degraded_after_s=None,
     # real signal is preserved: a host whose EVERY record is stale (genuinely not
     # reconciling) still reads outage, because its freshest is still stale. A
     # datable record always beats an undatable one for the same host.
+    #
+    # CAVEAT: "host" is the short hostname, so this assumes distinct machines have
+    # distinct short hostnames (true for this fleet: Mac / Ashs-MBP-Work /
+    # DeskbookPro / singularity). Two PHYSICAL machines sharing a short hostname,
+    # one healthy + one down, would merge and the down one's outage would hide.
+    # That collision domain is only slightly wider than the pre-fix write path
+    # (which already clobbered same-hostname+same-repo agents on one remote file);
+    # if the fleet ever spans non-unique short hostnames, key health by a more
+    # specific machine id instead.
     freshest = {}  # host_key -> (record, parsed_dt_or_None)
     for rec in health_records:
         key = rec.get("host") or rec.get("agent") or "?"
