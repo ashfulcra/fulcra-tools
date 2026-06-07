@@ -7396,9 +7396,8 @@ class TestParallelViewUpload(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_task_summaries",
-                   return_value=[schema.task_summary(task)]), \
-             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]):
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
+                   return_value=[schema.task_summary(task)]):
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
 
@@ -7418,9 +7417,8 @@ class TestParallelViewUpload(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_task_summaries",
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]), \
-             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
              patch("fulcra_coord.cli.lifecycle_annotations.emit_lifecycle_annotation") as emit:
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
@@ -7438,9 +7436,8 @@ class TestParallelViewUpload(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_task_summaries",
-                   return_value=[schema.task_summary(task)]), \
-             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]):
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
+                   return_value=[schema.task_summary(task)]):
             ok = _write_task_and_views(task, backend=["false"], command="update")
         self.assertTrue(ok)
         # Every standard view path was uploaded (index + summaries + active ...).
@@ -7685,7 +7682,7 @@ class TestParallelUploadExceptionSafety(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_summaries_for_rebuild",
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]):
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
@@ -9777,12 +9774,12 @@ class TestReviewSweep(unittest.TestCase):
                "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                "capabilities": ["review"]}]}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.routing_ops._cache_remote_task", return_value=moved), \
-             patch("fulcra_coord.cli._load_task", return_value=t) as lt, \
+             patch("fulcra_coord.routing_ops._cache_remote_task",
+                   return_value=moved) as load_fresh, \
              patch("fulcra_coord.routing_ops._write_task_and_views") as wtv:
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()  # another sweeper already moved it
-        lt.assert_not_called()  # the stale-observation check bypasses cache
+        load_fresh.assert_called_once_with(t["id"], backend=["false"])
 
     def test_sweep_ignores_non_review_tasks(self):
         from fulcra_coord.cli import _sweep_review_routes
@@ -9793,10 +9790,10 @@ class TestReviewSweep(unittest.TestCase):
         with patch("fulcra_coord.cli.remote.download_json",
                    side_effect=lambda p, backend=None: agg), \
              patch("fulcra_coord.routing_ops._write_task_and_views") as wtv, \
-             patch("fulcra_coord.cli._load_task") as lt:
+             patch("fulcra_coord.routing_ops._cache_remote_task") as load_fresh:
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()
-        lt.assert_not_called()
+        load_fresh.assert_not_called()
 
     def test_sweep_past_deadline_processes_nothing(self):
         """B1 — the sweep is now deadline-bounded.
