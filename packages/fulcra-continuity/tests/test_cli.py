@@ -27,6 +27,14 @@ def test_checkpoint_command_writes_json_and_brief(tmp_path: Path) -> None:
         "Migrate check-ins",
         "--objective",
         "Move parser to fulcra-coord",
+        "--workstream-id",
+        "openclaw:discord:main-comms",
+        "--agent-id",
+        "arc",
+        "--coord-task-id",
+        "TASK-123",
+        "--coord-owner-agent",
+        "openclaw:discord:main-comms",
         "--decision",
         "Avoid broad broadcasts",
         "--artifact",
@@ -48,6 +56,9 @@ def test_checkpoint_command_writes_json_and_brief(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     data = json.loads(checkpoint_path.read_text())
     assert data["task_id"] == "TASK-123"
+    assert data["identity"]["workstream_id"] == "openclaw:discord:main-comms"
+    assert data["identity"]["agent_id"] == "arc"
+    assert data["identity"]["coord_task_id"] == "TASK-123"
     assert data["decisions"] == ["Avoid broad broadcasts"]
     assert data["artifacts"] == [{"path": "parser.py", "note": "entry point"}]
     assert data["memory_writes"][0]["scope"] == "project:fulcra"

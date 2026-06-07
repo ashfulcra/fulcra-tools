@@ -31,6 +31,17 @@ class MemoryWrite:
 
 
 @dataclass(frozen=True)
+class WorkstreamIdentity:
+    workstream_id: str = ""
+    agent_id: str = ""
+    coord_task_id: str = ""
+    coord_owner_agent: str = ""
+
+    def is_empty(self) -> bool:
+        return not any((self.workstream_id, self.agent_id, self.coord_task_id, self.coord_owner_agent))
+
+
+@dataclass(frozen=True)
 class ContinuityCheckpoint:
     schema_version: str
     checkpoint_id: str
@@ -39,6 +50,7 @@ class ContinuityCheckpoint:
     objective: str
     created_at: str
     owner_agent: str = ""
+    identity: WorkstreamIdentity = field(default_factory=WorkstreamIdentity)
     source: str = "manual"
     transcript_path: str = ""
     context_used_percent: int | None = None
@@ -51,6 +63,8 @@ class ContinuityCheckpoint:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        if self.identity.is_empty():
+            data.pop("identity", None)
         data["artifacts"] = [asdict(item) for item in self.artifacts]
         data["memory_writes"] = [asdict(item) for item in self.memory_writes]
         return data
@@ -91,6 +105,11 @@ def make_checkpoint(
     memory_writes: list[MemoryWrite] | None = None,
     tags: list[str] | None = None,
     created_at: str | None = None,
+    identity: WorkstreamIdentity | None = None,
+    workstream_id: str = "",
+    agent_id: str = "",
+    coord_task_id: str = "",
+    coord_owner_agent: str = "",
 ) -> ContinuityCheckpoint:
     """Build a checkpoint with collision-resistant IDs for demos and logs."""
     created = created_at or utc_now_iso()
@@ -104,6 +123,13 @@ def make_checkpoint(
         objective=objective,
         created_at=created,
         owner_agent=owner_agent,
+        identity=identity
+        or WorkstreamIdentity(
+            workstream_id=workstream_id,
+            agent_id=agent_id,
+            coord_task_id=coord_task_id,
+            coord_owner_agent=coord_owner_agent,
+        ),
         source=source,
         transcript_path=transcript_path,
         context_used_percent=_optional_int(context_used_percent),
@@ -131,6 +157,15 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
         )
         for item in data.get("memory_writes", [])
     ]
+    identity_data = data.get("identity", {})
+    if not isinstance(identity_data, dict):
+        identity_data = {}
+    identity = WorkstreamIdentity(
+        workstream_id=str(identity_data.get("workstream_id", "")),
+        agent_id=str(identity_data.get("agent_id", "")),
+        coord_task_id=str(identity_data.get("coord_task_id", "")),
+        coord_owner_agent=str(identity_data.get("coord_owner_agent", "")),
+    )
     return ContinuityCheckpoint(
         schema_version=str(data.get("schema_version", SCHEMA_VERSION)),
         checkpoint_id=str(data.get("checkpoint_id", "")),
@@ -139,6 +174,7 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
         objective=str(data.get("objective", "")),
         created_at=str(data.get("created_at", "")),
         owner_agent=str(data.get("owner_agent", "")),
+        identity=identity,
         source=str(data.get("source", "manual")),
         transcript_path=str(data.get("transcript_path", "")),
         context_used_percent=_optional_int(data.get("context_used_percent")),
@@ -176,6 +212,16 @@ def render_resume_brief(checkpoint: ContinuityCheckpoint) -> str:
     ]
     if checkpoint.owner_agent:
         lines.append(f"Owner agent: {checkpoint.owner_agent}")
+    if not checkpoint.identity.is_empty():
+        lines.append("Identity:")
+        if checkpoint.identity.workstream_id:
+            lines.append(f"- Workstream: {checkpoint.identity.workstream_id}")
+        if checkpoint.identity.agent_id:
+            lines.append(f"- Agent: {checkpoint.identity.agent_id}")
+        if checkpoint.identity.coord_task_id:
+            lines.append(f"- Coord task: {checkpoint.identity.coord_task_id}")
+        if checkpoint.identity.coord_owner_agent:
+            lines.append(f"- Coord owner: {checkpoint.identity.coord_owner_agent}")
     if checkpoint.context_used_percent is not None:
         lines.append(f"Context used: {checkpoint.context_used_percent}%")
     if checkpoint.transcript_path:
@@ -220,6 +266,10 @@ def default_demo_checkpoint() -> ContinuityCheckpoint:
             "fulcra-coord lifecycle flow without losing task state during handoff."
         ),
         owner_agent="openclaw:discord:main-comms",
+        workstream_id="openclaw:discord:main-comms",
+        agent_id="arc",
+        coord_task_id="TASK-demo-context-cliff-rescue",
+        coord_owner_agent="openclaw:discord:main-comms",
         source="demo",
         context_used_percent=82,
         decisions=[

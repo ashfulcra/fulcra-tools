@@ -33,6 +33,26 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("--title", required=True)
     checkpoint.add_argument("--objective", required=True)
     checkpoint.add_argument("--owner-agent", default=os.environ.get("FULCRA_CONTINUITY_AGENT", ""))
+    checkpoint.add_argument(
+        "--workstream-id",
+        default=os.environ.get("FULCRA_CONTINUITY_WORKSTREAM_ID", ""),
+        help="Optional shared workstream identity, such as openclaw:discord:main-comms",
+    )
+    checkpoint.add_argument(
+        "--agent-id",
+        default=os.environ.get("FULCRA_CONTINUITY_AGENT_ID", ""),
+        help="Optional logical agent identity for handoff and pickup",
+    )
+    checkpoint.add_argument(
+        "--coord-task-id",
+        default="",
+        help="Optional fulcra-coord task ID this checkpoint resumes",
+    )
+    checkpoint.add_argument(
+        "--coord-owner-agent",
+        default="",
+        help="Optional fulcra-coord owner agent for the referenced task",
+    )
     checkpoint.add_argument("--source", default="manual")
     checkpoint.add_argument("--transcript-path", default="")
     checkpoint.add_argument("--context-used", type=int, default=None)
@@ -89,6 +109,10 @@ def run(argv: list[str] | None = None) -> int:
             title=args.title,
             objective=args.objective,
             owner_agent=args.owner_agent,
+            workstream_id=args.workstream_id,
+            agent_id=args.agent_id,
+            coord_task_id=args.coord_task_id,
+            coord_owner_agent=args.coord_owner_agent,
             source=args.source,
             transcript_path=args.transcript_path,
             context_used_percent=args.context_used,

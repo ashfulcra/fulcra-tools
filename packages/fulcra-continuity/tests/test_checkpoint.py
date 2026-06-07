@@ -6,6 +6,7 @@ from fulcra_continuity.checkpoint import (
     SCHEMA_VERSION,
     Artifact,
     MemoryWrite,
+    WorkstreamIdentity,
     checkpoint_from_dict,
     make_checkpoint,
     parse_memory_write,
@@ -24,6 +25,12 @@ def test_make_checkpoint_round_trips_to_dict() -> None:
         open_questions=["Who owns the next action?"],
         next_actions=["Run tests"],
         memory_writes=[MemoryWrite(claim="Continuity needs receipts", ttl="30d")],
+        identity=WorkstreamIdentity(
+            workstream_id="openclaw:discord:main-comms",
+            agent_id="arc",
+            coord_task_id="TASK-1",
+            coord_owner_agent="openclaw:discord:main-comms",
+        ),
         tags=["demo"],
     )
 
@@ -32,11 +39,28 @@ def test_make_checkpoint_round_trips_to_dict() -> None:
     assert data["schema_version"] == SCHEMA_VERSION
     assert data["checkpoint_id"].startswith("CHK-20260606T140000z-task-1-")
     assert data["task_id"] == "TASK-1"
+    assert data["identity"] == {
+        "agent_id": "arc",
+        "coord_owner_agent": "openclaw:discord:main-comms",
+        "coord_task_id": "TASK-1",
+        "workstream_id": "openclaw:discord:main-comms",
+    }
     assert data["artifacts"] == [{"path": "README.md", "note": "demo notes"}]
     assert data["memory_writes"][0]["claim"] == "Continuity needs receipts"
 
     loaded = checkpoint_from_dict(json.loads(json.dumps(data)))
     assert loaded == checkpoint
+
+
+def test_empty_identity_is_omitted_from_json() -> None:
+    checkpoint = make_checkpoint(
+        task_id="TASK-1",
+        title="Keep work alive",
+        objective="Resume after compaction",
+        created_at="2026-06-06T14:00:00Z",
+    )
+
+    assert "identity" not in checkpoint.to_dict()
 
 
 def test_resume_brief_highlights_operating_state() -> None:
@@ -45,6 +69,9 @@ def test_resume_brief_highlights_operating_state() -> None:
         title="Context Cliff Rescue",
         objective="Prove continuity",
         created_at="2026-06-06T14:00:00Z",
+        workstream_id="openclaw:discord:main-comms",
+        agent_id="arc",
+        coord_task_id="TASK-2",
         decisions=["Checkpoint before compaction"],
         next_actions=["Resume from checkpoint"],
     )
@@ -53,6 +80,9 @@ def test_resume_brief_highlights_operating_state() -> None:
 
     assert "Resume brief for TASK-2" in brief
     assert "Objective: Prove continuity" in brief
+    assert "- Workstream: openclaw:discord:main-comms" in brief
+    assert "- Agent: arc" in brief
+    assert "- Coord task: TASK-2" in brief
     assert "- Checkpoint before compaction" in brief
     assert "- Resume from checkpoint" in brief
 
