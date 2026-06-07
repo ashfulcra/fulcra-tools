@@ -13,7 +13,7 @@
 //   - pagehide flushes the in-progress visit immediately (tail flush)
 //   - sub-threshold (<MIN) visits are not emitted
 
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   startVisibilityCapture,
   SAFARI_CLIENT,
@@ -263,6 +263,63 @@ describe("startVisibilityCapture", () => {
     expect(ev.start_time.endsWith("Z")).toBe(true);
     expect(ev.end_time.endsWith("Z")).toBe(true);
   });
+
+  test("default DOM source listens for visibilitychange on document and page lifecycle events on window", () => {
+    const listeners = {
+      document: new Map<string, Set<Handler>>(),
+      window: new Map<string, Set<Handler>>(),
+    };
+    const add = (bucket: "document" | "window", type: string, fn: Handler): void => {
+      if (!listeners[bucket].has(type)) listeners[bucket].set(type, new Set());
+      listeners[bucket].get(type)!.add(fn);
+    };
+    const remove = (bucket: "document" | "window", type: string, fn: Handler): void => {
+      listeners[bucket].get(type)?.delete(fn);
+    };
+    const fire = (bucket: "document" | "window", type: string): void => {
+      for (const fn of listeners[bucket].get(type) ?? []) fn();
+    };
+
+    let visibilityState: "visible" | "hidden" = "visible";
+    const doc = {
+      get visibilityState() {
+        return visibilityState;
+      },
+      title: "DOM page",
+      addEventListener: (type: string, fn: Handler) => add("document", type, fn),
+      removeEventListener: (type: string, fn: Handler) => remove("document", type, fn),
+    };
+    const win = {
+      location: { href: "https://dom.test/page" },
+      addEventListener: (type: string, fn: Handler) => add("window", type, fn),
+      removeEventListener: (type: string, fn: Handler) => remove("window", type, fn),
+    };
+
+    vi.stubGlobal("document", doc);
+    vi.stubGlobal("window", win);
+
+    let t = 0;
+    const emitted: AttentionEvent[] = [];
+    const teardown = startVisibilityCapture({
+      now: () => t,
+      emit: (e) => emitted.push(e),
+    });
+
+    expect(listeners.document.get("visibilitychange")?.size).toBe(1);
+    expect(listeners.window.get("pagehide")?.size).toBe(1);
+    expect(listeners.window.get("pageshow")?.size).toBe(1);
+    expect(listeners.document.get("pagehide")?.size ?? 0).toBe(0);
+
+    t += 2_000;
+    fire("window", "pagehide");
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].url).toBe("https://dom.test/page");
+
+    teardown();
+    expect(listeners.document.get("visibilitychange")?.size ?? 0).toBe(0);
+    expect(listeners.window.get("pagehide")?.size ?? 0).toBe(0);
+    expect(listeners.window.get("pageshow")?.size ?? 0).toBe(0);
+  });
 });
 
 describe("constants", () => {
@@ -274,4 +331,8 @@ describe("constants", () => {
 
 beforeEach(() => {
   // no global state to reset — each setup() builds its own source/clock.
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });

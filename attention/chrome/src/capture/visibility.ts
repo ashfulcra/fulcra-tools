@@ -82,17 +82,21 @@ interface Visit {
   blurredAt: number | null;
 }
 
-/** Build the real default source: document for visibility/title + events,
- * window.location for href. Throws nothing here; callers in non-DOM contexts
- * must pass their own `source`. */
+/** Build the real default source: document for visibility/title, window for
+ * page lifecycle events, and window.location for href. Throws nothing here;
+ * callers in non-DOM contexts must pass their own `source`. */
 function defaultSource(): VisibilitySource {
   // Reference globals lazily so importing this module in a non-DOM context
   // (e.g. a unit test that always injects `source`) doesn't explode at import.
   const doc = document;
+  const win = window;
+  const targetFor = (type: string): EventTarget =>
+    type === "pageshow" || type === "pagehide" ? win : doc;
   return {
-    addEventListener: (type, listener) => doc.addEventListener(type, listener as EventListener),
+    addEventListener: (type, listener) =>
+      targetFor(type).addEventListener(type, listener as EventListener),
     removeEventListener: (type, listener) =>
-      doc.removeEventListener(type, listener as EventListener),
+      targetFor(type).removeEventListener(type, listener as EventListener),
     get visibilityState() {
       return doc.visibilityState;
     },
@@ -100,7 +104,7 @@ function defaultSource(): VisibilitySource {
       return doc.title;
     },
     get location() {
-      return window.location;
+      return win.location;
     },
   };
 }
