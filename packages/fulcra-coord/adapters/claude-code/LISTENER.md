@@ -80,6 +80,28 @@ OpenClaw uses its **heartbeat** instead of a separate schedule: the shipped
 `fulcra_coord/openclaw.py`). Same notify-only behavior, folded into the existing
 periodic heartbeat the gateway already runs.
 
+## How it notifies
+
+Delivery is layered and best-effort, so a directive is never silently dropped:
+
+- **Tier 0 — inbox surface file** (guaranteed, zero-config, no network): the
+  durable record the next SessionStart injects. Always reaches the operator on
+  next session start, on every OS.
+- **Tier 1 — real-time push** (opt-in): if `FULCRA_COORD_NOTIFY_WEBHOOK` is set,
+  each tick POSTs the notification to that URL via stdlib `urllib`. This is what
+  reaches your phone regardless of which host fired. The payload shape is
+  auto-detected from the URL host — `discord` / `slack`, else **ntfy** plain-body
+  (the generic default) — and `FULCRA_COORD_NOTIFY_FORMAT` (`ntfy|slack|discord|json`)
+  overrides it. Point it at any commodity push service (a free or self-hosted ntfy
+  topic, Pushover-style, Slack, Discord); it's not tied to specific infra.
+  `FULCRA_COORD_NOTIFY_TIMEOUT` (default 5s) caps the POST so a hung endpoint can't
+  stall the tick.
+- **Tier 2 — native desktop** (best-effort local bonus): macOS `osascript`, Linux
+  `notify-send` when present, else a stderr line. Never relied upon.
+
+The push fires once per **new** directive (a seen-set dedups it), so it doesn't
+re-alert on every poll for an inbox item you've already been told about.
+
 ## How the surface file is consumed
 
 `notify-inbox` writes `inbox-pending-<agent-slug>.json` under the fulcra-coord
