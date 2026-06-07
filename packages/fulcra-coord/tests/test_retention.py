@@ -730,8 +730,7 @@ class TestExpireStaleBroadcasts(unittest.TestCase):
                               tid="TASK-concrete")
         written = []
         with patch("fulcra_coord.retention._write_task_and_views",
-                   return_value=True) as wtv, \
-             patch("fulcra_coord.retention.cache.write_cached_task") as wct:
+                   return_value=True) as wtv:
             wtv.side_effect = lambda task, **kw: written.append(task) or True
             n = retention._expire_stale_broadcasts(
                 [stale, fresh, concrete], self.now, backend=["false"])
@@ -739,7 +738,7 @@ class TestExpireStaleBroadcasts(unittest.TestCase):
         self.assertEqual(len(written), 1)
         self.assertEqual(written[0]["id"], "TASK-stale")
         self.assertEqual(written[0]["status"], "abandoned")
-        wct.assert_called_once()
+        wtv.assert_called_once()
         # the fresh broadcast and the concrete ask were never written/abandoned.
         self.assertEqual({t["id"] for t in written}, {"TASK-stale"})
 
@@ -764,11 +763,21 @@ class TestExpireStaleBroadcasts(unittest.TestCase):
         self.assertEqual(n, 1)
 
     def test_conflict_does_not_count(self):
-        # ConflictError => the body was NOT written; skip and don't count.
+        # ConflictError => the body was NOT written; skip and don't count/cache.
         from fulcra_coord import schema
         stale = _broadcast(20, self.now, tid="TASK-cf")
         with patch("fulcra_coord.retention._write_task_and_views",
                    side_effect=schema.ConflictError("racing writer")), \
-             patch("fulcra_coord.retention.cache.write_cached_task"):
+             patch("fulcra_coord.retention.cache.write_cached_task") as wct:
             n = retention._expire_stale_broadcasts([stale], self.now, backend=["false"])
         self.assertEqual(n, 0)
+        wct.assert_not_called()
+
+    def test_failed_write_return_does_not_count_or_cache(self):
+        # A plain False return means the task upload failed, so no expiration landed.
+        stale = _broadcast(20, self.now, tid="TASK-fail")
+        with patch("fulcra_coord.retention._write_task_and_views", return_value=False), \
+             patch("fulcra_coord.retention.cache.write_cached_task") as wct:
+            n = retention._expire_stale_broadcasts([stale], self.now, backend=["false"])
+        self.assertEqual(n, 0)
+        wct.assert_not_called()

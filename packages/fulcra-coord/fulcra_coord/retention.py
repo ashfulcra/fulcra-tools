@@ -309,9 +309,8 @@ def _expire_stale_broadcasts(all_tasks: list[dict[str, Any]], now: datetime, *,
                 reason="Auto-expired: stale broadcast (proposed, never claimed, "
                        "older than the broadcast-expiry window).",
                 dt=now)
-            cache.write_cached_task(new_task)
-            _write_task_and_views(new_task, backend=backend, command="abandon")
-            expired += 1
+            if _write_task_and_views(new_task, backend=backend, command="abandon"):
+                expired += 1
         except schema.NeedsReconcile:
             # The body WAS written (only the view rebuild lagged) — the broadcast
             # is abandoned on the bus, so count it. The next reconcile heals views.
