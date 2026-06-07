@@ -216,3 +216,96 @@ entry.
 
 Steps 1–2 ship "Chrome without a daemon" independently and de-risk everything
 the iOS shell reuses.
+
+---
+
+## Addendum (2026-06-07): Safari/iOS — empirically confirmed blocker + refined native architecture
+
+This addendum supersedes the original "Auth on iOS" section, based on a live
+test plus a peer review on the coordination bus.
+
+### Empirically confirmed: the extension cannot do the Auth0 sign-in on Safari
+
+We converted the relayless Chrome extension with
+`xcrun safari-web-extension-converter`, built the macOS app target, loaded it in
+Safari, and clicked "Connect to Fulcra". Result: **`device code request failed:
+HTTP 403`** — the exact failure Chrome had before the declarativeNetRequest
+Origin-strip.
+
+Root cause (Apple docs + this live test):
+- The extension's `POST /oauth/device/code` carries the extension `Origin`;
+  Auth0 rejects any non-allowlisted Origin ("Allowed Web Origins" check).
+- On Chrome we strip that Origin via `declarativeNetRequest`. **Safari refuses:**
+  `Origin`/`Host` are disallowed *sensitive* headers, and DNR `modifyHeaders`
+  does not apply to *extension-initiated* requests. `chrome.identity` is also
+  unsupported (so the redirect/`launchWebAuthFlow` path is out too).
+- The converter additionally flags `idle` and `history` as unsupported → no idle
+  detection, no backfill.
+
+Conclusion: **the relayless extension's JS-side auth is not portable to Safari.**
+Auth must move into the native app.
+
+### Refined architecture — native owns auth + tokens [+ ingest]; JS only captures
+
+Apple's Safari Web Extension model is native app + extension JS + native
+extension in separate sandboxes, with **App Groups** for shared native data and
+**nativeMessaging** for JS↔native. The Safari/iOS build is therefore a different
+shape than Chrome:
+
+- **Auth — native app.** `ASWebAuthenticationSession` + Auth0 **native PKCE**
+  (cleaner UX than the device flow; or device-flow-via-`URLSession` to avoid
+  registering a callback URI). Native HTTP carries no browser Origin → no 403.
+- **Tokens — native, in the Keychain (access group).** Refresh + access tokens
+  live in the Keychain, NOT in `browser.storage.local` or App Group
+  `UserDefaults`. JS never holds the refresh token.
+- **Ingest — native (preferred).** Native POSTs to the Fulcra ingest API via
+  `URLSession`; JS forwards captured events to native and native builds the wire
+  record + POSTs. (Alternative: native hands JS a *short-lived access token* and
+  JS reuses `relayless/wire` + `relaylessSender` — only if avoiding a Swift
+  wire-port is worth a short-lived token in JS.)
+- **Wiring.** Content scripts can't talk to native directly:
+  `content script → background/event-page → sendNativeMessage(native)`. On iOS,
+  the extension JS requests/reads via the native extension, not containing-app
+  push.
+- **Background.** Safari prefers an **event page** over a service worker → add
+  `background.scripts` / `preferred_environment`; event-page lifetime is
+  undependable.
+- **Capture.** The page-visibility capture
+  (`attention/chrome/src/capture/visibility.ts`, shipped on this branch) detects
+  visits and emits `AttentionEvent`s; flush **opportunistically** (on
+  `pagehide`) because the event page can be killed at any time. No backfill.
+
+### Native-layer implementation spec (the remaining Swift work)
+
+In `attention/safari/` (converter scaffold, then hand-built):
+1. **Auth (Swift):** `ASWebAuthenticationSession` PKCE against the Auth0 public
+   client `48p3VbMnr5kMuJAUe9gJ9vjmdWLdnqZt` (audience
+   `https://api.fulcradynamics.com/`). Store refresh+access tokens in a Keychain
+   access group shared by app + native extension; refresh on 401/expiry.
+2. **Ingest (Swift):** a `URLSession` poster to
+   `POST https://api.fulcradynamics.com/ingest/v1/record/batch` with the Keychain
+   access token; build the same wire record as `relayless/wire.ts` (port
+   `source_id`, the data-inner shape, the def/tag binding incl. the
+   `machine:<slug>` identity tag — port `ensureDefinition`).
+3. **Native messaging bridge (Swift `NSExtensionRequestHandling`):** receives
+   `AttentionEvent` batches from the extension JS (`sendNativeMessage`), hands
+   them to the ingest poster; returns auth state (signed-in? identity label?) to
+   JS for the popup.
+4. **Extension JS (reuse):** visibility capture (this branch) →
+   background/event-page batches → `sendNativeMessage`. The popup shows auth
+   state from native (no token in JS).
+5. **Onboarding:** the native app screen drives sign-in (PKCE) + "name this
+   browser"; the extension popup shows status.
+
+Distribution: **TestFlight** — Apple Developer account, App ID + App Group +
+Keychain-access-group entitlements, App Store Connect record, signed build.
+(Needs Ash's Apple Developer account; not automatable from this repo.)
+
+### Sequencing (Safari/iOS)
+1. ✅ Visibility capture content-script (this branch) — platform-agnostic, tested.
+2. Convert + commit the Xcode scaffold (`attention/safari/`); add the event-page
+   `background.scripts` config; wire the visibility capture as the iOS content
+   script.
+3. Native auth (PKCE → Keychain) + the nativeMessaging bridge.
+4. Native ingest (`URLSession` + wire port), or short-lived-token-to-JS.
+5. TestFlight signed build (Ash's Apple account).
