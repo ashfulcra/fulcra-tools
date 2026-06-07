@@ -287,7 +287,8 @@ def _continuity_keep() -> int:
     return max(1, env_int("FULCRA_COORD_CONTINUITY_KEEP", 10))
 
 
-def _walk_continuity_checkpoint_dirs(backend: Optional[list[str]]) -> list[str]:
+def _walk_continuity_checkpoint_dirs(backend: Optional[list[str]], *,
+                                     deadline: Optional[float] = None) -> list[str]:
     """Enumerate every ``.../checkpoints/`` directory under the continuity tree.
 
     remote.list_files is NON-RECURSIVE: it returns only the IMMEDIATE children of
@@ -299,12 +300,22 @@ def _walk_continuity_checkpoint_dirs(backend: Optional[list[str]]) -> list[str]:
     _CONTINUITY_WALK_MAX_DEPTH so a malformed / self-referential listing can't
     infinite-loop. Best-effort: a list_files failure for any subtree is swallowed
     — that subtree contributes nothing rather than aborting the whole walk. The
-    caller is wrapped too, so nothing here escapes into reconcile."""
+    caller is wrapped too, so nothing here escapes into reconcile.
+
+    When reconcile supplies a deadline, the walk checks the same budget floor
+    before each remote listing. This is load-bearing: a huge malformed
+    continuity tree must not spend the whole reconcile budget before the prune
+    loop gets its first chance to stop."""
+    import time
+    budget_floor = (deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
+                    if deadline is not None else None)
     root = f"{remote_root()}/continuity"
     found: list[str] = []
     # Stack of (dir_path_without_trailing_slash, depth).
     stack: list[tuple[str, int]] = [(root, 0)]
     while stack:
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            break
         current, depth = stack.pop()
         if depth > _CONTINUITY_WALK_MAX_DEPTH:
             continue
@@ -370,7 +381,9 @@ def _prune_continuity_checkpoints(now: datetime, *,
                         if deadline is not None else None)
         if cap <= 0:
             return 0
-        for chk_dir in _walk_continuity_checkpoint_dirs(backend):
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            return 0
+        for chk_dir in _walk_continuity_checkpoint_dirs(backend, deadline=deadline):
             if deleted >= cap:
                 break
             if budget_floor is not None and time.monotonic() >= budget_floor:

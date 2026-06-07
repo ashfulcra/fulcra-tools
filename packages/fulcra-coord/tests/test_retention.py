@@ -1006,6 +1006,18 @@ class TestPruneContinuityCheckpoints(_ContTree):
         self.assertEqual(n, 0)
         self.assertEqual(self.deleted, [])
 
+    def test_expired_deadline_skips_tree_listing(self):
+        # The walk itself must respect the budget, not just the delete loop.
+        # Otherwise a giant continuity tree could burn reconcile's deadline before
+        # the pruner ever reaches its first delete.
+        with patch("fulcra_coord.retention.remote.list_files") as lf, \
+             patch("fulcra_coord.retention.remote.delete") as delete:
+            n = retention._prune_continuity_checkpoints(
+                self.now, backend=["false"], deadline=time.monotonic() - 1)
+        self.assertEqual(n, 0)
+        lf.assert_not_called()
+        delete.assert_not_called()
+
     def test_malformed_deep_tree_is_depth_bounded(self):
         # A pathological self-referential tree (a dir that lists itself as a child)
         # must NOT infinite-loop: the depth bound terminates the walk. We assert the
