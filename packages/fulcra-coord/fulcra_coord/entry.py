@@ -210,6 +210,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--snapshot", action="store_true",
                     help="Also write a Fulcra Continuity checkpoint for this pause")
 
+    # ---- snapshot ----
+    sp = sub.add_parser("snapshot", help="Write a Fulcra Continuity checkpoint without changing task state")
+    sp.add_argument("task_id", metavar="TASK-ID")
+    sp.add_argument("--reason", default="manual", metavar="REASON",
+                    help="Why this checkpoint is being written, e.g. pre-compact or idle")
+    sp.add_argument("--next", "-n", default=None, metavar="NEXT_ACTION",
+                    help="Optional next action override for the checkpoint")
+    sp.add_argument("--transcript-path", default="", metavar="PATH",
+                    help="Optional transcript/session log path for resume context")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
+
     # ---- done ----
     sp = sub.add_parser("done", help="Mark a task as done (requires evidence)")
     sp.add_argument("task_id", metavar="TASK-ID")
@@ -471,6 +482,7 @@ COMMAND_MAP = {
     "update": _cli.cmd_update,
     "block": _cli.cmd_block,
     "pause": _cli.cmd_pause,
+    "snapshot": _cli.cmd_snapshot,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
     "request-review": _cli.cmd_request_review,

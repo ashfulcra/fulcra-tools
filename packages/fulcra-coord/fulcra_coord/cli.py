@@ -87,7 +87,7 @@ from .digest import (
 # never imports cli.
 from .lifecycle import (
     cmd_tell, cmd_broadcast, cmd_assign, cmd_start, cmd_update, cmd_block,
-    cmd_pause, cmd_done, cmd_abandon,
+    cmd_pause, cmd_snapshot, cmd_done, cmd_abandon,
 )
 # Inbox + blocked-on-you notification extracted from this file. Re-exported so the
 # dispatch (inbox/notify-inbox), _build_health_record's read of the listener
@@ -375,5 +375,4 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
-
 

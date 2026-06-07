@@ -190,7 +190,7 @@ export default async function handler(event: any): Promise<void> {
 
     await execFileAsync(
       FULCRA_COORD_CMD[0],
-      [...FULCRA_COORD_CMD.slice(1), "pause", taskId, "--next", "Gateway shutdown; resume from last next_action."],
+      [...FULCRA_COORD_CMD.slice(1), "pause", taskId, "--next", "Gateway shutdown; resume from last next_action.", "--snapshot"],
       { timeout: WRITE_TIMEOUT_MS, env: childEnv },
     );
   } catch {
@@ -431,6 +431,17 @@ export default async function handler(event: any): Promise<void> {
         taskId,
         "--summary",
         "Compaction checkpoint (context about to be summarized; detail may be lost).",
+      ],
+      { timeout: WRITE_TIMEOUT_MS, env: childEnv },
+    );
+    await execFileAsync(
+      FULCRA_COORD_CMD[0],
+      [
+        ...FULCRA_COORD_CMD.slice(1),
+        "snapshot",
+        taskId,
+        "--reason",
+        "openclaw-before-compaction",
       ],
       { timeout: WRITE_TIMEOUT_MS, env: childEnv },
     );

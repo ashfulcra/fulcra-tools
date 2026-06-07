@@ -482,6 +482,6 @@ class TestRenderInfraLine(unittest.TestCase):
 
 
 class TestVersion(unittest.TestCase):
-    def test_version_is_0_11_0(self):
+    def test_version_is_0_12_0(self):
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.11.0")
+        self.assertEqual(__version__, "0.12.0")
