@@ -201,7 +201,11 @@ public final nonisolated class AuthManager: @unchecked Sendable {
         onDeviceCode?(device)
         openInBrowser(device.verificationURIComplete)
 
-        let token = try await pollForToken(deviceCode: device.deviceCode, interval: device.interval)
+        let token = try await pollForToken(
+            deviceCode: device.deviceCode,
+            interval: device.interval,
+            expiresIn: device.expiresIn
+        )
         let stored = StoredTokens(from: token)
         try persist(stored)
         authLog.info("signIn succeeded; tokens persisted to Keychain")
@@ -231,12 +235,17 @@ public final nonisolated class AuthManager: @unchecked Sendable {
     /// - Handles `authorization_pending` (wait `interval`) and `slow_down`
     ///   (increase interval by 5s, per RFC 8628).
     /// - Stops with an error on `expired_token` / `access_denied`.
-    public func pollForToken(deviceCode: String, interval: Int) async throws -> TokenResponse {
+    public func pollForToken(deviceCode: String, interval: Int, expiresIn: Int) async throws -> TokenResponse {
         var pollInterval = max(interval, 1)
+        let deadline = Date().addingTimeInterval(TimeInterval(max(expiresIn, 1)))
         authLog.info("pollForToken started; interval=\(pollInterval)s")
 
         while true {
             try Task.checkCancellation()
+            guard Date() < deadline else {
+                authLog.error("device code expired locally before token approval")
+                throw AuthError.deviceCodeExpired
+            }
 
             let body = formBody([
                 "client_id": config.clientID,
@@ -267,11 +276,11 @@ public final nonisolated class AuthManager: @unchecked Sendable {
             switch oauthError.error {
             case "authorization_pending":
                 authLog.debug("authorization_pending; sleeping \(pollInterval)s")
-                try await sleep(seconds: pollInterval)
+                try await sleep(seconds: secondsUntilNextPoll(pollInterval, deadline: deadline))
             case "slow_down":
                 pollInterval += 5
                 authLog.debug("slow_down; new interval \(pollInterval)s")
-                try await sleep(seconds: pollInterval)
+                try await sleep(seconds: secondsUntilNextPoll(pollInterval, deadline: deadline))
             case "expired_token":
                 authLog.error("device code expired")
                 throw AuthError.deviceCodeExpired
@@ -380,6 +389,11 @@ public final nonisolated class AuthManager: @unchecked Sendable {
 
     private func sleep(seconds: Int) async throws {
         try await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+    }
+
+    private func secondsUntilNextPoll(_ interval: Int, deadline: Date) -> Int {
+        let remaining = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
+        return max(1, min(interval, remaining))
     }
 
     private func openInBrowser(_ urlString: String) {

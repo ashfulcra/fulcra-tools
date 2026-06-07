@@ -41,7 +41,7 @@ public nonisolated struct KeychainStore {
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             // Available after first unlock; not migrated to other devices.
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
 
         let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
@@ -52,7 +52,7 @@ public nonisolated struct KeychainStore {
         if updateStatus == errSecItemNotFound {
             var insert = query
             insert[kSecValueData as String] = data
-            insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let addStatus = SecItemAdd(insert as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 keychainLog.error("keychain add failed status=\(addStatus)")
