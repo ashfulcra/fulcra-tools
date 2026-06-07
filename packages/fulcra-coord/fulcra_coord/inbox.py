@@ -151,6 +151,16 @@ def _needs_me_seen_path(human: str):
     with odd characters maps to a safe filename."""
     return cache.cache_root() / f"needs-me-seen-{listener.agent_slug(human)}.json"
 
+def _inbox_notified_seen_path(agent: str):
+    """Seen-set surface for the agent's OWN inbox-count notification, keyed by
+    the polling agent. Mirrors ``_needs_me_seen_path`` (which guards the human
+    blocked-on-you path): a set of directive ids the operator was already pinged
+    about, so a tick re-alerts only on NEW inbox items instead of every tick.
+    Slugged via the same agent_slug so an odd-character handle maps to a safe
+    filename, and distinct from the inbox-pending surface (which holds the full
+    payload, not just ids)."""
+    return cache.cache_root() / f"inbox-notified-{listener.agent_slug(agent)}.json"
+
 def _notify_new_needs_me(backend: Optional[list[str]] = None) -> None:
     """Fire a desktop notification for each NEW item blocked on the human.
 
@@ -204,8 +214,25 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         payload = {"agent": me, "count": len(items), "inbox": items}
         surface.write_text(json.dumps(payload, indent=2))
-        if items:
-            listener.emit_notification(me, len(items))
+        # Notify ONLY on NEW inbox items, not every tick. Mirrors the human
+        # blocked-on-you seen-set: load the ids we've already pinged about, alert
+        # only when something new arrived, then persist the CURRENT ids (so a
+        # resolved/acked directive drops out and a re-arrival re-alerts). The
+        # surface-file write above is Tier 0 (unconditional, guaranteed delivery)
+        # and is intentionally left untouched by this dedup.
+        seen_path = _inbox_notified_seen_path(me)
+        seen: set[str] = set()
+        if seen_path.exists():
+            try:
+                seen = set(json.loads(seen_path.read_text()))
+            except (json.JSONDecodeError, OSError, TypeError):
+                seen = set()
+        current_ids = {i["id"] for i in items}
+        new_ids = current_ids - seen
+        if new_ids:
+            listener.emit_notification(me, len(new_ids))
+        cache.cache_root().mkdir(parents=True, exist_ok=True)
+        seen_path.write_text(json.dumps(sorted(current_ids)))
         # ALSO notice anything newly blocked on the human (Part 5). Independent
         # of the agent's own inbox: a tick with an empty inbox can still alert on
         # a new blocked-on-you item. Best-effort within the same fail-safe guard.
