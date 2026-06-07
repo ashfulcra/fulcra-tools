@@ -124,6 +124,48 @@ class TestAssessInfraHealth(unittest.TestCase):
                                         degraded_after_s=3600, outage_after_s=10800)
         self.assertEqual(out["worst_status"], "outage")
 
+    def test_freshest_record_per_host_supersedes_dead_worktree_orphan(self):
+        # A machine accrues several health records under the SAME host: live
+        # worktrees plus orphans from deleted ones (health was keyed per-cwd).
+        # The freshest reconcile_at per host decides that host's status, so a
+        # live machine's current reconcile supersedes its own dead-worktree
+        # orphans — instead of one stale orphan pinning the whole fleet to
+        # "outage" until the 30-day prune (the false-alarm bug).
+        recs = [
+            _rec("mac", "claude-code-mac-deleted-worktree", 20000, self.now),  # orphan, outage-stale
+            _rec("mac", "claude-code-mac-fulcra-tools", 60, self.now),         # live machine, fresh
+        ]
+        out = views.assess_infra_health(recs, now=self.now,
+                                        degraded_after_s=3600, outage_after_s=10800)
+        self.assertEqual(out["worst_status"], "healthy")
+        mac = [h for h in out["hosts"] if h["host"] == "mac"]
+        self.assertEqual(len(mac), 1)            # one row per host, not per record
+        self.assertEqual(mac[0]["status"], "healthy")
+
+    def test_host_with_only_stale_records_still_reads_outage(self):
+        # The real signal is preserved: a machine whose EVERY record is stale
+        # (genuinely not reconciling) still reads outage — the freshest is stale.
+        recs = [
+            _rec("srv", "a", 20000, self.now),
+            _rec("srv", "b", 30000, self.now),
+        ]
+        out = views.assess_infra_health(recs, now=self.now,
+                                        degraded_after_s=3600, outage_after_s=10800)
+        self.assertEqual(out["worst_status"], "outage")
+
+    def test_datable_record_beats_undatable_for_same_host(self):
+        # A host with a fresh datable record AND an undatable one is healthy —
+        # the datable (freshest) wins; the undatable doesn't drag it to
+        # not_reporting.
+        good = _rec("mac", "a", 60, self.now)
+        bad = _rec("mac", "b", 60, self.now)
+        bad["reconcile_at"] = "garbage"
+        out = views.assess_infra_health([bad, good], now=self.now,
+                                        degraded_after_s=3600, outage_after_s=10800)
+        mac = [h for h in out["hosts"] if h["host"] == "mac"]
+        self.assertEqual(len(mac), 1)
+        self.assertEqual(mac[0]["status"], "healthy")
+
     def test_bus_missed_digest_only_on_true_miss(self):
         recs = [_rec("a", "a", 60, self.now)]
         # Today's marker (date == now's date) -> midnight is 12h before noon ->
