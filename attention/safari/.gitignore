@@ -1,0 +1,12 @@
+# Xcode build output and per-user state — never commit.
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Xcode user-specific schemes/settings
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
