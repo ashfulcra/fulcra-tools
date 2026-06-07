@@ -30,7 +30,8 @@ from .retention import (
     _archive_month, _archive_index_shard, _archive_task, _read_index_shard,
     _list_index_shards, _retention_max_per_run, _claim_retention_marker,
     _prune_markers, _prune_dead_presence, _prune_dead_health, _run_retention,
-    _RETENTION_DEADLINE_HEADROOM_SECONDS, cmd_search, cmd_restore,
+    _expire_stale_broadcasts, _RETENTION_DEADLINE_HEADROOM_SECONDS,
+    cmd_search, cmd_restore,
 )
 # Shared remote-task load/cache layer extracted from this file. Re-exported under
 # the historical underscore-prefixed names so every cli-resident caller
@@ -307,7 +308,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         ret = _run_retention(all_tasks, now=now, deadline=deadline, backend=backend)
         if not ret.get("skipped"):
             _info(f"  Retention: archived {ret['archived']} task(s) "
-                  f"(deferred {ret['deferred']}), pruned {ret['pruned_markers']} marker(s), "
+                  f"(deferred {ret['deferred']}), expired {ret.get('expired_broadcasts', 0)} "
+                  f"broadcast(s), pruned {ret['pruned_markers']} marker(s), "
                   f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health.")
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
