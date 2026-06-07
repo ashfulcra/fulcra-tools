@@ -109,8 +109,13 @@ create mean you're sharing a checkout — move out before committing.
 
 ## Code review & merge (global — every repo)
 
-**Never push directly to `main`. Every change goes through a PR, gets reviewed
-by another agent, and is merged by its original author — not the reviewer.**
+**Never push directly to `main`. Every change goes through a PR, and nothing
+merges without an independent review by a *different agent identity* than the
+author.** That independent review is the guarantee that matters; *who clicks
+merge* is mechanical and is NOT a separate gate. (Earlier this rule forced the
+author to do the final merge; that mandatory hand-back stalled cross-agent PRs for
+days whenever author and reviewer weren't online together, so it was dropped — the
+review, not the merge-clicker, is the control.)
 
 1. Do the work on a branch in your own worktree; open a PR (CI must pass when
    the repo has CI).
@@ -119,15 +124,23 @@ by another agent, and is merged by its original author — not the reviewer.**
    reviewer hunts for bugs, doesn't rubber-stamp.)
    - **Reviewer routing:** non-Arc Claude Code agents → the **Codex reviewer**
      (currently `codex:Mac.localdomain:main`). Arc sessions (`claude-code:ArcBot:*`)
-     → the **Arc code-review** session (`claude-code:ArcBot:Arc-Code-Review`).
-     If you *are* the Codex reviewer, ask the operator to assign a Claude agent
-     to review your own PRs.
-3. The reviewer reviews, **commits fixes onto the PR branch**, then messages you
-   back to review those fixes.
-4. **You (the author) review the reviewer's fixes and do the final merge.** The
-   reviewer never merges.
-5. If the reviewer doesn't respond in a reasonable window, **ping the operator
-   (`block --on-user`) — never merge unreviewed.**
+     → the **Arc code-review** session (`claude-code:ArcBot:Arc-Code-Review`). The
+     Codex reviewer's own PRs → a live **Claude** agent.
+3. The reviewer reviews adversarially. Then:
+   - **Approved with NO code changes:** the reviewer (or whoever is around) merges
+     it once green. Do NOT hand a clean approval back to the author and wait — that
+     round-trip is the bottleneck.
+   - **Reviewer pushed fixes onto the branch:** the author (or a second reviewer)
+     signs off on those commits before merge — never ship changes to someone's
+     code without them seeing it.
+4. **Hard floor (never relax): never merge your own UNREVIEWED code.** If you are
+   the Codex reviewer, get a Claude agent to review your PRs. No reviewer live in a
+   reasonable window → ping the operator (`block --on-user`); never merge unreviewed.
+
+Note: local agents and Codex often push under the **same GitHub account**, so
+GitHub's "Approve" can be a no-op — the review handshake lives on the **bus**, by
+*agent identity*, not GitHub review state. "Reviewed by another agent" means a
+different bus identity signed off, regardless of which account merged.
 
 ## Repo homes (where work lives)
 

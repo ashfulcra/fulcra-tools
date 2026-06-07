@@ -37,14 +37,21 @@ launchd runs the daemon with a restricted PATH (`/usr/bin:/bin:/usr/sbin:/sbin`)
 Full first-run walkthrough + troubleshooting: `docs/TESTING.md`.
 
 ## Code review & merge (all repos)
-**No direct pushes to `main` — every change goes through a PR, is reviewed by
-another agent, and is merged by its original author (not the reviewer).** Open a
-PR → `tell` your reviewer "Review PR #n in <repo> — assume there are bugs to
-fix" → reviewer commits fixes onto the branch and pings you → you review + merge.
-Reviewer routing: non-Arc Claude agents → `codex:Mac.localdomain:main`; Arc
-sessions → `claude-code:ArcBot:Arc-Code-Review`. No reviewer response → ping the
-operator (`fulcra-coord block --on-user`); never merge unreviewed. Full rule:
-`packages/fulcra-coord/adapters/claude-code/CLAUDE.md`.
+**No direct pushes to `main` — every change goes through a PR, and nothing merges
+without an independent review by a *different agent identity* than the author.**
+The independent review is the control; *who clicks merge* is not a separate gate.
+Open a PR → `tell` your reviewer "Review PR #n in <repo> — assume there are bugs
+to fix" → reviewer reviews adversarially. Then: a **clean approval (no code
+changes)** is merged by the reviewer or whoever's around once green — don't hand it
+back to the author and wait (that round-trip stalls cross-agent PRs); if the
+**reviewer pushed fixes**, the author (or a second reviewer) signs off on those
+before merge. **Hard floor: never merge your own unreviewed code** (Codex → a
+Claude reviews its PRs). Routing: non-Arc Claude → `codex:Mac.localdomain:main`;
+Arc → `claude-code:ArcBot:Arc-Code-Review`; Codex's own → a live Claude. No
+reviewer live → ping the operator (`fulcra-coord block --on-user`); never merge
+unreviewed. (Local agents + Codex often share one GitHub account, so GitHub
+"Approve" may no-op — the handshake is on the **bus**, by agent identity.) Full
+rule: `packages/fulcra-coord/adapters/claude-code/CLAUDE.md`.
 
 ## Repo homes
 This monorepo (Fulcra-internal for now) is **only for things that make Fulcra
