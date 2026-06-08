@@ -116,44 +116,67 @@ create mean you're sharing a checkout — move out before committing.
    `packages/fulcra-coord/docs/continuity-handoff.md`.
 
 ## Code review & merge (global — every repo)
+**Nothing merges without an independent review by a *different agent identity*
+than the author.** That independent review is the guarantee that matters; *who
+clicks merge* is mechanical and is NOT a separate gate. (Earlier this rule forced
+the author to do the final merge; that mandatory hand-back stalled cross-agent
+reviews for days whenever author and reviewer weren't online together, so it was
+dropped — the review, not the merge-clicker, is the control.)
 
-**Never push directly to `main`. Every change goes through a PR, and nothing
-merges without an independent review by a *different agent identity* than the
-author.** That independent review is the guarantee that matters; *who clicks
-merge* is mechanical and is NOT a separate gate. (Earlier this rule forced the
-author to do the final merge; that mandatory hand-back stalled cross-agent PRs for
-days whenever author and reviewer weren't online together, so it was dropped — the
-review, not the merge-clicker, is the control.)
+The handshake is **artifact-based** and runs **on the bus**, so it works with any
+forge or none. The artifact under review is an opaque ref — a PR#, MR#, branch,
+commit SHA, URL, patch id, or even a non-code deliverable (a doc, a dataset, a bus
+task):
 
-1. Do the work on a branch in your own worktree; open a PR (CI must pass when
-   the repo has CI).
-2. Post a bus message to your **reviewer**: `tell <reviewer> "Review PR #<n> in
-   <repo> — assume there are bugs that need fixing."` (Adversarial framing — the
-   reviewer hunts for bugs, doesn't rubber-stamp.)
+1. Do the work on a branch in your own worktree. Where a forge/PR exists, open
+   the PR (CI must pass when the repo has CI) — but the artifact can equally be a
+   branch or commit SHA on a shared remote with no forge at all.
+2. Route the review with `request-review <artifact> [--repo <repo>]` (`--repo` is
+   optional — a branch/URL ref carries its own context). It routes a `kind:review`
+   directive to a live/idle reviewer, self-healing if nobody's up; the reviewer
+   hunts for bugs adversarially, doesn't rubber-stamp.
    - **Reviewer routing:** non-Arc Claude Code agents → the **Codex reviewer**
      (currently `codex:Mac.localdomain:main`). Arc sessions (`claude-code:ArcBot:*`)
      → the **Arc code-review** session (`claude-code:ArcBot:Arc-Code-Review`). The
-     Codex reviewer's own PRs → a live **Claude** agent.
-3. The reviewer reviews adversarially. Then:
-   - **Approved with NO code changes:** the reviewer (or whoever is around) merges
-     it once green. Do NOT hand a clean approval back to the author and wait — that
-     round-trip is the bottleneck.
-   - **Reviewer pushed fixes onto the branch:** the author (or a second reviewer)
-     signs off on those commits before merge — never ship changes to someone's
-     code without them seeing it.
-4. **Hard floor (never relax): never merge your own UNREVIEWED code.** If you are
-   the Codex reviewer, get a Claude agent to review your PRs. No reviewer live in a
-   reasonable window → ping the operator (`block --on-user`); never merge unreviewed.
+     Codex reviewer's own work → a live **Claude** agent.
+3. The reviewer posts the outcome with
+   **`review-done <artifact> --verdict approve|changes [--note "…"] [--to <author>]`**.
+   This lands the verdict as a bus directive (tagged `kind:review-verdict`) in the
+   author's inbox, so it **always** reaches them regardless of any forge. The bus
+   is the source of truth — a review isn't "done" until `review-done` has run. A
+   GitHub-only PR "Approve"/comment does NOT count and is the durable bug this
+   command fixes: the listener / SessionStart only watch the bus, so a forge-only
+   verdict silently never reaches the author.
+4. Then:
+   - **`--verdict approve` with NO code changes:** the reviewer (or whoever is
+     around) merges it once green. Do NOT hand a clean approval back to the author
+     and wait — that round-trip is the bottleneck.
+   - **`--verdict changes`, or the reviewer pushed fixes onto the branch:** the
+     author addresses the changes / signs off on those commits before merge —
+     never ship changes to someone's code without them seeing it.
+5. **Hard floor (never relax): never merge your own UNREVIEWED code.** If you are
+   the Codex reviewer, get a Claude agent to review your work. No reviewer live in
+   a reasonable window → ping the operator (`block --on-user`); never merge
+   unreviewed.
+
+Merging is forge-agnostic: a plain `git` push / fast-forward on a shared remote,
+any forge, or `gh pr merge` all work — **`gh pr merge` is one option, not a
+requirement**, and coord never calls a forge itself.
 
 Note: local agents and Codex often push under the **same GitHub account**, so
 GitHub's "Approve" can be a no-op — the review handshake lives on the **bus**, by
-*agent identity*, not GitHub review state. "Reviewed by another agent" means a
-different bus identity signed off, regardless of which account merged.
+*agent identity*, not forge review state. "Reviewed by another agent" means a
+different bus identity signed off (via `review-done`), regardless of which account
+merged.
 
 ## Repo homes (where work lives)
 
-Everything lives on **GitHub** so PRs are possible — if a repo isn't on GitHub,
-get it there before merging (ask the operator where it should go if unsure).
+Most work lives on **GitHub** so PRs + `gh` are available — the convenient
+default, not a requirement. The review handshake itself is bus-based
+(`request-review` → `review-done --verdict`) and works on any remote (or none),
+so a non-GitHub repo is fine; put new repos where the operator wants them (ask if
+unsure). On GitHub, use PRs; elsewhere, review on the bus and merge with plain
+`git`.
 
 - **`ashfulcra/fulcra-tools`** (this monorepo, currently Fulcra-internal) is
   **only for things that make Fulcra useful for other people** — Fulcra-ecosystem

@@ -37,21 +37,43 @@ launchd runs the daemon with a restricted PATH (`/usr/bin:/bin:/usr/sbin:/sbin`)
 Full first-run walkthrough + troubleshooting: `docs/TESTING.md`.
 
 ## Code review & merge (all repos)
-**No direct pushes to `main` — every change goes through a PR, and nothing merges
-without an independent review by a *different agent identity* than the author.**
-The independent review is the control; *who clicks merge* is not a separate gate.
-Open a PR → `tell` your reviewer "Review PR #n in <repo> — assume there are bugs
-to fix" → reviewer reviews adversarially. Then: a **clean approval (no code
-changes)** is merged by the reviewer or whoever's around once green — don't hand it
-back to the author and wait (that round-trip stalls cross-agent PRs); if the
-**reviewer pushed fixes**, the author (or a second reviewer) signs off on those
-before merge. **Hard floor: never merge your own unreviewed code** (Codex → a
-Claude reviews its PRs). Routing: non-Arc Claude → `codex:Mac.localdomain:main`;
-Arc → `claude-code:ArcBot:Arc-Code-Review`; Codex's own → a live Claude. No
-reviewer live → ping the operator (`fulcra-coord block --on-user`); never merge
-unreviewed. (Local agents + Codex often share one GitHub account, so GitHub
-"Approve" may no-op — the handshake is on the **bus**, by agent identity.) Full
-rule: `packages/fulcra-coord/adapters/claude-code/CLAUDE.md`.
+**Nothing lands without an independent review by a *different agent identity*
+than the author.** That independent review is the control; *who clicks merge* is
+not a separate gate. The handshake is artifact-based and runs **on the bus**, so
+it works with any forge or none: `request-review <artifact>` routes the artifact
+to a reviewer → reviewer reviews adversarially → **`review-done <artifact>
+--verdict approve|changes`** lands the verdict as a bus directive in the author's
+inbox. The **bus is the source of truth** — a review isn't "done" until the
+verdict is on the bus. A GitHub-only PR comment does NOT count: the listener /
+SessionStart only see the bus, so a forge-only verdict gets lost. The
+`<artifact>` is an opaque ref — PR# · MR# · branch · commit SHA · URL · patch ·
+even a non-code deliverable (a doc, a dataset, a bus task) — and reviews the same
+way regardless.
+This works with **zero forge**: merge via plain `git` (push / fast-forward on a
+shared remote), any forge, or `gh` — `gh pr merge` is ONE option, not a
+requirement; coord never calls a forge itself.
+Rules that still hold: **no direct pushes to `main` where a forge/PR exists**;
+the review is by a **different agent identity** than the author; a **clean
+approval (no code changes)** is merged by the reviewer or whoever's around once
+green — don't hand it back to the author and wait (that round-trip stalls
+cross-agent reviews); if the **reviewer pushed fixes**, the author (or a second
+reviewer) signs off on those before merge. **Hard floor: never merge your own
+unreviewed code** (Codex → a Claude reviews its work). Routing: non-Arc Claude →
+`codex:Mac.localdomain:main`; Arc → `claude-code:ArcBot:Arc-Code-Review`; Codex's
+own → a live Claude. No reviewer live → ping the operator (`fulcra-coord block
+--on-user`); never merge unreviewed. (Co-located agents + Codex often share one
+GitHub account, so GitHub "Approve" can no-op — that's why the handshake lives on
+the **bus**, by agent identity.) Full rule:
+`packages/fulcra-coord/adapters/claude-code/CLAUDE.md`.
+
+**Forge-agnostic core (invariant).** The coordination bus is forge-agnostic —
+`fulcra_coord/` never calls a specific forge (no `gh`, no GitHub/GitLab API).
+GitHub is one optional integration. The review/merge handshake coordinates an
+opaque **artifact ref** (PR# · MR# · branch · commit SHA · URL · patch ·
+non-code deliverable) on the bus; verdicts ride the bus
+(`request-review <artifact>` → `review-done --verdict`), and a forge is optional
+sugar a human/agent invokes separately. Enforced by
+`packages/fulcra-coord/tests/test_forge_agnostic.py`.
 
 ## Repo homes
 This monorepo (Fulcra-internal for now) is **only for things that make Fulcra
