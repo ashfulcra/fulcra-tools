@@ -531,6 +531,7 @@ def cmd_snapshot(args: Any, backend: Optional[list[str]] = None) -> int:
         "current_state": getattr(args, "session_state", "") or "",
         "immediate_followup": getattr(args, "session_followup", "") or "",
     }
+    session_context = session_context if any(session_context.values()) else None
     artifacts = [_artifact(item) for item in (getattr(args, "artifact", None) or [])]
     checkpoint = continuity.make_checkpoint(
         task,

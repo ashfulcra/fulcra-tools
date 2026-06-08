@@ -112,7 +112,15 @@ def test_snapshot_writes_checkpoint_without_task_transition(capsys) -> None:
     assert checkpoint["bootstrap_primer"]["relationship_to_coord"].startswith(
         "fulcra-coord owns task/event coordination"
     )
+    assert checkpoint["session_context"]["overall_goal"]
     assert checkpoint["session_context"]["why_continuity_matters"]
+    assert checkpoint["session_context"]["current_state"] == (
+        "Keep enough state to resume Status: active. "
+        "Workstream: openclaw:discord:main-comms."
+    )
+    assert checkpoint["session_context"]["immediate_followup"] == (
+        "Pick up from latest checkpoint"
+    )
     assert checkpoint["next_actions"] == ["Pick up from latest checkpoint"]
 
 
