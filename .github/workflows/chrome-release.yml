@@ -1,6 +1,6 @@
 name: Chrome extension release
 
-# Builds the MV3 extension (attention/chrome) and publishes a
+# Builds the MV3 extension (packages/attention/chrome) and publishes a
 # ready-to-load zip so teammates never need the Node toolchain.
 #
 #   - Push a tag like `attention-v0.1.0` -> builds + attaches the zip to
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: attention/chrome
+        working-directory: packages/attention/chrome
     steps:
       - uses: actions/checkout@v4
 
@@ -31,7 +31,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: attention/chrome/package-lock.json
+          cache-dependency-path: packages/attention/chrome/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -53,12 +53,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fulcra-attention-chrome
-          path: attention/chrome/fulcra-attention-chrome.zip
+          path: packages/attention/chrome/fulcra-attention-chrome.zip
           if-no-files-found: error
 
       - name: Attach zip to the GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: attention/chrome/fulcra-attention-chrome.zip
+          files: packages/attention/chrome/fulcra-attention-chrome.zip
           fail_on_unmatched_files: true

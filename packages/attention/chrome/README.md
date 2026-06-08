@@ -18,25 +18,25 @@ Chrome keeps sideloaded extensions across restarts but shows a "Developer mode e
 
 ## Build from source (developers)
 
-From this directory (`attention/chrome/`):
+From this directory (`packages/attention/chrome/`):
 
 ```bash
 npm install         # or: pnpm install
 npm run dev         # Vite dev mode with hot reload
 npm test            # Vitest run (cross-language scrub gate included)
-npm run build       # Production build to attention/chrome/dist/
+npm run build       # Production build to packages/attention/chrome/dist/
 ```
 
-To load a from-source build: **Load unpacked** → select the **`dist/`** build output (`attention/chrome/dist/`), *not* the `attention/chrome/` source folder. Then click **Connect to Fulcra** and complete the device-flow sign-in as in the install steps above.
+To load a from-source build: **Load unpacked** → select the **`dist/`** build output (`packages/attention/chrome/dist/`), *not* the `packages/attention/chrome/` source folder. Then click **Connect to Fulcra** and complete the device-flow sign-in as in the install steps above.
 
 > **Load `dist/`, not the source folder.** The source folder has no `manifest.json`,
 > so Chrome rejects it with "Manifest file is missing or unreadable" — that error
-> means you picked the wrong folder. Run `npm run build` and choose `attention/chrome/dist/`.
+> means you picked the wrong folder. Run `npm run build` and choose `packages/attention/chrome/dist/`.
 > (`dist/` is gitignored, so it won't exist until you build.)
 
 ## Cutting a release
 
-Bump `version` in `attention/chrome/package.json`, commit, then push a matching tag:
+Bump `version` in `packages/attention/chrome/package.json`, commit, then push a matching tag:
 
 ```bash
 git tag attention-v0.1.0

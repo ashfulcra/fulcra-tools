@@ -134,8 +134,7 @@ Bearer** with the same token.
 
 ## Demo deploy — hosted ChatGPT against `/coordination-demo`
 
-This is the hosted-ChatGPT leg of the **three-agent coordination demo** (see
-`docs/demo/2026-06-02-three-agent-coordination-demo.md`). It lets a Custom GPT
+This is the hosted-ChatGPT leg of the **three-agent coordination demo**. It lets a Custom GPT
 read and write the same `/coordination-demo` bus the CLI agents use.
 
 **The facade host must itself be fulcra-api-authed** — the facade holds no Fulcra

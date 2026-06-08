@@ -370,8 +370,8 @@ extension and sign in; nothing is configured there.
 
 To wire up and test the extension:
 
-1. Build it: `npm run build` in `attention/chrome/`, then load
-   `attention/chrome/dist/` as an unpacked extension
+1. Build it: `npm run build` in `packages/attention/chrome/`, then load
+   `packages/attention/chrome/dist/` as an unpacked extension
    (`chrome://extensions` → Developer mode → Load unpacked).
 2. Open the extension and click **Connect to Fulcra**. Approve the
    browser sign-in page (the Auth0 device flow). You're returned to the

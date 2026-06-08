@@ -21,7 +21,7 @@
 //  The resolved {definitionId, tagIds} is cached (UserDefaults, NOT the
 //  Keychain — these are non-secret ids) so resolution happens ONCE.
 //
-//  Source of truth: attention/chrome/src/relayless/ensureDefinition.ts
+//  Source of truth: packages/attention/chrome/src/relayless/ensureDefinition.ts
 //
 
 import Foundation

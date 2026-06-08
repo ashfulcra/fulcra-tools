@@ -12,7 +12,7 @@
 //
 //   - definition shape:  packages/fulcra-common/fulcra_common/wire.py
 //       duration_definition_payload(...) and
-//     attention/fulcra_attention/definition_spec.py
+//     packages/attention/fulcra_attention/definition_spec.py
 //       ATTENTION_CANONICAL (name "Attention", description, value_type
 //       "duration", unit null) + ATTENTION_DEFINITION_TAG_NAMES
 //       ("attention","web").

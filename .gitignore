@@ -15,6 +15,7 @@ __pycache__/
 # the product. Product + human docs (docs/TESTING.md,
 # docs/how-do-i-get-my-data.md) stay tracked.
 /SESSION_HANDOFF.md
+/CREDS_NEEDED.md
 /docs/E2E_STATUS.md
 /docs/plans/
 /docs/superpowers/

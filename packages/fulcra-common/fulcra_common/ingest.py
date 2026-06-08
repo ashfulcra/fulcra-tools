@@ -113,8 +113,8 @@ class DurationEvent(IngestableEvent):
 
     @property
     def duration_seconds(self) -> int:
-        # Clamp to zero — see legacy sites in fulcra_attention/ingest.py
-        # and fulcra_media/fulcra.py for the #30 rationale. A misordered
+        # Clamp to zero — see the #30 rationale (historical sites in the
+        # attention and media ingest paths). A misordered
         # start/end shouldn't propagate a negative into the wire payload.
         return max(0, int((self.end - self.start).total_seconds()))
 
