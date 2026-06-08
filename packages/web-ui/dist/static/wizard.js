@@ -138,33 +138,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
     // prompt you" lie. permissionResult is {granted: bool, hint?: string}.
     permissionResult: null,
     permissionChecking: false,
-    // Extension pair state — drives the one-click pairing handshake with
-    // the Fulcra Attention browser extension. See _onStepEnter +
-    // startExtensionPair below.
-    //   "idle"     → button shown, nothing in flight
-    //   "pairing"  → POST + postMessage sent, awaiting ack
-    //   "success"  → got the ack from the extension
-    //   "fallback" → timed out with no ack; show the reload guidance +
-    //                manual paste-token UI
-    pairStatus: "idle",
-    pairFallbackToken: null,
-    // Why the fallback fired. When the handshake times out the single
-    // most likely cause is content-script injection timing (see
-    // startExtensionPair), so we surface a "reload the page" hint as the
-    // primary recovery action. Distinct from a hard POST/route error,
-    // which sets stepError instead.
-    pairTimedOut: false,
-    // Handle for the ack-wait timeout so we can cancel it on success /
-    // step exit and never let a stale timer flip a re-paired step back
-    // into the fallback UI.
-    _pairTimeoutHandle: null,
-    // Once-set callback to drop our postMessage listener on success /
-    // step exit, so we don't leak a listener across navigations.
-    _pairListenerCleanup: null,
-    // True after the user clicks "I pasted it" in fallback mode, which
-    // unblocks Next. Kept separate from pairStatus so the fallback UI
-    // can still show its instructions.
-    pairManuallyConfirmed: false,
     // Map of credential key → true for credentials already present in the
     // keychain. Populated by _loadExisting() on wizard mount so that:
     //   • the input renders a "(currently set — leave blank to keep)" placeholder
@@ -254,8 +227,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
           this.permissionResult, this.permissionChecking,
           this.current_permission_id,
           this.extensionConfirmed,
-          this.pairStatus, this.pairFallbackToken, this.pairManuallyConfirmed,
-          this.pairTimedOut,
           this.firstRunStatus, this.firstRunSummary, this.firstRunTimelineUrl,
           this.nextBlocked, this.stepError,
           this.input_fields,
@@ -478,8 +449,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         // Reset permission check transient state
         this.permissionResult = null;
         this.permissionChecking = false;
-        // Reset extension-pair transient state so a re-enter starts clean
-        this._resetPairState();
         this._onStepEnter();
       }
     },
@@ -509,8 +478,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         // Reset permission check transient state
         this.permissionResult = null;
         this.permissionChecking = false;
-        // Reset extension-pair transient state
-        this._resetPairState();
         // Re-run any auto-actions for the step we just landed on (e.g. a
         // permission_request step should re-verify on return).
         this._onStepEnter();
@@ -540,7 +507,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         this.dpForceNew = false;
         this.permissionResult = null;
         this.permissionChecking = false;
-        this._resetPairState();
         this._onStepEnter();
       } else {
         // Last step — skipping past "Done" means skip-plugin.
@@ -616,15 +582,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         } else {
           this.nextBlocked = false;
         }
-      }
-      if (this.current_step.kind === "extension_pair") {
-        // Block Next until the handshake succeeds OR the user clicks
-        // "I pasted it" in the fallback UI. Do NOT auto-start the pair
-        // attempt — the user clicks the button so the extension's
-        // content script runs in response to a user gesture (some
-        // future browsers may want that for postMessage permissions).
-        this.nextBlocked = true;
-        this._resetPairState();
       }
       if (this.current_step.kind === "done") {
         // Auto-trigger the first run when the user reaches the done step.
@@ -717,129 +674,6 @@ function createWizard(plugin_contract, on_complete, on_skip_plugin, on_back_to_p
         }
       };
       this.firstRunPollTimer = setTimeout(tick, 1000);
-    },
-
-    // ---------------------------------------------------------------------
-    // Extension pairing
-    // ---------------------------------------------------------------------
-
-    _resetPairState() {
-      this.pairStatus = "idle";
-      this.pairFallbackToken = null;
-      this.pairManuallyConfirmed = false;
-      this.pairTimedOut = false;
-      if (this._pairTimeoutHandle) {
-        clearTimeout(this._pairTimeoutHandle);
-        this._pairTimeoutHandle = null;
-      }
-      if (this._pairListenerCleanup) {
-        try { this._pairListenerCleanup(); } catch (_) { /* ignore */ }
-        this._pairListenerCleanup = null;
-      }
-    },
-
-    async startExtensionPair() {
-      // Defensive: clear any prior listener/timer/fallback flags before starting
-      // a new pairing attempt so a re-entry can never orphan a previous listener
-      // or timeout handle. (Resets pairStatus to "idle"; immediately re-set below.)
-      this._resetPairState();
-      this.stepError = "";
-      this.pairTimedOut = false;
-      this.pairStatus = "pairing";
-      let resp;
-      try {
-        resp = await api(`/api/plugin/attention-relay/pair`, { method: "POST" });
-      } catch (e) {
-        this.pairStatus = "fallback";
-        this.stepError = `Could not generate pairing token: ${e.message}`;
-        return;
-      }
-      const token = resp.token;
-      const daemonUrl = resp.daemon_url;
-      if (!token || !daemonUrl) {
-        this.pairStatus = "fallback";
-        this.stepError = "Pairing route returned an incomplete response.";
-        return;
-      }
-      // Keep the token around so the fallback UI can show it.
-      this.pairFallbackToken = token;
-
-      const self = this;
-      const onMessage = (e) => {
-        // Only accept messages from this same origin — prevents a
-        // cross-origin page (or iframe) from spoofing an ack.
-        if (e.origin !== window.location.origin) return;
-        const d = e.data;
-        if (!d || d.type !== "fulcra-attention-pair-ack" || d.ok !== true) return;
-        self.pairStatus = "success";
-        self.nextBlocked = false;
-        // Cancel the pending timeout so a late tick can't clobber success.
-        if (self._pairTimeoutHandle) {
-          clearTimeout(self._pairTimeoutHandle);
-          self._pairTimeoutHandle = null;
-        }
-        self._cleanupPairListener();
-      };
-      window.addEventListener("message", onMessage);
-      this._pairListenerCleanup = () => {
-        window.removeEventListener("message", onMessage);
-      };
-
-      // Post AFTER the listener is registered so we never miss the ack.
-      window.postMessage(
-        { type: "fulcra-attention-pair", token, daemonUrl },
-        "*",
-      );
-
-      // Fallback timeout. If we're still "pairing" after this, no ack ever
-      // arrived. The dominant cause is content-script injection timing:
-      // Chrome only injects a content script into pages that were loaded
-      // AFTER the extension was installed/enabled. If this wizard tab was
-      // already open when the extension went in, pair-listener.ts is simply
-      // not on this page, so our postMessage above lands nowhere and no ack
-      // is ever posted back. Reloading the tab re-injects the content script
-      // and makes Pair work — so the fallback UI leads with that. We also
-      // tear down our own message listener here (the success path already
-      // does, but a timeout previously left it dangling) and set pairTimedOut
-      // so the step component can show the actionable "reload" guidance
-      // rather than a silent no-op. 7 s gives a slow content script room to
-      // respond before we give up.
-      this._pairTimeoutHandle = setTimeout(() => {
-        this._pairTimeoutHandle = null;
-        if (self.pairStatus === "pairing") {
-          self.pairTimedOut = true;
-          self.pairStatus = "fallback";
-          // Stop listening — no ack is coming on this page load. A retry
-          // (after reload) registers a fresh listener via startExtensionPair.
-          self._cleanupPairListener();
-        }
-      }, 7000);
-    },
-
-    _cleanupPairListener() {
-      if (this._pairListenerCleanup) {
-        try { this._pairListenerCleanup(); } catch (_) { /* ignore */ }
-        this._pairListenerCleanup = null;
-      }
-    },
-
-    // Called by the "I pasted it" button in the fallback UI. The user
-    // has manually entered the token in the extension's options page;
-    // we trust them and unblock Next.
-    confirmManualPair() {
-      this.pairManuallyConfirmed = true;
-      this.nextBlocked = false;
-    },
-
-    async copyPairToken() {
-      if (!this.pairFallbackToken) return;
-      try {
-        await navigator.clipboard.writeText(this.pairFallbackToken);
-      } catch (_) {
-        // navigator.clipboard can fail in some contexts; fall back to a
-        // selection range so the user can ⌘-C manually. The UI also
-        // renders the token in a <code> block as a final fallback.
-      }
     },
 
     // Initiate the OAuth flow for the current step. Calls the start route,
