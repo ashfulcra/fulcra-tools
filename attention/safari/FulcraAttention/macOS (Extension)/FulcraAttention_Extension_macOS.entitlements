@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Safari Web Extensions are sandboxed; keep it explicit (see app file). -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- SafariWebExtensionHandler does native ingest (POST ingest/v1/record/batch)
+	     in the EXTENSION process, so the extension itself needs network.client. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Same App Group as the host app → reads the shared resolved-id cache. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.fulcra.attention</string>
+	</array>
+	<!-- Same keychain access group as the host app → reads the token the app
+	     stored, so tokens never travel through extension JS. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.fulcra.attention.shared</string>
+	</array>
+</dict>
+</plist>
