@@ -11,15 +11,16 @@
 # `ashfulcra` account — so GitHub cannot by itself tell "Ash" from "an agent."
 # That human-vs-agent distinction is enforced on the fulcra-coord BUS (by agent
 # identity), not here. This file is the VISIBILITY layer: with branch protection
-# set to 0 required approvals, CODEOWNERS does not hard-block a merge — it
-# auto-requests Ash's review on every PR so substantive changes are always
-# surfaced to the human, while agents remain free to merge fixes after their
-# bus `review-done` handshake.
+# set to 0 required approvals, CODEOWNERS does not hard-block a merge. It asks
+# GitHub to request Ash's review on PRs from outside contributors. PRs opened by
+# the shared `ashfulcra` account cannot rely on GitHub to request the author as a
+# reviewer, so agents must still surface substantive shared-account PRs to Ash on
+# the bus and complete the `review-done` handshake before merging routine fixes.
 #
 # To make the human gate HARD-enforced (block substantive merges until Ash
 # approves), agents must move to a GitHub identity separate from `ashfulcra`,
 # then flip branch protection to require code-owner reviews. Until then, this is
 # request-only.
 
-# Default owner for everything — every PR requests Ash's review.
+# Default owner for everything.
 *       @ashfulcra
