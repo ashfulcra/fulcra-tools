@@ -15,6 +15,7 @@
 		FCA000000000000000000004 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000001 /* AuthManager.swift */; };
 		FCA000000000000000000005 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000002 /* KeychainStore.swift */; };
 		FCA000000000000000000006 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000003 /* SignInView.swift */; };
+		FCA000000000000000000007 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000008 /* Wire.swift */; };
 		0DAEBD5D2FD5D984008ADF6D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */; };
 		0DAEBD642FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0DAEBD6E2FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -111,6 +112,7 @@
 		FCA000000000000000000001 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
 		FCA000000000000000000002 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		FCA000000000000000000003 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
+		FCA000000000000000000008 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
 		0DAEBD5C2FD5D984008ADF6D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		0DAEBD5E2FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "FulcraAttention Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -232,6 +234,7 @@
 				FCA000000000000000000001 /* AuthManager.swift */,
 				FCA000000000000000000002 /* KeychainStore.swift */,
 				FCA000000000000000000003 /* SignInView.swift */,
+				FCA000000000000000000008 /* Wire.swift */,
 				0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */,
 				0DAEBD5E2FD5D984008ADF6D /* Info.plist */,
 			);
@@ -479,6 +482,7 @@
 				FCA000000000000000000004 /* AuthManager.swift in Sources */,
 				FCA000000000000000000005 /* KeychainStore.swift in Sources */,
 				FCA000000000000000000006 /* SignInView.swift in Sources */,
+				FCA000000000000000000007 /* Wire.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
