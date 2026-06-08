@@ -9,6 +9,10 @@ Hermes sandbox handoff, or a standalone continuity-only workstream.
 Before changing this package or creating continuity-related agent instructions,
 read `docs/agent-handoff.md`.
 
+Assume the next agent may know nothing about Fulcra Continuity. A handoff must
+explain what the checkpoint is, how to render or read it, and which artifacts are
+portable enough for the receiver to access.
+
 ## Core Rules
 
 - A checkpoint is a cold-start handoff, not a log line. It must contain enough
@@ -24,6 +28,9 @@ read `docs/agent-handoff.md`.
   make continuity work.
 - Cross-agent transfer is a first-class use case. The producing agent must not
   write instructions that only its own runtime can understand.
+- Do not use bare local paths as the only artifact reference for cross-agent
+  handoff. Pair them with a repository URL, branch/commit, remote Fulcra path,
+  coord task ID, or explicit access note.
 
 ## Minimum Checkpoint Content
 
@@ -36,6 +43,12 @@ Every useful checkpoint should include:
 - `artifacts`: files, remote paths, task IDs, docs, branches, or URLs to inspect.
 - `identity`: workstream, logical agent, and coord task identity when available.
 - `memory_writes`: durable facts or requirements that should be saved elsewhere.
+
+For a receiver that has no continuity-specific bootstrap, include a short primer
+in the checkpoint objective, decisions, or first next action: "This is a Fulcra
+Continuity checkpoint. Render it with `fulcra-continuity resume <checkpoint>` or
+read the JSON fields `objective`, `decisions`, `open_questions`, `next_actions`,
+and `artifacts`."
 
 If the automatic writer cannot populate these fields, update the task summary
 first or write a richer checkpoint through the structured CLI/API path.

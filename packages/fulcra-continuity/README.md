@@ -61,6 +61,13 @@ Claude Code, Codex, OpenClaw/Arc, and Hermes, and explicitly supports
 cross-agent transfer and non-GitHub work. GitHub issues and PRs are artifacts,
 not required identity.
 
+Checkpoints must be portable. Do not rely on bare local paths when handing work
+to another agent or machine; include a URL, Fulcra remote path, coord task ID, or
+repo/ref/path triple. Also assume the receiving agent may not know what
+Continuity is: the checkpoint should explain that it is a Fulcra Continuity
+resume packet and point the agent to `fulcra-continuity resume <checkpoint>` or
+the JSON fields to read directly.
+
 ## Resume from a checkpoint
 
 ```bash

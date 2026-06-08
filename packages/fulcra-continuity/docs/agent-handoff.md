@@ -8,6 +8,13 @@ continuity is the cold-start handoff packet.
 Continuity must work even when there is no GitHub issue, no pull request, and no
 repo-backed task. GitHub links are artifacts only, not identity.
 
+Assume the receiving agent may not know what Fulcra Continuity is. The
+checkpoint and any handoff message must be self-describing: it should say that it
+is a Fulcra Continuity checkpoint, explain that `objective`, `decisions`,
+`open_questions`, `next_actions`, and `artifacts` are the resume payload, and
+include a way to render it with `fulcra-continuity resume <checkpoint>` when the
+CLI is available.
+
 ## Common Contract
 
 Every agent that participates in continuity follows the same loop:
@@ -48,8 +55,8 @@ original transcript. Include:
 - Decisions: choices made, especially constraints and rejected assumptions.
 - Open questions: unknowns the next agent should not guess.
 - Next actions: concrete ordered steps.
-- Artifacts: task files, checkpoint paths, local files, docs, branch names,
-  command outputs written to files, URLs, or remote object paths.
+- Artifacts: portable references to task files, checkpoint paths, docs, branch
+  names, commits, command-output files, URLs, or remote object paths.
 - Identity: workstream ID, producing agent ID, and coord task identity when
   present.
 - Memory writes: facts or requirements that need durable storage outside the
@@ -57,6 +64,53 @@ original transcript. Include:
 
 Thin checkpoints are acceptable only as plumbing tests. Production checkpoints
 must carry decisions, artifacts, and open questions.
+
+## Portable Artifacts
+
+Cross-agent artifacts must be resolvable by the receiving agent. A bare local
+path like `packages/fulcra-continuity/docs/agent-handoff.md` is not enough unless
+the checkpoint also tells the agent which repository, branch, commit, or remote
+workspace contains it.
+
+Prefer artifact references like:
+
+```text
+https://github.com/ashfulcra/fulcra-tools/pull/101
+repo: ashfulcra/fulcra-tools
+ref: feature/continuity-agent-instructions
+commit: 2af0f2a2f11b3234b94fb8e6b7c3dcbb2ceb7a1b
+path: packages/fulcra-continuity/docs/agent-handoff.md
+```
+
+or:
+
+```text
+fulcra-file: /coordination/tasks/TASK-...
+continuity-latest: /coordination/continuity/<workstream>/<agent>/<task>/latest.json
+coord-task-id: TASK-...
+```
+
+If an artifact is local-only, say so and explain how to reproduce or ignore it.
+Do not assume that Claude, Codex, OpenClaw, and Hermes share a filesystem.
+
+## Bootstrap for Unaware Agents
+
+When handing off to an agent that may not have continuity instructions installed,
+include this primer in the handoff message or checkpoint:
+
+```text
+You are receiving a Fulcra Continuity checkpoint. Treat it as the durable resume
+state for this task. Read `objective`, `decisions`, `open_questions`,
+`next_actions`, and `artifacts` before acting. If the `fulcra-continuity` CLI is
+available, run `fulcra-continuity resume <checkpoint.json>` to render the brief.
+If not, read the JSON directly. Artifacts may be GitHub URLs, Fulcra remote
+paths, coord task IDs, or repo/path/ref triples; do not assume local paths exist
+on your machine.
+```
+
+For repository-backed artifacts, include a URL or repo/ref/path triple. For
+non-repo work, include remote Fulcra paths, coord task IDs, chat/channel
+identities, or explicit reproduction steps.
 
 ## Coord-Backed Work
 
@@ -116,7 +170,7 @@ decision.
 For a handoff from agent A to agent B:
 
 1. Agent A writes a rich checkpoint.
-2. Agent A lists artifacts that agent B can actually access.
+2. Agent A lists portable artifacts that agent B can actually access.
 3. If coord is available, Agent A assigns or tells the coord task to Agent B.
 4. Agent B loads the checkpoint before reading broad history.
 5. Agent B writes a new checkpoint after pickup stating what it accepted,
@@ -131,7 +185,11 @@ Example transfer:
 OpenClaw/Arc writes checkpoint:
   agent_id=openclaw:discord:main-comms
   coord_task_id=TASK-...
-  next_actions=["Claude Code: inspect docs/agent-handoff.md and update adapters"]
+  artifacts=[
+    "repo=ashfulcra/fulcra-tools ref=feature/... path=packages/fulcra-continuity/docs/agent-handoff.md",
+    "fulcra-file=/coordination/tasks/TASK-..."
+  ]
+  next_actions=["Claude Code: render/read this checkpoint, then inspect the portable artifacts"]
 
 Claude Code resumes:
   loads checkpoint
@@ -158,6 +216,8 @@ Claude-specific instructions:
 - If the task is not GitHub-backed, keep the task ID and artifact paths generic.
 - Before requesting review or handing off, write a checkpoint with decisions,
   open questions, and the exact files or docs to inspect.
+- When writing artifacts for another machine, include repo/ref/path or remote
+  Fulcra paths, not only local paths from Claude's workspace.
 
 ## Codex
 
@@ -183,6 +243,9 @@ Codex-specific instructions:
   artifacts or decisions.
 - If receiving a checkpoint from OpenClaw, Claude, or Hermes, treat it as the
   primary resume source and only then read repo history or transcripts.
+- If Codex writes a checkpoint for another agent, include clickable/remote
+  repository URLs or repo/ref/path triples. Do not assume the receiving agent can
+  open Codex's local workspace paths.
 
 ## OpenClaw / Arc
 
@@ -227,6 +290,9 @@ OpenClaw-specific instructions:
   GitHub or coord if the work does not need it.
 - Before handing to Claude/Codex/Hermes, write a checkpoint that names the target
   and includes accessible artifacts.
+- If the handoff starts in Discord or another chat, include the channel/workstream
+  identity and any coord task ID. Do not rely on a local OpenClaw path unless it
+  is paired with a remote reference.
 
 ## Hermes
 
@@ -245,6 +311,9 @@ Hermes-specific instructions:
   onboarding session, a chat task, or a local sandbox operation.
 - Do not include secrets in checkpoints. List secret-dependent setup as an open
   question or artifact note, not as values.
+- Hermes sandboxes should treat local paths from other agents as hints only.
+  Resolve work from URLs, Fulcra remote paths, coord task IDs, or explicit
+  bootstrap payloads.
 
 Suggested identity:
 
@@ -271,7 +340,7 @@ Prefer:
 ```text
 Objective: write cross-agent continuity instructions.
 Decisions: must support OpenClaw to Claude; must not assume GitHub.
-Artifacts: continuity README, coord adapters, Hermes handoff docs.
+Artifacts: repo/ref/path for continuity README, coord adapters, Hermes handoff docs.
 Open questions: Hermes identity; taskless CLI shape.
 Next actions: inspect repo, add docs, run tests, write pickup checkpoint.
 ```
@@ -291,7 +360,8 @@ uv run --package fulcra-continuity fulcra-continuity checkpoint \
   --coord-owner-agent openclaw:discord:main-comms \
   --decision "Must work without GitHub" \
   --open-question "What is Hermes' canonical session ID?" \
-  --artifact "packages/fulcra-continuity/docs/agent-handoff.md=handoff contract" \
+  --artifact "https://github.com/ashfulcra/fulcra-tools/pull/101=PR with portable review context" \
+  --artifact "repo=ashfulcra/fulcra-tools ref=feature/continuity-agent-instructions path=packages/fulcra-continuity/docs/agent-handoff.md" \
   --next "Claude Code picks up and edits adapter docs" \
   --out /tmp/checkpoint.json \
   --resume-brief /tmp/resume.md
