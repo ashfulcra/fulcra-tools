@@ -3459,6 +3459,112 @@ class TestInstallOpenClawWithPluginCmd(unittest.TestCase):
         self.assertFalse(os.path.exists(self.pdir))
 
 
+class TestInstallOpenClawBundleCmd(unittest.TestCase):
+    """install-openclaw can BUNDLE the durable bus-pickup path (heartbeat +
+    per-agent listener) in one command — so "OpenClaw installed" means "this
+    agent hears directed work" without a separate install-heartbeat /
+    install-listener step. The OpenClaw analogue of ensure-codex-watch.
+
+    These patch the hardened installers at their REAL call sites
+    (`fulcra_coord.installers.heartbeat.install_heartbeat` /
+    `...listener.install_listener`) so the assertions are non-vacuous: if the
+    bundle were open-coded or wired to the wrong symbol, the mocks would not
+    fire. openclaw.install_openclaw is also patched to a plan dict so no Track A
+    files actually land.
+    """
+
+    def _patches(self):
+        """Patch the three installers cmd_install_openclaw composes, returning
+        the MagicMocks for heartbeat / listener so tests can assert on them.
+        openclaw.install_openclaw returns a minimal plan dict with the keys the
+        command's summary printing reads."""
+        from unittest.mock import patch, MagicMock
+        hb = patch("fulcra_coord.installers.heartbeat.install_heartbeat",
+                   return_value={"mechanism": "launchd", "writes": ["/tmp/hb.plist"],
+                                 "removes": ["/tmp/hb.plist"], "interval_min": 20,
+                                 "cli_command": "fulcra-coord"})
+        ls = patch("fulcra_coord.installers.listener.install_listener",
+                   return_value={"mechanism": "launchd", "writes": ["/tmp/ls.plist"],
+                                 "removes": ["/tmp/ls.plist"], "interval_min": 10,
+                                 "cli_command": "fulcra-coord"})
+        oc = patch("fulcra_coord.installers.openclaw.install_openclaw",
+                   return_value={"hooks_root": "/tmp/ocroot", "writes": [],
+                                 "removes": [], "hook_dirs": [], "prompt_files": []})
+        return hb, ls, oc
+
+    def _args(self, **kw):
+        from types import SimpleNamespace
+        base = dict(hooks_root="/tmp/ocroot", uninstall=False, dry_run=False,
+                    with_plugin=False, plugin_dir=None,
+                    with_heartbeat=False, with_listener=False, agent=None)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_cmd_can_bundle_heartbeat_and_listener(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args(
+                with_heartbeat=True, with_listener=True,
+                agent="openclaw:test:infra"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(m_hb.call_count, 1)
+        self.assertEqual(m_ls.call_count, 1)
+        # The listener is per-agent: it must watch the agent we passed.
+        self.assertEqual(m_ls.call_args.kwargs.get("agent"), "openclaw:test:infra")
+        # Heartbeat is machine-global → never per-agent.
+        self.assertNotIn("agent", m_hb.call_args.kwargs)
+
+    def test_cmd_bundle_uninstall_removes_scheduler_jobs(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args(
+                uninstall=True, with_heartbeat=True, with_listener=True,
+                agent="openclaw:test:infra"))
+        self.assertEqual(rc, 0)
+        # The gotcha guard for uninstall: the early `return 0` must not
+        # short-circuit the bundle. Both installers are reached with uninstall=True.
+        self.assertTrue(m_hb.call_args.kwargs.get("uninstall"))
+        self.assertTrue(m_ls.call_args.kwargs.get("uninstall"))
+
+    def test_cmd_bundle_dry_run_no_side_effects_but_previews(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args(
+                dry_run=True, with_heartbeat=True, with_listener=True,
+                agent="openclaw:test:infra"))
+        self.assertEqual(rc, 0)
+        # The core gotcha guard: the early dry-run `return 0` must NOT
+        # short-circuit the bundle. Both installers are reached with dry_run=True
+        # (they print their own plan and write nothing).
+        self.assertTrue(m_hb.call_args.kwargs.get("dry_run"))
+        self.assertTrue(m_ls.call_args.kwargs.get("dry_run"))
+
+    def test_cmd_without_bundle_flags_unchanged(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args())
+        self.assertEqual(rc, 0)
+        # No with_* flags → base behavior preserved: neither scheduler installs.
+        m_hb.assert_not_called()
+        m_ls.assert_not_called()
+
+    def test_cmd_listener_derives_agent_when_unset(self):
+        """with_listener but no --agent → the per-agent listener still gets a
+        concrete agent (derived), never None, or it would watch the wrong inbox."""
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb, ls as m_ls, oc, \
+                patch("fulcra_coord.installers._derive_agent",
+                      return_value="derived:agent"):
+            rc = installers.cmd_install_openclaw(self._args(with_listener=True))
+        self.assertEqual(rc, 0)
+        self.assertEqual(m_ls.call_args.kwargs.get("agent"), "derived:agent")
+
+
 def _park_reasons_line(ts: str) -> str:
     """Return the PARK_REASONS set literal so we can assert `compaction` is
     NOT among the reasons that park a task (compaction continues the session)."""
