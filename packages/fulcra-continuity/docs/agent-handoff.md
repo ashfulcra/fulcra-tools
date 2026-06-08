@@ -161,7 +161,8 @@ Claude-specific instructions:
 
 ## Codex
 
-Codex should use `fulcra-coord install-codex` for coord-backed hooks:
+Codex should use `fulcra-coord ensure-codex-watch` for coord-backed hooks and
+the durable listener self-heal. At minimum, `fulcra-coord install-codex` wires:
 
 - `SessionStart`: connect presence and keep review capability fresh.
 - `PreCompact`: checkpoint the active task before context loss.
@@ -190,6 +191,21 @@ OpenClaw should use `fulcra-coord install-openclaw` for Track A file hooks:
 - `session:compact:before`: checkpoint before summarization.
 - `gateway:shutdown`: park active work and checkpoint.
 - `agent:bootstrap`: surface in-flight work during boot.
+
+To make a fresh OpenClaw agent actually hear directed bus work while idle, bundle
+the durable pickup path at install time:
+
+```bash
+fulcra-coord install-openclaw \
+  --with-heartbeat \
+  --with-listener \
+  --agent openclaw:<surface>:<workstream>
+```
+
+The heartbeat is machine-global; the listener is per-agent, so the `--agent`
+value must be the identity whose inbox should be polled. This composes the
+standard `install-heartbeat` and `install-listener` installers rather than
+open-coding scheduler state.
 
 For deterministic per-session start/end, materialize and install Track B:
 
