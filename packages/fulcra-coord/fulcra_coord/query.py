@@ -353,6 +353,11 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
         and t.get("owner_agent") != me
         and t.get("status") in ("proposed", "waiting", "blocked")
     ]
+    # PRs I OWN that were never routed for review (author left "review PR #N" as
+    # free text instead of running request-review, so no kind:review directive
+    # exists and the review reaches no reviewer's inbox/resume — how PR #101 sat
+    # unreviewed). Surfaced so I route them before going idle.
+    unrouted_pr = views.unrouted_pr_reviews(all_tasks, me)
     blocked_on_human = views.needs_human(all_tasks, human)
     # M-2: a task I own that is assigned to the human is already surfaced under
     # "blocked on human"; exclude it from "owed to others" so a self-filed
@@ -405,6 +410,7 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
             "blocked_on_me": blocked_on_me,
             "owed_to_others": owed_to_others,
             "blocked_on_human": blocked_on_human,
+            "unrouted_pr_reviews": unrouted_pr,
             "other_agents": other_agents,
             "continuity_snapshots": continuity_snapshots,
         })
@@ -426,6 +432,20 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
                 ask = (s.get("blocked_on") or "").strip()
                 if ask:
                     print(f"          needs: {ask[:70]}")
+
+    # Loud, first — an unrouted PR review is silent work-loss, so it leads the
+    # briefing with the exact command to fix it.
+    if unrouted_pr:
+        print(f"\n  ⚠ PRs you own with NO review routed ({len(unrouted_pr)}) — "
+              f"run request-review so a reviewer actually gets it:")
+        for s in unrouted_pr:
+            prs = ", ".join("#" + p for p in s.get("pr_mentions", []))
+            print(f"    [{s.get('status','?').upper()}] {s.get('id','')}  "
+                  f"{s.get('title','')[:50]}  (mentions {prs})")
+            repo = s.get("workstream", "") or "<repo>"
+            first_pr = (s.get("pr_mentions") or ["N"])[0]
+            print(f"          fix: fulcra-coord request-review "
+                  f"--pr {first_pr} --repo {repo}")
 
     _section("Your active/waiting work", active)
     _section("Blocked on YOU", blocked_on_me, ask_field=True)

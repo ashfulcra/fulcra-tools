@@ -10,6 +10,27 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — `resume` flags PRs you opened but never routed for review
+
+**Why:** A reviewer can only act on a review that was *routed* — `request-review`
+creates a `kind:review` directive assigned to a live reviewer, which then shows
+in their inbox/resume. But when an author opens a PR and just leaves "review
+PR #N" as a free-text `next_action` (or task summary), no directive is ever
+created, so the review is assigned to nobody and silently goes unreviewed. This
+is exactly how PR #101 sat unreviewed: routed by convention only, on no one's
+plate.
+
+**What:**
+- New pure helper `views.unrouted_pr_reviews(tasks, agent)`: open tasks **owned
+  by** the agent whose title/summary/next_action name a PR (`PR #N`, `/pull/N`,
+  `pull request N` — deliberately not a bare `#N`, to avoid issue-ref false
+  positives) but that carry no `kind:review` marker (i.e. were never routed).
+- `resume` surfaces these first, loudly, with the exact fix command
+  (`fulcra-coord request-review --pr N --repo <workstream>`); `resume --format
+  json` adds an `unrouted_pr_reviews` array. Read-only, summary-only.
+- Rule (docs): opening a PR means running `request-review` — never leave a PR
+  review as a free-text next_action, or it reaches no reviewer.
+
 ## [Unreleased] — `install-openclaw` can bundle the durable bus-pickup path
 
 **Why:** `install-openclaw` installed OpenClaw's lifecycle hooks, but a fresh
