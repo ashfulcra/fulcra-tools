@@ -32,6 +32,8 @@ Every agent that participates in continuity follows the same loop:
    - `coord_owner_agent`: optional owner on the coord bus.
 2. On start or resume, look for a relevant checkpoint.
    - If a coord task is known, load the latest checkpoint for that task identity.
+     In current `fulcra-coord`, the automatic latest lookup is same-agent; for a
+     cross-agent pickup, use the producer-provided checkpoint path or JSON first.
    - If no coord task is known, load by workstream/session identity when available.
    - Render the resume brief and inspect listed artifacts before acting.
 3. While working, keep the task or checkpoint context rich enough for a cold
@@ -98,6 +100,9 @@ coord-task-id: TASK-...
 
 If an artifact is local-only, say so and explain how to reproduce or ignore it.
 Do not assume that Claude, Codex, OpenClaw, and Hermes share a filesystem.
+For cross-agent handoff, include the exact `continuity-latest` path or
+checkpoint JSON produced by the sending agent; the receiver's automatic
+same-agent lookup may not discover it.
 
 ## Bootstrap for Unaware Agents
 
@@ -128,7 +133,8 @@ When a `fulcra-coord` task exists:
 3. Write continuity at durable pause points with the same identity values.
 4. On resume, load both:
    - the coord task state
-   - the latest continuity checkpoint for that task
+   - the latest same-agent continuity checkpoint for that task
+   - for cross-agent pickup, the producer-provided checkpoint path or JSON
 
 Recommended identity shape:
 
@@ -178,7 +184,7 @@ For a handoff from agent A to agent B:
 1. Agent A writes a rich checkpoint.
 2. Agent A lists portable artifacts that agent B can actually access.
 3. If coord is available, Agent A assigns or tells the coord task to Agent B.
-4. Agent B loads the checkpoint before reading broad history.
+4. Agent B loads Agent A's provided checkpoint before reading broad history.
 5. Agent B writes a new checkpoint after pickup stating what it accepted,
    changed, or could not access.
 
@@ -193,7 +199,8 @@ OpenClaw/Arc writes checkpoint:
   coord_task_id=TASK-...
   artifacts=[
     "repo=ashfulcra/fulcra-tools ref=feature/... path=packages/fulcra-continuity/docs/agent-handoff.md",
-    "fulcra-file=/coordination/tasks/TASK-..."
+    "fulcra-file=/coordination/tasks/TASK-...",
+    "continuity-latest=/coordination/continuity/<workstream>/<agent>/<task>/latest.json"
   ]
   next_actions=["Claude Code: render/read this checkpoint, then inspect the portable artifacts"]
 

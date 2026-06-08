@@ -36,7 +36,8 @@ is in; Continuity says how to continue it cold.
 When an agent starts or receives directed work:
 
 1. Run `fulcra-coord resume --with-continuity --agent <agent-id>`.
-2. For each active/waiting task, read the task state and latest checkpoint.
+2. For each active/waiting task, read the task state and latest same-agent
+   checkpoint.
 3. If a checkpoint exists, treat it as the primary resume source before reading
    broad history.
 4. Inspect every portable artifact listed in the checkpoint.
@@ -77,6 +78,13 @@ continuity-latest=/coordination/continuity/<workstream>/<agent>/<task>/latest.js
 
 GitHub is optional. It is one portable artifact type, not a requirement.
 
+Current coord-side lookup stores checkpoints under workstream, agent, and task.
+That means `resume --with-continuity` finds checkpoints written with the same
+agent identity it is resuming as. During cross-agent transfer, include the
+explicit `continuity-latest` path or checkpoint JSON as a portable artifact so
+the receiving agent can load the producer's checkpoint directly before writing
+its own pickup checkpoint.
+
 ## Bootstrap for Agents That Do Not Know Continuity
 
 The receiving agent may not have Continuity instructions installed. Include a
@@ -99,7 +107,9 @@ transfer:
 1. Producing agent writes a checkpoint with portable artifacts.
 2. Producing agent routes the coord task if coord is available:
    `fulcra-coord assign TASK-... <target-agent>`.
-3. Target agent runs `resume --with-continuity` or loads the checkpoint directly.
+3. Target agent runs `resume --with-continuity` for any same-agent checkpoints
+   and loads the producer's checkpoint directly from the `continuity-latest` path
+   or checkpoint JSON provided in the handoff.
 4. Target agent writes a pickup checkpoint after accepting the work.
 
 If no coord task exists, use continuity-only identity. Do not invent a GitHub PR
