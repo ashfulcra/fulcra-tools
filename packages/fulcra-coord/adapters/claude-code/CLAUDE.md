@@ -171,8 +171,12 @@ merged.
 
 ## Repo homes (where work lives)
 
-Everything lives on **GitHub** so PRs are possible — if a repo isn't on GitHub,
-get it there before merging (ask the operator where it should go if unsure).
+Most work lives on **GitHub** so PRs + `gh` are available — the convenient
+default, not a requirement. The review handshake itself is bus-based
+(`request-review` → `review-done --verdict`) and works on any remote (or none),
+so a non-GitHub repo is fine; put new repos where the operator wants them (ask if
+unsure). On GitHub, use PRs; elsewhere, review on the bus and merge with plain
+`git`.
 
 - **`ashfulcra/fulcra-tools`** (this monorepo, currently Fulcra-internal) is
   **only for things that make Fulcra useful for other people** — Fulcra-ecosystem
