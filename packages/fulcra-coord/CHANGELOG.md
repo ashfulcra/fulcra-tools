@@ -10,6 +10,29 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — `ensure-codex-watch`: Codex coordination self-heals on every app start
+
+**Why:** Codex's durable per-agent inbox listener was only ever installed if an
+operator manually ran `install-listener`. On a fresh Codex machine that never
+happens, so Codex silently never heard directed work on the bus — it had hooks
+but no listener, and nobody noticed until directed work went unanswered.
+
+**What:** a new `ensure-codex-watch` command — the single idempotent "make Codex
+coordination self-healing" entry point. It composes the already-hardened
+installers (`install_codex` + the per-agent `install_listener`), best-effort
+`launchctl load`s the listener plist (`--no-load` to skip; macOS/launchd only),
+and optionally refreshes presence (`--no-connect`). The Codex SessionStart hook
+now backgrounds it on every app start, so a missing listener self-heals with no
+operator action. Fully fail-safe: a failed load or connect is warned but the
+command still returns 0 (it runs backgrounded at every SessionStart and must
+never hard-fail the hook), and it is safe to run repeatedly (the underlying
+installers are idempotent; an already-loaded launchd job is a harmless no-op).
+The SessionStart hook keeps its `connect --can-review` (Codex is the canonical
+review target) and now derives a `codex:*` fallback identity instead of
+`claude-code:*` so a pre-handshake box arms the right agent's listener.
+
+---
+
 ## [0.9.1] — `remote.list_files` normalizes the real CLI output to clean paths
 
 **Why:** `remote.list_files(prefix)` returned the raw `fulcra file list` display

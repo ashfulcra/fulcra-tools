@@ -15,12 +15,18 @@ their bodies. ``_derive_agent`` is the usual thin local alias.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 from . import claude_code, openclaw, codex, heartbeat, listener, identity
 from .output import info as _info, warn as _warn
+# Imported at module scope (not inline) so ensure-codex-watch's optional presence
+# refresh resolves the SAME cmd_connect the rest of the codebase dispatches, and
+# so tests can patch it at `fulcra_coord.installers.cmd_connect`. presence.py is a
+# leaf that never imports installers, so this introduces no cycle.
+from .presence import cmd_connect
 
 
 def _derive_agent() -> str:
@@ -152,6 +158,106 @@ def cmd_install_codex(args: Any, backend: Optional[list[str]] = None) -> int:
     _info("No Stop hook by design — Codex Stop fires every turn; end-parking is "
           "delegated to the heartbeat. Install it with: fulcra-coord install-heartbeat")
     _info("Verify auth/connectivity with: fulcra-coord doctor")
+    return 0
+
+
+def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Idempotently (re)arm Codex coordination in one shot — the self-heal entry.
+
+    The problem this solves: Codex's durable per-agent inbox listener only gets
+    installed if an operator MANUALLY runs ``install-listener``. On a fresh Codex
+    machine that never happens, so Codex silently never hears directed work on the
+    bus. This is the single idempotent "make Codex coordination self-healing"
+    command, run BACKGROUNDED on every Codex SessionStart so a missing listener
+    self-heals without operator action.
+
+    It composes the already-hardened installers (``codex.install_codex`` +
+    ``listener.install_listener``) rather than open-coding launchd/cron, so it
+    inherits their PATH-safe CLI resolution and per-agent slug semantics. It then
+    best-effort ``launchctl load``s the listener plist and (unless ``--no-connect``)
+    refreshes presence.
+
+    Fail-safe overall: it runs at every SessionStart, so a failure in the load or
+    connect step is reported via ``_warn`` but still returns 0 — it must NEVER
+    hard-fail the hook. Idempotent: the underlying installers are idempotent and an
+    already-loaded launchd job is a harmless no-op, so it is safe to run repeatedly.
+    """
+    agent = getattr(args, "agent", None) or _derive_agent()
+    uninstall = bool(getattr(args, "uninstall", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    # Persist a declared identity first (mirrors cmd_identity's `set` path) so the
+    # listener that gets armed below watches the RIGHT agent's inbox. In dry-run,
+    # use the declared id for the printed plan but do not write identity state.
+    if getattr(args, "set_identity", None):
+        agent = args.set_identity
+        if not dry_run:
+            identity.set_identity(args.set_identity)
+
+    # 1) Codex lifecycle hooks (SessionStart + PreCompact). Idempotent; the
+    # installer prints its own dry-run plan.
+    codex.install_codex(
+        uninstall=uninstall, dry_run=dry_run,
+        target_dir=getattr(args, "codex_target_dir", None))
+
+    # 2) The per-agent inbox listener — the piece that's otherwise never installed
+    # on a fresh Codex box. Idempotent; per-agent (slugged) so co-located agents
+    # don't clobber each other.
+    plan = listener.install_listener(
+        agent=agent,
+        interval_min=getattr(args, "interval_min", None) or listener.INTERVAL_MIN_DEFAULT,
+        uninstall=uninstall, dry_run=dry_run,
+        target_dir=getattr(args, "listener_target_dir", None),
+        logs_dir=getattr(args, "listener_logs_dir", None))
+
+    if dry_run:
+        # The installers above already printed their plans; just summarize what
+        # WOULD be armed and return WITHOUT loading/connecting (no side effects).
+        verb = "tear down" if uninstall else "arm"
+        _info(f"[dry-run] Would {verb} Codex hooks + the per-agent listener for "
+              f"{agent} (no launchctl load, no connect).")
+        return 0
+
+    # 3) Self-heal load of the listener plist (macOS launchd only). On uninstall we
+    # best-effort UNLOAD instead. Fully fail-safe: a failed load/unload (already
+    # loaded, launchctl missing, etc.) is a harmless no-op and must never crash
+    # the command. `--no-load` opts out entirely.
+    mechanism = plan.get("mechanism")
+    no_load = bool(getattr(args, "no_load", False))
+    if mechanism == "launchd" and not no_load:
+        writes = plan.get("removes") if uninstall else plan.get("writes")
+        plist = (writes or [None])[0]
+        if plist:
+            action = "unload" if uninstall else "load"
+            try:
+                subprocess.run(["launchctl", action, "-w", plist],
+                               capture_output=True, timeout=10, check=False)
+            except Exception:
+                # Best-effort self-heal load: a failure here must never propagate.
+                _warn(f"launchctl {action} of the listener plist was skipped "
+                      f"(non-fatal): {plist}")
+
+    # On uninstall we're done — there's no presence to refresh when tearing down.
+    if uninstall:
+        return 0
+
+    # 4) Refresh presence (unless --no-connect) so `agents`/`presence` show what
+    # this agent is on right after arming. Best-effort — a connect failure must
+    # not fail the self-heal. The Codex SessionStart hook passes --no-connect
+    # because it runs its own `connect --can-review` right after (avoid double).
+    if not getattr(args, "no_connect", False):
+        try:
+            connect_args = type(args)(
+                agent=agent,
+                can_review=getattr(args, "can_review", False),
+                role=getattr(args, "role", None),
+                summary=getattr(args, "summary", None),
+                workstream=getattr(args, "workstream", None),
+                format="table")
+            cmd_connect(connect_args, backend=backend)
+        except Exception as e:
+            _warn(f"presence refresh skipped (non-fatal): {e}")
+
     return 0
 
 
