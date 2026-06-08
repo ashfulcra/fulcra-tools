@@ -1,5 +1,7 @@
 # Generic Cloud Agent Adapter
 
+> **Canonical coord guide:** [`fulcra-coord/SKILL.md`](../SKILL.md) — the runtime-agnostic when/how-to-use reference (quick-reference + load-bearing rules). This file is the cloud/ephemeral-agent-specific layer.
+
 For ephemeral cloud agents, CI jobs, and remote Claude Code sessions that don't have persistent state between runs.
 
 ## Setup pattern

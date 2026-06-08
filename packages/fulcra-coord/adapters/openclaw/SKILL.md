@@ -1,5 +1,7 @@
 # fulcra-coord — OpenClaw Skill Adapter
 
+> **Canonical coord guide:** [`fulcra-coord/SKILL.md`](../../SKILL.md) — the runtime-agnostic when/how-to-use reference (quick-reference + load-bearing rules). This file is the OpenClaw-specific layer on top of it.
+
 This file documents the OpenClaw skill integration for fulcra-coord.
 
 ## Skill trigger conditions
