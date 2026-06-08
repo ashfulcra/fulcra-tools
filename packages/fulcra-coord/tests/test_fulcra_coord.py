@@ -10709,6 +10709,26 @@ class TestUnroutedPrReviews(unittest.TestCase):
         data = json.loads(buf.getvalue())
         self.assertEqual([t["id"] for t in data["unrouted_pr_reviews"]], ["T1"])
 
+    def test_resume_table_prints_valid_request_review_command(self):
+        from fulcra_coord.cli import cmd_resume
+        import io, contextlib
+        from unittest.mock import patch
+        with patch("fulcra_coord.query._load_task_summaries", return_value=self._tasks()), \
+             patch("fulcra_coord.query.identity.resolve_agent", return_value=self.ME), \
+             patch("fulcra_coord.query.identity.resolve_human", return_value="ash"), \
+             patch("fulcra_coord.query.remote.download_json", return_value=None):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_resume(types.SimpleNamespace(agent=self.ME,
+                                                      format="table",
+                                                      with_continuity=False),
+                                backend=["false"])
+        self.assertEqual(rc, 0)
+        text = buf.getvalue()
+        self.assertIn("fulcra-coord request-review 101 --repo ashfulcra/fulcra-tools",
+                      text)
+        self.assertNotIn("--pr 101", text)
+
 
 # ---------------------------------------------------------------------------
 # Main
