@@ -445,7 +445,7 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
             repo = s.get("workstream", "") or "<repo>"
             first_pr = (s.get("pr_mentions") or ["N"])[0]
             print(f"          fix: fulcra-coord request-review "
-                  f"--pr {first_pr} --repo {repo}")
+                  f"{first_pr} --repo {repo}")
 
     _section("Your active/waiting work", active)
     _section("Blocked on YOU", blocked_on_me, ask_field=True)
