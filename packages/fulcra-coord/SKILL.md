@@ -7,7 +7,7 @@ description: Use when coordinating durable work across multiple agent sessions o
 
 ## Overview
 
-`fulcra-coord` coordinates durable work across independent agents (Claude Code, Codex, OpenClaw, cloud, CI) using **Fulcra Files as the only shared store** — no shared memory, direct calls, or central broker. Tasks are JSON on a `/coordination` bus; agents read cheap **materialized views**, write under optimistic concurrency, and a reconcile heartbeat repairs partial writes.
+`fulcra-coord` coordinates durable work across independent agents (Claude Code, Codex, OpenClaw, Hermes, cloud, CI) using **Fulcra Files as the only shared store** — no shared memory, direct calls, or central broker. It is **runtime-agnostic**: every command below behaves identically on any platform that has the CLI + Fulcra credentials. Tasks are JSON on a `/coordination` bus; agents read cheap **materialized views**, write under optimistic concurrency, and a reconcile heartbeat repairs partial writes.
 
 **Core principle:** the bus is the source of truth and the operator's situational awareness. Write durable state at task boundaries so any session — or the human — can pick up cold.
 
@@ -59,12 +59,15 @@ Run any command with `--help` for flags; `--format json` is available on read co
 - **Listener:** a per-agent `notify-inbox` poll surfaces directed work while you're idle and self-heals at SessionStart. `install-listener` (or `ensure-codex-watch` for Codex).
 - **needs-me / block --on-user:** the operator-facing surface — the one channel that puts an ask on the human's plate and leads their next SessionStart.
 
-## Setup per environment
+## Works on any runtime
 
-Hook installers wire coord into each agent's lifecycle. Read the adapter doc for yours:
-- Claude Code → `adapters/claude-code/CLAUDE.md` (protocol) + `ONBOARD.md`; `install-claude-code`.
-- Codex → `adapters/codex/AGENTS.md`; `ensure-codex-watch`.
-- OpenClaw → `adapters/openclaw/SKILL.md`; `install-openclaw --with-heartbeat --with-listener`.
-- ChatGPT / cloud → `adapters/chatgpt/INSTRUCTIONS.md`, `adapters/generic-cloud-agent.md`.
+The core needs **only the `fulcra-coord` CLI + Fulcra credentials** — it runs identically on Claude Code, Codex, OpenClaw, Hermes, ChatGPT/cloud, or CI. The commands and rules above are all any runtime needs. **Adapters are optional lifecycle sugar** (auto-surface work at session start, checkpoint on compaction, park on exit) for the runtimes that have one; without an adapter, install the durable pickup path yourself with `install-heartbeat` + `install-listener` (a scheduled `reconcile` + `notify-inbox`).
+
+| Runtime | Lifecycle adapter | Arm coordination |
+|---|---|---|
+| Claude Code | `adapters/claude-code/CLAUDE.md` + `ONBOARD.md` | `install-claude-code` |
+| Codex | `adapters/codex/AGENTS.md` | `ensure-codex-watch` |
+| OpenClaw | `adapters/openclaw/SKILL.md` | `install-openclaw --with-heartbeat --with-listener` |
+| Hermes / ChatGPT / other cloud | `adapters/generic-cloud-agent.md` (+ `adapters/chatgpt/INSTRUCTIONS.md`) — no dedicated hook adapter yet | `install-heartbeat` + `install-listener` |
 
 Protocol, schema, auth, and remote layout: `docs/protocol.md`, `docs/schema.md`, `docs/auth.md`, and the README "Remote layout" section.
