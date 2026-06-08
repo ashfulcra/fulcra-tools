@@ -20,7 +20,6 @@ import "./step-oauth.js";
 import "./step-file_upload.js";
 import "./step-permission_request.js";
 import "./step-browser_extension.js";
-import "./step-extension_pair.js";
 import "./step-test_connection.js";
 import "./step-definition_picker.js";
 import "./step-done.js";
