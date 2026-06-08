@@ -34,9 +34,10 @@ npm run teardown -- --all
   `https://fulcra-litellm.fly.dev`. Wire it via `LITELLM_URL` +
   `LITELLM_MASTER_KEY` in `.env` to flip from the baseline key-injection
   path to the gateway path.
-- [`hermes-daytona`](../hermes-daytona) — the original
-  Daytona port. **Deprecated** (Daytona's egress allowlist blocks
-  `api.fulcradynamics.com`). Kept as a reference. See `docs/HANDOFF.md` § 8.4.
+- [`ashfulcra/fulcra-hermes-daytona`](https://github.com/ashfulcra/fulcra-hermes-daytona)
+  — the original Daytona port. **Deprecated** (Daytona's egress allowlist blocks
+  `api.fulcradynamics.com`) and extracted out of this monorepo into its own
+  standalone repo. Kept as a reference. See `docs/HANDOFF.md` § 8.4.
 
 ## File map
 
