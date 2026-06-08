@@ -4377,6 +4377,26 @@ class TestEnsureCodexWatch(unittest.TestCase):
         m_run.assert_not_called()
         m_connect.assert_not_called()
 
+    def test_dry_run_set_identity_does_not_persist(self):
+        # `--dry-run` promises zero side effects. A declared identity should shape
+        # the printed listener plan, but must not write identity state.
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.identity.set_identity") as m_set, \
+             patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(dry_run=True, set_identity="codex:box:repo"))
+        self.assertEqual(rc, 0)
+        m_set.assert_not_called()
+        self.assertTrue(m_codex.call_args.kwargs.get("dry_run"))
+        self.assertTrue(m_listener.call_args.kwargs.get("dry_run"))
+        self.assertEqual(m_listener.call_args.kwargs.get("agent"), "codex:box:repo")
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
     def test_set_identity_persists_before_arming(self):
         from fulcra_coord import installers
         with patch("fulcra_coord.installers.identity.set_identity") as m_set, \

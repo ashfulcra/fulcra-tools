@@ -187,10 +187,12 @@ def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> in
     dry_run = bool(getattr(args, "dry_run", False))
 
     # Persist a declared identity first (mirrors cmd_identity's `set` path) so the
-    # listener that gets armed below watches the RIGHT agent's inbox.
+    # listener that gets armed below watches the RIGHT agent's inbox. In dry-run,
+    # use the declared id for the printed plan but do not write identity state.
     if getattr(args, "set_identity", None):
-        identity.set_identity(args.set_identity)
         agent = args.set_identity
+        if not dry_run:
+            identity.set_identity(args.set_identity)
 
     # 1) Codex lifecycle hooks (SessionStart + PreCompact). Idempotent; the
     # installer prints its own dry-run plan.
