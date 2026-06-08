@@ -41,6 +41,15 @@ SEARCH_INDEX_DONE_DAYS = 30
 # it), and `inbox --all` bypasses it. CONCRETE-assignee directives (real asks)
 # are NEVER aged out regardless of this threshold.
 INBOX_AGE_DAYS_DEFAULT = 3
+# Default age (days) after which a still-`proposed` BROADCAST is auto-EXPIRED
+# (transitioned proposed->abandoned by the retention pass, then cold-archived on a
+# later sweep; recoverable via `restore`). Distinct from INBOX_AGE_DAYS, which is a
+# READ filter only: inbox age-out (3d) hides a broadcast from the live view but
+# leaves it on the bus; expiry (14d) is the DESTRUCTIVE garbage-collection that
+# finally clears never-claimed fan-out off the bus so `status` stops drowning in
+# stale "X is LIVE — UPDATE NOW" directives. The wider window is deliberate: a
+# broadcast must survive well past its inbox-relevance before we abandon it.
+BROADCAST_EXPIRY_DAYS_DEFAULT = 14
 # Default staleness threshold (hours). An `active` task whose updated_at is older
 # than this is "possibly forgotten" and surfaced in views/needs-attention.json.
 STALE_HOURS_DEFAULT = 2
@@ -110,6 +119,58 @@ def is_aged_out_broadcast(task: dict[str, Any], now: Optional[datetime] = None,
         now = _now()
     cutoff_hours = _inbox_age_days(age_days) * 24.0
     return _age_hours(task.get("updated_at", ""), now) >= cutoff_hours
+
+
+def _broadcast_expiry_days(expiry_days: Optional[float] = None) -> float:
+    """Resolve the broadcast auto-expiry cutoff (days): explicit arg > env > default.
+
+    Mirrors _inbox_age_days so the knob is read in exactly one place. The env var
+    FULCRA_COORD_BROADCAST_EXPIRY_DAYS lets a fleet tune how long a never-claimed
+    broadcast survives before it's abandoned; a non-numeric value falls back to the
+    default rather than crashing the best-effort retention pass.
+    """
+    return env_float("FULCRA_COORD_BROADCAST_EXPIRY_DAYS",
+                     BROADCAST_EXPIRY_DAYS_DEFAULT, override=expiry_days)
+
+
+def is_expirable_broadcast(task: dict[str, Any], now: Optional[datetime] = None,
+                           expiry_days: Optional[float] = None) -> bool:
+    """True when `task` is a stale never-claimed BROADCAST that should be auto-
+    EXPIRED (abandoned, then cold-archived on a later sweep, recoverable via
+    `restore`).
+
+    A broadcast expires ONLY when ALL of these hold:
+      * assignee == BROADCAST ("*") — it is fan-out, not a personal ask. A
+        directive addressed to a CONCRETE agent is a real ask and is NEVER expired,
+        regardless of age (the same concrete-assignee guarantee is_aged_out_broadcast
+        makes).
+      * status == "proposed" — still un-acted-on. A waiting/active/terminal
+        broadcast was deliberately picked up or parked; we never garbage-collect it.
+      * its created_at is older than the expiry cutoff (now - expiry_days).
+
+    Age is measured from `created_at`, NOT `updated_at`: a broadcast's created date
+    is its true age, whereas updated_at can be bumped by view rebuilds — measuring
+    from updated_at would keep resetting the expiry clock and never collect it.
+
+    SAFE DIRECTION on a missing/unparseable created_at — the OPPOSITE of
+    is_aged_out_broadcast: that predicate is a read-only filter, so a clockless
+    broadcast fails toward aging OUT (via _age_hours -> +inf). This predicate drives
+    a DESTRUCTIVE abandon->archive, so a clockless broadcast must FAIL SAFE: we
+    return False and never expire what we can't date (exactly like is_archivable_task,
+    via _parse_dt + `if dt is None: return False`). Boundary: age >= expiry_days
+    qualifies (a broadcast created exactly N days ago expires), matching
+    is_archivable_task's >= semantics.
+    """
+    if task.get("assignee") != BROADCAST:
+        return False
+    if task.get("status") != "proposed":
+        return False
+    if now is None:
+        now = _now()
+    dt = _parse_dt(task.get("created_at"))
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _broadcast_expiry_days(expiry_days)
 
 
 def _age_hours(updated_at: str, now: datetime) -> float:
@@ -361,8 +422,34 @@ def assess_infra_health(health_records, *, now=None, degraded_after_s=None,
     hosts = []
     worst_rank = 0  # 0 healthy, 1 degraded, 2 outage; not_reporting does NOT raise it
     rank = {"healthy": 0, "degraded": 1, "outage": 2}
+
+    # Dedup by host, freshest reconcile_at wins. A machine accrues several health
+    # records over time — multiple worktrees, plus ORPHANS from now-deleted ones —
+    # because the record is keyed per-cwd agent, not per-machine. Judging the
+    # FRESHEST record per host means a live machine's current reconcile supersedes
+    # its own stale/dead-worktree orphans, instead of one orphan pinning
+    # worst_status to "outage" until the 30-day prune (the false-alarm bug). The
+    # real signal is preserved: a host whose EVERY record is stale (genuinely not
+    # reconciling) still reads outage, because its freshest is still stale. A
+    # datable record always beats an undatable one for the same host.
+    #
+    # CAVEAT: "host" is the short hostname, so this assumes distinct machines have
+    # distinct short hostnames (true for this fleet: Mac / Ashs-MBP-Work /
+    # DeskbookPro / singularity). Two PHYSICAL machines sharing a short hostname,
+    # one healthy + one down, would merge and the down one's outage would hide.
+    # That collision domain is only slightly wider than the pre-fix write path
+    # (which already clobbered same-hostname+same-repo agents on one remote file);
+    # if the fleet ever spans non-unique short hostnames, key health by a more
+    # specific machine id instead.
+    freshest = {}  # host_key -> (record, parsed_dt_or_None)
     for rec in health_records:
+        key = rec.get("host") or rec.get("agent") or "?"
         dt = _parse_dt(rec.get("reconcile_at") or "")
+        prev = freshest.get(key)
+        if prev is None or (dt is not None and (prev[1] is None or dt > prev[1])):
+            freshest[key] = (rec, dt)
+
+    for rec, dt in freshest.values():
         metrics = {
             "duration_s": rec.get("duration_s"),
             "tasks_loaded": rec.get("tasks_loaded"),
@@ -866,6 +953,56 @@ def upcoming_for_human(tasks: list[dict[str, Any]], human: str, *,
         items.append((_schedule_iso_z(s.get("not_before")) or "",
                       _schedule_iso_z(s.get("due")) or "", s))
     return [s for _, _, s in sorted(items, key=lambda x: (x[0], x[1]))]
+
+
+# --- Unrouted PR-review detection ----------------------------------------
+# `views` must NOT import `routing` (routing imports `views`), so mirror the
+# kind:review marker here. Keep in sync with routing.REVIEW_TAG.
+_REVIEW_TAG = "kind:review"
+UNROUTED_REVIEW_OPEN_STATUSES = ("proposed", "active", "waiting", "blocked")
+# Match an explicit PR reference: "PR #101", "PR 101", "PRs #101", a GitHub
+# "/pull/101" URL, or "pull request 101". Deliberately NOT a bare "#101" — that
+# would false-positive on issue refs and unrelated hashes; the whole point is to
+# catch *PR* mentions an author forgot to route for review.
+_PR_MENTION_RE = _re.compile(
+    r"(?:\bPRs?\b\s*#?|/pull/|\bpull\s+request\s+#?)(\d{1,6})", _re.IGNORECASE)
+
+
+def unrouted_pr_reviews(tasks: list[dict[str, Any]], agent: str) -> list[dict[str, Any]]:
+    """Open tasks OWNED BY ``agent`` that name a PR in free text but were never
+    routed for review.
+
+    The failure this catches: an author opens a PR and leaves "review PR #N" as a
+    next_action/summary instead of running ``request-review``. No ``kind:review``
+    directive is ever created, so the review is assigned to nobody and surfaces
+    on no reviewer's inbox/resume — it silently goes unreviewed (exactly how
+    PR #101 sat unreviewed). Flagging it on the OWNER's resume nudges them to
+    route it so a reviewer actually gets it.
+
+    Read-only and summary-only (reads title/current_summary/next_action/tags —
+    no body or events). A task that already carries the ``kind:review`` marker is
+    a routed review directive and is excluded. Each returned summary gains a
+    ``pr_mentions`` list of the referenced PR numbers (strings, de-duped)."""
+    out: list[dict[str, Any]] = []
+    for t in tasks:
+        if t.get("owner_agent") != agent:
+            continue
+        if t.get("status") not in UNROUTED_REVIEW_OPEN_STATUSES:
+            continue
+        if _REVIEW_TAG in (t.get("tags") or []):
+            continue  # already a routed review directive
+        haystack = " ".join(
+            str(t.get(f, "") or "")
+            for f in ("title", "current_summary", "next_action"))
+        prs = sorted({m.group(1) for m in _PR_MENTION_RE.finditer(haystack)},
+                     key=int)
+        if not prs:
+            continue
+        s = dict(t)
+        s["pr_mentions"] = prs
+        out.append(s)
+    return sorted(out, key=lambda x: (x.get("priority", "P9"),
+                                      x.get("updated_at", "")))
 
 
 def build_next(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:

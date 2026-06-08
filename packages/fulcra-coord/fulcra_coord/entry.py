@@ -207,6 +207,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("task_id", metavar="TASK-ID")
     sp.add_argument("--next", "-n", required=True, metavar="NEXT_ACTION")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    sp.add_argument("--snapshot", action="store_true",
+                    help="Also write a Fulcra Continuity checkpoint for this pause")
+
+    # ---- snapshot ----
+    sp = sub.add_parser("snapshot", help="Write a Fulcra Continuity checkpoint without changing task state")
+    sp.add_argument("task_id", metavar="TASK-ID")
+    sp.add_argument("--reason", default="manual", metavar="REASON",
+                    help="Why this checkpoint is being written, e.g. pre-compact or idle")
+    sp.add_argument("--next", "-n", default=None, metavar="NEXT_ACTION",
+                    help="Optional next action override for the checkpoint")
+    sp.add_argument("--transcript-path", default="", metavar="PATH",
+                    help="Optional transcript/session log path for resume context")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
     # ---- done ----
     sp = sub.add_parser("done", help="Mark a task as done (requires evidence)")
@@ -231,16 +244,43 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- request-review ----
     sp = sub.add_parser(
         "request-review",
-        help="Route a PR review to a live/idle reviewer (capability-based, "
-             "self-healing); escalates to the human if nobody qualifies")
-    sp.add_argument("pr", metavar="PR", help="PR number/identifier")
-    sp.add_argument("--repo", required=True, metavar="REPO")
+        help="Route a review of an artifact to a live/idle reviewer "
+             "(capability-based, self-healing); escalates to the human if "
+             "nobody qualifies")
+    # `dest` stays "pr" so args.pr keeps working (lower churn), but the artifact
+    # is now an OPAQUE ref — a PR#, MR#, branch, commit SHA, URL, or patch id —
+    # not specifically a GitHub PR. --repo is OPTIONAL (forge-agnostic refs like
+    # a branch or URL carry their own context).
+    sp.add_argument("pr", metavar="ARTIFACT",
+                    help="What to review: PR#/MR#/branch/commit SHA/URL/patch id")
+    sp.add_argument("--repo", required=False, default=None, metavar="REPO")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="The author (default: derived) — selects the canonical reviewer")
     sp.add_argument("--candidate-list", dest="candidate_list", default=None, metavar="A,B,C",
                     help="Explicit preference-ordered pool override (advanced)")
     sp.add_argument("--dry-run", dest="dry_run", action="store_true",
                     help="Print ranked pool / tiers / excluded / winner / reason; write nothing")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
+    # ---- review-done ----
+    sp = sub.add_parser(
+        "review-done",
+        help="Land a reviewer's verdict as a bus directive to the artifact's "
+             "author (forge-agnostic — never a GitHub-comment-only signal). "
+             "The verdict always reaches the author's inbox.")
+    sp.add_argument("artifact", metavar="ARTIFACT",
+                    help="What was reviewed: PR#/MR#/branch/commit SHA/URL/patch id")
+    sp.add_argument("--verdict", required=True, choices=["approve", "changes"],
+                    help="approve|changes — the review outcome")
+    sp.add_argument("--note", default=None, metavar="TEXT",
+                    help="Optional reviewer note carried in the directive")
+    sp.add_argument("--repo", required=False, default=None, metavar="REPO")
+    sp.add_argument("--to", dest="to", default=None, metavar="AGENT",
+                    help="Explicit author override (skips author resolution)")
+    sp.add_argument("--from", dest="from", default=None, metavar="REVIEWER",
+                    help="The reviewer (default: derived identity)")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="Print what would be posted; write nothing")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- reconcile ----
@@ -306,6 +346,32 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Target dir for --with-plugin sources "
                          "(default: ~/.openclaw/plugins/fulcra-coord, "
                          "or $FULCRA_OPENCLAW_PLUGIN_DIR)")
+    # Bundle the durable bus-pickup path in one command, so a fresh OpenClaw
+    # agent HEARS directed work without a separate install-heartbeat /
+    # install-listener step (the OpenClaw analogue of ensure-codex-watch).
+    sp.add_argument("--agent", "-a", dest="agent", default=None, metavar="AGENT",
+                    help="Agent whose inbox the bundled listener watches "
+                         "(default: $FULCRA_COORD_AGENT or derived). Only used "
+                         "with --with-listener.")
+    sp.add_argument("--with-heartbeat", dest="with_heartbeat", action="store_true",
+                    help="Also install the machine-global reconcile heartbeat "
+                         "(reuses install-heartbeat — the crashed-agent safety net)")
+    sp.add_argument("--with-listener", dest="with_listener", action="store_true",
+                    help="Also install the per-agent inbox listener (reuses "
+                         "install-listener) so this agent hears directed work while idle")
+    sp.add_argument("--listener-interval-min", dest="listener_interval_min",
+                    type=int, default=None, metavar="N",
+                    help="Bundled listener poll cadence in minutes (default: 10)")
+    sp.add_argument("--heartbeat-interval-min", dest="heartbeat_interval_min",
+                    type=int, default=None, metavar="N",
+                    help="Bundled heartbeat cadence in minutes (default: 20)")
+    sp.add_argument("--schedule-target-dir", dest="schedule_target_dir",
+                    default=None, metavar="DIR",
+                    help="Override the LaunchAgents/cron target dir for the "
+                         "bundled heartbeat + listener (for testing)")
+    sp.add_argument("--logs-dir", dest="logs_dir", default=None, metavar="DIR",
+                    help="Override the stdout/stderr logs dir for the bundled "
+                         "heartbeat + listener")
 
     # ---- install-codex ----
     sp = sub.add_parser("install-codex",
@@ -316,6 +382,37 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Override the Codex config dir (default: ~/.codex)")
     sp.add_argument("--uninstall", action="store_true", help="Remove the managed hooks")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+
+    # ---- ensure-codex-watch ----
+    sp = sub.add_parser("ensure-codex-watch",
+                        help="Idempotently arm Codex hooks + per-agent inbox "
+                             "listener; safe to run at every Codex SessionStart")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Agent to arm (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--set-identity", dest="set_identity", default=None, metavar="AGENT",
+                    help="Persist this declared identity for the current cwd first")
+    sp.add_argument("--no-connect", dest="no_connect", action="store_true",
+                    help="Skip the presence refresh after arming")
+    sp.add_argument("--can-review", dest="can_review", action="store_true",
+                    help="Declare review capability when refreshing presence")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Declare a capability/role when refreshing presence (repeatable)")
+    sp.add_argument("--summary", default=None, metavar="TEXT",
+                    help="One-line 'what I'm on' for the presence refresh")
+    sp.add_argument("--interval-min", dest="interval_min", type=int, default=None,
+                    metavar="N", help="Listener poll cadence in minutes (default: 10)")
+    sp.add_argument("--codex-target-dir", dest="codex_target_dir", default=None,
+                    metavar="DIR", help="Override the Codex config dir (default: ~/.codex)")
+    sp.add_argument("--listener-target-dir", dest="listener_target_dir", default=None,
+                    metavar="DIR", help="Override the listener LaunchAgents/cron dir")
+    sp.add_argument("--listener-logs-dir", dest="listener_logs_dir", default=None,
+                    metavar="DIR", help="Override the listener stdout/stderr logs dir")
+    sp.add_argument("--no-load", dest="no_load", action="store_true",
+                    help="Skip the best-effort launchctl load of the listener plist")
+    sp.add_argument("--uninstall", action="store_true",
+                    help="Tear down the Codex hooks + per-agent listener")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print intended changes, write nothing, no load/connect")
 
     # ---- install-heartbeat ----
     sp = sub.add_parser("install-heartbeat",
@@ -404,6 +501,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "what you owe others, and what's blocked on the human")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="Whose briefing (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--with-continuity", action="store_true",
+                    help="Include latest Fulcra Continuity checkpoint summaries for active/waiting tasks")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- needs-me ----
@@ -467,9 +566,11 @@ COMMAND_MAP = {
     "update": _cli.cmd_update,
     "block": _cli.cmd_block,
     "pause": _cli.cmd_pause,
+    "snapshot": _cli.cmd_snapshot,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
     "request-review": _cli.cmd_request_review,
+    "review-done": _cli.cmd_review_done,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "restore": _cli.cmd_restore,
@@ -483,6 +584,7 @@ COMMAND_MAP = {
     "install-listener": _cli.cmd_install_listener,
     "notify-inbox": _cli.cmd_notify_inbox,
     "install-codex": _cli.cmd_install_codex,
+    "ensure-codex-watch": _cli.cmd_ensure_codex_watch,
     "identity": _cli.cmd_identity,
     "human": _cli.cmd_human,
     "annotations": _cli.cmd_annotations,

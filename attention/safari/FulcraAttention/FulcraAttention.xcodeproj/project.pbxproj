@@ -1,0 +1,1045 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0DAEBD492FD5D984008ADF6D /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD482FD5D984008ADF6D /* AppDelegate.swift */; };
+		0DAEBD4B2FD5D984008ADF6D /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD4A2FD5D984008ADF6D /* SceneDelegate.swift */; };
+		0DAEBD4E2FD5D984008ADF6D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD4C2FD5D984008ADF6D /* LaunchScreen.storyboard */; };
+		0DAEBD512FD5D984008ADF6D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD4F2FD5D984008ADF6D /* Main.storyboard */; };
+		0DAEBD5A2FD5D984008ADF6D /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD592FD5D984008ADF6D /* AppDelegate.swift */; };
+		FCA000000000000000000004 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000001 /* AuthManager.swift */; };
+		FCA000000000000000000005 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000002 /* KeychainStore.swift */; };
+		FCA000000000000000000006 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000003 /* SignInView.swift */; };
+		FCA000000000000000000021 /* Sharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000020 /* Sharing.swift */; };
+		FCA00000000000000000000A /* EnsureDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000009 /* EnsureDefinition.swift */; };
+		FCA000000000000000000007 /* Wire.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCA000000000000000000008 /* Wire.swift */; };
+		0DAEBD5D2FD5D984008ADF6D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */; };
+		0DAEBD642FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		0DAEBD6E2FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		0DAEBD732FD5D984008ADF6D /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD382FD5D983008ADF6D /* Main.html */; };
+		0DAEBD742FD5D984008ADF6D /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD382FD5D983008ADF6D /* Main.html */; };
+		0DAEBD752FD5D984008ADF6D /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3A2FD5D983008ADF6D /* Icon.png */; };
+		0DAEBD762FD5D984008ADF6D /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3A2FD5D983008ADF6D /* Icon.png */; };
+		0DAEBD772FD5D984008ADF6D /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3B2FD5D983008ADF6D /* Style.css */; };
+		0DAEBD782FD5D984008ADF6D /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3B2FD5D983008ADF6D /* Style.css */; };
+		0DAEBD792FD5D984008ADF6D /* Script.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3C2FD5D983008ADF6D /* Script.js */; };
+		0DAEBD7A2FD5D984008ADF6D /* Script.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3C2FD5D983008ADF6D /* Script.js */; };
+		0DAEBD7B2FD5D984008ADF6D /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3D2FD5D983008ADF6D /* ViewController.swift */; };
+		0DAEBD7C2FD5D984008ADF6D /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3D2FD5D983008ADF6D /* ViewController.swift */; };
+		0DAEBD7D2FD5D984008ADF6D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3E2FD5D984008ADF6D /* Assets.xcassets */; };
+		0DAEBD7E2FD5D984008ADF6D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD3E2FD5D984008ADF6D /* Assets.xcassets */; };
+		0DAEBD7F2FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */; };
+		0DAEBD802FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */; };
+		0DAEBD9A2FD5D985008ADF6D /* service-worker-loader.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */; };
+		0DAEBD9B2FD5D985008ADF6D /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD932FD5D985008ADF6D /* index.html */; };
+		0DAEBD9C2FD5D985008ADF6D /* wizard.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD942FD5D985008ADF6D /* wizard.html */; };
+		0DAEBD9D2FD5D985008ADF6D /* heartbeat.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD952FD5D985008ADF6D /* heartbeat.js */; };
+		0DAEBD9E2FD5D985008ADF6D /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD962FD5D985008ADF6D /* icons */; };
+		0DAEBD9F2FD5D985008ADF6D /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD972FD5D985008ADF6D /* manifest.json */; };
+		0DAEBDA02FD5D985008ADF6D /* options.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD982FD5D985008ADF6D /* options.html */; };
+		0DAEBDA12FD5D985008ADF6D /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD992FD5D985008ADF6D /* assets */; };
+		0DAEBDA22FD5D985008ADF6D /* service-worker-loader.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */; };
+		0DAEBDA32FD5D985008ADF6D /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD932FD5D985008ADF6D /* index.html */; };
+		0DAEBDA42FD5D985008ADF6D /* wizard.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD942FD5D985008ADF6D /* wizard.html */; };
+		0DAEBDA52FD5D985008ADF6D /* heartbeat.js in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD952FD5D985008ADF6D /* heartbeat.js */; };
+		0DAEBDA62FD5D985008ADF6D /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD962FD5D985008ADF6D /* icons */; };
+		0DAEBDA72FD5D985008ADF6D /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD972FD5D985008ADF6D /* manifest.json */; };
+		0DAEBDA82FD5D985008ADF6D /* options.html in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD982FD5D985008ADF6D /* options.html */; };
+		0DAEBDA92FD5D985008ADF6D /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 0DAEBD992FD5D985008ADF6D /* assets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		0DAEBD652FD5D984008ADF6D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0DAEBD322FD5D983008ADF6D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0DAEBD622FD5D984008ADF6D;
+			remoteInfo = "FulcraAttention Extension (iOS)";
+		};
+		0DAEBD6F2FD5D984008ADF6D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0DAEBD322FD5D983008ADF6D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0DAEBD6C2FD5D984008ADF6D;
+			remoteInfo = "FulcraAttention Extension (macOS)";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		0DAEBD862FD5D984008ADF6D /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				0DAEBD642FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD8D2FD5D984008ADF6D /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				0DAEBD6E2FD5D984008ADF6D /* FulcraAttention Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0DAEBD392FD5D983008ADF6D /* Base */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = Base; path = Base.lproj/Main.html; sourceTree = "<group>"; };
+		0DAEBD3A2FD5D983008ADF6D /* Icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Icon.png; sourceTree = "<group>"; };
+		0DAEBD3B2FD5D983008ADF6D /* Style.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = Style.css; sourceTree = "<group>"; };
+		0DAEBD3C2FD5D983008ADF6D /* Script.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Script.js; sourceTree = "<group>"; };
+		0DAEBD3D2FD5D983008ADF6D /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
+		0DAEBD3E2FD5D984008ADF6D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		0DAEBD452FD5D984008ADF6D /* FulcraAttention.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FulcraAttention.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DAEBD482FD5D984008ADF6D /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		0DAEBD4A2FD5D984008ADF6D /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
+		0DAEBD4D2FD5D984008ADF6D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		0DAEBD502FD5D984008ADF6D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		0DAEBD522FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0DAEBD572FD5D984008ADF6D /* FulcraAttention.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FulcraAttention.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DAEBD592FD5D984008ADF6D /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		FCA000000000000000000001 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
+		FCA000000000000000000002 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		FCA000000000000000000003 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
+		FCA000000000000000000020 /* Sharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sharing.swift; sourceTree = "<group>"; };
+		FCA000000000000000000009 /* EnsureDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnsureDefinition.swift; sourceTree = "<group>"; };
+		FCA000000000000000000008 /* Wire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wire.swift; sourceTree = "<group>"; };
+		0DAEBD5C2FD5D984008ADF6D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		0DAEBD5E2FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "FulcraAttention Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DAEBD682FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "FulcraAttention Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		0DAEBD722FD5D984008ADF6D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "service-worker-loader.js"; path = "../../../chrome/dist/service-worker-loader.js"; sourceTree = "<group>"; };
+		0DAEBD932FD5D985008ADF6D /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = index.html; path = ../../../chrome/dist/index.html; sourceTree = "<group>"; };
+		0DAEBD942FD5D985008ADF6D /* wizard.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = wizard.html; path = ../../../chrome/dist/wizard.html; sourceTree = "<group>"; };
+		0DAEBD952FD5D985008ADF6D /* heartbeat.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = heartbeat.js; path = ../../../chrome/dist/heartbeat.js; sourceTree = "<group>"; };
+		0DAEBD962FD5D985008ADF6D /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = ../../../chrome/dist/icons; sourceTree = "<group>"; };
+		0DAEBD972FD5D985008ADF6D /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = ../../../chrome/dist/manifest.json; sourceTree = "<group>"; };
+		0DAEBD982FD5D985008ADF6D /* options.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = options.html; path = ../../../chrome/dist/options.html; sourceTree = "<group>"; };
+		0DAEBD992FD5D985008ADF6D /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = assets; path = ../../../chrome/dist/assets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		0DAEBD422FD5D984008ADF6D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD542FD5D984008ADF6D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD602FD5D984008ADF6D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD6A2FD5D984008ADF6D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0DAEBD312FD5D983008ADF6D = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD362FD5D983008ADF6D /* Shared (App) */,
+				0DAEBD3F2FD5D984008ADF6D /* Shared (Extension) */,
+				0DAEBD472FD5D984008ADF6D /* iOS (App) */,
+				0DAEBD582FD5D984008ADF6D /* macOS (App) */,
+				0DAEBD672FD5D984008ADF6D /* iOS (Extension) */,
+				0DAEBD712FD5D984008ADF6D /* macOS (Extension) */,
+				0DAEBD462FD5D984008ADF6D /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		0DAEBD362FD5D983008ADF6D /* Shared (App) */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD3D2FD5D983008ADF6D /* ViewController.swift */,
+				0DAEBD3E2FD5D984008ADF6D /* Assets.xcassets */,
+				0DAEBD372FD5D983008ADF6D /* Resources */,
+			);
+			path = "Shared (App)";
+			sourceTree = "<group>";
+		};
+		0DAEBD372FD5D983008ADF6D /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD382FD5D983008ADF6D /* Main.html */,
+				0DAEBD3A2FD5D983008ADF6D /* Icon.png */,
+				0DAEBD3B2FD5D983008ADF6D /* Style.css */,
+				0DAEBD3C2FD5D983008ADF6D /* Script.js */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		0DAEBD3F2FD5D984008ADF6D /* Shared (Extension) */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD912FD5D985008ADF6D /* Resources */,
+				0DAEBD402FD5D984008ADF6D /* SafariWebExtensionHandler.swift */,
+			);
+			path = "Shared (Extension)";
+			sourceTree = "<group>";
+		};
+		0DAEBD462FD5D984008ADF6D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD452FD5D984008ADF6D /* FulcraAttention.app */,
+				0DAEBD572FD5D984008ADF6D /* FulcraAttention.app */,
+				0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */,
+				0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		0DAEBD472FD5D984008ADF6D /* iOS (App) */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD482FD5D984008ADF6D /* AppDelegate.swift */,
+				0DAEBD4A2FD5D984008ADF6D /* SceneDelegate.swift */,
+				0DAEBD4C2FD5D984008ADF6D /* LaunchScreen.storyboard */,
+				0DAEBD4F2FD5D984008ADF6D /* Main.storyboard */,
+				0DAEBD522FD5D984008ADF6D /* Info.plist */,
+			);
+			path = "iOS (App)";
+			sourceTree = "<group>";
+		};
+		0DAEBD582FD5D984008ADF6D /* macOS (App) */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD592FD5D984008ADF6D /* AppDelegate.swift */,
+				FCA000000000000000000001 /* AuthManager.swift */,
+				FCA000000000000000000002 /* KeychainStore.swift */,
+				FCA000000000000000000003 /* SignInView.swift */,
+				FCA000000000000000000020 /* Sharing.swift */,
+				FCA000000000000000000009 /* EnsureDefinition.swift */,
+				FCA000000000000000000008 /* Wire.swift */,
+				0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */,
+				0DAEBD5E2FD5D984008ADF6D /* Info.plist */,
+			);
+			path = "macOS (App)";
+			sourceTree = "<group>";
+		};
+		0DAEBD672FD5D984008ADF6D /* iOS (Extension) */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD682FD5D984008ADF6D /* Info.plist */,
+			);
+			path = "iOS (Extension)";
+			sourceTree = "<group>";
+		};
+		0DAEBD712FD5D984008ADF6D /* macOS (Extension) */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD722FD5D984008ADF6D /* Info.plist */,
+			);
+			path = "macOS (Extension)";
+			sourceTree = "<group>";
+		};
+		0DAEBD912FD5D985008ADF6D /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				0DAEBD922FD5D985008ADF6D /* service-worker-loader.js */,
+				0DAEBD932FD5D985008ADF6D /* index.html */,
+				0DAEBD942FD5D985008ADF6D /* wizard.html */,
+				0DAEBD952FD5D985008ADF6D /* heartbeat.js */,
+				0DAEBD962FD5D985008ADF6D /* icons */,
+				0DAEBD972FD5D985008ADF6D /* manifest.json */,
+				0DAEBD982FD5D985008ADF6D /* options.html */,
+				0DAEBD992FD5D985008ADF6D /* assets */,
+			);
+			name = Resources;
+			path = "Shared (Extension)";
+			sourceTree = SOURCE_ROOT;
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0DAEBD442FD5D984008ADF6D /* FulcraAttention (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0DAEBD872FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention (iOS)" */;
+			buildPhases = (
+				0DAEBD412FD5D984008ADF6D /* Sources */,
+				0DAEBD422FD5D984008ADF6D /* Frameworks */,
+				0DAEBD432FD5D984008ADF6D /* Resources */,
+				0DAEBD862FD5D984008ADF6D /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0DAEBD662FD5D984008ADF6D /* PBXTargetDependency */,
+			);
+			name = "FulcraAttention (iOS)";
+			packageProductDependencies = (
+			);
+			productName = "FulcraAttention (iOS)";
+			productReference = 0DAEBD452FD5D984008ADF6D /* FulcraAttention.app */;
+			productType = "com.apple.product-type.application";
+		};
+		0DAEBD562FD5D984008ADF6D /* FulcraAttention (macOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0DAEBD8E2FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention (macOS)" */;
+			buildPhases = (
+				0DAEBD532FD5D984008ADF6D /* Sources */,
+				0DAEBD542FD5D984008ADF6D /* Frameworks */,
+				0DAEBD552FD5D984008ADF6D /* Resources */,
+				0DAEBD8D2FD5D984008ADF6D /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				0DAEBD702FD5D984008ADF6D /* PBXTargetDependency */,
+			);
+			name = "FulcraAttention (macOS)";
+			packageProductDependencies = (
+			);
+			productName = "FulcraAttention (macOS)";
+			productReference = 0DAEBD572FD5D984008ADF6D /* FulcraAttention.app */;
+			productType = "com.apple.product-type.application";
+		};
+		0DAEBD622FD5D984008ADF6D /* FulcraAttention Extension (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0DAEBD832FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention Extension (iOS)" */;
+			buildPhases = (
+				0DAEBD5F2FD5D984008ADF6D /* Sources */,
+				0DAEBD602FD5D984008ADF6D /* Frameworks */,
+				0DAEBD612FD5D984008ADF6D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "FulcraAttention Extension (iOS)";
+			packageProductDependencies = (
+			);
+			productName = "FulcraAttention Extension (iOS)";
+			productReference = 0DAEBD632FD5D984008ADF6D /* FulcraAttention Extension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		0DAEBD6C2FD5D984008ADF6D /* FulcraAttention Extension (macOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0DAEBD8A2FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention Extension (macOS)" */;
+			buildPhases = (
+				0DAEBD692FD5D984008ADF6D /* Sources */,
+				0DAEBD6A2FD5D984008ADF6D /* Frameworks */,
+				0DAEBD6B2FD5D984008ADF6D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "FulcraAttention Extension (macOS)";
+			packageProductDependencies = (
+			);
+			productName = "FulcraAttention Extension (macOS)";
+			productReference = 0DAEBD6D2FD5D984008ADF6D /* FulcraAttention Extension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0DAEBD322FD5D983008ADF6D /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					0DAEBD442FD5D984008ADF6D = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					0DAEBD562FD5D984008ADF6D = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					0DAEBD622FD5D984008ADF6D = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					0DAEBD6C2FD5D984008ADF6D = {
+						CreatedOnToolsVersion = 26.5;
+					};
+				};
+			};
+			buildConfigurationList = 0DAEBD352FD5D983008ADF6D /* Build configuration list for PBXProject "FulcraAttention" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 0DAEBD312FD5D983008ADF6D;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0DAEBD462FD5D984008ADF6D /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0DAEBD442FD5D984008ADF6D /* FulcraAttention (iOS) */,
+				0DAEBD562FD5D984008ADF6D /* FulcraAttention (macOS) */,
+				0DAEBD622FD5D984008ADF6D /* FulcraAttention Extension (iOS) */,
+				0DAEBD6C2FD5D984008ADF6D /* FulcraAttention Extension (macOS) */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		0DAEBD432FD5D984008ADF6D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBD752FD5D984008ADF6D /* Icon.png in Resources */,
+				0DAEBD4E2FD5D984008ADF6D /* LaunchScreen.storyboard in Resources */,
+				0DAEBD732FD5D984008ADF6D /* Main.html in Resources */,
+				0DAEBD792FD5D984008ADF6D /* Script.js in Resources */,
+				0DAEBD7D2FD5D984008ADF6D /* Assets.xcassets in Resources */,
+				0DAEBD512FD5D984008ADF6D /* Main.storyboard in Resources */,
+				0DAEBD772FD5D984008ADF6D /* Style.css in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD552FD5D984008ADF6D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBD762FD5D984008ADF6D /* Icon.png in Resources */,
+				0DAEBD782FD5D984008ADF6D /* Style.css in Resources */,
+				0DAEBD5D2FD5D984008ADF6D /* Main.storyboard in Resources */,
+				0DAEBD7A2FD5D984008ADF6D /* Script.js in Resources */,
+				0DAEBD7E2FD5D984008ADF6D /* Assets.xcassets in Resources */,
+				0DAEBD742FD5D984008ADF6D /* Main.html in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD612FD5D984008ADF6D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBDA82FD5D985008ADF6D /* options.html in Resources */,
+				0DAEBDA92FD5D985008ADF6D /* assets in Resources */,
+				0DAEBDA42FD5D985008ADF6D /* wizard.html in Resources */,
+				0DAEBDA22FD5D985008ADF6D /* service-worker-loader.js in Resources */,
+				0DAEBDA32FD5D985008ADF6D /* index.html in Resources */,
+				0DAEBDA62FD5D985008ADF6D /* icons in Resources */,
+				0DAEBDA72FD5D985008ADF6D /* manifest.json in Resources */,
+				0DAEBDA52FD5D985008ADF6D /* heartbeat.js in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD6B2FD5D984008ADF6D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBDA02FD5D985008ADF6D /* options.html in Resources */,
+				0DAEBDA12FD5D985008ADF6D /* assets in Resources */,
+				0DAEBD9C2FD5D985008ADF6D /* wizard.html in Resources */,
+				0DAEBD9A2FD5D985008ADF6D /* service-worker-loader.js in Resources */,
+				0DAEBD9B2FD5D985008ADF6D /* index.html in Resources */,
+				0DAEBD9E2FD5D985008ADF6D /* icons in Resources */,
+				0DAEBD9F2FD5D985008ADF6D /* manifest.json in Resources */,
+				0DAEBD9D2FD5D985008ADF6D /* heartbeat.js in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0DAEBD412FD5D984008ADF6D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBD7B2FD5D984008ADF6D /* ViewController.swift in Sources */,
+				0DAEBD492FD5D984008ADF6D /* AppDelegate.swift in Sources */,
+				0DAEBD4B2FD5D984008ADF6D /* SceneDelegate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD532FD5D984008ADF6D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBD7C2FD5D984008ADF6D /* ViewController.swift in Sources */,
+				0DAEBD5A2FD5D984008ADF6D /* AppDelegate.swift in Sources */,
+				FCA000000000000000000004 /* AuthManager.swift in Sources */,
+				FCA000000000000000000005 /* KeychainStore.swift in Sources */,
+				FCA000000000000000000006 /* SignInView.swift in Sources */,
+				FCA000000000000000000021 /* Sharing.swift in Sources */,
+				FCA00000000000000000000A /* EnsureDefinition.swift in Sources */,
+				FCA000000000000000000007 /* Wire.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD5F2FD5D984008ADF6D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBD7F2FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0DAEBD692FD5D984008ADF6D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0DAEBD802FD5D984008ADF6D /* SafariWebExtensionHandler.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0DAEBD662FD5D984008ADF6D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0DAEBD622FD5D984008ADF6D /* FulcraAttention Extension (iOS) */;
+			targetProxy = 0DAEBD652FD5D984008ADF6D /* PBXContainerItemProxy */;
+		};
+		0DAEBD702FD5D984008ADF6D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0DAEBD6C2FD5D984008ADF6D /* FulcraAttention Extension (macOS) */;
+			targetProxy = 0DAEBD6F2FD5D984008ADF6D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		0DAEBD382FD5D983008ADF6D /* Main.html */ = {
+			isa = PBXVariantGroup;
+			children = (
+				0DAEBD392FD5D983008ADF6D /* Base */,
+			);
+			name = Main.html;
+			sourceTree = "<group>";
+		};
+		0DAEBD4C2FD5D984008ADF6D /* LaunchScreen.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				0DAEBD4D2FD5D984008ADF6D /* Base */,
+			);
+			name = LaunchScreen.storyboard;
+			sourceTree = "<group>";
+		};
+		0DAEBD4F2FD5D984008ADF6D /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				0DAEBD502FD5D984008ADF6D /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+		0DAEBD5B2FD5D984008ADF6D /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				0DAEBD5C2FD5D984008ADF6D /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		0DAEBD812FD5D984008ADF6D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		0DAEBD822FD5D984008ADF6D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		0DAEBD842FD5D984008ADF6D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "iOS (Extension)/FulcraAttention_Extension_iOS.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "FulcraAttention Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention.Extension;
+				PRODUCT_NAME = "FulcraAttention Extension";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		0DAEBD852FD5D984008ADF6D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "iOS (Extension)/FulcraAttention_Extension_iOS.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "FulcraAttention Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention.Extension;
+				PRODUCT_NAME = "FulcraAttention Extension";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		0DAEBD882FD5D984008ADF6D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "iOS (App)/FulcraAttention_iOS.entitlements";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = FulcraAttention;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention;
+				PRODUCT_NAME = FulcraAttention;
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		0DAEBD892FD5D984008ADF6D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "iOS (App)/FulcraAttention_iOS.entitlements";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = FulcraAttention;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention;
+				PRODUCT_NAME = FulcraAttention;
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		0DAEBD8B2FD5D984008ADF6D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "macOS (Extension)/FulcraAttention_Extension_macOS.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "FulcraAttention Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention.Extension;
+				PRODUCT_NAME = "FulcraAttention Extension";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		0DAEBD8C2FD5D984008ADF6D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "macOS (Extension)/FulcraAttention_Extension_macOS.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "FulcraAttention Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention.Extension;
+				PRODUCT_NAME = "FulcraAttention Extension";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		0DAEBD8F2FD5D984008ADF6D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "macOS (App)/FulcraAttention_macOS.entitlements";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = FulcraAttention;
+				INFOPLIST_KEY_NSMainStoryboardFile = Main;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention;
+				PRODUCT_NAME = FulcraAttention;
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		0DAEBD902FD5D984008ADF6D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "macOS (App)/FulcraAttention_macOS.entitlements";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = CWH48N2H7F;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "macOS (App)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = FulcraAttention;
+				INFOPLIST_KEY_NSMainStoryboardFile = Main;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fulcra.attention;
+				PRODUCT_NAME = FulcraAttention;
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0DAEBD352FD5D983008ADF6D /* Build configuration list for PBXProject "FulcraAttention" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0DAEBD812FD5D984008ADF6D /* Debug */,
+				0DAEBD822FD5D984008ADF6D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0DAEBD832FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention Extension (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0DAEBD842FD5D984008ADF6D /* Debug */,
+				0DAEBD852FD5D984008ADF6D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0DAEBD872FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0DAEBD882FD5D984008ADF6D /* Debug */,
+				0DAEBD892FD5D984008ADF6D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0DAEBD8A2FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention Extension (macOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0DAEBD8B2FD5D984008ADF6D /* Debug */,
+				0DAEBD8C2FD5D984008ADF6D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0DAEBD8E2FD5D984008ADF6D /* Build configuration list for PBXNativeTarget "FulcraAttention (macOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0DAEBD8F2FD5D984008ADF6D /* Debug */,
+				0DAEBD902FD5D984008ADF6D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 0DAEBD322FD5D983008ADF6D /* Project object */;
+}

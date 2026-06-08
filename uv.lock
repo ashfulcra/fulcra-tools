@@ -7,6 +7,7 @@ members = [
     "fulcra-attention",
     "fulcra-collect",
     "fulcra-common",
+    "fulcra-continuity",
     "fulcra-coord",
     "fulcra-csv-importer",
     "fulcra-dayone",
@@ -309,6 +310,20 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
 ]
+provides-extras = ["dev"]
+
+[[package]]
+name = "fulcra-continuity"
+version = "0.1.0"
+source = { editable = "packages/fulcra-continuity" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" }]
 provides-extras = ["dev"]
 
 [[package]]

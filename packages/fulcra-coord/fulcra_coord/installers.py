@@ -15,12 +15,18 @@ their bodies. ``_derive_agent`` is the usual thin local alias.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 from . import claude_code, openclaw, codex, heartbeat, listener, identity
 from .output import info as _info, warn as _warn
+# Imported at module scope (not inline) so ensure-codex-watch's optional presence
+# refresh resolves the SAME cmd_connect the rest of the codebase dispatches, and
+# so tests can patch it at `fulcra_coord.installers.cmd_connect`. presence.py is a
+# leaf that never imports installers, so this introduces no cycle.
+from .presence import cmd_connect
 
 
 def _derive_agent() -> str:
@@ -73,35 +79,55 @@ def cmd_install_claude_code(args: Any, backend: Optional[list[str]] = None) -> i
 
 
 def cmd_install_openclaw(args: Any, backend: Optional[list[str]] = None) -> int:
-    """Install/uninstall OpenClaw Track A coordination artifacts."""
+    """Install/uninstall OpenClaw Track A coordination artifacts.
+
+    Structure note (the early-return gotcha): the Track A hooks summary used to
+    ``return 0`` early on dry-run and uninstall, which made every *add-on* block
+    below it unreachable in those two modes. The ``--with-plugin`` Track B drop
+    and the heartbeat/listener bundle MUST run in ALL THREE modes (install,
+    dry-run, uninstall) — a dry-run that doesn't preview the bundle, or an
+    uninstall that leaves the scheduler jobs behind, would be silently wrong.
+    So the Track A summary is emitted from a helper WITHOUT short-circuiting,
+    the add-ons run unconditionally, and the single ``return 0`` is at the end.
+
+    The bundle (``--with-heartbeat`` / ``--with-listener``) is the OpenClaw
+    analogue of ``ensure-codex-watch``: it composes the already-hardened
+    ``heartbeat.install_heartbeat`` / ``listener.install_listener`` (inheriting
+    their PATH-safe CLI resolution + per-agent slug semantics) so that
+    "OpenClaw installed" can mean "this agent hears directed work on the bus"
+    in one command, instead of requiring a separate install-heartbeat +
+    install-listener step.
+    """
     hooks_root = getattr(args, "hooks_root", None)
     plan = openclaw.install_openclaw(
         hooks_root=hooks_root, uninstall=args.uninstall, dry_run=args.dry_run)
+    # Emit the Track A summary WITHOUT returning — add-ons below must still run.
     if args.dry_run:
         _info("[dry-run] OpenClaw hooks root: " + plan["hooks_root"])
         for w in plan.get("writes", []):
             _info(f"  + would write {w}")
         for r in plan.get("removes", []):
             _info(f"  - would remove {r}")
-        return 0
-    if args.uninstall:
+    elif args.uninstall:
         _info(f"Removed fulcra-coord OpenClaw artifacts from {plan['hooks_root']}")
-        return 0
-    _info(f"Installed OpenClaw Track A artifacts -> {plan['hooks_root']}")
-    for d in plan.get("hook_dirs", []):
-        _info(f"  + hook {d}")
-    for f in plan.get("prompt_files", []):
-        _info(f"  + prompt {f}")
-    _report_resolved_cli(plan)
-    _info("New OpenClaw sessions will surface in-flight work at boot and park "
-          "active tasks on gateway shutdown.")
-    _info("The handler.ts templates are written to the real OpenClaw "
-          "automation-hook API (verified against the SDK source); they still "
-          "can't be run in this repo.")
+    else:
+        _info(f"Installed OpenClaw Track A artifacts -> {plan['hooks_root']}")
+        for d in plan.get("hook_dirs", []):
+            _info(f"  + hook {d}")
+        for f in plan.get("prompt_files", []):
+            _info(f"  + prompt {f}")
+        _report_resolved_cli(plan)
+        _info("New OpenClaw sessions will surface in-flight work at boot and park "
+              "active tasks on gateway shutdown.")
+        _info("The handler.ts templates are written to the real OpenClaw "
+              "automation-hook API (verified against the SDK source); they still "
+              "can't be run in this repo.")
 
     # Track B add-on: materialize the Plugin-SDK plugin if requested. This is a
     # source drop only — building + registering needs npm/tsc, which the CLI
-    # can't do, so we print the manual finish-the-install steps.
+    # can't do, so we print the manual finish-the-install steps. Runs in all
+    # three modes (it was previously unreachable on dry-run/uninstall behind the
+    # early returns; fixing that is part of this change).
     if getattr(args, "with_plugin", False):
         from . import openclaw_plugin
         pplan = openclaw_plugin.install_openclaw_plugin(
@@ -120,6 +146,58 @@ def cmd_install_openclaw(args: Any, backend: Optional[list[str]] = None) -> int:
             _info("Build and register the plugin (needs npm; the CLI can't):")
             for step in pplan["build_steps"]:
                 _info(f"    {step}")
+
+    # Bundle add-on: arm the durable bus-pickup path (heartbeat + per-agent
+    # listener) so a fresh OpenClaw agent actually HEARS directed work without
+    # an operator separately running install-heartbeat + install-listener.
+    # Gated on flags, all read defensively via getattr so older arg namespaces
+    # (and tests that don't set them) keep working.
+    with_heartbeat = bool(getattr(args, "with_heartbeat", False))
+    with_listener = bool(getattr(args, "with_listener", False))
+    # Heartbeat is machine-global (no agent); the listener is per-agent, so it
+    # needs a concrete id — derive one only when a listener is actually wanted.
+    agent = getattr(args, "agent", None) or (_derive_agent() if with_listener else None)
+
+    if with_heartbeat:
+        # Reuse the hardened heartbeat installer (PATH-safe CLI resolution); do
+        # NOT open-code launchd/cron here.
+        heartbeat.install_heartbeat(
+            interval_min=getattr(args, "heartbeat_interval_min", None)
+            or heartbeat.INTERVAL_MIN_DEFAULT,
+            uninstall=args.uninstall, dry_run=args.dry_run,
+            target_dir=getattr(args, "schedule_target_dir", None),
+            logs_dir=getattr(args, "logs_dir", None))
+
+    if with_listener:
+        # Reuse the hardened, per-agent listener installer (slugged so co-located
+        # agents don't clobber each other).
+        listener.install_listener(
+            agent=agent,
+            interval_min=getattr(args, "listener_interval_min", None)
+            or listener.INTERVAL_MIN_DEFAULT,
+            uninstall=args.uninstall, dry_run=args.dry_run,
+            target_dir=getattr(args, "schedule_target_dir", None),
+            logs_dir=getattr(args, "logs_dir", None))
+
+    if with_heartbeat or with_listener:
+        # The composed installers print their own detailed plans; this line is
+        # the bundle-level summary so the operator sees the durable pickup path
+        # was armed (and in which mode).
+        bits = []
+        if with_heartbeat:
+            bits.append("heartbeat")
+        if with_listener:
+            bits.append("listener")
+        what = "/".join(bits)
+        if args.dry_run:
+            _info(f"[dry-run] Bundled heartbeat/listener: would arm {what} "
+                  f"(the durable bus-pickup path).")
+        elif args.uninstall:
+            _info(f"Removed bundled heartbeat/listener ({what}).")
+        else:
+            who = f" for {agent}" if with_listener else ""
+            _info(f"Installed bundled heartbeat/listener ({what}){who} — "
+                  "the durable bus-pickup path; this agent now hears directed work.")
 
     _info("Verify auth/connectivity with: fulcra-coord doctor")
     return 0
@@ -152,6 +230,106 @@ def cmd_install_codex(args: Any, backend: Optional[list[str]] = None) -> int:
     _info("No Stop hook by design — Codex Stop fires every turn; end-parking is "
           "delegated to the heartbeat. Install it with: fulcra-coord install-heartbeat")
     _info("Verify auth/connectivity with: fulcra-coord doctor")
+    return 0
+
+
+def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Idempotently (re)arm Codex coordination in one shot — the self-heal entry.
+
+    The problem this solves: Codex's durable per-agent inbox listener only gets
+    installed if an operator MANUALLY runs ``install-listener``. On a fresh Codex
+    machine that never happens, so Codex silently never hears directed work on the
+    bus. This is the single idempotent "make Codex coordination self-healing"
+    command, run BACKGROUNDED on every Codex SessionStart so a missing listener
+    self-heals without operator action.
+
+    It composes the already-hardened installers (``codex.install_codex`` +
+    ``listener.install_listener``) rather than open-coding launchd/cron, so it
+    inherits their PATH-safe CLI resolution and per-agent slug semantics. It then
+    best-effort ``launchctl load``s the listener plist and (unless ``--no-connect``)
+    refreshes presence.
+
+    Fail-safe overall: it runs at every SessionStart, so a failure in the load or
+    connect step is reported via ``_warn`` but still returns 0 — it must NEVER
+    hard-fail the hook. Idempotent: the underlying installers are idempotent and an
+    already-loaded launchd job is a harmless no-op, so it is safe to run repeatedly.
+    """
+    agent = getattr(args, "agent", None) or _derive_agent()
+    uninstall = bool(getattr(args, "uninstall", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    # Persist a declared identity first (mirrors cmd_identity's `set` path) so the
+    # listener that gets armed below watches the RIGHT agent's inbox. In dry-run,
+    # use the declared id for the printed plan but do not write identity state.
+    if getattr(args, "set_identity", None):
+        agent = args.set_identity
+        if not dry_run:
+            identity.set_identity(args.set_identity)
+
+    # 1) Codex lifecycle hooks (SessionStart + PreCompact). Idempotent; the
+    # installer prints its own dry-run plan.
+    codex.install_codex(
+        uninstall=uninstall, dry_run=dry_run,
+        target_dir=getattr(args, "codex_target_dir", None))
+
+    # 2) The per-agent inbox listener — the piece that's otherwise never installed
+    # on a fresh Codex box. Idempotent; per-agent (slugged) so co-located agents
+    # don't clobber each other.
+    plan = listener.install_listener(
+        agent=agent,
+        interval_min=getattr(args, "interval_min", None) or listener.INTERVAL_MIN_DEFAULT,
+        uninstall=uninstall, dry_run=dry_run,
+        target_dir=getattr(args, "listener_target_dir", None),
+        logs_dir=getattr(args, "listener_logs_dir", None))
+
+    if dry_run:
+        # The installers above already printed their plans; just summarize what
+        # WOULD be armed and return WITHOUT loading/connecting (no side effects).
+        verb = "tear down" if uninstall else "arm"
+        _info(f"[dry-run] Would {verb} Codex hooks + the per-agent listener for "
+              f"{agent} (no launchctl load, no connect).")
+        return 0
+
+    # 3) Self-heal load of the listener plist (macOS launchd only). On uninstall we
+    # best-effort UNLOAD instead. Fully fail-safe: a failed load/unload (already
+    # loaded, launchctl missing, etc.) is a harmless no-op and must never crash
+    # the command. `--no-load` opts out entirely.
+    mechanism = plan.get("mechanism")
+    no_load = bool(getattr(args, "no_load", False))
+    if mechanism == "launchd" and not no_load:
+        writes = plan.get("removes") if uninstall else plan.get("writes")
+        plist = (writes or [None])[0]
+        if plist:
+            action = "unload" if uninstall else "load"
+            try:
+                subprocess.run(["launchctl", action, "-w", plist],
+                               capture_output=True, timeout=10, check=False)
+            except Exception:
+                # Best-effort self-heal load: a failure here must never propagate.
+                _warn(f"launchctl {action} of the listener plist was skipped "
+                      f"(non-fatal): {plist}")
+
+    # On uninstall we're done — there's no presence to refresh when tearing down.
+    if uninstall:
+        return 0
+
+    # 4) Refresh presence (unless --no-connect) so `agents`/`presence` show what
+    # this agent is on right after arming. Best-effort — a connect failure must
+    # not fail the self-heal. The Codex SessionStart hook passes --no-connect
+    # because it runs its own `connect --can-review` right after (avoid double).
+    if not getattr(args, "no_connect", False):
+        try:
+            connect_args = type(args)(
+                agent=agent,
+                can_review=getattr(args, "can_review", False),
+                role=getattr(args, "role", None),
+                summary=getattr(args, "summary", None),
+                workstream=getattr(args, "workstream", None),
+                format="table")
+            cmd_connect(connect_args, backend=backend)
+        except Exception as e:
+            _warn(f"presence refresh skipped (non-fatal): {e}")
+
     return 0
 
 

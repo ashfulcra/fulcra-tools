@@ -40,8 +40,33 @@ from typing import Any
 from . import claude_code, cli_invocation
 from .cli_invocation import PLACEHOLDER_ARGV
 
-# SessionStart is identical to Claude Code's (same stdin shape, cwd-driven).
-SESSION_START_SH = claude_code.SESSION_START_SH
+# SessionStart mostly matches Claude Code's (same stdin shape, cwd-driven), but
+# Codex is the canonical reviewer in the review-router seed pool. If its startup
+# hook publishes ordinary presence without the review capability, the router
+# sees the right identity but rates it below-floor. Keep Codex findable for PR
+# review requests by declaring review capability on every connect.
+SESSION_START_SH = claude_code.SESSION_START_SH.replace(
+    '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+    # Re-arm Codex hooks + the per-agent inbox listener on every app start, THEN
+    # connect with the review capability. The self-heal is the whole point on a
+    # fresh Codex box where nobody ever ran `install-listener`: without a listener
+    # Codex silently never hears directed work on the bus. Backgrounded + silenced
+    # so it never blocks/slows boot; an old CLI without `ensure-codex-watch` simply
+    # no-ops. `--no-connect` because the `connect --can-review` below already
+    # refreshes presence — avoid a double-connect.
+    '# Re-arm Codex hooks + the per-agent inbox listener on every app start.\n'
+    '# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.\n'
+    '"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+    '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+).replace(
+    # The shared CC body derives a `claude-code:*` fallback id when the CLI can't
+    # resolve one (pre-handshake / old CLI). In a Codex hook that derived shape
+    # must be `codex:*` so a fresh Codex box without a declared identity still
+    # arms + watches the RIGHT (codex) agent's inbox — the slug the listener job
+    # and `ensure-codex-watch --agent "$AGENT"` then key off.
+    '[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"',
+    '[ -z "$AGENT" ] && AGENT="codex:${HOST}:${REPO}"',
+)
 
 # PreCompact reuses the CC body but keys the session-id env fallback on the
 # generic FULCRA_COORD_SESSION_KEY rather than Claude Code's native env var.

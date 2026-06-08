@@ -4,6 +4,8 @@
 
 Multiple independent agents — local Claude Code sessions, cloud agents, CI jobs, OpenClaw, Codex — coordinate durable work through Fulcra Files without shared memory, direct calls, or a central broker.
 
+> **Agents:** read [`SKILL.md`](SKILL.md) — the discoverable, scannable guide to *when* and *how* to use coord (quick-reference + the load-bearing rules). This README is the human/reference deep-dive; `SKILL.md` is the agent entry point.
+
 ## Value proposition
 
 - **No shared infrastructure required** — Fulcra Files is the only coordination store
@@ -54,10 +56,20 @@ fulcra-coord start "Deploy search service" \
 # 5. Update progress
 fulcra-coord update TASK-... --summary "Terraform done." --next "Run smoke tests."
 
-# 6. Pause (session ending)
-fulcra-coord pause TASK-... --next "Run GET /search?q=test smoke test."
+# 6. Snapshot without changing task state (for compaction / handoff)
+fulcra-coord snapshot TASK-... \
+  --reason pre-compact \
+  --transcript-path /tmp/session.jsonl
 
-# 7. Mark done
+# 7. Pause (session ending), optionally writing a Continuity checkpoint
+fulcra-coord pause TASK-... \
+  --next "Run GET /search?q=test smoke test." \
+  --snapshot
+
+# 7b. Resume with latest Continuity checkpoints included
+fulcra-coord resume --with-continuity
+
+# 8. Mark done
 fulcra-coord done TASK-... \
   --evidence "Smoke tests passed, service live at search.example.com" \
   --verification-level agent-verified
@@ -79,11 +91,12 @@ fulcra-coord done TASK-... \
 | `needs-me` | **What's blocked on YOU** (the human): every open task assigned to / blocked on you across all agents, showing who's waiting, the ask, and how long it's been (`--human <handle>`, `--format json`). The "what's on my plate from my agents" glance. Asks with a future `not_before` (see `block`) are split off into a compact **Upcoming (next 7d)** section instead of the DUE-NOW plate, so a task you can't act on yet doesn't clutter it; `--all` lists each upcoming item inline. JSON returns `{human, count, items, upcoming}` — `count` reflects DUE-NOW only |
 | `digest` | Write the **operator digest** — a consolidated twice-daily situational-awareness summary — to the Fulcra timeline on its own **Agent Tasks — Digest** track. Four blocks: blocked-on-you, upcoming, per-agent activity, stale (`--window morning\|evening` sets the lookback + label, omit for on-demand; `--human <handle>`; `--format table\|json`; `--dry-run`). `--dry-run` renders + prints without writing; `--format json` emits the structured digest for tooling. An any-agent dedup guard means it's safe to run from multiple machines — only the first writer per window lands a moment |
 | `install-digest` | Install the twice-daily scheduled `digest` jobs (launchd 08:00 + 18:00 on macOS, fixed cron lines elsewhere) — the push side of the operator digest. Safe to install on **every** machine: the any-agent dedup guard collapses concurrent ticks to one digest per window. `--uninstall` to remove, `--dry-run` to print the plan |
-| `resume` | Pick-up-where-you-left-off briefing for an agent: your active/waiting work, what's blocked on you, what you owe others, and what's blocked on the human (`--agent`, `--format json`). Read-only — run after a restart to reload context |
+| `resume` | Pick-up-where-you-left-off briefing for an agent: your active/waiting work, what's blocked on you, what you owe others, and what's blocked on the human (`--agent`, `--format json`). Add `--with-continuity` to include latest Fulcra Continuity checkpoints for active/waiting tasks. Read-only — run after a restart to reload context |
 | `start` | Create a new task |
 | `update` | Update summary / next_action / status |
 | `block` | Mark as blocked. `--blocked-on "<reason>"` for an agent/external blocker; **`--on-user "<ask>"`** to block on the human — assigns the task to the resolved human handle, tags `needs:human`, and lands it on `needs-me` + the human's next SessionStart. Optional scheduling on an `--on-user` ask: **`--not-before <when>`** gates when it surfaces as DUE-NOW (it stays under `needs-me`'s Upcoming until then), and **`--due <when>`** is the informational deadline (drives upcoming ordering/urgency, does not gate). `<when>` is an ISO date/datetime (`2026-06-08`, `2026-06-08T18:00:00Z`) or a relative offset (`5d`, `36h`, `10m`) |
-| `pause` | Set to waiting with a next_action |
+| `pause` | Set to waiting with a next_action. Add `--snapshot` to write a Fulcra Continuity-compatible checkpoint at the durable pause point without writing snapshots on every task update |
+| `snapshot` | Write a Fulcra Continuity-compatible checkpoint without changing task state (`--reason`, `--transcript-path`, optional `--next`). Used by compaction/idle hooks to capture resume state at session boundaries (bounded by `FULCRA_COORD_CONTINUITY_KEEP` retention, not by suppression) |
 | `done` | Mark done (requires evidence) |
 | `abandon` | Mark abandoned |
 | `reconcile` | Repair views and resolve pending markers |
@@ -91,8 +104,9 @@ fulcra-coord done TASK-... \
 | `doctor` | Check configuration and connectivity |
 | `install-shim` | Install CLI shim to `~/.local/bin/` |
 | `install-claude-code` | Install Claude Code lifecycle hooks (global by default) |
-| `install-openclaw` | Install OpenClaw Track A artifacts (boot/heartbeat prompts + shutdown/bootstrap hooks); add `--with-plugin` to also materialize the Track B Plugin-SDK plugin |
+| `install-openclaw` | Install OpenClaw Track A artifacts (boot/heartbeat prompts + shutdown/bootstrap hooks); add `--with-plugin` to also materialize the Track B Plugin-SDK plugin; add `--with-heartbeat --with-listener --agent <id>` to bundle the durable bus-pickup path (reuses `install-heartbeat` + the per-agent `install-listener`) in one command, so a fresh OpenClaw agent hears directed work without a separate step (the OpenClaw analogue of `ensure-codex-watch`) |
 | `install-codex` | Install Codex lifecycle hooks (SessionStart + PreCompact) into `~/.codex/hooks.json`. No Stop hook by design — Codex end-parking is delegated to the heartbeat |
+| `ensure-codex-watch` | Idempotently (re)arm Codex coordination in one shot — installs Codex hooks, the per-agent inbox listener, best-effort `launchctl load`s it (`--no-load` to skip), optionally refreshes presence (`--no-connect`). Codex SessionStart runs it backgrounded each app start so a missing listener self-heals. Idempotent (`--agent`, `--set-identity`, `--can-review`, `--interval-min N`, `--dry-run`) |
 | `install-heartbeat` | Install a scheduled `reconcile` heartbeat (launchd on macOS, crontab elsewhere) — the safety net that sweeps stale tasks for crashed / end-hook-less agents (`--interval-min N`) |
 | `install-listener` | Install a scheduled `notify-inbox` listener (launchd on macOS, crontab elsewhere) — the durable, per-agent way to notice directed work while idle (`--agent`, `--interval-min N`, default 10). See `adapters/claude-code/LISTENER.md` |
 | `notify-inbox` | Poll the inbox for an agent; if directives exist, write a surface file the next SessionStart injects and emit a best-effort notification (the call the listener runs each tick). Notify-only |
@@ -111,6 +125,11 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `XDG_CONFIG_HOME` | `~/.config` | Config base. The persisted identity is scoped **per working directory** at `<XDG_CONFIG_HOME>/fulcra-coord/identities/<cwd-hash>.json` (keyed by the cwd's realpath). A legacy global `identity.json` is **no longer resolved automatically** — it is only surfaced as a migration hint by `identity show` and copied in by `identity migrate`. The human handle lives at `<XDG_CONFIG_HOME>/fulcra-coord/human`. Neither is root-scoped. Pair per-cwd identity with **one git worktree per session** (`git worktree add ../<repo>-<purpose> -b <branch> origin/main`) so concurrent sessions don't share a single index/`HEAD` — see the ONBOARD docs |
 | `FULCRA_COORD_STALE_HOURS` | `2` | An `active` task older than this is flagged `stale` and collected into `views/needs-attention.json` |
 | `FULCRA_COORD_INBOX_AGE_DAYS` | `3` | A still-`proposed` **broadcast** (`assignee="*"`) older than this drops out of the default `inbox` / SessionStart view — informational fan-out ("X joined the mesh") that has served its purpose. Pure **read filter**: it never changes task status or the task file (a peer on an older CLI still sees it), and **only broadcasts age** — a directive addressed to a concrete agent (a real ask) is never aged out. `inbox --all` shows everything including aged-out broadcasts; the default `inbox` notes how many are hidden |
+| `FULCRA_COORD_BROADCAST_EXPIRY_DAYS` | `14` | A still-`proposed` **broadcast** (`assignee="*"`) whose `created_at` is older than this is transitioned `proposed → abandoned` by the reconcile retention pass, after which cold-archive sweeps it out of the hot path on a later pass — so never-claimed broadcasts stop cluttering `status` instead of living on the bus forever (they already leave the `inbox` at `FULCRA_COORD_INBOX_AGE_DAYS`). Unlike that read filter this **changes status**, but it is recoverable via `fulcra-coord restore`, and — like the inbox filter — it **only expires broadcasts**: a directive addressed to a concrete agent (a real ask) is never expired regardless of age. Clockless broadcasts (missing/unparseable `created_at`) are never expired (fail-safe). Reconcile reports `expired N broadcast(s)` in its Retention line |
+| `FULCRA_COORD_NOTIFY_WEBHOOK` | _(unset)_ | Opt-in real-time push endpoint for the listener (Tier 1). When set, `notify-inbox` POSTs a notification to this URL via stdlib `urllib` — the push that reaches the operator's phone regardless of OS or which host fired. Unset → push disabled, native-desktop only. Works with any commodity service (a free / self-hosted ntfy topic, Pushover-style, Slack, Discord) — it is **not** tied to any specific infrastructure |
+| `FULCRA_COORD_NOTIFY_FORMAT` | _(auto)_ | Payload shape for the webhook POST: `ntfy\|slack\|discord\|json`. Auto-detected from the URL host (`discord` → Discord JSON, `slack` → Slack JSON, else **ntfy** plain-body, the generic default); set this to override the detection |
+| `FULCRA_COORD_NOTIFY_TIMEOUT` | `5` | Seconds before the webhook POST gives up, so a slow/hung push endpoint can't stall a polling tick |
+| `FULCRA_COORD_CONTINUITY_KEEP` | `10` | How many of the newest **continuity checkpoint** archives to keep per task. `continuity/<ws>/<agent>/<task>/checkpoints/CHK-*.json` is written immutably on every snapshot (SessionEnd / PreCompact / compaction) and would otherwise grow without bound; the reconcile retention pass keeps the newest N per task and deletes the rest (`latest.json` is never touched — it's the live pointer a resuming agent reads). Floored at `1` so the latest checkpoint is never deleted. Reconcile reports `N continuity` in its Retention line |
 | `FULCRA_COORD_AGENT` | — | Session-scoped override for your agent id. Identity resolution order is: explicit `--agent` > `FULCRA_COORD_AGENT` > per-cwd persisted identity (`fulcra-coord identity set`) > derived `claude-code:<host>:<repo>` (matching the SessionStart hook) |
 | `FULCRA_COORD_HUMAN` | `human` | The human operator's handle — who tasks are "blocked on ME" against (`needs-me`, `block --on-user`). Resolution order: `FULCRA_COORD_HUMAN` > persisted handle (`fulcra-coord human set`) > default `human`. Personalize with `fulcra-coord human set <name>` |
 | `FULCRA_COORD_BACKEND` | — | Override backend (testing only) |
@@ -178,7 +197,7 @@ there are no import cycles.
 | | `presence.py` | per-agent presence + reconcile rebuild |
 | | `routing_ops.py` | liveness-aware reviewer routing + reroute sweep |
 | | `digest.py` | operator digest (push) + fleet-health dashboard (pull) |
-| | `lifecycle.py` | mutation commands (start/update/block/pause/done/abandon/tell/broadcast/assign) |
+| | `lifecycle.py` | mutation commands and durable checkpoints (start/update/block/pause/snapshot/done/abandon/tell/broadcast/assign) |
 | | `query.py` | read commands (status/agents/needs-me/resume) |
 | | `inbox.py` | directive inbox + blocked-on-you notification |
 | | `installers.py` | hook + scheduler installers |
@@ -228,7 +247,18 @@ extraction is behavior-preserving end to end.
   **per-agent**, not per-machine: its launchd label / plist / cron marker are
   derived from the agent's slug, so co-located agents on one machine each get
   their own coexisting job and none clobbers another. (A legacy pre-0.5.3
-  machine-global job is migrated to a per-agent job on the next install.) See
+  machine-global job is migrated to a per-agent job on the next install.)
+  Notification delivery is layered and best-effort: **Tier 0** is the SessionStart
+  inbox-surface file (guaranteed, zero-config, no network — directed work always
+  reaches the operator on the next session start, every OS); **Tier 1** is opt-in
+  real-time push — if `FULCRA_COORD_NOTIFY_WEBHOOK` is set, a stdlib-`urllib` POST
+  to that URL is what reaches the operator's phone, and a small adapter shapes the
+  payload from the URL host (`discord` / `slack`, else **ntfy** plain-body) so it
+  works with any commodity push service rather than depending on specific infra;
+  **Tier 2** is a best-effort native desktop ping (macOS `osascript`, Linux
+  `notify-send`, else a stderr line), a no-config local bonus never relied upon.
+  The inbox notification is deduped via a seen-set, so it fires once per **new**
+  directive instead of re-alerting every tick. See
   `adapters/claude-code/LISTENER.md`.
 - `fulcra-coord install-digest` — the push side of the **operator digest**.
   Where `install-heartbeat` / `install-listener` are *interval*-scheduled
@@ -282,6 +312,7 @@ extraction is behavior-preserving end to end.
 
 - `docs/protocol.md` — when and how to use coordination
 - `docs/auth.md` — auth in local and remote/headless environments
+- `docs/continuity-handoff.md` — how `fulcra-coord` and Fulcra Continuity work together for cross-agent, non-GitHub handoff
 - `docs/fulcra-cli-branch.md` — Fulcra CLI Files support requirement
 - `docs/schema.md` — full task and view schema reference
 - `docs/annotations.md` — Agent Tasks lifecycle annotation track (enable flag, tags, deferred-write caveat)

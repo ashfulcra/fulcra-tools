@@ -1,5 +1,7 @@
 # Fulcra Coordination Protocol for Codex Agents
 
+> **Canonical coord guide:** [`fulcra-coord/SKILL.md`](../../SKILL.md) — the runtime-agnostic when/how-to-use reference (quick-reference + load-bearing rules). This file is the Codex-specific layer.
+
 This project uses **fulcra-coord** for durable task coordination across agent sessions. Fulcra Files acts as a shared coordination bus — no shared memory or direct agent-to-agent calls required.
 
 ## Setup
@@ -80,6 +82,11 @@ fulcra-coord abandon TASK-... --reason "Why." --agent codex:paperclip
 - `next_action` is required when pausing or blocking — it's the handoff.
 - `evidence` is required when marking done.
 - If `fulcra-coord` is unavailable, cache files locally and run `reconcile` when connectivity recovers.
+- Treat Fulcra Continuity as the cold-start handoff layer on top of coord. When
+  handing work to another agent, include a self-describing checkpoint with
+  objective, decisions, open questions, next actions, and portable artifacts
+  (URL, Fulcra remote path, coord task ID, or repo/ref/path tuple), not local-only
+  paths. See `packages/fulcra-coord/docs/continuity-handoff.md`.
 
 ## Code review & merge (global — every repo)
 

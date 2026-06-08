@@ -10,6 +10,70 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — `resume` flags PRs you opened but never routed for review
+
+**Why:** A reviewer can only act on a review that was *routed* — `request-review`
+creates a `kind:review` directive assigned to a live reviewer, which then shows
+in their inbox/resume. But when an author opens a PR and just leaves "review
+PR #N" as a free-text `next_action` (or task summary), no directive is ever
+created, so the review is assigned to nobody and silently goes unreviewed. This
+is exactly how PR #101 sat unreviewed: routed by convention only, on no one's
+plate.
+
+**What:**
+- New pure helper `views.unrouted_pr_reviews(tasks, agent)`: open tasks **owned
+  by** the agent whose title/summary/next_action name a PR (`PR #N`, `/pull/N`,
+  `pull request N` — deliberately not a bare `#N`, to avoid issue-ref false
+  positives) but that carry no `kind:review` marker (i.e. were never routed).
+- `resume` surfaces these first, loudly, with the exact fix command
+  (`fulcra-coord request-review N --repo <workstream>`); `resume --format
+  json` adds an `unrouted_pr_reviews` array. Read-only, summary-only.
+- Rule (docs): opening a PR means running `request-review` — never leave a PR
+  review as a free-text next_action, or it reaches no reviewer.
+
+## [Unreleased] — `install-openclaw` can bundle the durable bus-pickup path
+
+**Why:** `install-openclaw` installed OpenClaw's lifecycle hooks, but a fresh
+OpenClaw agent still didn't *hear the bus* unless an operator separately ran
+`install-heartbeat` + `install-listener`. So "OpenClaw installed" did not mean
+"this agent hears directed work" — directed work could go unanswered until
+someone noticed the missing scheduler jobs.
+
+**What:** `install-openclaw` can now bundle the heartbeat + per-agent listener
+(the durable bus-pickup path) in one command via `--with-heartbeat`
+`--with-listener` `--agent <id>` (plus `--heartbeat-interval-min`,
+`--listener-interval-min`, `--schedule-target-dir`, `--logs-dir`). It composes
+the already-hardened `install_heartbeat` / `install_listener` (inheriting their
+PATH-safe CLI resolution + per-agent slug semantics) rather than open-coding
+launchd/cron. This is the OpenClaw analogue of the `ensure-codex-watch`
+self-heal. As part of the change, the command was restructured so its add-on
+blocks run in all three modes (install, dry-run, uninstall) — previously the
+early `return 0` on dry-run/uninstall made even the existing `--with-plugin`
+block unreachable in those modes; that is now fixed too.
+
+## [Unreleased] — `ensure-codex-watch`: Codex coordination self-heals on every app start
+
+**Why:** Codex's durable per-agent inbox listener was only ever installed if an
+operator manually ran `install-listener`. On a fresh Codex machine that never
+happens, so Codex silently never heard directed work on the bus — it had hooks
+but no listener, and nobody noticed until directed work went unanswered.
+
+**What:** a new `ensure-codex-watch` command — the single idempotent "make Codex
+coordination self-healing" entry point. It composes the already-hardened
+installers (`install_codex` + the per-agent `install_listener`), best-effort
+`launchctl load`s the listener plist (`--no-load` to skip; macOS/launchd only),
+and optionally refreshes presence (`--no-connect`). The Codex SessionStart hook
+now backgrounds it on every app start, so a missing listener self-heals with no
+operator action. Fully fail-safe: a failed load or connect is warned but the
+command still returns 0 (it runs backgrounded at every SessionStart and must
+never hard-fail the hook), and it is safe to run repeatedly (the underlying
+installers are idempotent; an already-loaded launchd job is a harmless no-op).
+The SessionStart hook keeps its `connect --can-review` (Codex is the canonical
+review target) and now derives a `codex:*` fallback identity instead of
+`claude-code:*` so a pre-handshake box arms the right agent's listener.
+
+---
+
 ## [0.9.1] — `remote.list_files` normalizes the real CLI output to clean paths
 
 **Why:** `remote.list_files(prefix)` returned the raw `fulcra file list` display

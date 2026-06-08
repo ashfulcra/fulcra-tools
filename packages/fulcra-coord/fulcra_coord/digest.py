@@ -66,9 +66,14 @@ def _assess_fleet(*, now: datetime, backend: Optional[list[str]] = None) -> dict
             retention_last_run = rmark.get("at") or rmark.get("date")
     except Exception:
         retention_last_run = None
+    task_count = None
+    try:
+        task_count = len(_load_task_summaries(backend=backend))
+    except Exception:
+        task_count = None
     return views.assess_infra_health(
         recs, now=now, digest_last_emit=digest_emit,
-        retention_last_run=retention_last_run, task_count=len(recs) or None)
+        retention_last_run=retention_last_run, task_count=task_count)
 
 
 def cmd_health(args: Any, backend: Optional[list[str]] = None) -> int:

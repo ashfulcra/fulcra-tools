@@ -2552,7 +2552,9 @@ class TestHookTemplates(unittest.TestCase):
             self.assertIn("exit 0", body)  # always exits clean
         self.assertIn("status", cc.SESSION_START_SH)
         self.assertIn("update", cc.PRE_COMPACT_SH)
+        self.assertIn("snapshot", cc.PRE_COMPACT_SH)
         self.assertIn("pause", cc.SESSION_END_SH)
+        self.assertIn("--snapshot", cc.SESSION_END_SH)
 
 
 class TestSessionTaskCmd(unittest.TestCase):
@@ -2818,7 +2820,10 @@ class TestHookScriptsE2E(unittest.TestCase):
     def test_pre_compact_calls_update(self):
         r = self._run("pre-compact.sh", json.dumps({"session_id": "s", "transcript_path": "/t.json"}))
         self.assertEqual(r.returncode, 0)
-        self.assertIn("update TASK-live", open(self.calls).read())
+        calls = open(self.calls).read()
+        self.assertIn("update TASK-live", calls)
+        self.assertIn("snapshot TASK-live", calls)
+        self.assertIn("--reason pre-compact", calls)
 
     def test_session_start_flags_active_task_with_missing_timestamp(self):
         # M-4: an active task NOT owned by this agent whose updated_at is missing
@@ -2837,7 +2842,9 @@ class TestHookScriptsE2E(unittest.TestCase):
         sj = json.dumps({"active": [{"id": "TASK-live", "status": "active"}]})
         r = self._run("session-end.sh", json.dumps({"session_id": "s"}), sj)
         self.assertEqual(r.returncode, 0)
-        self.assertIn("pause TASK-live", open(self.calls).read())
+        calls = open(self.calls).read()
+        self.assertIn("pause TASK-live", calls)
+        self.assertIn("--snapshot", calls)
 
     def test_session_end_noop_when_not_active(self):
         sj = json.dumps({"active": [{"id": "TASK-live", "status": "waiting"}]})
@@ -3119,6 +3126,7 @@ class TestOpenClawTemplates(unittest.TestCase):
         self.assertIn("fulcra-coord status", oc.HEARTBEAT_MD_BODY)
         # Shutdown handler pauses; bootstrap handler injects via bootstrapFiles.
         self.assertIn("pause", oc.SHUTDOWN_HANDLER_TS)
+        self.assertIn("--snapshot", oc.SHUTDOWN_HANDLER_TS)
         self.assertIn("bootstrapFiles", oc.BOOTSTRAP_HANDLER_TS)
         # HOOK.md frontmatter declares the right events + the bin requirement.
         self.assertIn("gateway:shutdown", oc.SHUTDOWN_HOOK_MD)
@@ -3182,6 +3190,8 @@ class TestInstallOpenClaw(unittest.TestCase):
         self.assertIn("compact:before", handler)
         self.assertIn("__session-task", handler)
         self.assertIn("update", handler)
+        self.assertIn("snapshot", handler)
+        self.assertIn("openclaw-before-compaction", handler)
 
     def test_boot_md_carries_marker_block(self):
         from fulcra_coord import openclaw as oc
@@ -3341,10 +3351,14 @@ class TestOpenClawPluginSource(unittest.TestCase):
         self.assertIn('api.on("session_start"', ts)
         self.assertIn('api.on("before_compaction"', ts)
         self.assertIn('api.on("session_end"', ts)
-        # before_compaction ALWAYS checkpoints via `update` (the Track A gap).
+        # before_compaction ALWAYS checkpoints: `update` stamps task freshness
+        # and `snapshot` archives a Fulcra Continuity-compatible resume point.
         self.assertIn("update", ts)
+        self.assertIn("snapshot", ts)
+        self.assertIn("openclaw-before-compaction", ts)
         # session_end parks via `pause`, and must skip `compaction` (continues).
         self.assertIn("pause", ts)
+        self.assertIn("--snapshot", ts)
         self.assertNotIn('"compaction"', _park_reasons_line(ts))
         # Uses the FULCRA_COORD_SESSION_KEY pointer fallback Track A added.
         self.assertIn("FULCRA_COORD_SESSION_KEY", ts)
@@ -3443,6 +3457,112 @@ class TestInstallOpenClawWithPluginCmd(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(self.root))
         self.assertFalse(os.path.exists(self.pdir))
+
+
+class TestInstallOpenClawBundleCmd(unittest.TestCase):
+    """install-openclaw can BUNDLE the durable bus-pickup path (heartbeat +
+    per-agent listener) in one command — so "OpenClaw installed" means "this
+    agent hears directed work" without a separate install-heartbeat /
+    install-listener step. The OpenClaw analogue of ensure-codex-watch.
+
+    These patch the hardened installers at their REAL call sites
+    (`fulcra_coord.installers.heartbeat.install_heartbeat` /
+    `...listener.install_listener`) so the assertions are non-vacuous: if the
+    bundle were open-coded or wired to the wrong symbol, the mocks would not
+    fire. openclaw.install_openclaw is also patched to a plan dict so no Track A
+    files actually land.
+    """
+
+    def _patches(self):
+        """Patch the three installers cmd_install_openclaw composes, returning
+        the MagicMocks for heartbeat / listener so tests can assert on them.
+        openclaw.install_openclaw returns a minimal plan dict with the keys the
+        command's summary printing reads."""
+        from unittest.mock import patch, MagicMock
+        hb = patch("fulcra_coord.installers.heartbeat.install_heartbeat",
+                   return_value={"mechanism": "launchd", "writes": ["/tmp/hb.plist"],
+                                 "removes": ["/tmp/hb.plist"], "interval_min": 20,
+                                 "cli_command": "fulcra-coord"})
+        ls = patch("fulcra_coord.installers.listener.install_listener",
+                   return_value={"mechanism": "launchd", "writes": ["/tmp/ls.plist"],
+                                 "removes": ["/tmp/ls.plist"], "interval_min": 10,
+                                 "cli_command": "fulcra-coord"})
+        oc = patch("fulcra_coord.installers.openclaw.install_openclaw",
+                   return_value={"hooks_root": "/tmp/ocroot", "writes": [],
+                                 "removes": [], "hook_dirs": [], "prompt_files": []})
+        return hb, ls, oc
+
+    def _args(self, **kw):
+        from types import SimpleNamespace
+        base = dict(hooks_root="/tmp/ocroot", uninstall=False, dry_run=False,
+                    with_plugin=False, plugin_dir=None,
+                    with_heartbeat=False, with_listener=False, agent=None)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_cmd_can_bundle_heartbeat_and_listener(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args(
+                with_heartbeat=True, with_listener=True,
+                agent="openclaw:test:infra"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(m_hb.call_count, 1)
+        self.assertEqual(m_ls.call_count, 1)
+        # The listener is per-agent: it must watch the agent we passed.
+        self.assertEqual(m_ls.call_args.kwargs.get("agent"), "openclaw:test:infra")
+        # Heartbeat is machine-global → never per-agent.
+        self.assertNotIn("agent", m_hb.call_args.kwargs)
+
+    def test_cmd_bundle_uninstall_removes_scheduler_jobs(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args(
+                uninstall=True, with_heartbeat=True, with_listener=True,
+                agent="openclaw:test:infra"))
+        self.assertEqual(rc, 0)
+        # The gotcha guard for uninstall: the early `return 0` must not
+        # short-circuit the bundle. Both installers are reached with uninstall=True.
+        self.assertTrue(m_hb.call_args.kwargs.get("uninstall"))
+        self.assertTrue(m_ls.call_args.kwargs.get("uninstall"))
+
+    def test_cmd_bundle_dry_run_no_side_effects_but_previews(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args(
+                dry_run=True, with_heartbeat=True, with_listener=True,
+                agent="openclaw:test:infra"))
+        self.assertEqual(rc, 0)
+        # The core gotcha guard: the early dry-run `return 0` must NOT
+        # short-circuit the bundle. Both installers are reached with dry_run=True
+        # (they print their own plan and write nothing).
+        self.assertTrue(m_hb.call_args.kwargs.get("dry_run"))
+        self.assertTrue(m_ls.call_args.kwargs.get("dry_run"))
+
+    def test_cmd_without_bundle_flags_unchanged(self):
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb as m_hb, ls as m_ls, oc:
+            rc = installers.cmd_install_openclaw(self._args())
+        self.assertEqual(rc, 0)
+        # No with_* flags → base behavior preserved: neither scheduler installs.
+        m_hb.assert_not_called()
+        m_ls.assert_not_called()
+
+    def test_cmd_listener_derives_agent_when_unset(self):
+        """with_listener but no --agent → the per-agent listener still gets a
+        concrete agent (derived), never None, or it would watch the wrong inbox."""
+        from fulcra_coord import installers
+        hb, ls, oc = self._patches()
+        with hb, ls as m_ls, oc, \
+                patch("fulcra_coord.installers._derive_agent",
+                      return_value="derived:agent"):
+            rc = installers.cmd_install_openclaw(self._args(with_listener=True))
+        self.assertEqual(rc, 0)
+        self.assertEqual(m_ls.call_args.kwargs.get("agent"), "derived:agent")
 
 
 def _park_reasons_line(ts: str) -> str:
@@ -4099,16 +4219,49 @@ class TestAgentsDigest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCodexTemplates(unittest.TestCase):
-    def test_reuses_claude_code_script_bodies(self):
+    def test_reuses_claude_code_script_bodies_with_codex_review_capability(self):
         from fulcra_coord import codex, claude_code as cc
-        # SessionStart body is shared verbatim with Claude Code (same stdin shape).
-        self.assertEqual(codex.SESSION_START_SH, cc.SESSION_START_SH)
+        # SessionStart mostly shares the Claude Code body (same stdin shape) with
+        # three intentional Codex transforms: (a) it publishes the review
+        # capability (Codex is the canonical review target, else request-review
+        # can't find it after startup); (b) it backgrounds an `ensure-codex-watch`
+        # self-heal BEFORE that connect (so a fresh Codex box that never ran
+        # `install-listener` still arms its listener); (c) the derived fallback id
+        # is `codex:*` not `claude-code:*`.
+        expected = cc.SESSION_START_SH.replace(
+            '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+            '# Re-arm Codex hooks + the per-agent inbox listener on every app start.\n'
+            '# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.\n'
+            '"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+            '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+        ).replace(
+            '[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"',
+            '[ -z "$AGENT" ] && AGENT="codex:${HOST}:${REPO}"',
+        )
+        self.assertEqual(codex.SESSION_START_SH, expected)
+        self.assertIn("connect --can-review", codex.SESSION_START_SH)
         # PreCompact reuses the CC body but keys the session-id env fallback on
         # FULCRA_COORD_SESSION_KEY (Codex's session id env differs).
         self.assertIn("FULCRA_COORD_SESSION_KEY", codex.PRE_COMPACT_SH)
         self.assertNotIn("CLAUDE_CODE_SESSION_ID", codex.PRE_COMPACT_SH)
         # Gap 1 argv placeholder present so it gets a resolved argv at install.
         self.assertIn("__FULCRA_COORD_ARGV__", codex.PRE_COMPACT_SH)
+
+    def test_session_start_self_heals_via_ensure_codex_watch(self):
+        # Every Codex app start should re-arm its own hooks + per-agent listener so
+        # a fresh machine that never ran `install-listener` still self-heals and
+        # hears directed work. The SessionStart hook backgrounds an
+        # `ensure-codex-watch --no-connect` (--no-connect because the hook already
+        # does its own `connect --can-review` right after — avoid double-connect).
+        from fulcra_coord import codex
+        self.assertIn("ensure-codex-watch", codex.SESSION_START_SH)
+        self.assertIn("--no-connect", codex.SESSION_START_SH)
+        # LOAD-BEARING: the self-heal must be ADDED, never at the cost of the
+        # review-capability connect (#70). The poisoned PR dropped this; guard it.
+        self.assertIn("connect --can-review", codex.SESSION_START_SH)
+        # Backgrounded + silenced so it never blocks or slows session boot.
+        self.assertIn('ensure-codex-watch --agent "$AGENT" --no-connect '
+                      '>/dev/null 2>&1 &', codex.SESSION_START_SH)
 
     def test_no_stop_hook(self):
         # Codex Stop fires every turn and would thrash; end-parking is delegated
@@ -4210,6 +4363,208 @@ class TestInstallCodexCmd(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(
             os.path.join(self.home, ".codex", "hooks.json")))
+
+
+class TestEnsureCodexWatch(unittest.TestCase):
+    """`ensure-codex-watch` — the single idempotent "make Codex coordination
+    self-healing" entry point. It composes the already-hardened installers
+    (install_codex + install_listener), best-effort launchctl-loads the listener
+    plist, and (unless --no-connect) refreshes presence — all fail-safe so it can
+    run backgrounded at every Codex SessionStart without ever hard-failing.
+    """
+
+    def _args(self, **overrides):
+        base = dict(
+            agent="codex:h:r", set_identity=None, no_connect=False,
+            can_review=False, role=None, summary=None, workstream=None,
+            interval_min=None, codex_target_dir=None, listener_target_dir=None,
+            listener_logs_dir=None, no_load=False, dry_run=False, uninstall=False)
+        base.update(overrides)
+        return types.SimpleNamespace(**base)
+
+    def _listener_plan(self, mechanism="launchd"):
+        # Minimal shape ensure-codex-watch reads from the listener plan: a
+        # mechanism (decides whether launchctl load is even attempted) and the
+        # plist path at writes[0] (the load target).
+        return {"mechanism": mechanism, "writes": ["/tmp/x.plist"], "removes": []}
+
+    def test_happy_path_arms_both_installers_loads_and_connects(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0) as m_connect:
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+        # Both hardened installers were composed (not open-coded).
+        m_codex.assert_called_once()
+        m_listener.assert_called_once()
+        self.assertEqual(m_listener.call_args.kwargs.get("agent"), "codex:h:r")
+        # The self-heal launchctl load targets the plan's plist (writes[0]).
+        self.assertTrue(m_run.called, "launchctl load was not attempted")
+        load_argv = m_run.call_args.args[0]
+        self.assertEqual(load_argv[:3], ["launchctl", "load", "-w"])
+        self.assertIn("/tmp/x.plist", load_argv)
+        # Presence refreshed exactly once.
+        m_connect.assert_called_once()
+
+    def test_no_connect_skips_presence(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(self._args(no_connect=True))
+        self.assertEqual(rc, 0)
+        m_connect.assert_not_called()
+
+    def test_no_load_skips_launchctl(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args(no_load=True))
+        self.assertEqual(rc, 0)
+        m_run.assert_not_called()
+
+    def test_non_launchd_mechanism_skips_launchctl(self):
+        # crontab (Linux) has no launchctl — the load step must not fire.
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan(mechanism="crontab")), \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+        m_run.assert_not_called()
+
+    def test_failsafe_load_raise_still_returns_zero(self):
+        # A failed launchctl load (e.g. already-loaded, or launchctl missing) must
+        # NEVER crash the command — it runs backgrounded at every SessionStart.
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run",
+                   side_effect=OSError("boom")), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+
+    def test_failsafe_connect_raise_still_returns_zero(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect",
+                   side_effect=RuntimeError("boom")):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+
+    def test_dry_run_delegates_no_load_no_connect(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(self._args(dry_run=True))
+        self.assertEqual(rc, 0)
+        # Installers run in dry-run (they print their own plans).
+        self.assertTrue(m_codex.call_args.kwargs.get("dry_run"))
+        self.assertTrue(m_listener.call_args.kwargs.get("dry_run"))
+        # No side effects in dry-run.
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
+    def test_dry_run_set_identity_does_not_persist(self):
+        # `--dry-run` promises zero side effects. A declared identity should shape
+        # the printed listener plan, but must not write identity state.
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.identity.set_identity") as m_set, \
+             patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(dry_run=True, set_identity="codex:box:repo"))
+        self.assertEqual(rc, 0)
+        m_set.assert_not_called()
+        self.assertTrue(m_codex.call_args.kwargs.get("dry_run"))
+        self.assertTrue(m_listener.call_args.kwargs.get("dry_run"))
+        self.assertEqual(m_listener.call_args.kwargs.get("agent"), "codex:box:repo")
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
+    def test_set_identity_persists_before_arming(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.identity.set_identity") as m_set, \
+             patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(set_identity="codex:box:repo"))
+        self.assertEqual(rc, 0)
+        m_set.assert_called_once_with("codex:box:repo")
+
+    def test_idempotent_two_calls_both_return_zero(self):
+        # The underlying installers are idempotent; running twice must be a clean
+        # no-op (this is the every-SessionStart contract).
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            a = installers.cmd_ensure_codex_watch(self._args())
+            b = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual((a, b), (0, 0))
+
+    def test_uninstall_tears_down_both(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect"):
+            rc = installers.cmd_ensure_codex_watch(self._args(uninstall=True))
+        self.assertEqual(rc, 0)
+        self.assertTrue(m_codex.call_args.kwargs.get("uninstall"))
+        self.assertTrue(m_listener.call_args.kwargs.get("uninstall"))
+
+
+class TestEnsureCodexWatchDispatch(unittest.TestCase):
+    def test_in_command_map(self):
+        from fulcra_coord.entry import COMMAND_MAP
+        from fulcra_coord import cli as climod
+        self.assertIn("ensure-codex-watch", COMMAND_MAP)
+        self.assertIs(COMMAND_MAP["ensure-codex-watch"],
+                      climod.cmd_ensure_codex_watch)
+
+    def test_parser_accepts_flags(self):
+        from fulcra_coord.entry import build_parser
+        parser = build_parser()
+        ns = parser.parse_args([
+            "ensure-codex-watch", "--agent", "codex:h:r",
+            "--set-identity", "codex:h:r", "--no-connect", "--can-review",
+            "--interval-min", "15", "--no-load", "--dry-run"])
+        self.assertEqual(ns.command, "ensure-codex-watch")
+        self.assertEqual(ns.agent, "codex:h:r")
+        self.assertEqual(ns.set_identity, "codex:h:r")
+        self.assertTrue(ns.no_connect)
+        self.assertTrue(ns.can_review)
+        self.assertEqual(ns.interval_min, 15)
+        self.assertTrue(ns.no_load)
+        self.assertTrue(ns.dry_run)
 
 
 class TestCodexHookParity(unittest.TestCase):
@@ -5231,6 +5586,201 @@ class TestInstallListenerCmd(unittest.TestCase):
             self.target, "com.fulcra.coord.listener.codex-h-r.plist")))
 
 
+class TestWebhookNotifier(unittest.TestCase):
+    """Cross-platform push notifier: webhook (ntfy/slack/discord/json) + native
+    desktop, both best-effort and independent. Network + subprocess fully mocked.
+    """
+
+    def setUp(self):
+        for k in ("FULCRA_COORD_NOTIFY_WEBHOOK", "FULCRA_COORD_NOTIFY_FORMAT",
+                  "FULCRA_COORD_NOTIFY_TIMEOUT"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k in ("FULCRA_COORD_NOTIFY_WEBHOOK", "FULCRA_COORD_NOTIFY_FORMAT",
+                  "FULCRA_COORD_NOTIFY_TIMEOUT"):
+            os.environ.pop(k, None)
+
+    # -- _webhook_format -----------------------------------------------------
+    def test_format_autodetect_discord(self):
+        from fulcra_coord import listener
+        self.assertEqual(
+            listener._webhook_format(
+                "https://discord.com/api/webhooks/1/abc"), "discord")
+
+    def test_format_autodetect_slack(self):
+        from fulcra_coord import listener
+        self.assertEqual(
+            listener._webhook_format(
+                "https://hooks.slack.com/services/T/B/x"), "slack")
+
+    def test_format_autodetect_ntfy_default(self):
+        from fulcra_coord import listener
+        self.assertEqual(
+            listener._webhook_format("https://ntfy.sh/mytopic"), "ntfy")
+
+    def test_format_explicit_env_overrides_host(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "json"
+        self.assertEqual(
+            listener._webhook_format("https://hooks.slack.com/x"), "json")
+
+    def test_format_bogus_explicit_falls_back_to_autodetect(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "carrier-pigeon"
+        self.assertEqual(
+            listener._webhook_format("https://discord.com/api/webhooks/1"),
+            "discord")
+
+    # -- _build_webhook_request ----------------------------------------------
+    def test_build_ntfy_request(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "ntfy"
+        req = listener._build_webhook_request(
+            "https://ntfy.sh/t", "fulcra-coord", "hello world")
+        self.assertEqual(req.full_url, "https://ntfy.sh/t")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.data, b"hello world")
+        # urllib title-cases header keys.
+        self.assertEqual(req.headers["Title"], "fulcra-coord")
+        self.assertIn("text/plain", req.headers["Content-type"])
+
+    def test_build_ntfy_request_sanitizes_nonascii_title(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "ntfy"
+        req = listener._build_webhook_request(
+            "https://ntfy.sh/t", "⛔ needs you", "msg")
+        # Non-ascii title is not header-safe -> falls back to plain marker.
+        self.assertEqual(req.headers["Title"], "fulcra-coord")
+        # Body is still the raw message.
+        self.assertEqual(req.data, b"msg")
+
+    def test_build_slack_request(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "slack"
+        req = listener._build_webhook_request(
+            "https://hooks.slack.com/x", "T", "M")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertIn("application/json", req.headers["Content-type"])
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["text"], "T: M")
+
+    def test_build_discord_request_and_truncates(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "discord"
+        req = listener._build_webhook_request(
+            "https://discord.com/api/webhooks/1", "Title", "x" * 5000)
+        self.assertEqual(req.get_method(), "POST")
+        self.assertIn("application/json", req.headers["Content-type"])
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertTrue(body["content"].startswith("**Title**\n"))
+        self.assertLessEqual(len(body["content"]), 1900)
+
+    def test_build_json_request(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_FORMAT"] = "json"
+        req = listener._build_webhook_request(
+            "https://example.com/hook", "T", "M")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertIn("application/json", req.headers["Content-type"])
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["title"], "T")
+        self.assertEqual(body["message"], "M")
+
+    # -- _post_webhook -------------------------------------------------------
+    def test_post_webhook_success(self):
+        from fulcra_coord import listener
+        import contextlib
+        cm = contextlib.nullcontext(types.SimpleNamespace(status=200))
+        with patch("fulcra_coord.listener.urllib.request.urlopen",
+                   return_value=cm) as uo:
+            ok = listener._post_webhook(
+                "https://ntfy.sh/t", "fulcra-coord", "hi")
+        self.assertTrue(ok)
+        uo.assert_called_once()
+        # The first positional arg is the built Request.
+        sent = uo.call_args[0][0]
+        self.assertEqual(sent.full_url, "https://ntfy.sh/t")
+
+    def test_post_webhook_failure_swallowed(self):
+        from fulcra_coord import listener
+        import urllib.error
+        with patch("fulcra_coord.listener.urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("boom")):
+            ok = listener._post_webhook(
+                "https://ntfy.sh/t", "fulcra-coord", "hi")
+        self.assertFalse(ok)
+
+    # -- _deliver orchestration ----------------------------------------------
+    def test_deliver_calls_both_when_webhook_set(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_WEBHOOK"] = "https://ntfy.sh/t"
+        with patch("fulcra_coord.listener._post_webhook") as pw, \
+             patch("fulcra_coord.listener._emit_native") as en:
+            listener._deliver("msg", title="t")
+        pw.assert_called_once()
+        en.assert_called_once_with("msg", "t")
+
+    def test_deliver_skips_webhook_when_unset(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener._post_webhook") as pw, \
+             patch("fulcra_coord.listener._emit_native") as en:
+            listener._deliver("msg", title="t")
+        pw.assert_not_called()
+        en.assert_called_once()
+
+    def test_deliver_native_runs_even_if_webhook_raises(self):
+        from fulcra_coord import listener
+        os.environ["FULCRA_COORD_NOTIFY_WEBHOOK"] = "https://ntfy.sh/t"
+        with patch("fulcra_coord.listener._post_webhook",
+                   side_effect=Exception("explode")), \
+             patch("fulcra_coord.listener._emit_native") as en:
+            listener._deliver("msg", title="t")  # must not raise
+        en.assert_called_once()
+
+    # -- public surface routes through _deliver ------------------------------
+    def test_emit_notification_routes_through_deliver(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener._deliver") as dl:
+            listener.emit_notification("codex:h:r", 3)
+        dl.assert_called_once()
+        msg = dl.call_args[0][0]
+        self.assertIn("3 directive(s)", msg)
+        self.assertEqual(dl.call_args[1]["title"], "fulcra-coord")
+
+    def test_emit_message_routes_through_deliver(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener._deliver") as dl:
+            listener.emit_message("hello", title="alert")
+        dl.assert_called_once_with("hello", title="alert")
+
+    # -- _emit_native Linux branch -------------------------------------------
+    def test_emit_native_linux_uses_notify_send(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener.scheduler_env.is_macos",
+                   return_value=False), \
+             patch("fulcra_coord.listener.sys.platform", "linux"), \
+             patch("fulcra_coord.listener.shutil.which",
+                   return_value="/usr/bin/notify-send"), \
+             patch("fulcra_coord.listener.subprocess.run") as run:
+            listener._emit_native("body", "title")
+        run.assert_called_once()
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[0], "notify-send")
+        self.assertEqual(argv[1], "title")
+        self.assertEqual(argv[2], "body")
+
+    def test_emit_native_linux_falls_back_to_stderr(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.listener.scheduler_env.is_macos",
+                   return_value=False), \
+             patch("fulcra_coord.listener.sys.platform", "linux"), \
+             patch("fulcra_coord.listener.shutil.which", return_value=None), \
+             patch("fulcra_coord.listener.subprocess.run") as run:
+            listener._emit_native("body", "title")  # must not raise
+        run.assert_not_called()
+
+
 class TestNotifyInbox(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -5271,6 +5821,42 @@ class TestNotifyInbox(unittest.TestCase):
         # No directives -> surface file is empty/absent (no stale notification)
         if sf.exists():
             self.assertEqual(json.loads(sf.read_text())["inbox"], [])
+
+    def _seen_path(self, agent):
+        from fulcra_coord import cache, listener
+        return cache.cache_root() / f"inbox-notified-{listener.agent_slug(agent)}.json"
+
+    def test_inbox_notify_dedups_across_ticks(self):
+        """Agent-inbox notify fires once for NEW ids: a re-tick over the SAME
+        items does not re-alert, a genuinely new id does, and the seen-set on
+        disk tracks the current ids (so resolved items drop and can re-alert)."""
+        from fulcra_coord.cli import cmd_notify_inbox
+        a, b = _directive("codex:h:r"), _directive("codex:h:r")
+        cache.write_cached_task(a)
+        cache.write_cached_task(b)
+        ns = types.SimpleNamespace(agent="codex:h:r")
+        with patch("fulcra_coord.listener.emit_notification") as emit:
+            # First tick: two new items -> one emit with count 2.
+            cmd_notify_inbox(ns, backend=self.fake_backend)
+            self.assertEqual(emit.call_count, 1)
+            self.assertEqual(emit.call_args[0][1], 2)
+            seen = set(json.loads(self._seen_path("codex:h:r").read_text()))
+            self.assertEqual(seen, {a["id"], b["id"]})
+
+            # Second identical tick: nothing new -> no emit.
+            emit.reset_mock()
+            cmd_notify_inbox(ns, backend=self.fake_backend)
+            emit.assert_not_called()
+
+            # Third tick adds one NEW directive -> emit once with count 1.
+            emit.reset_mock()
+            c = _directive("codex:h:r")
+            cache.write_cached_task(c)
+            cmd_notify_inbox(ns, backend=self.fake_backend)
+            self.assertEqual(emit.call_count, 1)
+            self.assertEqual(emit.call_args[0][1], 1)
+            seen = set(json.loads(self._seen_path("codex:h:r").read_text()))
+            self.assertEqual(seen, {a["id"], b["id"], c["id"]})
 
 
 class TestNotifyBlockedOnYou(unittest.TestCase):
@@ -5435,6 +6021,69 @@ class TestInboxClearsAfterAckOrClaim(unittest.TestCase):
             views.agent_slug(me), [])
         self.assertEqual(recomputed, [],
                          "build_inbox over the task set must also be empty")
+
+    def test_ack_visible_summary_when_task_body_missing(self):
+        """A directive visible via summaries must be ackable even if body load fails.
+
+        This matches a cross-agent stale/dangling view case: ``inbox`` lists the
+        summary, but ``inbox --ack`` cannot load ``tasks/<id>.json`` to append an
+        event. The fallback records the ack in the summaries aggregate and
+        rebuilds views so the listener stops re-notifying.
+        """
+        from fulcra_coord.cli import cmd_inbox
+        from fulcra_coord import remote
+        import io, contextlib
+
+        me = "codex:h:r"
+        d = _directive(me)
+        summary = schema.task_summary(d)
+        summaries = views.build_all_views([summary])["summaries"]
+        remote.upload_json(summaries, remote.view_remote_path("summaries"),
+                           backend=self.fake_backend)
+
+        self.assertEqual([item["id"] for item in self._inbox_json(me)], [d["id"]])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cmd_inbox(self._ns(agent=me, format="json", ack=d["id"]),
+                           backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._inbox_json(me), [])
+
+        saved = remote.download_json(remote.view_remote_path("summaries"),
+                                     backend=self.fake_backend)
+        acked = [item for item in saved["summaries"] if item["id"] == d["id"]][0]
+        self.assertEqual(acked["acked_by"], [me])
+
+    def test_reconcile_preserves_summary_only_ack_when_body_returns(self):
+        """A transient body-load miss must not resurrect an already-acked inbox item."""
+        from fulcra_coord.cli import cmd_reconcile, cmd_tell
+        from fulcra_coord import remote
+        import io, contextlib
+
+        me = "codex:h:r"
+        tell_args = self._ns(assignee=me, title="durable ack", workstream="general",
+                             priority="P2", next="", summary="",
+                             **{"from": "boss:h:r"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_tell(tell_args, backend=self.fake_backend)
+        summary = self._inbox_json(me)[0]
+        summary["acked_by"] = [me]
+
+        # Body is now loadable again, but it lacks the inbox_ack event that the
+        # summary-only fallback could not append during the transient miss.
+        remote.upload_json({"summaries": [summary]},
+                           remote.view_remote_path("summaries"),
+                           backend=self.fake_backend)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cmd_reconcile(self._ns(), backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+
+        saved = remote.download_json(remote.view_remote_path("summaries"),
+                                     backend=self.fake_backend)
+        acked = [item for item in saved["summaries"] if item["id"] == summary["id"]][0]
+        self.assertEqual(acked["acked_by"], [me])
+        self.assertEqual(self._inbox_json(me), [])
 
     def test_claim_clears_inbox_even_with_stale_cached_view(self):
         """tell -> update --status active --agent me (claim) -> inbox EMPTY."""
@@ -7061,17 +7710,13 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_10_0(self):
-        # 0.10.0: optimization + simplification pass. remote.list_json collapses
-        # six open-coded list+serial-download loops into one parallel primitive
-        # (presence/health load+prune, archive cold-index) — buying reconcile
-        # hot-path headroom; ~10 copy-pasted env-knob readers consolidated into
-        # env_float/env_int (a non-numeric override now falls back to the default
-        # uniformly, hardening the remote read timeouts that used to crash on a
-        # typo); bus-timestamp formatting centralized in _iso_z. Behavior-
-        # preserving. (0.9.1: remote.list_files real-CLI-format normalization.)
+    def test_version_is_0_12_0(self):
+        # 0.12.0: additive boundary-triggered Continuity snapshot layer
+        # (retention-bounded, not gated/suppressed). coord can write a
+        # snapshot without changing task state, and lifecycle hooks write
+        # checkpoints at compaction/session-end boundaries.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.10.0")
+        self.assertEqual(__version__, "0.12.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
@@ -7396,9 +8041,8 @@ class TestParallelViewUpload(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_task_summaries",
-                   return_value=[schema.task_summary(task)]), \
-             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]):
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
+                   return_value=[schema.task_summary(task)]):
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
 
@@ -7418,9 +8062,8 @@ class TestParallelViewUpload(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_task_summaries",
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]), \
-             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
              patch("fulcra_coord.cli.lifecycle_annotations.emit_lifecycle_annotation") as emit:
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
@@ -7438,9 +8081,8 @@ class TestParallelViewUpload(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_task_summaries",
-                   return_value=[schema.task_summary(task)]), \
-             patch("fulcra_coord.cli._load_all_tasks", return_value=[task]):
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
+                   return_value=[schema.task_summary(task)]):
             ok = _write_task_and_views(task, backend=["false"], command="update")
         self.assertTrue(ok)
         # Every standard view path was uploaded (index + summaries + active ...).
@@ -7685,7 +8327,7 @@ class TestParallelUploadExceptionSafety(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
-             patch("fulcra_coord.cli._load_summaries_for_rebuild",
+             patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]):
             with self.assertRaises(schema.NeedsReconcile):
                 _write_task_and_views(task, backend=["false"], command="update")
@@ -9496,6 +10138,21 @@ class TestRequestReview(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("42", escalated.get("pr", ""))
 
+    def test_miss_returns_nonzero_when_human_escalation_fails(self):
+        from fulcra_coord.cli import cmd_request_review
+        old_ls = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": old_ls, "capabilities": ["review"]}])
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.routing_ops._escalate_review_to_human",
+                   return_value=False), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 1)
+
     def test_escalate_to_human_lands_blocked_needs_human(self):
         # _escalate_review_to_human must actually land a blocked, human-assigned
         # task carrying needs:human, even though make_task starts at 'proposed'
@@ -9517,6 +10174,348 @@ class TestRequestReview(unittest.TestCase):
         self.assertEqual(t["status"], "blocked")
         self.assertEqual(t["assignee"], "ash@fulcradynamics.com")
         self.assertIn("needs:human", t["tags"])
+
+    def test_escalation_forge_agnostic_no_pr_no_none(self):
+        """Regression: escalating a non-numeric artifact with no --repo must
+        produce a clean ask + marker — no hardcoded "PR ", no literal "None".
+
+        Before the fix `_escalate_review_to_human` built `f"PR #{artifact} needs a
+        reviewer ({repo})"` and a marker `review-escalation:{repo}#{artifact}`, so
+        a branch ref with repo=None read "PR #feat/x needs a reviewer (None)" and
+        the marker "review-escalation:None#feat/x"."""
+        from fulcra_coord.cli import _escalate_review_to_human
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_human", return_value="ash@fulcradynamics.com"), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="codex:m:main"):
+            ok = _escalate_review_to_human(pr="feat/x", repo=None,
+                                           tried=["dead:h:r"], backend=["false"])
+        self.assertTrue(ok)
+        t = captured["task"]
+        blob = json.dumps(t)
+        # No hardcoded "PR " and no literal "None" leaking into ask / title / marker.
+        self.assertNotIn("PR ", blob)
+        self.assertNotIn("None", blob)
+        # The branch ref appears verbatim; the marker uses repo "general", not None.
+        self.assertIn("feat/x", blob)
+        marker = "review-escalation:general#feat/x"
+        self.assertIn(marker, t["tags"])
+
+
+# ---------------------------------------------------------------------------
+# Forge-agnostic review handshake — Part 1: request-review opaque artifact ref
+# ---------------------------------------------------------------------------
+
+
+class TestRequestReviewArtifactRef(unittest.TestCase):
+    """request-review's artifact is now an OPAQUE ref (PR#/MR#/branch/SHA/URL),
+    not a GitHub PR. Numeric refs keep the bare "#<n>" display (backward compat
+    with the old "Review PR #<n>" routing, minus the hardcoded "PR "); non-numeric
+    refs (branches, SHAs) get the artifact verbatim. --repo is OPTIONAL."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _live_presence(self):
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        return {"agents": [{"agent": "codex:Mac.localdomain:main",
+                            "last_seen": now_ls, "capabilities": ["review"]}]}
+
+    def _route_and_capture(self, *, pr, repo):
+        """Run request-review with a live reviewer, returning the written task."""
+        from fulcra_coord.cli import cmd_request_review
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   return_value=self._live_presence()), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_agent",
+                   return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr=pr, repo=repo, dry_run=False,
+                                         candidate_list=None, format="json",
+                                         agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        return rc, captured["task"]
+
+    def test_bare_number_artifact_titles_without_PR_word(self):
+        rc, t = self._route_and_capture(pr="101", repo="o/r")
+        self.assertEqual(rc, 0)
+        # Old behaviour said "Review PR #101"; the de-named title drops "PR ".
+        self.assertIn("Review #101", t["title"])
+        self.assertNotIn("PR #101", t["title"])
+
+    def test_branch_artifact_titles_verbatim(self):
+        rc, t = self._route_and_capture(pr="feat/my-branch", repo=None)
+        self.assertEqual(rc, 0)
+        self.assertIn("Review feat/my-branch", t["title"])
+        self.assertNotIn("#feat", t["title"])  # not numeric -> no '#'
+
+    def test_repo_omitted_still_routes_and_tags_review(self):
+        rc, t = self._route_and_capture(pr="feat/x", repo=None)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t["assignee"], "codex:Mac.localdomain:main")
+        self.assertIn("kind:review", t["tags"])
+        routed = [e for e in t["events"] if e["type"] == "routed"]
+        self.assertEqual(len(routed), 1)
+
+    def test_backward_compat_number_with_repo_still_routes(self):
+        rc, t = self._route_and_capture(pr="101", repo="o/r")
+        self.assertEqual(rc, 0)
+        self.assertEqual(t["assignee"], "codex:Mac.localdomain:main")
+        self.assertIn("kind:review", t["tags"])
+        self.assertEqual(t.get("repo"), "o/r")
+        self.assertEqual(t.get("pr"), "101")
+
+
+# ---------------------------------------------------------------------------
+# Forge-agnostic review handshake — Part 2: review-done verdict directive
+# ---------------------------------------------------------------------------
+
+
+class TestReviewDone(unittest.TestCase):
+    """`review-done` lands the reviewer's verdict as a BUS directive to the
+    artifact's AUTHOR — never a GitHub comment. coord must NEVER call a forge."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _args(self, **kw):
+        base = dict(artifact="101", verdict="approve", note=None, repo=None,
+                    to=None, format="table")
+        base.update(kw)
+        ns = types.SimpleNamespace(**{k: v for k, v in base.items() if k != "from"})
+        setattr(ns, "from", base.get("from"))
+        return ns
+
+    def _review_task(self, *, artifact, author):
+        """A routed kind:review directive as request-review would have written it
+        (owner_agent = the author who requested the review)."""
+        title = (f"Review #{artifact} — assume bugs, claim the review before working"
+                 if str(artifact).isdigit()
+                 else f"Review {artifact} — assume bugs, claim the review before working")
+        return {"id": "TASK-20260608-rev-00000000", "status": "proposed",
+                "title": title, "owner_agent": author, "assignee": "codex:m:main",
+                "tags": ["kind:review"], "events": [], "workstream": "o/r",
+                "pr": artifact}
+
+    def test_to_override_lands_verdict_directive(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=fake_write), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to="claude-code:h:r",
+                                            note="LGTM"), backend=["false"])
+        self.assertEqual(rc, 0)
+        t = captured["task"]
+        self.assertEqual(t["assignee"], "claude-code:h:r")
+        self.assertIn("kind:review-verdict", t["tags"])
+        self.assertIn("approve", t["title"])
+        self.assertIn("#101", t["title"])
+        blob = json.dumps(t)
+        self.assertIn("LGTM", blob)
+
+    def test_changes_verdict_in_title(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        with patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="changes", to="claude-code:h:r"),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertIn("changes", captured["task"]["title"])
+
+    def test_author_resolved_from_existing_review_task(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        existing = [self._review_task(artifact="101", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        # Author came from the existing kind:review task's owner_agent.
+        self.assertEqual(captured["task"]["assignee"], "claude-code:author:r")
+
+    def test_branch_artifact_author_resolution(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        existing = [self._review_task(artifact="feat/x", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="feat/x", verdict="approve",
+                                            to=None), backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["task"]["assignee"], "claude-code:author:r")
+        self.assertIn("Review verdict", captured["task"]["title"])
+
+    def test_unresolvable_author_clean_error_no_guess(self):
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=[]), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to=None),
+                                 backend=["false"])
+        # No author resolvable, no --to: clean non-zero, no write, no guess.
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(wrote["called"])
+
+    def test_no_forge_subprocess_call(self):
+        """The verdict is bus-only: review-done must NOT shell out to gh / any
+        forge. Assert subprocess is never invoked anywhere in the path."""
+        from fulcra_coord.cli import cmd_review_done
+        with patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"), \
+             patch("subprocess.run") as sprun, \
+             patch("subprocess.Popen") as spopen, \
+             patch("subprocess.check_output") as spco:
+            rc = cmd_review_done(self._args(verdict="approve", to="claude-code:h:r"),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        sprun.assert_not_called()
+        spopen.assert_not_called()
+        spco.assert_not_called()
+
+    def test_write_failure_is_fail_safe(self):
+        """A write blowup warns, never crashes (fail-safe like other directive
+        writers)."""
+        from fulcra_coord.cli import cmd_review_done
+
+        def boom(task, **kw):
+            raise RuntimeError("remote exploded")
+
+        with patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=boom), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to="claude-code:h:r"),
+                                 backend=["false"])
+        # Best-effort: a write failure must not raise out of the command.
+        self.assertEqual(rc, 1)
+
+    def test_resolves_in_routing_ops_namespace(self):
+        """Non-vacuous patch guard (the recurring trap): the helpers review-done
+        calls must actually live in routing_ops' namespace."""
+        from fulcra_coord import routing_ops
+        self.assertTrue(hasattr(routing_ops, "_write_task_and_views"))
+        self.assertTrue(hasattr(routing_ops, "_load_all_tasks"))
+        self.assertTrue(hasattr(routing_ops, "identity"))
+        self.assertTrue(callable(routing_ops.cmd_review_done))
+
+    # --- Regression: wrong-author misroute via substring match (CRITICAL) ---
+    # Author resolution must match the EXACT stored artifact (task["pr"]), never
+    # a substring of the directive title. Before the fix, `review-done 10`
+    # resolved against a `#101` directive (because "#10" is a substring of
+    # "#101"), confidently misrouting the verdict to PR #101's author.
+
+    def test_numeric_substring_does_not_misroute(self):
+        """`review-done 10` must NOT resolve from a `#101` directive — a confident
+        misroute is worse than a clean error. Expect non-zero, no write."""
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        existing = [self._review_task(artifact="101", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="10", verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(wrote["called"])
+
+    def test_branch_substring_does_not_misroute(self):
+        """`review-done feat/x` must NOT resolve from a `feat/xyz` directive."""
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        existing = [self._review_task(artifact="feat/xyz", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="feat/x", verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(wrote["called"])
+
+    def test_exact_numeric_artifact_resolves(self):
+        """`review-done 101` against the `#101` directive resolves to its
+        owner_agent (the exact-match path still works)."""
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        existing = [self._review_task(artifact="101", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="101", verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["task"]["assignee"], "claude-code:author:r")
+
+    def test_dry_run_unresolved_author_prints_plan_returns_zero(self):
+        """Dry-run never hard-fails: an unresolvable author under --dry-run prints
+        the plan with `to: <unresolved>` and returns 0 (non-dry-run still errors)."""
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=[]), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="feat/x", verdict="approve",
+                                            to=None, dry_run=True), backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertFalse(wrote["called"])
 
 
 # ---------------------------------------------------------------------------
@@ -9777,12 +10776,12 @@ class TestReviewSweep(unittest.TestCase):
                "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                "capabilities": ["review"]}]}
         with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
-             patch("fulcra_coord.routing_ops._cache_remote_task", return_value=moved), \
-             patch("fulcra_coord.cli._load_task", return_value=t) as lt, \
+             patch("fulcra_coord.routing_ops._cache_remote_task",
+                   return_value=moved) as load_fresh, \
              patch("fulcra_coord.routing_ops._write_task_and_views") as wtv:
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()  # another sweeper already moved it
-        lt.assert_not_called()  # the stale-observation check bypasses cache
+        load_fresh.assert_called_once_with(t["id"], backend=["false"])
 
     def test_sweep_ignores_non_review_tasks(self):
         from fulcra_coord.cli import _sweep_review_routes
@@ -9793,10 +10792,10 @@ class TestReviewSweep(unittest.TestCase):
         with patch("fulcra_coord.cli.remote.download_json",
                    side_effect=lambda p, backend=None: agg), \
              patch("fulcra_coord.routing_ops._write_task_and_views") as wtv, \
-             patch("fulcra_coord.cli._load_task") as lt:
+             patch("fulcra_coord.routing_ops._cache_remote_task") as load_fresh:
             _sweep_review_routes([t], backend=["false"], now=self.NOW)
         wtv.assert_not_called()
-        lt.assert_not_called()
+        load_fresh.assert_not_called()
 
     def test_sweep_past_deadline_processes_nothing(self):
         """B1 — the sweep is now deadline-bounded.
@@ -10004,6 +11003,88 @@ class TestReconcileHealthWrite(unittest.TestCase):
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
         self.assertEqual(rc, 0, "a health-write failure must never fail the tick")
+
+
+class TestUnroutedPrReviews(unittest.TestCase):
+    """views.unrouted_pr_reviews — catch PRs an author forgot to request-review.
+
+    Regression guard for the PR #101 class: a review left as a free-text
+    next_action (never routed via request-review) reaches no reviewer. The owner
+    must see it on their resume so they route it.
+    """
+    ME = "claude-code:ArcBot:Arc-Code-Review"
+
+    def _tasks(self):
+        return [
+            # owned by me, mentions a PR, not a routed review -> FLAG
+            {"id": "T1", "owner_agent": self.ME, "status": "active", "tags": [],
+             "title": "Demo continuity snapshots", "workstream": "ashfulcra/fulcra-tools",
+             "next_action": "Review and merge PR #101, then propagate", "priority": "P2"},
+            # already a routed kind:review directive -> NOT flagged
+            {"id": "T2", "owner_agent": self.ME, "status": "active",
+             "tags": ["kind:review"], "workstream": "ashfulcra/fulcra-tools",
+             "title": "Review PR #102 — assume bugs", "priority": "P1"},
+            # PR mention but owned by someone else -> NOT flagged (not my plate)
+            {"id": "T3", "owner_agent": "openclaw:discord:main-comms", "status": "active",
+             "tags": [], "title": "x", "next_action": "see PR #103", "workstream": "r"},
+            # closed task -> NOT flagged
+            {"id": "T4", "owner_agent": self.ME, "status": "done", "tags": [],
+             "title": "x", "next_action": "PR #104 merged", "workstream": "r"},
+            # bare "#105" with no PR/pull context -> NOT flagged (avoid false positives)
+            {"id": "T5", "owner_agent": self.ME, "status": "active", "tags": [],
+             "title": "fix issue #105", "workstream": "r"},
+        ]
+
+    def test_flags_only_unrouted_owned_open_pr_mentions(self):
+        from fulcra_coord import views
+        out = views.unrouted_pr_reviews(self._tasks(), self.ME)
+        self.assertEqual([t["id"] for t in out], ["T1"])
+        self.assertEqual(out[0]["pr_mentions"], ["101"])
+
+    def test_matches_pull_url_and_dedupes(self):
+        from fulcra_coord import views
+        tasks = [{"id": "U1", "owner_agent": self.ME, "status": "waiting", "tags": [],
+                  "title": "ship it",
+                  "current_summary": "opened https://github.com/o/r/pull/77 ; PR #77 awaits review",
+                  "workstream": "o/r"}]
+        out = views.unrouted_pr_reviews(tasks, self.ME)
+        self.assertEqual(out[0]["pr_mentions"], ["77"])
+
+    def test_resume_json_surfaces_unrouted_pr_reviews(self):
+        from fulcra_coord.cli import cmd_resume
+        import io, contextlib
+        from unittest.mock import patch
+        with patch("fulcra_coord.query._load_task_summaries", return_value=self._tasks()), \
+             patch("fulcra_coord.query.identity.resolve_agent", return_value=self.ME), \
+             patch("fulcra_coord.query.identity.resolve_human", return_value="ash"), \
+             patch("fulcra_coord.query.remote.download_json", return_value=None):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_resume(types.SimpleNamespace(agent=self.ME, format="json"),
+                                backend=["false"])
+        self.assertEqual(rc, 0)
+        data = json.loads(buf.getvalue())
+        self.assertEqual([t["id"] for t in data["unrouted_pr_reviews"]], ["T1"])
+
+    def test_resume_table_prints_valid_request_review_command(self):
+        from fulcra_coord.cli import cmd_resume
+        import io, contextlib
+        from unittest.mock import patch
+        with patch("fulcra_coord.query._load_task_summaries", return_value=self._tasks()), \
+             patch("fulcra_coord.query.identity.resolve_agent", return_value=self.ME), \
+             patch("fulcra_coord.query.identity.resolve_human", return_value="ash"), \
+             patch("fulcra_coord.query.remote.download_json", return_value=None):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_resume(types.SimpleNamespace(agent=self.ME,
+                                                      format="table",
+                                                      with_continuity=False),
+                                backend=["false"])
+        self.assertEqual(rc, 0)
+        text = buf.getvalue()
+        self.assertIn("fulcra-coord request-review 101 --repo ashfulcra/fulcra-tools",
+                      text)
+        self.assertNotIn("--pr 101", text)
 
 
 # ---------------------------------------------------------------------------

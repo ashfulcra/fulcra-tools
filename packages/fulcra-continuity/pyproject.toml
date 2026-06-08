@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-continuity"
+version = "0.1.0"
+description = "Agent continuity checkpoints and resume briefs for long-running Fulcra workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+fulcra-continuity = "fulcra_continuity.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4,<8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_continuity"]

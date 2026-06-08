@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Safari Web Extension host apps must stay sandboxed. Kept explicit so an
+	     explicit CODE_SIGN_ENTITLEMENTS file can never silently drop the sandbox
+	     that ENABLE_APP_SANDBOX=YES was auto-synthesizing. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- The app runs the Auth0 device flow + (optionally) ingest via URLSession;
+	     a sandboxed macOS app needs this for any outbound connection. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Shared, UNENCRYPTED container for the non-secret resolved
+	     {definitionId, tagIds} cache (UserDefaults suite). NOT for secrets. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.fulcra.attention</string>
+	</array>
+	<!-- Shared keychain for the access TOKEN so the extension's handler can read
+	     what AuthManager stored. $(AppIdentifierPrefix) expands to "<TeamID>." at
+	     build time → runtime kSecAttrAccessGroup is "<TeamID>.com.fulcra.attention.shared". -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.fulcra.attention.shared</string>
+	</array>
+</dict>
+</plist>

@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity
+from . import cache, remote, schema, views, identity, continuity
 from . import annotations as lifecycle_annotations
 from .io import _load_task
 from .output import info as _info, warn as _warn, err as _err
@@ -488,8 +488,51 @@ def cmd_pause(args: Any, backend: Optional[list[str]] = None) -> int:
         )
         return 1
 
+    if getattr(args, "snapshot", False):
+        checkpoint = continuity.make_checkpoint(
+            task,
+            agent=agent,
+            reason="pause",
+            next_actions=[next_action],
+        )
+        snap_ok, snap_path = continuity.write_checkpoint(checkpoint, backend=backend)
+        if snap_ok:
+            _info(f"  Continuity snapshot: {checkpoint['checkpoint_id']}")
+            _info(f"  Snapshot path: {snap_path}")
+        else:
+            _warn("Task paused, but continuity snapshot upload failed.")
+
     _info(f"Paused: {task_id}")
     _info(f"  Next: {next_action}")
+    return 0
+
+
+def cmd_snapshot(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Write a Fulcra Continuity checkpoint without changing task state."""
+    task_id = args.task_id
+    agent = getattr(args, "agent", None) or _derive_agent()
+
+    task = _load_task(task_id, backend=backend)
+    if task is None:
+        _err(f"Task not found: {task_id}")
+        return 1
+
+    next_action = getattr(args, "next", None)
+    next_actions = [next_action] if next_action else None
+    checkpoint = continuity.make_checkpoint(
+        task,
+        agent=agent,
+        reason=getattr(args, "reason", None) or "manual",
+        transcript_path=getattr(args, "transcript_path", None) or "",
+        next_actions=next_actions,
+    )
+    ok, snap_path = continuity.write_checkpoint(checkpoint, backend=backend)
+    if not ok:
+        _warn("Continuity snapshot upload failed.")
+        return 1
+
+    _info(f"Continuity snapshot: {checkpoint['checkpoint_id']}")
+    _info(f"  Snapshot path: {snap_path}")
     return 0
 
 

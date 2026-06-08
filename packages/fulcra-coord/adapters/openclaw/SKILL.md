@@ -1,5 +1,7 @@
 # fulcra-coord — OpenClaw Skill Adapter
 
+> **Canonical coord guide:** [`fulcra-coord/SKILL.md`](../../SKILL.md) — the runtime-agnostic when/how-to-use reference (quick-reference + load-bearing rules). This file is the OpenClaw-specific layer on top of it.
+
 This file documents the OpenClaw skill integration for fulcra-coord.
 
 ## Skill trigger conditions
@@ -34,6 +36,19 @@ fulcra-coord reconcile
 # Search
 fulcra-coord search "keyword"
 ```
+
+## Continuity handoff
+
+Fulcra Continuity is the cold-start handoff layer for `fulcra-coord` work. Use
+it when a task may survive compaction, transfer from OpenClaw/Arc to Claude or
+another agent, or continue without this chat transcript. A useful checkpoint must
+be self-describing for an agent that may not know Continuity yet, and its
+artifacts must be portable: URL, Fulcra remote path, coord task ID, or
+repo/ref/path tuple. Do not rely on local-only OpenClaw paths.
+
+Read `packages/fulcra-coord/docs/continuity-handoff.md` and
+`packages/fulcra-continuity/docs/agent-handoff.md` when implementing or
+debugging handoff behavior.
 
 ## Adapter configuration
 
