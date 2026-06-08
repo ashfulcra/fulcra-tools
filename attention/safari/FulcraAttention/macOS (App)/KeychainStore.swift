@@ -54,6 +54,10 @@ public nonisolated struct KeychainStore {
         ]
         if let accessGroup {
             q[kSecAttrAccessGroup as String] = accessGroup
+            // On macOS, access groups only apply to data-protection or
+            // synchronizable keychain queries. Keep app-private queries on the
+            // original default keychain by enabling this only for shared items.
+            q[kSecUseDataProtectionKeychain as String] = true
         }
         return q
     }
