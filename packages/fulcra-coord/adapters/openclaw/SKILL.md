@@ -35,6 +35,19 @@ fulcra-coord reconcile
 fulcra-coord search "keyword"
 ```
 
+## Continuity handoff
+
+Fulcra Continuity is the cold-start handoff layer for `fulcra-coord` work. Use
+it when a task may survive compaction, transfer from OpenClaw/Arc to Claude or
+another agent, or continue without this chat transcript. A useful checkpoint must
+be self-describing for an agent that may not know Continuity yet, and its
+artifacts must be portable: URL, Fulcra remote path, coord task ID, or
+repo/ref/path tuple. Do not rely on local-only OpenClaw paths.
+
+Read `packages/fulcra-coord/docs/continuity-handoff.md` and
+`packages/fulcra-continuity/docs/agent-handoff.md` when implementing or
+debugging handoff behavior.
+
 ## Adapter configuration
 
 Set these in the OpenClaw environment or skill config:

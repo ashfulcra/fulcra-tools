@@ -13,7 +13,12 @@ it. `fulcra-coord` remains the operational ledger for task lifecycle updates;
 Fulcra Continuity stores the durable "how to pick this work back up" snapshot.
 When both are used, checkpoints can carry the same workstream, agent, and coord
 task identity so another session can find a coord task and import the latest
-continuity snapshot.
+same-agent continuity snapshot. For cross-agent handoff, include the producer's
+checkpoint path or JSON as a portable artifact so the receiver can load it
+directly before writing its own pickup checkpoint.
+
+For the coord-side model, see
+[`../fulcra-coord/docs/continuity-handoff.md`](../fulcra-coord/docs/continuity-handoff.md).
 
 ## Install in the workspace
 
@@ -52,6 +57,21 @@ cheap and chatty enough for operational state. Continuity should write at durabl
 pause points: before compaction, before handoff, when a session goes idle, when a
 listener has seen several task events without user action, or when the user says
 they are done for a while.
+
+## Agent handoff contract
+
+Agents that write or consume continuity checkpoints should follow
+[`docs/agent-handoff.md`](docs/agent-handoff.md). The contract covers
+Claude Code, Codex, OpenClaw/Arc, and Hermes, and explicitly supports
+cross-agent transfer and non-GitHub work. GitHub issues and PRs are artifacts,
+not required identity.
+
+Checkpoints must be portable. Do not rely on bare local paths when handing work
+to another agent or machine; include a URL, Fulcra remote path, coord task ID, or
+repo/ref/path triple. Also assume the receiving agent may not know what
+Continuity is: the checkpoint should explain that it is a Fulcra Continuity
+resume packet and point the agent to `fulcra-continuity resume <checkpoint>` or
+the JSON fields to read directly.
 
 ## Resume from a checkpoint
 

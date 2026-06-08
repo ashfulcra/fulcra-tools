@@ -106,6 +106,12 @@ create mean you're sharing a checkout — move out before committing.
    PreCompact checkpoints before context loss, SessionEnd parks your task.
    Your job is to keep `next_action` and `--summary` *meaningful* via `update`
    at real milestones, so those automatic checkpoints capture useful state.
+9. **Continuity is the cold-start handoff layer.** For work that may transfer to
+   another agent or survive compaction, make checkpoints self-describing and
+   portable: include what Fulcra Continuity is, coord task identity, decisions,
+   open questions, next actions, and repo/ref/path or Fulcra remote artifacts
+   instead of local-only paths. See
+   `packages/fulcra-coord/docs/continuity-handoff.md`.
 
 ## Code review & merge (global — every repo)
 
