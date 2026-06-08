@@ -1,0 +1,26 @@
+# Code owners for ashfulcra/fulcra-tools
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The repo is public and worked on by multiple autonomous agents plus outside
+# contributors. We want: (1) outside people can contribute via PRs, (2) nothing
+# substantive lands without Ash's nod, (3) agents still handle routine fixes
+# among themselves.
+#
+# GitHub enforces by ACCOUNT, and Ash + all agents currently share the
+# `ashfulcra` account — so GitHub cannot by itself tell "Ash" from "an agent."
+# That human-vs-agent distinction is enforced on the fulcra-coord BUS (by agent
+# identity), not here. This file is the VISIBILITY layer: with branch protection
+# set to 0 required approvals, CODEOWNERS does not hard-block a merge. It asks
+# GitHub to request Ash's review on PRs from outside contributors. PRs opened by
+# the shared `ashfulcra` account cannot rely on GitHub to request the author as a
+# reviewer, so agents must still surface substantive shared-account PRs to Ash on
+# the bus and complete the `review-done` handshake before merging routine fixes.
+#
+# To make the human gate HARD-enforced (block substantive merges until Ash
+# approves), agents must move to a GitHub identity separate from `ashfulcra`,
+# then flip branch protection to require code-owner reviews. Until then, this is
+# request-only.
+
+# Default owner for everything.
+*       @ashfulcra
