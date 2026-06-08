@@ -268,8 +268,8 @@ This supersedes "Auth on iOS" and the `browser.storage.local` token note above.
    PR #91.)*
 3. **Native does ingest** so tokens never enter JS. The native side ports the
    wire transform and the def/tag resolver:
-   - wire byte-parity transform → `Wire.swift` *(PR #93, 25/25 golden vectors)*;
-   - def/tag resolver → `EnsureDefinition.swift` *(PR #94, 71/71 parity)*.
+   - wire byte-parity transform → `Wire.swift` *(PR #93, merged; 30/30 golden vectors after review)*;
+   - def/tag resolver → `EnsureDefinition.swift` *(PR #94, merged; 72/72 parity after review)*.
 4. **Capture stays in JS** (visibility-based content script, `visibility.ts`,
    PR #87) and hands `AttentionEvent` batches to native via
    `sendNativeMessage` → `SafariWebExtensionHandler.swift`, which builds the
@@ -281,7 +281,7 @@ This supersedes "Auth on iOS" and the `browser.storage.local` token note above.
    `chrome.windows` focus / `chrome.history` → **no backfill**, visibility +
    opportunistic `pagehide` flush only.
 
-### Sharing layer — App Group + Keychain access group (spec, not yet built)
+### Sharing layer — App Group + Keychain access group (implemented, needs portal registration)
 
 The extension process (where `SafariWebExtensionHandler` runs) must read what
 the app stored. Two **separate** entitlements are required — an App Group
@@ -290,46 +290,54 @@ identifier *cannot* double as a keychain access group:
 | Shared thing | Mechanism | Identifier | Why |
 |---|---|---|---|
 | Resolved `{definitionId, tagIds}` (non-secret) | **App Group** shared `UserDefaults` suite | `group.com.fulcra.attention` | `EnsureDefinition`'s cache already takes a `UserDefaults(suiteName:)` hook; resolve once, both processes read it. |
-| Access **token** (secret) | **Keychain access group** | `$(TeamIdentifierPrefix)com.fulcra.attention.shared` | Shared `UserDefaults` is **unencrypted** — secrets must go in a shared Keychain group, same team, exact-same string on both targets. |
+| Access **token** (secret) | **Keychain access group** | `$(AppIdentifierPrefix)com.fulcra.attention.shared` | Shared `UserDefaults` is **unencrypted** — secrets must go in a shared Keychain group, same team, exact-same string on both targets. |
 
-Both capabilities go on **both** targets (`com.fulcra.attention` app +
-`com.fulcra.attention.Extension`). Concretely:
+Both capabilities go on each app/extension pair (macOS app + macOS extension;
+iOS app + iOS extension). Concretely:
 - Add `keychain-access-groups` (value
-  `$(TeamIdentifierPrefix)com.fulcra.attention.shared`) to both targets'
-  entitlements; set `KeychainStore`'s `kSecAttrAccessGroup` to that group.
+  `$(AppIdentifierPrefix)com.fulcra.attention.shared`) to both targets'
+  entitlements; set `KeychainStore`'s `kSecAttrAccessGroup` to the resolved
+  runtime group (`<TeamID>.com.fulcra.attention.shared`). On macOS shared
+  keychain queries also set `kSecUseDataProtectionKeychain` so the access group
+  applies to the data-protection keychain.
 - Add `com.apple.security.application-groups`
   (`group.com.fulcra.attention`) to both; point the resolved-id cache at
   `UserDefaults(suiteName: "group.com.fulcra.attention")`.
 
-**Human step / why this isn't a headless PR:** both identifiers must be
+PR #97 has wired this layer in code (`Sharing.swift`, the app/extension
+entitlements, and the opt-in `KeychainStore(accessGroup:)` path), but the
+profile/capability registration is still a human step before it can be relied on
+in a signed app build.
+
+**Human step / why this can't be proven solely headless:** both identifiers must be
 registered in the Apple Developer portal. With Automatic signing, Xcode
 auto-registers them and regenerates the provisioning profiles **on the first
 GUI build after the capability is enabled** — but a headless `xcodebuild` build
-**fails code-signing** until that profile exists. So the entitlements change
-can't be verified by the author's `xcodebuild`/`swiftc` discipline the way
-`Wire.swift`/`EnsureDefinition.swift` were. It needs Ash to enable the two
-capabilities once in Xcode (Signing & Capabilities → + App Groups, + Keychain
-Sharing) so automatic signing registers them, then it builds headlessly
-thereafter. Team: `CWH48N2H7F`.
+**fails code-signing** until that profile exists. So the entitlements can be
+linted and typechecked, but the signed sharing behavior still needs Ash to
+enable the two capabilities once in Xcode (Signing & Capabilities → + App
+Groups, + Keychain Sharing) so automatic signing registers them, then it builds
+headlessly thereafter. Team: `CWH48N2H7F`.
 
 > Sources for the sharing mechanics: Apple,
 > [Sharing access to keychain items among a collection of apps](https://developer.apple.com/documentation/security/sharing-access-to-keychain-items-among-a-collection-of-apps)
-> (keychain-access-groups entitlement, `$(TeamIdentifierPrefix)` value format,
-> App-Group-≠-keychain-group); App Groups give a shared, **unencrypted**
-> `UserDefaults`/container, so secrets belong in the shared Keychain group.
+> (keychain-access-groups entitlement, `$(AppIdentifierPrefix)` value format,
+> App-Group-≠-keychain-group; on macOS shared access uses the data-protection
+> keychain); App Groups give a shared, **unencrypted** `UserDefaults`/container,
+> so secrets belong in the shared Keychain group.
 
 ### Revised sequencing (native track)
 
 1. ✅ Native auth (device flow via URLSession) + device-local Keychain — **PR #91 (merged)**.
-2. ✅ Wire byte-parity transform → `Wire.swift` — **PR #93 (in review)**.
-3. ✅ Def/tag resolver → `EnsureDefinition.swift` — **PR #94 (in review)**.
+2. ✅ Wire byte-parity transform → `Wire.swift` — **PR #93 (merged)**.
+3. ✅ Def/tag resolver → `EnsureDefinition.swift` — **PR #94 (merged)**.
 4. ✅ JS visibility capture → `visibility.ts` — **PR #87 (in review)**.
-5. ⏳ **Sharing layer** (App Group + Keychain access group) — spec above;
-   **needs Ash's one-time Xcode capability registration** (the only true
-   blocker on this track).
+5. ✅ / pending profile **Sharing layer** (App Group + Keychain access group) — code landed in
+   **PR #97**; still needs Ash's one-time Xcode capability/profile
+   registration before signed runtime sharing is proven.
 6. ⏳ **Native ingest poster** (URLSession → `ingest/v1/record/batch`, refresh
    on 401) — composes Wire.swift + EnsureDefinition.swift + Keychain token;
-   build after #93/#94 merge.
+   build on the merged #93/#94/#97 pieces.
 7. ⏳ **nativeMessaging bridge** — wire `SafariWebExtensionHandler.swift` to
    receive `AttentionEvent` batches from `visibility.ts`, ingest, return auth
    state; needs the sharing layer (5) + ingest (6).
