@@ -4,6 +4,8 @@
 
 Multiple independent agents — local Claude Code sessions, cloud agents, CI jobs, OpenClaw, Codex — coordinate durable work through Fulcra Files without shared memory, direct calls, or a central broker.
 
+> **Agents:** read [`SKILL.md`](SKILL.md) — the discoverable, scannable guide to *when* and *how* to use coord (quick-reference + the load-bearing rules). This README is the human/reference deep-dive; `SKILL.md` is the agent entry point.
+
 ## Value proposition
 
 - **No shared infrastructure required** — Fulcra Files is the only coordination store
