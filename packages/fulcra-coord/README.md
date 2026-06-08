@@ -94,7 +94,7 @@ fulcra-coord done TASK-... \
 | `update` | Update summary / next_action / status |
 | `block` | Mark as blocked. `--blocked-on "<reason>"` for an agent/external blocker; **`--on-user "<ask>"`** to block on the human — assigns the task to the resolved human handle, tags `needs:human`, and lands it on `needs-me` + the human's next SessionStart. Optional scheduling on an `--on-user` ask: **`--not-before <when>`** gates when it surfaces as DUE-NOW (it stays under `needs-me`'s Upcoming until then), and **`--due <when>`** is the informational deadline (drives upcoming ordering/urgency, does not gate). `<when>` is an ISO date/datetime (`2026-06-08`, `2026-06-08T18:00:00Z`) or a relative offset (`5d`, `36h`, `10m`) |
 | `pause` | Set to waiting with a next_action. Add `--snapshot` to write a Fulcra Continuity-compatible checkpoint at the durable pause point without writing snapshots on every task update |
-| `snapshot` | Write a Fulcra Continuity-compatible checkpoint without changing task state (`--reason`, `--transcript-path`, optional `--next`). Used by compaction/idle hooks for low-noise resume state |
+| `snapshot` | Write a Fulcra Continuity-compatible checkpoint without changing task state (`--reason`, `--transcript-path`, optional `--next`). Used by compaction/idle hooks to capture resume state at session boundaries (bounded by `FULCRA_COORD_CONTINUITY_KEEP` retention, not by suppression) |
 | `done` | Mark done (requires evidence) |
 | `abandon` | Mark abandoned |
 | `reconcile` | Repair views and resolve pending markers |

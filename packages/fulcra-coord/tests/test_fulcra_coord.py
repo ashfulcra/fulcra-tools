@@ -3351,7 +3351,8 @@ class TestOpenClawPluginSource(unittest.TestCase):
         self.assertIn('api.on("session_start"', ts)
         self.assertIn('api.on("before_compaction"', ts)
         self.assertIn('api.on("session_end"', ts)
-        # before_compaction ALWAYS checkpoints via `update` (the Track A gap).
+        # before_compaction ALWAYS checkpoints: `update` stamps task freshness
+        # and `snapshot` archives a Fulcra Continuity-compatible resume point.
         self.assertIn("update", ts)
         self.assertIn("snapshot", ts)
         self.assertIn("openclaw-before-compaction", ts)
@@ -7378,7 +7379,8 @@ class TestVersionFlag(unittest.TestCase):
         self.assertNotEqual(__version__, "0.1.0")
 
     def test_version_is_0_12_0(self):
-        # 0.12.0: additive low-noise Continuity trigger layer. coord can write a
+        # 0.12.0: additive boundary-triggered Continuity snapshot layer
+        # (retention-bounded, not gated/suppressed). coord can write a
         # snapshot without changing task state, and lifecycle hooks write
         # checkpoints at compaction/session-end boundaries.
         from fulcra_coord import __version__
