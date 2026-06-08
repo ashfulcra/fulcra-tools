@@ -6,7 +6,7 @@ using Fulcra's file and data stream primitives.
 Nothing in this repo is official Fulcra software, and it may or may
 not be supported in the future. 
 
-This repo contains various Fulcra helper projects and tools built on top of Fulcra. 
+This repo contains various helper projects and tools built on top of Fulcra. 
 Each project keeps its own overview, build,
 and tests; this README is the index that points you to them.
 
