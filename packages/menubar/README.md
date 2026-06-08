@@ -9,7 +9,7 @@ Swift rewrite follows once the UX is locked.
 
 ## Run in dev mode
 
-    cd /Users/Scanning/Developer/fulcra-tools
+    cd path/to/fulcra-tools
     uv sync --extra macos --package fulcra-menubar
     uv run --package fulcra-menubar python -m fulcra_menubar
 

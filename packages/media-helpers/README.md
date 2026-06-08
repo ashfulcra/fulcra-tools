@@ -98,7 +98,7 @@ Watermarks (per-importer high-water marks) live in `~/.config/fulcra-media/state
 - **Source-id idempotency** — every event has a deterministic SHA-derived ID, so re-imports are silent no-ops at the Fulcra layer
 - **JSON envelope** — agent-parseable output across every importer
 
-The sibling project [fulcra-csv-importer](../fulcra-csv-importer) handles the general-purpose CSV→annotation parsing; this repo's `generic-csv` and `generic-rss` importers ride that library.
+The sibling project [fulcra-csv-importer](../csv-importer) handles the general-purpose CSV→annotation parsing; this repo's `generic-csv` and `generic-rss` importers ride that library.
 
 ## Security
 
