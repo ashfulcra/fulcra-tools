@@ -1,7 +1,7 @@
 // macOS (App)/WireParityCheck.swift
 //
 // Standalone parity check for Wire.swift against the golden vectors in
-// attention/chrome/tests/relayless/wire.test.ts. Run it by compiling it
+// packages/attention/chrome/tests/relayless/wire.test.ts. Run it by compiling it
 // together with Wire.swift, e.g.:
 //
 //   swiftc -parse-as-library \

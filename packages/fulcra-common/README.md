@@ -150,13 +150,13 @@ The four primary callsites that previously held inline
 
 - `packages/media-helpers/fulcra_media/fulcra.py:ingest_batch` →
   loops `NormalizedEvent.to_duration_event(...)` → pipeline.
-- `attention/fulcra_attention/ingest.py:build_attention_event`
+- `packages/attention/fulcra_attention/ingest.py:build_attention_event`
   returned a `DurationEvent` for the daemon relay route. That route and
   the relay-era backend are gone: browsing-attention capture is now fully
   relayless — the Chrome extension signs in via an Auth0 device flow and
   POSTs records straight to the Fulcra API
   (`https://api.fulcradynamics.com/ingest/v1/record/batch`), building the
-  same wire shape in TypeScript (`attention/chrome/src/relayless/wire.ts`).
+  same wire shape in TypeScript (`packages/attention/chrome/src/relayless/wire.ts`).
   This bullet documents the historical Python callsite at the time of
   refactor #69.
 - `packages/csv-importer/fulcra_csv/fulcra.py:_build_record` builds a

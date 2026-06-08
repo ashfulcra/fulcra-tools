@@ -7,7 +7,7 @@ name: macOS CI
 # nil` crash, sign-in path resolving `shutil.which("fulcra")` to None) both
 # merged because nothing tested those paths on a clean macOS runner.
 #
-# COST: macOS runners bill at 10x on this PRIVATE repo, and this job runs the
+# COST: macOS runners bill at 10x on this repo, and this job runs the
 # WHOLE workspace (incl. PyObjC, which can't even install on Linux), so it
 # cannot simply move to ubuntu. To stop draining the Actions free tier on
 # changes with no macOS-specific content, the triggers are PATH-FILTERED to
@@ -81,4 +81,4 @@ jobs:
       - name: Run the full test suite
         # Must NOT hit the network. ~1500 tests, ~20s on a clean runner.
         # Fail fast on the first error to surface the cause quickly.
-        run: uv run pytest packages/ attention -q --maxfail=1
+        run: uv run --all-packages --all-extras --no-editable pytest packages/ -q --maxfail=1

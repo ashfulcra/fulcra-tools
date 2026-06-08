@@ -196,7 +196,7 @@ worth a look when nothing else matches.
   and ingests on its own. **Chromium browsers only** (Chrome / Edge /
   Brave / Arc / Vivaldi); Firefox and Safari are not supported yet.
 
-  To set it up: build with `npm run build` in `attention/chrome/`, load
+  To set it up: build with `npm run build` in `packages/attention/chrome/`, load
   `dist/` as an unpacked extension (`chrome://extensions` → Developer
   mode → Load unpacked), then open the extension and click **Connect to
   Fulcra**. Approve the browser sign-in page, choose the **destination**

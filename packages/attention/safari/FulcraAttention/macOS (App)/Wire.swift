@@ -9,13 +9,13 @@
 // dedup/align.
 //
 // Source of truth (ported, not reinvented):
-//   attention/chrome/src/relayless/wire.ts   — SOURCE_PREFIX, sourceId,
+//   packages/attention/chrome/src/relayless/wire.ts   — SOURCE_PREFIX, sourceId,
 //                                               buildWireRecord, encodeBatch
-//   attention/chrome/src/relayless/pyjson.ts — the sorted-key, ensure_ascii
+//   packages/attention/chrome/src/relayless/pyjson.ts — the sorted-key, ensure_ascii
 //                                               JSON encoder the `data` string
 //                                               must match
-//   attention/chrome/src/scrub.ts            — Tier-1 URL scrubbing
-//   attention/chrome/tests/relayless/wire.test.ts — the GOLDEN VECTORS
+//   packages/attention/chrome/src/scrub.ts            — Tier-1 URL scrubbing
+//   packages/attention/chrome/tests/relayless/wire.test.ts — the GOLDEN VECTORS
 //
 // This milestone is JUST the pure transform + a parity check. No auth, no
 // networking, no Keychain — those are later.

@@ -225,7 +225,7 @@ dependencies = [
 [[package]]
 name = "fulcra-attention"
 version = "0.1.0"
-source = { editable = "attention" }
+source = { editable = "packages/attention" }
 dependencies = [
     { name = "fulcra-collect" },
     { name = "fulcra-common" },

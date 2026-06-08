@@ -14,11 +14,7 @@ def _entry_point_ids() -> set[str]:
     """Every plugin id declared across the workspace pyprojects'
     [project.entry-points."fulcra_collect.plugins"] tables."""
     ids: set[str] = set()
-    pyprojects = [
-        *_WORKSPACE.glob("packages/*/pyproject.toml"),
-        # attention lives at the repo root (top-level), not under packages/.
-        _WORKSPACE / "attention" / "pyproject.toml",
-    ]
+    pyprojects = list(_WORKSPACE.glob("packages/*/pyproject.toml"))
     for pyproject in pyprojects:
         if not pyproject.is_file():
             continue

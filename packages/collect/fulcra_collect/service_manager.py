@@ -1,7 +1,7 @@
 """Install the fulcra-collect daemon as an OS-level user service.
 
-macOS: a launchd user agent. Linux: a systemd user unit. Adapted from
-fulcra_attention/service_manager.py — same shape, the hub's daemon.
+macOS: a launchd user agent. Linux: a systemd user unit. Adapted from the
+attention package's service manager (historical) — same shape, the hub's daemon.
 """
 from __future__ import annotations
 
