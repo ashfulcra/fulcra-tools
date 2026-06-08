@@ -105,6 +105,7 @@ from .inbox import (
 from .installers import (
     _report_resolved_cli, cmd_install_claude_code, cmd_install_openclaw,
     cmd_install_codex, cmd_install_heartbeat, cmd_install_listener, cmd_install_shim,
+    cmd_ensure_codex_watch,
 )
 # Diagnostics (capabilities + doctor) extracted from this file. Re-exported so the
 # dispatch (entry.py) and test imports resolve. doctor.py never imports cli.

@@ -4115,16 +4115,24 @@ class TestAgentsDigest(unittest.TestCase):
 class TestCodexTemplates(unittest.TestCase):
     def test_reuses_claude_code_script_bodies_with_codex_review_capability(self):
         from fulcra_coord import codex, claude_code as cc
-        # SessionStart mostly shares the Claude Code body (same stdin shape), but
-        # Codex is the canonical review target, so its hook must publish the
-        # review capability or request-review cannot find it after app startup.
-        self.assertEqual(
-            codex.SESSION_START_SH,
-            cc.SESSION_START_SH.replace(
-                '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
-                '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
-            ),
+        # SessionStart mostly shares the Claude Code body (same stdin shape) with
+        # three intentional Codex transforms: (a) it publishes the review
+        # capability (Codex is the canonical review target, else request-review
+        # can't find it after startup); (b) it backgrounds an `ensure-codex-watch`
+        # self-heal BEFORE that connect (so a fresh Codex box that never ran
+        # `install-listener` still arms its listener); (c) the derived fallback id
+        # is `codex:*` not `claude-code:*`.
+        expected = cc.SESSION_START_SH.replace(
+            '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+            '# Re-arm Codex hooks + the per-agent inbox listener on every app start.\n'
+            '# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.\n'
+            '"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+            '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+        ).replace(
+            '[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"',
+            '[ -z "$AGENT" ] && AGENT="codex:${HOST}:${REPO}"',
         )
+        self.assertEqual(codex.SESSION_START_SH, expected)
         self.assertIn("connect --can-review", codex.SESSION_START_SH)
         # PreCompact reuses the CC body but keys the session-id env fallback on
         # FULCRA_COORD_SESSION_KEY (Codex's session id env differs).
@@ -4132,6 +4140,22 @@ class TestCodexTemplates(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_SESSION_ID", codex.PRE_COMPACT_SH)
         # Gap 1 argv placeholder present so it gets a resolved argv at install.
         self.assertIn("__FULCRA_COORD_ARGV__", codex.PRE_COMPACT_SH)
+
+    def test_session_start_self_heals_via_ensure_codex_watch(self):
+        # Every Codex app start should re-arm its own hooks + per-agent listener so
+        # a fresh machine that never ran `install-listener` still self-heals and
+        # hears directed work. The SessionStart hook backgrounds an
+        # `ensure-codex-watch --no-connect` (--no-connect because the hook already
+        # does its own `connect --can-review` right after — avoid double-connect).
+        from fulcra_coord import codex
+        self.assertIn("ensure-codex-watch", codex.SESSION_START_SH)
+        self.assertIn("--no-connect", codex.SESSION_START_SH)
+        # LOAD-BEARING: the self-heal must be ADDED, never at the cost of the
+        # review-capability connect (#70). The poisoned PR dropped this; guard it.
+        self.assertIn("connect --can-review", codex.SESSION_START_SH)
+        # Backgrounded + silenced so it never blocks or slows session boot.
+        self.assertIn('ensure-codex-watch --agent "$AGENT" --no-connect '
+                      '>/dev/null 2>&1 &', codex.SESSION_START_SH)
 
     def test_no_stop_hook(self):
         # Codex Stop fires every turn and would thrash; end-parking is delegated
@@ -4233,6 +4257,208 @@ class TestInstallCodexCmd(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(
             os.path.join(self.home, ".codex", "hooks.json")))
+
+
+class TestEnsureCodexWatch(unittest.TestCase):
+    """`ensure-codex-watch` — the single idempotent "make Codex coordination
+    self-healing" entry point. It composes the already-hardened installers
+    (install_codex + install_listener), best-effort launchctl-loads the listener
+    plist, and (unless --no-connect) refreshes presence — all fail-safe so it can
+    run backgrounded at every Codex SessionStart without ever hard-failing.
+    """
+
+    def _args(self, **overrides):
+        base = dict(
+            agent="codex:h:r", set_identity=None, no_connect=False,
+            can_review=False, role=None, summary=None, workstream=None,
+            interval_min=None, codex_target_dir=None, listener_target_dir=None,
+            listener_logs_dir=None, no_load=False, dry_run=False, uninstall=False)
+        base.update(overrides)
+        return types.SimpleNamespace(**base)
+
+    def _listener_plan(self, mechanism="launchd"):
+        # Minimal shape ensure-codex-watch reads from the listener plan: a
+        # mechanism (decides whether launchctl load is even attempted) and the
+        # plist path at writes[0] (the load target).
+        return {"mechanism": mechanism, "writes": ["/tmp/x.plist"], "removes": []}
+
+    def test_happy_path_arms_both_installers_loads_and_connects(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0) as m_connect:
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+        # Both hardened installers were composed (not open-coded).
+        m_codex.assert_called_once()
+        m_listener.assert_called_once()
+        self.assertEqual(m_listener.call_args.kwargs.get("agent"), "codex:h:r")
+        # The self-heal launchctl load targets the plan's plist (writes[0]).
+        self.assertTrue(m_run.called, "launchctl load was not attempted")
+        load_argv = m_run.call_args.args[0]
+        self.assertEqual(load_argv[:3], ["launchctl", "load", "-w"])
+        self.assertIn("/tmp/x.plist", load_argv)
+        # Presence refreshed exactly once.
+        m_connect.assert_called_once()
+
+    def test_no_connect_skips_presence(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(self._args(no_connect=True))
+        self.assertEqual(rc, 0)
+        m_connect.assert_not_called()
+
+    def test_no_load_skips_launchctl(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args(no_load=True))
+        self.assertEqual(rc, 0)
+        m_run.assert_not_called()
+
+    def test_non_launchd_mechanism_skips_launchctl(self):
+        # crontab (Linux) has no launchctl — the load step must not fire.
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan(mechanism="crontab")), \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+        m_run.assert_not_called()
+
+    def test_failsafe_load_raise_still_returns_zero(self):
+        # A failed launchctl load (e.g. already-loaded, or launchctl missing) must
+        # NEVER crash the command — it runs backgrounded at every SessionStart.
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run",
+                   side_effect=OSError("boom")), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+
+    def test_failsafe_connect_raise_still_returns_zero(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect",
+                   side_effect=RuntimeError("boom")):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+
+    def test_dry_run_delegates_no_load_no_connect(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(self._args(dry_run=True))
+        self.assertEqual(rc, 0)
+        # Installers run in dry-run (they print their own plans).
+        self.assertTrue(m_codex.call_args.kwargs.get("dry_run"))
+        self.assertTrue(m_listener.call_args.kwargs.get("dry_run"))
+        # No side effects in dry-run.
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
+    def test_dry_run_set_identity_does_not_persist(self):
+        # `--dry-run` promises zero side effects. A declared identity should shape
+        # the printed listener plan, but must not write identity state.
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.identity.set_identity") as m_set, \
+             patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(dry_run=True, set_identity="codex:box:repo"))
+        self.assertEqual(rc, 0)
+        m_set.assert_not_called()
+        self.assertTrue(m_codex.call_args.kwargs.get("dry_run"))
+        self.assertTrue(m_listener.call_args.kwargs.get("dry_run"))
+        self.assertEqual(m_listener.call_args.kwargs.get("agent"), "codex:box:repo")
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
+    def test_set_identity_persists_before_arming(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.identity.set_identity") as m_set, \
+             patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(set_identity="codex:box:repo"))
+        self.assertEqual(rc, 0)
+        m_set.assert_called_once_with("codex:box:repo")
+
+    def test_idempotent_two_calls_both_return_zero(self):
+        # The underlying installers are idempotent; running twice must be a clean
+        # no-op (this is the every-SessionStart contract).
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            a = installers.cmd_ensure_codex_watch(self._args())
+            b = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual((a, b), (0, 0))
+
+    def test_uninstall_tears_down_both(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex") as m_codex, \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()) as m_listener, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect"):
+            rc = installers.cmd_ensure_codex_watch(self._args(uninstall=True))
+        self.assertEqual(rc, 0)
+        self.assertTrue(m_codex.call_args.kwargs.get("uninstall"))
+        self.assertTrue(m_listener.call_args.kwargs.get("uninstall"))
+
+
+class TestEnsureCodexWatchDispatch(unittest.TestCase):
+    def test_in_command_map(self):
+        from fulcra_coord.entry import COMMAND_MAP
+        from fulcra_coord import cli as climod
+        self.assertIn("ensure-codex-watch", COMMAND_MAP)
+        self.assertIs(COMMAND_MAP["ensure-codex-watch"],
+                      climod.cmd_ensure_codex_watch)
+
+    def test_parser_accepts_flags(self):
+        from fulcra_coord.entry import build_parser
+        parser = build_parser()
+        ns = parser.parse_args([
+            "ensure-codex-watch", "--agent", "codex:h:r",
+            "--set-identity", "codex:h:r", "--no-connect", "--can-review",
+            "--interval-min", "15", "--no-load", "--dry-run"])
+        self.assertEqual(ns.command, "ensure-codex-watch")
+        self.assertEqual(ns.agent, "codex:h:r")
+        self.assertEqual(ns.set_identity, "codex:h:r")
+        self.assertTrue(ns.no_connect)
+        self.assertTrue(ns.can_review)
+        self.assertEqual(ns.interval_min, 15)
+        self.assertTrue(ns.no_load)
+        self.assertTrue(ns.dry_run)
 
 
 class TestCodexHookParity(unittest.TestCase):

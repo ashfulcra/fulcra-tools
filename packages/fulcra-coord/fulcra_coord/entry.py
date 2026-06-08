@@ -330,6 +330,37 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--uninstall", action="store_true", help="Remove the managed hooks")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
 
+    # ---- ensure-codex-watch ----
+    sp = sub.add_parser("ensure-codex-watch",
+                        help="Idempotently arm Codex hooks + per-agent inbox "
+                             "listener; safe to run at every Codex SessionStart")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Agent to arm (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--set-identity", dest="set_identity", default=None, metavar="AGENT",
+                    help="Persist this declared identity for the current cwd first")
+    sp.add_argument("--no-connect", dest="no_connect", action="store_true",
+                    help="Skip the presence refresh after arming")
+    sp.add_argument("--can-review", dest="can_review", action="store_true",
+                    help="Declare review capability when refreshing presence")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Declare a capability/role when refreshing presence (repeatable)")
+    sp.add_argument("--summary", default=None, metavar="TEXT",
+                    help="One-line 'what I'm on' for the presence refresh")
+    sp.add_argument("--interval-min", dest="interval_min", type=int, default=None,
+                    metavar="N", help="Listener poll cadence in minutes (default: 10)")
+    sp.add_argument("--codex-target-dir", dest="codex_target_dir", default=None,
+                    metavar="DIR", help="Override the Codex config dir (default: ~/.codex)")
+    sp.add_argument("--listener-target-dir", dest="listener_target_dir", default=None,
+                    metavar="DIR", help="Override the listener LaunchAgents/cron dir")
+    sp.add_argument("--listener-logs-dir", dest="listener_logs_dir", default=None,
+                    metavar="DIR", help="Override the listener stdout/stderr logs dir")
+    sp.add_argument("--no-load", dest="no_load", action="store_true",
+                    help="Skip the best-effort launchctl load of the listener plist")
+    sp.add_argument("--uninstall", action="store_true",
+                    help="Tear down the Codex hooks + per-agent listener")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Print intended changes, write nothing, no load/connect")
+
     # ---- install-heartbeat ----
     sp = sub.add_parser("install-heartbeat",
                         help="Install a scheduled `fulcra-coord reconcile` heartbeat "
@@ -499,6 +530,7 @@ COMMAND_MAP = {
     "install-listener": _cli.cmd_install_listener,
     "notify-inbox": _cli.cmd_notify_inbox,
     "install-codex": _cli.cmd_install_codex,
+    "ensure-codex-watch": _cli.cmd_ensure_codex_watch,
     "identity": _cli.cmd_identity,
     "human": _cli.cmd_human,
     "annotations": _cli.cmd_annotations,
