@@ -106,6 +106,12 @@ def _escalate_review_to_human(*, pr, repo, tried, backend=None, existing=None):
     """Escalate a review with no live reviewer to the human via the existing
     block --on-user shape (needs:human -> needs-me plate + digest + banner).
 
+    Forge-agnostic: `pr` is the OPAQUE artifact ref (PR#/MR#/branch/SHA/URL),
+    rendered the SAME way cmd_request_review does — "#<n>" for an all-digit ref,
+    verbatim otherwise — with no hardcoded "PR " prefix. `repo` is optional;
+    when absent we fall back to "general" everywhere (workstream, ask, marker)
+    so a repo-less ref never emits the literal "None".
+
     Idempotent by caller: the sweep passes `existing` (the review task) to
     update IT in place (so the escalation lands on the same task the agents are
     already tracking, not a duplicate); a fresh request-review miss passes None
@@ -114,14 +120,18 @@ def _escalate_review_to_human(*, pr, repo, tried, backend=None, existing=None):
     try:
         human = identity.resolve_human()
         me = identity.resolve_agent(None)
-        ask = (f"PR #{pr} in {repo} needs review; no reviewer is live/idle "
-               f"(tried: {', '.join(tried) or 'none'}). Assign a reviewer manually.")
-        marker = f"review-escalation:{repo}#{pr}"
+        artifact_display = (f"#{pr}" if str(pr).isdigit() else str(pr))
+        repo_label = repo or "general"
+        repo_clause = f" in {repo}" if repo else ""
+        ask = (f"{artifact_display}{repo_clause} needs review; no reviewer is "
+               f"live/idle (tried: {', '.join(tried) or 'none'}). Assign a "
+               f"reviewer manually.")
+        marker = f"review-escalation:{repo_label}#{pr}"
         task = existing
         if task is None:
             task = schema.make_task(
-                title=f"PR #{pr} needs a reviewer ({repo})",
-                workstream=repo, agent=me, owner_agent=me, assignee=human,
+                title=f"{artifact_display}{repo_clause} needs a reviewer",
+                workstream=repo_label, agent=me, owner_agent=me, assignee=human,
                 priority="P1",
                 summary=ask)
         task = _force_block_for_human(task, by=me, ask=ask, human=human)
@@ -135,7 +145,8 @@ def _escalate_review_to_human(*, pr, repo, tried, backend=None, existing=None):
 
 
 def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
-    """Route a PR review to a live/idle reviewer, or escalate to the human.
+    """Route a review of an artifact to a live/idle reviewer, or escalate to the
+    human.
 
     Builds a preference-ordered pool (canonical reviewer seed + capability:review
     agents), resolves the best live/idle recipient via the liveness-aware
@@ -224,38 +235,30 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
 REVIEW_VERDICT_TAG = "kind:review-verdict"
 
 
-def _artifact_matches_title(artifact: str, title: str) -> bool:
-    """True iff a routed review directive's title references this artifact.
-
-    Mirrors request-review's title convention so review-done can find the
-    author's original review request: a bare-number artifact appears as "#<n>"
-    in the title; any other ref (branch/SHA/URL/patch id) appears verbatim. The
-    substring check is the same artifact-matching idea as the title builder."""
-    if not title:
-        return False
-    needle = f"#{artifact}" if str(artifact).isdigit() else str(artifact)
-    return needle in title
-
-
 def _resolve_review_author(artifact: str, *, backend=None) -> Optional[str]:
     """Find the AUTHOR who requested review of this artifact, or None.
 
     request-review records the author as ``owner_agent`` on the routed
-    kind:review directive (the author requested the review; the reviewer is the
-    assignee). So we scan open kind:review directives whose title references the
-    artifact and return the first one's owner_agent. Returns None when no such
-    directive exists — the caller must then require --to rather than guess.
-    Best-effort: a load failure resolves to None (caller falls back to --to)."""
+    kind:review directive and stores the opaque artifact ref verbatim in
+    ``task["pr"]`` (routing_ops ~:207). We match on that EXACT stored field —
+    ``str(t["pr"]) == str(artifact)`` — never on a substring of the directive
+    title. Title-substring matching was a confident-misroute hazard: it sent
+    `review-done 10`'s verdict to the author of a `Review #101 …` directive
+    (and `feat/x` to `feat/xyz`), which is worse than a clean error. Returns
+    None when no exact match exists — the caller then requires --to rather than
+    guess. Best-effort: a load failure resolves to None (caller falls back to
+    --to)."""
     try:
         tasks = _load_all_tasks(backend=backend)
     except Exception:  # noqa: BLE001 — never crash the verdict path on a load error
         return None
+    target = str(artifact)
     for t in tasks:
         if not routing.is_review_directive(t):
             continue
         if t.get("status") in ("done", "abandoned"):
             continue
-        if not _artifact_matches_title(artifact, t.get("title", "")):
+        if str(t.get("pr")) != target:  # EXACT stored-ref match, no substrings
             continue
         author = t.get("owner_agent")
         if author:
@@ -292,6 +295,22 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     # Resolve the author the verdict is directed at. --to is the explicit override;
     # otherwise derive it from the original review request. Never guess.
     author = to or _resolve_review_author(artifact, backend=backend)
+
+    # --dry-run must NEVER hard-fail: it's a planning/preview mode, so an
+    # unresolved author prints the plan with a "<unresolved — pass --to>"
+    # placeholder and returns 0. Only the real (non-dry-run) path treats an
+    # unresolved author as a clean error.
+    if dry_run:
+        to_display = author or "<unresolved — pass --to>"
+        report = {"artifact": artifact, "verdict": verdict, "to": to_display,
+                  "from": reviewer, "note": note, "repo": repo,
+                  "tag": REVIEW_VERDICT_TAG}
+        if getattr(args, "format", "table") == "json":
+            _print_json(report)
+        else:
+            _info(f"[dry-run] verdict {verdict} on {artifact_display} -> {to_display}")
+        return 0
+
     if not author:
         _warn(f"could not resolve the author of {artifact_display}; "
               f"pass --to <agent>")
@@ -304,16 +323,6 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     # next_action nudges the author toward the obvious follow-up per verdict.
     next_action = ("Address the requested changes." if verdict == "changes"
                    else "Approved — proceed to land.")
-
-    if dry_run:
-        report = {"artifact": artifact, "verdict": verdict, "to": author,
-                  "from": reviewer, "note": note, "repo": repo,
-                  "tag": REVIEW_VERDICT_TAG}
-        if getattr(args, "format", "table") == "json":
-            _print_json(report)
-        else:
-            _info(f"[dry-run] verdict {verdict} on {artifact_display} -> {author}")
-        return 0
 
     try:
         workstream = repo or "general"

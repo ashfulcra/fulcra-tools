@@ -244,8 +244,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- request-review ----
     sp = sub.add_parser(
         "request-review",
-        help="Route a PR review to a live/idle reviewer (capability-based, "
-             "self-healing); escalates to the human if nobody qualifies")
+        help="Route a review of an artifact to a live/idle reviewer "
+             "(capability-based, self-healing); escalates to the human if "
+             "nobody qualifies")
     # `dest` stays "pr" so args.pr keeps working (lower churn), but the artifact
     # is now an OPAQUE ref — a PR#, MR#, branch, commit SHA, URL, or patch id —
     # not specifically a GitHub PR. --repo is OPTIONAL (forge-agnostic refs like
