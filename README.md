@@ -33,13 +33,9 @@ and tests; this README is the index that points you to them.
 
 > **Related standalone repos.** The **Hermes "press play" demo** (per-guest
 > ephemeral Hermes agents that onboard each person into their own Fulcra
-> account) lives in its own repos, not this monorepo:
-> [`ashfulcra/fulcra-hermes-vercel`](https://github.com/ashfulcra/fulcra-hermes-vercel)
-> (the active Vercel Sandbox port),
-> [`ashfulcra/fulcra-litellm`](https://github.com/ashfulcra/fulcra-litellm)
-> (its LLM gateway), and
-> [`ashfulcra/fulcra-hermes-daytona`](https://github.com/ashfulcra/fulcra-hermes-daytona)
-> (the deprecated original Daytona port).
+> account) lives in its own repos, not this monorepo: `fulcra-hermes-vercel`
+> (the active Vercel Sandbox port), `fulcra-litellm` (its LLM gateway), and
+> `fulcra-hermes-daytona` (the deprecated original Daytona port).
 
 > **More coming.** Ash's other Fulcra projects will be added here as they are
 > consolidated into this repo — each as its own row above, linking to
