@@ -1,5 +1,7 @@
 # Fulcra Coordination Protocol for Claude Code
 
+> **Canonical coord guide:** [`fulcra-coord/SKILL.md`](../../SKILL.md) — the runtime-agnostic when/how-to-use reference (quick-reference + load-bearing rules). This file is the Claude Code-specific layer.
+
 This repo uses **fulcra-coord** to coordinate durable work across agent sessions using Fulcra Files as a shared bus. Read this before starting any non-trivial task.
 
 ## Setup check

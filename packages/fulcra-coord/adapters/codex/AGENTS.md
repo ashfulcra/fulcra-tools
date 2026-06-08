@@ -1,5 +1,7 @@
 # Fulcra Coordination Protocol for Codex Agents
 
+> **Canonical coord guide:** [`fulcra-coord/SKILL.md`](../../SKILL.md) — the runtime-agnostic when/how-to-use reference (quick-reference + load-bearing rules). This file is the Codex-specific layer.
+
 This project uses **fulcra-coord** for durable task coordination across agent sessions. Fulcra Files acts as a shared coordination bus — no shared memory or direct agent-to-agent calls required.
 
 ## Setup

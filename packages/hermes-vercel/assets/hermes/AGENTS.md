@@ -1,5 +1,7 @@
 # Onboarding directive
 
+> **Canonical coord guide:** `packages/fulcra-coord/SKILL.md` (the fulcra-coord package in the fulcra-tools monorepo) — the runtime-agnostic when/how-to-use coord reference (quick-reference + load-bearing rules). This file is the Hermes-specific layer.
+
 When a session starts, your first action is to run the `fulcra-onboarding`
 skill (read its SKILL.md and follow it). The skill greets the user; you do not
 add a separate greeting.

@@ -1,5 +1,7 @@
 # Onboard an already-running Claude Code session
 
+> **Canonical coord guide:** [`fulcra-coord/SKILL.md`](../../SKILL.md) — the runtime-agnostic when/how-to-use reference (quick-reference + load-bearing rules). This file is the Claude Code-specific onboarding layer.
+
 A new session is wired automatically once `fulcra-coord install-claude-code`
 has run (its SessionStart hook fires at launch). A session that was ALREADY
 running when hooks were installed must onboard manually — run these now:
