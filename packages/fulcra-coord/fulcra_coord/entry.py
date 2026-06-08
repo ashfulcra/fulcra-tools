@@ -246,14 +246,40 @@ def build_parser() -> argparse.ArgumentParser:
         "request-review",
         help="Route a PR review to a live/idle reviewer (capability-based, "
              "self-healing); escalates to the human if nobody qualifies")
-    sp.add_argument("pr", metavar="PR", help="PR number/identifier")
-    sp.add_argument("--repo", required=True, metavar="REPO")
+    # `dest` stays "pr" so args.pr keeps working (lower churn), but the artifact
+    # is now an OPAQUE ref — a PR#, MR#, branch, commit SHA, URL, or patch id —
+    # not specifically a GitHub PR. --repo is OPTIONAL (forge-agnostic refs like
+    # a branch or URL carry their own context).
+    sp.add_argument("pr", metavar="ARTIFACT",
+                    help="What to review: PR#/MR#/branch/commit SHA/URL/patch id")
+    sp.add_argument("--repo", required=False, default=None, metavar="REPO")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
                     help="The author (default: derived) — selects the canonical reviewer")
     sp.add_argument("--candidate-list", dest="candidate_list", default=None, metavar="A,B,C",
                     help="Explicit preference-ordered pool override (advanced)")
     sp.add_argument("--dry-run", dest="dry_run", action="store_true",
                     help="Print ranked pool / tiers / excluded / winner / reason; write nothing")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
+    # ---- review-done ----
+    sp = sub.add_parser(
+        "review-done",
+        help="Land a reviewer's verdict as a bus directive to the artifact's "
+             "author (forge-agnostic — never a GitHub-comment-only signal). "
+             "The verdict always reaches the author's inbox.")
+    sp.add_argument("artifact", metavar="ARTIFACT",
+                    help="What was reviewed: PR#/MR#/branch/commit SHA/URL/patch id")
+    sp.add_argument("--verdict", required=True, choices=["approve", "changes"],
+                    help="approve|changes — the review outcome")
+    sp.add_argument("--note", default=None, metavar="TEXT",
+                    help="Optional reviewer note carried in the directive")
+    sp.add_argument("--repo", required=False, default=None, metavar="REPO")
+    sp.add_argument("--to", dest="to", default=None, metavar="AGENT",
+                    help="Explicit author override (skips author resolution)")
+    sp.add_argument("--from", dest="from", default=None, metavar="REVIEWER",
+                    help="The reviewer (default: derived identity)")
+    sp.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="Print what would be posted; write nothing")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- reconcile ----
@@ -543,6 +569,7 @@ COMMAND_MAP = {
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
     "request-review": _cli.cmd_request_review,
+    "review-done": _cli.cmd_review_done,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "restore": _cli.cmd_restore,

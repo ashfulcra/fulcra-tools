@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, routing, env_float
-from .io import _cache_remote_task
+from .io import _cache_remote_task, _load_all_tasks
 from .output import info as _info, print_json as _print_json, warn as _warn
 from .timeutil import iso_z as _iso_z
 from .writepipe import _write_task_and_views
@@ -145,8 +145,11 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     nothing. Best-effort: a presence/resolve failure escalates rather than
     crashing (a review must never silently vanish)."""
     from . import routing
-    pr = args.pr
-    repo = args.repo
+    # The artifact is an OPAQUE review ref (PR#/MR#/branch/SHA/URL/patch id), not
+    # specifically a GitHub PR. args.pr keeps the historical dest name (lower
+    # churn); `artifact` is the clear local. --repo is now optional.
+    artifact = args.pr
+    repo = getattr(args, "repo", None)
     dry_run = getattr(args, "dry_run", False)
     out_format = getattr(args, "format", "table")
     author = identity.resolve_agent(getattr(args, "agent", None))
@@ -170,8 +173,12 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     ]
     winner = views.resolve_live_recipient(pool, presence, floor="idle", now=now)
     excluded = [s for s in snapshot if s["tier"] == "below-floor"]
+    # Display form of the artifact: bare-number refs keep the "#<n>" convention
+    # (backward compat with the old "Review PR #<n>", minus the hardcoded "PR ");
+    # everything else (branch/SHA/URL/patch id) is shown verbatim.
+    artifact_display = (f"#{artifact}" if str(artifact).isdigit() else str(artifact))
     if dry_run:
-        report = {"pr": pr, "repo": repo, "pool": pool, "snapshot": snapshot,
+        report = {"artifact": artifact, "repo": repo, "pool": pool, "snapshot": snapshot,
                   "excluded": [e["agent"] for e in excluded], "winner": winner,
                   "reason": "live/idle reviewer found" if winner
                             else "no live reviewer — would escalate"}
@@ -181,20 +188,25 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
             _info(f"[dry-run] pool={pool} winner={winner}")
         return 0
     if winner is None:
-        _escalate_review_to_human(pr=pr, repo=repo,
+        _escalate_review_to_human(pr=artifact, repo=repo,
                                   tried=[s["agent"] for s in snapshot], backend=backend)
-        _info(f"PR #{pr}: no reviewer live — escalated to human.")
+        _info(f"Review {artifact_display}: no reviewer live — escalated to human.")
         return 0
     # HIT: build the directive, tag kind:review, append routed event + assignee.
-    title = f"Review PR #{pr} — assume bugs, claim the review before working"
+    title = f"Review {artifact_display} — assume bugs, claim the review before working"
+    # --repo is optional now; when absent the directive has no repo workstream, so
+    # fall back to "general" and omit the "in <repo>" clause from the summary.
+    workstream = repo or "general"
+    repo_clause = f" in {repo}" if repo else ""
     task = schema.make_task(
-        title=title, workstream=repo, agent=author,
+        title=title, workstream=workstream, agent=author,
         owner_agent=author, assignee=winner, priority="P1",
-        summary=(f"PR #{pr} in {repo} needs review. Claim it (transition active / "
-                 f"emit review-accepted) before working."))
+        summary=(f"Review {artifact_display}{repo_clause} needs review. Claim it "
+                 f"(transition active / emit review-accepted) before working."))
     task["tags"] = sorted(set(task.get("tags", []) + [routing.REVIEW_TAG]))
-    task["pr"] = pr
-    task["repo"] = repo  # carried for the sweep + audit
+    task["pr"] = artifact
+    if repo is not None:
+        task["repo"] = repo  # carried for the sweep + audit (only when supplied)
     tier = next((s["tier"] for s in snapshot if s["agent"] == winner), "idle")
     task = _append_route_event_and_assignee(
         task, kind="routed", to=winner, by=author, attempt=1,
@@ -205,7 +217,123 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
         ok = _write_task_and_views(task, backend=backend, command="request-review")
     except (schema.ConflictError, schema.NeedsReconcile):
         ok = True
-    _info(f"PR #{pr} routed to {winner} ({tier}).")
+    _info(f"Review {artifact_display} routed to {winner} ({tier}).")
+    return 0 if ok else 1
+
+
+REVIEW_VERDICT_TAG = "kind:review-verdict"
+
+
+def _artifact_matches_title(artifact: str, title: str) -> bool:
+    """True iff a routed review directive's title references this artifact.
+
+    Mirrors request-review's title convention so review-done can find the
+    author's original review request: a bare-number artifact appears as "#<n>"
+    in the title; any other ref (branch/SHA/URL/patch id) appears verbatim. The
+    substring check is the same artifact-matching idea as the title builder."""
+    if not title:
+        return False
+    needle = f"#{artifact}" if str(artifact).isdigit() else str(artifact)
+    return needle in title
+
+
+def _resolve_review_author(artifact: str, *, backend=None) -> Optional[str]:
+    """Find the AUTHOR who requested review of this artifact, or None.
+
+    request-review records the author as ``owner_agent`` on the routed
+    kind:review directive (the author requested the review; the reviewer is the
+    assignee). So we scan open kind:review directives whose title references the
+    artifact and return the first one's owner_agent. Returns None when no such
+    directive exists — the caller must then require --to rather than guess.
+    Best-effort: a load failure resolves to None (caller falls back to --to)."""
+    try:
+        tasks = _load_all_tasks(backend=backend)
+    except Exception:  # noqa: BLE001 — never crash the verdict path on a load error
+        return None
+    for t in tasks:
+        if not routing.is_review_directive(t):
+            continue
+        if t.get("status") in ("done", "abandoned"):
+            continue
+        if not _artifact_matches_title(artifact, t.get("title", "")):
+            continue
+        author = t.get("owner_agent")
+        if author:
+            return author
+    return None
+
+
+def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Land a reviewer's verdict as a BUS directive to the artifact's author.
+
+    The durable fix for review verdicts getting lost when a reviewer posts only
+    to a forge (GitHub comment): the verdict ALWAYS rides the bus to the author's
+    inbox (listener/SessionStart catch it), regardless of any forge mirror.
+    coord NEVER calls gh / a forge — the directive is the source of truth; a
+    forge mirror is the reviewer's separate manual step.
+
+    Author resolution: --to wins if given; else the open kind:review directive
+    whose title references this artifact supplies its owner_agent (the author who
+    requested the review). If neither resolves, error cleanly (do NOT guess /
+    broadcast). The directive is a proposed task assigned to the author, tagged
+    kind:review-verdict, carrying the verdict + note. Best-effort + fail-safe:
+    a write failure warns and returns non-zero rather than crashing."""
+    artifact = args.artifact
+    verdict = args.verdict
+    note = getattr(args, "note", None) or ""
+    repo = getattr(args, "repo", None)
+    to = getattr(args, "to", None)
+    reviewer = getattr(args, "from", None)
+    dry_run = getattr(args, "dry_run", False)
+
+    reviewer = identity.resolve_agent(reviewer)
+    artifact_display = (f"#{artifact}" if str(artifact).isdigit() else str(artifact))
+
+    # Resolve the author the verdict is directed at. --to is the explicit override;
+    # otherwise derive it from the original review request. Never guess.
+    author = to or _resolve_review_author(artifact, backend=backend)
+    if not author:
+        _warn(f"could not resolve the author of {artifact_display}; "
+              f"pass --to <agent>")
+        return 1
+
+    title = f"Review verdict ({verdict}) on {artifact_display}"
+    summary = f"Reviewer {reviewer} verdict: {verdict}."
+    if note:
+        summary += f" Note: {note}"
+    # next_action nudges the author toward the obvious follow-up per verdict.
+    next_action = ("Address the requested changes." if verdict == "changes"
+                   else "Approved — proceed to land.")
+
+    if dry_run:
+        report = {"artifact": artifact, "verdict": verdict, "to": author,
+                  "from": reviewer, "note": note, "repo": repo,
+                  "tag": REVIEW_VERDICT_TAG}
+        if getattr(args, "format", "table") == "json":
+            _print_json(report)
+        else:
+            _info(f"[dry-run] verdict {verdict} on {artifact_display} -> {author}")
+        return 0
+
+    try:
+        workstream = repo or "general"
+        task = schema.make_task(
+            title=title, workstream=workstream, agent=reviewer,
+            owner_agent=reviewer, assignee=author, priority="P1",
+            summary=summary, next_action=next_action)
+        task["tags"] = sorted(set(task.get("tags", []) + [REVIEW_VERDICT_TAG]))
+        task["pr"] = artifact
+        if repo is not None:
+            task["repo"] = repo
+        cache.write_cached_task(task)
+        try:
+            ok = _write_task_and_views(task, backend=backend, command="review-done")
+        except (schema.ConflictError, schema.NeedsReconcile):
+            ok = True
+    except Exception as e:  # noqa: BLE001 — best-effort; a write blowup warns, never crashes
+        _warn(f"review-done directive failed (non-fatal): {e}")
+        return 1
+    _info(f"Review verdict ({verdict}) on {artifact_display} sent to {author}.")
     return 0 if ok else 1
 
 
