@@ -199,10 +199,14 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
             _info(f"[dry-run] pool={pool} winner={winner}")
         return 0
     if winner is None:
-        _escalate_review_to_human(pr=artifact, repo=repo,
-                                  tried=[s["agent"] for s in snapshot], backend=backend)
-        _info(f"Review {artifact_display}: no reviewer live — escalated to human.")
-        return 0
+        escalated = _escalate_review_to_human(
+            pr=artifact, repo=repo, tried=[s["agent"] for s in snapshot],
+            backend=backend)
+        if escalated:
+            _info(f"Review {artifact_display}: no reviewer live — escalated to human.")
+            return 0
+        _warn(f"Review {artifact_display}: no reviewer live and escalation failed.")
+        return 1
     # HIT: build the directive, tag kind:review, append routed event + assignee.
     title = f"Review {artifact_display} — assume bugs, claim the review before working"
     # --repo is optional now; when absent the directive has no repo workstream, so

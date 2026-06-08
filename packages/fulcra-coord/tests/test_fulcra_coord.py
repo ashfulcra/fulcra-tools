@@ -10138,6 +10138,21 @@ class TestRequestReview(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("42", escalated.get("pr", ""))
 
+    def test_miss_returns_nonzero_when_human_escalation_fails(self):
+        from fulcra_coord.cli import cmd_request_review
+        old_ls = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": old_ls, "capabilities": ["review"]}])
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.routing_ops._escalate_review_to_human",
+                   return_value=False), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 1)
+
     def test_escalate_to_human_lands_blocked_needs_human(self):
         # _escalate_review_to_human must actually land a blocked, human-assigned
         # task carrying needs:human, even though make_task starts at 'proposed'
