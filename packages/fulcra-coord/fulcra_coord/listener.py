@@ -47,14 +47,19 @@ reports the plan, surgical uninstall, fail-safe. stdlib-only. ``target_dir`` /
 """
 from __future__ import annotations
 
+import json
+import os
 import plistlib
 import shlex
+import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from . import cli_invocation
+from . import env_int
 from . import scheduler_env
 from .views import agent_slug  # one source of truth for the agent->slug mapping
 
@@ -350,39 +355,116 @@ def install_listener(*, agent: str, interval_min: int = INTERVAL_MIN_DEFAULT,
     return plan
 
 
-def emit_notification(agent: str, count: int) -> None:
-    """Best-effort desktop notification that `count` directives await `agent`.
+# ---------------------------------------------------------------------------
+# Cross-platform notification delivery.
+#
+# WHY this layer exists: the listener's only push path used to be ``osascript
+# display notification`` — which silently drops banners when the osascript host
+# isn't authorized, and is useless on a headless Linux server. To make delivery
+# distributable (reach the operator's phone regardless of which host fired the
+# tick, work on every OS), every push now flows through ``_deliver``: a
+# best-effort HTTP push to a user-configured webhook (Tier 1) PLUS a native
+# desktop notification (Tier 2). Both tiers are independent and best-effort — a
+# failing/raising webhook must never skip native, and vice-versa, and neither
+# may ever raise into a polling tick. (Guaranteed delivery — the SessionStart
+# surface file — is Tier 0 and lives in inbox.py, untouched.)
+# ---------------------------------------------------------------------------
 
-    macOS -> osascript ``display notification`` (the user-session notifier where
-    the operator's agents run); elsewhere -> a line on stderr (which cron/launchd
-    capture to their logs). Swallows EVERY error: a failed notification must
-    never break the scheduled job (fail-safe contract). Pure side-effect, no
-    return — callers decide whether to call it (skip on empty inbox)."""
-    msg = f"{count} directive(s) waiting in your fulcra-coord inbox"
+def _notify_webhook_url() -> str:
+    """The operator's push-webhook URL, or "" when unconfigured (push disabled,
+    native-only). Read fresh each call so a tick picks up a newly-set env var."""
+    return os.environ.get("FULCRA_COORD_NOTIFY_WEBHOOK", "").strip()
+
+
+def _notify_timeout() -> int:
+    """Socket timeout (seconds) for the webhook POST. A small default keeps a
+    slow/hung webhook from stalling a polling tick; env-tunable for odd hosts."""
+    return env_int("FULCRA_COORD_NOTIFY_TIMEOUT", 5)
+
+
+def _webhook_format(url: str) -> str:
+    """Pick the payload shape for ``url``: one of ``ntfy|slack|discord|json``.
+
+    Precedence: an explicit ``FULCRA_COORD_NOTIFY_FORMAT`` (normalized lower)
+    wins when recognized; otherwise (including an unrecognized explicit value)
+    auto-detect from the host — ``discord`` / ``slack`` substrings map to their
+    rich-webhook shapes, everything else falls to ``ntfy`` (a plain-body POST,
+    the safe generic default that also suits a bespoke text endpoint)."""
+    explicit = os.environ.get("FULCRA_COORD_NOTIFY_FORMAT", "").strip().lower()
+    if explicit in ("ntfy", "slack", "discord", "json"):
+        return explicit
+    low = url.lower()
+    if "discord" in low:
+        return "discord"
+    if "slack" in low:
+        return "slack"
+    return "ntfy"
+
+
+def _ascii_header(value: str, fallback: str = "fulcra-coord") -> str:
+    """Make ``value`` safe for an HTTP header: ntfy carries the notification
+    title in a ``Title`` header, which must be plain ASCII with no newlines.
+    A non-ASCII title (e.g. the "⛔ needs you" alert) can't ride a header, so we
+    fall back to a plain marker rather than corrupting or crashing the request."""
     try:
-        if scheduler_env.is_macos():
-            subprocess.run(
-                ["osascript", "-e",
-                 f'display notification {_osa_quote(msg)} '
-                 f'with title "fulcra-coord"'],
-                capture_output=True, timeout=5, check=False,
-            )
-        else:
-            print(f"[fulcra-coord] {agent}: {msg}", file=sys.stderr)
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return fallback
+    cleaned = value.replace("\r", " ").replace("\n", " ").strip()
+    return cleaned or fallback
+
+
+def _build_webhook_request(url: str, title: str,
+                           message: str) -> urllib.request.Request:
+    """Build (do NOT send) the POST ``Request`` for ``url`` per its format.
+
+    Pure function so the payload/headers are unit-testable without a network: it
+    only constructs the Request; ``_post_webhook`` is what dispatches it."""
+    fmt = _webhook_format(url)
+    if fmt == "slack":
+        body = json.dumps({"text": f"{title}: {message}"}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+    elif fmt == "discord":
+        # Discord caps message content at 2000 chars; truncate with headroom.
+        content = f"**{title}**\n{message}"[:1900]
+        body = json.dumps({"content": content}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+    elif fmt == "json":
+        body = json.dumps({"title": title, "message": message}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+    else:  # ntfy (and the generic default): title in a header, body is the text.
+        body = message.encode("utf-8")
+        headers = {
+            "Title": _ascii_header(title),
+            "Content-Type": "text/plain; charset=utf-8",
+        }
+    return urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+
+def _post_webhook(url: str, title: str, message: str) -> bool:
+    """Send the webhook POST. Returns True on completion, False on ANY error.
+
+    Best-effort: swallows every exception (DNS/connection/timeout/HTTP error/
+    bad URL) so a misconfigured or unreachable webhook never raises into — or
+    blocks — a polling tick. The boolean is advisory only (callers ignore it
+    today); native delivery runs regardless."""
+    try:
+        req = _build_webhook_request(url, title, message)
+        with urllib.request.urlopen(req, timeout=_notify_timeout()):
+            return True
     except Exception:
-        # Notification is advisory; never let it fail the listener tick.
-        pass
+        return False
 
 
-def emit_message(message: str, *, title: str = "fulcra-coord") -> None:
-    """Best-effort desktop notification of an arbitrary `message`.
+def _emit_native(message: str, title: str) -> None:
+    """Best-effort NATIVE desktop notification (Tier 2), per OS:
 
-    The general-purpose sibling of ``emit_notification`` (which formats a fixed
-    inbox-count string). Used for the blocked-on-you alert
-    ("⛔ <agent> needs you: <ask>") where the caller composes the full message.
-    macOS -> osascript ``display notification``; elsewhere -> a stderr line that
-    cron/launchd capture. Swallows EVERY error so a failed notification never
-    breaks the scheduled tick (fail-safe contract). Pure side-effect."""
+    * macOS -> osascript ``display notification`` (the user-session notifier).
+    * Linux -> ``notify-send`` when present (desktop session); else stderr.
+    * other -> a single stderr line cron/launchd capture to their logs.
+
+    Swallows EVERY error: a failed notification must never break a scheduled
+    tick (fail-safe contract). Pure side-effect."""
     try:
         if scheduler_env.is_macos():
             subprocess.run(
@@ -391,10 +473,58 @@ def emit_message(message: str, *, title: str = "fulcra-coord") -> None:
                  f'with title {_osa_quote(title)}'],
                 capture_output=True, timeout=5, check=False,
             )
+        elif sys.platform.startswith("linux") and shutil.which("notify-send"):
+            subprocess.run(
+                ["notify-send", title, message],
+                capture_output=True, timeout=5, check=False,
+            )
         else:
-            print(f"[fulcra-coord] {message}", file=sys.stderr)
+            print(f"[fulcra-coord] {title}: {message}", file=sys.stderr)
     except Exception:
+        # Notification is advisory; never let it fail the listener tick.
         pass
+
+
+def _deliver(message: str, *, title: str = "fulcra-coord") -> None:
+    """Push ``message`` over every configured tier, best-effort + independent.
+
+    When a webhook is configured, POST it (Tier 1); THEN always emit a native
+    desktop notification (Tier 2). The two are decoupled on purpose: a raising
+    or failing webhook must NOT skip native delivery, and a failing native path
+    must not affect the webhook. Never raises — the whole thing is fail-safe so
+    a notification can't crash a polling tick."""
+    url = _notify_webhook_url()
+    if url:
+        try:
+            _post_webhook(url, title, message)
+        except Exception:
+            # _post_webhook already swallows its own errors; this guards against
+            # any unexpected raise so native delivery below still runs.
+            pass
+    _emit_native(message, title)
+
+
+def emit_notification(agent: str, count: int) -> None:
+    """Best-effort push that `count` directives await `agent`.
+
+    Formats the fixed inbox-count string and routes it through ``_deliver`` —
+    a webhook POST (when configured) plus a native desktop notification, both
+    best-effort. Swallows every error: a failed notification must never break
+    the scheduled job (fail-safe contract). Pure side-effect, no return —
+    callers decide whether to call it (skip on empty/already-seen inbox)."""
+    msg = f"{count} directive(s) waiting in your fulcra-coord inbox"
+    _deliver(msg, title="fulcra-coord")
+
+
+def emit_message(message: str, *, title: str = "fulcra-coord") -> None:
+    """Best-effort push of an arbitrary `message` (composed title + body).
+
+    The general-purpose sibling of ``emit_notification`` (which formats a fixed
+    inbox-count string). Used for the blocked-on-you alert
+    ("⛔ <agent> needs you: <ask>") where the caller composes the full message.
+    Routes through ``_deliver`` (webhook + native), best-effort, never raising
+    (fail-safe contract). Pure side-effect."""
+    _deliver(message, title=title)
 
 
 def _osa_quote(s: str) -> str:

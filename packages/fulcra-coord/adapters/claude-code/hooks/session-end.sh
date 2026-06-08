@@ -17,5 +17,5 @@ except Exception: sys.exit(0)
 for t in d.get("active",[]) or []:
     if t.get("id")==tid: print(t.get("status","")); break' 2>/dev/null)"
 [ "$STATUS" = "active" ] || exit 0
-"${FULCRA_COORD[@]}" pause "$TASK" --next "Session ended; resume from last next_action." >/dev/null 2>&1
+"${FULCRA_COORD[@]}" pause "$TASK" --next "Session ended; resume from last next_action." --snapshot >/dev/null 2>&1
 exit 0

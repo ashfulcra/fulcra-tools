@@ -14,4 +14,8 @@ TASK="$("${FULCRA_COORD[@]}" __session-task "$SID" 2>/dev/null)"
 "${FULCRA_COORD[@]}" update "$TASK" \
   --summary "Context compaction checkpoint ($(date -u +%Y-%m-%dT%H:%M:%SZ)). Transcript: ${TP:-n/a}" \
   >/dev/null 2>&1
+"${FULCRA_COORD[@]}" snapshot "$TASK" \
+  --reason pre-compact \
+  --transcript-path "${TP:-}" \
+  >/dev/null 2>&1
 exit 0

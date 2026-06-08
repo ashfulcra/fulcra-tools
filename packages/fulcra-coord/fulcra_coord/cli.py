@@ -30,6 +30,7 @@ from .retention import (
     _archive_month, _archive_index_shard, _archive_task, _read_index_shard,
     _list_index_shards, _retention_max_per_run, _claim_retention_marker,
     _prune_markers, _prune_dead_presence, _prune_dead_health, _run_retention,
+    _prune_continuity_checkpoints, _continuity_keep,
     _expire_stale_broadcasts, _RETENTION_DEADLINE_HEADROOM_SECONDS,
     cmd_search, cmd_restore,
 )
@@ -88,7 +89,7 @@ from .digest import (
 # never imports cli.
 from .lifecycle import (
     cmd_tell, cmd_broadcast, cmd_assign, cmd_start, cmd_update, cmd_block,
-    cmd_pause, cmd_done, cmd_abandon,
+    cmd_pause, cmd_snapshot, cmd_done, cmd_abandon,
 )
 # Inbox + blocked-on-you notification extracted from this file. Re-exported so the
 # dispatch (inbox/notify-inbox), _build_health_record's read of the listener
@@ -104,6 +105,7 @@ from .inbox import (
 from .installers import (
     _report_resolved_cli, cmd_install_claude_code, cmd_install_openclaw,
     cmd_install_codex, cmd_install_heartbeat, cmd_install_listener, cmd_install_shim,
+    cmd_ensure_codex_watch,
 )
 # Diagnostics (capabilities + doctor) extracted from this file. Re-exported so the
 # dispatch (entry.py) and test imports resolve. doctor.py never imports cli.
@@ -201,6 +203,39 @@ def _detect_stale_claims(all_tasks: list[dict[str, Any]],
     return stale_claims
 
 
+def _reconcile_rebuild_source_preserving_acks(
+    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Summarize loaded bodies while preserving summary-only inbox acks.
+
+    ``inbox --ack`` can suppress a visible directive by writing only the summaries
+    aggregate when the task body is temporarily unloadable. A later reconcile may
+    successfully load that body, but the body still lacks the ``inbox_ack`` event.
+    If reconcile rebuilt views from raw bodies alone, the ack would disappear and
+    the directive would re-notify. Treat the current aggregate's ``acked_by`` as a
+    durable prior fact, matching ``_load_summaries_for_rebuild`` on normal writes.
+    """
+    prior_acks: dict[str, set[str]] = {}
+    try:
+        for summary in _load_task_summaries(backend=backend):
+            tid = summary.get("id")
+            if tid:
+                prior_acks[tid] = set(summary.get("acked_by") or [])
+    except Exception:
+        prior_acks = {}
+
+    rebuild_source: list[dict[str, Any]] = []
+    for task in all_tasks:
+        summary = schema.task_summary(task)
+        tid = summary.get("id")
+        if tid in prior_acks:
+            summary["acked_by"] = sorted(
+                set(summary.get("acked_by") or []) | prior_acks[tid]
+            )
+        rebuild_source.append(summary)
+    return rebuild_source
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
     import time
@@ -232,7 +267,9 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         _err("Reconcile timeout exceeded.")
         return 1
 
-    all_views = views.build_all_views(all_tasks)
+    all_views = views.build_all_views(
+        _reconcile_rebuild_source_preserving_acks(all_tasks, backend=backend)
+    )
     view_items = list(all_views.items())
 
     # Cache every view locally regardless of upload outcome — matches the prior
@@ -310,7 +347,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             _info(f"  Retention: archived {ret['archived']} task(s) "
                   f"(deferred {ret['deferred']}), expired {ret.get('expired_broadcasts', 0)} "
                   f"broadcast(s), pruned {ret['pruned_markers']} marker(s), "
-                  f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health.")
+                  f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health, "
+                  f"{ret.get('pruned_continuity', 0)} continuity.")
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
@@ -377,5 +415,4 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
-
 

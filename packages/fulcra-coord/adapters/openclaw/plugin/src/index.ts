@@ -136,6 +136,16 @@ export default definePluginEntry({
           ],
           { timeout: WRITE_TIMEOUT_MS, env },
         );
+        await execFileAsync(
+          "fulcra-coord",
+          [
+            "snapshot",
+            taskId,
+            "--reason",
+            "openclaw-before-compaction",
+          ],
+          { timeout: WRITE_TIMEOUT_MS, env },
+        );
       } catch {
         // Fail-safe: never block or fail compaction on a coordination error.
       }
@@ -162,6 +172,7 @@ export default definePluginEntry({
             taskId,
             "--next",
             `Session ended (${reason}); resume from last next_action.`,
+            "--snapshot",
           ],
           { timeout: WRITE_TIMEOUT_MS, env },
         );
