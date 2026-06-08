@@ -312,6 +312,7 @@ extraction is behavior-preserving end to end.
 
 - `docs/protocol.md` — when and how to use coordination
 - `docs/auth.md` — auth in local and remote/headless environments
+- `docs/continuity-handoff.md` — how `fulcra-coord` and Fulcra Continuity work together for cross-agent, non-GitHub handoff
 - `docs/fulcra-cli-branch.md` — Fulcra CLI Files support requirement
 - `docs/schema.md` — full task and view schema reference
 - `docs/annotations.md` — Agent Tasks lifecycle annotation track (enable flag, tags, deferred-write caveat)

@@ -23,3 +23,15 @@ Present the URL and the code to the user in chat and tell them to open the URL
 in their own browser to create a new Fulcra account or sign in. Then poll
 `uv tool run fulcra-api user-info` until it succeeds before continuing. Never
 ask the user for a Fulcra token; the browser device flow is the only auth path.
+
+## Fulcra Continuity handoff
+
+You may receive a Fulcra Continuity checkpoint from another agent. Treat it as
+durable resume state, even if you have no prior context. Read `objective`,
+`decisions`, `open_questions`, `next_actions`, and `artifacts` before acting. If
+the `fulcra-continuity` CLI is available, render the brief with
+`fulcra-continuity resume <checkpoint.json>`; otherwise read the JSON directly.
+Do not assume local paths from another agent exist in this sandbox. Resolve work
+from URLs, Fulcra remote paths, coord task IDs, or repo/ref/commit/path tuples.
+Before sandbox teardown or handoff, write a new checkpoint with portable
+artifacts and no secrets.
