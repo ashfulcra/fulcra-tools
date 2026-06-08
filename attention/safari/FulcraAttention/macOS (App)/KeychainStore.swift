@@ -3,8 +3,14 @@
 //  FulcraAttention (macOS App)
 //
 //  Thin wrapper over the Security framework for storing the token JSON blob.
-//  App-scoped for THIS milestone.
-//  TODO: keychain access group for app<->extension sharing (later milestone)
+//
+//  Optionally scopes items to a shared keychain access group so the Safari
+//  Web Extension's handler can read the token the app stored (app<->extension
+//  sharing). The access group is OPT-IN via `init(accessGroup:)`; the default
+//  (nil) preserves the original app-private behavior, so existing call sites and
+//  the current signed build are unaffected until the keychain-access-groups
+//  entitlement is registered (Ash's one-time Xcode capability step). Pass
+//  `Sharing.keychainAccessGroup` once the entitlement is live.
 //
 
 import Foundation
@@ -28,15 +34,33 @@ public enum KeychainError: LocalizedError {
 /// Generic-password Keychain store keyed by (service, account).
 public nonisolated struct KeychainStore {
 
-    public init() {}
+    /// When non-nil, every query is scoped to this keychain access group so the
+    /// app and its Safari extension share the item. Must EXACTLY match an entry
+    /// in both targets' `keychain-access-groups` entitlement, including the
+    /// team prefix (e.g. "CWH48N2H7F.com.fulcra.attention.shared"); use
+    /// `Sharing.keychainAccessGroup`. Nil → app-private (original behavior).
+    public let accessGroup: String?
 
-    /// Write (insert or update) `data` under (service, account).
-    public func write(_ data: Data, service: String, account: String) throws {
-        let query: [String: Any] = [
+    public init(accessGroup: String? = nil) {
+        self.accessGroup = accessGroup
+    }
+
+    /// Base (service, account[, access-group]) query shared by all operations.
+    private func baseQuery(service: String, account: String) -> [String: Any] {
+        var q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        if let accessGroup {
+            q[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return q
+    }
+
+    /// Write (insert or update) `data` under (service, account).
+    public func write(_ data: Data, service: String, account: String) throws {
+        let query = baseQuery(service: service, account: account)
 
         let attributes: [String: Any] = [
             kSecValueData as String: data,
@@ -67,13 +91,9 @@ public nonisolated struct KeychainStore {
 
     /// Read the data stored under (service, account). Returns nil if absent.
     public func read(service: String, account: String) throws -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query = baseQuery(service: service, account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -90,11 +110,7 @@ public nonisolated struct KeychainStore {
 
     /// Delete the item under (service, account). No-op if absent.
     public func delete(service: String, account: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        let query = baseQuery(service: service, account: account)
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             keychainLog.error("keychain delete failed status=\(status)")
