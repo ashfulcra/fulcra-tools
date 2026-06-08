@@ -53,6 +53,15 @@ unreviewed. (Local agents + Codex often share one GitHub account, so GitHub
 "Approve" may no-op — the handshake is on the **bus**, by agent identity.) Full
 rule: `packages/fulcra-coord/adapters/claude-code/CLAUDE.md`.
 
+**Forge-agnostic core (invariant).** The coordination bus is forge-agnostic —
+`fulcra_coord/` never calls a specific forge (no `gh`, no GitHub/GitLab API).
+GitHub is one optional integration. The review/merge handshake coordinates an
+opaque **artifact ref** (PR# · MR# · branch · commit SHA · URL · patch ·
+non-code deliverable) on the bus; verdicts ride the bus
+(`request-review <artifact>` → `review-done --verdict`), and a forge is optional
+sugar a human/agent invokes separately. Enforced by
+`packages/fulcra-coord/tests/test_forge_agnostic.py`.
+
 ## Repo homes
 This monorepo (Fulcra-internal for now) is **only for things that make Fulcra
 useful for other people**. Fulcra-related infra that isn't useful-to-others
