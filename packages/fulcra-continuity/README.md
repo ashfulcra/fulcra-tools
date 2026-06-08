@@ -53,6 +53,14 @@ pause points: before compaction, before handoff, when a session goes idle, when 
 listener has seen several task events without user action, or when the user says
 they are done for a while.
 
+## Agent handoff contract
+
+Agents that write or consume continuity checkpoints should follow
+[`docs/agent-handoff.md`](docs/agent-handoff.md). The contract covers
+Claude Code, Codex, OpenClaw/Arc, and Hermes, and explicitly supports
+cross-agent transfer and non-GitHub work. GitHub issues and PRs are artifacts,
+not required identity.
+
 ## Resume from a checkpoint
 
 ```bash

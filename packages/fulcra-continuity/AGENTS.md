@@ -1,0 +1,47 @@
+# AGENTS.md - Fulcra Continuity
+
+Fulcra Continuity is the durable handoff layer for agent work. It must work
+across agents and surfaces, including OpenClaw/Arc to Claude Code, Claude Code to
+Codex, Codex to Hermes, and back again. Do not assume the work is GitHub-backed:
+checkpoints may describe a coord task, a chat-originated task, a local task, a
+Hermes sandbox handoff, or a standalone continuity-only workstream.
+
+Before changing this package or creating continuity-related agent instructions,
+read `docs/agent-handoff.md`.
+
+## Core Rules
+
+- A checkpoint is a cold-start handoff, not a log line. It must contain enough
+  context for another agent to continue without the original transcript.
+- Use Fulcra Continuity at durable pause points: pre-compaction, handoff,
+  teardown, idle/archive, overnight stop, or explicit "pause/done for now".
+  Do not write a checkpoint for every chat message or every coord update.
+- When a `fulcra-coord` task exists, carry its identity in the checkpoint:
+  `identity.coord_task_id`, `identity.coord_owner_agent`, `identity.workstream_id`,
+  and `identity.agent_id`.
+- When no `fulcra-coord` task exists, still write continuity using a stable
+  task/workstream/session identity. Do not fabricate a GitHub issue or PR just to
+  make continuity work.
+- Cross-agent transfer is a first-class use case. The producing agent must not
+  write instructions that only its own runtime can understand.
+
+## Minimum Checkpoint Content
+
+Every useful checkpoint should include:
+
+- `objective`: what the work is trying to accomplish now.
+- `decisions`: choices already made, including rejected assumptions.
+- `open_questions`: unknowns the next agent must resolve.
+- `next_actions`: concrete ordered steps for the next agent.
+- `artifacts`: files, remote paths, task IDs, docs, branches, or URLs to inspect.
+- `identity`: workstream, logical agent, and coord task identity when available.
+- `memory_writes`: durable facts or requirements that should be saved elsewhere.
+
+If the automatic writer cannot populate these fields, update the task summary
+first or write a richer checkpoint through the structured CLI/API path.
+
+## Agent-Specific Instructions
+
+`docs/agent-handoff.md` defines how Claude Code, Codex, OpenClaw/Arc, and Hermes
+join continuity, write checkpoints, and resume from another agent's checkpoint.
+Keep any adapter-specific docs consistent with that file.
