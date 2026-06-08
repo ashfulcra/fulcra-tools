@@ -65,6 +65,11 @@ def test_pause_snapshot_writes_latest_and_archived_checkpoint(capsys) -> None:
     checkpoint = uploaded[0][0]
     assert checkpoint["schema_version"] == continuity.SCHEMA_VERSION
     assert checkpoint["identity"]["coord_task_id"] == task["id"]
+    assert checkpoint["bootstrap_primer"]["what_this_is"].startswith(
+        "This is a Fulcra Continuity checkpoint"
+    )
+    assert checkpoint["session_context"]["overall_goal"]
+    assert checkpoint["session_context"]["current_state"]
     assert checkpoint["next_actions"] == ["Resume from checkpoint"]
 
 
@@ -75,6 +80,14 @@ def test_snapshot_writes_checkpoint_without_task_transition(capsys) -> None:
         reason="pre-compact",
         next=None,
         transcript_path="/tmp/session.jsonl",
+        decision=[],
+        open_question=[],
+        artifact=[],
+        memory=[],
+        session_goal="",
+        why_continuity="",
+        session_state="",
+        session_followup="",
         agent="arc",
     )
     uploaded = []
@@ -96,7 +109,56 @@ def test_snapshot_writes_checkpoint_without_task_transition(capsys) -> None:
     checkpoint = uploaded[0][0]
     assert checkpoint["source"] == "fulcra-coord:pre-compact"
     assert checkpoint["transcript_path"] == "/tmp/session.jsonl"
+    assert checkpoint["bootstrap_primer"]["relationship_to_coord"].startswith(
+        "fulcra-coord owns task/event coordination"
+    )
+    assert checkpoint["session_context"]["why_continuity_matters"]
     assert checkpoint["next_actions"] == ["Pick up from latest checkpoint"]
+
+
+def test_snapshot_accepts_rich_handoff_context(capsys) -> None:
+    task = _task()
+    args = argparse.Namespace(
+        task_id=task["id"],
+        reason="manual",
+        next="Continue listener fix",
+        transcript_path="",
+        decision=["Continuity needs a primer"],
+        open_question=["How should listeners claim work?"],
+        artifact=["https://example.test/pr=merged PR"],
+        memory=["Remember the broader session"],
+        session_goal="Build fulcra-coord",
+        why_continuity="Cold agents need the story",
+        session_state="Docs merged",
+        session_followup="Fix listener pickup",
+        agent="arc",
+    )
+    uploaded = []
+
+    def upload_json(data, path, **_kwargs):
+        uploaded.append((data, path))
+        return True
+
+    with patch("fulcra_coord.lifecycle._load_task", return_value=task), \
+         patch("fulcra_coord.continuity.remote.upload_json", side_effect=upload_json):
+        rc = cli.cmd_snapshot(args)
+
+    assert rc == 0
+    assert "Continuity snapshot:" in capsys.readouterr().out
+    checkpoint = uploaded[0][0]
+    assert checkpoint["decisions"] == ["Continuity needs a primer"]
+    assert checkpoint["open_questions"] == ["How should listeners claim work?"]
+    assert checkpoint["artifacts"] == [
+        {"path": "https://example.test/pr", "note": "merged PR"}
+    ]
+    assert checkpoint["memory_writes"] == ["Remember the broader session"]
+    assert checkpoint["session_context"] == {
+        "overall_goal": "Build fulcra-coord",
+        "why_continuity_matters": "Cold agents need the story",
+        "current_state": "Docs merged",
+        "immediate_followup": "Fix listener pickup",
+    }
+    assert checkpoint["next_actions"] == ["Continue listener fix"]
 
 
 def test_resume_json_can_include_latest_continuity_snapshot(capsys) -> None:

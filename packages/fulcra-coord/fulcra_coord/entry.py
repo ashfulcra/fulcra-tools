@@ -219,6 +219,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Optional next action override for the checkpoint")
     sp.add_argument("--transcript-path", default="", metavar="PATH",
                     help="Optional transcript/session log path for resume context")
+    sp.add_argument("--decision", action="append", default=[],
+                    help="Decision or constraint the next agent must know")
+    sp.add_argument("--open-question", action="append", default=[],
+                    help="Open question the next agent should not guess")
+    sp.add_argument("--artifact", action="append", default=[],
+                    help="Portable artifact reference, PATH or PATH=NOTE")
+    sp.add_argument("--memory", action="append", default=[],
+                    help="Memory write claim to carry in the checkpoint")
+    sp.add_argument("--session-goal", default="", metavar="TEXT",
+                    help="Broader work/session goal this checkpoint belongs to")
+    sp.add_argument("--why-continuity", default="", metavar="TEXT",
+                    help="Why continuity matters for this workstream or handoff")
+    sp.add_argument("--session-state", default="", metavar="TEXT",
+                    help="Current broader session/program state")
+    sp.add_argument("--session-followup", default="", metavar="TEXT",
+                    help="Immediate broader follow-up after this checkpoint")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
     # ---- done ----

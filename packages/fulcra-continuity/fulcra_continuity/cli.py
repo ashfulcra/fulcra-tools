@@ -56,6 +56,26 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("--source", default="manual")
     checkpoint.add_argument("--transcript-path", default="")
     checkpoint.add_argument("--context-used", type=int, default=None)
+    checkpoint.add_argument(
+        "--session-goal",
+        default="",
+        help="Broader work/session goal this checkpoint belongs to",
+    )
+    checkpoint.add_argument(
+        "--why-continuity",
+        default="",
+        help="Why continuity matters for this workstream or handoff",
+    )
+    checkpoint.add_argument(
+        "--session-state",
+        default="",
+        help="Current broader session/program state, beyond the immediate task",
+    )
+    checkpoint.add_argument(
+        "--session-followup",
+        default="",
+        help="Immediate follow-up in the broader session/program",
+    )
     checkpoint.add_argument("--decision", action="append", default=[])
     checkpoint.add_argument("--artifact", action="append", default=[], help="PATH or PATH=NOTE")
     checkpoint.add_argument("--open-question", action="append", default=[])
@@ -116,6 +136,12 @@ def run(argv: list[str] | None = None) -> int:
             source=args.source,
             transcript_path=args.transcript_path,
             context_used_percent=args.context_used,
+            session_context={
+                "overall_goal": args.session_goal,
+                "why_continuity_matters": args.why_continuity,
+                "current_state": args.session_state,
+                "immediate_followup": args.session_followup,
+            },
             decisions=args.decision,
             artifacts=[parse_artifact(item) for item in args.artifact],
             open_questions=args.open_question,

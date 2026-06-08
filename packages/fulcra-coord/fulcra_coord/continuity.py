@@ -18,6 +18,31 @@ from . import remote, views
 
 SCHEMA_VERSION = "fulcra.continuity.checkpoint.v1"
 
+DEFAULT_BOOTSTRAP_PRIMER = {
+    "what_this_is": "This is a Fulcra Continuity checkpoint: a durable resume packet for agent work.",
+    "how_to_use_it": (
+        "Read objective, decisions, open_questions, next_actions, identity, "
+        "and artifacts before acting. If the fulcra-continuity CLI is available, "
+        "render the JSON with fulcra-continuity resume <checkpoint.json>; "
+        "otherwise read the JSON directly."
+    ),
+    "why_it_exists": (
+        "Agents may lose context, run on different machines, lack the prior "
+        "chat transcript, or be a different runtime entirely. The checkpoint "
+        "gives them enough portable context to continue safely."
+    ),
+    "relationship_to_coord": (
+        "fulcra-coord owns task/event coordination; Fulcra Continuity owns "
+        "cold-start resume context for the work on or around coord."
+    ),
+}
+
+DEFAULT_WHY_CONTINUITY_MATTERS = (
+    "Coordination state can say what task exists, but a cold agent also needs "
+    "the story: why the task matters, what has been decided, what assumptions "
+    "were corrected, and what artifacts are portable."
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -61,6 +86,37 @@ def checkpoint_remote_path(checkpoint_id: str, identity: dict[str, str]) -> str:
     return f"{remote_prefix(identity)}/checkpoints/{_slug(checkpoint_id)}.json"
 
 
+def _session_context_for_task(
+    task: dict[str, Any],
+    *,
+    session_context: Optional[dict[str, str]] = None,
+) -> dict[str, str]:
+    if session_context:
+        return {
+            "overall_goal": str(session_context.get("overall_goal", "")),
+            "why_continuity_matters": str(
+                session_context.get("why_continuity_matters")
+                or DEFAULT_WHY_CONTINUITY_MATTERS
+            ),
+            "current_state": str(session_context.get("current_state", "")),
+            "immediate_followup": str(session_context.get("immediate_followup", "")),
+        }
+    summary = str(task.get("current_summary") or task.get("title") or "")
+    next_action = str(task.get("next_action") or "")
+    workstream = str(task.get("workstream") or "")
+    return {
+        "overall_goal": (
+            "Keep agent work durable and transferable across agents, sessions, "
+            "machines, and workstreams."
+        ),
+        "why_continuity_matters": DEFAULT_WHY_CONTINUITY_MATTERS,
+        "current_state": (
+            f"{summary} Status: {task.get('status', '')}. Workstream: {workstream}."
+        ).strip(),
+        "immediate_followup": next_action,
+    }
+
+
 def make_checkpoint(
     task: dict[str, Any],
     *,
@@ -70,6 +126,10 @@ def make_checkpoint(
     decisions: Optional[list[str]] = None,
     open_questions: Optional[list[str]] = None,
     next_actions: Optional[list[str]] = None,
+    artifacts: Optional[list[dict[str, str]]] = None,
+    memory_writes: Optional[list[str | dict[str, str]]] = None,
+    bootstrap_primer: Optional[dict[str, str]] = None,
+    session_context: Optional[dict[str, str]] = None,
     tags: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     created = _now_iso()
@@ -79,6 +139,12 @@ def make_checkpoint(
     checkpoint_id = f"CHK-{stamp}-{_slug(task_id)}-{uuid.uuid4().hex[:8]}"
     nexts = next_actions if next_actions is not None else [str(task.get("next_action") or "").strip()]
     nexts = [item for item in nexts if item]
+    artifact_list = artifacts if artifacts is not None else [
+        {
+            "path": str(task.get("task_file") or remote.task_remote_path(task_id)),
+            "note": "fulcra-coord task state",
+        }
+    ]
     tag_list = list(tags or [])
     tag_list.extend(["fulcra-coord", f"reason:{reason}"])
     return {
@@ -90,19 +156,19 @@ def make_checkpoint(
         "created_at": created,
         "owner_agent": str(task.get("owner_agent") or ""),
         "identity": identity,
+        "bootstrap_primer": bootstrap_primer or DEFAULT_BOOTSTRAP_PRIMER,
+        "session_context": _session_context_for_task(
+            task,
+            session_context=session_context,
+        ),
         "source": f"fulcra-coord:{reason}",
         "transcript_path": transcript_path,
         "context_used_percent": None,
         "decisions": decisions or [],
-        "artifacts": [
-            {
-                "path": str(task.get("task_file") or remote.task_remote_path(task_id)),
-                "note": "fulcra-coord task state",
-            }
-        ],
+        "artifacts": artifact_list,
         "open_questions": open_questions or [],
         "next_actions": nexts,
-        "memory_writes": [],
+        "memory_writes": memory_writes or [],
         "tags": sorted(set(filter(None, tag_list))),
     }
 
@@ -141,6 +207,8 @@ def summarize_checkpoint(checkpoint: Optional[dict[str, Any]]) -> Optional[dict[
         "task_id": checkpoint.get("task_id", ""),
         "title": checkpoint.get("title", ""),
         "identity": identity,
+        "bootstrap_primer": checkpoint.get("bootstrap_primer", {}),
+        "session_context": checkpoint.get("session_context", {}),
         "next_actions": checkpoint.get("next_actions", []),
         "decisions": checkpoint.get("decisions", []),
         "path": latest_remote_path(identity),

@@ -21,6 +21,8 @@ transcript access, a shared filesystem, or a GitHub-backed task.
 
 Fulcra Continuity owns resume context:
 
+- a bootstrap primer for agents that do not know Continuity yet
+- broader session/program context, not only the immediate task
 - objective and current state
 - decisions already made
 - open questions

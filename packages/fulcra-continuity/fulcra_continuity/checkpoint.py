@@ -42,6 +42,38 @@ class WorkstreamIdentity:
 
 
 @dataclass(frozen=True)
+class BootstrapPrimer:
+    what_this_is: str = "This is a Fulcra Continuity checkpoint: a durable resume packet for agent work."
+    how_to_use_it: str = (
+        "Read objective, decisions, open_questions, next_actions, identity, "
+        "and artifacts before acting. If the fulcra-continuity CLI is available, "
+        "render the JSON with fulcra-continuity resume <checkpoint.json>; "
+        "otherwise read the JSON directly."
+    )
+    why_it_exists: str = (
+        "Agents may lose context, run on different machines, lack the prior "
+        "chat transcript, or be a different runtime entirely. The checkpoint "
+        "gives them enough portable context to continue safely."
+    )
+    relationship_to_coord: str = (
+        "fulcra-coord owns task/event coordination; Fulcra Continuity owns "
+        "cold-start resume context for the work on or around coord."
+    )
+
+
+@dataclass(frozen=True)
+class SessionContext:
+    overall_goal: str = ""
+    why_continuity_matters: str = (
+        "Coordination state can say what task exists, but a cold agent also "
+        "needs the story: why the task matters, what has been decided, what "
+        "assumptions were corrected, and what artifacts are portable."
+    )
+    current_state: str = ""
+    immediate_followup: str = ""
+
+
+@dataclass(frozen=True)
 class ContinuityCheckpoint:
     schema_version: str
     checkpoint_id: str
@@ -51,6 +83,8 @@ class ContinuityCheckpoint:
     created_at: str
     owner_agent: str = ""
     identity: WorkstreamIdentity = field(default_factory=WorkstreamIdentity)
+    bootstrap_primer: BootstrapPrimer = field(default_factory=BootstrapPrimer)
+    session_context: SessionContext = field(default_factory=SessionContext)
     source: str = "manual"
     transcript_path: str = ""
     context_used_percent: int | None = None
@@ -65,6 +99,8 @@ class ContinuityCheckpoint:
         data = asdict(self)
         if self.identity.is_empty():
             data.pop("identity", None)
+        data["bootstrap_primer"] = asdict(self.bootstrap_primer)
+        data["session_context"] = asdict(self.session_context)
         data["artifacts"] = [asdict(item) for item in self.artifacts]
         data["memory_writes"] = [asdict(item) for item in self.memory_writes]
         return data
@@ -106,6 +142,8 @@ def make_checkpoint(
     tags: list[str] | None = None,
     created_at: str | None = None,
     identity: WorkstreamIdentity | None = None,
+    bootstrap_primer: BootstrapPrimer | dict[str, Any] | None = None,
+    session_context: SessionContext | dict[str, Any] | None = None,
     workstream_id: str = "",
     agent_id: str = "",
     coord_task_id: str = "",
@@ -115,6 +153,8 @@ def make_checkpoint(
     created = created_at or utc_now_iso()
     stamp = created.replace(":", "").replace("-", "").replace("Z", "z")
     checkpoint_id = f"CHK-{stamp}-{_slug(task_id or title)}-{uuid4().hex[:8]}"
+    primer = _coerce_bootstrap_primer(bootstrap_primer)
+    context = _coerce_session_context(session_context)
     return ContinuityCheckpoint(
         schema_version=SCHEMA_VERSION,
         checkpoint_id=checkpoint_id,
@@ -130,6 +170,8 @@ def make_checkpoint(
             coord_task_id=coord_task_id,
             coord_owner_agent=coord_owner_agent,
         ),
+        bootstrap_primer=primer,
+        session_context=context,
         source=source,
         transcript_path=transcript_path,
         context_used_percent=_optional_int(context_used_percent),
@@ -152,6 +194,38 @@ def _coerce_list(value: Any) -> list[Any]:
 
 def _coerce_str_list(value: Any) -> list[str]:
     return [str(item) for item in _coerce_list(value)]
+
+
+def _coerce_bootstrap_primer(value: BootstrapPrimer | dict[str, Any] | None) -> BootstrapPrimer:
+    if isinstance(value, BootstrapPrimer):
+        return value
+    if not isinstance(value, dict):
+        return BootstrapPrimer()
+    default = BootstrapPrimer()
+    return BootstrapPrimer(
+        what_this_is=str(value.get("what_this_is") or default.what_this_is),
+        how_to_use_it=str(value.get("how_to_use_it") or default.how_to_use_it),
+        why_it_exists=str(value.get("why_it_exists") or default.why_it_exists),
+        relationship_to_coord=str(
+            value.get("relationship_to_coord") or default.relationship_to_coord
+        ),
+    )
+
+
+def _coerce_session_context(value: SessionContext | dict[str, Any] | None) -> SessionContext:
+    if isinstance(value, SessionContext):
+        return value
+    if not isinstance(value, dict):
+        return SessionContext()
+    default = SessionContext()
+    return SessionContext(
+        overall_goal=str(value.get("overall_goal", "")),
+        why_continuity_matters=str(
+            value.get("why_continuity_matters") or default.why_continuity_matters
+        ),
+        current_state=str(value.get("current_state", "")),
+        immediate_followup=str(value.get("immediate_followup", "")),
+    )
 
 
 def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
@@ -193,6 +267,8 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
         coord_task_id=str(identity_data.get("coord_task_id", "")),
         coord_owner_agent=str(identity_data.get("coord_owner_agent", "")),
     )
+    bootstrap_primer = _coerce_bootstrap_primer(data.get("bootstrap_primer"))
+    session_context = _coerce_session_context(data.get("session_context"))
     return ContinuityCheckpoint(
         schema_version=str(data.get("schema_version", SCHEMA_VERSION)),
         checkpoint_id=str(data.get("checkpoint_id", "")),
@@ -202,6 +278,8 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
         created_at=str(data.get("created_at", "")),
         owner_agent=str(data.get("owner_agent", "")),
         identity=identity,
+        bootstrap_primer=bootstrap_primer,
+        session_context=session_context,
         source=str(data.get("source", "manual")),
         transcript_path=str(data.get("transcript_path", "")),
         context_used_percent=_optional_int(data.get("context_used_percent")),
@@ -239,6 +317,34 @@ def render_resume_brief(checkpoint: ContinuityCheckpoint) -> str:
     ]
     if checkpoint.owner_agent:
         lines.append(f"Owner agent: {checkpoint.owner_agent}")
+    lines.append("")
+    lines.append("Bootstrap primer:")
+    lines.append(f"- What this is: {checkpoint.bootstrap_primer.what_this_is}")
+    lines.append(f"- How to use it: {checkpoint.bootstrap_primer.how_to_use_it}")
+    lines.append(f"- Why it exists: {checkpoint.bootstrap_primer.why_it_exists}")
+    lines.append(
+        f"- Relationship to coord: {checkpoint.bootstrap_primer.relationship_to_coord}"
+    )
+    if any((
+        checkpoint.session_context.overall_goal,
+        checkpoint.session_context.why_continuity_matters,
+        checkpoint.session_context.current_state,
+        checkpoint.session_context.immediate_followup,
+    )):
+        lines.append("")
+        lines.append("Session context:")
+        if checkpoint.session_context.overall_goal:
+            lines.append(f"- Overall goal: {checkpoint.session_context.overall_goal}")
+        if checkpoint.session_context.why_continuity_matters:
+            lines.append(
+                f"- Why continuity matters: {checkpoint.session_context.why_continuity_matters}"
+            )
+        if checkpoint.session_context.current_state:
+            lines.append(f"- Current state: {checkpoint.session_context.current_state}")
+        if checkpoint.session_context.immediate_followup:
+            lines.append(
+                f"- Immediate follow-up: {checkpoint.session_context.immediate_followup}"
+            )
     if not checkpoint.identity.is_empty():
         lines.append("Identity:")
         if checkpoint.identity.workstream_id:
@@ -297,6 +403,14 @@ def default_demo_checkpoint() -> ContinuityCheckpoint:
         agent_id="arc",
         coord_task_id="TASK-demo-context-cliff-rescue",
         coord_owner_agent="openclaw:discord:main-comms",
+        session_context=SessionContext(
+            overall_goal=(
+                "Build fulcra-coord into a reliable shared coordination system "
+                "for agent work across chats, machines, runtimes, and workstreams."
+            ),
+            current_state="Demo checkpoint for proving cross-agent resume after context loss.",
+            immediate_followup="Use the listed next actions to continue without reading the original transcript.",
+        ),
         source="demo",
         context_used_percent=82,
         decisions=[

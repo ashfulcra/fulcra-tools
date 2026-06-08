@@ -5,7 +5,9 @@ import json
 from fulcra_continuity.checkpoint import (
     SCHEMA_VERSION,
     Artifact,
+    BootstrapPrimer,
     MemoryWrite,
+    SessionContext,
     WorkstreamIdentity,
     checkpoint_from_dict,
     make_checkpoint,
@@ -22,6 +24,17 @@ def test_make_checkpoint_round_trips_to_dict() -> None:
         created_at="2026-06-06T14:00:00Z",
         decisions=["Use structured checkpoint"],
         artifacts=[Artifact(path="README.md", note="demo notes")],
+        bootstrap_primer=BootstrapPrimer(
+            what_this_is="A test checkpoint",
+            how_to_use_it="Read it",
+            why_it_exists="Context is finite",
+            relationship_to_coord="Coord tracks tasks",
+        ),
+        session_context=SessionContext(
+            overall_goal="Build durable handoff",
+            current_state="Testing round-trip",
+            immediate_followup="Assert fields",
+        ),
         open_questions=["Who owns the next action?"],
         next_actions=["Run tests"],
         memory_writes=[MemoryWrite(claim="Continuity needs receipts", ttl="30d")],
@@ -45,6 +58,8 @@ def test_make_checkpoint_round_trips_to_dict() -> None:
         "coord_task_id": "TASK-1",
         "workstream_id": "openclaw:discord:main-comms",
     }
+    assert data["bootstrap_primer"]["what_this_is"] == "A test checkpoint"
+    assert data["session_context"]["overall_goal"] == "Build durable handoff"
     assert data["artifacts"] == [{"path": "README.md", "note": "demo notes"}]
     assert data["memory_writes"][0]["claim"] == "Continuity needs receipts"
 
@@ -61,6 +76,10 @@ def test_empty_identity_is_omitted_from_json() -> None:
     )
 
     assert "identity" not in checkpoint.to_dict()
+    assert checkpoint.to_dict()["bootstrap_primer"]["what_this_is"].startswith(
+        "This is a Fulcra Continuity checkpoint"
+    )
+    assert "why_continuity_matters" in checkpoint.to_dict()["session_context"]
 
 
 def test_resume_brief_highlights_operating_state() -> None:
@@ -72,6 +91,11 @@ def test_resume_brief_highlights_operating_state() -> None:
         workstream_id="openclaw:discord:main-comms",
         agent_id="arc",
         coord_task_id="TASK-2",
+        session_context=SessionContext(
+            overall_goal="Build the coord bus",
+            current_state="PR merged",
+            immediate_followup="Fix listener",
+        ),
         decisions=["Checkpoint before compaction"],
         next_actions=["Resume from checkpoint"],
     )
@@ -80,6 +104,11 @@ def test_resume_brief_highlights_operating_state() -> None:
 
     assert "Resume brief for TASK-2" in brief
     assert "Objective: Prove continuity" in brief
+    assert "Bootstrap primer:" in brief
+    assert "Session context:" in brief
+    assert "- Overall goal: Build the coord bus" in brief
+    assert "- Current state: PR merged" in brief
+    assert "- Immediate follow-up: Fix listener" in brief
     assert "- Workstream: openclaw:discord:main-comms" in brief
     assert "- Agent: arc" in brief
     assert "- Coord task: TASK-2" in brief
@@ -162,6 +191,35 @@ def test_checkpoint_from_dict_tolerates_scalar_and_malformed_lists() -> None:
         MemoryWrite(claim="structured", scope="project"),
     ]
     assert checkpoint.tags == ["handoff"]
+
+
+def test_checkpoint_from_dict_parses_bootstrap_and_session_context() -> None:
+    checkpoint = checkpoint_from_dict(
+        {
+            "task_id": "TASK-1",
+            "title": "x",
+            "objective": "y",
+            "created_at": "2026-06-06T14:00:00Z",
+            "bootstrap_primer": {
+                "what_this_is": "Custom primer",
+                "how_to_use_it": "Read fields",
+                "why_it_exists": "Cross-agent handoff",
+                "relationship_to_coord": "Coord owns task state",
+            },
+            "session_context": {
+                "overall_goal": "Build fulcra-coord",
+                "current_state": "Docs merged",
+                "immediate_followup": "Fix listener",
+            },
+        }
+    )
+
+    assert checkpoint.bootstrap_primer.what_this_is == "Custom primer"
+    assert checkpoint.bootstrap_primer.relationship_to_coord == "Coord owns task state"
+    assert checkpoint.session_context.overall_goal == "Build fulcra-coord"
+    assert checkpoint.session_context.current_state == "Docs merged"
+    assert checkpoint.session_context.immediate_followup == "Fix listener"
+    assert checkpoint.session_context.why_continuity_matters
 
 
 def test_parse_memory_write_supports_optional_fields() -> None:

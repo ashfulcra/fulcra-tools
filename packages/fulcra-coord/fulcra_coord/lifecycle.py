@@ -517,14 +517,32 @@ def cmd_snapshot(args: Any, backend: Optional[list[str]] = None) -> int:
         _err(f"Task not found: {task_id}")
         return 1
 
+    def _artifact(value: str) -> dict[str, str]:
+        if "=" not in value:
+            return {"path": value, "note": ""}
+        path, note = value.split("=", 1)
+        return {"path": path.strip(), "note": note.strip()}
+
     next_action = getattr(args, "next", None)
     next_actions = [next_action] if next_action else None
+    session_context = {
+        "overall_goal": getattr(args, "session_goal", "") or "",
+        "why_continuity_matters": getattr(args, "why_continuity", "") or "",
+        "current_state": getattr(args, "session_state", "") or "",
+        "immediate_followup": getattr(args, "session_followup", "") or "",
+    }
+    artifacts = [_artifact(item) for item in (getattr(args, "artifact", None) or [])]
     checkpoint = continuity.make_checkpoint(
         task,
         agent=agent,
         reason=getattr(args, "reason", None) or "manual",
         transcript_path=getattr(args, "transcript_path", None) or "",
+        decisions=getattr(args, "decision", None) or None,
+        open_questions=getattr(args, "open_question", None) or None,
         next_actions=next_actions,
+        artifacts=artifacts or None,
+        memory_writes=getattr(args, "memory", None) or None,
+        session_context=session_context,
     )
     ok, snap_path = continuity.write_checkpoint(checkpoint, backend=backend)
     if not ok:

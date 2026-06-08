@@ -35,6 +35,14 @@ def test_checkpoint_command_writes_json_and_brief(tmp_path: Path) -> None:
         "TASK-123",
         "--coord-owner-agent",
         "openclaw:discord:main-comms",
+        "--session-goal",
+        "Build fulcra-coord",
+        "--why-continuity",
+        "Cold agents need the story",
+        "--session-state",
+        "Docs are merged",
+        "--session-followup",
+        "Fix listener pickup",
         "--decision",
         "Avoid broad broadcasts",
         "--artifact",
@@ -59,10 +67,23 @@ def test_checkpoint_command_writes_json_and_brief(tmp_path: Path) -> None:
     assert data["identity"]["workstream_id"] == "openclaw:discord:main-comms"
     assert data["identity"]["agent_id"] == "arc"
     assert data["identity"]["coord_task_id"] == "TASK-123"
+    assert data["bootstrap_primer"]["what_this_is"].startswith(
+        "This is a Fulcra Continuity checkpoint"
+    )
+    assert data["session_context"] == {
+        "overall_goal": "Build fulcra-coord",
+        "why_continuity_matters": "Cold agents need the story",
+        "current_state": "Docs are merged",
+        "immediate_followup": "Fix listener pickup",
+    }
     assert data["decisions"] == ["Avoid broad broadcasts"]
     assert data["artifacts"] == [{"path": "parser.py", "note": "entry point"}]
     assert data["memory_writes"][0]["scope"] == "project:fulcra"
-    assert "Find parser" in brief_path.read_text()
+    brief = brief_path.read_text()
+    assert "Bootstrap primer:" in brief
+    assert "Session context:" in brief
+    assert "Build fulcra-coord" in brief
+    assert "Find parser" in brief
 
 
 def test_resume_command_prints_brief(tmp_path: Path) -> None:

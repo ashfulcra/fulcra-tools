@@ -8,6 +8,17 @@ handoff, capture the task objective, decisions, artifacts, open questions, next
 actions, and memory writes. After compaction, render a resume brief that gives
 the next session an inspectable operating state.
 
+Every checkpoint now includes two cold-start fields by default:
+
+- `bootstrap_primer`: explains what a Fulcra Continuity checkpoint is, how to
+  use it, why it exists, and how it relates to `fulcra-coord`.
+- `session_context`: explains the broader work/session goal, why Continuity
+  matters for that goal, current program state, and the immediate follow-up.
+
+Those fields are intentionally part of the snapshot rather than only adapter
+documentation, because the receiving agent may know nothing about Continuity or
+the original chat.
+
 Fulcra Continuity is designed to pair with `fulcra-coord` without depending on
 it. `fulcra-coord` remains the operational ledger for task lifecycle updates;
 Fulcra Continuity stores the durable "how to pick this work back up" snapshot.
@@ -37,6 +48,9 @@ uv run --package fulcra-continuity fulcra-continuity checkpoint \
   --agent-id arc \
   --coord-task-id TASK-123 \
   --coord-owner-agent openclaw:discord:main-comms \
+  --session-goal "Build fulcra-coord into a reliable shared coordination bus" \
+  --session-state "Parser migration is one step in a larger low-noise lifecycle flow" \
+  --session-followup "Verify listener pickup after migration" \
   --decision "Use lifecycle updates instead of channel broadcasts" \
   --artifact packages/fulcra-coord/README.md \
   --next "Audit current parser inputs" \
