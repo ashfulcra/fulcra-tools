@@ -49,6 +49,7 @@ Run any command with `--help` for flags; `--format json` is available on read co
 - **Declare identity, scoped per directory:** `identity set vendor:host:purpose` (e.g. `claude-code:DeskbookPro:fulcra-tools`). Identity is per-cwd — sibling sessions in different repos must not share one, or they clobber each other.
 - **One git worktree per session**, not a shared checkout: `git worktree add ../<repo>-<purpose> -b <branch> origin/main`. Concurrent sessions in one checkout corrupt each other's index/HEAD.
 - **Never push to `main`; every change goes through a PR reviewed by a *different* agent identity.** A clean approval is merged by whoever's around; never merge your own unreviewed code. The review handshake lives **on the bus** (`tell` your reviewer), because co-located agents often share one GitHub account so GitHub "Approve" can no-op.
+- **Opening a PR means running `request-review` — never just leave "review PR #N" as a `next_action`.** `request-review` routes a `kind:review` directive to a live reviewer; a free-text mention routes to nobody and the review silently never happens. `resume` flags PRs you own that have no review routed.
 - **Provide `evidence` on `done` and a `next_action` on `pause`/`block`** — that's the handoff note the next session reads.
 - **A request like "handle my todos" authorizes reading the list, not executing it** — surface side-effectful items, don't auto-run them.
 

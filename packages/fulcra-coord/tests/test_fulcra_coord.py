@@ -10648,6 +10648,88 @@ class TestReconcileHealthWrite(unittest.TestCase):
         self.assertEqual(rc, 0, "a health-write failure must never fail the tick")
 
 
+class TestUnroutedPrReviews(unittest.TestCase):
+    """views.unrouted_pr_reviews — catch PRs an author forgot to request-review.
+
+    Regression guard for the PR #101 class: a review left as a free-text
+    next_action (never routed via request-review) reaches no reviewer. The owner
+    must see it on their resume so they route it.
+    """
+    ME = "claude-code:ArcBot:Arc-Code-Review"
+
+    def _tasks(self):
+        return [
+            # owned by me, mentions a PR, not a routed review -> FLAG
+            {"id": "T1", "owner_agent": self.ME, "status": "active", "tags": [],
+             "title": "Demo continuity snapshots", "workstream": "ashfulcra/fulcra-tools",
+             "next_action": "Review and merge PR #101, then propagate", "priority": "P2"},
+            # already a routed kind:review directive -> NOT flagged
+            {"id": "T2", "owner_agent": self.ME, "status": "active",
+             "tags": ["kind:review"], "workstream": "ashfulcra/fulcra-tools",
+             "title": "Review PR #102 — assume bugs", "priority": "P1"},
+            # PR mention but owned by someone else -> NOT flagged (not my plate)
+            {"id": "T3", "owner_agent": "openclaw:discord:main-comms", "status": "active",
+             "tags": [], "title": "x", "next_action": "see PR #103", "workstream": "r"},
+            # closed task -> NOT flagged
+            {"id": "T4", "owner_agent": self.ME, "status": "done", "tags": [],
+             "title": "x", "next_action": "PR #104 merged", "workstream": "r"},
+            # bare "#105" with no PR/pull context -> NOT flagged (avoid false positives)
+            {"id": "T5", "owner_agent": self.ME, "status": "active", "tags": [],
+             "title": "fix issue #105", "workstream": "r"},
+        ]
+
+    def test_flags_only_unrouted_owned_open_pr_mentions(self):
+        from fulcra_coord import views
+        out = views.unrouted_pr_reviews(self._tasks(), self.ME)
+        self.assertEqual([t["id"] for t in out], ["T1"])
+        self.assertEqual(out[0]["pr_mentions"], ["101"])
+
+    def test_matches_pull_url_and_dedupes(self):
+        from fulcra_coord import views
+        tasks = [{"id": "U1", "owner_agent": self.ME, "status": "waiting", "tags": [],
+                  "title": "ship it",
+                  "current_summary": "opened https://github.com/o/r/pull/77 ; PR #77 awaits review",
+                  "workstream": "o/r"}]
+        out = views.unrouted_pr_reviews(tasks, self.ME)
+        self.assertEqual(out[0]["pr_mentions"], ["77"])
+
+    def test_resume_json_surfaces_unrouted_pr_reviews(self):
+        from fulcra_coord.cli import cmd_resume
+        import io, contextlib
+        from unittest.mock import patch
+        with patch("fulcra_coord.query._load_task_summaries", return_value=self._tasks()), \
+             patch("fulcra_coord.query.identity.resolve_agent", return_value=self.ME), \
+             patch("fulcra_coord.query.identity.resolve_human", return_value="ash"), \
+             patch("fulcra_coord.query.remote.download_json", return_value=None):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_resume(types.SimpleNamespace(agent=self.ME, format="json"),
+                                backend=["false"])
+        self.assertEqual(rc, 0)
+        data = json.loads(buf.getvalue())
+        self.assertEqual([t["id"] for t in data["unrouted_pr_reviews"]], ["T1"])
+
+    def test_resume_table_prints_valid_request_review_command(self):
+        from fulcra_coord.cli import cmd_resume
+        import io, contextlib
+        from unittest.mock import patch
+        with patch("fulcra_coord.query._load_task_summaries", return_value=self._tasks()), \
+             patch("fulcra_coord.query.identity.resolve_agent", return_value=self.ME), \
+             patch("fulcra_coord.query.identity.resolve_human", return_value="ash"), \
+             patch("fulcra_coord.query.remote.download_json", return_value=None):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_resume(types.SimpleNamespace(agent=self.ME,
+                                                      format="table",
+                                                      with_continuity=False),
+                                backend=["false"])
+        self.assertEqual(rc, 0)
+        text = buf.getvalue()
+        self.assertIn("fulcra-coord request-review 101 --repo ashfulcra/fulcra-tools",
+                      text)
+        self.assertNotIn("--pr 101", text)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
