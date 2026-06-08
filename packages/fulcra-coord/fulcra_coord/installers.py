@@ -79,35 +79,55 @@ def cmd_install_claude_code(args: Any, backend: Optional[list[str]] = None) -> i
 
 
 def cmd_install_openclaw(args: Any, backend: Optional[list[str]] = None) -> int:
-    """Install/uninstall OpenClaw Track A coordination artifacts."""
+    """Install/uninstall OpenClaw Track A coordination artifacts.
+
+    Structure note (the early-return gotcha): the Track A hooks summary used to
+    ``return 0`` early on dry-run and uninstall, which made every *add-on* block
+    below it unreachable in those two modes. The ``--with-plugin`` Track B drop
+    and the heartbeat/listener bundle MUST run in ALL THREE modes (install,
+    dry-run, uninstall) — a dry-run that doesn't preview the bundle, or an
+    uninstall that leaves the scheduler jobs behind, would be silently wrong.
+    So the Track A summary is emitted from a helper WITHOUT short-circuiting,
+    the add-ons run unconditionally, and the single ``return 0`` is at the end.
+
+    The bundle (``--with-heartbeat`` / ``--with-listener``) is the OpenClaw
+    analogue of ``ensure-codex-watch``: it composes the already-hardened
+    ``heartbeat.install_heartbeat`` / ``listener.install_listener`` (inheriting
+    their PATH-safe CLI resolution + per-agent slug semantics) so that
+    "OpenClaw installed" can mean "this agent hears directed work on the bus"
+    in one command, instead of requiring a separate install-heartbeat +
+    install-listener step.
+    """
     hooks_root = getattr(args, "hooks_root", None)
     plan = openclaw.install_openclaw(
         hooks_root=hooks_root, uninstall=args.uninstall, dry_run=args.dry_run)
+    # Emit the Track A summary WITHOUT returning — add-ons below must still run.
     if args.dry_run:
         _info("[dry-run] OpenClaw hooks root: " + plan["hooks_root"])
         for w in plan.get("writes", []):
             _info(f"  + would write {w}")
         for r in plan.get("removes", []):
             _info(f"  - would remove {r}")
-        return 0
-    if args.uninstall:
+    elif args.uninstall:
         _info(f"Removed fulcra-coord OpenClaw artifacts from {plan['hooks_root']}")
-        return 0
-    _info(f"Installed OpenClaw Track A artifacts -> {plan['hooks_root']}")
-    for d in plan.get("hook_dirs", []):
-        _info(f"  + hook {d}")
-    for f in plan.get("prompt_files", []):
-        _info(f"  + prompt {f}")
-    _report_resolved_cli(plan)
-    _info("New OpenClaw sessions will surface in-flight work at boot and park "
-          "active tasks on gateway shutdown.")
-    _info("The handler.ts templates are written to the real OpenClaw "
-          "automation-hook API (verified against the SDK source); they still "
-          "can't be run in this repo.")
+    else:
+        _info(f"Installed OpenClaw Track A artifacts -> {plan['hooks_root']}")
+        for d in plan.get("hook_dirs", []):
+            _info(f"  + hook {d}")
+        for f in plan.get("prompt_files", []):
+            _info(f"  + prompt {f}")
+        _report_resolved_cli(plan)
+        _info("New OpenClaw sessions will surface in-flight work at boot and park "
+              "active tasks on gateway shutdown.")
+        _info("The handler.ts templates are written to the real OpenClaw "
+              "automation-hook API (verified against the SDK source); they still "
+              "can't be run in this repo.")
 
     # Track B add-on: materialize the Plugin-SDK plugin if requested. This is a
     # source drop only — building + registering needs npm/tsc, which the CLI
-    # can't do, so we print the manual finish-the-install steps.
+    # can't do, so we print the manual finish-the-install steps. Runs in all
+    # three modes (it was previously unreachable on dry-run/uninstall behind the
+    # early returns; fixing that is part of this change).
     if getattr(args, "with_plugin", False):
         from . import openclaw_plugin
         pplan = openclaw_plugin.install_openclaw_plugin(
@@ -126,6 +146,58 @@ def cmd_install_openclaw(args: Any, backend: Optional[list[str]] = None) -> int:
             _info("Build and register the plugin (needs npm; the CLI can't):")
             for step in pplan["build_steps"]:
                 _info(f"    {step}")
+
+    # Bundle add-on: arm the durable bus-pickup path (heartbeat + per-agent
+    # listener) so a fresh OpenClaw agent actually HEARS directed work without
+    # an operator separately running install-heartbeat + install-listener.
+    # Gated on flags, all read defensively via getattr so older arg namespaces
+    # (and tests that don't set them) keep working.
+    with_heartbeat = bool(getattr(args, "with_heartbeat", False))
+    with_listener = bool(getattr(args, "with_listener", False))
+    # Heartbeat is machine-global (no agent); the listener is per-agent, so it
+    # needs a concrete id — derive one only when a listener is actually wanted.
+    agent = getattr(args, "agent", None) or (_derive_agent() if with_listener else None)
+
+    if with_heartbeat:
+        # Reuse the hardened heartbeat installer (PATH-safe CLI resolution); do
+        # NOT open-code launchd/cron here.
+        heartbeat.install_heartbeat(
+            interval_min=getattr(args, "heartbeat_interval_min", None)
+            or heartbeat.INTERVAL_MIN_DEFAULT,
+            uninstall=args.uninstall, dry_run=args.dry_run,
+            target_dir=getattr(args, "schedule_target_dir", None),
+            logs_dir=getattr(args, "logs_dir", None))
+
+    if with_listener:
+        # Reuse the hardened, per-agent listener installer (slugged so co-located
+        # agents don't clobber each other).
+        listener.install_listener(
+            agent=agent,
+            interval_min=getattr(args, "listener_interval_min", None)
+            or listener.INTERVAL_MIN_DEFAULT,
+            uninstall=args.uninstall, dry_run=args.dry_run,
+            target_dir=getattr(args, "schedule_target_dir", None),
+            logs_dir=getattr(args, "logs_dir", None))
+
+    if with_heartbeat or with_listener:
+        # The composed installers print their own detailed plans; this line is
+        # the bundle-level summary so the operator sees the durable pickup path
+        # was armed (and in which mode).
+        bits = []
+        if with_heartbeat:
+            bits.append("heartbeat")
+        if with_listener:
+            bits.append("listener")
+        what = "/".join(bits)
+        if args.dry_run:
+            _info(f"[dry-run] Bundled heartbeat/listener: would arm {what} "
+                  f"(the durable bus-pickup path).")
+        elif args.uninstall:
+            _info(f"Removed bundled heartbeat/listener ({what}).")
+        else:
+            who = f" for {agent}" if with_listener else ""
+            _info(f"Installed bundled heartbeat/listener ({what}){who} — "
+                  "the durable bus-pickup path; this agent now hears directed work.")
 
     _info("Verify auth/connectivity with: fulcra-coord doctor")
     return 0

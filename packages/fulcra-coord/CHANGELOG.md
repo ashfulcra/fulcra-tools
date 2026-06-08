@@ -10,6 +10,26 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — `install-openclaw` can bundle the durable bus-pickup path
+
+**Why:** `install-openclaw` installed OpenClaw's lifecycle hooks, but a fresh
+OpenClaw agent still didn't *hear the bus* unless an operator separately ran
+`install-heartbeat` + `install-listener`. So "OpenClaw installed" did not mean
+"this agent hears directed work" — directed work could go unanswered until
+someone noticed the missing scheduler jobs.
+
+**What:** `install-openclaw` can now bundle the heartbeat + per-agent listener
+(the durable bus-pickup path) in one command via `--with-heartbeat`
+`--with-listener` `--agent <id>` (plus `--heartbeat-interval-min`,
+`--listener-interval-min`, `--schedule-target-dir`, `--logs-dir`). It composes
+the already-hardened `install_heartbeat` / `install_listener` (inheriting their
+PATH-safe CLI resolution + per-agent slug semantics) rather than open-coding
+launchd/cron. This is the OpenClaw analogue of the `ensure-codex-watch`
+self-heal. As part of the change, the command was restructured so its add-on
+blocks run in all three modes (install, dry-run, uninstall) — previously the
+early `return 0` on dry-run/uninstall made even the existing `--with-plugin`
+block unreachable in those modes; that is now fixed too.
+
 ## [Unreleased] — `ensure-codex-watch`: Codex coordination self-heals on every app start
 
 **Why:** Codex's durable per-agent inbox listener was only ever installed if an

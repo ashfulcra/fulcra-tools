@@ -319,6 +319,32 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Target dir for --with-plugin sources "
                          "(default: ~/.openclaw/plugins/fulcra-coord, "
                          "or $FULCRA_OPENCLAW_PLUGIN_DIR)")
+    # Bundle the durable bus-pickup path in one command, so a fresh OpenClaw
+    # agent HEARS directed work without a separate install-heartbeat /
+    # install-listener step (the OpenClaw analogue of ensure-codex-watch).
+    sp.add_argument("--agent", "-a", dest="agent", default=None, metavar="AGENT",
+                    help="Agent whose inbox the bundled listener watches "
+                         "(default: $FULCRA_COORD_AGENT or derived). Only used "
+                         "with --with-listener.")
+    sp.add_argument("--with-heartbeat", dest="with_heartbeat", action="store_true",
+                    help="Also install the machine-global reconcile heartbeat "
+                         "(reuses install-heartbeat — the crashed-agent safety net)")
+    sp.add_argument("--with-listener", dest="with_listener", action="store_true",
+                    help="Also install the per-agent inbox listener (reuses "
+                         "install-listener) so this agent hears directed work while idle")
+    sp.add_argument("--listener-interval-min", dest="listener_interval_min",
+                    type=int, default=None, metavar="N",
+                    help="Bundled listener poll cadence in minutes (default: 10)")
+    sp.add_argument("--heartbeat-interval-min", dest="heartbeat_interval_min",
+                    type=int, default=None, metavar="N",
+                    help="Bundled heartbeat cadence in minutes (default: 20)")
+    sp.add_argument("--schedule-target-dir", dest="schedule_target_dir",
+                    default=None, metavar="DIR",
+                    help="Override the LaunchAgents/cron target dir for the "
+                         "bundled heartbeat + listener (for testing)")
+    sp.add_argument("--logs-dir", dest="logs_dir", default=None, metavar="DIR",
+                    help="Override the stdout/stderr logs dir for the bundled "
+                         "heartbeat + listener")
 
     # ---- install-codex ----
     sp = sub.add_parser("install-codex",

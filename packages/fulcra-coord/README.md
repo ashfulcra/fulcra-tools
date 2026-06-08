@@ -102,7 +102,7 @@ fulcra-coord done TASK-... \
 | `doctor` | Check configuration and connectivity |
 | `install-shim` | Install CLI shim to `~/.local/bin/` |
 | `install-claude-code` | Install Claude Code lifecycle hooks (global by default) |
-| `install-openclaw` | Install OpenClaw Track A artifacts (boot/heartbeat prompts + shutdown/bootstrap hooks); add `--with-plugin` to also materialize the Track B Plugin-SDK plugin |
+| `install-openclaw` | Install OpenClaw Track A artifacts (boot/heartbeat prompts + shutdown/bootstrap hooks); add `--with-plugin` to also materialize the Track B Plugin-SDK plugin; add `--with-heartbeat --with-listener --agent <id>` to bundle the durable bus-pickup path (reuses `install-heartbeat` + the per-agent `install-listener`) in one command, so a fresh OpenClaw agent hears directed work without a separate step (the OpenClaw analogue of `ensure-codex-watch`) |
 | `install-codex` | Install Codex lifecycle hooks (SessionStart + PreCompact) into `~/.codex/hooks.json`. No Stop hook by design — Codex end-parking is delegated to the heartbeat |
 | `ensure-codex-watch` | Idempotently (re)arm Codex coordination in one shot — installs Codex hooks, the per-agent inbox listener, best-effort `launchctl load`s it (`--no-load` to skip), optionally refreshes presence (`--no-connect`). Codex SessionStart runs it backgrounded each app start so a missing listener self-heals. Idempotent (`--agent`, `--set-identity`, `--can-review`, `--interval-min N`, `--dry-run`) |
 | `install-heartbeat` | Install a scheduled `reconcile` heartbeat (launchd on macOS, crontab elsewhere) — the safety net that sweeps stale tasks for crashed / end-hook-less agents (`--interval-min N`) |
