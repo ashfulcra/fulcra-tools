@@ -26,7 +26,7 @@ plate.
   `pull request N` — deliberately not a bare `#N`, to avoid issue-ref false
   positives) but that carry no `kind:review` marker (i.e. were never routed).
 - `resume` surfaces these first, loudly, with the exact fix command
-  (`fulcra-coord request-review --pr N --repo <workstream>`); `resume --format
+  (`fulcra-coord request-review N --repo <workstream>`); `resume --format
   json` adds an `unrouted_pr_reviews` array. Read-only, summary-only.
 - Rule (docs): opening a PR means running `request-review` — never leave a PR
   review as a free-text next_action, or it reaches no reviewer.
