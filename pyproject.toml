@@ -2,14 +2,14 @@
 # itself — it just ties the packages/ together so `uv sync` resolves the
 # intra-repo `fulcra-common` dependency from source.
 [tool.uv.workspace]
-members = ["packages/*", "attention"]
+members = ["packages/*"]
 # Exclude non-Python packages that live under packages/ but aren't uv workspace
 # members (no pyproject.toml). web-ui is a frontend — globbing it as a member
 # breaks `uv sync`/`uv run`/`uv tool install` workspace resolution. (The JS/Node
 # hermes-vercel + litellm packages that also used to need excluding were
 # extracted to their own standalone repos — ashfulcra/fulcra-hermes-vercel and
 # ashfulcra/fulcra-litellm.)
-exclude = ["packages/web-ui", "packages/attention"]
+exclude = ["packages/web-ui"]
 
 # Workspace-wide pytest settings — applied when running `pytest packages/`
 # from the monorepo root.  Each package also has its own [tool.pytest.ini_options]

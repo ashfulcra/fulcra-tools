@@ -65,7 +65,7 @@ def test_description_points_at_the_browser_extension():
     in via the browser — and must not reference the dead relay machinery."""
     desc = PLUGIN.description.lower()
     assert "browser extension" in desc
-    assert "attention/chrome" in PLUGIN.description
+    assert "packages/attention/chrome" in PLUGIN.description
     # No residue of the retired relay/pairing machinery.
     assert "extension-token" not in desc
     assert "pair" not in desc
@@ -87,7 +87,7 @@ def test_run_emits_a_single_informational_message():
     assert event["ok"] is True
     detail = event["detail"]
     assert "browser" in detail.lower()
-    assert "attention/chrome/dist" in detail
+    assert "packages/attention/chrome/dist" in detail
 
 
 def test_run_does_not_touch_credentials_or_fulcra():
