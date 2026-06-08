@@ -24,7 +24,7 @@ FULCRA_COORD=(__FULCRA_COORD_ARGV__)
 # Fail-safe: an old/missing CLI yields empty -> fall back to the shell-derived id
 # (the same shape resolve_agent derives), so the hook still works pre-handshake.
 AGENT="$("${FULCRA_COORD[@]}" identity --format json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("agent",""))' 2>/dev/null)"
-[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"
+[ -z "$AGENT" ] && AGENT="codex:${HOST}:${REPO}"
 
 JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
 [ -z "$JSON" ] && exit 0
@@ -34,6 +34,9 @@ JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
 # when it owns no active task. `connect` auto-derives workstreams from this
 # agent's open tasks. Backgrounded + silenced — best-effort, never blocks or
 # delays session start; a missing/old CLI without `connect` simply no-ops.
+# Re-arm Codex hooks + the per-agent inbox listener on every app start.
+# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.
+"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &
 "${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &
 
 # Directives addressed to this agent. status JSON may not carry `assignee`, so

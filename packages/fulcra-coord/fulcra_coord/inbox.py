@@ -17,14 +17,63 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from . import cache, schema, views, identity, listener
+from . import cache, remote, schema, views, identity, listener
 from .io import _load_task, _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
-from .writepipe import _write_task_and_views
+from .writepipe import _view_name_to_remote, _write_task_and_views
 
 
 def _derive_agent() -> str:
     return identity.resolve_agent()
+
+def _load_task_from_summary(summary: dict[str, Any], *,
+                            backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+    """Load a task body using the exact durable path carried by a summary."""
+    task_id = summary.get("id")
+    task_file = summary.get("task_file")
+    if not (task_id and task_file):
+        return None
+    task = remote.download_json(task_file, backend=backend)
+    if not (task and task.get("id") == task_id):
+        return None
+    cache.write_cached_task(task)
+    return task
+
+def _ack_summary_only(task_id: str, me: str, *,
+                      backend: Optional[list[str]] = None) -> bool:
+    """Record an inbox ack in summaries when the task body is missing."""
+    summaries = _load_task_summaries(backend=backend)
+    changed = False
+    found = False
+    rebuilt: list[dict[str, Any]] = []
+    for item in summaries:
+        if item.get("id") != task_id:
+            rebuilt.append(item)
+            continue
+        found = True
+        updated = dict(item)
+        acked_by = set(updated.get("acked_by") or [])
+        if me not in acked_by:
+            acked_by.add(me)
+            updated["acked_by"] = sorted(acked_by)
+            changed = True
+        rebuilt.append(updated)
+
+    if not found:
+        return False
+    if not changed:
+        return True
+
+    ok = True
+    for view_name, view_data in views.build_all_views(rebuilt).items():
+        try:
+            uploaded = remote.upload_json(
+                view_data, _view_name_to_remote(view_name), backend=backend)
+        except Exception:
+            uploaded = False
+        cache.write_cached_view(view_name, view_data)
+        ok = uploaded and ok
+    return ok
 
 def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """List (or ack) open directives addressed to the calling agent.
@@ -42,8 +91,19 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     if ack_id:
         task = _load_task(ack_id, backend=backend)
         if task is None:
-            _err(f"Task not found: {ack_id}")
-            return 1
+            match = next(
+                (item for item in _load_inbox(me, backend=backend, include_aged=True)
+                 if item.get("id") == ack_id),
+                None,
+            )
+            if match:
+                task = _load_task_from_summary(match, backend=backend)
+            if task is None:
+                if match and _ack_summary_only(ack_id, me, backend=backend):
+                    _info(f"Acknowledged: {ack_id}")
+                    return 0
+                _err(f"Task not found: {ack_id}")
+                return 1
         task = schema.apply_event(task, "inbox_ack", by=me,
                                   summary=f"Inbox acknowledged by {me}.")
         cache.write_cached_task(task)
@@ -151,6 +211,16 @@ def _needs_me_seen_path(human: str):
     with odd characters maps to a safe filename."""
     return cache.cache_root() / f"needs-me-seen-{listener.agent_slug(human)}.json"
 
+def _inbox_notified_seen_path(agent: str):
+    """Seen-set surface for the agent's OWN inbox-count notification, keyed by
+    the polling agent. Mirrors ``_needs_me_seen_path`` (which guards the human
+    blocked-on-you path): a set of directive ids the operator was already pinged
+    about, so a tick re-alerts only on NEW inbox items instead of every tick.
+    Slugged via the same agent_slug so an odd-character handle maps to a safe
+    filename, and distinct from the inbox-pending surface (which holds the full
+    payload, not just ids)."""
+    return cache.cache_root() / f"inbox-notified-{listener.agent_slug(agent)}.json"
+
 def _notify_new_needs_me(backend: Optional[list[str]] = None) -> None:
     """Fire a desktop notification for each NEW item blocked on the human.
 
@@ -204,8 +274,25 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         payload = {"agent": me, "count": len(items), "inbox": items}
         surface.write_text(json.dumps(payload, indent=2))
-        if items:
-            listener.emit_notification(me, len(items))
+        # Notify ONLY on NEW inbox items, not every tick. Mirrors the human
+        # blocked-on-you seen-set: load the ids we've already pinged about, alert
+        # only when something new arrived, then persist the CURRENT ids (so a
+        # resolved/acked directive drops out and a re-arrival re-alerts). The
+        # surface-file write above is Tier 0 (unconditional, guaranteed delivery)
+        # and is intentionally left untouched by this dedup.
+        seen_path = _inbox_notified_seen_path(me)
+        seen: set[str] = set()
+        if seen_path.exists():
+            try:
+                seen = set(json.loads(seen_path.read_text()))
+            except (json.JSONDecodeError, OSError, TypeError):
+                seen = set()
+        current_ids = {i["id"] for i in items}
+        new_ids = current_ids - seen
+        if new_ids:
+            listener.emit_notification(me, len(new_ids))
+        cache.cache_root().mkdir(parents=True, exist_ok=True)
+        seen_path.write_text(json.dumps(sorted(current_ids)))
         # ALSO notice anything newly blocked on the human (Part 5). Independent
         # of the agent's own inbox: a tick with an empty inbox can still alert on
         # a new blocked-on-you item. Best-effort within the same fail-safe guard.

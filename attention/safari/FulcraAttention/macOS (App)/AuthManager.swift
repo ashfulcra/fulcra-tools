@@ -407,3 +407,48 @@ public final nonisolated class AuthManager: @unchecked Sendable {
         #endif
     }
 }
+
+// MARK: - Token provider shim (for EnsureAttention / native ingest)
+
+extension AuthManager {
+    /// Return the current Bearer access token, refreshing first when
+    /// `forceRefresh` is true OR the stored token is expired. Returns nil when
+    /// not signed in (no stored tokens) or when a needed refresh is impossible
+    /// (no refresh token / refresh failed).
+    ///
+    /// Mirrors the TS `getToken({ force?: boolean })` contract used by the
+    /// relayless modules: a normal call returns the current token; a
+    /// `force:true` call refreshes first. This is additive — it does not change
+    /// any existing call site.
+    public func accessToken(forceRefresh: Bool = false) async throws -> String? {
+        guard let stored = currentTokens() else {
+            authLog.debug("accessToken: no stored tokens; not signed in")
+            return nil
+        }
+        if forceRefresh || stored.isExpired {
+            guard let refreshToken = stored.refreshToken else {
+                authLog.debug("accessToken: refresh needed but no refresh token; returning nil")
+                return nil
+            }
+            do {
+                let refreshed = try await refresh(refreshToken: refreshToken)
+                return refreshed.accessToken
+            } catch {
+                authLog.error("accessToken: forced/expired refresh failed: \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+        return stored.accessToken
+    }
+}
+
+/// Adapts an `AuthManager` to the `TokenProvider` protocol consumed by
+/// `EnsureAttention`. Keeps `EnsureDefinition.swift` decoupled from the auth
+/// implementation (and trivially fakeable in tests).
+public final class AuthManagerTokenProvider: TokenProvider, @unchecked Sendable {
+    private let auth: AuthManager
+    public init(_ auth: AuthManager) { self.auth = auth }
+    public func accessToken(forceRefresh: Bool) async throws -> String? {
+        try await auth.accessToken(forceRefresh: forceRefresh)
+    }
+}
