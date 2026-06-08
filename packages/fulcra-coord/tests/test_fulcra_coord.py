@@ -10138,6 +10138,21 @@ class TestRequestReview(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("42", escalated.get("pr", ""))
 
+    def test_miss_returns_nonzero_when_human_escalation_fails(self):
+        from fulcra_coord.cli import cmd_request_review
+        old_ls = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": old_ls, "capabilities": ["review"]}])
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.routing_ops._escalate_review_to_human",
+                   return_value=False), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 1)
+
     def test_escalate_to_human_lands_blocked_needs_human(self):
         # _escalate_review_to_human must actually land a blocked, human-assigned
         # task carrying needs:human, even though make_task starts at 'proposed'
@@ -10159,6 +10174,348 @@ class TestRequestReview(unittest.TestCase):
         self.assertEqual(t["status"], "blocked")
         self.assertEqual(t["assignee"], "redacted@users.noreply.github.com")
         self.assertIn("needs:human", t["tags"])
+
+    def test_escalation_forge_agnostic_no_pr_no_none(self):
+        """Regression: escalating a non-numeric artifact with no --repo must
+        produce a clean ask + marker — no hardcoded "PR ", no literal "None".
+
+        Before the fix `_escalate_review_to_human` built `f"PR #{artifact} needs a
+        reviewer ({repo})"` and a marker `review-escalation:{repo}#{artifact}`, so
+        a branch ref with repo=None read "PR #feat/x needs a reviewer (None)" and
+        the marker "review-escalation:None#feat/x"."""
+        from fulcra_coord.cli import _escalate_review_to_human
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_human", return_value="redacted@users.noreply.github.com"), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="codex:m:main"):
+            ok = _escalate_review_to_human(pr="feat/x", repo=None,
+                                           tried=["dead:h:r"], backend=["false"])
+        self.assertTrue(ok)
+        t = captured["task"]
+        blob = json.dumps(t)
+        # No hardcoded "PR " and no literal "None" leaking into ask / title / marker.
+        self.assertNotIn("PR ", blob)
+        self.assertNotIn("None", blob)
+        # The branch ref appears verbatim; the marker uses repo "general", not None.
+        self.assertIn("feat/x", blob)
+        marker = "review-escalation:general#feat/x"
+        self.assertIn(marker, t["tags"])
+
+
+# ---------------------------------------------------------------------------
+# Forge-agnostic review handshake — Part 1: request-review opaque artifact ref
+# ---------------------------------------------------------------------------
+
+
+class TestRequestReviewArtifactRef(unittest.TestCase):
+    """request-review's artifact is now an OPAQUE ref (PR#/MR#/branch/SHA/URL),
+    not a GitHub PR. Numeric refs keep the bare "#<n>" display (backward compat
+    with the old "Review PR #<n>" routing, minus the hardcoded "PR "); non-numeric
+    refs (branches, SHAs) get the artifact verbatim. --repo is OPTIONAL."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _live_presence(self):
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        return {"agents": [{"agent": "codex:Mac.localdomain:main",
+                            "last_seen": now_ls, "capabilities": ["review"]}]}
+
+    def _route_and_capture(self, *, pr, repo):
+        """Run request-review with a live reviewer, returning the written task."""
+        from fulcra_coord.cli import cmd_request_review
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   return_value=self._live_presence()), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_agent",
+                   return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr=pr, repo=repo, dry_run=False,
+                                         candidate_list=None, format="json",
+                                         agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        return rc, captured["task"]
+
+    def test_bare_number_artifact_titles_without_PR_word(self):
+        rc, t = self._route_and_capture(pr="101", repo="o/r")
+        self.assertEqual(rc, 0)
+        # Old behaviour said "Review PR #101"; the de-named title drops "PR ".
+        self.assertIn("Review #101", t["title"])
+        self.assertNotIn("PR #101", t["title"])
+
+    def test_branch_artifact_titles_verbatim(self):
+        rc, t = self._route_and_capture(pr="feat/my-branch", repo=None)
+        self.assertEqual(rc, 0)
+        self.assertIn("Review feat/my-branch", t["title"])
+        self.assertNotIn("#feat", t["title"])  # not numeric -> no '#'
+
+    def test_repo_omitted_still_routes_and_tags_review(self):
+        rc, t = self._route_and_capture(pr="feat/x", repo=None)
+        self.assertEqual(rc, 0)
+        self.assertEqual(t["assignee"], "codex:Mac.localdomain:main")
+        self.assertIn("kind:review", t["tags"])
+        routed = [e for e in t["events"] if e["type"] == "routed"]
+        self.assertEqual(len(routed), 1)
+
+    def test_backward_compat_number_with_repo_still_routes(self):
+        rc, t = self._route_and_capture(pr="101", repo="o/r")
+        self.assertEqual(rc, 0)
+        self.assertEqual(t["assignee"], "codex:Mac.localdomain:main")
+        self.assertIn("kind:review", t["tags"])
+        self.assertEqual(t.get("repo"), "o/r")
+        self.assertEqual(t.get("pr"), "101")
+
+
+# ---------------------------------------------------------------------------
+# Forge-agnostic review handshake — Part 2: review-done verdict directive
+# ---------------------------------------------------------------------------
+
+
+class TestReviewDone(unittest.TestCase):
+    """`review-done` lands the reviewer's verdict as a BUS directive to the
+    artifact's AUTHOR — never a GitHub comment. coord must NEVER call a forge."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_cache = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self._tmp
+
+    def tearDown(self):
+        if self._old_cache is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._old_cache
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _args(self, **kw):
+        base = dict(artifact="101", verdict="approve", note=None, repo=None,
+                    to=None, format="table")
+        base.update(kw)
+        ns = types.SimpleNamespace(**{k: v for k, v in base.items() if k != "from"})
+        setattr(ns, "from", base.get("from"))
+        return ns
+
+    def _review_task(self, *, artifact, author):
+        """A routed kind:review directive as request-review would have written it
+        (owner_agent = the author who requested the review)."""
+        title = (f"Review #{artifact} — assume bugs, claim the review before working"
+                 if str(artifact).isdigit()
+                 else f"Review {artifact} — assume bugs, claim the review before working")
+        return {"id": "TASK-20260608-rev-00000000", "status": "proposed",
+                "title": title, "owner_agent": author, "assignee": "codex:m:main",
+                "tags": ["kind:review"], "events": [], "workstream": "o/r",
+                "pr": artifact}
+
+    def test_to_override_lands_verdict_directive(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=fake_write), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to="claude-code:h:r",
+                                            note="LGTM"), backend=["false"])
+        self.assertEqual(rc, 0)
+        t = captured["task"]
+        self.assertEqual(t["assignee"], "claude-code:h:r")
+        self.assertIn("kind:review-verdict", t["tags"])
+        self.assertIn("approve", t["title"])
+        self.assertIn("#101", t["title"])
+        blob = json.dumps(t)
+        self.assertIn("LGTM", blob)
+
+    def test_changes_verdict_in_title(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        with patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="changes", to="claude-code:h:r"),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertIn("changes", captured["task"]["title"])
+
+    def test_author_resolved_from_existing_review_task(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        existing = [self._review_task(artifact="101", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        # Author came from the existing kind:review task's owner_agent.
+        self.assertEqual(captured["task"]["assignee"], "claude-code:author:r")
+
+    def test_branch_artifact_author_resolution(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        existing = [self._review_task(artifact="feat/x", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="feat/x", verdict="approve",
+                                            to=None), backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["task"]["assignee"], "claude-code:author:r")
+        self.assertIn("Review verdict", captured["task"]["title"])
+
+    def test_unresolvable_author_clean_error_no_guess(self):
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=[]), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to=None),
+                                 backend=["false"])
+        # No author resolvable, no --to: clean non-zero, no write, no guess.
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(wrote["called"])
+
+    def test_no_forge_subprocess_call(self):
+        """The verdict is bus-only: review-done must NOT shell out to gh / any
+        forge. Assert subprocess is never invoked anywhere in the path."""
+        from fulcra_coord.cli import cmd_review_done
+        with patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"), \
+             patch("subprocess.run") as sprun, \
+             patch("subprocess.Popen") as spopen, \
+             patch("subprocess.check_output") as spco:
+            rc = cmd_review_done(self._args(verdict="approve", to="claude-code:h:r"),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        sprun.assert_not_called()
+        spopen.assert_not_called()
+        spco.assert_not_called()
+
+    def test_write_failure_is_fail_safe(self):
+        """A write blowup warns, never crashes (fail-safe like other directive
+        writers)."""
+        from fulcra_coord.cli import cmd_review_done
+
+        def boom(task, **kw):
+            raise RuntimeError("remote exploded")
+
+        with patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=boom), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(verdict="approve", to="claude-code:h:r"),
+                                 backend=["false"])
+        # Best-effort: a write failure must not raise out of the command.
+        self.assertEqual(rc, 1)
+
+    def test_resolves_in_routing_ops_namespace(self):
+        """Non-vacuous patch guard (the recurring trap): the helpers review-done
+        calls must actually live in routing_ops' namespace."""
+        from fulcra_coord import routing_ops
+        self.assertTrue(hasattr(routing_ops, "_write_task_and_views"))
+        self.assertTrue(hasattr(routing_ops, "_load_all_tasks"))
+        self.assertTrue(hasattr(routing_ops, "identity"))
+        self.assertTrue(callable(routing_ops.cmd_review_done))
+
+    # --- Regression: wrong-author misroute via substring match (CRITICAL) ---
+    # Author resolution must match the EXACT stored artifact (task["pr"]), never
+    # a substring of the directive title. Before the fix, `review-done 10`
+    # resolved against a `#101` directive (because "#10" is a substring of
+    # "#101"), confidently misrouting the verdict to PR #101's author.
+
+    def test_numeric_substring_does_not_misroute(self):
+        """`review-done 10` must NOT resolve from a `#101` directive — a confident
+        misroute is worse than a clean error. Expect non-zero, no write."""
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        existing = [self._review_task(artifact="101", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="10", verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(wrote["called"])
+
+    def test_branch_substring_does_not_misroute(self):
+        """`review-done feat/x` must NOT resolve from a `feat/xyz` directive."""
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        existing = [self._review_task(artifact="feat/xyz", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="feat/x", verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(wrote["called"])
+
+    def test_exact_numeric_artifact_resolves(self):
+        """`review-done 101` against the `#101` directive resolves to its
+        owner_agent (the exact-match path still works)."""
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+        existing = [self._review_task(artifact="101", author="claude-code:author:r")]
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="101", verdict="approve", to=None),
+                                 backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["task"]["assignee"], "claude-code:author:r")
+
+    def test_dry_run_unresolved_author_prints_plan_returns_zero(self):
+        """Dry-run never hard-fails: an unresolvable author under --dry-run prints
+        the plan with `to: <unresolved>` and returns 0 (non-dry-run still errors)."""
+        from fulcra_coord.cli import cmd_review_done
+        wrote = {"called": False}
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=[]), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: wrote.update(called=True) or True), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(self._args(artifact="feat/x", verdict="approve",
+                                            to=None, dry_run=True), backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertFalse(wrote["called"])
 
 
 # ---------------------------------------------------------------------------

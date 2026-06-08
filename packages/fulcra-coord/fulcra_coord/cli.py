@@ -72,6 +72,7 @@ from .writepipe import (
 from .routing_ops import (
     _canonical_reviewer, _review_pool, _append_route_event_and_assignee,
     _force_block_for_human, _escalate_review_to_human, cmd_request_review,
+    cmd_review_done, _resolve_review_author,
     _reroute_minutes, _reroute_max, _accepted_stall_hours,
     _review_accepted_by_assignee, _classify_review, _sweep_review_routes,
 )
