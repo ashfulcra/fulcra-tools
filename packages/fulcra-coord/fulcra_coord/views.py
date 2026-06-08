@@ -955,6 +955,56 @@ def upcoming_for_human(tasks: list[dict[str, Any]], human: str, *,
     return [s for _, _, s in sorted(items, key=lambda x: (x[0], x[1]))]
 
 
+# --- Unrouted PR-review detection ----------------------------------------
+# `views` must NOT import `routing` (routing imports `views`), so mirror the
+# kind:review marker here. Keep in sync with routing.REVIEW_TAG.
+_REVIEW_TAG = "kind:review"
+UNROUTED_REVIEW_OPEN_STATUSES = ("proposed", "active", "waiting", "blocked")
+# Match an explicit PR reference: "PR #101", "PR 101", "PRs #101", a GitHub
+# "/pull/101" URL, or "pull request 101". Deliberately NOT a bare "#101" — that
+# would false-positive on issue refs and unrelated hashes; the whole point is to
+# catch *PR* mentions an author forgot to route for review.
+_PR_MENTION_RE = _re.compile(
+    r"(?:\bPRs?\b\s*#?|/pull/|\bpull\s+request\s+#?)(\d{1,6})", _re.IGNORECASE)
+
+
+def unrouted_pr_reviews(tasks: list[dict[str, Any]], agent: str) -> list[dict[str, Any]]:
+    """Open tasks OWNED BY ``agent`` that name a PR in free text but were never
+    routed for review.
+
+    The failure this catches: an author opens a PR and leaves "review PR #N" as a
+    next_action/summary instead of running ``request-review``. No ``kind:review``
+    directive is ever created, so the review is assigned to nobody and surfaces
+    on no reviewer's inbox/resume — it silently goes unreviewed (exactly how
+    PR #101 sat unreviewed). Flagging it on the OWNER's resume nudges them to
+    route it so a reviewer actually gets it.
+
+    Read-only and summary-only (reads title/current_summary/next_action/tags —
+    no body or events). A task that already carries the ``kind:review`` marker is
+    a routed review directive and is excluded. Each returned summary gains a
+    ``pr_mentions`` list of the referenced PR numbers (strings, de-duped)."""
+    out: list[dict[str, Any]] = []
+    for t in tasks:
+        if t.get("owner_agent") != agent:
+            continue
+        if t.get("status") not in UNROUTED_REVIEW_OPEN_STATUSES:
+            continue
+        if _REVIEW_TAG in (t.get("tags") or []):
+            continue  # already a routed review directive
+        haystack = " ".join(
+            str(t.get(f, "") or "")
+            for f in ("title", "current_summary", "next_action"))
+        prs = sorted({m.group(1) for m in _PR_MENTION_RE.finditer(haystack)},
+                     key=int)
+        if not prs:
+            continue
+        s = dict(t)
+        s["pr_mentions"] = prs
+        out.append(s)
+    return sorted(out, key=lambda x: (x.get("priority", "P9"),
+                                      x.get("updated_at", "")))
+
+
 def build_next(tasks: list[dict[str, Any]], updated_at: Optional[str] = None) -> dict[str, Any]:
     """Proposed and waiting tasks — candidates for starting next."""
     if updated_at is None:
