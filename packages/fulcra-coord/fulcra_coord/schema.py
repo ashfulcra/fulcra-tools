@@ -365,10 +365,14 @@ _DIRECTIVE_KEYS = {
 
 
 def make_directive_id(directive_type: str, dt: Optional[datetime] = None) -> str:
-    """Generate a collision-resistant, time-sortable directive ID.
+    """Generate a collision-resistant, day-sortable directive ID.
 
-    Mirrors make_task_id's approach (date slug + random suffix) so IDs sort
-    lexicographically by creation time and remain human-readable in file listings.
+    Mirrors make_task_id's approach (date slug + random suffix). The id is
+    ``DIR-<YYYYMMDD>-<type>-<rand8>``, so IDs are lexically sortable by creation
+    DAY and remain human-readable in file listings. Sortability is DAY
+    granularity only: two directives created on the same day sort by the random
+    suffix, NOT by sub-day creation time — within a day the order is arbitrary,
+    not chronological. (Use ``created_at`` for true time ordering.)
     The directive_type is embedded so a ``ls directives/`` scan is self-describing.
 
     WHY include a random suffix: two directives of the same type created in the
