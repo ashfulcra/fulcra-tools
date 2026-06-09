@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, continuity
 from . import annotations as lifecycle_annotations
+from . import log as ops_log
 from .io import _load_task
 from .output import info as _info, warn as _warn, err as _err
 from .writepipe import _write_task_and_views
@@ -121,14 +122,60 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None) -> int:
         _err(str(e))
         return 2
     except schema.NeedsReconcile as e:
+        # The TASK BODY landed (NeedsReconcile is raised only after the body
+        # uploaded — see writepipe), so the dual-write mirror should still fire.
         _warn(str(e))
+        _dual_write_directive(task, command="tell", backend=backend)
         return 0
 
     if ok:
+        _dual_write_directive(task, command="tell", backend=backend)
         _info(f"\nDirective created: {task['id']} -> {assignee}")
         return 0
     _warn(f"Directive cached locally but remote upload failed: {task['id']}.")
     return 1
+
+
+def _dual_write_directive(
+    task: dict[str, Any], *, command: str, backend: Optional[list[str]] = None
+) -> None:
+    """Phase 3b strangler-fig dual-write: ADDITIVELY mirror a directive-creating
+    task into a first-class ``directives/<id>.json`` record.
+
+    BEST-EFFORT — this NEVER fails or alters the authoritative legacy task write.
+    It is called only AFTER the task body has already landed, so the legacy write
+    is committed regardless of what happens here. Any failure (a raising or
+    False-returning upload, a mapping error) is swallowed and recorded in the
+    ops log as ``directive_write_failed`` so the migration parity can be audited
+    — exactly mirroring the event-append best-effort posture in writepipe.
+
+    ``directives`` is lazy-imported inside the function to avoid paying its
+    import cost on every lifecycle import and to keep the module-load graph flat
+    (no eager cycle risk during package init). Nothing READS directives for
+    correctness yet — this is purely the write half of the migration.
+    """
+    try:
+        from . import directives  # lazy import: avoid import cost / cycle at module load
+        directive = directives.directive_from_task(task)
+        ok = remote.upload_json(
+            directive, remote.directive_remote_path(directive["id"]), backend=backend
+        )
+        if not ok:
+            try:
+                ops_log.log_op(command, task.get("id"),
+                               status="directive_write_failed",
+                               error="Directive upload returned false")
+            except Exception:
+                pass
+    except Exception as exc:
+        # Best-effort: the legacy task write already succeeded. Record the miss
+        # in the ops log (Phase 3b's job is to validate the dual-write), guarded
+        # so even the logging cannot break the authoritative write.
+        try:
+            ops_log.log_op(command, task.get("id"),
+                           status="directive_write_failed", error=str(exc))
+        except Exception:
+            pass
 
 
 def cmd_broadcast(args: Any, backend: Optional[list[str]] = None) -> int:
