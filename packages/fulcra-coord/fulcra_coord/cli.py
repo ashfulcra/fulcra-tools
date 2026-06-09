@@ -169,6 +169,39 @@ def _build_health_record(*, now, duration_s, tasks_loaded, views_refreshed,
     }
 
 
+#: Window for the dual-write append-failure liveness count. 24h is long enough to
+#: catch an intermittent failure between reconciles, short enough that a
+#: long-resolved blip ages out instead of dragging the signal forever. The ops-log
+#: file is append-only/unbounded today; pruning it is a separate retention
+#: follow-up (NOT built here).
+_DUAL_WRITE_FAILURE_WINDOW = timedelta(hours=24)
+
+
+def _event_dual_write_health() -> dict:
+    """SIGNAL C (dual-write liveness): recent ``event_append_failed`` count.
+
+    The dual-write append path records an ``event_append_failed`` op on every
+    failed event append, but those entries were write-only — a host whose
+    dual-write is silently failing was invisible to the fleet. This counts them
+    over a recent window from the local ops log and returns an
+    ``event_dual_write`` block for the health record.
+
+    Best-effort: any failure reading/counting yields ``append_failures_recent``
+    0 (the block is still emitted with the window), and this never raises — a
+    corrupt ops log must NEVER break reconcile. ``window_since`` records the
+    window start so a reader knows the count's horizon."""
+    since = datetime.now(timezone.utc) - _DUAL_WRITE_FAILURE_WINDOW
+    n = 0
+    try:
+        n = sum(
+            1 for e in cache.read_ops_log(since=since)
+            if e.get("status") == "event_append_failed"
+        )
+    except Exception:
+        n = 0
+    return {"append_failures_recent": n, "window_since": _iso_z(since)}
+
+
 #: Max items rendered per digest block before collapsing the tail into "+N more".
 #: Keeps the timeline note bounded (a 284-event-in-two-days bus could otherwise
 #: produce a wall of text) while always showing the most-salient head of each list.
@@ -308,6 +341,16 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     # authoritative summaries view holds (root cause C1, report-only).
     ack_drift_ids_set: set[str] = set()
     checked = 0
+    # SIGNAL A (coverage liveness): "drift == 0" is satisfiable two ways — the
+    # fold faithfully reconstructs every task, OR the fold folded nothing / there
+    # are no events so there is nothing to disagree with. These additive counts
+    # make the difference visible so a host that folded nothing can no longer read
+    # green just because there was nothing to compare.
+    #   tasks_total      — every task .json file iterated under tasks/.
+    #   tasks_with_events — tasks that had >=1 event and were compared (== checked).
+    #   folds_complete    — tasks whose fold_is_complete (trustworthy full-snapshot).
+    tasks_total = 0
+    folds_complete = 0
 
     # Fields excluded from BOTH the full-task and delta-only comparisons — shared
     # so the two branches stay consistent. See the docstring for why each differs
@@ -346,15 +389,23 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             continue
         if "/events/" in path:
             continue
+        # Count every well-formed task file BEFORE the events gate, so
+        # tasks_total reflects the full bus task population (the denominator the
+        # flip gate's coverage check divides tasks_with_events by). A task with no
+        # events still counts toward the total — it just isn't compared.
         snap = remote.download_json(path, backend=backend)
         if not snap or "id" not in snap:
             continue
+        tasks_total += 1
         evs = _eventlog.read_events(snap["id"], backend=backend)
         if not evs:
             continue  # not yet dual-written (pre-migration task) — not drift
         checked += 1
         folded = _events.fold_task(evs)
-        if _events.fold_is_complete(folded):
+        fold_complete = _events.fold_is_complete(folded)
+        if fold_complete:
+            folds_complete += 1
+        if fold_complete:
             # Compare the durable task fields. Exclude bookkeeping the fold adds
             # (_applied_event_count) and fields that legitimately differ between a
             # point-in-time snapshot and the live file: updated_at / last_touched_*
@@ -389,6 +440,10 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
         "drift_task_ids": drift_task_ids,
         "ack_drift": len(ack_drift_task_ids),
         "ack_drift_task_ids": ack_drift_task_ids,
+        # SIGNAL A — additive coverage/liveness counts (existing keys unchanged):
+        "tasks_total": tasks_total,
+        "tasks_with_events": checked,  # same as checked; named for the flip gate
+        "folds_complete": folds_complete,
     }
 
 
@@ -566,6 +621,17 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             # reconcile either). record["event_parity"] is simply absent.
             try:
                 _warn(f"  Event-parity check skipped (error): {_pe}")
+            except Exception:
+                pass
+        # SIGNAL C: surface recent dual-write append failures so a host whose
+        # event-append is silently failing is no longer invisible. Best-effort and
+        # self-guarding (the helper never raises); wrapped here too so a future
+        # change to it can never break reconcile.
+        try:
+            record["event_dual_write"] = _event_dual_write_health()
+        except Exception as _de:
+            try:
+                _warn(f"  Dual-write health skipped (error): {_de}")
             except Exception:
                 pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:

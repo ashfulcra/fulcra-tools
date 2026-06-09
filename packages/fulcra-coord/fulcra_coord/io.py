@@ -21,7 +21,7 @@ import copy
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import cache, read_source, remote, schema, views
+from . import cache, log as ops_log, read_source, remote, schema, views
 
 
 def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
@@ -77,7 +77,22 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
                 # so a later in-place edit of the returned body (the command's
                 # read-modify-write) cannot retro-alter the merge base.
                 fold_base = copy.deepcopy(folded)
-        except Exception:
+        except Exception as exc:
+            # SIGNAL B (read-funnel liveness): a SYSTEMATIC fold error
+            # (read_events / fold_task raising) must be observable. Without this
+            # the except branch is byte-identical to a benign incomplete fold —
+            # both leave task=None and fall through to the file — so a read funnel
+            # that is consistently throwing reads as "working / nothing to fold".
+            # Emit a distinct best-effort signal naming the task + the error
+            # BEFORE the file fallback, so a fold ERROR is distinguishable from
+            # fold-incomplete in the ops log. Wrapped in its own try/except so the
+            # signal can NEVER break the read; layering is safe (log imports only
+            # cache, which io already imports — no upward import / cycle).
+            try:
+                ops_log.log_op("read", task_id=task_id,
+                               status="event_fold_read_error", error=str(exc))
+            except Exception:
+                pass
             task = None  # fall through to the file — never let a fold error read-fail
             fold_base = None
 
