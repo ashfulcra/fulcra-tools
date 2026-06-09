@@ -130,6 +130,8 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_COORD_NOTIFY_FORMAT` | _(auto)_ | Payload shape for the webhook POST: `ntfy\|slack\|discord\|json`. Auto-detected from the URL host (`discord` → Discord JSON, `slack` → Slack JSON, else **ntfy** plain-body, the generic default); set this to override the detection |
 | `FULCRA_COORD_NOTIFY_TIMEOUT` | `5` | Seconds before the webhook POST gives up, so a slow/hung push endpoint can't stall a polling tick |
 | `FULCRA_COORD_CONTINUITY_KEEP` | `10` | How many of the newest **continuity checkpoint** archives to keep per task. `continuity/<ws>/<agent>/<task>/checkpoints/CHK-*.json` is written immutably on every snapshot (SessionEnd / PreCompact / compaction) and would otherwise grow without bound; the reconcile retention pass keeps the newest N per task and deletes the rest (`latest.json` is never touched — it's the live pointer a resuming agent reads). Floored at `1` so the latest checkpoint is never deleted. Reconcile reports `N continuity` in its Retention line |
+| `FULCRA_COORD_READ_SOURCE` | `file` | Where task **bodies** are reconstructed from (per host, reversible). `file` (default) reads the mutable `tasks/<id>.json`, byte-identical to pre-substrate behaviour. `events` folds the task's immutable event log and uses the fold **only** when it's a complete snapshot, falling back to the file on a delta-only / empty / errored fold. Opting a single host into `events` is the validation step for the read cutover; flipping the fleet default is a deliberate operator decision gated on parity (see [Event-sourcing substrate](#event-sourcing-substrate-the-durable-event-log)). Any unrecognised value degrades to `file`, so a typo can never silently flip the read path |
+| `FULCRA_COORD_EVENTLOG_KEEP` | `20` | How many of the newest **event-log shards** to keep per LIVE task. Every task mutation appends `events/tasks/<id>/<event_id>.json` forever, so the reconcile retention pass window-prunes each live task below its latest snapshot — keeping that snapshot plus the most recent N events — and GCs the whole shard tree of archived/deleted tasks. A delta-only task (no snapshot ever emitted) is **never** pruned (fail-safe: a delta may carry a unique field never re-set). Floored at `1`. Reconcile reports `N events` in its Retention line |
 | `FULCRA_COORD_AGENT` | — | Session-scoped override for your agent id. Identity resolution order is: explicit `--agent` > `FULCRA_COORD_AGENT` > per-cwd persisted identity (`fulcra-coord identity set`) > derived `claude-code:<host>:<repo>` (matching the SessionStart hook) |
 | `FULCRA_COORD_HUMAN` | `human` | The human operator's handle — who tasks are "blocked on ME" against (`needs-me`, `block --on-user`). Resolution order: `FULCRA_COORD_HUMAN` > persisted handle (`fulcra-coord human set`) > default `human`. Personalize with `fulcra-coord human set <name>` |
 | `FULCRA_COORD_BACKEND` | — | Override backend (testing only) |
@@ -154,7 +156,10 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
     inbox/{agent-slug}.json ← open directives addressed to each assignee
   workstreams/{ws}.json     ← per-workstream active view
   agents/{agent}.json       ← per-agent active view
-  tasks/TASK-*.json         ← individual task files
+  tasks/TASK-*.json         ← individual task files (mutable, authoritative)
+  events/
+    tasks/{task_id}/{event_id}.json ← immutable, append-only event shards
+                                       (one path per event; never overwritten)
   digest/
     markers/{date}-{window}.json ← per-window operator-digest dedup marker
                                    (first-writer-wins; any agent, any machine)
@@ -174,6 +179,85 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 
 Read commands use local cache when fresh. Full remote sync happens on `status` and `reconcile`.
 
+## Event-sourcing substrate (the durable event log)
+
+Alongside the mutable `tasks/<id>.json` files, the bus now keeps an immutable,
+append-only **event log**. This is a strangler-fig migration: the event log is
+written today, validated in parallel, and only takes over reads once parity
+proves it's safe. The mutable file stays authoritative until that flip.
+
+**The model.** Every task mutation (`_write_task_and_views`) does two things:
+upload the task file as before, *and* — best-effort, default-ON — append one
+immutable shard `events/tasks/<id>/<event_id>.json`. The `event_id` is a
+time-sortable `<sortable-ts>-<rand>` (the canonical UTC-microsecond instant of
+the event plus a random suffix), so every append lands on a *distinct* path —
+two concurrent writers for the same task in the same microsecond never collide,
+which is what lets a no-CAS, no-lock store stay correct. The dual-write is
+best-effort by design: an event-append failure is logged but **never** fails the
+task write (Phase 1's job is to validate the dual-write, not to depend on it).
+
+**The fold.** `events.fold_task` is a pure reducer that reduces a task's events
+back to a snapshot. It (1) sorts by `(canonical-microsecond-instant, event_id)`
+— canonicalizing the timestamp so lexical order equals chronological order, NOT
+a raw-string compare which inverts when timestamps differ only in trailing
+precision; (2) dedups retries by the compound `(actor, idempotency_key)` pair,
+first-in-sort-order wins; and (3) merges by payload type. A **snapshot** payload
+(a full task, carrying both `schema` and `id`) *replaces* the accumulated state
+wholesale — the latest snapshot wins and stale fields drop. A legacy **delta**
+payload (a field subset, Phase-1 events) field-merges last-write-wins. The two
+compose in any order. `fold_is_complete` is true once at least one full snapshot
+has been applied — that's the signal the fold reconstructed a trustworthy,
+schema-complete task rather than a partial delta-only stream.
+
+> **Gotcha:** the `event_id` is derived from `at` but is **not** recomputable —
+> two `make_event` calls with the same `at` produce different ids (random
+> suffix). The reducer stores the id on creation; it never re-derives it.
+
+**The read cutover.** `FULCRA_COORD_READ_SOURCE` (`file` default | `events`)
+governs where task *bodies* are read from, per host and reversible by unsetting
+it. Under `events`, `_cache_remote_task` folds the event log and uses the fold
+**only** when `fold_is_complete`; on a delta-only / empty / errored fold it falls
+through to the mutable file. So opting a host into `events` is incompleteness-
+and-error-safe by construction. Default is `file`: this changes what a read
+*returns*, so a host must explicitly opt in — that's the validation step.
+Flipping the fleet default is a deliberate operator decision gated on parity,
+**not** automatic.
+
+> **Gotcha:** even under `events`, the write-path concurrency baseline always
+> stats the *file* (`tasks/<id>.json`), never the fold. The cutover changes
+> reads only; the optimistic-concurrency stat stays file-sourced, or the next
+> write would lose its baseline.
+
+**The parity safety net.** Reconcile's `_event_parity_check` folds each task's
+events and compares the result against its mutable file, recording
+`event_parity: {checked, drift, drift_task_ids, ack_drift, ack_drift_task_ids}`
+in the per-host health record. `drift` counts tasks where the fold disagrees with
+the file; `ack_drift` separately counts folds missing a durable ack that the
+`summaries` view has (a delta-only or truncated-event-log task can lose an
+`inbox_ack` the aggregate still holds). The check is **report-only** — the
+mutable file stays authoritative, nothing is rewritten. Sustained `drift == 0`
+is the green light for the flip.
+
+**Retention.** `FULCRA_COORD_EVENTLOG_KEEP` (default 20) bounds per-task shard
+growth: the reconcile retention pass keeps each live task's latest snapshot plus
+the most recent K events and prunes everything strictly older; a delta-only task
+is never pruned (fail-safe), and an archived/deleted task's whole shard tree is
+GC'd. Reconcile reports the count.
+
+**Honest status.** The read cutover is still being hardened — mixed-fleet write
+soundness (a fleet where some hosts read from `events` and others from `file`) is
+in-flight. The flip is gated on sustained zero drift and is fully reversible per
+host. Until then the mutable file is the source of truth and `events` is opt-in.
+
+A first-class **Directive** record (Phase 3a, schema
+`fulcra.coordination.directive.v1`, built/validated by `schema.make_directive` /
+`validate_directive` against `DIRECTIVE_SCHEMA`) also lands as an *additive*
+schema. It models *communication* (who told whom what) as its own record type
+rather than a task-with-assignee. It is **not yet wired into the lifecycle** —
+nothing produces or consumes it on the bus today; its dual-write arrives in a
+later phase. It's documented here so its presence in the code isn't mistaken for
+an active path.
+
 ## Module architecture
 
 The package is layered: leaf utilities at the bottom, feature subsystems above
@@ -189,7 +273,9 @@ there are no import cycles.
 | | `textfmt.py` | human relative-time formatters (`age`/`until`/`due`) |
 | core | `__init__.py` | `remote_root`, `task_file_path`, `env_float`/`env_int` |
 | | `remote.py` | Fulcra Files I/O (upload/download/list/`list_json`/stat/delete) |
-| | `schema.py` | task schema + state transitions |
+| | `events.py` | pure event envelope (`make_event`/`event_id`) + the `fold_task` reducer / `fold_is_complete` (no I/O) |
+| | `eventlog.py` | append-only event-shard I/O (`append_event`/`read_events`) over the immutable `events/tasks/<id>/<event_id>.json` paths |
+| | `schema.py` | task schema + state transitions; the additive Phase-3a `make_directive`/`validate_directive` record (not yet wired in) |
 | | `views.py` | materialized-view generation + pure judgments |
 | | `io.py` | task load/cache layer (parallel fetch, summaries fast-path, self-heal) |
 | | `writepipe.py` | the single write path: optimistic-concurrency upload + merge + view fan-out |
