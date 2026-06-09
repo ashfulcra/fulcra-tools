@@ -62,9 +62,15 @@ def _env_int(name: str, default: int) -> int:
 
     Vendored from ``fulcra_coord.env_int`` so the transport stays free of any
     import back into the coordination package (which would create a dependency
-    cycle: coord -> files -> coord). A non-numeric override must degrade to the
+    cycle: coord -> files -> coord). A non-numeric env value must degrade to the
     default rather than crash every read op on a typo'd value, which is the whole
     reason the callers below use this instead of a bare ``int()``.
+
+    NOTE: the original ``fulcra_coord.env_int`` took a third ``override`` arg; it
+    was intentionally dropped here because the transport's only callers
+    (``_read_timeout`` / ``_reconcile_timeout``) never used it. Do not assume
+    signature parity with ``fulcra_coord.env_int`` — re-add the param if a future
+    caller needs it.
     """
     raw = os.environ.get(name)
     if raw is None:
