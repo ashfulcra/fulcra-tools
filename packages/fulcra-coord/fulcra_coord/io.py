@@ -20,16 +20,66 @@ import concurrent.futures
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import cache, remote, schema, views
+from . import cache, read_source, remote, schema, views
 
 
 def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
-    """Download a remote task, cache its body and current stat metadata."""
+    """Reconstruct a remote task body, cache it, and cache the FILE's stat meta.
+
+    The single funnel every task-BODY read passes through (both ``_load_task``
+    and the bulk ``_load_all_tasks``). It resolves the body from one of two
+    sources, governed by the per-host ``read_source()`` knob (Phase-2b cutover):
+
+    * ``'file'`` (DEFAULT) — download the mutable ``tasks/<id>.json``. This is
+      the pre-cutover behaviour, byte-identical and default-on so an operator
+      sees zero change unless they opt in.
+    * ``'events'`` — best-effort fold the task's event log; use the fold ONLY
+      when ``fold_is_complete`` (a full-task snapshot was applied). On a
+      delta-only / empty / errored fold the body stays ``None`` and we fall
+      through to the file. This is the read cutover: it changes what a read
+      returns, so it is incompleteness-and-error-safe by construction.
+
+    CRITICAL — the stat meta is ALWAYS the FILE's stat, even when the body came
+    from the fold. The write path (``writepipe._write_task_and_views``) reads
+    ``cache.read_meta`` on ``tasks/<id>.json`` for optimistic-concurrency; if
+    events-mode skipped the file stat, the next write would lose its baseline.
+    Phase-2b changes READS only — the write-path concurrency stat stays
+    file-sourced.
+    """
     task_path = remote.task_remote_path(task_id)
-    task = remote.download_json(task_path, backend=backend)
-    if not task:
-        return None
+    task: Optional[dict[str, Any]] = None
+
+    # READ cutover: events source folds the event log when it's a complete
+    # snapshot, else leaves task=None to fall through to the file below. Lazy
+    # import keeps these substrate modules off io's import-time path and sidesteps
+    # any cycle risk (io sits ABOVE events/eventlog; the layering fitness test
+    # only forbids the reverse). Best-effort: ANY fold/read error → file fallback.
+    if read_source() == "events":
+        try:
+            from . import eventlog, events
+            folded = events.fold_task(eventlog.read_events(task_id, backend=backend))
+            if events.fold_is_complete(folded):
+                # Strip the fold's internal bookkeeping so the returned/cached body
+                # is a clean task. Without this, `_applied_event_count` would be
+                # persisted by cache.write_cached_task and — worse — copied into the
+                # durable tasks/<id>.json on the next read-modify-write (apply_event
+                # deep-copies all keys), a fold-only field leaking into the
+                # authoritative file that the parity check's ignore-set hides.
+                folded.pop("_applied_event_count", None)
+                task = folded
+        except Exception:
+            task = None  # fall through to the file — never let a fold error read-fail
+
+    # File source (default, OR events-mode fallback when the fold was
+    # incomplete/absent/errored). This is the authoritative mutable snapshot.
+    if task is None:
+        task = remote.download_json(task_path, backend=backend)
+        if not task:
+            return None
+
     cache.write_cached_task(task)
+    # Always stat the FILE (not the fold) so the write-path concurrency baseline
+    # stays correct regardless of where the body was sourced from.
     task_stat = remote.stat(task_path, backend=backend)
     if task_stat:
         cache.write_meta(task_path, task_stat)
@@ -237,6 +287,8 @@ def _load_summaries_for_rebuild(
 
 def _load_task(task_id: str, *, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
     """Load a specific task from cache or remote."""
+    if read_source() == "events":
+        return _cache_remote_task(task_id, backend=backend)
     t = cache.read_cached_task(task_id)
     if t is not None:
         return t
