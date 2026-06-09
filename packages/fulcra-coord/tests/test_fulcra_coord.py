@@ -7714,20 +7714,24 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_13_0(self):
-        # 0.13.0: the event-sourcing substrate. An immutable per-task event
-        # log is written alongside the mutable task files (best-effort
-        # dual-write, default-on — a write failure never blocks the task
-        # mutation). A `fold_task` reducer replays those events into the same
-        # task shape, backed by a snapshot model. The read path can cut over
-        # to the folded view via the flag-gated `FULCRA_COORD_READ_SOURCE`
-        # (default `file`, so upgrading changes no read behavior). A reconcile
-        # event-parity safety net cross-checks file vs. folded state (incl.
-        # `ack_drift`), event-log retention is bounded by
-        # `FULCRA_COORD_EVENTLOG_KEEP`, and the Directive record becomes an
-        # additive first-class type.
+    def test_version_is_0_14_0(self):
+        # 0.14.0: three additive, default-safe feature lines landed on top of
+        # the 0.13.0 event-sourcing substrate, all without flipping the
+        # read-cutover (that stays operator-gated).
+        #   - Event-liveness observability (#123): reconcile now emits parity
+        #     coverage + fold-completeness counts (`tasks_total`,
+        #     `tasks_with_events`, `folds_complete`), an `event_fold_read_error`
+        #     signal, and `event_dual_write.append_failures_recent` in the
+        #     health record.
+        #   - Ancillary-state retention (#124): the ops log rotates by size and
+        #     orphaned `.prov.json` provenance sidecars are pruned in the
+        #     retention pass.
+        #   - Phase 3b directive dual-write (#125): directive-creating commands
+        #     now mirror a first-class `directives/<id>.json` LWW record plus a
+        #     clobber-safe, append-only ack/route sub-log, with a report-only
+        #     `_directive_parity_check`.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.13.0")
+        self.assertEqual(__version__, "0.14.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
