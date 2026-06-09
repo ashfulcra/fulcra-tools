@@ -484,7 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     isub = sp.add_subparsers(dest="identity_action")
     isp_set = isub.add_parser("set", help="Persist <agent-id> as this host's identity")
     isp_set.add_argument("agent_id", metavar="AGENT-ID",
-                         help="e.g. claude-code:DeskbookPro:fulcra-coord")
+                         help="e.g. claude-code:<host>:<repo>")
     isp_set.add_argument("--format", choices=["table", "json"], default="table")
     isp_clear = isub.add_parser("clear", help="Remove the persisted identity")
     isp_clear.add_argument("--format", choices=["table", "json"], default="table")

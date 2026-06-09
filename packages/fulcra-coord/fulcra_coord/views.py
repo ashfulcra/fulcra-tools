@@ -655,8 +655,8 @@ def agent_matches(me: str, assignee: str) -> bool:
 
     Match rule: ``assignee == me`` OR ``assignee``'s colon-segments are a prefix
     of ``me``'s colon-segments. So a directive addressed to the SHORT id
-    ``claude-code`` reaches the full id ``claude-code:DeskbookPro:fulcra-coord``,
-    and ``claude-code:DeskbookPro`` does too — but ``openclaw`` (different kind)
+    ``claude-code`` reaches the full id ``claude-code:<host>:<repo>``,
+    and ``claude-code:<host>`` does too — but ``openclaw`` (different kind)
     and ``claude-code:other`` (divergent segment) do NOT, and a MORE-specific
     assignee never matches a less-specific me.
 
