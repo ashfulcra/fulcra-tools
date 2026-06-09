@@ -13,7 +13,9 @@ Two core properties under test:
    same task, written independently, reduce to the expected final state.
 """
 
-from fulcra_coord import events, eventlog
+from unittest import mock
+
+from fulcra_coord import events, eventlog, remote
 
 
 def test_append_then_read_roundtrips(coord_backend):
@@ -80,3 +82,67 @@ def test_read_events_for_unknown_task_returns_empty(coord_backend):
     """A task with no event shards yields []. The reconcile parity check (T6)
     relies on this empty-list path to mean 'not yet dual-written', so pin it."""
     assert eventlog.read_events("TASK-NOPE", backend=coord_backend) == []
+
+
+def _shard(task_id, eid):
+    """Build a minimal valid event dict whose JSON would parse to a dict."""
+    return {"task_id": task_id, "event_id": eid, "payload": {"status": "active"}}
+
+
+def test_read_events_warns_when_a_shard_fails_to_parse():
+    """D3: a shard that fails to parse to a dict is silently dropped by
+    list_json. A dropped *snapshot* shard could make the fold reconstruct
+    STALE state while fold_is_complete still returns True — a silent
+    correctness hazard. read_events must emit a best-effort warning naming the
+    task and the drop count when fewer shards parse than the store lists, while
+    STILL returning the good records unchanged."""
+    listed = [
+        "events/tasks/TASK-D3/aaa.json",
+        "events/tasks/TASK-D3/bbb.json",
+        "events/tasks/TASK-D3/ccc.json",  # this one fails to parse -> dropped
+    ]
+    parsed = [
+        ("events/tasks/TASK-D3/aaa.json", _shard("TASK-D3", "aaa")),
+        ("events/tasks/TASK-D3/bbb.json", _shard("TASK-D3", "bbb")),
+    ]
+    with mock.patch.object(remote, "list_files", return_value=listed), \
+         mock.patch.object(remote, "list_json", return_value=parsed), \
+         mock.patch.object(eventlog.log, "warning") as warn:
+        got = eventlog.read_events("TASK-D3")
+
+    # The good records are returned unchanged — the signal never blocks the read.
+    assert [r["event_id"] for r in got] == ["aaa", "bbb"]
+    assert warn.called, "expected a warning when listed > parsed"
+    msg = " ".join(str(a) for a in warn.call_args[0]) + " " + str(warn.call_args)
+    assert "TASK-D3" in msg, f"warning must name the task; got {warn.call_args!r}"
+    assert "1" in msg, f"warning must report the drop count (1); got {warn.call_args!r}"
+
+
+def test_read_events_no_warning_when_all_shards_parse():
+    """When listed == parsed there is nothing dropped — no warning fires."""
+    listed = [
+        "events/tasks/TASK-OK/aaa.json",
+        "events/tasks/TASK-OK/bbb.json",
+    ]
+    parsed = [
+        ("events/tasks/TASK-OK/aaa.json", _shard("TASK-OK", "aaa")),
+        ("events/tasks/TASK-OK/bbb.json", _shard("TASK-OK", "bbb")),
+    ]
+    with mock.patch.object(remote, "list_files", return_value=listed), \
+         mock.patch.object(remote, "list_json", return_value=parsed), \
+         mock.patch.object(eventlog.log, "warning") as warn:
+        got = eventlog.read_events("TASK-OK")
+
+    assert [r["event_id"] for r in got] == ["aaa", "bbb"]
+    assert not warn.called, "no shard was dropped; warning must not fire"
+
+
+def test_read_events_warning_failure_never_breaks_the_read():
+    """The drop-detection is best-effort: if the extra list_files probe raises,
+    read_events must still return the parsed records (signal is never load-
+    bearing)."""
+    parsed = [("events/tasks/TASK-B/aaa.json", _shard("TASK-B", "aaa"))]
+    with mock.patch.object(remote, "list_files", side_effect=RuntimeError("boom")), \
+         mock.patch.object(remote, "list_json", return_value=parsed):
+        got = eventlog.read_events("TASK-B")
+    assert [r["event_id"] for r in got] == ["aaa"]

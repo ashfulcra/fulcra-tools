@@ -16,9 +16,19 @@ cleanly separated.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from . import remote
+
+# Best-effort drop-detection signal (see ``read_events``). We use the stdlib
+# ``logging`` module rather than the coord ops-log helper (``fulcra_coord.log``)
+# on purpose: ``fulcra_coord.log`` imports ``cache``, and importing it here would
+# pull a feature-layer dependency into this leaf-adjacent module — breaking the
+# import boundary the ``test_layering_boundaries.py`` fitness test enforces
+# (eventlog may import only remote / events / timeutil). stdlib ``logging`` has
+# no such boundary cost, so it is the lightest signal that keeps eventlog a leaf.
+log = logging.getLogger("fulcra_coord.eventlog")
 
 
 def append_event(
@@ -66,6 +76,18 @@ def read_events(
     ``[]`` — the best-effort contract inherited from
     :func:`fulcra_coord.remote.list_json`.
 
+    Drop detection (observability, non-invasive): ``remote.list_json``
+    *silently* filters out any shard whose JSON fails to parse to a dict. A
+    dropped **snapshot** shard is especially dangerous — the fold would
+    reconstruct STALE state from an older snapshot while ``fold_is_complete``
+    still returned True, a silent correctness hazard with zero signal. So after
+    reading, we cheaply compare the count of ``.json`` paths the store *lists*
+    against the count of records that actually *parsed*; if fewer parsed, we
+    emit a best-effort warning naming the task and the drop count. This NEVER
+    changes the return value (the good records are returned unchanged) and the
+    whole probe is wrapped in try/except so it can never break the read — it is
+    a signal only.
+
     Args:
         task_id: The task whose event shards to retrieve.
         backend: Optional explicit backend command list.
@@ -73,4 +95,22 @@ def read_events(
     Returns:
         List of event dicts, unordered.
     """
-    return [record for _path, record in remote.list_json(remote.events_prefix(task_id), backend=backend)]
+    prefix = remote.events_prefix(task_id)
+    records = [record for _path, record in remote.list_json(prefix, backend=backend)]
+
+    # Best-effort: surface silently-dropped shards. Guarded so an extra probe
+    # failure (or any list_files hiccup) can never turn a successful read into
+    # a failure — the records above are already in hand.
+    try:
+        listed = sum(1 for p in remote.list_files(prefix, backend=backend) if p.endswith(".json"))
+        dropped = listed - len(records)
+        if dropped > 0:
+            log.warning(
+                "read_events(%s): %d of %d event shard(s) failed to parse and "
+                "were dropped — fold may reconstruct stale/incomplete state.",
+                task_id, dropped, listed,
+            )
+    except Exception:  # pragma: no cover — signal only, must not break the read
+        pass
+
+    return records
