@@ -409,6 +409,117 @@ def _try_merge(
     return merged
 
 
+# Fields the per-field 3-way decision must NOT touch: events/acked_by are
+# reconciled by the union helper, the derived ``tags`` are rebuilt by
+# _repair_merged_tags from the merged scalar fields, and updated_at /
+# last_touched_* legitimately differ between a point-in-time fold and the live
+# file on every write (the same set the parity check ignores), so comparing them
+# would manufacture spurious "both changed differently" conflicts. status is
+# handled by its own transition policy below, so it is excluded from the generic
+# scalar loop too. _applied_event_count is fold bookkeeping that should never
+# reach a clean body, excluded defensively.
+_THREE_WAY_DERIVED_OR_VOLATILE = {
+    "events", "acked_by", "tags", "status",
+    "updated_at", "last_touched_by", "last_touched_in",
+    "_applied_event_count",
+}
+
+
+def _try_merge_from_base(
+    base: dict[str, Any],
+    mine: dict[str, Any],
+    theirs: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """3-way merge for a FOLD-sourced write. Returns merged task or None if unsafe.
+
+    ``base``   — the fold body at read time (the merge base).
+    ``mine``   — the command's edited body (read-modify-write result).
+    ``theirs`` — the fresh mutable ``tasks/<id>.json`` body.
+
+    WHY a 3-way merge and not the 2-way ``_try_merge``: in events-mode the body a
+    command edited was reconstructed from a FOLD that may LAG the file (a missed
+    best-effort event append, an old-CLI writer, a mixed fleet). The 2-way merge
+    treats the ENTIRE local body as intentional, so an unchanged-but-stale fold
+    field with a newer ``updated_at`` would clobber a newer file field — silent
+    data loss (root cause A2). With the fold as base we can tell an unchanged
+    field (stale read state → recover ``theirs``) from a real edit (keep
+    ``mine``).
+
+    Per non-event / non-acked / non-derived-tag / non-status scalar-or-dict
+    field, over the UNION of base/mine/theirs keys minus the derived/volatile
+    set:
+      * mine == base, theirs != base  → take theirs (recover the newer file
+        field; my unchanged copy was just stale read state).
+      * mine != base, theirs == base  → take mine (my real edit).
+      * both changed to the SAME value → that value.
+      * both changed DIFFERENTLY      → conflict (None).
+
+    ``status`` uses a transition policy evaluated against BASE: a remote-only
+    status change (theirs != base, mine == base) must survive — a stale fold must
+    never overwrite it; a local-only change wins; both changing away from base is
+    a conflict. ``events`` and ``acked_by`` are UNIONed (acked_by never shrinks —
+    a file ack the fold lacked is preserved). Derived ``tags`` are rebuilt from
+    the merged fields afterward.
+    """
+    merged = copy.deepcopy(base)
+
+    # --- status: transition policy evaluated against base ---
+    base_status = base.get("status")
+    mine_status = mine.get("status")
+    theirs_status = theirs.get("status")
+    mine_changed_status = mine_status != base_status
+    theirs_changed_status = theirs_status != base_status
+    if mine_changed_status and theirs_changed_status:
+        if mine_status != theirs_status:
+            return None  # both moved status away from base, differently → unsafe
+        merged["status"] = mine_status  # both agreed on the same new status
+    elif mine_changed_status:
+        merged["status"] = mine_status      # my real transition
+    elif theirs_changed_status:
+        merged["status"] = theirs_status    # remote transition — must not be clobbered
+    else:
+        merged["status"] = base_status      # neither moved status
+
+    # --- generic per-field 3-way over the key universe ---
+    keys = (set(base) | set(mine) | set(theirs)) - _THREE_WAY_DERIVED_OR_VOLATILE
+    for k in keys:
+        b = base.get(k)
+        m = mine.get(k)
+        t = theirs.get(k)
+        mine_changed = m != b
+        theirs_changed = t != b
+        if mine_changed and theirs_changed:
+            if m == t:
+                merged[k] = m          # both changed to the same value
+            else:
+                return None            # both changed differently → conflict
+        elif mine_changed:
+            merged[k] = m              # my real edit
+        elif theirs_changed:
+            merged[k] = t              # recover newer file field (mine was stale)
+        else:
+            merged[k] = b              # unchanged on both sides
+
+    # --- events + acked_by union, then derived-tag repair ---
+    # Reuse the 2-way helper: it unions events (dedup-by-`at`, sort, truncate)
+    # and unions acked_by across the two dicts it is given. Folding the base in
+    # too keeps any base-only event/ack that neither side carried. acked_by can
+    # only GROW (set union), so a file ack the fold lacked is never dropped.
+    base_event_times = {e["at"] for e in base.get("events", []) if "at" in e}
+    mine_event_times = {e["at"] for e in mine.get("events", []) if "at" in e}
+    theirs_event_times = {e["at"] for e in theirs.get("events", []) if "at" in e}
+    # Two passes so all three sources contribute (the helper takes two dicts):
+    # first union base into theirs-shaped merged, then union mine on top.
+    _union_events_and_acked(merged, base, theirs,
+                            base_event_times, theirs_event_times)
+    _union_events_and_acked(merged, merged, mine,
+                            {e["at"] for e in merged.get("events", []) if "at" in e},
+                            mine_event_times)
+
+    _repair_merged_tags(merged, mine, theirs)
+    return merged
+
+
 def _carry_fields(
     dst: dict[str, Any], src: dict[str, Any], *, skip_status: bool = False
 ) -> None:
