@@ -10421,8 +10421,15 @@ class TestReviewDone(unittest.TestCase):
         """The verdict is bus-only: review-done must NOT shell out to gh / any
         forge. Assert subprocess is never invoked anywhere in the path."""
         from fulcra_coord.cli import cmd_review_done
+        # The Phase 3b best-effort directive dual-write writes to the COORDINATION
+        # bus (remote.upload_json), which itself spawns a backend subprocess — that
+        # is the bus, NOT a forge. This test is specifically about review-done never
+        # shelling out to gh / a forge, so stub the bus dual-write (as the real task
+        # write is already stubbed via _write_task_and_views) and assert no
+        # subprocess is invoked on the remaining (forge) path.
         with patch("fulcra_coord.routing_ops._write_task_and_views",
                    side_effect=lambda task, **kw: True), \
+             patch("fulcra_coord.directives.dual_write"), \
              patch("fulcra_coord.routing_ops.identity.resolve_agent",
                    return_value="codex:rev:main"), \
              patch("subprocess.run") as sprun, \

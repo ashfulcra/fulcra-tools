@@ -20,7 +20,6 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, continuity
 from . import annotations as lifecycle_annotations
-from . import log as ops_log
 from .io import _load_task
 from .output import info as _info, warn as _warn, err as _err
 from .writepipe import _write_task_and_views
@@ -153,29 +152,16 @@ def _dual_write_directive(
     import cost on every lifecycle import and to keep the module-load graph flat
     (no eager cycle risk during package init). Nothing READS directives for
     correctness yet — this is purely the write half of the migration.
+
+    Task 3: the upload + ops-log-on-miss logic now lives in the low-layer
+    ``directives.dual_write`` so tell/broadcast (here) and the routing_ops
+    commands (assign/request-review/review-done) share ONE writer. This function
+    is kept as the thin lifecycle-facing entry point cmd_tell/cmd_broadcast
+    already call; it delegates so there is a single best-effort implementation to
+    audit, not two divergent copies.
     """
-    try:
-        from . import directives  # lazy import: avoid import cost / cycle at module load
-        directive = directives.directive_from_task(task)
-        ok = remote.upload_json(
-            directive, remote.directive_remote_path(directive["id"]), backend=backend
-        )
-        if not ok:
-            try:
-                ops_log.log_op(command, task.get("id"),
-                               status="directive_write_failed",
-                               error="Directive upload returned false")
-            except Exception:
-                pass
-    except Exception as exc:
-        # Best-effort: the legacy task write already succeeded. Record the miss
-        # in the ops log (Phase 3b's job is to validate the dual-write), guarded
-        # so even the logging cannot break the authoritative write.
-        try:
-            ops_log.log_op(command, task.get("id"),
-                           status="directive_write_failed", error=str(exc))
-        except Exception:
-            pass
+    from . import directives  # lazy import: avoid import cost / cycle at module load
+    directives.dual_write(task, command=command, backend=backend)
 
 
 def cmd_broadcast(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -240,6 +226,11 @@ def cmd_assign(args: Any, backend: Optional[list[str]] = None) -> int:
     if not ok:
         _warn(f"Task cached locally but remote upload failed: {task_id}.")
         return 1
+    # Phase 3b dual-write: assignment sets/redirects the directive audience. This
+    # is an LWW-snapshot OVERWRITE of directives/<id>.json (storage model A): a
+    # re-assign re-writes the same record with the new audience, so the directive
+    # always reflects the latest assignee. Best-effort — never fails the task write.
+    _dual_write_directive(task, command="assign", backend=backend)
     _info(f"Assigned {task_id} -> {assignee}")
     return 0
 

@@ -231,7 +231,16 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     try:
         ok = _write_task_and_views(task, backend=backend, command="request-review")
     except (schema.ConflictError, schema.NeedsReconcile):
+        # The task BODY landed (these are raised only after the body uploaded),
+        # so the dual-write mirror should still fire — same posture as cmd_tell.
         ok = True
+    if ok:
+        # Phase 3b dual-write: mirror the routed review into a `review` directive
+        # (type detected by the kind:review tag; artifact_ref from pr/repo). Uses
+        # the shared low-layer writer in directives — see the WHY note there for
+        # the lifecycle↔routing_ops import-cycle reason it lives there, not here.
+        from . import directives
+        directives.dual_write(task, command="request-review", backend=backend)
     _info(f"Review {artifact_display} routed to {winner} ({tier}).")
     return 0 if ok else 1
 
@@ -346,6 +355,12 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     except Exception as e:  # noqa: BLE001 — best-effort; a write blowup warns, never crashes
         _warn(f"review-done directive failed (non-fatal): {e}")
         return 1
+    if ok:
+        # Phase 3b dual-write: mirror the verdict into a `verdict` directive
+        # addressed to the author (type detected by the kind:review-verdict tag).
+        # Shared low-layer writer; never fails the authoritative task write.
+        from . import directives
+        directives.dual_write(task, command="review-done", backend=backend)
     _info(f"Review verdict ({verdict}) on {artifact_display} sent to {author}.")
     return 0 if ok else 1
 

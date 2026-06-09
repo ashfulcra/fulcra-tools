@@ -242,6 +242,14 @@ def _list_directive_ids(backend):
     return [Path(f).stem for f in files]
 
 
+def _started_task_id(backend):
+    """The id of the single task landed by a cmd_start into the fake backend."""
+    files = remote.list_files(f"{remote.remote_root()}/tasks/", backend=backend)
+    ids = [Path(f).stem for f in files]
+    assert len(ids) == 1, f"expected exactly one started task, got {ids}"
+    return ids[0]
+
+
 def test_tell_dual_writes_a_directive(coord_backend, monkeypatch):
     from fulcra_coord import lifecycle
     rc = lifecycle.cmd_tell(_tell_args(), backend=coord_backend)
@@ -287,7 +295,11 @@ def test_directive_write_failure_does_not_fail_tell(coord_backend, monkeypatch):
     monkeypatch.setattr(lc.remote, "upload_json", _selective)
 
     seen = []
-    monkeypatch.setattr(lc.ops_log, "log_op",
+    # The dual-write logging now lives in the shared low-layer directives.dual_write
+    # (Task 3 consolidated tell/broadcast/assign/request-review/review-done onto one
+    # writer), so patch the ops_log it uses, not lifecycle's.
+    from fulcra_coord import log as ops_log
+    monkeypatch.setattr(ops_log, "log_op",
                         lambda *a, **k: seen.append((a, k)))
 
     rc = lc.cmd_tell(_tell_args(), backend=coord_backend)
@@ -310,8 +322,229 @@ def test_directive_write_false_return_logs_failure_without_failing_tell(coord_ba
 
     monkeypatch.setattr(lc.remote, "upload_json", _selective)
     seen = []
-    monkeypatch.setattr(lc.ops_log, "log_op", lambda *a, **k: seen.append((a, k)))
+    from fulcra_coord import log as ops_log
+    monkeypatch.setattr(ops_log, "log_op", lambda *a, **k: seen.append((a, k)))
 
     rc = lc.cmd_tell(_tell_args(), backend=coord_backend)
     assert rc == 0
+    assert any(k.get("status") == "directive_write_failed" for a, k in seen), seen
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — extend the best-effort dual-write to the THREE remaining
+# directive-creating commands: assign / request-review / review-done.
+#
+# Same posture as Task 1: after each command's authoritative
+# _write_task_and_views SUCCEEDS, a directives/<id>.json mirror lands
+# best-effort; a directive-write failure NEVER fails or alters the task write.
+# ---------------------------------------------------------------------------
+
+def _now_ls() -> str:
+    """A presence last_seen stamp that reads as live right now."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+
+
+def _assign_args(task_id, assignee, agent="agent-a") -> SimpleNamespace:
+    return SimpleNamespace(task_id=task_id, assignee=assignee, agent=agent)
+
+
+def _start_args(**overrides) -> SimpleNamespace:
+    base = dict(title="A task to assign", workstream="devops", agent="agent-a",
+                kind="ops", priority="P2", summary="s", next="n", surface=None)
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _rr_args(**overrides) -> SimpleNamespace:
+    base = dict(pr="42", repo="fulcra-tools", dry_run=False,
+                candidate_list=None, format="json", agent=None)
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _patch_presence(monkeypatch, routing_ops):
+    """Make a single live reviewer visible WITHOUT clobbering real reads.
+
+    request-review downloads the presence view via ``remote.download_json``; the
+    directive-mirror read in the test ALSO goes through ``download_json``. A blanket
+    patch returning the presence agg would corrupt the directive read, so we only
+    answer the presence path and delegate every other path to the real reader."""
+    real_dl = remote.download_json
+    agg = {"agents": [{"agent": "codex:m:main", "last_seen": _now_ls(),
+                       "capabilities": ["review"]}]}
+    presence_path = remote.presence_view_path()
+
+    def _dl(path, *a, **k):
+        if path == presence_path:
+            return agg
+        return real_dl(path, *a, **k)
+
+    monkeypatch.setattr(routing_ops.remote, "download_json", _dl)
+
+
+def _rd_args(**overrides) -> SimpleNamespace:
+    base = dict(artifact="101", verdict="approve", note=None, repo=None,
+                to=None, format="table", dry_run=False)
+    base.update(overrides)
+    ns = SimpleNamespace(**{k: v for k, v in base.items() if k != "from"})
+    setattr(ns, "from", base.get("from"))
+    return ns
+
+
+# --- assign -----------------------------------------------------------------
+
+def test_assign_dual_writes_a_directive_mirroring_the_task(coord_backend, monkeypatch):
+    """A successful `assign` ALSO writes a directives/<id>.json mirror whose
+    audience is the new assignee, with the task_id back-ref and clean validate."""
+    from fulcra_coord import lifecycle
+    # Create the task to assign against (its own start dual-write is not under test;
+    # we assert exactly ONE directive exists for the assigned task id below).
+    rc = lifecycle.cmd_start(_start_args(), backend=coord_backend)
+    assert rc == 0
+    # cmd_start is NOT a directive command, so no directive yet.
+    assert _list_directive_ids(coord_backend) == [], "start must not dual-write a directive"
+    started_id = _started_task_id(coord_backend)
+    rc = lifecycle.cmd_assign(_assign_args(started_id, "agent-b"), backend=coord_backend)
+    assert rc == 0
+    ids = _list_directive_ids(coord_backend)
+    assert len(ids) == 1, f"assign must dual-write exactly one directive, got {ids}"
+    d = _read_directive(coord_backend, ids[0])
+    assert d is not None, "assign must dual-write a directive mirror"
+    assert d["audience"] == "agent-b"
+    assert d["task_id"] == started_id
+    assert validate_directive(d) == [], validate_directive(d)
+
+
+def test_reassign_overwrites_audience_lww(coord_backend, monkeypatch):
+    """LWW snapshot: a second assign to a new agent OVERWRITES the directive
+    record so audience reflects the latest assignee (storage model = option A)."""
+    from fulcra_coord import lifecycle
+    rc = lifecycle.cmd_start(_start_args(), backend=coord_backend)
+    assert rc == 0
+    started_id = _started_task_id(coord_backend)
+    assert lifecycle.cmd_assign(_assign_args(started_id, "agent-b"),
+                                backend=coord_backend) == 0
+    assert lifecycle.cmd_assign(_assign_args(started_id, "agent-c"),
+                                backend=coord_backend) == 0
+    # Exactly ONE directive record for this task (overwrite, not append) — the
+    # LWW snapshot keyed on the task id (storage model A).
+    ids = _list_directive_ids(coord_backend)
+    assert len(ids) == 1, f"reassign must overwrite, not append: {ids}"
+    d = _read_directive(coord_backend, ids[0])
+    assert d["audience"] == "agent-c", "reassign must overwrite audience (LWW)"
+    assert d["task_id"] == started_id
+
+
+def test_directive_write_failure_does_not_fail_assign(coord_backend, monkeypatch):
+    """A raising directive upload must NOT fail `assign`; the task still lands."""
+    from fulcra_coord import lifecycle
+    rc = lifecycle.cmd_start(_start_args(), backend=coord_backend)
+    assert rc == 0
+    started_id = _started_task_id(coord_backend)
+
+    real_upload = remote.upload_json
+
+    def _selective(data, path, *a, **k):
+        if "/directives/" in path:
+            raise RuntimeError("boom")
+        return real_upload(data, path, *a, **k)
+
+    monkeypatch.setattr(lifecycle.remote, "upload_json", _selective)
+    seen = []
+    from fulcra_coord import log as ops_log
+    monkeypatch.setattr(ops_log, "log_op",
+                        lambda *a, **k: seen.append((a, k)))
+    rc = lifecycle.cmd_assign(_assign_args(started_id, "agent-b"), backend=coord_backend)
+    assert rc == 0, "assign must succeed even when the directive write raises"
+    assert _read_directive(coord_backend, started_id) is None
+    assert any(k.get("status") == "directive_write_failed" for a, k in seen), seen
+
+
+# --- request-review ---------------------------------------------------------
+
+def test_request_review_dual_writes_review_directive(coord_backend, monkeypatch):
+    """request-review lands a `review` directive (type detected by kind:review
+    tag) with artifact_ref derived from pr/repo."""
+    from fulcra_coord import routing_ops
+    _patch_presence(monkeypatch, routing_ops)
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "claude-code:author:r")
+    rc = routing_ops.cmd_request_review(_rr_args(), backend=coord_backend)
+    assert rc == 0
+    ids = _list_directive_ids(coord_backend)
+    assert len(ids) == 1, f"expected one review directive, got {ids}"
+    d = _read_directive(coord_backend, ids[0])
+    assert d is not None
+    assert d["directive_type"] == "review"
+    assert d["artifact_ref"] == {"ref": "42", "repo": "fulcra-tools"}
+    assert validate_directive(d) == [], validate_directive(d)
+
+
+def test_directive_write_failure_does_not_fail_request_review(coord_backend, monkeypatch):
+    from fulcra_coord import routing_ops
+    _patch_presence(monkeypatch, routing_ops)
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "claude-code:author:r")
+
+    real_upload = remote.upload_json
+
+    def _selective(data, path, *a, **k):
+        if "/directives/" in path:
+            raise RuntimeError("boom")
+        return real_upload(data, path, *a, **k)
+
+    monkeypatch.setattr(routing_ops.remote, "upload_json", _selective)
+    seen = []
+    # routing_ops logs via the shared directives writer's ops_log; patch there.
+    from fulcra_coord import log as ops_log
+    monkeypatch.setattr(ops_log, "log_op", lambda *a, **k: seen.append((a, k)))
+    rc = routing_ops.cmd_request_review(_rr_args(), backend=coord_backend)
+    assert rc == 0, "request-review task write must survive a directive-write failure"
+    assert _list_directive_ids(coord_backend) == []
+    assert any(k.get("status") == "directive_write_failed" for a, k in seen), seen
+
+
+# --- review-done ------------------------------------------------------------
+
+def test_review_done_dual_writes_verdict_directive(coord_backend, monkeypatch):
+    """review-done lands a `verdict` directive addressed to the author."""
+    from fulcra_coord import routing_ops
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "codex:rev:main")
+    rc = routing_ops.cmd_review_done(
+        _rd_args(verdict="approve", to="claude-code:author:r"),
+        backend=coord_backend)
+    assert rc == 0
+    ids = _list_directive_ids(coord_backend)
+    assert len(ids) == 1, f"expected one verdict directive, got {ids}"
+    d = _read_directive(coord_backend, ids[0])
+    assert d is not None
+    assert d["directive_type"] == "verdict"
+    assert d["audience"] == "claude-code:author:r"
+    assert validate_directive(d) == [], validate_directive(d)
+
+
+def test_directive_write_failure_does_not_fail_review_done(coord_backend, monkeypatch):
+    from fulcra_coord import routing_ops
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "codex:rev:main")
+
+    real_upload = remote.upload_json
+
+    def _selective(data, path, *a, **k):
+        if "/directives/" in path:
+            raise RuntimeError("boom")
+        return real_upload(data, path, *a, **k)
+
+    monkeypatch.setattr(routing_ops.remote, "upload_json", _selective)
+    seen = []
+    from fulcra_coord import log as ops_log
+    monkeypatch.setattr(ops_log, "log_op", lambda *a, **k: seen.append((a, k)))
+    rc = routing_ops.cmd_review_done(
+        _rd_args(verdict="approve", to="claude-code:author:r"),
+        backend=coord_backend)
+    assert rc == 0, "review-done task write must survive a directive-write failure"
+    assert _list_directive_ids(coord_backend) == []
     assert any(k.get("status") == "directive_write_failed" for a, k in seen), seen

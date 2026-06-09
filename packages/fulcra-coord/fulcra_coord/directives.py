@@ -20,9 +20,11 @@ mapping stays a pure function of its input.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from . import schema
+from . import remote
+from . import log as ops_log
 
 # Pure leaf constants, re-declared locally to respect LAYERING. ``views`` is an
 # up-layer module (forbidden by the package fitness test), so we MUST NOT import
@@ -151,6 +153,26 @@ def _directive_type_for(task: dict[str, Any]) -> str:
     return "tell"
 
 
+def _stable_directive_id(task_id: str) -> str:
+    """Deterministic directive id for the mirror of legacy task ``task_id``.
+
+    STORAGE MODEL A (LWW snapshot): a directive-task maps to EXACTLY ONE
+    ``directives/<id>.json`` record. Every dual-write of the same task — the
+    initial tell/broadcast/request-review/review-done AND every later edit that
+    re-creates the directive (a re-assign that changes the audience, a status
+    change) — must land on the SAME directive file so the latest write wins and
+    overwrites rather than spawning a fresh random-id duplicate per edit.
+
+    ``schema.make_directive_id`` uses a RANDOM suffix (collision-resistance for
+    independently-authored directives), which is exactly wrong here: a re-assign
+    would mint a second file and the directive store would accumulate stale
+    duplicates of the same logical directive. So we derive the id deterministically
+    from the task id instead: ``DIR-T-<task_id>``. The mirror is 1:1 with its task,
+    so keying on the task id is both stable and unique.
+    """
+    return f"DIR-T-{task_id}"
+
+
 def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
     """Build a first-class Directive record mirroring a legacy directive-task.
 
@@ -181,6 +203,13 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
     audience = task.get("assignee")
     audience = (audience.strip() if isinstance(audience, str) else "") or "unknown"
 
+    # Deterministic id keyed on the originating task (storage model A — see
+    # _stable_directive_id) so re-writes OVERWRITE the same record (LWW). If the
+    # task is malformed with no id, fall back to make_directive's random id rather
+    # than crash the best-effort mirror.
+    task_id = task.get("id")
+    directive_id = _stable_directive_id(task_id) if task_id else None
+
     # artifact_ref: request-review stores the opaque review ref verbatim in
     # task["pr"]; surface it as a structured ref when present. None otherwise.
     artifact_ref = None
@@ -203,7 +232,8 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
         artifact_ref=artifact_ref,
         not_before=task.get("not_before"),
         due=task.get("due"),
-        task_id=task.get("id"),
+        task_id=task_id,
+        directive_id=directive_id,
     )
     # make_directive starts acked_by empty; carry the task's acks onto the mirror
     # so the directive reflects who has already acknowledged it.
@@ -211,3 +241,55 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
     if acked:
         directive["acked_by"] = acked
     return directive
+
+
+def dual_write(
+    task: dict[str, Any], *, command: str, backend: Optional[list[str]] = None
+) -> None:
+    """Shared Phase 3b best-effort directive dual-write — the WRITE half.
+
+    ADDITIVELY mirror a directive-creating ``task`` into a first-class
+    ``directives/<id>.json`` record. This is the single low-layer implementation
+    of the strangler-fig dual-write so EVERY directive-creating command (tell /
+    broadcast / assign / request-review / review-done) shares one writer rather
+    than each re-implementing the upload + ops-log-on-miss dance.
+
+    WHY this lives in ``directives.py`` (the low layer) and NOT as a helper
+    imported from ``lifecycle``: ``lifecycle`` already imports
+    ``routing_ops._escalate_review_to_human`` at module load, so a module-level
+    ``from . import lifecycle`` in ``routing_ops`` would close a
+    ``lifecycle → routing_ops → lifecycle`` import cycle. Putting the writer here
+    — where ``routing_ops`` and ``lifecycle`` BOTH already depend down onto
+    ``directives`` — lets both peers reuse it with zero new edges and no cycle.
+    ``directives.py`` stays layering-clean: it imports only ``schema`` / ``remote``
+    / ``log`` (ops_log), never ``lifecycle`` / ``cli`` / ``views`` / ``writepipe``
+    / ``inbox`` / ``routing_ops`` (enforced by ``test_directives_imports_no_up_layer_module``).
+
+    BEST-EFFORT — this NEVER fails or alters the authoritative legacy task write.
+    Callers invoke it ONLY AFTER the task body has already landed, so the legacy
+    write is committed regardless of what happens here. Any failure (a raising or
+    False-returning upload, a mapping error) is swallowed and recorded in the ops
+    log as ``directive_write_failed`` so migration parity can be audited — exactly
+    mirroring the event-append best-effort posture in writepipe.
+    """
+    try:
+        directive = directive_from_task(task)
+        ok = remote.upload_json(
+            directive, remote.directive_remote_path(directive["id"]), backend=backend
+        )
+        if not ok:
+            try:
+                ops_log.log_op(command, task.get("id"),
+                               status="directive_write_failed",
+                               error="Directive upload returned false")
+            except Exception:
+                pass
+    except Exception as exc:
+        # Best-effort: the legacy task write already succeeded. Record the miss
+        # in the ops log (Phase 3b's job is to validate the dual-write), guarded
+        # so even the logging cannot break the authoritative write.
+        try:
+            ops_log.log_op(command, task.get("id"),
+                           status="directive_write_failed", error=str(exc))
+        except Exception:
+            pass
