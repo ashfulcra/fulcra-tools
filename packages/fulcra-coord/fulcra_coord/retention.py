@@ -510,24 +510,35 @@ def _prune_event_log(all_tasks: list[dict[str, Any]], now: datetime, *,
         # is a candidate ORPHAN (B2), confirmed only by a positive stat-miss.
         live_ids = {t.get("id") for t in all_tasks if t.get("id")}
 
+        events_root = f"{remote.remote_root()}/events/tasks/"
         try:
-            children = remote.list_files(
-                f"{remote.remote_root()}/events/tasks/", backend=backend)
+            children = remote.list_files(events_root, backend=backend)
         except Exception:
             return deleted
 
+        task_ids: list[str] = []
+        seen_task_ids: set[str] = set()
         for child in children:
+            # Support both list contracts seen in the repo:
+            # - mocked non-recursive listings expose task dirs with trailing "/"
+            # - the fake/real file-oriented backend can expose recursive shard paths
+            #   such as events/tasks/<task_id>/<event_id>.json.
+            task_id = ""
+            if child.endswith("/"):
+                task_id = child.rstrip("/").rsplit("/", 1)[-1]
+            elif child.startswith(events_root):
+                rest = child[len(events_root):]
+                if "/" in rest:
+                    task_id = rest.split("/", 1)[0]
+            if task_id and task_id not in seen_task_ids:
+                seen_task_ids.add(task_id)
+                task_ids.append(task_id)
+
+        for task_id in task_ids:
             if deleted >= cap:
                 break
             if budget_floor is not None and time.monotonic() >= budget_floor:
                 break
-            # list_files is NON-RECURSIVE: a per-task dir comes back with a
-            # TRAILING SLASH; a bare file (no slash) is a stray, never a task dir.
-            if not child.endswith("/"):
-                continue
-            task_id = child.rstrip("/").rsplit("/", 1)[-1]
-            if not task_id:
-                continue
             try:
                 if task_id not in live_ids:
                     # B2 ORPHAN branch — but ONLY if the hot file is CONFIRMED

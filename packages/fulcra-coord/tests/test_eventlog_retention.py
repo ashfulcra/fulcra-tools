@@ -141,6 +141,29 @@ class TestEventlogKeep(_EventTree):
 
 
 class TestPruneEventLogLive(_EventTree):
+    def test_recursive_root_listing_still_prunes_live_task(self):
+        # The real/fake file backend lists files under a prefix recursively, so
+        # listing events/tasks/ may return shard file paths rather than per-task
+        # directories with trailing slashes. The pruner must still discover the
+        # task id and apply the live-task snapshot window.
+        tid = "task-recursive"
+        recs = [
+            _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
+                payload=_delta_payload(title="old")),
+            _ev(tid, at="2026-01-02T00:00:00Z", suffix="01",
+                payload=_snapshot_payload(tid, title="snap", status="active")),
+            _ev(tid, at="2026-01-03T00:00:00Z", suffix="01",
+                payload=_delta_payload(current_summary="new")),
+        ]
+        pairs = [(_shard_path(tid, r), r) for r in recs]
+        files_tree = {_EVENTS_ROOT: [p for p, _ in pairs]}
+        os.environ["FULCRA_COORD_EVENTLOG_KEEP"] = "1"
+        n = self._run(files_tree=files_tree,
+                      json_tree={_events_prefix(tid): pairs},
+                      all_tasks=[{"id": tid}])
+        self.assertEqual(n, 1)
+        self.assertEqual(self.deleted, [_shard_path(tid, recs[0])])
+
     def test_keep_snapshot_and_recent_delete_older(self):
         # A live task: old deltas -> old snapshot -> more deltas -> NEWER snapshot
         # -> a couple trailing deltas. Everything strictly before the LATEST
@@ -262,6 +285,23 @@ class TestPruneEventLogDeltaOnly(_EventTree):
 
 
 class TestPruneEventLogOrphans(_EventTree):
+    def test_recursive_root_listing_still_deletes_orphan_tree(self):
+        # Same recursive root-listing shape as the fake backend, but for the
+        # orphan branch: the task id must be extracted from shard paths so an
+        # archived task's event tree can actually be reached and deleted.
+        tid = "task-archived-recursive"
+        recs = [
+            _ev(tid, at=f"2026-01-0{d}T00:00:00Z", suffix="01",
+                payload=_delta_payload(x=d))
+            for d in range(1, 4)
+        ]
+        shards = [_shard_path(tid, r) for r in recs]
+        n = self._run(files_tree={_EVENTS_ROOT: shards,
+                                  _events_prefix(tid): shards},
+                      json_tree={}, all_tasks=[], present_paths=())
+        self.assertEqual(n, 3)
+        self.assertEqual(sorted(self.deleted), sorted(shards))
+
     def test_orphan_all_shards_deleted(self):
         # B2: task dir whose id is NOT in all_tasks AND whose hot file is confirmed
         # absent (stat -> None) is an archived/deleted task: delete ALL its shards.
