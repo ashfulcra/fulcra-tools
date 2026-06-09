@@ -18,7 +18,7 @@ import json
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, listener
-from .io import _load_task, _load_task_summaries
+from .io import _cache_remote_task, _load_task, _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
 from .writepipe import _view_name_to_remote, _write_task_and_views
 
@@ -33,7 +33,13 @@ def _load_task_from_summary(summary: dict[str, Any], *,
     task_file = summary.get("task_file")
     if not (task_id and task_file):
         return None
-    task = remote.download_json(task_file, backend=backend)
+    # Route the body read through the single funnel so it honors the Phase-2b
+    # read_source() knob (file vs event-fold) like every other read path. The
+    # funnel derives the path from task_id itself, but we still require the
+    # summary to NAME a durable file (the guard above) — that's what makes this
+    # fallback applicable at all. The funnel doesn't assert the id matches, so
+    # keep the caller's identity guard below.
+    task = _cache_remote_task(task_id, backend=backend)
     if not (task and task.get("id") == task_id):
         return None
     cache.write_cached_task(task)
