@@ -428,7 +428,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                   f"(deferred {ret['deferred']}), expired {ret.get('expired_broadcasts', 0)} "
                   f"broadcast(s), pruned {ret['pruned_markers']} marker(s), "
                   f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health, "
-                  f"{ret.get('pruned_continuity', 0)} continuity.")
+                  f"{ret.get('pruned_continuity', 0)} continuity, "
+                  f"{ret.get('pruned_events', 0)} events.")
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
