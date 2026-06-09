@@ -169,6 +169,39 @@ def _build_health_record(*, now, duration_s, tasks_loaded, views_refreshed,
     }
 
 
+#: Window for the dual-write append-failure liveness count. 24h is long enough to
+#: catch an intermittent failure between reconciles, short enough that a
+#: long-resolved blip ages out instead of dragging the signal forever. The ops-log
+#: file is append-only/unbounded today; pruning it is a separate retention
+#: follow-up (NOT built here).
+_DUAL_WRITE_FAILURE_WINDOW = timedelta(hours=24)
+
+
+def _event_dual_write_health() -> dict:
+    """SIGNAL C (dual-write liveness): recent ``event_append_failed`` count.
+
+    The dual-write append path records an ``event_append_failed`` op on every
+    failed event append, but those entries were write-only — a host whose
+    dual-write is silently failing was invisible to the fleet. This counts them
+    over a recent window from the local ops log and returns an
+    ``event_dual_write`` block for the health record.
+
+    Best-effort: any failure reading/counting yields ``append_failures_recent``
+    0 (the block is still emitted with the window), and this never raises — a
+    corrupt ops log must NEVER break reconcile. ``window_since`` records the
+    window start so a reader knows the count's horizon."""
+    since = datetime.now(timezone.utc) - _DUAL_WRITE_FAILURE_WINDOW
+    n = 0
+    try:
+        n = sum(
+            1 for e in cache.read_ops_log(since=since)
+            if e.get("status") == "event_append_failed"
+        )
+    except Exception:
+        n = 0
+    return {"append_failures_recent": n, "window_since": _iso_z(since)}
+
+
 #: Max items rendered per digest block before collapsing the tail into "+N more".
 #: Keeps the timeline note bounded (a 284-event-in-two-days bus could otherwise
 #: produce a wall of text) while always showing the most-salient head of each list.
@@ -588,6 +621,17 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             # reconcile either). record["event_parity"] is simply absent.
             try:
                 _warn(f"  Event-parity check skipped (error): {_pe}")
+            except Exception:
+                pass
+        # SIGNAL C: surface recent dual-write append failures so a host whose
+        # event-append is silently failing is no longer invisible. Best-effort and
+        # self-guarding (the helper never raises); wrapped here too so a future
+        # change to it can never break reconcile.
+        try:
+            record["event_dual_write"] = _event_dual_write_health()
+        except Exception as _de:
+            try:
+                _warn(f"  Dual-write health skipped (error): {_de}")
             except Exception:
                 pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:

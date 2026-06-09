@@ -321,6 +321,68 @@ def append_ops_log(entry: dict[str, Any]) -> None:
         fh.write(json.dumps(entry) + "\n")
 
 
+def read_ops_log(since: Optional["datetime"] = None) -> list[dict[str, Any]]:
+    """Read the local JSONL ops log back, best-effort and windowed by ``since``.
+
+    SIGNAL C (dual-write liveness): the dual-write append path records an
+    ``event_append_failed`` op on every failed event append, but until now those
+    entries were write-only — a host whose dual-write is silently failing left no
+    visible trace. This reader lets the health record surface a recent
+    append-failure count.
+
+    Best-effort by construction (mirrors ``read_meta``): malformed or blank lines
+    are skipped, a missing file returns ``[]``, and nothing here ever raises — a
+    corrupt ops log must never break the caller (reconcile). When ``since`` is
+    given, only entries whose ``logged_at`` parses AND is ``>= since`` are kept;
+    an entry with a missing/unparseable timestamp is dropped from a windowed read
+    (we can't prove it falls inside the window, and over-counting a stale failure
+    as "recent" would be the misleading outcome this signal exists to avoid).
+    """
+    path = ops_log_path()
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if since is not None:
+            dt = _parse_logged_at(entry.get("logged_at"))
+            if dt is None or dt < since:
+                continue
+        out.append(entry)
+    return out
+
+
+def _parse_logged_at(value: Any) -> Optional["datetime"]:
+    """Parse a ``logged_at`` ISO string (UTC, trailing ``Z``) to an aware dt.
+
+    Returns ``None`` on anything unparseable so a windowed read can safely drop
+    the entry rather than raise. Kept local to cache (a low-layer module) so the
+    ops-log reader needs no upward import for timestamp parsing."""
+    if not isinstance(value, str) or not value:
+        return None
+    from datetime import datetime, timezone
+    try:
+        # append_ops_log stamps "...Z"; fromisoformat wants +00:00.
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
