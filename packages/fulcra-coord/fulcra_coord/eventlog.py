@@ -55,13 +55,12 @@ def read_events(
     task_id: str,
     *,
     backend: Optional[list[str]] = None,
-) -> list[tuple[str, dict[str, Any]]]:
-    """Read all event shards for *task_id* from the remote store.
+) -> list[dict[str, Any]]:
+    """Read all event envelopes for a task (unordered; ``fold_task`` orders them).
 
-    Returns a list of ``(path, event_dict)`` pairs — one per shard found under
-    the task's events prefix.  The list is **unordered**: callers that need a
-    deterministic reduction should pass the extracted dicts to
-    :func:`fulcra_coord.events.fold_task`, which sorts by ``(at, event_id)``.
+    Returns the event dicts only — the remote path of each shard is dropped
+    here so callers can fold the result directly (``fold_task(read_events(...))``).
+    A caller that needs the shard paths should use ``remote.list_json`` directly.
 
     Missing prefix (no events written yet) or an unreachable store returns
     ``[]`` — the best-effort contract inherited from
@@ -72,6 +71,6 @@ def read_events(
         backend: Optional explicit backend command list.
 
     Returns:
-        List of ``(remote_path, event_dict)`` pairs, unordered.
+        List of event dicts, unordered.
     """
-    return remote.list_json(remote.events_prefix(task_id), backend=backend)
+    return [record for _path, record in remote.list_json(remote.events_prefix(task_id), backend=backend)]
