@@ -518,8 +518,12 @@ def _try_merge_from_base(
         b = base.get(k)
         m = mine.get(k)
         t = theirs.get(k)
-        mine_changed = m != b
-        theirs_changed = t != b
+        # A key absent from a side is stale-read/absent state, NOT a deletion: an
+        # older-CLI / mixed-fleet writer that omits a key must not null a field the
+        # other side legitimately carries (root cause A: silent data loss). Only
+        # honor a change when the key actually EXISTS on that side.
+        mine_changed = (k in mine) and (m != b)
+        theirs_changed = (k in theirs) and (t != b)
         if mine_changed and theirs_changed:
             if m == t:
                 merged[k] = m          # both changed to the same value

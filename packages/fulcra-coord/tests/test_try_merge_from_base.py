@@ -117,6 +117,46 @@ def test_events_are_unioned():
     assert e1["at"] in ats and e2["at"] in ats
 
 
+def test_field_absent_in_theirs_is_not_nulled():
+    """A key in base+mine but ABSENT from theirs is stale-read/absent state, not a
+    deletion: a fold/local field must not be nulled just because an older-schema /
+    mixed-fleet file omits the key. (RED before the presence guard: theirs.get(k)
+    is None != base value => theirs_changed True => merged[k] = None.)"""
+    base = _base(assignee="agent2")
+    mine = _base(assignee="agent2")
+    theirs = _base()
+    theirs.pop("assignee", None)  # older-CLI / mixed-fleet writer omitted the key
+    assert "assignee" not in theirs
+    merged = writepipe._try_merge_from_base(base, mine, theirs)
+    assert merged is not None
+    assert merged["assignee"] == "agent2"  # field preserved, not silently nulled
+
+
+def test_field_only_in_theirs_is_carried():
+    """A key present only in theirs (a new field base/mine lack) is carried into the
+    merge. Already works today; pinned so a refactor can't regress it."""
+    base = _base()
+    mine = _base()
+    theirs = _base(priority_note="x")  # new field neither base nor mine carries
+    merged = writepipe._try_merge_from_base(base, mine, theirs)
+    assert merged is not None
+    assert merged["priority_note"] == "x"
+
+
+def test_field_absent_in_mine_present_in_base_theirs():
+    """A key in base+theirs, ABSENT from mine, unchanged in theirs (theirs==base)
+    must keep the base/theirs value. Confirms the symmetric `k in mine` guard
+    doesn't drop a field just because mine omits it."""
+    base = _base(assignee="agent2")
+    mine = _base()
+    mine.pop("assignee", None)  # mine omits the key
+    theirs = _base(assignee="agent2")  # theirs unchanged vs base
+    assert "assignee" not in mine
+    merged = writepipe._try_merge_from_base(base, mine, theirs)
+    assert merged is not None
+    assert merged["assignee"] == "agent2"  # not dropped
+
+
 def test_tags_repaired_to_merged_status():
     """After a remote status change is recovered, derived status tag follows it."""
     base = _base(status="active", current_summary="orig")
