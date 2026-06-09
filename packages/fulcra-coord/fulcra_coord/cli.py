@@ -362,7 +362,15 @@ def _undelivered_directive_check(
             tid = t.get("id")
             assignee = t.get("assignee")
             # Directed directive only: concrete agent id, not broadcast/human/empty.
-            if not assignee or assignee == "*" or assignee == human:
+            # A ROLE audience (@<role>) is NOT a concrete recipient — it resolves at
+            # read time to whatever LIVE agent(s) hold the role (views.inbox_for), so
+            # it is never "offline" the way a frozen id can be, and `assignee in live`
+            # (a set of concrete ids) would ALWAYS be False for it and falsely flag it
+            # undelivered. Skip role audiences here; live-holder rerouting for them is
+            # a separate, out-of-scope follow-on. This keeps the undelivered detector
+            # backward-compatible (concrete/broadcast behaviour unchanged).
+            if (not assignee or assignee == "*" or assignee == human
+                    or views.is_role_audience(assignee)):
                 continue
             # Open and un-picked-up: only a `proposed` task is still awaiting receipt.
             if t.get("status") != "proposed":

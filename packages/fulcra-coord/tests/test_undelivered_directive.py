@@ -128,6 +128,20 @@ def test_broadcast_never_flagged(coord_backend):
     assert report["count"] == 0
 
 
+def test_role_audience_never_flagged(coord_backend):
+    """A directive addressed to a ROLE (@<role>) is NOT a concrete recipient: it
+    resolves at read time to whatever LIVE agent(s) hold the role, so it can never
+    be "offline" the way a frozen id can. The undelivered detector must skip it —
+    `assignee in live` (a set of concrete ids) would otherwise ALWAYS be False for
+    a role string and falsely flag every role directive undelivered. (Live-holder
+    rerouting for role audiences is a separate, out-of-scope follow-on.)"""
+    _seed_presence(coord_backend, agents=[("alice", _iso(datetime.now(timezone.utc)))])
+    task = _directed_directive(task_id="TASK-ROLE", assignee="@coord-maintainer")
+    report = cli._undelivered_directive_check([task], backend=coord_backend)
+    assert "TASK-ROLE" not in {u["id"] for u in report["undelivered"]}
+    assert report["count"] == 0
+
+
 def test_acked_directive_not_flagged(coord_backend):
     """A directive the assignee already ACKED (inbox_ack event) is delivered ->
     NOT flagged, even if the assignee is now offline."""
