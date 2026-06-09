@@ -793,11 +793,20 @@ def build_inbox(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     at least one open directive. Assignees with no open directives are omitted
     (an empty inbox needs no view). Keyed by agent_slug so the per-assignee view
     files (`views/inbox/<slug>.json`) and the index counts agree on the key.
+
+    ROLE audiences (@<role>) are EXCLUDED: they are resolved at delivery time
+    against each agent's declared roles (inbox_for + _my_roles), never by a
+    per-slug view file. Materializing one here would create a phantom
+    ``views/inbox/<role-slug>.json`` bucket and an index.counts.inbox entry that
+    no agent ever reads as "their" inbox (no concrete agent's slug equals a role
+    name) — a misleading operator-surface artifact. Skipping them keeps the
+    materialized view tree and counts describing only concrete/broadcast
+    recipients, exactly mirroring what the slug-keyed read path can deliver.
     """
     inbox: dict[str, list[dict[str, Any]]] = {}
     for t in tasks:
         assignee = t.get("assignee")
-        if not assignee or not is_open_directive(t, assignee):
+        if not assignee or is_role_audience(assignee) or not is_open_directive(t, assignee):
             continue
         inbox.setdefault(agent_slug(assignee), []).append(task_summary(t))
     for slug in inbox:

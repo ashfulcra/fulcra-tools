@@ -157,6 +157,41 @@ class TestInboxForRoleResolution:
         assert views.inbox_for("alice:h:r", [d], roles={"coord-maintainer"}) == []
 
 
+class TestBuildInboxExcludesRoleAudiences:
+    """A role audience must NOT materialize a per-slug inbox bucket / count.
+
+    Role directives are resolved at delivery time (inbox_for + _my_roles), never
+    by a slug-keyed view file. If build_inbox materialized one it would create a
+    phantom ``views/inbox/<role-slug>.json`` and an index.counts.inbox entry no
+    agent ever reads as theirs — a misleading operator-surface artifact.
+    """
+
+    def test_role_directive_makes_no_bucket(self):
+        d = _directive("@coord-maintainer")
+        assert views.build_inbox([d]) == {}
+
+    def test_concrete_directive_still_makes_a_bucket(self):
+        # Regression: concrete recipients are unaffected by the role exclusion.
+        d = _directive("alice:h:r")
+        built = views.build_inbox([d])
+        assert built == {"alice-h-r": [s for s in built["alice-h-r"]]}
+        assert [s["id"] for s in built["alice-h-r"]] == [d["id"]]
+
+    def test_broadcast_directive_still_makes_a_bucket(self):
+        # Regression: "*" broadcast still materializes its broadcast bucket.
+        d = _directive("*")
+        built = views.build_inbox([d])
+        assert list(built.keys()) == ["broadcast"]
+        assert [s["id"] for s in built["broadcast"]] == [d["id"]]
+
+    def test_role_and_concrete_mixed_only_concrete_bucketed(self):
+        role = _directive("@coord-maintainer", title="role one")
+        concrete = _directive("alice:h:r", title="concrete one")
+        built = views.build_inbox([role, concrete])
+        assert list(built.keys()) == ["alice-h-r"]
+        assert [s["id"] for s in built["alice-h-r"]] == [concrete["id"]]
+
+
 # ---------------------------------------------------------------------------
 # Integration — presence-declared roles drive cmd_inbox membership
 # ---------------------------------------------------------------------------
