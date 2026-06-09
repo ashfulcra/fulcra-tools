@@ -1,281 +1,77 @@
-"""Fulcra file operations — thin wrapper around the Fulcra CLI.
+"""Fulcra coordination-bus remote layer.
 
-Backend resolution order:
-  1. FULCRA_COORD_BACKEND env var (split on whitespace) — for testing
-  2. FULCRA_CLI_COMMAND env var
-  3. `fulcra-api` if found on PATH
-  4. `uv tool run fulcra-api` (fallback)
+This module is now split into two concerns:
 
-All remote I/O goes through subprocesses. Tests inject a fake backend via
-backend= parameter or FULCRA_COORD_BACKEND env var.
+  * **Transport** (put/get/stat/list/delete of immutable blobs) lives in the
+    standalone ``fulcra_coord_files`` package and is RE-EXPORTED here unchanged.
+    The re-export is load-bearing back-compat: every coord module imports these
+    as ``remote.<name>``, and the test suite patches them as
+    ``fulcra_coord.remote.<name>`` (``monkeypatch.setattr(remote, "upload_json",
+    ...)``). Re-exported names are real module attributes, so both keep working.
+    See ``fulcra_coord_files.store`` for the full NO-CAS contract.
 
-Timeout env vars:
-  FULCRA_COORD_TIMEOUT_SECONDS          — read ops (default: 5)
-  FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS — reconcile (default: 90)
+  * **Path layout** (which ``remote_root()``-anchored path a given record lives
+    at) STAYS here, below, because it is coordination-bus policy that depends on
+    ``remote_root()`` from ``fulcra_coord.__init__`` — not transport.
+
+Backend resolution, timeouts, and I/O semantics are documented on the transport
+in ``fulcra_coord_files.store``; nothing about them changed in the extraction.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-import json
-import os
-import re
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
+
+# ``subprocess`` is imported (and not used directly here) purely so that
+# ``fulcra_coord.remote.subprocess`` resolves: several tests patch the transport
+# at the syscall boundary via ``mock.patch("fulcra_coord.remote.subprocess.run")``.
+# Because ``subprocess`` is a process-global singleton module, patching
+# ``remote.subprocess.run`` patches the SAME module object that
+# ``fulcra_coord_files.store`` calls through — so the re-exported leaf transport
+# (``list_files``, ``check_cli_available`` …) observes the mock unchanged.
+import subprocess  # noqa: F401  — re-exported as a test patch point
 from typing import Any, Optional
 
-from . import env_int, remote_root
+from . import remote_root
+
+# Re-export the full transport surface from the extracted package. ALL moved
+# names are bound here — including the private helpers (``_backend_cmd``,
+# ``cli_base_cmd``, ``_read_timeout``, ``_write_timeout``, ``_reconcile_timeout``,
+# ``_parse_stat``) — because other coord modules reach for them via
+# ``remote.<name>`` (e.g. ``annotations.py`` uses ``remote.cli_base_cmd()`` and
+# ``remote._write_timeout()``) and tests patch them on this module.
+#
+# NB: ``list_json`` is deliberately NOT re-exported from the store — it is
+# re-implemented below as a thin wrapper, see that function for why.
+from fulcra_coord_files.store import (  # noqa: F401  (re-exported for callers + test patch surface)
+    _backend_cmd,
+    _parse_stat,
+    _read_timeout,
+    _reconcile_timeout,
+    _write_timeout,
+    check_cli_available,
+    check_file_commands,
+    cli_base_cmd,
+    delete,
+    download,
+    download_json,
+    list_files,
+    stat,
+    stat_changed,
+    upload,
+    upload_json,
+)
+from fulcra_coord_files.store import (
+    check_remote_access as _store_check_remote_access,
+)
+from fulcra_coord_files.store import (
+    probe_reachable as _store_probe_reachable,
+)
 
 
 # ---------------------------------------------------------------------------
-# Backend resolution
+# Composite transport that must dispatch through THIS module's bindings
 # ---------------------------------------------------------------------------
-
-def cli_base_cmd() -> list[str]:
-    """Resolve the *base* Fulcra CLI invocation (NO subcommand appended).
-
-    This is the single source of truth for "how do we shell the Fulcra CLI on
-    this machine". File ops append ``file`` to it; annotation writes append
-    ``create-data-type`` / ``delete-data-type``. Resolution order mirrors the
-    documented backend precedence so every consumer honours the SAME configured
-    CLI (e.g. ``FULCRA_CLI_COMMAND``) rather than each hardcoding ``fulcra``:
-
-      1. ``FULCRA_CLI_COMMAND`` env var (explicit operator override)
-      2. ``fulcra-api`` if found on PATH
-      3. ``uv tool run fulcra-api`` (fallback)
-
-    Note ``FULCRA_COORD_BACKEND`` is deliberately NOT consulted here: that
-    override is the file-ops *fake backend* used in tests (it speaks the ``file``
-    subcommand protocol of the emulator, not the real CLI's top-level command
-    surface), so it has no meaning for annotation writes. Annotation tests inject
-    their own base via ``FULCRA_CLI_COMMAND``."""
-    env_cli = os.environ.get("FULCRA_CLI_COMMAND", "").strip()
-    if env_cli:
-        return env_cli.split()
-
-    if shutil.which("fulcra-api"):
-        return ["fulcra-api"]
-
-    return ["uv", "tool", "run", "fulcra-api"]
-
-
-def _backend_cmd() -> list[str]:
-    """Return the base command list for Fulcra file operations."""
-    # 1. Test override (fake backend emulator speaking the `file` protocol).
-    env_test = os.environ.get("FULCRA_COORD_BACKEND", "").strip()
-    if env_test:
-        return env_test.split()
-
-    # 2-4. Resolved real CLI base + the `file` subcommand.
-    return cli_base_cmd() + ["file"]
-
-
-def _read_timeout() -> int:
-    # env_int (not a bare int()): a non-numeric override falls back to 5 instead
-    # of raising and crashing every read op on a typo'd value.
-    return env_int("FULCRA_COORD_TIMEOUT_SECONDS", 5)
-
-
-def _write_timeout() -> int:
-    return max(15, _read_timeout())
-
-
-def _reconcile_timeout() -> int:
-    return env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
-
-
-# ---------------------------------------------------------------------------
-# Low-level wrappers
-# ---------------------------------------------------------------------------
-
-def stat(remote_path: str, *, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
-    """Return parsed stat output for remote_path, or None on failure."""
-    cmd = (backend or _backend_cmd()) + ["stat", remote_path]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_read_timeout(),
-        )
-        if result.returncode != 0:
-            return None
-        return _parse_stat(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return None
-
-
-def download(
-    remote_path: str,
-    *,
-    backend: Optional[list[str]] = None,
-    timeout: Optional[int] = None,
-) -> Optional[str]:
-    """Download remote_path and return contents as string, or None on failure."""
-    cmd = (backend or _backend_cmd()) + ["download", remote_path, "-"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout or _read_timeout(),
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return None
-
-
-def download_json(
-    remote_path: str,
-    *,
-    backend: Optional[list[str]] = None,
-    timeout: Optional[int] = None,
-) -> Optional[dict[str, Any]]:
-    """Download and parse JSON from remote_path."""
-    text = download(remote_path, backend=backend, timeout=timeout)
-    if text is None:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
-
-
-def upload(
-    content: str,
-    remote_path: str,
-    *,
-    backend: Optional[list[str]] = None,
-    timeout: Optional[int] = None,
-) -> bool:
-    """Upload string content to remote_path. Returns True on success."""
-    cmd = backend or _backend_cmd()
-    tmp_path: Optional[str] = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, prefix="fulcra-coord-"
-        ) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-
-        upload_cmd = cmd + ["upload", tmp_path, remote_path]
-        result = subprocess.run(
-            upload_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout or _write_timeout(),
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-    finally:
-        if tmp_path:
-            try:
-                Path(tmp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-
-
-def upload_json(
-    data: dict[str, Any],
-    remote_path: str,
-    *,
-    backend: Optional[list[str]] = None,
-    timeout: Optional[int] = None,
-) -> bool:
-    """Serialize data as JSON and upload to remote_path."""
-    return upload(
-        json.dumps(data, indent=2),
-        remote_path,
-        backend=backend,
-        timeout=timeout,
-    )
-
-
-def delete(remote_path: str, *, backend: Optional[list[str]] = None) -> bool:
-    """Delete remote_path, wrapping ``fulcra file delete <PATH>``. Returns True on
-    success, False on any failure (missing file, timeout, backend error).
-
-    The platform delete is a SOFT-delete (the prior version is recoverable via
-    ``fulcra file restore <VERSION_ID>``), which is what makes the retention
-    prune of regenerable markers / dead presence safe. The archive MOVE relies on
-    this returning honestly: _archive_task only deletes the hot copy AFTER it has
-    verified the archived body landed, and a False here just leaves a recoverable
-    duplicate for the next pass to finish — never a lost task. Best-effort: never
-    raises, so a prune/move failure can't escape into the reconcile tick."""
-    cmd = (backend or _backend_cmd()) + ["delete", remote_path]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_write_timeout(),
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-
-
-def list_files(
-    prefix: str,
-    *,
-    backend: Optional[list[str]] = None,
-    timeout: Optional[int] = None,
-) -> list[str]:
-    """List remote files under prefix. Returns NORMALIZED full remote paths
-    (e.g. ``/coordination/health/<id>.json``) that ``download_json`` / ``delete``
-    accept directly — never the CLI's raw display lines.
-
-    Why this normalization exists: the real ``fulcra file list`` formats each
-    line for humans as ``"<size>  <date> <tz>  <FILENAME>"`` (size + date +
-    FILENAME-only, no path). Returning those lines verbatim — as 0.9.0 did —
-    silently broke every list-based consumer in live (self-heal, presence
-    reconcile/prune, retention pruning, ``search --archived``, the health
-    command): they each fed the formatted string straight into
-    ``download_json`` / ``delete``, which is not a path, so it resolved to
-    None / a no-op. Tests stayed green only because the fake backend emits
-    clean full paths. We reconstruct the path here so the two formats converge.
-
-    Robust to BOTH shapes: take the filename as the LAST whitespace-delimited
-    token (for the formatted line that's the trailing filename; for an
-    already-clean path it's the whole path, since these are slug/id-based names
-    with NO spaces — that no-spaces assumption is what makes last-token
-    extraction safe). If that token is already a full path (starts with "/")
-    or already begins with the prefix, pass it through unchanged; otherwise it's
-    a bare filename from the real CLI, so join it onto the prefix.
-
-    Best-effort: returns [] on any error (non-zero exit, timeout, missing CLI)."""
-    cmd = (backend or _backend_cmd()) + ["list", prefix]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout or _read_timeout(),
-        )
-        if result.returncode != 0:
-            return []
-        normalized: list[str] = []
-        for raw in result.stdout.splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            # Filenames are slug/id-based with no spaces, so the trailing
-            # whitespace-delimited token is the filename (real CLI) or the
-            # whole clean path (fake / already-normalized).
-            name = line.split()[-1]
-            if name.startswith("/") or name.startswith(prefix):
-                normalized.append(name)
-            else:
-                normalized.append(prefix.rstrip("/") + "/" + name)
-        return normalized
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return []
-
 
 def list_json(
     prefix: str,
@@ -287,29 +83,17 @@ def list_json(
     """List ``prefix`` and PARALLEL-download every file ending in ``suffix``,
     returning ``[(path, record), ...]`` for each path whose JSON parsed to a dict.
 
-    This is the shared "enumerate a bus directory and read each record" primitive
-    behind self-reported per-host/per-agent state (presence reconcile + prune,
-    health load + prune, the archive cold-index). Before this helper each consumer
-    open-coded the same ``for path in list_files(...): download_json(...)`` loop
-    SERIALLY — N+1 round-trips per call, on the reconcile hot path.
-
-    PERF: downloads run in a ThreadPoolExecutor, the exact pattern proven in
-    cli._load_all_tasks — each ``download`` is one independent subprocess with no
-    shared mutable state, so the pool is safe and collapses N serial ~1.3s
-    round-trips into a single batch's wall-time. This is the per-tick win for
-    presence reconcile, health load, and the retention prunes.
-
-    ORDER-PRESERVING: results are returned in ``list_files`` order (not completion
-    order), so the helper is a behavior-exact drop-in for the serial loops it
-    replaces — a caller that aggregates/dedups, and any test that asserts on the
-    sequence, both see the identical ordering they did before.
-
-    BEST-EFFORT, per-item isolated: a failed listing yields ``[]``; a single
-    download/parse failure (or an unexpected raise inside the pool) drops just that
-    item; a non-dict payload is dropped. Never raises into the caller — the same
-    contract every existing consumer relied on. Each consumer keeps its OWN record
-    predicate (``rec.get("agent")``, ``is_prunable_*``, ...); this helper only owns
-    the list + parallel-read + dict-guard.
+    Behaviorally identical to ``fulcra_coord_files.store.list_json`` (same
+    ordering, dict-guard, best-effort isolation). It is re-implemented HERE rather
+    than re-exported for ONE reason: it is the only transport primitive that
+    composes other transport primitives (``list_files`` + ``download_json``), and
+    every existing consumer + test patches those callees on the ``remote`` module
+    (``mock.patch("fulcra_coord.remote.list_files", ...)`` / ``...download_json``)
+    and expects ``list_json`` to honour the patch. A re-export of the store's
+    ``list_json`` would close over the store's OWN ``list_files``/``download_json``,
+    so a ``remote``-level patch wouldn't reach it. Resolving the callees from this
+    module's globals (``list_files(...)`` / ``download_json(...)``) preserves that
+    patch surface exactly. See the store version for the full contract docstring.
     """
     try:
         paths = [p for p in list_files(prefix, backend=backend) if p.endswith(suffix)]
@@ -335,88 +119,28 @@ def list_json(
 
 
 # ---------------------------------------------------------------------------
-# Stat parsing
+# Transport calls that need the bus's remote_root() bound in
 # ---------------------------------------------------------------------------
+# ``probe_reachable`` and ``check_remote_access`` are transport, but their target
+# path is coordination-bus policy (``remote_root()``). We keep the transport free
+# of that policy — otherwise it would import back into ``fulcra_coord`` and create
+# a coord -> files -> coord cycle — by injecting ``remote_root()`` here. Behavior
+# is identical to the pre-extraction functions for every caller, who reaches them
+# as ``remote.probe_reachable(backend=...)`` / ``remote.check_remote_access(...)``.
 
-def _parse_stat(text: str) -> Optional[dict[str, Any]]:
-    """Parse fulcra file stat output into a dict."""
-    text = text.strip()
-    if not text:
-        return None
-
-    # Try JSON first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Parse human-readable text output
-    data: dict[str, Any] = {"raw": text}
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if lines:
-        first = lines[0]
-        size_match = re.search(r"\((\d+)\s+bytes\)", first)
-        if size_match:
-            data["size"] = int(size_match.group(1))
-        if first.startswith("/"):
-            data["path_display"] = first.split(" (", 1)[0]
-    for line in lines:
-        if ":" in line:
-            key, _, val = line.partition(":")
-            norm_key = key.strip().lower().replace(" ", "_")
-            norm_val: Any = val.strip()
-            if norm_key == "version":
-                data["version_id"] = norm_val
-            elif norm_key == "uploaded":
-                data["uploaded_at"] = norm_val
-            elif norm_key == "previous_versions":
-                try:
-                    data["previous_versions"] = int(norm_val)
-                except ValueError:
-                    data["previous_versions"] = norm_val
-            else:
-                data[norm_key] = norm_val
-    return data if len(data) > 1 else {"raw": text}
+def probe_reachable(backend: Optional[list[str]] = None) -> bool:
+    """Cheap liveness probe against the coordination root. See
+    :func:`fulcra_coord_files.store.probe_reachable` for the full rationale
+    (disambiguates "empty but reachable" from "unreachable"). Binds the bus's
+    ``remote_root()`` as the list target."""
+    return _store_probe_reachable(backend, root=remote_root())
 
 
-# ---------------------------------------------------------------------------
-# Version change detection (optimistic concurrency)
-# ---------------------------------------------------------------------------
-
-def stat_changed(before: Optional[dict[str, Any]], after: Optional[dict[str, Any]]) -> bool:
-    """Return True if the remote file changed between two stat calls.
-
-    Strong identity keys (version_id / version / etag): if both sides have the
-    key, an equal value is definitive proof of no change and we short-circuit.
-    A differing value is definitive proof of change.
-
-    Weak indicators (size, timestamps, previous_versions): equal values do NOT
-    prove the file is unchanged (a re-upload can produce the same size); we
-    therefore check ALL weak keys and return True if ANY of them differ.
-    """
-    if before is None and after is None:
-        return False
-    if before is None or after is None:
-        return True
-
-    # Strong identity keys — one match is definitive
-    for key in ("version_id", "version", "etag"):
-        bv = before.get(key)
-        av = after.get(key)
-        if bv is not None and av is not None:
-            return bv != av
-
-    # Weak indicators — any difference signals a change
-    for key in ("size", "uploaded_at", "updated_at", "date_uploaded", "previous_versions"):
-        bv = before.get(key)
-        av = after.get(key)
-        if bv is not None and av is not None and bv != av:
-            return True
-
-    if "raw" in before and "raw" in after:
-        return before["raw"] != after["raw"]
-
-    return False
+def check_remote_access(backend: Optional[list[str]] = None) -> tuple[bool, str]:
+    """Verify remote access by stat-ing ``{remote_root()}/index.json``. See
+    :func:`fulcra_coord_files.store.check_remote_access`. Binds the bus's
+    well-known index path as the probe target."""
+    return _store_check_remote_access(backend, probe_path=f"{remote_root()}/index.json")
 
 
 # ---------------------------------------------------------------------------
@@ -503,122 +227,3 @@ def health_remote_path(host_slug: str) -> str:
 def health_prefix() -> str:
     """List prefix for per-host health records (health command + retention prune)."""
     return f"{remote_root()}/health/"
-
-
-# ---------------------------------------------------------------------------
-# Auth / doctor helpers
-# ---------------------------------------------------------------------------
-
-def check_cli_available(backend: Optional[list[str]] = None) -> tuple[bool, str]:
-    """Check if the Fulcra CLI file backend is reachable. Returns (ok, message)."""
-    cmd = backend or _backend_cmd()
-    # Probe the file subcommand itself. The base CLI can exist while the
-    # installed build lacks Fulcra Files support, which would make every write
-    # fail later with a misleading doctor result.
-    try:
-        result = subprocess.run(
-            cmd + ["--help"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return True, " ".join(cmd)
-        detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
-        suffix = f": {detail[0]}" if detail else ""
-        return False, f"CLI file command returned code {result.returncode}{suffix}"
-    except FileNotFoundError:
-        return False, f"Command not found: {cmd[0]}"
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return False, str(e)
-
-
-def check_file_commands(backend: Optional[list[str]] = None) -> tuple[bool, str]:
-    """Probe whether the resolved Fulcra CLI exposes the ``file`` command group.
-
-    WHY THIS EXISTS (the #1 fresh-agent onboarding failure):
-    The public PyPI ``fulcra-api`` build (e.g. 0.1.32) does NOT ship the ``file``
-    command group, yet the entire coordination bus is driven by ``fulcra file``
-    ops (upload/download/stat/list). A freshly-onboarded agent that pip-installs
-    ``fulcra-api`` and runs ``fulcra-coord`` then sees every bus op fail
-    *silently* with no clear signal why. This probe gives doctor a dedicated,
-    legible signal so the failure points straight at the fix: install a
-    file-capable build (the ``file-management`` branch of
-    ``fulcradynamics/fulcra-api-python`` — see docs/fulcra-cli-branch.md).
-
-    Distinct from ``check_cli_available``: that helper probes whatever
-    ``_backend_cmd()`` resolves to, which in tests is the *fake backend* (it
-    speaks the ``file`` subcommand protocol directly and has no top-level
-    ``file`` group). This helper deliberately targets the **resolved real CLI
-    base** (``cli_base_cmd()``) + ``file --help``, the same base every real file
-    op shells, so it answers exactly "does the installed CLI have ``file``?".
-
-    Robust by contract: a missing binary, a non-zero exit, a timeout, or any OS
-    error all degrade to ``(False, message)`` — this must never raise, so doctor
-    can call it without a guard and never crash on a hung or absent CLI.
-
-    Returns ``(ok, message)`` where ``message`` names the probed base on success
-    or describes the failure otherwise.
-    """
-    base = backend or cli_base_cmd()
-    cmd = base + ["file", "--help"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return True, " ".join(base)
-        detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
-        suffix = f": {detail[0]}" if detail else ""
-        return False, f"`{' '.join(base)} file` returned code {result.returncode}{suffix}"
-    except FileNotFoundError:
-        return False, f"Command not found: {base[0]}"
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return False, f"file probe failed: {e}"
-    except Exception as e:  # pragma: no cover - defensive: never crash doctor
-        return False, f"file probe error: {e}"
-
-
-def probe_reachable(backend: Optional[list[str]] = None) -> bool:
-    """Cheap liveness probe: is the Fulcra remote reachable at all?
-
-    WHY THIS EXISTS (distinct from stat/download returning None):
-    ``stat``/``download`` collapse two very different conditions into the same
-    ``None`` — "the file genuinely does not exist yet" (a fresh, reachable
-    backend with no tasks) and "the backend could not be reached" (auth gone,
-    CLI missing, network down). A reader that treats both as "empty" silently
-    masks an outage as a successful empty result.
-
-    This probe disambiguates by running the ``list`` subcommand against the
-    coordination root: the backend process EXITING SUCCESSFULLY (returncode 0)
-    proves the remote is reachable, regardless of whether any files came back.
-    A non-zero exit, a missing CLI, a timeout, or any OS error means the remote
-    is NOT reachable. We deliberately key off the *process* success rather than
-    the (possibly empty) output, so an empty-but-reachable bus probes True.
-    """
-    cmd = (backend or _backend_cmd()) + ["list", remote_root()]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_read_timeout(),
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-
-
-def check_remote_access(backend: Optional[list[str]] = None) -> tuple[bool, str]:
-    """Try a stat on a well-known path to verify remote access."""
-    probe_path = f"{remote_root()}/index.json"
-    s = stat(probe_path, backend=backend)
-    if s is not None:
-        return True, f"Remote accessible ({probe_path})"
-    return False, (
-        f"Could not stat {probe_path} — check auth or FULCRA_COORD_REMOTE_ROOT. "
-        f"On a fresh installation with no tasks yet, run 'fulcra-coord start' first to initialize the root."
-    )
