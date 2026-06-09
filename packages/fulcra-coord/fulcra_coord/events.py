@@ -20,14 +20,17 @@ Design notes
 * **rand** — first 12 hex chars of a random UUID4, making each id unique
   within a microsecond even when two events share the same wall-clock instant.
 
-The id is derived from ``at`` so it encodes the same instant as the envelope
-timestamp; changing ``at`` would change the id, which is intentional — the
-id is a content-addressed surrogate, not a database auto-increment.
+The id is derived from ``at`` so its prefix encodes the same instant as the
+envelope timestamp; the random suffix makes it unique even across concurrent
+writers at the same microsecond.  Unlike a content-addressed hash, two calls
+with the same ``at`` produce *different* ids — the id is NOT recomputable from
+the envelope, so a reducer must store it on creation, never re-derive it.
 """
 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from fulcra_coord.timeutil import now_iso
 
@@ -67,10 +70,10 @@ def make_event(
     task_id: str,
     kind: str,
     actor: str,
-    payload: dict,
+    payload: dict[str, Any],
     idempotency_key: str | None = None,
     at: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Build an immutable coordination event envelope.
 
     The envelope is the canonical record of "something happened to a task
@@ -92,9 +95,11 @@ def make_event(
                           ``role:host:project`` form.
         payload:          Arbitrary event-specific data.  Caller owns the
                           schema; no validation is performed here.
-        idempotency_key:  Optional caller-supplied key that lets consumers
-                          deduplicate re-deliveries.  ``None`` when the
-                          caller does not require dedup.
+        idempotency_key:  Optional caller-supplied key the reducer uses to
+                          deduplicate re-deliveries.  Dedup is keyed on the
+                          compound ``(actor, idempotency_key)`` pair — the same
+                          key from a *different* actor is a distinct event.
+                          ``None`` when the caller does not require dedup.
         at:               UTC ISO-8601 timestamp.  Defaults to ``now_iso()``.
 
     Returns:
