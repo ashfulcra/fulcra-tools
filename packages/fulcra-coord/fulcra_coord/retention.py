@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from . import cache, remote, views, identity, schema
 from . import env_int, remote_root
+from .events import _is_snapshot_payload
 from .io import _load_task_summaries
 from .writepipe import _write_task_and_views
 from .output import info as _info, print_json as _print_json, err as _err
@@ -418,6 +419,200 @@ def _prune_continuity_checkpoints(now: datetime, *,
     return deleted
 
 
+def _eventlog_keep() -> int:
+    """How many of the NEWEST event shards to keep per LIVE task: env
+    FULCRA_COORD_EVENTLOG_KEEP (default 20), floored at 1.
+
+    The floor is load-bearing: a 0 / negative override must NEVER let the prune
+    window dip below the latest snapshot's safety. The prune always computes
+    ``keep_from = min(snap_idx, max(0, len(pairs) - keep))`` so the keep window
+    is only ever an ADDITIONAL guard on top of "never delete the latest snapshot
+    or anything after it"; the ``max(0, ...)`` clamps ``len - keep`` to a
+    non-negative slice start, so a ``keep`` larger than the event count can never
+    produce a negative ``keep_from`` (which would slice off the TAIL and delete
+    the snapshot). A 0 window paired with a tiny event list could still surprise
+    a future reader, so we clamp to 1 to keep the contract obvious: at minimum we
+    retain one recent event beyond the structural snapshot floor. env_int already
+    falls back to the default on a non-numeric value; max(1, ...) clamps the
+    explicit-but-too-small case."""
+    return max(1, env_int("FULCRA_COORD_EVENTLOG_KEEP", 20))
+
+
+def _prune_event_log(all_tasks: list[dict[str, Any]], now: datetime, *,
+                     backend: Optional[list[str]] = None,
+                     deadline: Optional[float] = None) -> int:
+    """Bound the unbounded event-log growth (Root cause B).
+
+    WHY this exists: the event-sourcing dual-write (_write_task_and_views)
+    appends an immutable shard at events/tasks/<id>/<event_id>.json on EVERY
+    task mutation, FOREVER. No other pruner touches the events/ family, so the
+    log grows without bound (B1) and every archived task orphans its whole shard
+    tree (B2) — read_events/fold_task degrade O(mutations-per-task) on the live
+    bus. This is the GC that bounds both.
+
+    HOW (two branches per task dir under events/tasks/):
+
+      * ORPHAN (B2): a task dir whose id is NOT in the live set AND whose hot
+        file (tasks/<id>.json) is CONFIRMED absent (stat -> None) belongs to an
+        archived/deleted task — delete ALL its shards. The stat is a positive
+        confirmation guarding against a PARTIAL all_tasks: if the hot file still
+        exists (task merely missing from this caller's list), SKIP — never prune
+        a possibly-live task's tree.
+
+      * LIVE (B1): for a task still in the live set, keep the LATEST snapshot
+        event + the most recent _eventlog_keep() events; delete only shards
+        STRICTLY OLDER than the latest snapshot. A snapshot is self-complete
+        (fold_task replaces accumulated state wholesale on a snapshot), so every
+        event before the latest snapshot is stale. A DELTA-ONLY task (no snapshot
+        anywhere) is NEVER pruned (fail-safe — each delta may carry a unique field
+        never re-set, so dropping any delta could lose fold state).
+
+    FOLD-EQUIVALENCE BOUNDARY: for the CURRENT writer the fold output is unchanged
+    after the prune. _write_task_and_views mints a fresh ``idempotency_key``
+    (= op_id = uuid4 hex) per write and emits a FULL snapshot every time, so a
+    pruned pre-snapshot event can never be the first-seen copy of a surviving
+    event's identity. The one THEORETICAL divergence: fold_task dedups by
+    (actor, idempotency_key), first-in-sort-order wins; a post-snapshot delta that
+    shared an (actor, idempotency_key) pair with a PRE-snapshot event would, once
+    the pre-snapshot copy is pruned, become first-seen and newly-applied — a
+    different folded state. The unique-per-op writer never emits such a duplicate
+    pair, so this branch is unreachable today; it is documented so a future writer
+    that reuses idempotency keys across the snapshot boundary doesn't silently
+    break the guarantee.
+
+    Shards are sorted by the SAME key fold_task uses — (at, event_id) — so
+    "latest snapshot" and the keep window line up exactly with the reducer.
+
+    BUDGET/CAP, mirroring the other prune steps (_prune_continuity_checkpoints):
+    stop deleting once the wall-clock budget is nearly spent (when a `deadline`
+    is supplied) and cap total deletions per run at _retention_max_per_run()
+    (reusing the same knob — no second cap). Soft-deletes are recoverable, so a
+    partial pass is safe; the remainder drains next run.
+
+    BEST-EFFORT: the whole body is wrapped so it NEVER raises into _run_retention
+    (which must never raise into the reconcile tick). A single task's
+    listing/delete failure is skipped (per-item try/except), not fatal. Returns
+    the count deleted."""
+    import time
+    deleted = 0
+    try:
+        keep = _eventlog_keep()
+        cap = _retention_max_per_run()
+        budget_floor = (deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
+                        if deadline is not None else None)
+        if cap <= 0:
+            return 0
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            return 0
+
+        # The live set: ids of every task the caller currently knows about. A
+        # task dir whose id is here is LIVE (B1 window prune); one that's absent
+        # is a candidate ORPHAN (B2), confirmed only by a positive stat-miss.
+        live_ids = {t.get("id") for t in all_tasks if t.get("id")}
+
+        events_root = f"{remote.remote_root()}/events/tasks/"
+        try:
+            children = remote.list_files(events_root, backend=backend)
+        except Exception:
+            return deleted
+
+        task_ids: list[str] = []
+        seen_task_ids: set[str] = set()
+        for child in children:
+            # Support both list contracts seen in the repo:
+            # - mocked non-recursive listings expose task dirs with trailing "/"
+            # - the fake/real file-oriented backend can expose recursive shard paths
+            #   such as events/tasks/<task_id>/<event_id>.json.
+            task_id = ""
+            if child.endswith("/"):
+                task_id = child.rstrip("/").rsplit("/", 1)[-1]
+            elif child.startswith(events_root):
+                rest = child[len(events_root):]
+                if "/" in rest:
+                    task_id = rest.split("/", 1)[0]
+            if task_id and task_id not in seen_task_ids:
+                seen_task_ids.add(task_id)
+                task_ids.append(task_id)
+
+        for task_id in task_ids:
+            if deleted >= cap:
+                break
+            if budget_floor is not None and time.monotonic() >= budget_floor:
+                break
+            try:
+                if task_id not in live_ids:
+                    # B2 ORPHAN branch — but ONLY if the hot file is CONFIRMED
+                    # gone. A still-present hot file means the task may be live
+                    # and merely missing from a partial all_tasks: SKIP it.
+                    if remote.stat(remote.task_remote_path(task_id),
+                                   backend=backend) is not None:
+                        continue
+                    # Enumerate via list_files, NOT list_json: the orphan branch
+                    # deletes the WHOLE tree and never inspects a payload, while
+                    # list_json silently drops any shard whose JSON doesn't parse
+                    # to a dict — so a corrupt/half-written shard in an archived
+                    # task's tree would survive forever (incomplete GC, the B2
+                    # corrupt-shard hole). list_files sees every file; filter to
+                    # .json so a stray non-shard file is never deleted.
+                    try:
+                        shards = [p for p in remote.list_files(
+                            remote.events_prefix(task_id), backend=backend)
+                            if p.endswith(".json")]
+                    except Exception:
+                        continue
+                    for path in shards:
+                        if deleted >= cap:
+                            break
+                        if (budget_floor is not None
+                                and time.monotonic() >= budget_floor):
+                            break
+                        try:
+                            if remote.delete(path, backend=backend):
+                                deleted += 1
+                        except Exception:
+                            continue
+                    continue
+
+                # B1 LIVE branch — window-prune everything strictly before the
+                # latest snapshot.
+                pairs = remote.list_json(
+                    remote.events_prefix(task_id), backend=backend)
+                if not pairs:
+                    continue
+                # Sort by the SAME key fold_task uses so "latest snapshot" and the
+                # keep window align exactly with the reducer's view of the stream.
+                pairs.sort(key=lambda pr: (pr[1].get("at", ""),
+                                           pr[1].get("event_id", "")))
+                snap_idx = -1
+                for i, (_path, rec) in enumerate(pairs):
+                    if _is_snapshot_payload(rec.get("payload") or {}):
+                        snap_idx = i
+                if snap_idx < 0:
+                    # Delta-only task: dropping any delta could lose fold state.
+                    # Fail-safe — never prune.
+                    continue
+                # Keep everything from the latest snapshot onward AND at least the
+                # most recent `keep` events. keep_from is the first index we KEEP;
+                # min() guarantees we never delete at/after the latest snapshot.
+                keep_from = min(snap_idx, max(0, len(pairs) - keep))
+                for path, _rec in pairs[:keep_from]:
+                    if deleted >= cap:
+                        break
+                    if (budget_floor is not None
+                            and time.monotonic() >= budget_floor):
+                        break
+                    try:
+                        if remote.delete(path, backend=backend):
+                            deleted += 1
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return deleted
+
+
 def _expire_stale_broadcasts(all_tasks: list[dict[str, Any]], now: datetime, *,
                              backend: Optional[list[str]] = None,
                              deadline: Optional[float] = None) -> int:
@@ -480,7 +675,8 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     the reconcile tick — any failure returns a result dict, logged by the caller.
     Returns {"skipped": True} when throttled/errored, else
     {"archived": N, "deferred": D, "expired_broadcasts": E, "pruned_markers": M,
-    "pruned_presence": K, "pruned_health": H, "pruned_continuity": C}.
+    "pruned_presence": K, "pruned_health": H, "pruned_continuity": C,
+    "pruned_events": V}.
 
     1. THROTTLE: _claim_retention_marker(now) — first host today wins; others skip.
     2. ARCHIVE up to _retention_max_per_run() archivable tasks (views.
@@ -491,7 +687,9 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
        the same presence-retention window, so a decommissioned host's presence and
        health records drop in lockstep), plus old continuity checkpoint archives
        (keep the newest _continuity_keep() per task; the recursive sweep that
-       bounds the unbounded checkpoints/ growth).
+       bounds the unbounded checkpoints/ growth), plus old event-log shards
+       (Root cause B: window-prune live tasks below their latest snapshot and GC
+       orphaned archived-task shard trees, bounding the unbounded events/ growth).
     Per-item isolation: one task's archive failure is skipped, not fatal. The
     `deadline` is reconcile's existing deadline local, so the budget COMPOSES with
     (never double-counts) reconcile's 90s ceiling."""
@@ -542,11 +740,18 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     # overrunning it. Best-effort; never raises into this pass.
     pruned_continuity = _prune_continuity_checkpoints(
         now, backend=backend, deadline=deadline)
+    # Event-log sweep (Root cause B): bound the unbounded events/tasks/ growth —
+    # window-prune live tasks below their latest snapshot, GC orphaned archived
+    # task shard trees. Threads the SAME `deadline` so it composes with the
+    # budget; best-effort, never raises into this pass.
+    pruned_events = _prune_event_log(
+        all_tasks, now, backend=backend, deadline=deadline)
     return {"archived": archived, "deferred": deferred,
             "expired_broadcasts": expired_broadcasts,
             "pruned_markers": pruned_markers, "pruned_presence": pruned_presence,
             "pruned_health": pruned_health,
-            "pruned_continuity": pruned_continuity}
+            "pruned_continuity": pruned_continuity,
+            "pruned_events": pruned_events}
 
 
 
