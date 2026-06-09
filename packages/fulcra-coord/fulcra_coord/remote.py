@@ -239,6 +239,35 @@ def presence_prefix() -> str:
     return f"{remote_root()}/presence/"
 
 
+# ---------------------------------------------------------------------------
+# Directive path helpers (Phase 3a — additive, nothing writes here yet)
+# ---------------------------------------------------------------------------
+
+def directives_prefix() -> str:
+    """List prefix for all first-class directive records.
+
+    WHY a dedicated top-level prefix (not ``tasks/directives/``): directives
+    have a distinct schema, lifecycle, and retention policy from tasks. Keeping
+    them at ``{root}/directives/`` makes it possible to list, scan, and prune
+    them independently without touching the task tree — and avoids the path
+    ambiguity that would arise if a task id and a directive id ever collided
+    under a shared prefix.
+    """
+    return f"{remote_root()}/directives/"
+
+
+def directive_remote_path(directive_id: str) -> str:
+    """Canonical storage path for a single directive record.
+
+    Mirrors ``task_remote_path`` / ``presence_remote_path`` in structure:
+    one file per record, keyed by id, under the directives prefix. Only the
+    issuing agent writes this file (Phase 3b dual-write), so there is no
+    cross-agent write contention — the same per-entity pattern used for
+    presence and agent views.
+    """
+    return f"{directives_prefix()}{directive_id}.json"
+
+
 def health_remote_path(host_slug: str) -> str:
     """Per-host self-reported health record path. Takes an ALREADY-SLUGGED id
     (views.agent_slug). Only that host writes its own file -> zero cross-host
