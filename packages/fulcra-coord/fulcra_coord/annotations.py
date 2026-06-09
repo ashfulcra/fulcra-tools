@@ -44,12 +44,16 @@ opts in, and so machines without the annotations-capable CLI stay inert:
     "Agent Tasks" moment definition (cached), then POST a JSONL record to
     ``/ingest/v1/record/batch``. See ``_write_http``.
   * "cli"  -> shell ``create-data-type MomentAnnotation ... --add-to-timeline``
-    through the resolved Fulcra CLI (legacy; needs the annotations-capable CLI
-    build, which the everyday installed CLI lacks — kept for back-compat)
+    through the resolved Fulcra CLI (preferred once the CLI gains annotation-write
+    support; currently blocked because the command is absent in fulcra-api 0.1.32/0.1.33)
 
-The HTTP path is the recommended one; the public contract, tag mapping,
-text/link building, gating, idempotency, and the CLI hook points are unchanged
-regardless of transport.
+The HTTP path (urllib → ``/ingest/v1/record/batch``) is the **interim
+recommendation** only because the CLI lacks the annotation-write command today.
+Annotation-write support is coming to the Fulcra CLI soon, and when a CLI
+annotation-write command ships, the `cli` mode should be wired/repaired to use it
+and the recommended/default mode should flip from `http` to `cli` (`http` retained
+as a fallback). The public contract, tag mapping, text/link building, gating,
+idempotency, and the CLI hook points are unchanged regardless of transport.
 
 CONTRACT
 --------

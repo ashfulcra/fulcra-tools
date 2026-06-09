@@ -87,6 +87,30 @@ fulcra-coord doctor       # must report CLI reachable and File commands OK
 If it still reports 0.12.0, the reinstall didn't replace the on-PATH binary —
 check that `~/.local/bin` is ahead of any other `fulcra-coord` on `PATH`.
 
+### Client bump: fulcra-api ≥ 0.1.33
+
+The fleet's **fulcra-api client** is what fulcra-coord shells out to for the
+brokerless bus file transport (`file list/download/upload/stat/delete`). Bump it
+to the latest released version:
+
+```bash
+uv tool install 'fulcra-api==0.1.33' --force
+uv tool list | grep fulcra-api   # confirm the bump took
+```
+
+**Gotcha (real, just hit):** On some hosts, `fulcra-api` was installed from a
+now-deleted local source path (e.g. `/private/tmp/fulcra-api-python`), so `uv tool
+upgrade fulcra-api` FAILS with "Distribution not found at: file://…". Use the
+explicit version form (`uv tool install 'fulcra-api==0.1.33' --force`) above to
+move such a host onto the released build. If a host intentionally runs a LOCAL/dev
+build of fulcra-api (e.g. for unreleased features), point it at that source
+instead — don't blindly force it to PyPI.
+
+The `fulcra-api` `file` command surface is unchanged 0.1.32→0.1.33 (identical
+command set; the delta is internal), so this bump is safe and loses nothing — it's
+stay-on-latest-client hygiene. The `File commands: OK` check from the verification
+section below still applies.
+
 ## 4. Post-deploy verification
 
 Once at least one upgraded (0.13.0) host has done real task mutations
