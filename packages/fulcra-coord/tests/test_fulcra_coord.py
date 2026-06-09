@@ -7714,13 +7714,20 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_12_0(self):
-        # 0.12.0: additive boundary-triggered Continuity snapshot layer
-        # (retention-bounded, not gated/suppressed). coord can write a
-        # snapshot without changing task state, and lifecycle hooks write
-        # checkpoints at compaction/session-end boundaries.
+    def test_version_is_0_13_0(self):
+        # 0.13.0: the event-sourcing substrate. An immutable per-task event
+        # log is written alongside the mutable task files (best-effort
+        # dual-write, default-on — a write failure never blocks the task
+        # mutation). A `fold_task` reducer replays those events into the same
+        # task shape, backed by a snapshot model. The read path can cut over
+        # to the folded view via the flag-gated `FULCRA_COORD_READ_SOURCE`
+        # (default `file`, so upgrading changes no read behavior). A reconcile
+        # event-parity safety net cross-checks file vs. folded state (incl.
+        # `ack_drift`), event-log retention is bounded by
+        # `FULCRA_COORD_EVENTLOG_KEEP`, and the Directive record becomes an
+        # additive first-class type.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.12.0")
+        self.assertEqual(__version__, "0.13.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
