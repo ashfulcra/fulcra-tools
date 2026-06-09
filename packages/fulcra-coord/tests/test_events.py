@@ -25,7 +25,19 @@ def test_event_id_is_unique_per_call():
     assert len(ids) == 200
 
 
-def test_event_id_sorts_by_time_then_breaks_ties_deterministically():
+def test_event_id_prefix_is_chronological():
     a = events.make_event(family="tasks", task_id="T", kind="updated", actor="a", payload={})
     b = events.make_event(family="tasks", task_id="T", kind="updated", actor="a", payload={})
     assert a["event_id"].split("-")[0] <= b["event_id"].split("-")[0]
+
+
+def test_event_id_unique_within_same_microsecond():
+    # Two events stamped at the IDENTICAL instant must still get distinct ids
+    # (same sortable prefix, different random suffix) — guards against a future
+    # refactor dropping the random suffix.
+    at = "2026-06-08T15:30:45.000000Z"
+    id1 = events.event_id(at=at)
+    id2 = events.event_id(at=at)
+    assert id1 != id2
+    assert id1.split("-")[0] == id2.split("-")[0]  # same prefix
+    assert id1.split("-")[1] != id2.split("-")[1]  # different suffix
