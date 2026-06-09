@@ -60,3 +60,18 @@ def test_event_write_false_return_logs_failure_without_failing_task_write(coord_
         args == ("start", "TASK-DW3") and kwargs["status"] == "event_append_failed"
         for args, kwargs in seen
     )
+
+
+def test_dual_write_event_payload_is_full_task_snapshot(coord_backend, monkeypatch):
+    monkeypatch.setenv("FULCRA_COORD_BACKEND", " ".join(coord_backend))
+    from fulcra_coord import schema, eventlog
+    task = schema.make_task(title="snap", workstream="ws", agent="a")
+    task["status"] = "active"
+    assert cli._write_task_and_views(task, backend=coord_backend, command="start") is True
+    evs = eventlog.read_events(task["id"], backend=coord_backend)
+    assert len(evs) == 1
+    payload = evs[0]["payload"]
+    for key in ("id", "schema", "source", "claim", "done", "tags", "created_at", "current_summary"):
+        assert key in payload, f"snapshot payload missing {key}"
+    assert payload["id"] == task["id"]
+    assert evs[0]["kind"] == "start"
