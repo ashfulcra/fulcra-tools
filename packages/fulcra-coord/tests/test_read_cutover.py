@@ -139,7 +139,9 @@ def test_events_source_body_has_no_fold_bookkeeping(coord_backend, monkeypatch):
     # the durable tasks/<id>.json (apply_event deep-copies all keys) and parity
     # would be blind to it (its ignore-set hides _applied_event_count).
     monkeypatch.setenv("FULCRA_COORD_READ_SOURCE", "events")
-    tid = _seed_file_and_snapshot(coord_backend, file_summary="F", event_summary="E")
-    got = io._cache_remote_task(tid, backend=coord_backend)
-    assert got["current_summary"] == "E"          # confirm it IS the fold
+    task = schema.make_task(title="bookkeeping", workstream="ws", agent="a")
+    _write_file_task({**task, "current_summary": "FILE-BODY"}, backend=coord_backend)
+    _append_snapshot({**task, "current_summary": "FOLD-BODY"}, backend=coord_backend)
+    got = io._cache_remote_task(task["id"], backend=coord_backend)
+    assert got["current_summary"] == "FOLD-BODY"   # confirm it IS the fold
     assert "_applied_event_count" not in got       # but bookkeeping stripped
