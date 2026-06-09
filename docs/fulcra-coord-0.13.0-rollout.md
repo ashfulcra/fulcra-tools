@@ -1,3 +1,73 @@
+## 0.14.0 — what's new since 0.13.0
+
+0.14.0 is **purely additive** on top of the 0.13.0 event-sourcing substrate. It
+adds observability, retention, and the Phase 3b directive dual-write — and it
+changes nothing about how reads resolve. There is **still no read-cutover flip**:
+the flip stays a separate, operator-gated decision (section 5 below), and a
+0.14.0 host returns byte-identical reads to a 0.13.0 host until someone opts that
+host into `events`.
+
+**Upgrade procedure is unchanged from 0.13.0.** Follow section 3 exactly —
+`git pull && uv tool install --reinstall --force .` per host, then re-point the
+listener/heartbeat. Then `fulcra-coord --version` should report `0.14.0`.
+
+### What 0.14.0 adds
+
+Three feature lines merged after the 0.13.0 bump (#123, #124, #125) without their
+own version bump; 0.14.0 makes them a deployable, detectable release. All three
+are additive and default-safe:
+
+- **Event-liveness observability (#123).** Reconcile now emits parity *coverage*
+  and fold-*completeness* counts, a fold-read-error signal, and a dual-write
+  append-failure count. These let you see whether the event log is actually
+  keeping up, not just whether the tasks it covers agree.
+- **Ancillary-state retention (#124).** The ops log now rotates by size (it
+  became a load-bearing read surface in 0.13.0 and grows unbounded on long-lived
+  hosts), and orphaned `.prov.json` provenance sidecars are pruned in the
+  retention pass.
+- **Phase 3b directive dual-write (#125).** Directive-creating commands now
+  mirror a first-class `directives/<id>.json` LWW record, plus a clobber-safe,
+  append-only ack/route sub-log, with a report-only `_directive_parity_check`.
+  This is the durable-ack work the 0.13.0 runbook called out as the thing that
+  resolves `ack_drift` (see below).
+
+### New health-record fields a reconcile now emits
+
+After 0.14.0 is deployed and a host runs reconcile, its health record carries
+more than the 0.13.0 `event_parity` block:
+
+- **`event_parity`** now additionally carries `tasks_total`, `tasks_with_events`,
+  and `folds_complete` — coverage + completeness, alongside the existing
+  `drift` / `ack_drift` counts.
+- **`event_dual_write`** block — including `append_failures_recent`, so a host
+  silently failing to append shards becomes visible instead of invisible.
+- **`directive_parity`** block — the report-only directive fold-vs-file check.
+
+These are the **flip-readiness signals.** In particular, `directive_parity` plus
+the durable directive acks from Phase 3b (#125) are what let the read-cutover's
+`ack_drift` clear once 0.14.0 is deployed fleet-wide: the 0.13.0 runbook
+(section 5, step 3) flagged `ack_drift` as expected-nonzero and flip-blocking
+*until ack durability landed in Phase 3b* — that's this release. Watch `drift`,
+and now expect `ack_drift` to be able to reach zero too once the whole fleet is
+on 0.14.0.
+
+### Post-deploy check
+
+In addition to the 0.13.0 checks (section 4 — `events/tasks/` filling,
+`event_parity` appearing), one new thing should appear on the bus once a 0.14.0
+host does directive work: a `directives/<id>.json` tree, as the Phase 3b
+dual-write goes live.
+
+```bash
+# default root is /coordination; substitute FULCRA_COORD_REMOTE_ROOT if overridden
+<file-capable-cli> file list /coordination/directives/
+```
+
+Today that path is empty (no host dual-writes directives). Seeing records there
+is the Phase 3b dual-write proving it works end to end.
+
+---
+
 # fulcra-coord 0.13.0 — deploy / rollout runbook
 
 Audience: the operator (Ash) + teammates running the fleet. This is the
