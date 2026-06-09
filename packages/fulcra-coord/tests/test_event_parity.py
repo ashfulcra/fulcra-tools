@@ -267,6 +267,54 @@ def test_parity_delta_only_ack_drift_flagged(coord_backend):
     assert "TASK-DELTA-ACK" in report["drift_task_ids"]
 
 
+# ---------------------------------------------------------------------------
+# Signal A (coverage liveness): tasks_total / tasks_with_events / folds_complete
+#
+# "drift == 0" is satisfiable two ways: (a) the fold faithfully reconstructs
+# every task, OR (b) the fold folded nothing / there are no events, so there is
+# nothing to disagree with. These additive counts let the flip gate distinguish
+# the two — a host that folded nothing can no longer read green just because
+# there was nothing to compare.
+# ---------------------------------------------------------------------------
+
+def test_parity_coverage_counts(coord_backend):
+    """tasks_total counts ALL task files; tasks_with_events counts the ones with
+    >=1 event (== checked); folds_complete counts the complete-snapshot folds."""
+    # 1) Complete-fold task: snapshot event -> fold_is_complete True.
+    complete = schema.make_task(title="complete", workstream="ws", agent="a")
+    complete["status"] = "active"
+    remote.upload_json(complete, remote.task_remote_path(complete["id"]),
+                       backend=coord_backend)
+    eventlog.append_event(events.make_event(family="tasks", task_id=complete["id"],
+                          kind="start", actor="a", payload=dict(complete)),
+                          backend=coord_backend)
+
+    # 2) Delta-only task: events but NO snapshot -> fold_is_complete False.
+    delta = {"id": "TASK-COV-DELTA", "title": "t", "status": "active",
+             "current_summary": "s0"}
+    remote.upload_json(delta, remote.task_remote_path("TASK-COV-DELTA"),
+                       backend=coord_backend)
+    for kind, p in [("start", {"status": "active"}),
+                    ("update", {"current_summary": "s0"})]:
+        eventlog.append_event(events.make_event(family="tasks", task_id="TASK-COV-DELTA",
+                              kind=kind, actor="a", payload=p), backend=coord_backend)
+
+    # 3) File-only task: a task file with NO events at all.
+    no_events = {"id": "TASK-COV-NOEV", "title": "t", "status": "active"}
+    remote.upload_json(no_events, remote.task_remote_path("TASK-COV-NOEV"),
+                       backend=coord_backend)
+
+    report = cli._event_parity_check(backend=coord_backend)
+
+    assert report["tasks_total"] == 3        # all three task files iterated
+    assert report["tasks_with_events"] == 2  # complete + delta (== checked)
+    assert report["tasks_with_events"] == report["checked"]
+    assert report["folds_complete"] == 1     # only the snapshot fold is complete
+    # Additive: existing keys still present and unchanged in shape.
+    assert "drift" in report and "drift_task_ids" in report
+    assert "ack_drift" in report and "ack_drift_task_ids" in report
+
+
 def test_parity_no_ack_drift_for_task_with_no_events(coord_backend):
     """A task with a summaries entry (with an acker) but NO event shards at all
     contributes zero ack_drift because the per-task loop's 'if not evs: continue'

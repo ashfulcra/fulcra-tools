@@ -23,6 +23,7 @@ default-off (zero behaviour change unless an operator sets
 import os
 
 from fulcra_coord import cache, eventlog, events, io, remote, schema
+from fulcra_coord import log as ops_log
 
 
 def _write_file_task(task, *, backend):
@@ -147,6 +148,83 @@ def test_events_source_still_stats_file_for_write_meta(monkeypatch, coord_backen
     meta = cache.read_meta(task_path)
     assert meta is not None
     assert meta.get("version") == remote.stat(task_path, backend=coord_backend)["version"]
+
+
+# ---------------------------------------------------------------------------
+# Signal B (read-funnel liveness): a SYSTEMATIC fold error must be observable.
+#
+# The events-mode except branch sets task=None and falls through to the file —
+# byte-identical to a benign INCOMPLETE fold. That makes a fold that is
+# *consistently raising* (read_events / fold_task broken) indistinguishable from
+# the harmless delta-only case, so a silently-broken read funnel reads as
+# "working". The fix emits a distinct best-effort signal (ops_log.log_op with
+# status "event_fold_read_error") in the except branch BEFORE the file fallback,
+# while keeping the fallback behaviour byte-identical.
+# ---------------------------------------------------------------------------
+
+def test_events_fold_error_fires_signal_and_still_returns_file(
+        monkeypatch, coord_backend):
+    """A fold ERROR fires the distinct event_fold_read_error signal AND still
+    falls back to the file body (behaviour unchanged)."""
+    monkeypatch.setenv("FULCRA_COORD_READ_SOURCE", "events")
+    task = schema.make_task(title="fold-raises", workstream="ws", agent="a")
+    task["current_summary"] = "FILE-BODY"
+    _write_file_task(task, backend=coord_backend)
+    # A snapshot exists, but folding it will raise — simulating a systematic
+    # fold/read error (not a benign incomplete fold).
+    _append_snapshot({**task, "current_summary": "FOLD-BODY"}, backend=coord_backend)
+
+    def _boom(*a, **k):
+        raise RuntimeError("fold blew up")
+
+    monkeypatch.setattr(events, "fold_task", _boom)
+
+    calls = []
+    monkeypatch.setattr(
+        ops_log, "log_op",
+        lambda *a, **k: calls.append((a, k)))
+
+    got = io._cache_remote_task(task["id"], backend=coord_backend)
+
+    # (b) fallback intact: still returned the file body.
+    assert got is not None
+    assert got["current_summary"] == "FILE-BODY"
+    # (a) the distinct error signal fired, naming the task + the error.
+    fold_errors = [
+        k for (_a, k) in calls
+        if k.get("status") == "event_fold_read_error"
+    ]
+    assert fold_errors, f"expected an event_fold_read_error signal, got {calls!r}"
+    assert fold_errors[0].get("task_id") == task["id"]
+    assert "fold blew up" in (fold_errors[0].get("error") or "")
+
+
+def test_benign_incomplete_fold_does_not_fire_error_signal(
+        monkeypatch, coord_backend):
+    """A benign INCOMPLETE fold (events exist, no snapshot) must NOT fire the
+    error signal — it just falls back to the file silently as before."""
+    monkeypatch.setenv("FULCRA_COORD_READ_SOURCE", "events")
+    task = schema.make_task(title="delta-incomplete", workstream="ws", agent="a")
+    task["current_summary"] = "FILE-BODY"
+    _write_file_task(task, backend=coord_backend)
+    # Delta-only stream -> fold_is_complete False, but folding does NOT raise.
+    _append_delta(task["id"], {"current_summary": "DELTA-ONLY"}, backend=coord_backend)
+
+    calls = []
+    monkeypatch.setattr(
+        ops_log, "log_op",
+        lambda *a, **k: calls.append((a, k)))
+
+    got = io._cache_remote_task(task["id"], backend=coord_backend)
+
+    assert got is not None
+    assert got["current_summary"] == "FILE-BODY"  # fell back to file
+    fold_errors = [
+        k for (_a, k) in calls
+        if k.get("status") == "event_fold_read_error"
+    ]
+    assert not fold_errors, (
+        f"benign incomplete fold must NOT fire error signal, got {fold_errors!r}")
 
 
 def test_events_source_body_has_no_fold_bookkeeping(coord_backend, monkeypatch):
