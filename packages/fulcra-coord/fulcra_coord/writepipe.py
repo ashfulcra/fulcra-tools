@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, session_link
 from . import annotations as lifecycle_annotations
+from . import eventlog, events as _events
 from . import log as ops_log
 from .io import _load_summaries_for_rebuild, _updated_at_key
 from .timeutil import now_iso as _now_iso
@@ -211,6 +212,50 @@ def _write_task_and_views(
     ops_log.log_op(command, task_id, status="ok")
 
     _emit_lifecycle(command, task, lifecycle, backend=backend)
+
+    # Strangler-fig dual-write: also append an immutable event mirroring this
+    # mutation. BEST-EFFORT — never fail the task write on an event-log error
+    # (Phase 1: the mutable file is still authoritative). A later reconcile
+    # parity pass surfaces any event-vs-file drift as health debt.
+    #
+    # Reaches here ONLY on the fully-clean normal-completion path: the
+    # conflict branch raised ConflictError before any upload (no mutation to
+    # mirror), and the partial-view-failure branch raised NeedsReconcile above.
+    # So an event is appended exactly when — and only when — the task body and
+    # all views actually landed.
+    try:
+        ev = _events.make_event(
+            family="tasks", task_id=task["id"], kind=command,
+            actor=task.get("owner_agent") or task.get("assignee") or "unknown",
+            # Mirror the task's top-level mutable fields. NOTE: ``current_summary``
+            # is the real schema key (there is no top-level ``summary``); and
+            # ``evidence`` is intentionally absent here — it lives nested under
+            # ``task["done"]["evidence"]``, so Phase 2 will lift completion
+            # evidence into the event separately. ``if k in task`` keeps any
+            # absent key safe.
+            payload={k: task.get(k) for k in
+                     ("title", "status", "current_summary", "next_action",
+                      "blocked_on", "workstream", "priority", "assignee")
+                     if k in task},
+            idempotency_key=op_id,
+        )
+        ok = eventlog.append_event(ev, backend=backend)
+        if not ok:
+            try:
+                ops_log.log_op(command, task["id"], status="event_append_failed",
+                               error="Event append returned false")
+            except Exception:
+                pass
+    except Exception as exc:
+        # Best-effort; the mutable write already succeeded. But DO record the
+        # failure in the ops log — Phase 1's whole job is to validate the
+        # dual-write, so a silent miss is exactly what we must not have. The
+        # logging is itself guarded so even it cannot break the task write.
+        try:
+            ops_log.log_op(command, task["id"], status="event_append_failed",
+                           error=str(exc))
+        except Exception:
+            pass
 
     return True
 

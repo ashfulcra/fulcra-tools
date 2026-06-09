@@ -1802,8 +1802,12 @@ class TestConflictDetectionWithNoCachedMeta(unittest.TestCase):
         captured = {}
 
         def _fake_upload(data, path, *, backend=None, timeout=None):
-            # Only capture the task file (not view files)
-            if "tasks/" in path:
+            # Only capture the task BODY file (tasks/<id>.json), not view files
+            # and not the additive event shards (events/tasks/<id>/<event_id>.json),
+            # whose path also contains the "tasks/" substring. Match the task-body
+            # prefix specifically so the best-effort dual-write append can't clobber
+            # the captured body.
+            if "/tasks/" in path and "/events/" not in path:
                 captured["task"] = data
             return True
 
