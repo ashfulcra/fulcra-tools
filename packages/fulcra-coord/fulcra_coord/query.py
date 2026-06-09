@@ -88,6 +88,27 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
         for m in markers:
             print(f"    OP-{m['op_id']}: {m.get('task_id', '?')} — {m.get('status')}")
 
+    # Surface the undelivered-directive safety net: directives addressed to an
+    # OFFLINE/stale agent that were never picked up (the dead-inbox bug). A
+    # maintainer running `status` must SEE this. Read from the per-host health
+    # records reconcile already writes (the same surface infra-health uses) — NOT
+    # re-running the check here — so query.py stays free of any cli import cycle.
+    # Best-effort: a missing/garbage health surface yields no warning, never an
+    # error. The max count across hosts is shown (one record per machine; they
+    # see the same bus, so the freshest/largest count is the live signal).
+    try:
+        worst = 0
+        for _, rec in remote.list_json(remote.health_prefix(), backend=backend):
+            if isinstance(rec, dict):
+                ud = rec.get("undelivered_directives")
+                if isinstance(ud, dict):
+                    worst = max(worst, int(ud.get("count") or 0))
+        if worst:
+            print(f"\n  WARN: {worst} directive(s) undelivered "
+                  f"(addressed to offline/stale agents, never picked up).")
+    except Exception:
+        pass
+
     print()
     return 0
 

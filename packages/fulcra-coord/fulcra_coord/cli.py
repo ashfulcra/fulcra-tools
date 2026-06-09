@@ -203,6 +203,140 @@ def _event_dual_write_health() -> dict:
     return {"append_failures_recent": n, "window_since": _iso_z(since)}
 
 
+#: Cap on the undelivered-directive LIST (not the count). Keeps the health-record
+#: block and the reconcile/status warning bounded — a fleet that somehow piled up
+#: hundreds of directives into a dead inbox must not produce a wall of ids — while
+#: ``count`` always carries the TRUE total so the signal is never silently lost.
+_UNDELIVERED_LIST_CAP = 50
+
+
+def _live_agent_ids(*, backend: Optional[list[str]] = None) -> set[str]:
+    """The set of agent ids whose presence is LIVE (live or idle), reusing the
+    EXISTING liveness rule ``cmd_agents`` applies — no reinvented staleness.
+
+    Loads the presence aggregate (``presence_view_path`` → ``views/presence.json``)
+    and rebuilds it through ``views.build_presence`` so each entry carries a fresh
+    ``liveness`` annotation derived by ``views.presence_liveness`` (the single
+    ``FULCRA_COORD_STALE_HOURS`` rule the whole tool shares). An agent counts as
+    live iff that band is ``live`` or ``idle``; a ``stale`` band — or no presence
+    record at all — is NOT live (a crashed/forgotten session is exactly the dead
+    inbox this safety net exists to surface).
+
+    Best-effort: any load/parse failure yields an EMPTY live set. That is the
+    SAFE direction here — with no liveness signal every directed directive looks
+    "addressed to a non-live agent", which over-surfaces (loud, recoverable)
+    rather than silently hiding a genuinely-dead inbox. The caller wraps this so
+    a raise can never reach reconcile."""
+    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+    if not agg:
+        return set()
+    # Strip any stored liveness so build_presence re-derives it from last_seen —
+    # exactly how cmd_agents avoids trusting a possibly-stale rebuilt annotation.
+    roster = views.build_presence([
+        {k: v for k, v in a.items() if k != "liveness"}
+        for a in agg.get("agents", [])
+    ])
+    return {
+        a["agent"]
+        for a in roster["agents"]
+        if a.get("agent") and a.get("liveness") in ("live", "idle")
+    }
+
+
+def _assignee_acked(task: dict[str, Any], assignee: str) -> bool:
+    """True when ``assignee`` has acknowledged receipt of ``task``.
+
+    Mirrors the two durable ack representations ``schema.task_summary`` folds:
+    an ``inbox_ack`` event from the assignee in the task's ``events`` log, OR an
+    ``acked_by`` entry (the summary-only ack path, used when the body was
+    temporarily unloadable). Either means the directive WAS delivered — the
+    recipient saw it — so it is not undelivered regardless of presence state."""
+    if assignee in (task.get("acked_by") or []):
+        return True
+    for e in task.get("events", []) or []:
+        if e.get("type") == "inbox_ack" and e.get("by") == assignee:
+            return True
+    return False
+
+
+def _undelivered_directive_check(
+    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None
+) -> dict:
+    """SAFETY NET (report-only): open directives addressed to an OFFLINE agent.
+
+    THE BUG THIS CATCHES — a real, demonstrated incident: agents sent directives
+    to an identity whose live session had been presence-stale for days, so the
+    messages rotted in a dead inbox. The bus accepted them into a void and never
+    flagged that nobody was reading them. This check reconciles ``all_tasks``
+    (which cmd_reconcile already has) against the LIVE presence set and surfaces
+    every directed directive that is sitting un-picked-up in an offline/stale
+    inbox.
+
+    A task is UNDELIVERED when ALL hold:
+
+      * DIRECTED directive — ``assignee`` is a concrete agent id: not ``"*"``
+        (a broadcast has no single recipient inbox), not the human handle
+        (humans aren't presence agents, so "offline" is meaningless for them),
+        not empty.
+      * OPEN and un-picked-up — ``status == "proposed"``. An ``active`` / ``done``
+        / ``abandoned`` task was demonstrably received and acted on.
+      * NOT acked by the assignee — no ``inbox_ack`` / ``acked_by`` from them
+        (an ack means it was seen, i.e. delivered).
+      * assignee NOT in the LIVE set — offline or stale presence (the dead inbox).
+
+    Returns ``{"count": N, "undelivered": [{"id", "assignee", "age_days"}...]}``.
+    The list is capped at ``_UNDELIVERED_LIST_CAP`` (so the timeline note / warn
+    line stay bounded) and ``truncated`` is set True when the cap bit — but
+    ``count`` is ALWAYS the true total, never the truncated length, so the signal
+    is never silently dropped.
+
+    REPORT-ONLY and best-effort, mirroring ``_event_parity_check`` /
+    ``_event_dual_write_health`` / ``_directive_parity_check``: it NEVER mutates a
+    task or view, NEVER reroutes (rerouting to a live role-holder is a separate
+    later phase), and the OUTER try/except guarantees a malformed body or a
+    presence-load failure can never raise into reconcile or change its exit code.
+    On any internal error it returns a valid empty report."""
+    try:
+        human = identity.resolve_human()
+        live = _live_agent_ids(backend=backend)
+        now = datetime.now(timezone.utc)
+        undelivered: list[dict[str, Any]] = []
+        count = 0
+        for t in all_tasks:
+            assignee = t.get("assignee")
+            # Directed directive only: concrete agent id, not broadcast/human/empty.
+            if not assignee or assignee == "*" or assignee == human:
+                continue
+            # Open and un-picked-up: only a `proposed` task is still awaiting receipt.
+            if t.get("status") != "proposed":
+                continue
+            # Delivered if the recipient acked it (seen), regardless of presence.
+            if _assignee_acked(t, assignee):
+                continue
+            # The dead-inbox condition: the recipient is offline / stale.
+            if assignee in live:
+                continue
+            count += 1
+            if len(undelivered) < _UNDELIVERED_LIST_CAP:
+                # created_at is the directive's true age; fall back to updated_at.
+                created = t.get("created_at") or t.get("updated_at") or ""
+                age_days = round(views._age_hours(created, now) / 24.0, 1)
+                undelivered.append({
+                    "id": t.get("id"),
+                    "assignee": assignee,
+                    "age_days": age_days,
+                })
+        report = {"count": count, "undelivered": undelivered}
+        if count > len(undelivered):
+            report["truncated"] = True
+        return report
+    except Exception:
+        # Report-only: a failure here must never break reconcile. Degrade to a
+        # valid empty report (the wrapping at the call site also guards, but this
+        # keeps the helper itself non-raising for direct callers like `status`).
+        return {"count": 0, "undelivered": []}
+
+
 #: Max items rendered per digest block before collapsing the tail into "+N more".
 #: Keeps the timeline note bounded (a 284-event-in-two-days bus could otherwise
 #: produce a wall of text) while always showing the most-salient head of each list.
@@ -797,6 +931,32 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             # break reconcile either); record["directive_parity"] is simply absent.
             try:
                 _warn(f"  Directive-parity check skipped (error): {_dpe}")
+            except Exception:
+                pass
+        # SAFETY NET: directives addressed to an OFFLINE/stale agent that were
+        # never picked up — the dead-inbox bug. Report-only and best-effort: it
+        # never mutates or reroutes, and the wrapping guarantees a failure can
+        # never change reconcile's exit code (mirrors the parity passes above).
+        # all_tasks is already in hand, so this adds no remote round-trip beyond
+        # the single presence-aggregate read inside the check.
+        try:
+            ud = _undelivered_directive_check(all_tasks, backend=backend)
+            record["undelivered_directives"] = ud
+            # LOUD when >0: a maintainer reading the reconcile log must SEE that
+            # directives are rotting in dead inboxes, not have it buried in JSON.
+            if ud.get("count"):
+                ids = [u.get("id") for u in ud.get("undelivered", [])]
+                _warn(
+                    f"  ⚠ {ud['count']} directive(s) undelivered — assignee "
+                    f"offline/stale, never picked up: {ids}"
+                )
+        except Exception as _ue:
+            # Best-effort but not silent: a checker that ate its own error would
+            # look healthy while the dead-inbox bug it exists to catch festers.
+            # Surface it (guarded so the warn can't break reconcile either);
+            # record["undelivered_directives"] is simply absent.
+            try:
+                _warn(f"  Undelivered-directive check skipped (error): {_ue}")
             except Exception:
                 pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:
