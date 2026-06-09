@@ -17,6 +17,7 @@ there is no import cycle.
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -48,6 +49,11 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
     """
     task_path = remote.task_remote_path(task_id)
     task: Optional[dict[str, Any]] = None
+    # Provenance hand-off to the write path (root cause A2). ``fold_base`` is the
+    # CLEAN fold body at read time when the body came from a complete fold, else
+    # None. The write path uses (source, fold_base) to 3-way-merge a fold-sourced
+    # write against the fold base instead of clobbering newer file fields.
+    fold_base: Optional[dict[str, Any]] = None
 
     # READ cutover: events source folds the event log when it's a complete
     # snapshot, else leaves task=None to fall through to the file below. Lazy
@@ -67,8 +73,13 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
                 # authoritative file that the parity check's ignore-set hides.
                 folded.pop("_applied_event_count", None)
                 task = folded
+                # Capture the fold-at-read base as a deep copy BEFORE returning,
+                # so a later in-place edit of the returned body (the command's
+                # read-modify-write) cannot retro-alter the merge base.
+                fold_base = copy.deepcopy(folded)
         except Exception:
             task = None  # fall through to the file — never let a fold error read-fail
+            fold_base = None
 
     # File source (default, OR events-mode fallback when the fold was
     # incomplete/absent/errored). This is the authoritative mutable snapshot.
@@ -83,6 +94,30 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
     task_stat = remote.stat(task_path, backend=backend)
     if task_stat:
         cache.write_meta(task_path, task_stat)
+
+    # Record provenance for the write path (root cause A2). Best-effort: a
+    # provenance-write failure must NEVER fail the read — the body is already
+    # resolved and cached, and a missing sidecar just means the write path falls
+    # back to its existing stat-change merge check (no soundness regression vs
+    # today, only the loss of the new fold-base recovery for THIS read).
+    try:
+        if fold_base is not None:
+            cache.write_provenance(task_id, {
+                "source": "fold",
+                "file_stat_at_read": task_stat,
+                "fold_base": fold_base,
+                "fold_complete": True,
+            })
+        else:
+            cache.write_provenance(task_id, {
+                "source": "file",
+                "file_stat_at_read": task_stat,
+                "fold_base": None,
+                "fold_complete": False,
+            })
+    except Exception:
+        pass
+
     return task
 
 
