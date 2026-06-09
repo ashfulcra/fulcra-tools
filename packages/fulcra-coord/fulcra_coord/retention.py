@@ -425,9 +425,12 @@ def _eventlog_keep() -> int:
 
     The floor is load-bearing: a 0 / negative override must NEVER let the prune
     window dip below the latest snapshot's safety. The prune always computes
-    ``keep_from = min(snap_idx, len - keep)`` so the keep window is only ever an
-    ADDITIONAL guard on top of "never delete the latest snapshot or anything
-    after it" — but a 0 window paired with a tiny event list could still surprise
+    ``keep_from = min(snap_idx, max(0, len(pairs) - keep))`` so the keep window
+    is only ever an ADDITIONAL guard on top of "never delete the latest snapshot
+    or anything after it"; the ``max(0, ...)`` clamps ``len - keep`` to a
+    non-negative slice start, so a ``keep`` larger than the event count can never
+    produce a negative ``keep_from`` (which would slice off the TAIL and delete
+    the snapshot). A 0 window paired with a tiny event list could still surprise
     a future reader, so we clamp to 1 to keep the contract obvious: at minimum we
     retain one recent event beyond the structural snapshot floor. env_int already
     falls back to the default on a non-numeric value; max(1, ...) clamps the
@@ -460,10 +463,22 @@ def _prune_event_log(all_tasks: list[dict[str, Any]], now: datetime, *,
         event + the most recent _eventlog_keep() events; delete only shards
         STRICTLY OLDER than the latest snapshot. A snapshot is self-complete
         (fold_task replaces accumulated state wholesale on a snapshot), so every
-        event before the latest snapshot is stale — fold output is byte-identical
-        after the prune. A DELTA-ONLY task (no snapshot anywhere) is NEVER pruned
-        (fail-safe — each delta may carry a unique field never re-set, so dropping
-        any delta could lose fold state).
+        event before the latest snapshot is stale. A DELTA-ONLY task (no snapshot
+        anywhere) is NEVER pruned (fail-safe — each delta may carry a unique field
+        never re-set, so dropping any delta could lose fold state).
+
+    FOLD-EQUIVALENCE BOUNDARY: for the CURRENT writer the fold output is unchanged
+    after the prune. _write_task_and_views mints a fresh ``idempotency_key``
+    (= op_id = uuid4 hex) per write and emits a FULL snapshot every time, so a
+    pruned pre-snapshot event can never be the first-seen copy of a surviving
+    event's identity. The one THEORETICAL divergence: fold_task dedups by
+    (actor, idempotency_key), first-in-sort-order wins; a post-snapshot delta that
+    shared an (actor, idempotency_key) pair with a PRE-snapshot event would, once
+    the pre-snapshot copy is pruned, become first-seen and newly-applied — a
+    different folded state. The unique-per-op writer never emits such a duplicate
+    pair, so this branch is unreachable today; it is documented so a future writer
+    that reuses idempotency keys across the snapshot boundary doesn't silently
+    break the guarantee.
 
     Shards are sorted by the SAME key fold_task uses — (at, event_id) — so
     "latest snapshot" and the keep window line up exactly with the reducer.
@@ -521,9 +536,20 @@ def _prune_event_log(all_tasks: list[dict[str, Any]], now: datetime, *,
                     if remote.stat(remote.task_remote_path(task_id),
                                    backend=backend) is not None:
                         continue
-                    pairs = remote.list_json(
-                        remote.events_prefix(task_id), backend=backend)
-                    for path, _rec in pairs:
+                    # Enumerate via list_files, NOT list_json: the orphan branch
+                    # deletes the WHOLE tree and never inspects a payload, while
+                    # list_json silently drops any shard whose JSON doesn't parse
+                    # to a dict — so a corrupt/half-written shard in an archived
+                    # task's tree would survive forever (incomplete GC, the B2
+                    # corrupt-shard hole). list_files sees every file; filter to
+                    # .json so a stray non-shard file is never deleted.
+                    try:
+                        shards = [p for p in remote.list_files(
+                            remote.events_prefix(task_id), backend=backend)
+                            if p.endswith(".json")]
+                    except Exception:
+                        continue
+                    for path in shards:
                         if deleted >= cap:
                             break
                         if (budget_floor is not None

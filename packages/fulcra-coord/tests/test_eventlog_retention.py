@@ -265,20 +265,60 @@ class TestPruneEventLogOrphans(_EventTree):
     def test_orphan_all_shards_deleted(self):
         # B2: task dir whose id is NOT in all_tasks AND whose hot file is confirmed
         # absent (stat -> None) is an archived/deleted task: delete ALL its shards.
+        # The orphan branch enumerates via list_files (files_tree), NOT list_json:
+        # it never inspects payloads, and list_json would silently drop any shard
+        # whose JSON can't parse to a dict (Fix 1 — closes the corrupt-shard hole).
         tid = "task-archived"
         recs = [
             _ev(tid, at=f"2026-01-0{d}T00:00:00Z", suffix="01",
                 payload=_delta_payload(x=d))
             for d in range(1, 5)
         ]
-        pairs = [(_shard_path(tid, r), r) for r in recs]
-        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)]},
-                      json_tree={_events_prefix(tid): pairs},
+        shards = [_shard_path(tid, r) for r in recs]
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): shards},
+                      json_tree={},
                       all_tasks=[],          # not live
                       present_paths=())      # hot file absent
         self.assertEqual(n, 4)
-        self.assertEqual(sorted(self.deleted),
-                         sorted(_shard_path(tid, r) for r in recs))
+        self.assertEqual(sorted(self.deleted), sorted(shards))
+
+    def test_orphan_corrupt_shard_still_deleted(self):
+        # Fix 1 regression: an orphan tree contains a shard that is INVISIBLE to
+        # list_json (its JSON doesn't parse to a dict, so list_json drops it) but
+        # IS present in the directory listing (files_tree). Under the OLD list_json
+        # enumeration this shard would leak forever — incomplete GC. The orphan
+        # branch must enumerate via list_files so the corrupt shard IS deleted.
+        tid = "task-archived-corrupt"
+        good = _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
+                   payload=_delta_payload(x=1))
+        good_path = _shard_path(tid, good)
+        corrupt_path = f"{_events_prefix(tid)}corrupt-half-written.json"
+        # files_tree (list_files) sees BOTH shards; json_tree (list_json) sees only
+        # the parseable one — the corrupt shard is absent there.
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): [good_path, corrupt_path]},
+                      json_tree={_events_prefix(tid): [(good_path, good)]},
+                      all_tasks=[],          # not live
+                      present_paths=())      # hot file absent
+        self.assertEqual(n, 2)
+        self.assertIn(corrupt_path, self.deleted)
+        self.assertIn(good_path, self.deleted)
+
+    def test_orphan_enumeration_ignores_non_json(self):
+        # The orphan list_files enumeration is filtered to .json: a stray non-JSON
+        # file in the tree (e.g. a leftover lock/tmp) is NOT deleted.
+        tid = "task-archived-stray"
+        good = _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
+                   payload=_delta_payload(x=1))
+        good_path = _shard_path(tid, good)
+        stray = f"{_events_prefix(tid)}.tmp-lock"
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): [good_path, stray]},
+                      json_tree={},
+                      all_tasks=[], present_paths=())
+        self.assertEqual(n, 1)
+        self.assertEqual(self.deleted, [good_path])
 
     def test_orphan_failsafe_hot_file_present_skips(self):
         # B2 fail-safe: not in all_tasks BUT hot file stat -> present => possibly
@@ -288,10 +328,11 @@ class TestPruneEventLogOrphans(_EventTree):
             _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
                 payload=_delta_payload(x=1)),
         ]
-        pairs = [(_shard_path(tid, r), r) for r in recs]
+        shards = [_shard_path(tid, r) for r in recs]
         hot = f"{_ROOT}/tasks/{tid}.json"
-        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)]},
-                      json_tree={_events_prefix(tid): pairs},
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): shards},
+                      json_tree={},
                       all_tasks=[],
                       present_paths=(hot,))  # hot file present -> skip
         self.assertEqual(n, 0)
@@ -303,7 +344,6 @@ class TestPruneEventLogBudgetCap(_EventTree):
         # Two orphan task dirs with many shards each; cap=3 limits total deletions.
         tids = ["orph-a", "orph-b"]
         files_tree = {_EVENTS_ROOT: [_events_prefix(t) for t in tids]}
-        json_tree = {}
         all_shards = []
         for t in tids:
             recs = [
@@ -311,9 +351,10 @@ class TestPruneEventLogBudgetCap(_EventTree):
                     payload=_delta_payload(x=d))
                 for d in range(1, 5)
             ]
-            json_tree[_events_prefix(t)] = [(_shard_path(t, r), r) for r in recs]
-            all_shards += [_shard_path(t, r) for r in recs]
-        n = self._run(files_tree=files_tree, json_tree=json_tree,
+            shards = [_shard_path(t, r) for r in recs]
+            files_tree[_events_prefix(t)] = shards
+            all_shards += shards
+        n = self._run(files_tree=files_tree, json_tree={},
                       all_tasks=[], present_paths=(), max_per_run=3)
         self.assertEqual(n, 3)
         self.assertEqual(len(self.deleted), 3)
@@ -325,8 +366,9 @@ class TestPruneEventLogBudgetCap(_EventTree):
             _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
                 payload=_delta_payload(x=1)),
         ]
-        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)]},
-                      json_tree={_events_prefix(tid): [(_shard_path(tid, recs[0]), recs[0])]},
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): [_shard_path(tid, recs[0])]},
+                      json_tree={},
                       all_tasks=[], present_paths=(),
                       deadline=time.monotonic() - 1)
         self.assertEqual(n, 0)
@@ -343,10 +385,11 @@ class TestPruneEventLogBestEffort(_EventTree):
                 payload=_delta_payload(x=d))
             for d in range(1, 4)
         ]
-        pairs = [(_shard_path(tid, r), r) for r in recs]
+        shards = [_shard_path(tid, r) for r in recs]
         boom = _shard_path(tid, recs[1])
-        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)]},
-                      json_tree={_events_prefix(tid): pairs},
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): shards},
+                      json_tree={},
                       all_tasks=[], present_paths=(),
                       raise_on=(boom,))
         # 3 shards, one raised -> 2 counted, no exception escapes.
@@ -361,6 +404,65 @@ class TestPruneEventLogBestEffort(_EventTree):
                       json_tree={}, all_tasks=[], present_paths=())
         self.assertEqual(n, 0)
         self.assertEqual(self.deleted, [])
+
+
+class TestPruneEventLogEdgeCases(_EventTree):
+    def test_empty_events_tasks_dir(self):
+        # The events/tasks/ dir lists nothing at all -> the pass is a clean no-op.
+        n = self._run(files_tree={_EVENTS_ROOT: []},
+                      json_tree={}, all_tasks=[{"id": "whatever"}],
+                      present_paths=())
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+
+    def test_live_task_with_zero_shards(self):
+        # A live task whose events_prefix lists nothing: list_json -> [] -> the
+        # `if not pairs: continue` guard fires -> zero deletions, no error.
+        tid = "task-empty"
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)]},
+                      json_tree={_events_prefix(tid): []},
+                      all_tasks=[{"id": tid}],
+                      present_paths=())
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+
+    def test_keep_larger_than_event_count(self):
+        # keep > len on the LIVE branch, with the snapshot NOT at the start AND
+        # NOT at the end. This is the case the max(0, len - keep) guard exists
+        # for: len - keep is NEGATIVE, so an un-guarded keep_from would go
+        # negative and pairs[:keep_from] would slice off the TAIL — wrongly
+        # deleting the snapshot itself (and post-snapshot events) instead of the
+        # pre-snapshot shards. Existing keep-window tests only hit keep_from=0 via
+        # a snapshot at index 0, so a regressed guard would slip past them.
+        #
+        # len=5, snap_idx=2, keep=6 -> len-keep=-1.
+        #   WITHOUT the guard: keep_from = min(2, -1) = -1, pairs[:-1] = indices
+        #     0..3 -> deletes the snapshot at idx 2 (a correctness violation).
+        #   WITH the guard:    keep_from = min(2, max(0, -1)) = min(2, 0) = 0,
+        #     pairs[:0] = [] -> nothing deleted.
+        tid = "task-bigkeep"
+        recs = [
+            _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
+                payload=_delta_payload(title="d0")),
+            _ev(tid, at="2026-01-02T00:00:00Z", suffix="01",
+                payload=_delta_payload(current_summary="s1")),
+            # snapshot at index 2 (middle):
+            _ev(tid, at="2026-01-03T00:00:00Z", suffix="01",
+                payload=_snapshot_payload(tid, title="snap", status="active")),
+            _ev(tid, at="2026-01-04T00:00:00Z", suffix="01",
+                payload=_delta_payload(current_summary="s2")),
+            _ev(tid, at="2026-01-05T00:00:00Z", suffix="01",
+                payload=_delta_payload(status="done")),
+        ]
+        pairs = [(_shard_path(tid, r), r) for r in recs]
+        os.environ["FULCRA_COORD_EVENTLOG_KEEP"] = "6"  # keep > len (5)
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)]},
+                      json_tree={_events_prefix(tid): pairs},
+                      all_tasks=[{"id": tid}], present_paths=())
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+        # The snapshot must never be in the delete set.
+        self.assertNotIn(_shard_path(tid, recs[2]), self.deleted)
 
 
 class TestRunRetentionEventlogWiring(_EventTree):
