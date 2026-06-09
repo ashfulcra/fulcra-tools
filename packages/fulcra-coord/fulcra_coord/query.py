@@ -88,6 +88,40 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
         for m in markers:
             print(f"    OP-{m['op_id']}: {m.get('task_id', '?')} — {m.get('status')}")
 
+    # Surface the undelivered-directive safety net: directives addressed to an
+    # OFFLINE/stale agent that were never picked up (the dead-inbox bug). A
+    # maintainer running `status` must SEE this. Read from the per-host health
+    # records reconcile already writes (the same surface infra-health uses) — NOT
+    # re-running the check here — so query.py stays free of any cli import cycle.
+    # Best-effort: a missing/garbage health surface yields no warning, never an
+    # error. The max count across hosts is shown (one record per machine; they
+    # see the same bus, so the freshest/largest count is the live signal).
+    try:
+        worst = 0
+        presence_unavailable = False
+        for _, rec in remote.list_json(remote.health_prefix(), backend=backend):
+            if isinstance(rec, dict):
+                ud = rec.get("undelivered_directives")
+                if isinstance(ud, dict):
+                    worst = max(worst, int(ud.get("count") or 0))
+                    # A host that COULDN'T check (presence read failed / no live
+                    # agents visible) is a distinct signal — surface it as
+                    # "couldn't check," never as the undelivered flood.
+                    if ud.get("presence_unavailable"):
+                        presence_unavailable = True
+        if worst:
+            # A real, confirmed count takes precedence — that's the live dead-inbox
+            # signal a maintainer must act on.
+            print(f"\n  WARN: {worst} directive(s) undelivered "
+                  f"(addressed to offline/stale agents, never picked up).")
+        elif presence_unavailable:
+            # No confirmed count, but at least one host couldn't check this cycle.
+            # Stay LOUD about the outage without crying wolf about rotting inboxes.
+            print("\n  WARN: presence aggregate unavailable on a recent reconcile "
+                  "— directive delivery could not be checked.")
+    except Exception:
+        pass
+
     print()
     return 0
 

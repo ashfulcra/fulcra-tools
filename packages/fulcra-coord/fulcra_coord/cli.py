@@ -203,6 +203,205 @@ def _event_dual_write_health() -> dict:
     return {"append_failures_recent": n, "window_since": _iso_z(since)}
 
 
+#: Cap on the undelivered-directive LIST (not the count). Keeps the health-record
+#: block and the reconcile/status warning bounded — a fleet that somehow piled up
+#: hundreds of directives into a dead inbox must not produce a wall of ids — while
+#: ``count`` always carries the TRUE total so the signal is never silently lost.
+_UNDELIVERED_LIST_CAP = 50
+
+
+def _live_agent_ids(*, backend: Optional[list[str]] = None) -> Optional[set[str]]:
+    """The set of agent ids whose presence is LIVE (live or idle), reusing the
+    EXISTING liveness rule ``cmd_agents`` applies — no reinvented staleness.
+
+    Loads the presence aggregate (``presence_view_path`` → ``views/presence.json``)
+    and rebuilds it through ``views.build_presence`` so each entry carries a fresh
+    ``liveness`` annotation derived by ``views.presence_liveness`` (the single
+    ``FULCRA_COORD_STALE_HOURS`` rule the whole tool shares). An agent counts as
+    live iff that band is ``live`` or ``idle``; a ``stale`` band — or no presence
+    record at all — is NOT live (a crashed/forgotten session is exactly the dead
+    inbox this safety net exists to surface).
+
+    Returns:
+      * a ``set`` (possibly empty) when the presence aggregate genuinely LOADED —
+        the derived live roster;
+      * ``None`` (sentinel) when the aggregate could NOT be read.
+        ``remote.download_json`` returns ``None`` (it does NOT raise) on any
+        transport failure — timeout / non-zero / OSError. We MUST distinguish that
+        read failure from a genuinely-empty roster: treating a failed read as an
+        empty live set made every directed directive look "addressed to a non-live
+        agent" and produced a cry-wolf FLOOD on a single presence blip (the bug
+        this sentinel fixes). The caller treats ``None`` as INDETERMINATE — emit a
+        single "presence unavailable" signal, never enumerate. The caller also
+        wraps this so a raise can never reach reconcile."""
+    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+    # `agg is None` is the read-failure shape (download_json returns None on any
+    # transport failure). A loaded-but-empty dict is a genuine roster, not a
+    # failure — so only the None case is INDETERMINATE.
+    if agg is None:
+        return None
+    # Strip any stored liveness so build_presence re-derives it from last_seen —
+    # exactly how cmd_agents avoids trusting a possibly-stale rebuilt annotation.
+    roster = views.build_presence([
+        {k: v for k, v in a.items() if k != "liveness"}
+        for a in agg.get("agents", [])
+    ])
+    return {
+        a["agent"]
+        for a in roster["agents"]
+        if a.get("agent") and a.get("liveness") in ("live", "idle")
+    }
+
+
+def _assignee_acked(task: dict[str, Any], assignee: str) -> bool:
+    """True when ``assignee`` has acknowledged receipt of ``task``.
+
+    Mirrors the two durable ack representations ``schema.task_summary`` folds:
+    an ``inbox_ack`` event from the assignee in the task's ``events`` log, OR an
+    ``acked_by`` entry (the summary-only ack path, used when the body was
+    temporarily unloadable). Either means the directive WAS delivered — the
+    recipient saw it — so it is not undelivered regardless of presence state."""
+    if assignee in (task.get("acked_by") or []):
+        return True
+    for e in task.get("events", []) or []:
+        if e.get("type") == "inbox_ack" and e.get("by") == assignee:
+            return True
+    return False
+
+
+def _summary_ack_map(*, backend: Optional[list[str]] = None) -> dict[str, set[str]]:
+    """Load durable summary-only acks, degrading to an empty map on old buses."""
+    try:
+        summaries_view = remote.download_json(
+            remote.view_remote_path("summaries"), backend=backend
+        )
+        acks: dict[str, set[str]] = {}
+        for summary in (summaries_view or {}).get("summaries", []):
+            if not isinstance(summary, dict):
+                continue
+            tid = summary.get("id")
+            if not tid:
+                continue
+            acked_by = summary.get("acked_by") or []
+            if not isinstance(acked_by, list):
+                continue
+            acks[tid] = {agent for agent in acked_by if agent}
+        return acks
+    except Exception:
+        return {}
+
+
+def _undelivered_directive_check(
+    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None
+) -> dict:
+    """SAFETY NET (report-only): open directives addressed to an OFFLINE agent.
+
+    THE BUG THIS CATCHES — a real, demonstrated incident: agents sent directives
+    to an identity whose live session had been presence-stale for days, so the
+    messages rotted in a dead inbox. The bus accepted them into a void and never
+    flagged that nobody was reading them. This check reconciles ``all_tasks``
+    (which cmd_reconcile already has) against the LIVE presence set and surfaces
+    every directed directive that is sitting un-picked-up in an offline/stale
+    inbox.
+
+    A task is UNDELIVERED when ALL hold:
+
+      * DIRECTED directive — ``assignee`` is a concrete agent id: not ``"*"``
+        (a broadcast has no single recipient inbox), not the human handle
+        (humans aren't presence agents, so "offline" is meaningless for them),
+        not empty.
+      * OPEN and un-picked-up — ``status == "proposed"``. An ``active`` / ``done``
+        / ``abandoned`` task was demonstrably received and acted on.
+      * NOT acked by the assignee — no ``inbox_ack`` / ``acked_by`` from them
+        (including durable summary-only ``acked_by`` priors; an ack means it was
+        seen, i.e. delivered).
+      * assignee NOT in the LIVE set — offline or stale presence (the dead inbox).
+
+    Returns ``{"count": N, "undelivered": [{"id", "assignee", "age_days"}...]}``.
+    The list is capped at ``_UNDELIVERED_LIST_CAP`` (so the timeline note / warn
+    line stay bounded) and ``truncated`` is set True when the cap bit — but
+    ``count`` is ALWAYS the true total, never the truncated length, so the signal
+    is never silently dropped.
+
+    INDETERMINATE presence (the anti-flood rule): we can ONLY confidently call a
+    directive undelivered when we have a NON-EMPTY live set to compare against —
+    i.e. we KNOW some agents are live and the assignee is not among them. Two
+    cases mean we CANNOT distinguish "assignee offline" from "presence
+    unavailable", and so we must NOT enumerate (a safety net that cries wolf on
+    every read blip gets ignored):
+      * ``_live_agent_ids() is None`` — the presence aggregate couldn't be read
+        (``remote.download_json`` returned ``None`` on a transport failure); and
+      * an EMPTY live set — no live agents we can see (failed-equivalent or a
+        genuinely empty roster).
+    In both, this returns ``{"count": 0, "undelivered": [], "presence_unavailable":
+    True}`` so the caller emits ONE distinct "couldn't check delivery this cycle"
+    note instead of flagging every open directive. ``presence_unavailable`` is
+    ``False`` on the normal path so the existing undelivered warning still stands.
+
+    REPORT-ONLY and best-effort, mirroring ``_event_parity_check`` /
+    ``_event_dual_write_health`` / ``_directive_parity_check``: it NEVER mutates a
+    task or view, NEVER reroutes (rerouting to a live role-holder is a separate
+    later phase), and the OUTER try/except guarantees a malformed body or a
+    presence-load failure can never raise into reconcile or change its exit code.
+    On any internal error it returns a valid empty report."""
+    try:
+        human = identity.resolve_human()
+        live = _live_agent_ids(backend=backend)
+        # INDETERMINATE: a failed presence read (None sentinel) OR an empty live
+        # set means we can't confirm any specific assignee is offline. Do NOT
+        # enumerate — emit the distinct presence-unavailable signal instead of a
+        # cry-wolf flood. (Only a NON-EMPTY live set lets us name a directive
+        # undelivered: some agents ARE live and this assignee isn't among them.)
+        if not live:
+            return {"count": 0, "undelivered": [], "presence_unavailable": True}
+        now = datetime.now(timezone.utc)
+        summary_acks = _summary_ack_map(backend=backend)
+        undelivered: list[dict[str, Any]] = []
+        count = 0
+        for t in all_tasks:
+            tid = t.get("id")
+            assignee = t.get("assignee")
+            # Directed directive only: concrete agent id, not broadcast/human/empty.
+            if not assignee or assignee == "*" or assignee == human:
+                continue
+            # Open and un-picked-up: only a `proposed` task is still awaiting receipt.
+            if t.get("status") != "proposed":
+                continue
+            # Delivered if the recipient acked it (seen), regardless of presence.
+            if _assignee_acked(t, assignee) or assignee in summary_acks.get(tid, set()):
+                continue
+            # The dead-inbox condition: the recipient is offline / stale.
+            if assignee in live:
+                continue
+            count += 1
+            if len(undelivered) < _UNDELIVERED_LIST_CAP:
+                # created_at is the directive's true age; fall back to updated_at.
+                created = t.get("created_at") or t.get("updated_at") or ""
+                # _age_hours returns +inf for a missing/unparseable stamp. Render
+                # that as the "?" sentinel rather than letting `inf` leak into the
+                # warn line (an unreadable "inf days" is noise, not signal).
+                hours = views._age_hours(created, now)
+                age_days: Any = "?" if hours == float("inf") else round(hours / 24.0, 1)
+                undelivered.append({
+                    "id": tid,
+                    "assignee": assignee,
+                    "age_days": age_days,
+                })
+        report = {"count": count, "undelivered": undelivered,
+                  "presence_unavailable": False}
+        if count > len(undelivered):
+            report["truncated"] = True
+        return report
+    except Exception:
+        # Report-only: a failure here must never break reconcile. Degrade to a
+        # valid empty report (the wrapping at the call site also guards, but this
+        # keeps the helper itself non-raising for direct callers like `status`).
+        # An internal raise is also an INDETERMINATE outcome — we couldn't check —
+        # so mark presence_unavailable so the surfacing says "couldn't check" (the
+        # honest, non-flooding signal) rather than implying a clean zero.
+        return {"count": 0, "undelivered": [], "presence_unavailable": True}
+
+
 #: Max items rendered per digest block before collapsing the tail into "+N more".
 #: Keeps the timeline note bounded (a 284-event-in-two-days bus could otherwise
 #: produce a wall of text) while always showing the most-salient head of each list.
@@ -797,6 +996,43 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             # break reconcile either); record["directive_parity"] is simply absent.
             try:
                 _warn(f"  Directive-parity check skipped (error): {_dpe}")
+            except Exception:
+                pass
+        # SAFETY NET: directives addressed to an OFFLINE/stale agent that were
+        # never picked up — the dead-inbox bug. Report-only and best-effort: it
+        # never mutates or reroutes, and the wrapping guarantees a failure can
+        # never change reconcile's exit code (mirrors the parity passes above).
+        # all_tasks is already in hand, so this adds no remote round-trip beyond
+        # the single presence-aggregate read inside the check.
+        try:
+            ud = _undelivered_directive_check(all_tasks, backend=backend)
+            record["undelivered_directives"] = ud
+            # Distinct signals — a genuine presence OUTAGE must stay LOUD (never
+            # silent) but as "couldn't check," NOT as "N directives rotting." When
+            # the presence aggregate was unreadable / no live agents were visible,
+            # the check is INDETERMINATE: emit ONE note instead of flooding the log
+            # with every open directive (the cry-wolf bug). Only a real, non-empty
+            # live set yields the "N undelivered" enumeration.
+            if ud.get("presence_unavailable"):
+                _warn(
+                    "  ⚠ presence aggregate unavailable — could not check "
+                    "directive delivery this cycle"
+                )
+            elif ud.get("count"):
+                # LOUD when >0: a maintainer reading the reconcile log must SEE that
+                # directives are rotting in dead inboxes, not have it buried in JSON.
+                ids = [u.get("id") for u in ud.get("undelivered", [])]
+                _warn(
+                    f"  ⚠ {ud['count']} directive(s) undelivered — assignee "
+                    f"offline/stale, never picked up: {ids}"
+                )
+        except Exception as _ue:
+            # Best-effort but not silent: a checker that ate its own error would
+            # look healthy while the dead-inbox bug it exists to catch festers.
+            # Surface it (guarded so the warn can't break reconcile either);
+            # record["undelivered_directives"] is simply absent.
+            try:
+                _warn(f"  Undelivered-directive check skipped (error): {_ue}")
             except Exception:
                 pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:
