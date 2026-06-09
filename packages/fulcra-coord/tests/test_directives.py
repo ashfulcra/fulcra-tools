@@ -270,6 +270,41 @@ class TestMakeDirectiveValidation(unittest.TestCase):
                 workstream="w",
             )
 
+    def test_raises_on_empty_workstream(self):
+        # D4a: workstream is a required positional kwarg with no default, but the
+        # emptiness guard was missing — an empty workstream slipped through and
+        # would later break workstream-keyed routing/listing. Mirror the
+        # from_agent/audience/title guards.
+        with self.assertRaises(ValueError):
+            make_directive(
+                directive_type="tell",
+                from_agent="a",
+                audience="b",
+                title="T",
+                workstream="",
+            )
+
+    def test_raises_on_whitespace_workstream(self):
+        with self.assertRaises(ValueError):
+            make_directive(
+                directive_type="tell",
+                from_agent="a",
+                audience="b",
+                title="T",
+                workstream="   ",
+            )
+
+    def test_valid_workstream_still_builds(self):
+        d = make_directive(
+            directive_type="tell",
+            from_agent="a",
+            audience="b",
+            title="T",
+            workstream="devops",
+            dt=_FIXED_DT,
+        )
+        self.assertEqual(d["workstream"], "devops")
+
     def test_all_valid_directive_types_accepted(self):
         for dtype in ("tell", "broadcast", "review", "verdict", "human-ask"):
             with self.subTest(dtype=dtype):
@@ -376,6 +411,44 @@ class TestValidateDirective(unittest.TestCase):
         self.assertTrue(any("acked_by" in e for e in errs), errs)
         self.assertTrue(any("routing" in e for e in errs), errs)
 
+    def test_whitespace_only_string_field_flagged(self):
+        # D4b: ``not "   "`` is False, so a whitespace-only required string
+        # slipped past the emptiness check. A whitespace-only title is
+        # effectively empty and must be flagged just like "".
+        d = _good_directive()
+        d["title"] = "   "
+        errs = validate_directive(d)
+        self.assertTrue(any("title" in e for e in errs), errs)
+
+    def test_empty_string_field_still_flagged(self):
+        # Regression: the genuinely-empty case must keep being flagged.
+        d = _good_directive()
+        d["workstream"] = ""
+        errs = validate_directive(d)
+        self.assertTrue(any("workstream" in e for e in errs), errs)
+
+    def test_bad_created_at_format_flagged(self):
+        # D4c: created_at/updated_at must parse as the bus timestamp convention
+        # (ISO-8601 UTC, trailing Z). A garbage value must be flagged.
+        d = _good_directive()
+        d["created_at"] = "not-a-date"
+        errs = validate_directive(d)
+        self.assertTrue(any("created_at" in e for e in errs), errs)
+
+    def test_non_z_timestamp_flagged(self):
+        # A valid ISO string WITHOUT the trailing Z violates the bus convention.
+        d = _good_directive()
+        d["updated_at"] = "2026-06-09T00:00:00+00:00"
+        errs = validate_directive(d)
+        self.assertTrue(any("updated_at" in e for e in errs), errs)
+
+    def test_make_directive_output_validates_clean(self):
+        # The freshly-built record's created_at/updated_at must pass the format
+        # check — a guard against the validator and the builder drifting apart.
+        d = _good_directive()
+        errs = validate_directive(d)
+        self.assertEqual(errs, [], f"make_directive output should validate clean: {errs}")
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -436,3 +509,25 @@ def test_make_directive_accepts_each_valid_status():
                                   title="t", workstream="ws", status=s)
         assert d["status"] == s
         assert validate_directive(d) == []
+
+
+def test_validate_directive_missing_created_at_reports_missing_field_not_format():
+    # A directive with missing created_at reports the missing-field error
+    # without also firing the timestamp format check. The format check only
+    # runs when the field is present and non-empty; the missing case is
+    # already reported by the key-set check.
+    d = make_directive(
+        directive_type="tell",
+        from_agent="a",
+        audience="b",
+        title="t",
+        workstream="ws",
+    )
+    del d["created_at"]
+    errs = validate_directive(d)
+    # Should have a "Missing required field: 'created_at'" error.
+    missing_field_errs = [e for e in errs if "Missing required field" in e and "created_at" in e]
+    assert len(missing_field_errs) >= 1, f"Expected missing-field error for created_at, got: {errs}"
+    # Should NOT have any "format" error for created_at.
+    format_errs = [e for e in errs if "format" in e.lower() and "created_at" in e]
+    assert len(format_errs) == 0, f"Should not have format error when field is missing, got: {format_errs}"
