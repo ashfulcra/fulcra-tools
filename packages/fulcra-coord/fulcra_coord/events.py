@@ -255,11 +255,14 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
 def fold_is_complete(state: dict[str, Any]) -> bool:
     """True iff the fold reconstructed a full schema-valid task.
 
-    A complete fold means the latest applied event was a full-task snapshot
-    (it carried both the task schema marker and an id).  Phase 2b uses this
-    to decide whether to trust the fold result or fall back to the mutable
-    task file for a task whose events are delta-only (not yet snapshotted by
-    the dual-write path).
+    A complete fold means **at least one full-task snapshot** has been applied
+    (the folded state carries both the task schema marker and an id) — so the
+    result has the full schema, whether the latest event was that snapshot or a
+    later delta that merged a few fields on top of it.  It is NOT "the latest
+    event was a snapshot": a delta arriving after a snapshot still leaves a
+    complete fold.  Phase 2b uses this to decide whether to trust the fold
+    result or fall back to the mutable task file for a task whose events are
+    delta-only (not yet snapshotted by the dual-write path).
 
     Returns False for:
     * delta-only folds (Phase-1 events, no snapshot ever emitted for this task)
