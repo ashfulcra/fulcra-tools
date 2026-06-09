@@ -427,6 +427,10 @@ def make_directive(
         raise ValueError(
             f"Invalid priority {priority!r}. Valid: {sorted(VALID_PRIORITIES)}"
         )
+    if status not in _DIRECTIVE_STATUSES:
+        raise ValueError(
+            f"Invalid status {status!r}. Valid: {sorted(_DIRECTIVE_STATUSES)}"
+        )
 
     if dt is None:
         dt = datetime.now(timezone.utc)
@@ -503,6 +507,13 @@ def validate_directive(d: dict) -> list[str]:
     if dtype and dtype not in _DIRECTIVE_TYPES:
         errors.append(
             f"Unknown directive_type {dtype!r}. Valid: {sorted(_DIRECTIVE_TYPES)}"
+        )
+
+    # status enum — same present-and-non-empty guard as directive_type.
+    dstatus = d.get("status", "")
+    if dstatus and dstatus not in _DIRECTIVE_STATUSES:
+        errors.append(
+            f"Unknown status {dstatus!r}. Valid: {sorted(_DIRECTIVE_STATUSES)}"
         )
 
     return errors
