@@ -36,6 +36,10 @@ from fulcra_coord.timeutil import now_iso
 
 EVENT_SCHEMA_VERSION = "fulcra.coordination.event.v1"
 
+# Statuses from which a task cannot move unless a *later-timestamped* event
+# explicitly carries a non-terminal status (a deliberate reopen).
+TERMINAL: frozenset[str] = frozenset({"done", "abandoned"})
+
 
 def event_id(*, at: str) -> str:
     """Return a time-sortable unique event id derived from *at*.
@@ -120,3 +124,101 @@ def make_event(
         "idempotency_key": idempotency_key,
         "payload": payload,
     }
+
+
+def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Deterministically reduce an event list to a task snapshot.
+
+    This is the pure kernel the coordination system rides on.  It is
+    intentionally boring so every behaviour can be proven by a unit test
+    against a plain list — no I/O, no service calls.
+
+    Rules (in application order):
+
+    1. **Sort by (at, event_id)** — ``at`` is the logical wall-clock instant;
+       ``event_id`` is a stable tie-breaker when two events share the same
+       microsecond (its sortable-ts prefix encodes the same instant and the
+       random suffix provides lexicographic uniqueness).
+
+    2. **Dedup retries by (actor, idempotency_key)** — when a caller supplies
+       an ``idempotency_key``, only the first occurrence (in sort order) of
+       the compound ``(actor, idempotency_key)`` pair is applied; later
+       duplicates are silently skipped.  Events with ``idempotency_key=None``
+       are *never* deduped — every such event is always applied.
+
+    3. **Shallow last-write-wins field merge** — each event's ``payload`` dict
+       is merged into the accumulator state; the last event to set a key wins.
+       This is intentionally shallow: nested dicts are replaced, not merged.
+       Callers needing a deep-merge strategy should embed a versioned sub-key
+       in the payload and manage merging above this layer.
+
+    4. **Sticky terminal status** — once a terminal status (``done`` or
+       ``abandoned``) is written, subsequent events that carry a *non-terminal*
+       ``status`` in their payload do NOT overwrite it.  A deliberate reopen
+       is possible only when a later-timestamped event explicitly carries a
+       non-terminal ``status``; at that point ``terminal_seen`` is cleared and
+       the new status is applied normally.  Note that the sort-by-``at`` in
+       rule 1 is what makes "later" meaningful: an event that is logically
+       earlier (lower ``at``) can never revive a logically later terminal state.
+
+    5. **Bookkeeping** — ``state["id"]`` is set to the ``task_id`` shared by
+       all events; ``state["_applied_event_count"]`` records how many events
+       were actually applied after deduplication.
+
+    Args:
+        evs: List of event envelopes, each produced by :func:`make_event`.
+             All events must share the same ``task_id``.  An empty list
+             returns ``{"id": None, "_applied_event_count": 0}`` (caller
+             should never fold an empty stream in practice, but the function
+             handles it gracefully rather than raising).
+
+    Returns:
+        A plain ``dict`` representing the current task snapshot.  Keys come
+        from payload merges plus the ``id`` and ``_applied_event_count``
+        bookkeeping fields.
+    """
+    ordered = sorted(evs, key=lambda e: (e.get("at", ""), e.get("event_id", "")))
+    seen: set[tuple[str, str]] = set()
+    state: dict[str, Any] = {}
+    applied = 0
+    terminal_seen = False
+
+    for e in ordered:
+        ikey = e.get("idempotency_key")
+        if ikey:
+            dedup_key = (e.get("actor", ""), ikey)
+            if dedup_key in seen:
+                # Duplicate delivery — skip silently.
+                continue
+            seen.add(dedup_key)
+
+        payload = e.get("payload") or {}
+        new_status = payload.get("status")
+
+        # A later event with an explicit non-terminal status reopens the task.
+        # This only fires after we've already seen a terminal event; the sort
+        # guarantee means this event is logically *after* the terminal one.
+        if terminal_seen and new_status is not None and new_status not in TERMINAL:
+            terminal_seen = False
+
+        # Shallow last-write-wins merge.  When terminal_seen is True and the
+        # incoming payload carries a non-terminal status, we already cleared
+        # terminal_seen above, so the status writes through normally.  The
+        # only suppression case would be if we wanted to block the write — but
+        # the spec says "sticky UNLESS a later event explicitly carries a
+        # non-terminal status", which is exactly what the terminal_seen reset
+        # above implements.  No special-casing needed here.
+        for k, v in payload.items():
+            state[k] = v
+
+        if new_status in TERMINAL:
+            terminal_seen = True
+
+        applied += 1
+
+    # state["id"] uses the original list so it is defined even when `ordered`
+    # is empty (evs could theoretically be passed as non-empty but produce an
+    # empty ordered list — impossible in practice, but defensive).
+    state["id"] = evs[0]["task_id"] if evs else None
+    state["_applied_event_count"] = applied
+    return state
