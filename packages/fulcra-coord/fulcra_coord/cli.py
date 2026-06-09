@@ -252,6 +252,17 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     ``{remote_root()}/events/tasks/`` — completely separate directory trees, so
     listing the tasks prefix never returns event shards. The ``.json`` filter and
     ``/events/`` guard are belt-and-suspenders against any future layout change.
+
+    Cost: O(N) remote I/O — one ``download_json`` per task snapshot plus one
+    ``read_events`` (a ``list_json`` sweep) per task's event prefix. Acceptable
+    for a Phase-1 diagnostic on the current bus scale (reconcile already sweeps
+    all tasks); if the bus grows, Phase 2 can cache/index event heads.
+
+    Phase 2 extension: once the fold is authoritative, broaden the comparison
+    from ``status`` alone to all top-level snapshot fields (title,
+    current_summary, next_action, …). Status-only here deliberately limits false
+    positives during the dual-write ramp-up, where partial pre-migration payloads
+    would make field-level drift noisy.
     """
     drift_ids: list[str] = []
     checked = 0
@@ -442,8 +453,16 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         try:
             parity = _event_parity_check(backend=backend)
             record["event_parity"] = parity
-        except Exception:
-            pass
+        except Exception as _pe:
+            # Best-effort, but NOT silent: a checker that eats its own errors
+            # would report zero drift and look healthy while actually being
+            # broken — the worst failure mode for the very pass meant to catch
+            # dual-write problems. Surface it (guarded so the warn can't break
+            # reconcile either). record["event_parity"] is simply absent.
+            try:
+                _warn(f"  Event-parity check skipped (error): {_pe}")
+            except Exception:
+                pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:
         # the health surface is per-host ("is this machine reconciling?"), and every
         # worktree/clone on a machine runs the same reconcile against the same bus.
