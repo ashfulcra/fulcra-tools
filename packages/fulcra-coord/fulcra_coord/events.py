@@ -36,10 +36,6 @@ from fulcra_coord.timeutil import now_iso
 
 EVENT_SCHEMA_VERSION = "fulcra.coordination.event.v1"
 
-# Statuses from which a task cannot move unless a *later-timestamped* event
-# explicitly carries a non-terminal status (a deliberate reopen).
-TERMINAL: frozenset[str] = frozenset({"done", "abandoned"})
-
 
 def event_id(*, at: str) -> str:
     """Return a time-sortable unique event id derived from *at*.
@@ -103,7 +99,9 @@ def make_event(
                           deduplicate re-deliveries.  Dedup is keyed on the
                           compound ``(actor, idempotency_key)`` pair — the same
                           key from a *different* actor is a distinct event.
-                          ``None`` when the caller does not require dedup.
+                          A falsy value (``None`` or ``""``) means "no dedup
+                          key — this event is always applied regardless of
+                          other events from the same actor."
         at:               UTC ISO-8601 timestamp.  Defaults to ``now_iso()``.
 
     Returns:
@@ -141,10 +139,10 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
        random suffix provides lexicographic uniqueness).
 
     2. **Dedup retries by (actor, idempotency_key)** — when a caller supplies
-       an ``idempotency_key``, only the first occurrence (in sort order) of
-       the compound ``(actor, idempotency_key)`` pair is applied; later
-       duplicates are silently skipped.  Events with ``idempotency_key=None``
-       are *never* deduped — every such event is always applied.
+       a truthy ``idempotency_key``, only the first occurrence (in sort order)
+       of the compound ``(actor, idempotency_key)`` pair is applied; later
+       duplicates are silently skipped.  A falsy ``idempotency_key`` (``None``
+       or ``""``) means "no dedup key — always apply this event."
 
     3. **Shallow last-write-wins field merge** — each event's ``payload`` dict
        is merged into the accumulator state; the last event to set a key wins.
@@ -152,14 +150,22 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
        Callers needing a deep-merge strategy should embed a versioned sub-key
        in the payload and manage merging above this layer.
 
-    4. **Sticky terminal status** — once a terminal status (``done`` or
-       ``abandoned``) is written, subsequent events that carry a *non-terminal*
-       ``status`` in their payload do NOT overwrite it.  A deliberate reopen
-       is possible only when a later-timestamped event explicitly carries a
-       non-terminal ``status``; at that point ``terminal_seen`` is cleared and
-       the new status is applied normally.  Note that the sort-by-``at`` in
-       rule 1 is what makes "later" meaningful: an event that is logically
-       earlier (lower ``at``) can never revive a logically later terminal state.
+    4. **Terminal stickiness is emergent, not special-cased** — a task's
+       ``status`` is only changed by an event whose payload carries a
+       ``status`` key, and events are applied in ``at`` order (rule 1), so the
+       logically-last ``status`` wins.  Therefore:
+
+       * A ``done`` followed by an update whose payload carries *no* ``status``
+         key leaves ``status`` as ``"done"`` — the merge simply does not touch
+         the key.
+       * A ``done`` followed by an event that explicitly sets a non-terminal
+         ``status`` (e.g. ``"active"``) reopens the task — the later write wins.
+       * An event that is logically *earlier* (lower ``at``) can never revive a
+         later terminal status, because sort order ensures the terminal event is
+         applied last.
+
+       There is no ``terminal_seen`` flag or suppression logic — stickiness is
+       a consequence of pure LWW-by-sort, not a special case.
 
     5. **Bookkeeping** — ``state["id"]`` is set to the ``task_id`` shared by
        all events; ``state["_applied_event_count"]`` records how many events
@@ -181,7 +187,6 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
     seen: set[tuple[str, str]] = set()
     state: dict[str, Any] = {}
     applied = 0
-    terminal_seen = False
 
     for e in ordered:
         ikey = e.get("idempotency_key")
@@ -192,33 +197,17 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
                 continue
             seen.add(dedup_key)
 
-        payload = e.get("payload") or {}
-        new_status = payload.get("status")
-
-        # A later event with an explicit non-terminal status reopens the task.
-        # This only fires after we've already seen a terminal event; the sort
-        # guarantee means this event is logically *after* the terminal one.
-        if terminal_seen and new_status is not None and new_status not in TERMINAL:
-            terminal_seen = False
-
-        # Shallow last-write-wins merge.  When terminal_seen is True and the
-        # incoming payload carries a non-terminal status, we already cleared
-        # terminal_seen above, so the status writes through normally.  The
-        # only suppression case would be if we wanted to block the write — but
-        # the spec says "sticky UNLESS a later event explicitly carries a
-        # non-terminal status", which is exactly what the terminal_seen reset
-        # above implements.  No special-casing needed here.
-        for k, v in payload.items():
+        # Shallow last-write-wins merge — apply every payload key unconditionally.
+        # Terminal stickiness is emergent: a later event without a ``status`` key
+        # simply does not overwrite an existing terminal status; a later event
+        # that explicitly sets a new status does overwrite it.  No suppression
+        # logic is needed; pure sort-order LWW is the full spec.
+        for k, v in (e.get("payload") or {}).items():
             state[k] = v
-
-        if new_status in TERMINAL:
-            terminal_seen = True
 
         applied += 1
 
-    # state["id"] uses the original list so it is defined even when `ordered`
-    # is empty (evs could theoretically be passed as non-empty but produce an
-    # empty ordered list — impossible in practice, but defensive).
+    # Set after the loop so ``id`` is always present, even for an empty event list.
     state["id"] = evs[0]["task_id"] if evs else None
     state["_applied_event_count"] = applied
     return state
