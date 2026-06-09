@@ -314,11 +314,64 @@ def clear_op_marker(op_id: str) -> None:
 # Ops log (JSONL)
 # ---------------------------------------------------------------------------
 
+def _opslog_max_bytes() -> int:
+    """Size ceiling for the current ops-log segment before it rotates to ``.1``.
+
+    Read from ``FULCRA_COORD_OPSLOG_MAX_BYTES`` (default 1_000_000), floored at a
+    sane minimum so a tiny/garbage override can't degenerate into rotating on
+    every single append (which would churn the disk and, worse, keep only the
+    last line — defeating the recent-window read Signal C depends on). A
+    non-positive override DISABLES rotation entirely (the unbounded legacy
+    behaviour, opt-in), letting an operator turn the feature off if needed."""
+    from . import env_int
+    raw = env_int("FULCRA_COORD_OPSLOG_MAX_BYTES", 1_000_000)
+    if raw <= 0:
+        return 0  # disabled
+    # Floor so a pathologically small value can't rotate after every line.
+    return max(4096, raw)
+
+
+def _rotate_ops_log_if_needed() -> None:
+    """Best-effort single-segment size rotation of the current ops log.
+
+    Called by ``append_ops_log`` AFTER the append has already landed, so a
+    rotation failure can never lose the entry that triggered it. When the current
+    file exceeds ``_opslog_max_bytes()``, rename it onto the ``.1`` sibling
+    (``os.replace`` — atomic, overwrites any prior ``.1``). There is NO shared
+    open handle across the rename: every append (via ``append_ops_log`` /
+    ``log.log_op``) opens the path fresh in append mode, so the next write simply
+    re-creates the current file. That is what makes the rotation lossless.
+
+    Wrapped so it NEVER raises into ``append_ops_log`` — the append is the
+    load-bearing operation; bounding the file is strictly secondary."""
+    try:
+        cap = _opslog_max_bytes()
+        if cap <= 0:
+            return  # rotation disabled
+        path = ops_log_path()
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        if size <= cap:
+            return
+        rotated = path.with_name(path.name + ".1")
+        # os.replace is atomic and overwrites an existing .1 (single retained
+        # segment — we keep exactly the previous file, not an unbounded archive).
+        os.replace(path, rotated)
+    except Exception:
+        # Best-effort: a rotation failure must never break logging.
+        pass
+
+
 def append_ops_log(entry: dict[str, Any]) -> None:
     ensure_dirs()
     entry.setdefault("logged_at", _now_iso())
+    # The append MUST succeed first (and on its own) — it is the load-bearing op.
     with ops_log_path().open("a") as fh:
         fh.write(json.dumps(entry) + "\n")
+    # THEN bound the file. Best-effort: never raises back into the caller.
+    _rotate_ops_log_if_needed()
 
 
 def read_ops_log(since: Optional["datetime"] = None) -> list[dict[str, Any]]:
@@ -339,28 +392,36 @@ def read_ops_log(since: Optional["datetime"] = None) -> list[dict[str, Any]]:
     as "recent" would be the misleading outcome this signal exists to avoid).
     """
     path = ops_log_path()
-    if not path.exists():
-        return []
+    # Read BOTH segments so the recent window isn't truncated the instant a size
+    # rotation happens: ``.1`` holds the just-rotated-out (older) lines and the
+    # current file holds the newest. Order them OLDEST-first (``.1`` then current)
+    # so the returned list stays chronological — Signal C's recent-window filter
+    # and any "last N ops" consumer rely on that. Each segment is independently
+    # best-effort: a missing or unreadable segment is simply skipped.
+    rotated = path.with_name(path.name + ".1")
     out: list[dict[str, Any]] = []
-    try:
-        text = path.read_text()
-    except OSError:
-        return []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
+    for seg in (rotated, path):
+        if not seg.exists():
             continue
         try:
-            entry = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+            text = seg.read_text()
+        except OSError:
             continue
-        if not isinstance(entry, dict):
-            continue
-        if since is not None:
-            dt = _parse_logged_at(entry.get("logged_at"))
-            if dt is None or dt < since:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
                 continue
-        out.append(entry)
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if since is not None:
+                dt = _parse_logged_at(entry.get("logged_at"))
+                if dt is None or dt < since:
+                    continue
+            out.append(entry)
     return out
 
 
