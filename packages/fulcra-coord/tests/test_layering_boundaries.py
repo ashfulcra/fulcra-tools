@@ -244,6 +244,15 @@ class SyntheticViolationDetectionTest(unittest.TestCase):
             f"as a violation.  Extracted: {found_relative!r}",
         )
 
+        # Exhaustively cover the remaining import forms so a future parser
+        # refactor can't silently stop catching one of them.
+        self.assertIn("cli", _imported_submodules("import fulcra_coord.cli\n"),
+                      "bare 'import fulcra_coord.cli' must be caught")
+        self.assertIn("cli", _imported_submodules("from .cli import foo\n"),
+                      "'from .cli import foo' must be caught")
+        self.assertIn("cli", _imported_submodules("from fulcra_coord import cli\n"),
+                      "'from fulcra_coord import cli' must be caught")
+
     def test_does_not_flag_legitimate_leaf_imports(self) -> None:
         """Regression: allowed imports must NOT appear in the forbidden set."""
         # These are the legitimate imports eventlog.py is allowed to make.
