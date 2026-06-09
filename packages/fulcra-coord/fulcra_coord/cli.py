@@ -324,11 +324,16 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
         summaries_view = remote.download_json(
             remote.view_remote_path("summaries"), backend=backend
         )
-        summ_acks = {
-            s["id"]: set(s.get("acked_by") or [])
-            for s in (summaries_view or {}).get("summaries", [])
-            if s.get("id")
-        }
+        for s in (summaries_view or {}).get("summaries", []):
+            if not isinstance(s, dict):
+                continue
+            tid = s.get("id")
+            if not tid:
+                continue
+            acked_by = s.get("acked_by") or []
+            if not isinstance(acked_by, list):
+                continue
+            summ_acks[tid] = set(acked_by)
     except Exception:
         summ_acks = {}
 
@@ -585,4 +590,3 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
-

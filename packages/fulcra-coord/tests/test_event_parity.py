@@ -166,6 +166,24 @@ def test_parity_no_crash_when_summaries_view_absent(coord_backend):
     assert report["ack_drift_task_ids"] == []
 
 
+def test_parity_malformed_summary_entry_does_not_blind_valid_ack_drift(coord_backend):
+    """A single malformed summaries entry must be skipped, not disable the whole
+    ack-drift check for later valid entries."""
+    task = schema.make_task(title="p", workstream="ws", agent="a")
+    task["status"] = "active"
+    remote.upload_json(task, remote.task_remote_path(task["id"]), backend=coord_backend)
+    eventlog.append_event(events.make_event(family="tasks", task_id=task["id"],
+                          kind="start", actor="a", payload=dict(task)), backend=coord_backend)
+    remote.upload_json(
+        {"summaries": ["bad-entry", {"id": task["id"], "acked_by": ["agent-x"]}]},
+        remote.view_remote_path("summaries"),
+        backend=coord_backend,
+    )
+    report = cli._event_parity_check(backend=coord_backend)
+    assert task["id"] in report["ack_drift_task_ids"]
+    assert task["id"] in report["drift_task_ids"]
+
+
 # ---------------------------------------------------------------------------
 # Root cause C2 — safe delta-only field broadening
 #
