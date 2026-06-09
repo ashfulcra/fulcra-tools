@@ -268,6 +268,69 @@ def directive_remote_path(directive_id: str) -> str:
     return f"{directives_prefix()}{directive_id}.json"
 
 
+# ---------------------------------------------------------------------------
+# Directive SUB-LOG path helpers (Phase 3b Task 2 — append-only ack + routing)
+# ---------------------------------------------------------------------------
+#
+# THE CONCURRENCY CRUX: the bus is a brokerless object store with NO compare-and-
+# swap and many concurrent writers. A read-modify-write of the single
+# ``directives/<id>.json`` record to ADD an ack would CLOBBER concurrent acks —
+# two agents acking the same broadcast at once each read the old record, add only
+# their own ack, and the slower upload overwrites (loses) the faster one's.
+#
+# So acks/routing live in an APPEND-ONLY SUB-LOG under the directive, where every
+# writer writes a DISTINCT file — no shared mutable file, no clobber, exactly the
+# pattern the event log uses:
+#   * ack sub-log:     one file PER ACKING AGENT  -> ``<id>/acks/<agent-slug>.json``
+#     (an agent re-acking overwrites only its OWN file = idempotent; two agents
+#     never collide; the ack UNION = list the prefix).
+#   * routing sub-log: append-only route-event shards -> ``<id>/routing/<event_id>.json``.
+
+
+def _filename_slug(text: str) -> str:
+    """Filename-safe slug for an arbitrary id used as a sub-log basename.
+
+    Agent ids look like ``claude-code:Mac:repo`` — the colons/slashes are not
+    portable as path segments, so collapse every non-[a-z0-9-_.] run to a single
+    ``-`` and lowercase (so two ids differing only in case can't fork into two
+    files). Mirrors ``schema._slugify`` / ``views.agent_slug`` semantics; kept
+    LOCAL here so the low-layer ``remote`` module needn't import ``schema`` just
+    for a slug. Falls back to ``id`` for an all-punctuation input (never empty,
+    which would alias every such id onto one file)."""
+    s = "".join(c if (c.isalnum() or c in "-_.") else "-" for c in str(text).lower())
+    return s.strip("-") or "id"
+
+
+def directive_acks_prefix(directive_id: str) -> str:
+    """List prefix for a directive's per-agent ack files (the ack union = list it)."""
+    return f"{directives_prefix()}{directive_id}/acks/"
+
+
+def directive_ack_path(directive_id: str, agent: str) -> str:
+    """Storage path for ONE agent's ack of a directive.
+
+    One file per acking agent (keyed by the slugified agent id) so an agent
+    re-acking overwrites only its OWN file (idempotent) and two different agents
+    NEVER collide — the property that makes 'one agent acking a broadcast must not
+    clear it for others' true BY CONSTRUCTION (no shared mutable record)."""
+    return f"{directive_acks_prefix(directive_id)}{_filename_slug(agent)}.json"
+
+
+def directive_routing_prefix(directive_id: str) -> str:
+    """List prefix for a directive's append-only route-event shards."""
+    return f"{directives_prefix()}{directive_id}/routing/"
+
+
+def directive_route_path(directive_id: str, event_id: str) -> str:
+    """Storage path for ONE route-event shard, keyed by a unique event id.
+
+    Append-only: each route decision lands as its own shard (like the event log),
+    so concurrent re-routes never overwrite one another. The caller supplies a
+    unique ``event_id`` (the route event's ``event_id``/``route_id`` or a fresh
+    uuid) — distinct ids => distinct files => no clobber."""
+    return f"{directive_routing_prefix(directive_id)}{event_id}.json"
+
+
 def health_remote_path(host_slug: str) -> str:
     """Per-host self-reported health record path. Takes an ALREADY-SLUGGED id
     (views.agent_slug). Only that host writes its own file -> zero cross-host
