@@ -247,9 +247,28 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     Phase-2a broadening: when ``events.fold_is_complete(folded)`` is True
     (at least one full-task snapshot event has been applied), the check
     compares ALL durable task fields — not just status — giving a precise
-    whole-task parity signal.  For legacy delta-only tasks where the fold is
-    not complete, the Phase-1 status-only comparison is kept to avoid false
-    positives from partial pre-migration payloads.
+    whole-task parity signal.
+
+    Root cause C2 broadening: for legacy delta-only tasks where the fold is NOT
+    complete, the check no longer compares status alone.  It compares every field
+    the fold ACTUALLY carries (``set(folded.keys()) - ignore``) against the file,
+    but ONLY those fields — a field the fold never saw is skipped, so genuinely
+    partial pre-migration payloads can't false-positive.  status is one of the
+    fold's keys, so the original status drift is still caught.
+
+    Root cause C1 — ack divergence (report-only).  The AUTHORITATIVE ack set for a
+    task is ``summaries.acked_by`` (the summaries view), NOT the fold: io.py UNIONS
+    prior acks into each summary because the in-task event log is truncated to
+    ``MAX_EVENTS_INLINE``, and ``inbox._ack_summary_only`` records an ack in
+    ``summaries`` with NO event shard at all.  So the FOLD (what a post-flip
+    events-as-source read would return) can be MISSING acks the summaries view has —
+    and a flip would then re-notify an already-acked directive.  The summaries view
+    is loaded ONCE before the loop and each task's fold ``acked_by`` is cross-checked
+    against it; any task whose fold is missing >=1 durable ack is recorded in
+    ``ack_drift_task_ids`` AND folded into ``drift_task_ids`` so the flip-readiness
+    gate (drift>0) trips.  A missing / old-bus summaries view degrades to no
+    ack-drift, never raises.  This is report-only; the durable write-path fix that
+    makes the fold carry every ack is deferred to a later phase.
 
     Fields excluded from the full-task comparison (the ignore-set):
 
@@ -281,8 +300,43 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     for a Phase-2a diagnostic on the current bus scale (reconcile already sweeps
     all tasks).
     """
-    drift_ids: list[str] = []
+    # Union set of every task id that drifts for ANY reason (field/status drift
+    # OR ack divergence). A task that drifts for multiple reasons is counted
+    # ONCE here, so ``drift``/``drift_task_ids`` never double-count.
+    drift_set: set[str] = set()
+    # Separate breakdown: tasks whose fold is missing >=1 durable ack the
+    # authoritative summaries view holds (root cause C1, report-only).
+    ack_drift_ids_set: set[str] = set()
     checked = 0
+
+    # Fields excluded from BOTH the full-task and delta-only comparisons — shared
+    # so the two branches stay consistent. See the docstring for why each differs
+    # legitimately between a point-in-time fold and the live file.
+    ignore = {"_applied_event_count", "updated_at", "last_touched_by",
+              "last_touched_in", "events"}
+
+    # C1: load the AUTHORITATIVE ack view ONCE, before the loop. summaries.acked_by
+    # is the durable ack set; the fold can lag it (MAX_EVENTS_INLINE truncation, or
+    # inbox._ack_summary_only acks that emit NO event shard). A missing / old-bus
+    # summaries view degrades to an empty map -> no ack drift flagged, never raises.
+    summ_acks: dict[str, set[str]] = {}
+    try:
+        summaries_view = remote.download_json(
+            remote.view_remote_path("summaries"), backend=backend
+        )
+        for s in (summaries_view or {}).get("summaries", []):
+            if not isinstance(s, dict):
+                continue
+            tid = s.get("id")
+            if not tid:
+                continue
+            acked_by = s.get("acked_by") or []
+            if not isinstance(acked_by, list):
+                continue
+            summ_acks[tid] = set(acked_by)
+    except Exception:
+        summ_acks = {}
+
     tasks_prefix = f"{remote.remote_root()}/tasks/"
     task_paths = remote.list_files(tasks_prefix, backend=backend)
     for path in task_paths:
@@ -305,15 +359,37 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             # (_applied_event_count) and fields that legitimately differ between a
             # point-in-time snapshot and the live file: updated_at / last_touched_*
             # move on every write, and the in-task events[] log grows independently.
-            ignore = {"_applied_event_count", "updated_at", "last_touched_by",
-                      "last_touched_in", "events"}
             a = {k: v for k, v in folded.items() if k not in ignore}
             b = {k: v for k, v in snap.items() if k not in ignore}
             if a != b:
-                drift_ids.append(snap["id"])
-        elif folded.get("status") != snap.get("status"):
-            drift_ids.append(snap["id"])
-    return {"checked": checked, "drift": len(drift_ids), "drift_task_ids": drift_ids}
+                drift_set.add(snap["id"])
+        else:
+            # delta-only: the fold is reconstructed from partial deltas, so only
+            # compare fields the fold ACTUALLY carries (skip anything it never saw —
+            # that would false-positive on genuinely-partial pre-migration payloads).
+            # Reuse the same ignore-set as the full-task branch. status is one of the
+            # fold's keys, so the original status-only behaviour is still covered.
+            keys = set(folded.keys()) - ignore
+            if any(folded.get(k) != snap.get(k) for k in keys):
+                drift_set.add(snap["id"])
+
+        # C1: regardless of fold completeness, the fold must carry every durable
+        # ack the summaries authority holds. If it's missing any, a post-flip read
+        # would re-notify an already-acked directive — surface it (report-only).
+        missing = summ_acks.get(snap["id"], set()) - set(folded.get("acked_by") or [])
+        if missing:
+            ack_drift_ids_set.add(snap["id"])
+            drift_set.add(snap["id"])
+
+    drift_task_ids = sorted(drift_set)
+    ack_drift_task_ids = sorted(ack_drift_ids_set)
+    return {
+        "checked": checked,
+        "drift": len(drift_task_ids),
+        "drift_task_ids": drift_task_ids,
+        "ack_drift": len(ack_drift_task_ids),
+        "ack_drift_task_ids": ack_drift_task_ids,
+    }
 
 
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -514,4 +590,3 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
-
