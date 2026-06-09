@@ -168,3 +168,32 @@ def test_tags_repaired_to_merged_status():
     assert merged["status"] == "done"
     assert "status:done" in merged["tags"]
     assert "status:active" not in merged["tags"]
+
+
+def test_write_metadata_comes_from_mine_not_stale_fold_base():
+    """updated_at/last_touched_* are volatile for conflict purposes, but the
+    merged write must still carry the command's fresh touch metadata. Otherwise
+    a successful fold-sourced write would publish the stale fold timestamp and
+    stale toucher, breaking views/order/audit even though the data merge worked."""
+    base = _base(
+        updated_at="2026-06-09T00:00:00.000000Z",
+        last_touched_by="fold-agent",
+        last_touched_in="fold-surface",
+    )
+    mine = _base(
+        updated_at="2026-06-09T12:00:00.000000Z",
+        last_touched_by="writer-agent",
+        last_touched_in="writer-surface",
+        current_summary="my edit",
+    )
+    theirs = _base(
+        updated_at="2026-06-09T11:00:00.000000Z",
+        last_touched_by="file-agent",
+        last_touched_in="file-surface",
+        next_action="file edit",
+    )
+    merged = writepipe._try_merge_from_base(base, mine, theirs)
+    assert merged is not None
+    assert merged["updated_at"] == "2026-06-09T12:00:00.000000Z"
+    assert merged["last_touched_by"] == "writer-agent"
+    assert merged["last_touched_in"] == "writer-surface"

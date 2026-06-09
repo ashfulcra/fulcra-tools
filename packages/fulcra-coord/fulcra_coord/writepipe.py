@@ -552,6 +552,16 @@ def _try_merge_from_base(
                             {e["at"] for e in merged.get("events", []) if "at" in e},
                             mine_event_times)
 
+    # These fields are excluded from the conflict loop because point-in-time
+    # fold/file values naturally differ on every write; still, the successful
+    # merged write must publish the command's fresh touch metadata, not the stale
+    # fold base.
+    for key in ("updated_at", "last_touched_by", "last_touched_in"):
+        if key in mine:
+            merged[key] = mine[key]
+        elif key in theirs:
+            merged[key] = theirs[key]
+
     _repair_merged_tags(merged, mine, theirs)
     return merged
 
