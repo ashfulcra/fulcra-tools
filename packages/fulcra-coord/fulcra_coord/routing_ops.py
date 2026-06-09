@@ -1,7 +1,7 @@
 """Liveness-aware reviewer routing for fulcra-coord.
 
-The review-directive lifecycle: pick the canonical reviewer for an author
-(_canonical_reviewer), build the live-reviewer candidate pool from presence
+The review-directive lifecycle: resolve the configured reviewer SEED ids for an
+author (_review_seeds), build the live-reviewer candidate pool from presence
 (_review_pool), the `request-review` command, and the reconcile-time sweep
 (_sweep_review_routes) that reroutes a stalled review to a live reviewer or
 escalates it to the human (_escalate_review_to_human / _force_block_for_human),
@@ -14,8 +14,11 @@ never imports cli, so the split has no cycle.
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, routing, env_float
@@ -24,38 +27,66 @@ from .output import info as _info, print_json as _print_json, warn as _warn
 from .timeutil import iso_z as _iso_z
 from .writepipe import _write_task_and_views
 
-ARC_REVIEWER = "claude-code:ArcBot:Arc-Code-Review"
-DEFAULT_REVIEWER = "codex:Mac.localdomain:main"
 _SWEEP_DEADLINE_HEADROOM_SECONDS = 5.0
 
 
-def _canonical_reviewer(author: str) -> str:
-    """The seeded, preference-first reviewer for an author. Seeded even if it
-    never declared --can-review (day-one works before agents update). #devops/
-    openclaw is deliberately NOT canonical — it qualifies only if actually
-    live/idle AND review-capable."""
-    if (author or "").startswith("claude-code:ArcBot:"):
-        return ARC_REVIEWER
-    return DEFAULT_REVIEWER
+def _review_routing_config_path() -> Optional[str]:
+    """Optional per-fleet review-routing policy file. Adopters drop their own
+    seed/overrides here; absent by default (pure capability-driven)."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    p = Path(base) / "fulcra-coord" / "review-routing.json"
+    return str(p) if p.exists() else None
+
+
+def _review_routing_config() -> dict:
+    """Load the optional policy file. Best-effort: any error -> {} (no policy)."""
+    path = _review_routing_config_path()
+    if not path:
+        return {}
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _review_seeds(author: str) -> list[str]:
+    """Ordered preferred-reviewer SEED ids for `author`, from config. Empty by
+    default. NO fleet ids are hard-coded here — policy is per-adopter config.
+
+    Precedence: env FULCRA_COORD_REVIEW_SEED (comma-sep) > file author_overrides
+    (first author_prefix match) > file top-level seed > []. The seed is a day-one
+    preference/tie-break only; a live capability:review agent still wins in
+    _review_pool, and an empty seed degrades gracefully to capability-driven."""
+    env = os.environ.get("FULCRA_COORD_REVIEW_SEED", "").strip()
+    if env:
+        return [s.strip() for s in env.split(",") if s.strip()]
+    cfg = _review_routing_config()
+    for ov in (cfg.get("author_overrides") or []):
+        pref = ov.get("author_prefix")
+        if pref and (author or "").startswith(pref):
+            return [s for s in (ov.get("seed") or []) if s]
+    return [s for s in (cfg.get("seed") or []) if s]
 
 
 def _review_pool(author: str, presence: list[dict[str, Any]]) -> list[str]:
-    """Preference-ordered candidate pool: canonical reviewer first (seeded,
-    tie-break only — a live non-canonical reviewer still wins), then every
-    review-capable agent in presence order. De-duplicated, canonical kept first."""
-    canonical = _canonical_reviewer(author)
-    pool = [canonical]
+    """Preference-ordered candidate pool: configured seed ids first (may be
+    empty — see _review_seeds), then every review-capable agent in presence
+    order. De-duplicated, seeds kept first. An empty seed degrades to a purely
+    capability-driven pool; cmd_request_review escalates via block --on-user when
+    the pool has no live reviewer."""
+    pool = list(_review_seeds(author))
     for rec in presence:
         agent = rec.get("agent")
-        if not agent or agent == canonical:
+        if not agent:
             continue
         if "review" in (rec.get("capabilities") or []):
             pool.append(agent)
-    # de-dup preserving first occurrence (canonical stays index 0)
     seen: set[str] = set()
     ordered: list[str] = []
     for a in pool:
-        if a not in seen:
+        if a and a not in seen:
             seen.add(a)
             ordered.append(a)
     return ordered
