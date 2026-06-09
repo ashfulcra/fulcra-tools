@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, log as ops_log, heartbeat, identity
 from . import env_int
+from . import events as _events, eventlog as _eventlog
 # Leaf-utility modules extracted from this file. Re-exported under the historical
 # underscore-prefixed names so every internal call site AND the test patch targets
 # (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
@@ -237,6 +238,45 @@ def _reconcile_rebuild_source_preserving_acks(
     return rebuild_source
 
 
+def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
+    """Compare each task snapshot against the fold of its event log. Phase-1
+    safety net: surfaces drift as health debt (the mutable file is still
+    authoritative, so drift is REPORTED, never acted on). Compares the status
+    field only this phase — the cheapest signal that dual-write is consistent.
+
+    Only tasks that have at least one event shard are compared — tasks with no
+    events were written before dual-write was introduced and are not drift by
+    definition (they haven't been through the dual-write path yet).
+
+    The tasks prefix is ``{remote_root()}/tasks/`` and the events prefix is
+    ``{remote_root()}/events/tasks/`` — completely separate directory trees, so
+    listing the tasks prefix never returns event shards. The ``.json`` filter and
+    ``/events/`` guard are belt-and-suspenders against any future layout change.
+    """
+    drift_ids: list[str] = []
+    checked = 0
+    tasks_prefix = f"{remote.remote_root()}/tasks/"
+    task_paths = remote.list_files(tasks_prefix, backend=backend)
+    for path in task_paths:
+        # Only process actual task JSON files directly under tasks/ — skip
+        # anything that looks like an events shard or a non-JSON file.
+        if not path.endswith(".json"):
+            continue
+        if "/events/" in path:
+            continue
+        snap = remote.download_json(path, backend=backend)
+        if not snap or "id" not in snap:
+            continue
+        evs = _eventlog.read_events(snap["id"], backend=backend)
+        if not evs:
+            continue  # not yet dual-written (pre-migration task) — not drift
+        checked += 1
+        folded = _events.fold_task(evs)
+        if folded.get("status") != snap.get("status"):
+            drift_ids.append(snap["id"])
+    return {"checked": checked, "drift": len(drift_ids), "drift_task_ids": drift_ids}
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
     import time
@@ -394,6 +434,16 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             listener_last_fire=listener_last_fire,
             bus_task_count=len(all_tasks),
         )
+        # Phase-1 event-parity sub-pass: fold each task's event log and compare
+        # status to the mutable snapshot. Best-effort — any error is swallowed and
+        # the result, whether present or absent, NEVER changes the reconcile exit
+        # code. Drift is recorded in the health record as health debt only; the
+        # mutable file remains authoritative until Phase 2.
+        try:
+            parity = _event_parity_check(backend=backend)
+            record["event_parity"] = parity
+        except Exception:
+            pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:
         # the health surface is per-host ("is this machine reconciling?"), and every
         # worktree/clone on a machine runs the same reconcile against the same bus.
