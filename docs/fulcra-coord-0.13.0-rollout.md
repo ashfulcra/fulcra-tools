@@ -81,6 +81,7 @@ version:
 
 ```bash
 fulcra-coord --version    # must report 0.13.0
+fulcra-coord doctor       # must report CLI reachable and File commands OK
 ```
 
 If it still reports 0.12.0, the reinstall didn't replace the on-PATH binary —
@@ -92,15 +93,28 @@ Once at least one upgraded (0.13.0) host has done real task mutations
 (`start` / `update` / `done` / `block`), two things should appear that are absent
 today:
 
+First, confirm which Fulcra CLI command has the `file` command group on this
+host:
+
+```bash
+fulcra-coord doctor
+```
+
+Use the file-capable command reported by `doctor` for the file checks below. On
+some hosts that is `fulcra`; on others it may be a configured command such as
+`uv run --project /Users/<you>/Developer/fulcra-api-python fulcra`. Do not assume
+the public `fulcra-api` command has file support unless `doctor` explicitly
+reports File commands OK for it.
+
 **(a) The event tree starts filling.** An `events/tasks/<id>/` subtree appears
 under the coordination root and shards accumulate, one immutable file per
 mutation:
 
 ```bash
 # default root is /coordination; substitute FULCRA_COORD_REMOTE_ROOT if overridden
-fulcra-api file list /coordination/events/tasks/
+<file-capable-fulcra-cli> file list /coordination/events/tasks/
 # then drill into a specific task to see the shards pile up
-fulcra-api file list /coordination/events/tasks/TASK-<id>/
+<file-capable-fulcra-cli> file list /coordination/events/tasks/TASK-<id>/
 ```
 
 Today that path is empty (no host dual-writes). Seeing shards is the dual-write
@@ -111,7 +125,7 @@ then read that host's health record:
 
 ```bash
 fulcra-coord reconcile
-fulcra-api file download /coordination/health/<host>.json   # then read it
+<file-capable-fulcra-cli> file download /coordination/health/<host>.json   # then read it
 ```
 
 The health record should now carry an `event_parity` block:
