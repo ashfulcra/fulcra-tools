@@ -43,3 +43,20 @@ def test_event_write_failure_does_not_fail_the_task_write(coord_backend, monkeyp
     task = {"id": "TASK-DW2", "title": "t", "status": "active", "current_summary": "s",
             "workstream": "ws", "owner_agent": "a"}
     assert cli._write_task_and_views(task, backend=coord_backend, command="start") is True
+
+
+def test_event_write_false_return_logs_failure_without_failing_task_write(coord_backend, monkeypatch):
+    import fulcra_coord.writepipe as wp
+
+    seen = []
+    monkeypatch.setattr(wp.eventlog, "append_event", lambda *a, **k: False)
+    monkeypatch.setattr(wp.ops_log, "log_op",
+                        lambda *args, **kwargs: seen.append((args, kwargs)))
+
+    task = {"id": "TASK-DW3", "title": "t", "status": "active", "current_summary": "s",
+            "workstream": "ws", "owner_agent": "a"}
+    assert cli._write_task_and_views(task, backend=coord_backend, command="start") is True
+    assert any(
+        args == ("start", "TASK-DW3") and kwargs["status"] == "event_append_failed"
+        for args, kwargs in seen
+    )

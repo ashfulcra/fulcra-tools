@@ -239,7 +239,13 @@ def _write_task_and_views(
                      if k in task},
             idempotency_key=op_id,
         )
-        eventlog.append_event(ev, backend=backend)
+        ok = eventlog.append_event(ev, backend=backend)
+        if not ok:
+            try:
+                ops_log.log_op(command, task["id"], status="event_append_failed",
+                               error="Event append returned false")
+            except Exception:
+                pass
     except Exception as exc:
         # Best-effort; the mutable write already succeeded. But DO record the
         # failure in the ops log — Phase 1's whole job is to validate the
