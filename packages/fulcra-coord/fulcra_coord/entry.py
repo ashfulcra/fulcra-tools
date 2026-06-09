@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # `--version` works even though a subcommand is required — argparse's
-    # version action fires before the subparser-required check. ArcBot-2 flagged
+    # version action fires before the subparser-required check. A reviewer flagged
     # the CLI as having no usable version signal across breaking subcommand
     # additions; this plus the dynamic version makes `--version` authoritative.
     p.add_argument("--version", action="version",

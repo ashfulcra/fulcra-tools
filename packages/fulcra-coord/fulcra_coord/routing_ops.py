@@ -51,6 +51,13 @@ def _review_routing_config() -> dict:
         return {}
 
 
+def _review_seed_list(value: Any) -> list[str]:
+    """Return only explicit non-empty string seed entries from config."""
+    if not isinstance(value, list):
+        return []
+    return [s for s in value if isinstance(s, str) and s]
+
+
 def _review_seeds(author: str) -> list[str]:
     """Ordered preferred-reviewer SEED ids for `author`, from config. Empty by
     default. NO fleet ids are hard-coded here — policy is per-adopter config.
@@ -63,11 +70,18 @@ def _review_seeds(author: str) -> list[str]:
     if env:
         return [s.strip() for s in env.split(",") if s.strip()]
     cfg = _review_routing_config()
-    for ov in (cfg.get("author_overrides") or []):
+    overrides = cfg.get("author_overrides") or []
+    if not isinstance(overrides, list):
+        overrides = []
+    for ov in overrides:
+        if not isinstance(ov, dict):
+            continue
         pref = ov.get("author_prefix")
+        if not isinstance(pref, str):
+            continue
         if pref and (author or "").startswith(pref):
-            return [s for s in (ov.get("seed") or []) if s]
-    return [s for s in (cfg.get("seed") or []) if s]
+            return _review_seed_list(ov.get("seed"))
+    return _review_seed_list(cfg.get("seed"))
 
 
 def _review_pool(author: str, presence: list[dict[str, Any]]) -> list[str]:
