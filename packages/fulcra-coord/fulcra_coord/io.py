@@ -59,6 +59,13 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
             from . import eventlog, events
             folded = events.fold_task(eventlog.read_events(task_id, backend=backend))
             if events.fold_is_complete(folded):
+                # Strip the fold's internal bookkeeping so the returned/cached body
+                # is a clean task. Without this, `_applied_event_count` would be
+                # persisted by cache.write_cached_task and — worse — copied into the
+                # durable tasks/<id>.json on the next read-modify-write (apply_event
+                # deep-copies all keys), a fold-only field leaking into the
+                # authoritative file that the parity check's ignore-set hides.
+                folded.pop("_applied_event_count", None)
                 task = folded
         except Exception:
             task = None  # fall through to the file — never let a fold error read-fail

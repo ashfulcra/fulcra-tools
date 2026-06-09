@@ -131,3 +131,15 @@ def test_events_source_still_stats_file_for_write_meta(monkeypatch, coord_backen
     meta = cache.read_meta(task_path)
     assert meta is not None
     assert meta.get("version") == remote.stat(task_path, backend=coord_backend)["version"]
+
+
+def test_events_source_body_has_no_fold_bookkeeping(coord_backend, monkeypatch):
+    # The fold's internal _applied_event_count must NOT leak into the returned
+    # task body — else a read-modify-write in events mode would persist it into
+    # the durable tasks/<id>.json (apply_event deep-copies all keys) and parity
+    # would be blind to it (its ignore-set hides _applied_event_count).
+    monkeypatch.setenv("FULCRA_COORD_READ_SOURCE", "events")
+    tid = _seed_file_and_snapshot(coord_backend, file_summary="F", event_summary="E")
+    got = io._cache_remote_task(tid, backend=coord_backend)
+    assert got["current_summary"] == "E"          # confirm it IS the fold
+    assert "_applied_event_count" not in got       # but bookkeeping stripped
