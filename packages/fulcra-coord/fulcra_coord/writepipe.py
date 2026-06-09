@@ -227,6 +227,12 @@ def _write_task_and_views(
         ev = _events.make_event(
             family="tasks", task_id=task["id"], kind=command,
             actor=task.get("owner_agent") or task.get("assignee") or "unknown",
+            # Mirror the task's top-level mutable fields. NOTE: ``current_summary``
+            # is the real schema key (there is no top-level ``summary``); and
+            # ``evidence`` is intentionally absent here — it lives nested under
+            # ``task["done"]["evidence"]``, so Phase 2 will lift completion
+            # evidence into the event separately. ``if k in task`` keeps any
+            # absent key safe.
             payload={k: task.get(k) for k in
                      ("title", "status", "current_summary", "next_action",
                       "blocked_on", "workstream", "priority", "assignee")
@@ -234,8 +240,16 @@ def _write_task_and_views(
             idempotency_key=op_id,
         )
         eventlog.append_event(ev, backend=backend)
-    except Exception:
-        pass  # best-effort; mutable write already succeeded
+    except Exception as exc:
+        # Best-effort; the mutable write already succeeded. But DO record the
+        # failure in the ops log — Phase 1's whole job is to validate the
+        # dual-write, so a silent miss is exactly what we must not have. The
+        # logging is itself guarded so even it cannot break the task write.
+        try:
+            ops_log.log_op(command, task["id"], status="event_append_failed",
+                           error=str(exc))
+        except Exception:
+            pass
 
     return True
 

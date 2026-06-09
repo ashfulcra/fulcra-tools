@@ -30,6 +30,10 @@ def test_start_also_appends_an_event(coord_backend, monkeypatch):
     assert len(evs) == 1
     assert evs[0]["kind"] == "start"
     assert evs[0]["payload"]["status"] == "active"
+    # idempotency_key (the op_id) must be present + truthy — fold_task dedup
+    # of retried writes depends on it; a regression dropping it would silently
+    # disable retry-collapse.
+    assert evs[0]["idempotency_key"]
 
 
 def test_event_write_failure_does_not_fail_the_task_write(coord_backend, monkeypatch):
