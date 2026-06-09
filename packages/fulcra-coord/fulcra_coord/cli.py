@@ -14,6 +14,7 @@ from typing import Any, Optional
 from . import cache, remote, schema, views, log as ops_log, heartbeat, identity
 from . import env_int
 from . import events as _events, eventlog as _eventlog
+from . import directives as _directives
 # Leaf-utility modules extracted from this file. Re-exported under the historical
 # underscore-prefixed names so every internal call site AND the test patch targets
 # (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
@@ -447,6 +448,153 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     }
 
 
+def _directive_parity_check(*, backend: Optional[list[str]] = None) -> dict:
+    """Compare each first-class directive record against its back-ref task.
+
+    Phase 3b Task 4 safety net — the strangler-fig dual-write writes a
+    ``directives/<id>.json`` LWW snapshot mirroring each directive-creating task
+    (id ``DIR-T-<task_id>``), but NOTHING reads the directive store for
+    correctness yet (the legacy task-with-assignee stays authoritative). This
+    sub-pass folds the STORED directive record against the EXPECTED mirror of its
+    current back-ref task and surfaces divergence as health debt — REPORT-ONLY,
+    exactly like ``_event_parity_check``: drift is recorded, never acted on, and
+    a failure here can never change reconcile's exit code or mutate anything.
+
+    THE TOP-LEVEL-ONLY FILTER (load-bearing). ``remote.directives_prefix()`` now
+    contains SUB-LOG SUBTREES as well as top-level records:
+
+      * top-level record : ``directives/<id>.json``
+      * ack sub-log shard: ``directives/<id>/acks/<agent-slug>.json``
+      * route sub-log shard: ``directives/<id>/routing/<event_id>.json``
+
+    ``remote.list_files(directives_prefix())`` returns ALL of these. The check
+    MUST enumerate top-level records ONLY — a path that, after stripping the
+    prefix, has NO further ``/`` AND ends in ``.json``. A sub-log shard always
+    has a ``/`` after the directive id (``<id>/acks/...``), so the
+    no-inner-slash test rejects it. WITHOUT this filter every ack/route shard
+    would be mis-counted as a directive record and produce massive false drift
+    (a shard has no ``task_id`` back-ref shape). This is pinned by
+    ``test_directive_parity_counts_top_level_records_only``.
+
+    Per top-level record:
+
+      * Load it (``remote.download_json``). Read its ``task_id`` back-ref. No
+        ``task_id`` -> SKIP (gate): a directly-authored / orphan directive has no
+        task to compare against, so it is neither checked nor drift.
+      * Load the back-ref task via the shared task-load path (``_load_task``).
+        Task gone -> count as ``orphan`` and SKIP (the back-ref dangles; nothing
+        to compare, and a dangling ref is not the directive record's "drift").
+      * Recompute the EXPECTED mirror ``directives.directive_from_task(task)``,
+        then fold in the SAME durable ack union ``dual_write`` applies
+        (``read_directive_acks(id)`` ∪ the task-derived acks already on the
+        mirror) so the expected ``acked_by`` reflects every durable ack — even
+        ones the task's capped inline event log has since dropped.
+      * Compare the mapped fields to the STORED record:
+          - ``directive_type`` (exact)
+          - ``audience``       (exact — maps the task's current assignee)
+          - ``status``         (exact — the mapped directive status)
+          - ``acked_by`` as a SET: the meaningful drift is the stored record
+            MISSING an acker the task/sub-log holds (``expected - stored``
+            non-empty). A stored record that is a SUPERSET of expected is fine —
+            an extra acker is never a re-notify risk — so we do NOT flag that.
+
+    Volatile fields (``created_at`` / ``updated_at``) are IGNORED, mirroring the
+    way ``_event_parity_check`` ignores its volatile set: a stored snapshot and a
+    freshly-recomputed mirror legitimately differ on write timestamps and that is
+    not drift.
+
+    Returns ``{checked, drift, drift_task_ids, orphans}``. ``checked`` counts only
+    top-level records that had a comparable back-ref task (shards and orphans are
+    excluded). ``orphans`` counts records whose back-ref task is gone.
+
+    Cost: O(D) remote I/O — one ``download_json`` per directive record plus one
+    task load (and a sub-log ``list_json``) per comparable record. Acceptable for
+    a reconcile diagnostic at the current bus scale.
+    """
+    drift_set: set[str] = set()
+    checked = 0
+    orphans = 0
+
+    # Volatile fields (created_at / updated_at) are ignored BY CONSTRUCTION here:
+    # rather than diff whole records and subtract an ignore-set (the
+    # _event_parity_check approach), we compare only an explicit ALLOW-LIST of the
+    # mapped fields below (directive_type / audience / status / acked_by-as-set).
+    # A write timestamp is never in that list, so it can never register as drift.
+
+    prefix = remote.directives_prefix()
+    try:
+        paths = remote.list_files(prefix, backend=backend)
+    except Exception:
+        paths = []
+
+    for path in paths:
+        # TOP-LEVEL-ONLY FILTER (load-bearing): strip the prefix and accept only a
+        # direct child ``<id>.json`` — no further '/' (which would make it a
+        # sub-log shard under ``<id>/acks/`` or ``<id>/routing/``).
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        if "/" in rel:
+            continue  # sub-log shard (acks/ or routing/) — never a directive record
+        if not rel.endswith(".json"):
+            continue
+
+        stored = remote.download_json(path, backend=backend)
+        if not isinstance(stored, dict):
+            continue
+
+        task_id = stored.get("task_id")
+        if not task_id:
+            continue  # orphan / directly-authored directive — can't compare (gate)
+
+        task = _load_task(task_id, backend=backend)
+        if not task:
+            orphans += 1  # back-ref task gone — dangling ref, nothing to compare
+            continue
+
+        checked += 1
+
+        # Recompute the EXPECTED mirror, then fold in the SAME durable ack union
+        # dual_write applies, so expected.acked_by reflects every durable ack.
+        try:
+            expected = _directives.directive_from_task(task)
+            directive_id = expected.get("id")
+            if directive_id:
+                try:
+                    sublog_acks = _directives.read_directive_acks(
+                        directive_id, backend=backend)
+                    if sublog_acks:
+                        expected["acked_by"] = sorted(
+                            set(expected.get("acked_by") or []) | set(sublog_acks))
+                except Exception:
+                    pass  # sub-log read miss -> compare against task-derived acks only
+        except Exception:
+            # A mapping failure on one record must not abort the whole sweep.
+            continue
+
+        # Compare the mapped fields. directive_type / audience / status are exact;
+        # acked_by compares as SETS — the meaningful drift is the stored record
+        # MISSING an acker the expected (task/sub-log) set holds.
+        drifted = False
+        for field in ("directive_type", "audience", "status"):
+            if stored.get(field) != expected.get(field):
+                drifted = True
+                break
+        if not drifted:
+            missing_ackers = set(expected.get("acked_by") or []) - set(
+                stored.get("acked_by") or [])
+            if missing_ackers:
+                drifted = True
+        if drifted:
+            drift_set.add(task_id)
+
+    drift_task_ids = sorted(drift_set)
+    return {
+        "checked": checked,
+        "drift": len(drift_task_ids),
+        "drift_task_ids": drift_task_ids,
+        "orphans": orphans,
+    }
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
     import time
@@ -633,6 +781,22 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         except Exception as _de:
             try:
                 _warn(f"  Dual-write health skipped (error): {_de}")
+            except Exception:
+                pass
+        # Phase 3b Task 4 directive-parity sub-pass: fold each first-class
+        # directive record against its back-ref task and surface divergence as
+        # health debt. REPORT-ONLY and best-effort — the directive store is not
+        # authoritative (nothing reads it for correctness), so any error is
+        # swallowed and the result, present or absent, NEVER changes reconcile's
+        # exit code. Wrapped exactly like the event-parity pass above.
+        try:
+            record["directive_parity"] = _directive_parity_check(backend=backend)
+        except Exception as _dpe:
+            # Best-effort but not silent: a checker that ate its own error would
+            # report green while broken. Surface it (guarded so the warn can't
+            # break reconcile either); record["directive_parity"] is simply absent.
+            try:
+                _warn(f"  Directive-parity check skipped (error): {_dpe}")
             except Exception:
                 pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:

@@ -66,7 +66,11 @@ def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
                                      dt=None):
     """Append a routing event AND sync task.assignee to its `to`, so the event
     log (audit + sweep input) and the assignee (inbox/tell machinery) never
-    disagree. Mutates + returns a deep copy of the task."""
+    disagree. Mutates + returns a deep copy of the task.
+
+    The durable directive routing sub-log is mirrored AFTER the authoritative
+    task write confirms the body landed. Keeping this helper pure avoids a
+    phantom route shard when the later task upload returns False."""
     import copy
     from . import routing
     task = copy.deepcopy(task)
@@ -80,6 +84,27 @@ def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
     task["updated_at"] = at
     task["last_touched_by"] = by
     return task
+
+
+def _mirror_route_to_directive_sublog(
+    task: dict[str, Any], *, backend: Optional[list[str]] = None
+) -> None:
+    """Best-effort mirror of the task's latest route event into the directive sub-log.
+
+    This is called only after the task body has landed (True or NeedsReconcile
+    path from _write_task_and_views). Writing the shard before the task upload
+    would let a failed upload leave durable directive routing metadata for a
+    route that never became authoritative.
+    """
+    try:
+        task_id = task.get("id")
+        route_event = routing.current_route(task)
+        if task_id and route_event:
+            from . import directives
+            directives.append_directive_route(
+                directives.stable_directive_id(task_id), route_event, backend=backend)
+    except Exception:
+        pass
 
 
 def _force_block_for_human(task, *, by, ask, human):
@@ -231,7 +256,17 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     try:
         ok = _write_task_and_views(task, backend=backend, command="request-review")
     except (schema.ConflictError, schema.NeedsReconcile):
+        # The task BODY landed (these are raised only after the body uploaded),
+        # so the dual-write mirror should still fire — same posture as cmd_tell.
         ok = True
+    if ok:
+        _mirror_route_to_directive_sublog(task, backend=backend)
+        # Phase 3b dual-write: mirror the routed review into a `review` directive
+        # (type detected by the kind:review tag; artifact_ref from pr/repo). Uses
+        # the shared low-layer writer in directives — see the WHY note there for
+        # the lifecycle↔routing_ops import-cycle reason it lives there, not here.
+        from . import directives
+        directives.dual_write(task, command="request-review", backend=backend)
     _info(f"Review {artifact_display} routed to {winner} ({tier}).")
     return 0 if ok else 1
 
@@ -346,6 +381,12 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     except Exception as e:  # noqa: BLE001 — best-effort; a write blowup warns, never crashes
         _warn(f"review-done directive failed (non-fatal): {e}")
         return 1
+    if ok:
+        # Phase 3b dual-write: mirror the verdict into a `verdict` directive
+        # addressed to the author (type detected by the kind:review-verdict tag).
+        # Shared low-layer writer; never fails the authoritative task write.
+        from . import directives
+        directives.dual_write(task, command="review-done", backend=backend)
     _info(f"Review verdict ({verdict}) on {artifact_display} sent to {author}.")
     return 0 if ok else 1
 
@@ -528,8 +569,11 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None):
                 candidate_snapshot=snapshot,
                 observed_updated_at=fresh.get("updated_at", ""))
             try:
-                _write_task_and_views(updated, backend=backend, command="reroute-review")
-            except (schema.ConflictError, schema.NeedsReconcile):
+                if _write_task_and_views(updated, backend=backend, command="reroute-review"):
+                    _mirror_route_to_directive_sublog(updated, backend=backend)
+            except schema.NeedsReconcile:
+                _mirror_route_to_directive_sublog(updated, backend=backend)
+            except schema.ConflictError:
                 pass  # optimistic write is the second line of defence; reconverges next cycle
         except Exception:
             continue  # one bad task must never break the sweep / reconcile tick
