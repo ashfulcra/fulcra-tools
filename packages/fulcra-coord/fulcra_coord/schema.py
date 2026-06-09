@@ -338,6 +338,225 @@ def make_presence(
     }
 
 
+# ---------------------------------------------------------------------------
+# First-class Directive record (Phase 3a — additive, nothing reads/writes yet)
+# ---------------------------------------------------------------------------
+
+DIRECTIVE_SCHEMA = "fulcra.coordination.directive.v1"
+
+# The closed set of directive communication types. WHY these five:
+#   tell       — an instruction from one agent to another (one-to-one).
+#   broadcast  — a one-to-many instruction; audience="*" is the wildcard.
+#   review     — a request for another agent (or human) to review work.
+#   verdict    — the outcome of a review (approved/rejected + rationale).
+#   human-ask  — a directive that surfaces to the human inbox (replaces the
+#                "blocked-on-you" pattern currently encoded as task status).
+_DIRECTIVE_TYPES = {"tell", "broadcast", "review", "verdict", "human-ask"}
+
+# Valid statuses for a directive. Intentionally SMALLER than task statuses:
+# directives are ephemeral routing primitives, not lifecycle-tracked work units.
+_DIRECTIVE_STATUSES = {"proposed", "delivered", "acked", "acted", "expired"}
+_DIRECTIVE_KEYS = {
+    "schema", "id", "directive_type", "from", "audience",
+    "title", "summary", "next_action", "priority", "workstream",
+    "status", "acked_by", "artifact_ref", "not_before", "due",
+    "routing", "created_at", "updated_at", "task_id",
+}
+
+
+def make_directive_id(directive_type: str, dt: Optional[datetime] = None) -> str:
+    """Generate a collision-resistant, time-sortable directive ID.
+
+    Mirrors make_task_id's approach (date slug + random suffix) so IDs sort
+    lexicographically by creation time and remain human-readable in file listings.
+    The directive_type is embedded so a ``ls directives/`` scan is self-describing.
+
+    WHY include a random suffix: two directives of the same type created in the
+    same second by different agents (or in rapid succession) must not collide —
+    the suffix gives 8 hex chars (32-bit) of per-instant entropy, matching the
+    task ID scheme.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    date_part = dt.strftime("%Y%m%d")
+    type_slug = _slugify(directive_type)[:16].rstrip("-")
+    suffix = hashlib.sha1(uuid.uuid4().bytes).hexdigest()[:8]
+    return f"DIR-{date_part}-{type_slug}-{suffix}"
+
+
+def make_directive(
+    *,
+    directive_type: str,
+    from_agent: str,
+    audience: str,
+    title: str,
+    workstream: str,
+    summary: str = "",
+    next_action: str = "",
+    priority: str = "P2",
+    status: str = "proposed",
+    artifact_ref: Optional[dict] = None,
+    not_before: Optional[str] = None,
+    due: Optional[str] = None,
+    task_id: Optional[str] = None,
+    directive_id: Optional[str] = None,
+    dt: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Build a first-class directive record. ADDITIVE — nothing consumes it yet.
+
+    ``from_agent`` is who issues the directive (the instructing owner);
+    ``audience`` is the recipient agent id or ``'*'`` (broadcast wildcard, matching
+    ``views.BROADCAST``). ``task_id`` is a back-reference to the legacy
+    task-with-assignee during the dual-write transition (Phase 3b); it is ``None``
+    for directives created directly after the migration cutover.
+
+    WHY a separate record type rather than a task with assignee: tasks model
+    WORK (with lifecycle, evidence, checklists, done/blocked semantics). Directives
+    model COMMUNICATION (who told whom what). Conflating them forces the inbox,
+    ack, expiry, and routing semantics to leak into the task lifecycle state
+    machine — which is exactly the coupling Phase 3 removes.
+    """
+    # --- Validate required string fields first (before the more expensive path) ---
+    if directive_type not in _DIRECTIVE_TYPES:
+        raise ValueError(
+            f"Invalid directive_type {directive_type!r}. "
+            f"Valid: {sorted(_DIRECTIVE_TYPES)}"
+        )
+    if not from_agent or not from_agent.strip():
+        raise ValueError("from_agent must be a non-empty string.")
+    if not audience or not audience.strip():
+        raise ValueError("audience must be a non-empty string.")
+    if not title or not title.strip():
+        raise ValueError("title must be a non-empty string.")
+
+    if priority not in VALID_PRIORITIES:
+        raise ValueError(
+            f"Invalid priority {priority!r}. Valid: {sorted(VALID_PRIORITIES)}"
+        )
+    if status not in _DIRECTIVE_STATUSES:
+        raise ValueError(
+            f"Invalid status {status!r}. Valid: {sorted(_DIRECTIVE_STATUSES)}"
+        )
+
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    now_iso = dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    if directive_id is None:
+        directive_id = make_directive_id(directive_type, dt)
+
+    return {
+        "schema": DIRECTIVE_SCHEMA,
+        "id": directive_id,
+        "directive_type": directive_type,
+        # "from" is the standard JSON key name for the issuing agent. We use
+        # "from" (not "from_agent") in the wire format to match the spec and keep
+        # the record self-describing. Python callers pass from_agent= to avoid the
+        # reserved-word clash.
+        "from": from_agent,
+        "audience": audience,
+        "title": title,
+        "summary": summary,
+        "next_action": next_action,
+        "priority": priority,
+        "workstream": workstream,
+        "status": status,
+        # acked_by: agents (or humans) who have acknowledged receipt. Initially
+        # empty; the Phase 3b listener appends entries as acks arrive.
+        "acked_by": [],
+        "artifact_ref": artifact_ref,
+        "not_before": not_before,
+        "due": due,
+        # routing: reserved for Phase 3b fan-out metadata (e.g. re-broadcast
+        # hops, delivery receipts). Empty list is the safe default.
+        "routing": [],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        # Back-reference to the legacy task-with-assignee during Phase 3b
+        # dual-write. None once migration is complete and directives are primary.
+        "task_id": task_id,
+    }
+
+
+def validate_directive(d: dict) -> list[str]:
+    """Return a list of human-readable validation problems (empty = valid).
+
+    Mirrors validate_task in style: iterates over required fields, checks
+    the schema string, and validates the directive_type enum. Returns ALL
+    problems found — not just the first — so callers can surface a complete
+    picture to the user.
+
+    WHY pure (no raises): validators that raise stop at the first problem.
+    A list-returning validator lets the CLI / inbox renderer show everything
+    wrong with an inbound directive in one pass, which matters for triage.
+    """
+    errors: list[str] = []
+
+    missing = sorted(_DIRECTIVE_KEYS - set(d.keys()))
+    extra = sorted(set(d.keys()) - _DIRECTIVE_KEYS)
+    for field in missing:
+        errors.append(f"Missing required field: {field!r}")
+    for field in extra:
+        errors.append(f"Unexpected field: {field!r}")
+
+    # Required non-empty string fields — same pattern as validate_task.
+    required_str = [
+        "id", "directive_type", "from", "audience", "title",
+        "priority", "workstream", "status", "schema", "created_at", "updated_at",
+    ]
+    for field in required_str:
+        if field in d and not d[field] and d[field] != 0:
+            errors.append(f"Required field {field!r} must be non-empty.")
+
+    # Schema string check — must be the exact constant, not a task schema etc.
+    schema = d.get("schema", "")
+    if schema and schema != DIRECTIVE_SCHEMA:
+        errors.append(
+            f"Wrong schema {schema!r}; expected {DIRECTIVE_SCHEMA!r}."
+        )
+
+    # directive_type enum — only flag if the field is present AND non-empty
+    # (the missing/empty case is already covered above).
+    dtype = d.get("directive_type", "")
+    if dtype and dtype not in _DIRECTIVE_TYPES:
+        errors.append(
+            f"Unknown directive_type {dtype!r}. Valid: {sorted(_DIRECTIVE_TYPES)}"
+        )
+
+    # status enum — same present-and-non-empty guard as directive_type.
+    dstatus = d.get("status", "")
+    if dstatus and dstatus not in _DIRECTIVE_STATUSES:
+        errors.append(
+            f"Unknown status {dstatus!r}. Valid: {sorted(_DIRECTIVE_STATUSES)}"
+        )
+
+    priority = d.get("priority", "")
+    if priority and priority not in VALID_PRIORITIES:
+        errors.append(
+            f"Unknown priority {priority!r}. Valid: {sorted(VALID_PRIORITIES)}"
+        )
+
+    if "acked_by" in d and not isinstance(d.get("acked_by"), list):
+        errors.append("Field 'acked_by' must be a list.")
+    if "routing" in d and not isinstance(d.get("routing"), list):
+        errors.append("Field 'routing' must be a list.")
+    if (
+        "artifact_ref" in d
+        and d.get("artifact_ref") is not None
+        and not isinstance(d.get("artifact_ref"), dict)
+    ):
+        errors.append("Field 'artifact_ref' must be an object or None.")
+    for field in ("not_before", "due", "task_id", "summary", "next_action"):
+        if (
+            field in d
+            and d.get(field) is not None
+            and not isinstance(d.get(field), str)
+        ):
+            errors.append(f"Field {field!r} must be a string or None.")
+
+    return errors
+
+
 def build_tags(
     *,
     status: str,
