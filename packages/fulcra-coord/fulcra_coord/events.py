@@ -52,6 +52,12 @@ def _at_sort_key(at: str) -> str:
     chronological order. This is the single source of truth for the
     normalization, shared by :func:`event_id` (its sortable-ts prefix) and
     :func:`fold_task` (its event ordering) so the two can never drift apart.
+
+    Offset forms (e.g. ``+00:00``) are NOT normalized — the ``+`` and its
+    digits survive as literal characters and would mis-sort relative to a
+    ``Z`` form. This is safe only because the sole writer (``timeutil.iso_z``
+    via ``now_iso``) always emits the uniform microsecond ``...Z`` form; a
+    replay/backfill must use the same convention.
     """
     return at.replace(":", "").replace("-", "").replace(".", "").replace("Z", "")
 

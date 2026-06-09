@@ -509,3 +509,25 @@ def test_make_directive_accepts_each_valid_status():
                                   title="t", workstream="ws", status=s)
         assert d["status"] == s
         assert validate_directive(d) == []
+
+
+def test_validate_directive_missing_created_at_reports_missing_field_not_format():
+    # A directive with missing created_at reports the missing-field error
+    # without also firing the timestamp format check. The format check only
+    # runs when the field is present and non-empty; the missing case is
+    # already reported by the key-set check.
+    d = make_directive(
+        directive_type="tell",
+        from_agent="a",
+        audience="b",
+        title="t",
+        workstream="ws",
+    )
+    del d["created_at"]
+    errs = validate_directive(d)
+    # Should have a "Missing required field: 'created_at'" error.
+    missing_field_errs = [e for e in errs if "Missing required field" in e and "created_at" in e]
+    assert len(missing_field_errs) >= 1, f"Expected missing-field error for created_at, got: {errs}"
+    # Should NOT have any "format" error for created_at.
+    format_errs = [e for e in errs if "format" in e.lower() and "created_at" in e]
+    assert len(format_errs) == 0, f"Should not have format error when field is missing, got: {format_errs}"

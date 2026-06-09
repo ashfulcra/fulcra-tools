@@ -204,3 +204,10 @@ def test_fold_orders_by_numeric_instant_not_raw_string():
     # Feed them in BOTH orders so the result depends only on sort, not input order.
     assert events.fold_task([earlier, later])["status"] == "active"
     assert events.fold_task([later, earlier])["status"] == "active"
+
+
+def test_at_sort_key_empty_string():
+    # Empty ``at`` returns empty key, sorts first. This characterizes the
+    # edge case where a fold receives an event with no timestamp (malformed),
+    # ensuring it sorts predictably to the front.
+    assert events._at_sort_key("") == ""
