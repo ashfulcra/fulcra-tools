@@ -20,11 +20,17 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
-# No non-stdlib dependencies — just subprocess + stdlib JSON/pathlib.
-dependencies = []
+# The object-store transport now lives in its own package; we depend on it and
+# re-export it from fulcra_coord.remote for back-compat. No OTHER non-stdlib
+# deps — the transport itself is still just subprocess + stdlib JSON/pathlib.
+dependencies = ["fulcra-coord-files"]
 
 [project.scripts]
 fulcra-coord = "fulcra_coord.entry:main"
+
+# Resolve fulcra-coord-files from the in-repo workspace member rather than PyPI.
+[tool.uv.sources]
+fulcra-coord-files = { workspace = true }
 
 [project.optional-dependencies]
 # pyyaml is a TEST-ONLY dep (validating the adapter OpenAPI YAML parses) — the

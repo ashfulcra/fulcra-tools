@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -103,3 +105,27 @@ def _hermetic_cache_and_backend():
             os.environ["FULCRA_COORD_ANNOTATIONS"] = prev_annotations
 
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.fixture
+def coord_backend(tmp_path):
+    """Per-test isolated fake Fulcra backend for eventlog I/O tests.
+
+    Points FULCRA_FAKE_ROOT at the per-test ``tmp_path`` (distinct from the
+    shared tmpdir used by the autouse hermetic fixture) so each test gets a
+    clean, empty store. Returns an explicit backend list — callers pass it as
+    ``backend=coord_backend`` — so the env-var ``FULCRA_COORD_BACKEND`` set by
+    the autouse fixture (the ``false`` safety net) is bypassed entirely and
+    never reaches the fake backend script.
+    """
+    prev = os.environ.get("FULCRA_FAKE_ROOT")
+    os.environ["FULCRA_FAKE_ROOT"] = str(tmp_path)
+    fake = Path(__file__).resolve().parent / "fake_fulcra_backend.py"
+    yield [sys.executable, str(fake)]
+    # Restore on teardown so this per-test path can't leak into a later test
+    # that reaches the fake backend without an explicit backend= (test-pollution
+    # time-bomb once T5/T6 add more fake-backend fixtures).
+    if prev is None:
+        os.environ.pop("FULCRA_FAKE_ROOT", None)
+    else:
+        os.environ["FULCRA_FAKE_ROOT"] = prev
