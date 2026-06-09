@@ -223,3 +223,45 @@ def test_parity_dedups_task_drifting_on_both_field_and_ack(coord_backend):
     report = cli._event_parity_check(backend=coord_backend)
     assert report["drift_task_ids"].count(task["id"]) == 1
     assert report["drift"] == len(report["drift_task_ids"])
+
+
+# ---------------------------------------------------------------------------
+# Ack drift on delta-only folds + skip ordering
+# ---------------------------------------------------------------------------
+
+def test_parity_delta_only_ack_drift_flagged(coord_backend):
+    """Ack drift is flagged on delta-only folds too (sits outside the complete/delta
+    branch). A delta-only task (events but NO snapshot event) whose fold lacks an
+    acker that the summaries view has must contribute to ack_drift AND drift."""
+    task = {"id": "TASK-DELTA-ACK", "title": "t", "status": "active", "current_summary": "s0"}
+    remote.upload_json(task, remote.task_remote_path("TASK-DELTA-ACK"), backend=coord_backend)
+    # Delta events only (no full-task snapshot -> fold_is_complete False).
+    for kind, p in [("start", {"status": "active"}),
+                    ("update", {"current_summary": "s0"})]:
+        eventlog.append_event(events.make_event(family="tasks", task_id="TASK-DELTA-ACK",
+                              kind=kind, actor="a", payload=p), backend=coord_backend)
+    # Summaries view has an ack the fold is missing.
+    remote.upload_json({"summaries": [{"id": "TASK-DELTA-ACK", "acked_by": ["agent-x"]}]},
+                       remote.view_remote_path("summaries"), backend=coord_backend)
+    report = cli._event_parity_check(backend=coord_backend)
+    assert report["ack_drift"] >= 1
+    assert "TASK-DELTA-ACK" in report["ack_drift_task_ids"]
+    assert "TASK-DELTA-ACK" in report["drift_task_ids"]
+
+
+def test_parity_no_ack_drift_for_task_with_no_events(coord_backend):
+    """A task with a summaries entry (with an acker) but NO event shards at all
+    contributes zero ack_drift because the per-task loop's 'if not evs: continue'
+    skip runs BEFORE the ack check. This pins the skip ordering against future
+    refactors."""
+    task = {"id": "TASK-NO-EVENTS", "title": "t", "status": "active"}
+    remote.upload_json(task, remote.task_remote_path("TASK-NO-EVENTS"), backend=coord_backend)
+    # NO event shards for this task (not dual-written yet).
+    # But summaries view has an ack for it.
+    remote.upload_json({"summaries": [{"id": "TASK-NO-EVENTS", "acked_by": ["agent-x"]}]},
+                       remote.view_remote_path("summaries"), backend=coord_backend)
+    report = cli._event_parity_check(backend=coord_backend)
+    # Since there are no events, the task is skipped entirely (not checked),
+    # so it contributes NO ack_drift.
+    assert report["ack_drift"] == 0
+    assert "TASK-NO-EVENTS" not in report["ack_drift_task_ids"]

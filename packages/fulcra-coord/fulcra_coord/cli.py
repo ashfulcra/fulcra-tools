@@ -306,7 +306,7 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     drift_set: set[str] = set()
     # Separate breakdown: tasks whose fold is missing >=1 durable ack the
     # authoritative summaries view holds (root cause C1, report-only).
-    ack_drift_ids: list[str] = []
+    ack_drift_ids_set: set[str] = set()
     checked = 0
 
     # Fields excluded from BOTH the full-task and delta-only comparisons — shared
@@ -373,17 +373,17 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
         # would re-notify an already-acked directive — surface it (report-only).
         missing = summ_acks.get(snap["id"], set()) - set(folded.get("acked_by") or [])
         if missing:
-            if snap["id"] not in ack_drift_ids:
-                ack_drift_ids.append(snap["id"])
+            ack_drift_ids_set.add(snap["id"])
             drift_set.add(snap["id"])
 
     drift_task_ids = sorted(drift_set)
+    ack_drift_task_ids = sorted(ack_drift_ids_set)
     return {
         "checked": checked,
         "drift": len(drift_task_ids),
         "drift_task_ids": drift_task_ids,
-        "ack_drift": len(ack_drift_ids),
-        "ack_drift_task_ids": ack_drift_ids,
+        "ack_drift": len(ack_drift_task_ids),
+        "ack_drift_task_ids": ack_drift_task_ids,
     }
 
 
