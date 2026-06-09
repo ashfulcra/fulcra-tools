@@ -28,6 +28,18 @@ def task_file_path(task_id: str) -> str:
     return f"{remote_root()}/tasks/{task_id}.json"
 
 
+def read_source() -> str:
+    """Where reads reconstruct a task body from. 'file' (default) = the mutable
+    tasks/<id>.json; 'events' = the event fold when complete, else file. Per-host
+    env knob for the Phase-2b cutover; reversible by unsetting it.
+
+    Default-off by design: this changes what a READ returns, so an operator must
+    explicitly opt in (FULCRA_COORD_READ_SOURCE=events). Any unrecognised value
+    degrades to 'file' so a typo can never silently flip the read path."""
+    v = (os.environ.get("FULCRA_COORD_READ_SOURCE") or "file").strip().lower()
+    return v if v in ("file", "events") else "file"
+
+
 def env_float(name: str, default: float, override=None) -> float:
     """Resolve a float knob: explicit ``override`` > env var ``name`` > ``default``.
 
