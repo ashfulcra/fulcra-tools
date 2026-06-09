@@ -230,13 +230,24 @@ Flipping the fleet default is a deliberate operator decision gated on parity,
 
 **The parity safety net.** Reconcile's `_event_parity_check` folds each task's
 events and compares the result against its mutable file, recording
-`event_parity: {checked, drift, drift_task_ids, ack_drift, ack_drift_task_ids}`
-in the per-host health record. `drift` counts tasks where the fold disagrees with
-the file; `ack_drift` separately counts folds missing a durable ack that the
-`summaries` view has (a delta-only or truncated-event-log task can lose an
-`inbox_ack` the aggregate still holds). The check is **report-only** — the
-mutable file stays authoritative, nothing is rewritten. Sustained `drift == 0`
-is the green light for the flip.
+`event_parity: {checked, drift, drift_task_ids, ack_drift, ack_drift_task_ids,
+tasks_total, tasks_with_events, folds_complete}` in the per-host health record.
+`drift` counts tasks where the fold disagrees with the file; `ack_drift`
+separately counts folds missing a durable ack that the `summaries` view has (a
+delta-only or truncated-event-log task can lose an `inbox_ack` the aggregate
+still holds). The three coverage counts are the liveness signal: `tasks_total`
+is every task file on the bus, `tasks_with_events` is how many had an event log
+to compare (identical to `checked`), and `folds_complete` is how many produced a
+trustworthy full-snapshot fold. The check is **report-only** — the mutable file
+stays authoritative, nothing is rewritten.
+
+The green light for the flip is **not** bare `drift == 0`. `drift == 0` is
+satisfiable two ways: the fold faithfully reconstructs every task, OR the fold
+folded nothing / there are no events on the bus, so there was simply nothing to
+disagree with. The strengthened gate is `drift == 0` **AND** `folds_complete > 0`
+**AND** `tasks_with_events` ≈ `tasks_total` (high coverage). A host that folded
+nothing, or a bus with no events, can no longer read green just because there was
+nothing to compare.
 
 **Retention.** `FULCRA_COORD_EVENTLOG_KEEP` (default 20) bounds per-task shard
 growth: the reconcile retention pass keeps each live task's latest snapshot plus

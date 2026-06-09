@@ -308,6 +308,16 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     # authoritative summaries view holds (root cause C1, report-only).
     ack_drift_ids_set: set[str] = set()
     checked = 0
+    # SIGNAL A (coverage liveness): "drift == 0" is satisfiable two ways — the
+    # fold faithfully reconstructs every task, OR the fold folded nothing / there
+    # are no events so there is nothing to disagree with. These additive counts
+    # make the difference visible so a host that folded nothing can no longer read
+    # green just because there was nothing to compare.
+    #   tasks_total      — every task .json file iterated under tasks/.
+    #   tasks_with_events — tasks that had >=1 event and were compared (== checked).
+    #   folds_complete    — tasks whose fold_is_complete (trustworthy full-snapshot).
+    tasks_total = 0
+    folds_complete = 0
 
     # Fields excluded from BOTH the full-task and delta-only comparisons — shared
     # so the two branches stay consistent. See the docstring for why each differs
@@ -346,15 +356,23 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             continue
         if "/events/" in path:
             continue
+        # Count every well-formed task file BEFORE the events gate, so
+        # tasks_total reflects the full bus task population (the denominator the
+        # flip gate's coverage check divides tasks_with_events by). A task with no
+        # events still counts toward the total — it just isn't compared.
         snap = remote.download_json(path, backend=backend)
         if not snap or "id" not in snap:
             continue
+        tasks_total += 1
         evs = _eventlog.read_events(snap["id"], backend=backend)
         if not evs:
             continue  # not yet dual-written (pre-migration task) — not drift
         checked += 1
         folded = _events.fold_task(evs)
-        if _events.fold_is_complete(folded):
+        fold_complete = _events.fold_is_complete(folded)
+        if fold_complete:
+            folds_complete += 1
+        if fold_complete:
             # Compare the durable task fields. Exclude bookkeeping the fold adds
             # (_applied_event_count) and fields that legitimately differ between a
             # point-in-time snapshot and the live file: updated_at / last_touched_*
@@ -389,6 +407,10 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
         "drift_task_ids": drift_task_ids,
         "ack_drift": len(ack_drift_task_ids),
         "ack_drift_task_ids": ack_drift_task_ids,
+        # SIGNAL A — additive coverage/liveness counts (existing keys unchanged):
+        "tasks_total": tasks_total,
+        "tasks_with_events": checked,  # same as checked; named for the flip gate
+        "folds_complete": folds_complete,
     }
 
 
