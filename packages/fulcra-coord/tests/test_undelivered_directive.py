@@ -143,9 +143,24 @@ def test_acked_directive_not_flagged(coord_backend):
 def test_acked_via_acked_by_field_not_flagged(coord_backend):
     """An ack recorded as an ``acked_by`` entry (summary-only ack path) also counts
     as delivered -> NOT flagged."""
+    _seed_presence(coord_backend, agents=[("alice", _iso(datetime.now(timezone.utc)))])
     task = _directed_directive(task_id="TASK-ACKBY", assignee="bob", acked_by=["bob"])
     report = cli._undelivered_directive_check([task], backend=coord_backend)
     assert "TASK-ACKBY" not in {u["id"] for u in report["undelivered"]}
+
+
+def test_summary_only_ack_from_summaries_view_not_flagged(coord_backend):
+    """A summary-only ack is durable even when the task body still lacks that ack."""
+    _seed_presence(coord_backend, agents=[("alice", _iso(datetime.now(timezone.utc)))])
+    task = _directed_directive(task_id="TASK-SUMMARYACK", assignee="bob")
+    remote.upload_json(
+        {"summaries": [{"id": task["id"], "acked_by": ["bob"]}]},
+        remote.view_remote_path("summaries"),
+        backend=coord_backend,
+    )
+    report = cli._undelivered_directive_check([task], backend=coord_backend)
+    assert report["count"] == 0
+    assert "TASK-SUMMARYACK" not in {u["id"] for u in report["undelivered"]}
 
 
 def test_active_task_not_flagged(coord_backend):

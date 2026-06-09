@@ -269,6 +269,28 @@ def _assignee_acked(task: dict[str, Any], assignee: str) -> bool:
     return False
 
 
+def _summary_ack_map(*, backend: Optional[list[str]] = None) -> dict[str, set[str]]:
+    """Load durable summary-only acks, degrading to an empty map on old buses."""
+    try:
+        summaries_view = remote.download_json(
+            remote.view_remote_path("summaries"), backend=backend
+        )
+        acks: dict[str, set[str]] = {}
+        for summary in (summaries_view or {}).get("summaries", []):
+            if not isinstance(summary, dict):
+                continue
+            tid = summary.get("id")
+            if not tid:
+                continue
+            acked_by = summary.get("acked_by") or []
+            if not isinstance(acked_by, list):
+                continue
+            acks[tid] = {agent for agent in acked_by if agent}
+        return acks
+    except Exception:
+        return {}
+
+
 def _undelivered_directive_check(
     all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None
 ) -> dict:
@@ -291,7 +313,8 @@ def _undelivered_directive_check(
       * OPEN and un-picked-up — ``status == "proposed"``. An ``active`` / ``done``
         / ``abandoned`` task was demonstrably received and acted on.
       * NOT acked by the assignee — no ``inbox_ack`` / ``acked_by`` from them
-        (an ack means it was seen, i.e. delivered).
+        (including durable summary-only ``acked_by`` priors; an ack means it was
+        seen, i.e. delivered).
       * assignee NOT in the LIVE set — offline or stale presence (the dead inbox).
 
     Returns ``{"count": N, "undelivered": [{"id", "assignee", "age_days"}...]}``.
@@ -332,9 +355,11 @@ def _undelivered_directive_check(
         if not live:
             return {"count": 0, "undelivered": [], "presence_unavailable": True}
         now = datetime.now(timezone.utc)
+        summary_acks = _summary_ack_map(backend=backend)
         undelivered: list[dict[str, Any]] = []
         count = 0
         for t in all_tasks:
+            tid = t.get("id")
             assignee = t.get("assignee")
             # Directed directive only: concrete agent id, not broadcast/human/empty.
             if not assignee or assignee == "*" or assignee == human:
@@ -343,7 +368,7 @@ def _undelivered_directive_check(
             if t.get("status") != "proposed":
                 continue
             # Delivered if the recipient acked it (seen), regardless of presence.
-            if _assignee_acked(t, assignee):
+            if _assignee_acked(t, assignee) or assignee in summary_acks.get(tid, set()):
                 continue
             # The dead-inbox condition: the recipient is offline / stale.
             if assignee in live:
@@ -358,7 +383,7 @@ def _undelivered_directive_check(
                 hours = views._age_hours(created, now)
                 age_days: Any = "?" if hours == float("inf") else round(hours / 24.0, 1)
                 undelivered.append({
-                    "id": t.get("id"),
+                    "id": tid,
                     "assignee": assignee,
                     "age_days": age_days,
                 })
