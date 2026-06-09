@@ -31,6 +31,41 @@ INBOX_OPEN_STATUSES = ("proposed", "waiting")
 # never be "*" (ids are kind:host:repo triples), so the sentinel can't collide.
 BROADCAST = "*"
 
+# Role-audience prefix. A directive whose assignee starts with "@" and names a
+# non-empty role (e.g. "@coord-maintainer") is addressed to a logical ROLE, not a
+# frozen agent id. It is delivered — at READ time — to whoever currently HOLDS
+# that role (declared via presence capabilities), so a directive to "the coord
+# maintainer" reaches the LIVE holder(s) instead of rotting in one stale agent's
+# dead inbox. A real agent id is a "kind:host:repo" triple and never begins with
+# "@", and the BROADCAST sentinel is "*", so the prefix can't collide with either.
+ROLE_PREFIX = "@"
+
+
+def is_role_audience(assignee: Any) -> bool:
+    """True when ``assignee`` is a ROLE audience (``@<role>`` with a non-empty role).
+
+    A role audience is resolved at delivery time against the calling agent's
+    declared roles (see inbox_for), NOT at send time — that late binding is the
+    whole point: the directive follows whoever HOLDS the role, not a fixed id.
+
+    Strict: a bare ``@`` (no role name, or only whitespace after it) is malformed,
+    not a role audience, so it can never accidentally match every agent or no agent
+    ambiguously. A None/empty/concrete/broadcast assignee is not a role audience."""
+    return (
+        isinstance(assignee, str)
+        and assignee.startswith(ROLE_PREFIX)
+        and bool(assignee[len(ROLE_PREFIX):].strip())
+    )
+
+
+def role_of(assignee: str) -> str:
+    """The role name behind a ``@<role>`` audience (the ``@`` stripped, trimmed).
+
+    Only meaningful when is_role_audience(assignee) is True; the caller gates on
+    that first. Trimmed so ``@ coord `` and ``@coord`` resolve to the same role."""
+    return assignee[len(ROLE_PREFIX):].strip()
+
+
 RECENTLY_DONE_DAYS = 7
 SEARCH_INDEX_DONE_DAYS = 30
 # Default age (days) after which a still-`proposed` BROADCAST directive drops out
@@ -677,6 +712,15 @@ def agent_matches(me: str, assignee: str) -> bool:
         # wildcard widens matching; concrete assignees below still match strictly
         # by colon-segment prefix, so "*" can't be reproduced by any real id.
         return True
+    if is_role_audience(assignee):
+        # A role audience (``@<role>``) is NEVER matched here: it is resolved at
+        # delivery time against the caller's declared roles (inbox_for), not by
+        # id-prefix. Returning False keeps this id-matching helper honest — a role
+        # string is not an agent id — so any caller that asks "does this concrete
+        # agent equal/prefix the assignee" (the index's self-owned check, the
+        # human-plate filter, undelivered-directive detection) treats a role
+        # audience as "not me", and only inbox_for's explicit role path delivers it.
+        return False
     if assignee == me:
         return True
     me_parts = me.split(":")
@@ -764,7 +808,8 @@ def build_inbox(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
 
 def inbox_for(me: str, tasks: list[dict[str, Any]], now: Optional[datetime] = None,
               include_aged: bool = False,
-              age_days: Optional[float] = None) -> list[dict[str, Any]]:
+              age_days: Optional[float] = None,
+              roles: Optional[set[str]] = None) -> list[dict[str, Any]]:
     """Open directives addressed to `me`, using prefix-aware matching.
 
     Membership for a querying agent is decided by agent_matches (a directive
@@ -778,6 +823,16 @@ def inbox_for(me: str, tasks: list[dict[str, Any]], now: Optional[datetime] = No
     assignee). The ack check is against `me`: my own ack clears it from my inbox
     even if the directive was addressed to a short id I prefix.
 
+    ROLE AUDIENCE (`@<role>`): a directive addressed to a logical role is in
+    `me`'s inbox WHEN `me` currently HOLDS that role — i.e. role_of(assignee) is
+    in `roles`, the caller's declared capability/role set (loaded from `me`'s own
+    presence record by the inbox.py caller). This is multi-holder fan-out: EVERY
+    live agent holding the role sees the directive, and NObody who doesn't. The
+    role match is delivery-time and replaces the id-prefix match for these (the
+    id helper agent_matches never matches a role audience). `roles=None`/empty (an
+    agent with no declared roles, or an old presence record without capabilities)
+    means no role directives are ever surfaced — fully backward-compatible.
+
     AGE-OUT (default behaviour): a stale informational BROADCAST (see
     is_aged_out_broadcast) is excluded so old "X joined the mesh" fan-out stops
     cluttering every inbox / SessionStart. This is a VIEW filter only — the task
@@ -785,10 +840,20 @@ def inbox_for(me: str, tasks: list[dict[str, Any]], now: Optional[datetime] = No
     shows everything. `now` is injectable for deterministic tests (like
     needs_human / is_stale). CONCRETE-assignee directives are never aged out.
     """
+    held_roles = roles or set()
     items: list[dict[str, Any]] = []
     for t in tasks:
         assignee = t.get("assignee")
-        if not assignee or not agent_matches(me, assignee):
+        if not assignee:
+            continue
+        # Membership: a role audience matches iff `me` holds the role; everything
+        # else falls back to the existing id/broadcast prefix match. A role
+        # audience is mutually exclusive with agent_matches (which returns False
+        # for it), so these two branches never double-count a directive.
+        if is_role_audience(assignee):
+            if role_of(assignee) not in held_roles:
+                continue
+        elif not agent_matches(me, assignee):
             continue
         if t.get("status") not in INBOX_OPEN_STATUSES:
             continue
