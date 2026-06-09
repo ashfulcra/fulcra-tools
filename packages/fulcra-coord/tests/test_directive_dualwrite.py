@@ -188,7 +188,7 @@ class TestDirectivesLayering:
         import ast
         pkg = Path(__file__).resolve().parents[1] / "fulcra_coord"
         src = (pkg / "directives.py").read_text(encoding="utf-8")
-        forbidden = {"lifecycle", "cli", "views", "writepipe", "inbox"}
+        forbidden = {"lifecycle", "cli", "views", "writepipe", "inbox", "routing_ops"}
         imported: set[str] = set()
         for node in ast.walk(ast.parse(src)):
             if isinstance(node, ast.ImportFrom):
