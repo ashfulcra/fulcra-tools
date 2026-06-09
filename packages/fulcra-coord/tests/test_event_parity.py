@@ -103,3 +103,123 @@ def test_parity_full_task_ignores_volatile_fields(coord_backend):
                           kind="update", actor="a", payload=snap), backend=coord_backend)
     report = cli._event_parity_check(backend=coord_backend)
     assert report["drift"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Root cause C1 — ack-divergence detection (report-only)
+#
+# The AUTHORITATIVE ack set for a task is summaries.acked_by — io.py unions
+# prior acks into each summary because the in-task event log is truncated to
+# MAX_EVENTS_INLINE, and inbox._ack_summary_only records an ack with NO event
+# shard at all. So the FOLD can be MISSING durable acks the summaries view has.
+# Parity must SURFACE that loss (otherwise a flip to events-as-source would
+# re-notify already-acked directives).
+# ---------------------------------------------------------------------------
+
+def test_parity_flags_ack_drift_when_summaries_has_extra_acker(coord_backend):
+    """C1a: fold is complete and matches the file, but the summaries view carries
+    an acker the fold never saw -> ack drift must be surfaced AND fold the task
+    into drift_task_ids so the flip-readiness gate trips."""
+    task = schema.make_task(title="p", workstream="ws", agent="a")
+    task["status"] = "active"
+    remote.upload_json(task, remote.task_remote_path(task["id"]), backend=coord_backend)
+    # Snapshot event matches the file exactly (no field drift), and carries no acks.
+    eventlog.append_event(events.make_event(family="tasks", task_id=task["id"],
+                          kind="start", actor="a", payload=dict(task)), backend=coord_backend)
+    # Authoritative summaries view records an ack the fold is missing.
+    remote.upload_json({"summaries": [{"id": task["id"], "acked_by": ["agent-x"]}]},
+                       remote.view_remote_path("summaries"), backend=coord_backend)
+    report = cli._event_parity_check(backend=coord_backend)
+    assert report["ack_drift"] >= 1
+    assert task["id"] in report["ack_drift_task_ids"]
+    assert task["id"] in report["drift_task_ids"]
+    assert report["drift"] >= 1
+
+
+def test_parity_no_ack_drift_when_fold_has_all_durable_acks(coord_backend):
+    """C1b: the fold's acked_by is a superset of the summaries acked_by -> the fold
+    has every durable ack, so no ack drift is contributed."""
+    task = schema.make_task(title="p", workstream="ws", agent="a")
+    task["status"] = "active"
+    task["acked_by"] = ["agent-x", "agent-y"]
+    remote.upload_json(task, remote.task_remote_path(task["id"]), backend=coord_backend)
+    eventlog.append_event(events.make_event(family="tasks", task_id=task["id"],
+                          kind="start", actor="a", payload=dict(task)), backend=coord_backend)
+    remote.upload_json({"summaries": [{"id": task["id"], "acked_by": ["agent-x"]}]},
+                       remote.view_remote_path("summaries"), backend=coord_backend)
+    report = cli._event_parity_check(backend=coord_backend)
+    assert report["ack_drift"] == 0
+    assert task["id"] not in report["ack_drift_task_ids"]
+
+
+def test_parity_no_crash_when_summaries_view_absent(coord_backend):
+    """C1c: no summaries view present (download returns None) -> no crash, no ack
+    drift flagged. The check must degrade gracefully on an old / missing bus view."""
+    task = schema.make_task(title="p", workstream="ws", agent="a")
+    task["status"] = "active"
+    remote.upload_json(task, remote.task_remote_path(task["id"]), backend=coord_backend)
+    eventlog.append_event(events.make_event(family="tasks", task_id=task["id"],
+                          kind="start", actor="a", payload=dict(task)), backend=coord_backend)
+    # No summaries view uploaded.
+    report = cli._event_parity_check(backend=coord_backend)
+    assert report["ack_drift"] == 0
+    assert report["ack_drift_task_ids"] == []
+
+
+# ---------------------------------------------------------------------------
+# Root cause C2 — safe delta-only field broadening
+#
+# When the fold is NOT complete (legacy delta-only task, no snapshot), parity
+# used to compare ONLY status, missing drift in every other delta-carried
+# field. We broaden to compare all fields the fold ACTUALLY carries, but ONLY
+# those — a field the fold never saw can't false-positive.
+# ---------------------------------------------------------------------------
+
+def test_parity_delta_only_flags_non_status_field_drift(coord_backend):
+    """C2a: delta-only task (events but NO snapshot) where a NON-status field the
+    fold carries differs from the file -> now flagged as drift (status-only missed it)."""
+    task = {"id": "TASK-C2A", "title": "t", "status": "active", "current_summary": "FILE-VALUE"}
+    remote.upload_json(task, remote.task_remote_path("TASK-C2A"), backend=coord_backend)
+    # Delta events only (no snapshot -> fold_is_complete False). status agrees,
+    # but current_summary disagrees with the file.
+    for kind, p in [("start", {"status": "active"}),
+                    ("update", {"current_summary": "FOLD-VALUE"})]:
+        eventlog.append_event(events.make_event(family="tasks", task_id="TASK-C2A",
+                              kind=kind, actor="a", payload=p), backend=coord_backend)
+    report = cli._event_parity_check(backend=coord_backend)
+    assert report["drift"] >= 1
+    assert "TASK-C2A" in report["drift_task_ids"]
+
+
+def test_parity_delta_only_no_false_positive_on_unseen_field(coord_backend):
+    """C2b: delta-only task where the file has an EXTRA field the fold never saw,
+    but all fold-carried fields match -> NO drift (broadening must not over-flag)."""
+    task = {"id": "TASK-C2B", "title": "t", "status": "active",
+            "current_summary": "same", "extra_only_in_file": "ignored"}
+    remote.upload_json(task, remote.task_remote_path("TASK-C2B"), backend=coord_backend)
+    for kind, p in [("start", {"status": "active"}),
+                    ("update", {"current_summary": "same"})]:
+        eventlog.append_event(events.make_event(family="tasks", task_id="TASK-C2B",
+                              kind=kind, actor="a", payload=p), backend=coord_backend)
+    report = cli._event_parity_check(backend=coord_backend)
+    assert "TASK-C2B" not in report["drift_task_ids"]
+
+
+def test_parity_dedups_task_drifting_on_both_field_and_ack(coord_backend):
+    """C1+drift dedup: a task that drifts on BOTH a field AND an ack appears
+    EXACTLY ONCE in drift_task_ids, and drift == len(drift_task_ids)."""
+    task = schema.make_task(title="p", workstream="ws", agent="a")
+    task["status"] = "active"
+    task["current_summary"] = "FILE-VALUE"
+    remote.upload_json(task, remote.task_remote_path(task["id"]), backend=coord_backend)
+    # Snapshot event disagrees with the file on current_summary (field drift).
+    snap = dict(task)
+    snap["current_summary"] = "FOLD-VALUE"
+    eventlog.append_event(events.make_event(family="tasks", task_id=task["id"],
+                          kind="start", actor="a", payload=snap), backend=coord_backend)
+    # And summaries carries an ack the fold is missing (ack drift).
+    remote.upload_json({"summaries": [{"id": task["id"], "acked_by": ["agent-x"]}]},
+                       remote.view_remote_path("summaries"), backend=coord_backend)
+    report = cli._event_parity_check(backend=coord_backend)
+    assert report["drift_task_ids"].count(task["id"]) == 1
+    assert report["drift"] == len(report["drift_task_ids"])
