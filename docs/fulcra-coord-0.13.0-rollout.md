@@ -96,6 +96,7 @@ to the latest released version:
 ```bash
 uv tool install 'fulcra-api==0.1.33' --force
 uv tool list | grep fulcra-api   # confirm the bump took
+fulcra-coord doctor              # confirm the invoked client is file-capable
 ```
 
 **Gotcha (real, just hit):** On some hosts, `fulcra-api` was installed from a
@@ -105,6 +106,13 @@ explicit version form (`uv tool install 'fulcra-api==0.1.33' --force`) above to
 move such a host onto the released build. If a host intentionally runs a LOCAL/dev
 build of fulcra-api (e.g. for unreleased features), point it at that source
 instead — don't blindly force it to PyPI.
+
+`uv tool install` updates the uv-tool shim; it does **not** override an explicit
+`FULCRA_CLI_COMMAND`. If `fulcra-coord doctor` still reports a local/dev command,
+keep that only when it intentionally points at a current file-capable build.
+Otherwise update/unset `FULCRA_CLI_COMMAND` in the host shell/launchd environment
+and reinstall listener/heartbeat jobs so background processes inherit the same
+client that `doctor` reports.
 
 The `fulcra-api` `file` command surface is unchanged 0.1.32→0.1.33 (identical
 command set; the delta is internal), so this bump is safe and loses nothing — it's

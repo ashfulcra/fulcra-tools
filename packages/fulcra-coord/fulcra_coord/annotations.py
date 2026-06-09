@@ -8,9 +8,9 @@ task, we want a single durable breadcrumb on the operator's Fulcra timeline — 
 their own Life timeline, *what the agents were doing and when*. One track, one
 annotation per real lifecycle transition.
 
-THE WRITE MECHANISM (confirmed live via the Fulcra CLI)
--------------------------------------------------------
-The per-occurrence write is a *moment annotation* created on the timeline via
+THE WRITE MECHANISMS
+--------------------
+The CLI per-occurrence write is a *moment annotation* created on the timeline via
 the Fulcra CLI's ``create-data-type`` command::
 
     fulcra create-data-type MomentAnnotation "<NAME>" \
@@ -24,12 +24,12 @@ of lifecycle/agent. The created annotation returns JSON including its ``id`` and
 ``fulcra_source_id`` and is deletable via ``fulcra delete-data-type <id>`` (used
 only by the live smoke test, never in the task path).
 
-This support currently lives on the Fulcra CLI's ``create-annotations-commands``
-branch (not yet on ``fulcra-api`` main). Until it merges, point fulcra-coord at
-that build via ``FULCRA_CLI_COMMAND`` (e.g.
-``FULCRA_CLI_COMMAND="uv run --project /path/to/fulcra-api-python fulcra"``);
-once it lands on ``fulcra-api`` main and the installed CLI gains
-``create-data-type``, no pointer is needed.
+This CLI support has been live-smoked on the Fulcra CLI's
+``create-annotations-commands`` branch, but the released file-capable
+``fulcra-api`` 0.1.32/0.1.33 builds do not yet include ``create-data-type``. Until
+one released CLI build has both file commands and annotation writes, use the HTTP
+writer for fleet rollout; CLI mode is only for hosts that intentionally point
+``FULCRA_COORD_ANNOTATION_CLI`` at an annotations-capable dev build.
 
 WHY IT IS CAPABILITY-GATED (and OFF by default)
 -----------------------------------------------
@@ -44,8 +44,9 @@ opts in, and so machines without the annotations-capable CLI stay inert:
     "Agent Tasks" moment definition (cached), then POST a JSONL record to
     ``/ingest/v1/record/batch``. See ``_write_http``.
   * "cli"  -> shell ``create-data-type MomentAnnotation ... --add-to-timeline``
-    through the resolved Fulcra CLI (preferred once the CLI gains annotation-write
-    support; currently blocked because the command is absent in fulcra-api 0.1.32/0.1.33)
+    through the resolved annotation CLI (preferred future transport; today only
+    usable when ``FULCRA_COORD_ANNOTATION_CLI`` points at an annotations-capable
+    dev build because released fulcra-api 0.1.32/0.1.33 lack the command)
 
 The HTTP path (urllib → ``/ingest/v1/record/batch``) is the **interim
 recommendation** only because the CLI lacks the annotation-write command today.
