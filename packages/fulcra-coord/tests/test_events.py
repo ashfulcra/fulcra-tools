@@ -206,6 +206,31 @@ def test_fold_orders_by_numeric_instant_not_raw_string():
     assert events.fold_task([later, earlier])["status"] == "active"
 
 
+def test_at_sort_key_collapses_equivalent_iso_spellings():
+    # The sort key is a canonical UTC microsecond instant, not just punctuation
+    # stripping. Same-instant spellings must tie so event_id, not representation,
+    # is the deterministic tie-breaker.
+    assert (
+        events._at_sort_key("2026-06-08T00:00:00Z")
+        == events._at_sort_key("2026-06-08T00:00:00.000000Z")
+    )
+    assert (
+        events._at_sort_key("2026-06-08T00:00:00+00:00")
+        == events._at_sort_key("2026-06-08T00:00:00.000000Z")
+    )
+
+
+def test_at_sort_key_normalizes_offsets_to_utc():
+    assert (
+        events._at_sort_key("2026-06-08T01:30:00+01:30")
+        == events._at_sort_key("2026-06-08T00:00:00.000000Z")
+    )
+
+
+def test_at_sort_key_malformed_input_falls_back_to_legacy_strip():
+    assert events._at_sort_key("not-a-date:Z") == "notadate"
+
+
 def test_at_sort_key_empty_string():
     # Empty ``at`` returns empty key, sorts first. This characterizes the
     # edge case where a fold receives an event with no timestamp (malformed),

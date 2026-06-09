@@ -12,8 +12,9 @@ Design notes
 ------------
 ``event_id`` encodes ``<sortable-ts>-<rand>``:
 
-* **sortable-ts** — the ISO-8601 timestamp with `:`, `-`, `.`, and ``Z``
-  stripped, leaving a monotonically-increasing numeric string (e.g.
+* **sortable-ts** — the ISO-8601 timestamp canonicalized to the bus's UTC
+  microsecond ``...Z`` convention, then stripped of `:`, `-`, `.`, and ``Z``,
+  leaving a monotonically-increasing numeric string (e.g.
   ``20260608T153045123456`` from ``2026-06-08T15:30:45.123456Z``).  Events
   from a single producer sort chronologically by this prefix without needing
   a shared sequence counter.
@@ -30,6 +31,7 @@ the envelope, so a reducer must store it on creation, never re-derive it.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fulcra_coord.timeutil import now_iso
@@ -40,8 +42,11 @@ EVENT_SCHEMA_VERSION = "fulcra.coordination.event.v1"
 def _at_sort_key(at: str) -> str:
     """Return the numeric-microsecond sort prefix for an ISO-8601 *at* string.
 
-    Strips ``:``, ``-``, ``.``, and ``Z`` so a timestamp like
-    ``2026-06-08T15:30:45.123456Z`` collapses to ``20260608T153045123456``.
+    Valid ISO-8601 timestamps are first canonicalized to the bus's UTC
+    microsecond ``...Z`` convention, then stripped of punctuation, so all
+    spellings of the same instant collapse to the same fixed-width key. A
+    timestamp like ``2026-06-08T15:30:45.123456Z`` collapses to
+    ``20260608T153045123456``.
 
     WHY this and not a raw string compare: a lexical sort of the raw ``at``
     string INVERTS when two timestamps differ only in trailing precision or
@@ -53,13 +58,24 @@ def _at_sort_key(at: str) -> str:
     normalization, shared by :func:`event_id` (its sortable-ts prefix) and
     :func:`fold_task` (its event ordering) so the two can never drift apart.
 
-    Offset forms (e.g. ``+00:00``) are NOT normalized — the ``+`` and its
-    digits survive as literal characters and would mis-sort relative to a
-    ``Z`` form. This is safe only because the sole writer (``timeutil.iso_z``
-    via ``now_iso``) always emits the uniform microsecond ``...Z`` form; a
-    replay/backfill must use the same convention.
+    Malformed timestamps fall back to the historical punctuation-stripping key
+    instead of raising, so a corrupt shard remains foldable and sorts
+    deterministically rather than breaking the read.
     """
-    return at.replace(":", "").replace("-", "").replace(".", "").replace("Z", "")
+    if not at:
+        return ""
+    try:
+        dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return at.replace(":", "").replace("-", "").replace(".", "").replace("Z", "")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    canonical = (
+        dt.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+    return canonical.replace(":", "").replace("-", "").replace(".", "").replace("Z", "")
 
 
 def event_id(*, at: str) -> str:
@@ -180,10 +196,11 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
        the raw ``at`` string.  A raw-string sort inverts when timestamps differ
        only in trailing precision/offset (``...00Z`` would sort AFTER
        ``...00.000001Z`` because ``.`` < ``Z``, despite being earlier in time);
-       normalizing to the punctuation-stripped numeric form makes lexical order
-       equal chronological order.  ``event_id`` is a stable tie-breaker when two
-       events share the same microsecond (its sortable-ts prefix encodes the
-       same instant and the random suffix provides lexicographic uniqueness).
+       canonicalizing to UTC microseconds and then stripping punctuation makes
+       lexical order equal chronological order.  ``event_id`` is a stable
+       tie-breaker when two events share the same microsecond (its sortable-ts
+       prefix encodes the same instant and the random suffix provides
+       lexicographic uniqueness).
 
     2. **Dedup retries by (actor, idempotency_key)** — when a caller supplies
        a truthy ``idempotency_key``, only the first occurrence (in sort order)
