@@ -391,3 +391,32 @@ class TestRouteEventHook:
         monkeypatch.setattr(directives, "append_directive_route", _boom)
         rc = routing_ops.cmd_request_review(_rr_args(), backend=coord_backend)
         assert rc == 0, "request-review must survive a routing sub-log mirror failure"
+
+    def test_request_review_does_not_mirror_route_when_task_upload_fails(
+        self, coord_backend, monkeypatch
+    ):
+        """A failed authoritative task upload must not leave a phantom route shard."""
+        from fulcra_coord import routing_ops, directives
+        _patch_presence(monkeypatch, routing_ops)
+        monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                            lambda *a, **k: "claude-code:author:r")
+
+        real_upload = remote.upload_json
+        task_ids = []
+
+        def _task_upload_fails(data, path, *a, **k):
+            if path.startswith(f"{remote.remote_root()}/tasks/"):
+                task_ids.append(Path(path).stem)
+                return False
+            return real_upload(data, path, *a, **k)
+
+        monkeypatch.setattr(routing_ops.remote, "upload_json", _task_upload_fails)
+
+        rc = routing_ops.cmd_request_review(_rr_args(), backend=coord_backend)
+
+        assert rc == 1
+        assert task_ids, "request-review should have attempted to write a task body"
+        directive_id = directives.stable_directive_id(task_ids[0])
+        assert remote.list_files(
+            remote.directive_routing_prefix(directive_id), backend=coord_backend
+        ) == []

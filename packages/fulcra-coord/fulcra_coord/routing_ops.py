@@ -63,18 +63,14 @@ def _review_pool(author: str, presence: list[dict[str, Any]]) -> list[str]:
 
 def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
                                      candidate_snapshot, observed_updated_at,
-                                     dt=None, backend=None):
+                                     dt=None):
     """Append a routing event AND sync task.assignee to its `to`, so the event
     log (audit + sweep input) and the assignee (inbox/tell machinery) never
     disagree. Mutates + returns a deep copy of the task.
 
-    Phase 3b Task 2: ALSO best-effort mirror the same route event into the
-    directive's append-only ROUTING SUB-LOG (one shard per route decision, keyed
-    by the event's route_id). The task's inline event log is bounded and can drop
-    older route decisions; the sub-log is the durable, clobber-safe routing truth
-    (concurrent re-routes never overwrite one another — distinct shards). Lazy-
-    import keeps `directives` low-layer (it never imports `routing_ops`). Wrapped
-    so a sub-log mirror failure NEVER affects the route command / sweep tick."""
+    The durable directive routing sub-log is mirrored AFTER the authoritative
+    task write confirms the body landed. Keeping this helper pure avoids a
+    phantom route shard when the later task upload returns False."""
     import copy
     from . import routing
     task = copy.deepcopy(task)
@@ -87,15 +83,28 @@ def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
     task["assignee"] = to
     task["updated_at"] = at
     task["last_touched_by"] = by
+    return task
+
+
+def _mirror_route_to_directive_sublog(
+    task: dict[str, Any], *, backend: Optional[list[str]] = None
+) -> None:
+    """Best-effort mirror of the task's latest route event into the directive sub-log.
+
+    This is called only after the task body has landed (True or NeedsReconcile
+    path from _write_task_and_views). Writing the shard before the task upload
+    would let a failed upload leave durable directive routing metadata for a
+    route that never became authoritative.
+    """
     try:
         task_id = task.get("id")
-        if task_id:
+        route_event = routing.current_route(task)
+        if task_id and route_event:
             from . import directives
             directives.append_directive_route(
-                directives.stable_directive_id(task_id), ev, backend=backend)
+                directives.stable_directive_id(task_id), route_event, backend=backend)
     except Exception:
         pass
-    return task
 
 
 def _force_block_for_human(task, *, by, ask, human):
@@ -242,7 +251,7 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     task = _append_route_event_and_assignee(
         task, kind="routed", to=winner, by=author, attempt=1,
         reason=f"live/idle reviewer ({tier})", candidate_snapshot=snapshot,
-        observed_updated_at=task.get("updated_at", ""), backend=backend)
+        observed_updated_at=task.get("updated_at", ""))
     cache.write_cached_task(task)
     try:
         ok = _write_task_and_views(task, backend=backend, command="request-review")
@@ -251,6 +260,7 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
         # so the dual-write mirror should still fire — same posture as cmd_tell.
         ok = True
     if ok:
+        _mirror_route_to_directive_sublog(task, backend=backend)
         # Phase 3b dual-write: mirror the routed review into a `review` directive
         # (type detected by the kind:review tag; artifact_ref from pr/repo). Uses
         # the shared low-layer writer in directives — see the WHY note there for
@@ -557,10 +567,13 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None):
                 attempt=prev_attempt + 1,
                 reason="assignee below floor, never acted",
                 candidate_snapshot=snapshot,
-                observed_updated_at=fresh.get("updated_at", ""), backend=backend)
+                observed_updated_at=fresh.get("updated_at", ""))
             try:
-                _write_task_and_views(updated, backend=backend, command="reroute-review")
-            except (schema.ConflictError, schema.NeedsReconcile):
+                if _write_task_and_views(updated, backend=backend, command="reroute-review"):
+                    _mirror_route_to_directive_sublog(updated, backend=backend)
+            except schema.NeedsReconcile:
+                _mirror_route_to_directive_sublog(updated, backend=backend)
+            except schema.ConflictError:
                 pass  # optimistic write is the second line of defence; reconverges next cycle
         except Exception:
             continue  # one bad task must never break the sweep / reconcile tick
