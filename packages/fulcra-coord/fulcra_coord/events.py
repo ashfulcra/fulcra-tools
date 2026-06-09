@@ -182,6 +182,27 @@ def _is_snapshot_payload(payload: dict[str, Any]) -> bool:
     return bool(payload.get("schema")) and bool(payload.get("id"))
 
 
+# ---------------------------------------------------------------------------
+# A1 — same-microsecond concurrent-write determinism (why this is sound)
+# ---------------------------------------------------------------------------
+# Two writers can emit events at the SAME microsecond (the bus is brokerless,
+# has no compare-and-swap, and timestamps are microsecond-resolution). When that
+# happens the fold's sort key — ``(_at_sort_key(at), event_id)`` — falls through
+# to the ``event_id`` tie-break, whose suffix is a random UUID4. So the winner of
+# a same-µs race is ARBITRARY but STABLE: every reader folding the same event set
+# picks the same winner forever. This is the same last-writer-wins outcome the
+# mutable-file model already had (a same-second file overwrite was equally
+# arbitrary), so the events path introduces no new nondeterminism.
+#
+# This is sound ONLY because ``event_id`` is IMMUTABLE — minted exactly once at
+# append (in ``make_event``) and NEVER re-derived during read, fold, replay, or
+# retention/repair. If any of those re-minted the id, the random suffix would
+# reshuffle on every read and the tie-break winner would flap, silently changing
+# which concurrent write "won" between two reads of the same log. ``fold_task``
+# therefore reads ``event_id`` off the stored envelope and never calls
+# ``event_id()``; retention/replay must preserve stored ids verbatim.
+
+
 def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
     """Deterministically reduce an event list to a task snapshot.
 

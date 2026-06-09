@@ -215,6 +215,62 @@ def _meta_key(remote_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-body provenance sidecar (read->write hand-off for events-mode soundness)
+# ---------------------------------------------------------------------------
+#
+# Records, per task_id, WHERE the body the read funnel (io._cache_remote_task)
+# last returned came from, plus the fold-at-read base when the body was folded.
+# The write path (writepipe._write_task_and_views) consults it to decide whether
+# a fold-sourced write must do a 3-way merge against the fold base — recovering
+# newer file fields a stale/lagging fold would otherwise silently clobber (root
+# cause A2). LOCAL-ONLY: this is a per-machine read->write hand-off, never part
+# of the shared task payload and NEVER uploaded to the remote bus. It lives in
+# the same hashed-key meta dir as read_meta, in a ``.prov.json`` sidecar.
+#
+# ``prov`` shape:
+#   {"source": "file"|"fold",
+#    "file_stat_at_read": <stat dict|None>,
+#    "fold_base": <clean folded task dict|None>,
+#    "fold_complete": bool}
+
+def _prov_key(task_id: str) -> str:
+    import hashlib
+    return hashlib.sha1(task_id.encode()).hexdigest()[:16]
+
+
+def write_provenance(task_id: str, prov: dict[str, Any]) -> None:
+    ensure_dirs()
+    key = _prov_key(task_id)
+    path = meta_dir() / f"{key}.prov.json"
+    path.write_text(json.dumps(prov))
+
+
+def read_provenance(task_id: str) -> Optional[dict[str, Any]]:
+    key = _prov_key(task_id)
+    path = meta_dir() / f"{key}.prov.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        # Mirror read_meta: a corrupt sidecar is treated as absent, not a crash.
+        return None
+
+
+def clear_provenance(task_id: str) -> None:
+    """Drop a task's provenance sidecar. Best-effort, idempotent (missing → no-op).
+
+    Called after a successful upload so a later file-sourced write doesn't
+    inherit stale fold provenance and force a spurious 3-way merge."""
+    key = _prov_key(task_id)
+    path = meta_dir() / f"{key}.prov.json"
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Operation markers (partial upload / needs_reconcile)
 # ---------------------------------------------------------------------------
 
