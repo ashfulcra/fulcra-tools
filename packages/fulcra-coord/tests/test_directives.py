@@ -381,3 +381,26 @@ class TestDirectivePathHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_make_directive_rejects_unknown_status():
+    import pytest
+    with pytest.raises(ValueError):
+        schema.make_directive(directive_type="tell", from_agent="a", audience="b",
+                              title="t", workstream="ws", status="banana")
+
+
+def test_validate_directive_flags_unknown_status():
+    d = schema.make_directive(directive_type="tell", from_agent="a", audience="b",
+                              title="t", workstream="ws")
+    d["status"] = "banana"
+    errs = schema.validate_directive(d)
+    assert any("status" in e.lower() for e in errs)
+
+
+def test_make_directive_accepts_each_valid_status():
+    for s in ("proposed", "delivered", "acked", "acted", "expired"):
+        d = schema.make_directive(directive_type="tell", from_agent="a", audience="b",
+                                  title="t", workstream="ws", status=s)
+        assert d["status"] == s
+        assert schema.validate_directive(d) == []
