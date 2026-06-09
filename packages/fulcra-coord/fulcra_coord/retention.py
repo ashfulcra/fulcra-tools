@@ -669,6 +669,74 @@ def _expire_stale_broadcasts(all_tasks: list[dict[str, Any]], now: datetime, *,
     return expired
 
 
+def _prune_provenance_sidecars(all_tasks: list[dict[str, Any]], *,
+                               deadline: Optional[float] = None) -> int:
+    """Prune orphaned ``*.prov.json`` provenance sidecars under ``cache.meta_dir()``.
+
+    WHY this exists (root cause A leftover): ``cache.write_provenance`` writes a
+    ``<key>.prov.json`` sidecar (key = ``cache._prov_key(task_id)``) for every
+    task body read in events-mode, each holding a full ``fold_base`` body.
+    ``clear_provenance`` drops one after a successful upload, but a task that
+    simply ages out (archived / deleted remotely) never gets its sidecar cleared,
+    so the family grows without bound on a long-lived host. This is the GC that
+    bounds it.
+
+    HOW:
+      * Build ``live_keys`` = the ``_prov_key`` of every LIVE task id (tasks
+        missing an ``id`` contribute nothing — they can't anchor a live sidecar).
+      * List ``meta_dir()`` for ``*.prov.json`` files; a file's key is its name
+        with the ``.prov.json`` suffix stripped. If that key is NOT in
+        ``live_keys`` the sidecar belongs to a task no longer in the live set ->
+        unlink it.
+
+    SAFETY (load-bearing): these are LOCAL files — deleted with ``Path.unlink``,
+    NEVER ``remote.delete``. ONLY ``*.prov.json`` orphans are touched: the
+    ``*.stat.json`` meta sidecars (hash-keyed over MIXED task+view paths, so not
+    safely orphan-prunable, and tiny — deliberately out of scope) and anything
+    else in ``meta_dir()`` are never matched. A live task's prov sidecar always
+    survives.
+
+    BUDGET/CAP, mirroring the sibling prune passes: cap deletions per run at
+    ``_retention_max_per_run()`` and stop once the wall-clock budget is nearly
+    spent (when a ``deadline`` is supplied) so this composes with reconcile's
+    ceiling. BEST-EFFORT: the whole body is wrapped so it NEVER raises into
+    ``_run_retention`` (which must never raise into the reconcile tick); a single
+    delete failure is skipped, not fatal. Returns the count deleted."""
+    import time
+    deleted = 0
+    try:
+        cap = _retention_max_per_run()
+        if cap <= 0:
+            return 0
+        budget_floor = (deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
+                        if deadline is not None else None)
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            return 0
+        meta = cache.meta_dir()
+        if not meta.exists():
+            return 0
+        live_keys = {cache._prov_key(t["id"]) for t in all_tasks
+                     if isinstance(t, dict) and t.get("id")}
+        for path in meta.glob("*.prov.json"):
+            if deleted >= cap:
+                break
+            if budget_floor is not None and time.monotonic() >= budget_floor:
+                break
+            # Strip the ``.prov.json`` suffix to recover the sidecar's key.
+            key = path.name[: -len(".prov.json")]
+            if key in live_keys:
+                continue  # belongs to a live task — keep it
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError:
+                # One bad unlink never aborts the sweep; the next pass retries.
+                continue
+    except Exception:
+        pass
+    return deleted
+
+
 def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
                    deadline: float, backend: Optional[list[str]] = None) -> dict[str, Any]:
     """The retention pass, folded into reconcile. Best-effort: NEVER raises into
@@ -676,7 +744,7 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     Returns {"skipped": True} when throttled/errored, else
     {"archived": N, "deferred": D, "expired_broadcasts": E, "pruned_markers": M,
     "pruned_presence": K, "pruned_health": H, "pruned_continuity": C,
-    "pruned_events": V}.
+    "pruned_events": V, "pruned_provenance": P}.
 
     1. THROTTLE: _claim_retention_marker(now) — first host today wins; others skip.
     2. ARCHIVE up to _retention_max_per_run() archivable tasks (views.
@@ -689,7 +757,10 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
        (keep the newest _continuity_keep() per task; the recursive sweep that
        bounds the unbounded checkpoints/ growth), plus old event-log shards
        (Root cause B: window-prune live tasks below their latest snapshot and GC
-       orphaned archived-task shard trees, bounding the unbounded events/ growth).
+       orphaned archived-task shard trees, bounding the unbounded events/ growth),
+       plus orphaned LOCAL `*.prov.json` provenance sidecars (root cause A
+       leftover: a sidecar whose task aged out of the live set is unlinked,
+       bounding the unbounded meta/ growth).
     Per-item isolation: one task's archive failure is skipped, not fatal. The
     `deadline` is reconcile's existing deadline local, so the budget COMPOSES with
     (never double-counts) reconcile's 90s ceiling."""
@@ -746,12 +817,19 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     # budget; best-effort, never raises into this pass.
     pruned_events = _prune_event_log(
         all_tasks, now, backend=backend, deadline=deadline)
+    # Provenance-sidecar sweep (root cause A leftover): delete orphaned LOCAL
+    # `<key>.prov.json` sidecars whose task is no longer in the live set, bounding
+    # the unbounded meta/ growth. Threads the SAME `deadline` so it composes with
+    # the budget; LOCAL files (Path.unlink, not remote.delete); best-effort, never
+    # raises into this pass.
+    pruned_provenance = _prune_provenance_sidecars(all_tasks, deadline=deadline)
     return {"archived": archived, "deferred": deferred,
             "expired_broadcasts": expired_broadcasts,
             "pruned_markers": pruned_markers, "pruned_presence": pruned_presence,
             "pruned_health": pruned_health,
             "pruned_continuity": pruned_continuity,
-            "pruned_events": pruned_events}
+            "pruned_events": pruned_events,
+            "pruned_provenance": pruned_provenance}
 
 
 
