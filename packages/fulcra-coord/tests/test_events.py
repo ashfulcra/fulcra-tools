@@ -183,3 +183,24 @@ def test_fold_snapshot_then_legacy_delta_merges_on_top():
     state = events.fold_task([s, d])
     assert state["current_summary"] == "s1"
     assert state["status"] == "active"   # snapshot fields survive the partial delta
+
+
+def test_fold_orders_by_numeric_instant_not_raw_string():
+    # D1: ``at`` is an ISO-8601 string, but a raw lexical string sort INVERTS
+    # when two timestamps differ only in trailing precision: ``...00Z`` vs
+    # ``...00.000001Z``. Lexically, ``.`` (0x2E) < ``Z`` (0x5A), so the bare-Z
+    # form sorts AFTER the higher-precision form — even though the
+    # ``.000001Z`` instant is LATER in real time. The fold must order by the
+    # numeric microsecond instant (the same normalization ``event_id`` uses),
+    # so the genuinely-later ``.000001Z`` event wins last-write.
+    earlier = events.make_event(
+        family="tasks", task_id="T", kind="completed", actor="a",
+        payload={"status": "done"}, at="2026-06-08T00:00:00Z",
+    )
+    later = events.make_event(
+        family="tasks", task_id="T", kind="updated", actor="a",
+        payload={"status": "active"}, at="2026-06-08T00:00:00.000001Z",
+    )
+    # Feed them in BOTH orders so the result depends only on sort, not input order.
+    assert events.fold_task([earlier, later])["status"] == "active"
+    assert events.fold_task([later, earlier])["status"] == "active"

@@ -37,6 +37,25 @@ from fulcra_coord.timeutil import now_iso
 EVENT_SCHEMA_VERSION = "fulcra.coordination.event.v1"
 
 
+def _at_sort_key(at: str) -> str:
+    """Return the numeric-microsecond sort prefix for an ISO-8601 *at* string.
+
+    Strips ``:``, ``-``, ``.``, and ``Z`` so a timestamp like
+    ``2026-06-08T15:30:45.123456Z`` collapses to ``20260608T153045123456``.
+
+    WHY this and not a raw string compare: a lexical sort of the raw ``at``
+    string INVERTS when two timestamps differ only in trailing precision or
+    offset. ``"2026-06-08T00:00:00Z"`` vs ``"2026-06-08T00:00:00.000001Z"`` —
+    the higher-precision form sorts FIRST under a raw compare because ``.``
+    (0x2E) < ``Z`` (0x5A), even though it is LATER in real time. Removing the
+    punctuation yields a fixed-shape numeric string whose lexical order equals
+    chronological order. This is the single source of truth for the
+    normalization, shared by :func:`event_id` (its sortable-ts prefix) and
+    :func:`fold_task` (its event ordering) so the two can never drift apart.
+    """
+    return at.replace(":", "").replace("-", "").replace(".", "").replace("Z", "")
+
+
 def event_id(*, at: str) -> str:
     """Return a time-sortable unique event id derived from *at*.
 
@@ -46,7 +65,8 @@ def event_id(*, at: str) -> str:
     removed — leaving the numeric representation of the UTC microsecond
     instant (e.g. ``20260608T153045123456``).  Ids from events with
     earlier timestamps will sort lexicographically before ids from later
-    ones.
+    ones.  The normalization is delegated to :func:`_at_sort_key` so the id
+    prefix and the fold's event ordering share one definition.
 
     *rand* is the first 12 hex characters of a random UUID4.  This makes
     two ids generated in the same microsecond distinct while keeping the
@@ -59,7 +79,7 @@ def event_id(*, at: str) -> str:
     Returns:
         A string of the form ``<sortable-ts>-<rand12>``.
     """
-    sortable_ts = at.replace(":", "").replace("-", "").replace(".", "").replace("Z", "")
+    sortable_ts = _at_sort_key(at)
     rand = uuid.uuid4().hex[:12]
     return f"{sortable_ts}-{rand}"
 
@@ -149,10 +169,15 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
 
     Rules (in application order):
 
-    1. **Sort by (at, event_id)** — ``at`` is the logical wall-clock instant;
-       ``event_id`` is a stable tie-breaker when two events share the same
-       microsecond (its sortable-ts prefix encodes the same instant and the
-       random suffix provides lexicographic uniqueness).
+    1. **Sort by (numeric-instant, event_id)** — events are ordered by the
+       NUMERIC microsecond instant of ``at`` (via :func:`_at_sort_key`), not
+       the raw ``at`` string.  A raw-string sort inverts when timestamps differ
+       only in trailing precision/offset (``...00Z`` would sort AFTER
+       ``...00.000001Z`` because ``.`` < ``Z``, despite being earlier in time);
+       normalizing to the punctuation-stripped numeric form makes lexical order
+       equal chronological order.  ``event_id`` is a stable tie-breaker when two
+       events share the same microsecond (its sortable-ts prefix encodes the
+       same instant and the random suffix provides lexicographic uniqueness).
 
     2. **Dedup retries by (actor, idempotency_key)** — when a caller supplies
        a truthy ``idempotency_key``, only the first occurrence (in sort order)
@@ -215,7 +240,7 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
         reconstructed from a full snapshot (trustworthy) or only from legacy
         deltas (may be incomplete).
     """
-    ordered = sorted(evs, key=lambda e: (e.get("at", ""), e.get("event_id", "")))
+    ordered = sorted(evs, key=lambda e: (_at_sort_key(e.get("at", "")), e.get("event_id", "")))
     seen: set[tuple[str, str]] = set()
     state: dict[str, Any] = {}
     applied = 0
