@@ -118,6 +118,14 @@ def coord_backend(tmp_path):
     the autouse fixture (the ``false`` safety net) is bypassed entirely and
     never reaches the fake backend script.
     """
+    prev = os.environ.get("FULCRA_FAKE_ROOT")
     os.environ["FULCRA_FAKE_ROOT"] = str(tmp_path)
     fake = Path(__file__).resolve().parent / "fake_fulcra_backend.py"
-    return [sys.executable, str(fake)]
+    yield [sys.executable, str(fake)]
+    # Restore on teardown so this per-test path can't leak into a later test
+    # that reaches the fake backend without an explicit backend= (test-pollution
+    # time-bomb once T5/T6 add more fake-backend fixtures).
+    if prev is None:
+        os.environ.pop("FULCRA_FAKE_ROOT", None)
+    else:
+        os.environ["FULCRA_FAKE_ROOT"] = prev
