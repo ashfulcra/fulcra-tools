@@ -287,6 +287,8 @@ def _load_summaries_for_rebuild(
 
 def _load_task(task_id: str, *, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
     """Load a specific task from cache or remote."""
+    if read_source() == "events":
+        return _cache_remote_task(task_id, backend=backend)
     t = cache.read_cached_task(task_id)
     if t is not None:
         return t
