@@ -20,11 +20,23 @@ mapping stays a pure function of its input.
 
 from __future__ import annotations
 
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from . import schema
 from . import remote
 from . import log as ops_log
+
+
+def _now_z() -> str:
+    """Current UTC instant as an ISO-8601 ``...Z`` stamp (the bus's clock format).
+
+    Inlined here rather than importing ``timeutil`` so ``directives`` keeps its
+    minimal low-layer import surface (schema / remote / log only)."""
+    return datetime.now(timezone.utc).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
 
 # Pure leaf constants, re-declared locally to respect LAYERING. ``views`` is an
 # up-layer module (forbidden by the package fitness test), so we MUST NOT import
@@ -173,6 +185,112 @@ def _stable_directive_id(task_id: str) -> str:
     return f"DIR-T-{task_id}"
 
 
+def stable_directive_id(task_id: str) -> str:
+    """Public accessor for the deterministic directive id of a legacy task.
+
+    The up-layer hooks (``inbox.cmd_inbox --ack`` -> durable directive ack,
+    ``routing_ops`` -> routing sub-log) need the SAME ``DIR-T-<task_id>`` id the
+    dual-write uses, so the per-agent ack files and route shards land under the
+    directive that mirrors the task. Thin public wrapper over the internal
+    ``_stable_directive_id`` so callers don't reach for the underscore name."""
+    return _stable_directive_id(task_id)
+
+
+# ---------------------------------------------------------------------------
+# Append-only SUB-LOG API (Phase 3b Task 2) — ack + routing persistence.
+#
+# WHY a sub-log and not a field on the single directive record: see the long note
+# on remote.directive_acks_prefix. The bus has no compare-and-swap, so a
+# read-modify-write of one record loses concurrent writes. Each writer here writes
+# its OWN file (per-agent ack file / per-event route shard); the union is the
+# list-the-prefix read. ALL of these are LOW-LAYER and BEST-EFFORT: they never
+# raise (a transport failure degrades to False / []), so a sub-log miss can never
+# break the authoritative task write, the inbox-ack, or a route command.
+# ---------------------------------------------------------------------------
+
+def write_directive_ack(
+    directive_id: str, agent: str, *, backend: Optional[list[str]] = None
+) -> bool:
+    """Durably record ONE agent's ack of a directive (per-agent file; idempotent).
+
+    Uploads ``{agent, at}`` to ``directive_ack_path(id, agent)`` — a file keyed by
+    the acking agent, so re-acking overwrites only that agent's own file and two
+    different agents acking the same (e.g. broadcast) directive NEVER clobber each
+    other. This is the clobber-safe, durable per-agent ack. Best-effort: returns
+    True on a confirmed upload, False on any failure (never raises)."""
+    try:
+        record = {"agent": agent, "at": _now_z()}
+        return bool(remote.upload_json(
+            record, remote.directive_ack_path(directive_id, agent), backend=backend))
+    except Exception:
+        return False
+
+
+def read_directive_acks(
+    directive_id: str, *, backend: Optional[list[str]] = None
+) -> list[str]:
+    """The sorted UNION of agents who have acked a directive (list the acks prefix).
+
+    Reads every per-agent ack file under the acks prefix and returns the distinct
+    ``agent`` ids, sorted. This is the durable ack truth — it can't shrink when one
+    agent re-acks, because each agent owns its own file. Best-effort: a
+    missing/empty prefix or any read failure -> ``[]`` (never raises)."""
+    try:
+        records = remote.list_json(remote.directive_acks_prefix(directive_id),
+                                   backend=backend)
+    except Exception:
+        return []
+    agents: set[str] = set()
+    for _path, rec in records:
+        if isinstance(rec, dict) and rec.get("agent"):
+            agents.add(rec["agent"])
+    return sorted(agents)
+
+
+def append_directive_route(
+    directive_id: str, route_event: dict[str, Any], *,
+    backend: Optional[list[str]] = None,
+) -> bool:
+    """Append ONE route event to a directive's routing sub-log (append-only shard).
+
+    Uploads ``route_event`` to ``directive_route_path(id, <event_id>)``. The shard
+    key is the event's own ``event_id`` (or its ``route_id``, the field a route
+    event built by ``routing.make_route_event`` carries) or, failing both, a fresh
+    uuid — so each route decision lands as its OWN file and concurrent re-routes
+    never overwrite one another. Best-effort: returns True on a confirmed upload,
+    False on any failure (never raises)."""
+    try:
+        event_id = (route_event.get("event_id") or route_event.get("route_id")
+                    or uuid.uuid4().hex)
+        return bool(remote.upload_json(
+            route_event, remote.directive_route_path(directive_id, str(event_id)),
+            backend=backend))
+    except Exception:
+        return False
+
+
+def read_directive_routing(
+    directive_id: str, *, backend: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Every route-event shard for a directive, sorted by (at, event id).
+
+    Lists the routing prefix and returns the route-event dicts in stable order —
+    by their ``at`` stamp, ties broken by the shard's event id (the filename stem,
+    which is the event_id/route_id) so the order is machine-agnostic (the bus has
+    no global clock). Best-effort: a missing prefix or any read failure -> ``[]``."""
+    try:
+        records = remote.list_json(remote.directive_routing_prefix(directive_id),
+                                   backend=backend)
+    except Exception:
+        return []
+    events: list[tuple[str, str, dict[str, Any]]] = []
+    for path, rec in records:
+        if isinstance(rec, dict):
+            events.append((rec.get("at", "") or "", Path(path).stem, rec))
+    events.sort(key=lambda t: (t[0], t[1]))
+    return [rec for _at, _eid, rec in events]
+
+
 def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
     """Build a first-class Directive record mirroring a legacy directive-task.
 
@@ -274,6 +392,29 @@ def dual_write(
     """
     try:
         directive = directive_from_task(task)
+        # Fold the durable SUB-LOG truth into the LWW snapshot before uploading.
+        # directive_from_task stays PURE (task-derived acks only); the union with
+        # the append-only sub-log happens HERE, in the I/O layer, so the snapshot
+        # reflects every durable ack — even ones the task's capped inline event log
+        # has since dropped. The snapshot's acked_by therefore NEVER shrinks below
+        # the sub-log union, and routing reflects every persisted route shard.
+        # Best-effort per side: a sub-log read failure leaves the task-derived
+        # acked_by / empty routing as-is (never worse than today).
+        directive_id = directive.get("id")
+        if directive_id:
+            try:
+                sublog_acks = read_directive_acks(directive_id, backend=backend)
+                if sublog_acks:
+                    union = set(directive.get("acked_by") or []) | set(sublog_acks)
+                    directive["acked_by"] = sorted(union)
+            except Exception:
+                pass  # leave task-derived acked_by untouched
+            try:
+                routes = read_directive_routing(directive_id, backend=backend)
+                if routes:
+                    directive["routing"] = routes
+            except Exception:
+                pass  # leave routing as make_directive's empty default
         ok = remote.upload_json(
             directive, remote.directive_remote_path(directive["id"]), backend=backend
         )

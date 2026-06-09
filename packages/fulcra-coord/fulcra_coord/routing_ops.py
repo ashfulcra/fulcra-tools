@@ -63,10 +63,18 @@ def _review_pool(author: str, presence: list[dict[str, Any]]) -> list[str]:
 
 def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
                                      candidate_snapshot, observed_updated_at,
-                                     dt=None):
+                                     dt=None, backend=None):
     """Append a routing event AND sync task.assignee to its `to`, so the event
     log (audit + sweep input) and the assignee (inbox/tell machinery) never
-    disagree. Mutates + returns a deep copy of the task."""
+    disagree. Mutates + returns a deep copy of the task.
+
+    Phase 3b Task 2: ALSO best-effort mirror the same route event into the
+    directive's append-only ROUTING SUB-LOG (one shard per route decision, keyed
+    by the event's route_id). The task's inline event log is bounded and can drop
+    older route decisions; the sub-log is the durable, clobber-safe routing truth
+    (concurrent re-routes never overwrite one another — distinct shards). Lazy-
+    import keeps `directives` low-layer (it never imports `routing_ops`). Wrapped
+    so a sub-log mirror failure NEVER affects the route command / sweep tick."""
     import copy
     from . import routing
     task = copy.deepcopy(task)
@@ -79,6 +87,14 @@ def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
     task["assignee"] = to
     task["updated_at"] = at
     task["last_touched_by"] = by
+    try:
+        task_id = task.get("id")
+        if task_id:
+            from . import directives
+            directives.append_directive_route(
+                directives.stable_directive_id(task_id), ev, backend=backend)
+    except Exception:
+        pass
     return task
 
 
@@ -226,7 +242,7 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     task = _append_route_event_and_assignee(
         task, kind="routed", to=winner, by=author, attempt=1,
         reason=f"live/idle reviewer ({tier})", candidate_snapshot=snapshot,
-        observed_updated_at=task.get("updated_at", ""))
+        observed_updated_at=task.get("updated_at", ""), backend=backend)
     cache.write_cached_task(task)
     try:
         ok = _write_task_and_views(task, backend=backend, command="request-review")
@@ -541,7 +557,7 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None):
                 attempt=prev_attempt + 1,
                 reason="assignee below floor, never acted",
                 candidate_snapshot=snapshot,
-                observed_updated_at=fresh.get("updated_at", ""))
+                observed_updated_at=fresh.get("updated_at", ""), backend=backend)
             try:
                 _write_task_and_views(updated, backend=backend, command="reroute-review")
             except (schema.ConflictError, schema.NeedsReconcile):

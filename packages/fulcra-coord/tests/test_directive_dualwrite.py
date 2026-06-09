@@ -238,8 +238,14 @@ def _read_directive(backend, directive_id):
 
 
 def _list_directive_ids(backend):
-    files = remote.list_files(remote.directives_prefix(), backend=backend)
-    return [Path(f).stem for f in files]
+    # Only the TOP-LEVEL directive records (directives/<id>.json) count here, not
+    # the Phase 3b Task 2 ack/routing SUB-LOG shards that live one level deeper at
+    # directives/<id>/acks/* and directives/<id>/routing/*. list_files recurses, so
+    # filter to direct children of the prefix (no extra path segment after it).
+    prefix = remote.directives_prefix()
+    files = remote.list_files(prefix, backend=backend)
+    return [Path(f).stem for f in files
+            if "/" not in f[len(prefix):] and f.endswith(".json")]
 
 
 def _started_task_id(backend):

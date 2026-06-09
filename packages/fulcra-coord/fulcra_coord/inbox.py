@@ -106,6 +106,15 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
                 task = _load_task_from_summary(match, backend=backend)
             if task is None:
                 if match and _ack_summary_only(ack_id, me, backend=backend):
+                    # Same durable per-agent directive ack as the full-body path
+                    # (best-effort): the summary-only fallback still records the
+                    # clobber-safe ack so the durable union stays complete.
+                    try:
+                        from . import directives
+                        directives.write_directive_ack(
+                            directives.stable_directive_id(ack_id), me, backend=backend)
+                    except Exception:
+                        pass
                     _info(f"Acknowledged: {ack_id}")
                     return 0
                 _err(f"Task not found: {ack_id}")
@@ -125,6 +134,19 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         if not ok:
             _warn(f"Ack cached locally but remote upload failed: {ack_id}.")
             return 1
+        # Phase 3b Task 2: ALSO record a DURABLE, clobber-safe per-agent directive
+        # ack in the append-only sub-log. The task's inline ``inbox_ack`` event is
+        # capped (the bounded event log can drop it) and a single-record update
+        # would clobber concurrent acks of a broadcast; the per-agent ack file is
+        # the durable truth (one file per acking agent, idempotent). Lazy-import
+        # keeps directives low-layer (it never imports inbox). Best-effort: wrapped
+        # so a sub-log failure NEVER affects the ack command's result.
+        try:
+            from . import directives
+            directives.write_directive_ack(
+                directives.stable_directive_id(ack_id), me, backend=backend)
+        except Exception:
+            pass
         _info(f"Acknowledged: {ack_id}")
         return 0
 
