@@ -79,6 +79,22 @@ def test_events_source_returns_fold_for_complete_task(monkeypatch, coord_backend
     assert got["current_summary"] == "FOLD-BODY"
 
 
+def test_events_source_load_task_bypasses_stale_file_cache(monkeypatch, coord_backend):
+    """events mode must not let a pre-existing file-sourced cache hide the fold."""
+    task = schema.make_task(title="cached", workstream="ws", agent="a")
+    file_task = {**task, "current_summary": "FILE-BODY"}
+    fold_task = {**task, "current_summary": "FOLD-BODY"}
+    _write_file_task(file_task, backend=coord_backend)
+    cache.write_cached_task(file_task)
+    _append_snapshot(fold_task, backend=coord_backend)
+
+    monkeypatch.setenv("FULCRA_COORD_READ_SOURCE", "events")
+    got = io._load_task(task["id"], backend=coord_backend)
+    assert got is not None
+    assert got["current_summary"] == "FOLD-BODY"
+    assert cache.read_cached_task(task["id"])["current_summary"] == "FOLD-BODY"
+
+
 def test_events_source_falls_back_to_file_for_delta_only(monkeypatch, coord_backend):
     """events mode + a DELTA-only stream (fold incomplete) → fall back to file."""
     monkeypatch.setenv("FULCRA_COORD_READ_SOURCE", "events")
