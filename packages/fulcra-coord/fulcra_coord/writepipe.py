@@ -82,28 +82,52 @@ def _write_task_and_views(
     pre_stat = remote.stat(task_path, backend=backend)
     cached_meta = cache.read_meta(task_path)
 
-    # Trigger merge/conflict check when:
-    # - we have a cached baseline and it differs from the current remote (normal case), OR
-    # - we have NO cached baseline but the file already exists remotely (fresh machine
-    #   that loaded the task via _load_task or _load_all_tasks but never previously wrote
-    #   it — unknown whether another agent updated it since we loaded it).
-    # Skipping this check when cached_meta is None would silently overwrite concurrent
-    # remote changes from other agents on cross-machine sessions.
-    needs_merge_check = pre_stat is not None and (
-        cached_meta is None or remote.stat_changed(cached_meta, pre_stat)
-    )
-    if needs_merge_check:
+    # Provenance hand-off from the read (root cause A2). When the body this write
+    # carries was reconstructed from a COMPLETE fold (events-mode), the fold may
+    # LAG the file: an unchanged-but-stale fold field would otherwise clobber a
+    # newer file field with no stat-change signal (stat is the FILE's, which the
+    # fold body's read also cached, so stat_changed is False — the silent
+    # data-loss path). For a fold-sourced write we therefore ALWAYS download the
+    # fresh file and 3-way-merge it against the fold-at-read base, regardless of
+    # stat. A file-sourced (or provenance-absent) write keeps the EXISTING
+    # 2-way stat-change merge check unchanged.
+    prov = cache.read_provenance(task_id)
+    if prov and prov.get("source") == "fold" and prov.get("fold_complete"):
         fresh = remote.download_json(task_path, backend=backend)
         if fresh:
-            merged = _try_merge(task, fresh)
+            merged = _try_merge_from_base(prov.get("fold_base") or {}, task, fresh)
             if merged is None:
                 ops_log.log_op(command, task_id, status="conflict",
-                               error="Unsafe merge — remote version changed")
+                               error="Unsafe 3-way merge — fold-sourced write vs newer file")
                 raise schema.ConflictError(
-                    f"Remote task {task_id} changed and merge is unsafe. "
-                    f"Run 'fulcra-coord reconcile' to repair."
+                    f"Remote task {task_id} changed and fold-sourced merge is "
+                    f"unsafe. Run 'fulcra-coord reconcile' to repair."
                 )
             task = merged
+        # If the file is gone (None), keep `task` as-is — nothing to merge against.
+    else:
+        # Trigger merge/conflict check when:
+        # - we have a cached baseline and it differs from the current remote (normal case), OR
+        # - we have NO cached baseline but the file already exists remotely (fresh machine
+        #   that loaded the task via _load_task or _load_all_tasks but never previously wrote
+        #   it — unknown whether another agent updated it since we loaded it).
+        # Skipping this check when cached_meta is None would silently overwrite concurrent
+        # remote changes from other agents on cross-machine sessions.
+        needs_merge_check = pre_stat is not None and (
+            cached_meta is None or remote.stat_changed(cached_meta, pre_stat)
+        )
+        if needs_merge_check:
+            fresh = remote.download_json(task_path, backend=backend)
+            if fresh:
+                merged = _try_merge(task, fresh)
+                if merged is None:
+                    ops_log.log_op(command, task_id, status="conflict",
+                                   error="Unsafe merge — remote version changed")
+                    raise schema.ConflictError(
+                        f"Remote task {task_id} changed and merge is unsafe. "
+                        f"Run 'fulcra-coord reconcile' to repair."
+                    )
+                task = merged
 
     # Write operation marker before fan-out
     op_marker = {
@@ -129,6 +153,14 @@ def _write_task_and_views(
     post_stat = remote.stat(task_path, backend=backend)
     if post_stat:
         cache.write_meta(task_path, post_stat)
+
+    # Drop the read->write provenance now that the body has landed: a LATER
+    # file-sourced write of this task must not inherit a stale fold provenance
+    # and force a spurious 3-way merge. Best-effort (clear is ignore-missing).
+    try:
+        cache.clear_provenance(task_id)
+    except Exception:
+        pass
 
     _stamp_session_pointer(task)
 
