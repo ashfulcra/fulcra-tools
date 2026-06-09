@@ -354,8 +354,6 @@ def _try_merge(
     local_event_times = {e["at"] for e in local.get("events", [])}
     remote_event_times = {e["at"] for e in remote_task.get("events", [])}
 
-    import copy
-
     if local_status != remote_status:
         local_has_new_status_change = any(
             e.get("type") in schema.VALID_STATUSES and e["at"] not in remote_event_times
