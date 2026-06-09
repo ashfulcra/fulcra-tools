@@ -19,6 +19,7 @@ is load-bearing — the bodies are moved verbatim.
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import uuid
 from typing import Any, Optional
 
@@ -227,16 +228,14 @@ def _write_task_and_views(
         ev = _events.make_event(
             family="tasks", task_id=task["id"], kind=command,
             actor=task.get("owner_agent") or task.get("assignee") or "unknown",
-            # Mirror the task's top-level mutable fields. NOTE: ``current_summary``
-            # is the real schema key (there is no top-level ``summary``); and
-            # ``evidence`` is intentionally absent here — it lives nested under
-            # ``task["done"]["evidence"]``, so Phase 2 will lift completion
-            # evidence into the event separately. ``if k in task`` keeps any
-            # absent key safe.
-            payload={k: task.get(k) for k in
-                     ("title", "status", "current_summary", "next_action",
-                      "blocked_on", "workstream", "priority", "assignee")
-                     if k in task},
+            # Phase 2a: the payload IS the full task snapshot — the entire task
+            # dict, not a field subset — so ``fold_task`` can reconstruct a
+            # complete, schema-valid task from the latest snapshot (including the
+            # nested ``source{}``/``claim{}``/``done{}`` and ``tags[]``). It is
+            # deep-copied so a later in-place mutation of ``task`` (this same
+            # object can be re-touched downstream) can't retro-alter the
+            # already-emitted, immutable event.
+            payload=copy.deepcopy(task),
             idempotency_key=op_id,
         )
         ok = eventlog.append_event(ev, backend=backend)
