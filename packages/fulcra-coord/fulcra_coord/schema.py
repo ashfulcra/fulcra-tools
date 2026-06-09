@@ -428,6 +428,11 @@ def make_directive(
         raise ValueError("audience must be a non-empty string.")
     if not title or not title.strip():
         raise ValueError("title must be a non-empty string.")
+    # workstream is a required positional kwarg with no default; guard it the
+    # same way as the other required strings so an empty/whitespace value can't
+    # slip through and break the workstream-keyed routing/listing downstream.
+    if not workstream or not workstream.strip():
+        raise ValueError("workstream must be a non-empty string.")
 
     if priority not in VALID_PRIORITIES:
         raise ValueError(
@@ -505,7 +510,17 @@ def validate_directive(d: dict) -> list[str]:
         "priority", "workstream", "status", "schema", "created_at", "updated_at",
     ]
     for field in required_str:
-        if field in d and not d[field] and d[field] != 0:
+        if field not in d:
+            continue
+        val = d[field]
+        # A string field is "empty" if it is falsy OR whitespace-only — a bare
+        # ``not val`` would PASS "   " (``not "   "`` is False), letting a
+        # whitespace-only required string slip through. The ``val != 0`` guard
+        # preserves the numeric-zero allowance (0 is a legitimate value, not
+        # "empty"); non-string types have their own type checks below, so we
+        # only apply the strip-emptiness rule to actual ``str`` values.
+        is_empty = (not val and val != 0) or (isinstance(val, str) and val.strip() == "")
+        if is_empty:
             errors.append(f"Required field {field!r} must be non-empty.")
 
     # Schema string check — must be the exact constant, not a task schema etc.
@@ -553,6 +568,28 @@ def validate_directive(d: dict) -> list[str]:
             and not isinstance(d.get(field), str)
         ):
             errors.append(f"Field {field!r} must be a string or None.")
+
+    # Timestamp format — created_at/updated_at must follow the bus convention
+    # (ISO-8601 UTC with a trailing ``Z``, as emitted by make_directive). We
+    # check format only when the field is present and non-empty; the
+    # missing/empty case is already covered by the required_str loop above. A
+    # value that doesn't parse, or that lacks the trailing ``Z``, is flagged —
+    # an offset form like ``+00:00`` parses fine but violates the bus
+    # convention, so the explicit ``Z`` suffix is required.
+    for field in ("created_at", "updated_at"):
+        val = d.get(field)
+        if isinstance(val, str) and val.strip():
+            ok = val.endswith("Z")
+            if ok:
+                try:
+                    datetime.fromisoformat(val.replace("Z", "+00:00"))
+                except ValueError:
+                    ok = False
+            if not ok:
+                errors.append(
+                    f"Field {field!r} must be an ISO-8601 UTC timestamp "
+                    f"ending in 'Z' (got {val!r})."
+                )
 
     return errors
 
