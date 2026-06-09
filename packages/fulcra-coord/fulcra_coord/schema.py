@@ -356,6 +356,12 @@ _DIRECTIVE_TYPES = {"tell", "broadcast", "review", "verdict", "human-ask"}
 # Valid statuses for a directive. Intentionally SMALLER than task statuses:
 # directives are ephemeral routing primitives, not lifecycle-tracked work units.
 _DIRECTIVE_STATUSES = {"proposed", "delivered", "acked", "acted", "expired"}
+_DIRECTIVE_KEYS = {
+    "schema", "id", "directive_type", "from", "audience",
+    "title", "summary", "next_action", "priority", "workstream",
+    "status", "acked_by", "artifact_ref", "not_before", "due",
+    "routing", "created_at", "updated_at", "task_id",
+}
 
 
 def make_directive_id(directive_type: str, dt: Optional[datetime] = None) -> str:
@@ -486,12 +492,20 @@ def validate_directive(d: dict) -> list[str]:
     """
     errors: list[str] = []
 
+    missing = sorted(_DIRECTIVE_KEYS - set(d.keys()))
+    extra = sorted(set(d.keys()) - _DIRECTIVE_KEYS)
+    for field in missing:
+        errors.append(f"Missing required field: {field!r}")
+    for field in extra:
+        errors.append(f"Unexpected field: {field!r}")
+
     # Required non-empty string fields — same pattern as validate_task.
-    required_str = ["id", "directive_type", "from", "audience", "title", "status", "schema"]
+    required_str = [
+        "id", "directive_type", "from", "audience", "title",
+        "priority", "workstream", "status", "schema", "created_at", "updated_at",
+    ]
     for field in required_str:
-        if field not in d:
-            errors.append(f"Missing required field: {field!r}")
-        elif not d[field] and d[field] != 0:
+        if field in d and not d[field] and d[field] != 0:
             errors.append(f"Required field {field!r} must be non-empty.")
 
     # Schema string check — must be the exact constant, not a task schema etc.
@@ -515,6 +529,30 @@ def validate_directive(d: dict) -> list[str]:
         errors.append(
             f"Unknown status {dstatus!r}. Valid: {sorted(_DIRECTIVE_STATUSES)}"
         )
+
+    priority = d.get("priority", "")
+    if priority and priority not in VALID_PRIORITIES:
+        errors.append(
+            f"Unknown priority {priority!r}. Valid: {sorted(VALID_PRIORITIES)}"
+        )
+
+    if "acked_by" in d and not isinstance(d.get("acked_by"), list):
+        errors.append("Field 'acked_by' must be a list.")
+    if "routing" in d and not isinstance(d.get("routing"), list):
+        errors.append("Field 'routing' must be a list.")
+    if (
+        "artifact_ref" in d
+        and d.get("artifact_ref") is not None
+        and not isinstance(d.get("artifact_ref"), dict)
+    ):
+        errors.append("Field 'artifact_ref' must be an object or None.")
+    for field in ("not_before", "due", "task_id", "summary", "next_action"):
+        if (
+            field in d
+            and d.get(field) is not None
+            and not isinstance(d.get(field), str)
+        ):
+            errors.append(f"Field {field!r} must be a string or None.")
 
     return errors
 

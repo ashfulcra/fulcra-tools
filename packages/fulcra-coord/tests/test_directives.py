@@ -344,6 +344,38 @@ class TestValidateDirective(unittest.TestCase):
         errs = validate_directive(d)
         self.assertGreaterEqual(len(errs), 2)
 
+    def test_missing_each_schema_key_is_flagged(self):
+        d = _good_directive()
+        for field in sorted(TestMakeDirectiveKeySet.REQUIRED_KEYS):
+            with self.subTest(field=field):
+                broken = dict(d)
+                del broken[field]
+                errs = validate_directive(broken)
+                self.assertTrue(any(field in e for e in errs), errs)
+
+    def test_unexpected_key_is_flagged(self):
+        d = _good_directive()
+        d["unexpected"] = "value"
+        errs = validate_directive(d)
+        self.assertTrue(
+            any("Unexpected field" in e and "unexpected" in e for e in errs),
+            errs,
+        )
+
+    def test_invalid_priority_is_flagged(self):
+        d = _good_directive()
+        d["priority"] = "urgent"
+        errs = validate_directive(d)
+        self.assertTrue(any("priority" in e.lower() for e in errs), errs)
+
+    def test_acked_by_and_routing_must_be_lists(self):
+        d = _good_directive()
+        d["acked_by"] = "agent-a"
+        d["routing"] = "hop"
+        errs = validate_directive(d)
+        self.assertTrue(any("acked_by" in e for e in errs), errs)
+        self.assertTrue(any("routing" in e for e in errs), errs)
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
