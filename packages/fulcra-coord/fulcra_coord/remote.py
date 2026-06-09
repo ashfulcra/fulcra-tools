@@ -151,6 +151,28 @@ def task_remote_path(task_id: str) -> str:
     return f"{remote_root()}/tasks/{task_id}.json"
 
 
+def events_prefix(task_id: str) -> str:
+    """List prefix for all event shards belonging to *task_id*.
+
+    Every shard under this prefix is an immutable append: one file per event,
+    keyed by ``event_id``, written by ``eventlog.append_event``.  There is no
+    shared mutable index under this prefix, so concurrent writers never clobber
+    each other's shards (the no-CAS-safe per-file pattern from archive_index).
+    """
+    return f"{remote_root()}/events/tasks/{task_id}/"
+
+
+def event_remote_path(task_id: str, event_id: str) -> str:
+    """Full remote path for one immutable event shard.
+
+    Path is ``{events_prefix(task_id)}{event_id}.json``.  Because the
+    ``event_id`` encodes a microsecond timestamp + random suffix, two concurrent
+    writers for the same task will always land on distinct paths — no last-write-
+    wins risk even without compare-and-swap on the store.
+    """
+    return f"{events_prefix(task_id)}{event_id}.json"
+
+
 def view_remote_path(name: str) -> str:
     """name: index, active, next, recently-done, search-index"""
     if name == "index":
