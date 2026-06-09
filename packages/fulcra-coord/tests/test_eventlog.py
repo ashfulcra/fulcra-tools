@@ -74,3 +74,9 @@ def test_read_events_returns_plain_dicts_not_tuples(coord_backend):
     assert all(isinstance(e, dict) for e in got)
     # fold_task must consume read_events output DIRECTLY
     assert events.fold_task(got)["status"] == "active"
+
+
+def test_read_events_for_unknown_task_returns_empty(coord_backend):
+    """A task with no event shards yields []. The reconcile parity check (T6)
+    relies on this empty-list path to mean 'not yet dual-written', so pin it."""
+    assert eventlog.read_events("TASK-NOPE", backend=coord_backend) == []
