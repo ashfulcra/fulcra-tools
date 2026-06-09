@@ -91,9 +91,16 @@ def test_undelivered_flagged_when_assignee_offline(coord_backend):
 
 def test_undelivered_flagged_when_assignee_presence_stale(coord_backend):
     """A proposed directive to an agent whose presence is STALE (older than the
-    stale threshold) is undelivered — the session is dead, not merely idle."""
+    stale threshold) is undelivered — the session is dead, not merely idle.
+
+    A LIVE agent (alice) is seeded alongside so the live set is NON-EMPTY: only
+    then can the check confidently say bob's stale inbox is undelivered (an empty
+    live set is indeterminate — see the presence-unavailable tests)."""
     stale_seen = _iso(datetime.now(timezone.utc) - timedelta(days=4))
-    _seed_presence(coord_backend, agents=[("bob", stale_seen)])
+    _seed_presence(coord_backend, agents=[
+        ("alice", _iso(datetime.now(timezone.utc))),  # live -> non-empty roster
+        ("bob", stale_seen),
+    ])
     task = _directed_directive(task_id="TASK-STALE", assignee="bob")
     report = cli._undelivered_directive_check([task], backend=coord_backend)
     assert "TASK-STALE" in {u["id"] for u in report["undelivered"]}
@@ -188,6 +195,9 @@ def test_check_does_not_mutate_tasks(coord_backend):
 def test_list_is_capped_but_count_is_total(coord_backend):
     """The undelivered LIST is capped (so the timeline note stays bounded), but
     ``count`` reflects the TRUE total — the count is never silently truncated."""
+    # A live agent so the roster is NON-EMPTY (an empty roster is indeterminate
+    # and would short-circuit to presence_unavailable before any enumeration).
+    _seed_presence(coord_backend, agents=[("alice", _iso(datetime.now(timezone.utc)))])
     tasks = [
         _directed_directive(task_id=f"TASK-CAP-{i:03d}", assignee="bob")
         for i in range(60)
@@ -206,6 +216,81 @@ def test_check_never_raises_on_bad_presence(coord_backend):
         report = cli._undelivered_directive_check([task], backend=coord_backend)
     assert "count" in report
     assert "undelivered" in report
+
+
+# ---------------------------------------------------------------------------
+# 3b. The cry-wolf flood: a presence-READ failure (download_json -> None, the
+#     non-raising transport-failure path) must NOT enumerate every directive as
+#     undelivered. It is INDETERMINATE, not "all dead" — emit a single distinct
+#     ``presence_unavailable`` signal instead of a flood.
+# ---------------------------------------------------------------------------
+
+def test_no_flood_when_presence_read_returns_none(coord_backend):
+    """THE FLOOD REGRESSION (load-bearing). ``remote.download`` returns ``None``
+    (it does NOT raise) on any transport failure, so the presence-aggregate read
+    can come back ``None`` without the helper's try/except firing. When that
+    happens while there ARE directed ``proposed`` directives to (would-be) live
+    agents, the check must NOT flag them all undelivered — we can't distinguish
+    "assignee offline" from "presence unavailable". Assert NO flood: count 0,
+    empty list, and the distinct ``presence_unavailable`` signal set True.
+
+    RED before the fix: the old code took ``_live_agent_ids`` -> empty set ->
+    every directed proposed directive matched ``assignee not in live`` and was
+    flagged, so count == 2 here (a flood)."""
+    tasks = [
+        _directed_directive(task_id="TASK-FLOOD-1", assignee="bob"),
+        _directed_directive(task_id="TASK-FLOOD-2", assignee="carol"),
+    ]
+    # Drive ONLY the presence-aggregate read to None (the real transport-failure
+    # shape: remote.download_json returns None, no raise).
+    with mock.patch.object(remote, "download_json", return_value=None):
+        report = cli._undelivered_directive_check(tasks, backend=coord_backend)
+    assert report["count"] == 0
+    assert report["undelivered"] == []
+    assert report.get("presence_unavailable") is True
+
+
+def test_no_flood_when_roster_empty(coord_backend):
+    """Empty roster: the presence aggregate LOADS fine but contains zero live
+    agents. We still cannot confirm any specific assignee is offline (an empty
+    live set is indistinguishable from "presence unavailable"), so this is also
+    INDETERMINATE — ``presence_unavailable`` True, no enumeration."""
+    # An aggregate that builds to zero live agents (all entries stale).
+    stale_seen = _iso(datetime.now(timezone.utc) - timedelta(days=10))
+    _seed_presence(coord_backend, agents=[("ghost", stale_seen)])
+    task = _directed_directive(task_id="TASK-EMPTYROSTER", assignee="bob")
+    report = cli._undelivered_directive_check([task], backend=coord_backend)
+    assert report["count"] == 0
+    assert report["undelivered"] == []
+    assert report.get("presence_unavailable") is True
+
+
+def test_genuine_undelivered_still_flagged_with_nonempty_roster(coord_backend):
+    """The genuine detection is PRESERVED: with a NON-EMPTY live set (≥1 live
+    agent) we CAN confidently say a proposed directive to a DIFFERENT, offline
+    agent is undelivered. ``presence_unavailable`` is False and the directive is
+    flagged — the flood fix must not blunt the real signal."""
+    _seed_presence(coord_backend, agents=[("alice", _iso(datetime.now(timezone.utc)))])
+    task = _directed_directive(task_id="TASK-REALDEAD", assignee="bob")  # bob offline
+    report = cli._undelivered_directive_check([task], backend=coord_backend)
+    assert report["count"] == 1
+    assert "TASK-REALDEAD" in {u["id"] for u in report["undelivered"]}
+    assert report.get("presence_unavailable") is False
+
+
+def test_age_days_not_inf_on_missing_timestamp(coord_backend):
+    """A directive whose timestamps are missing/unparseable must NOT render an
+    ``inf`` age in the warn line (``_age_hours`` returns +inf for an unparseable
+    stamp). With a non-empty live set so the directive is genuinely flagged, the
+    rendered ``age_days`` must be a finite number or the ``"?"`` sentinel."""
+    _seed_presence(coord_backend, agents=[("alice", _iso(datetime.now(timezone.utc)))])
+    task = _directed_directive(task_id="TASK-NOTS", assignee="bob")
+    task["created_at"] = ""
+    task["updated_at"] = ""
+    report = cli._undelivered_directive_check([task], backend=coord_backend)
+    flagged = next(u for u in report["undelivered"] if u["id"] == "TASK-NOTS")
+    age = flagged["age_days"]
+    assert age == "?" or (isinstance(age, (int, float)) and age != float("inf"))
 
 
 # ---------------------------------------------------------------------------
