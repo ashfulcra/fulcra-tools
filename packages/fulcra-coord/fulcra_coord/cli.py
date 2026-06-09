@@ -239,10 +239,33 @@ def _reconcile_rebuild_source_preserving_acks(
 
 
 def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
-    """Compare each task snapshot against the fold of its event log. Phase-1
-    safety net: surfaces drift as health debt (the mutable file is still
-    authoritative, so drift is REPORTED, never acted on). Compares the status
-    field only this phase — the cheapest signal that dual-write is consistent.
+    """Compare each task snapshot against the fold of its event log.
+
+    Phase-1 safety net: surfaces drift as health debt (the mutable file is
+    still authoritative, so drift is REPORTED, never acted on).
+
+    Phase-2a broadening: when ``events.fold_is_complete(folded)`` is True
+    (at least one full-task snapshot event has been applied), the check
+    compares ALL durable task fields — not just status — giving a precise
+    whole-task parity signal.  For legacy delta-only tasks where the fold is
+    not complete, the Phase-1 status-only comparison is kept to avoid false
+    positives from partial pre-migration payloads.
+
+    Fields excluded from the full-task comparison (the ignore-set):
+
+    * ``_applied_event_count`` — bookkeeping added by ``fold_task``; absent
+      from the live file entirely.
+    * ``updated_at`` — updated on every write; legitimately differs between a
+      point-in-time snapshot and the current live file.
+    * ``last_touched_by``, ``last_touched_in`` — same as ``updated_at``;
+      stamps the most-recent writer, which is always the live file's most
+      recent write, not the snapshot instant.
+    * ``events`` — the in-task human-readable event log grows independently
+      with every write and is NOT part of the machine-readable event stream;
+      it legitimately lags or diverges from the canonical event shard.
+
+    These fields are expected to differ and their difference is not drift.
+    Any other top-level field that differs IS drift and will be flagged.
 
     Only tasks that have at least one event shard are compared — tasks with no
     events were written before dual-write was introduced and are not drift by
@@ -255,14 +278,8 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
 
     Cost: O(N) remote I/O — one ``download_json`` per task snapshot plus one
     ``read_events`` (a ``list_json`` sweep) per task's event prefix. Acceptable
-    for a Phase-1 diagnostic on the current bus scale (reconcile already sweeps
-    all tasks); if the bus grows, Phase 2 can cache/index event heads.
-
-    Phase 2 extension: once the fold is authoritative, broaden the comparison
-    from ``status`` alone to all top-level snapshot fields (title,
-    current_summary, next_action, …). Status-only here deliberately limits false
-    positives during the dual-write ramp-up, where partial pre-migration payloads
-    would make field-level drift noisy.
+    for a Phase-2a diagnostic on the current bus scale (reconcile already sweeps
+    all tasks).
     """
     drift_ids: list[str] = []
     checked = 0
@@ -283,7 +300,18 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             continue  # not yet dual-written (pre-migration task) — not drift
         checked += 1
         folded = _events.fold_task(evs)
-        if folded.get("status") != snap.get("status"):
+        if _events.fold_is_complete(folded):
+            # Compare the durable task fields. Exclude bookkeeping the fold adds
+            # (_applied_event_count) and fields that legitimately differ between a
+            # point-in-time snapshot and the live file: updated_at / last_touched_*
+            # move on every write, and the in-task events[] log grows independently.
+            ignore = {"_applied_event_count", "updated_at", "last_touched_by",
+                      "last_touched_in", "events"}
+            a = {k: v for k, v in folded.items() if k not in ignore}
+            b = {k: v for k, v in snap.items() if k not in ignore}
+            if a != b:
+                drift_ids.append(snap["id"])
+        elif folded.get("status") != snap.get("status"):
             drift_ids.append(snap["id"])
     return {"checked": checked, "drift": len(drift_ids), "drift_task_ids": drift_ids}
 

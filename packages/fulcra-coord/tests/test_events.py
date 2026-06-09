@@ -137,3 +137,49 @@ def test_fold_later_explicit_nonterminal_reopens():
     ]
     state = events.fold_task(evs)
     assert state["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a: snapshot semantics + fold_is_complete
+# ---------------------------------------------------------------------------
+
+def test_fold_latest_snapshot_replaces_accumulated_state():
+    s1 = events.make_event(family="tasks", task_id="T", kind="start", actor="a",
+                           payload={"id": "T", "schema": "fulcra.coordination.task.v1",
+                                    "status": "active", "title": "v1", "x": 1},
+                           at="2026-06-09T10:00:00.000000Z")
+    s2 = events.make_event(family="tasks", task_id="T", kind="update", actor="a",
+                           payload={"id": "T", "schema": "fulcra.coordination.task.v1",
+                                    "status": "active", "title": "v2"},
+                           at="2026-06-09T11:00:00.000000Z")
+    state = events.fold_task([s1, s2])
+    assert state["title"] == "v2"
+    assert "x" not in state          # latest snapshot REPLACED — stale field dropped
+    assert state["id"] == "T"
+
+
+def test_fold_is_complete_true_when_snapshot_present():
+    s = events.make_event(family="tasks", task_id="T", kind="start", actor="a",
+                          payload={"id": "T", "schema": "fulcra.coordination.task.v1", "status": "active"})
+    assert events.fold_is_complete(events.fold_task([s])) is True
+
+
+def test_fold_is_complete_false_for_legacy_delta_only_events():
+    d = events.make_event(family="tasks", task_id="T", kind="update", actor="a",
+                          payload={"summary": "s"})
+    assert events.fold_is_complete(events.fold_task([d])) is False
+
+
+def test_fold_snapshot_then_legacy_delta_merges_on_top():
+    # A delta arriving AFTER a snapshot still field-merges onto it (back-compat;
+    # in practice snapshots come last, but the reducer must be order-correct).
+    s = events.make_event(family="tasks", task_id="T", kind="start", actor="a",
+                          payload={"id": "T", "schema": "fulcra.coordination.task.v1",
+                                   "status": "active", "current_summary": "s0"},
+                          at="2026-06-09T10:00:00.000000Z")
+    d = events.make_event(family="tasks", task_id="T", kind="update", actor="a",
+                          payload={"current_summary": "s1"},
+                          at="2026-06-09T11:00:00.000000Z")
+    state = events.fold_task([s, d])
+    assert state["current_summary"] == "s1"
+    assert state["status"] == "active"   # snapshot fields survive the partial delta

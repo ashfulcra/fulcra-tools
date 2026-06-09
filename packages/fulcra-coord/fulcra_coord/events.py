@@ -124,6 +124,22 @@ def make_event(
     }
 
 
+def _is_snapshot_payload(payload: dict[str, Any]) -> bool:
+    """Return True if *payload* is a full-task snapshot, False if it is a legacy delta.
+
+    A full-task snapshot carries the task schema marker (``"schema"`` key) AND
+    the task id (``"id"`` key).  Phase-1 delta payloads carry neither — they are
+    just a subset of changed fields (title, status, current_summary, etc.).  This
+    discriminator is clean: none of the Phase-1 delta keys overlap with ``schema``
+    or ``id``, so there are no false positives.
+
+    The distinction drives ``fold_task``'s merge strategy:
+    * snapshot → ``state = dict(payload)`` (replace wholesale; latest snapshot wins)
+    * delta    → shallow field-merge into accumulated state (back-compat, unchanged)
+    """
+    return bool(payload.get("schema")) and bool(payload.get("id"))
+
+
 def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
     """Deterministically reduce an event list to a task snapshot.
 
@@ -144,11 +160,23 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
        duplicates are silently skipped.  A falsy ``idempotency_key`` (``None``
        or ``""``) means "no dedup key — always apply this event."
 
-    3. **Shallow last-write-wins field merge** — each event's ``payload`` dict
-       is merged into the accumulator state; the last event to set a key wins.
-       This is intentionally shallow: nested dicts are replaced, not merged.
-       Callers needing a deep-merge strategy should embed a versioned sub-key
-       in the payload and manage merging above this layer.
+    3. **Snapshot vs. delta merge strategy** — Phase 2a introduced full-task
+       snapshot payloads (distinguishable via :func:`_is_snapshot_payload`).
+       The merge strategy depends on the payload type:
+
+       * **Snapshot** (``payload.get("schema")`` and ``payload.get("id")`` are
+         both truthy) → ``state = dict(payload)`` — the snapshot *replaces* the
+         accumulated state wholesale.  The latest snapshot in sort order wins,
+         and any fields present in earlier events but absent from the latest
+         snapshot are dropped (they are stale).
+       * **Delta** (Phase-1 legacy — payload carries only a field subset) →
+         shallow last-write-wins field merge into the accumulated state, exactly
+         as before.  This preserves full backward-compat with events already on
+         the live bus.
+
+       The two strategies compose correctly in any order: a delta after a
+       snapshot merges on top of the snapshot state; a delta before a snapshot
+       is overwritten when the snapshot replaces state.
 
     4. **Terminal stickiness is emergent, not special-cased** — a task's
        ``status`` is only changed by an event whose payload carries a
@@ -168,7 +196,8 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
        a consequence of pure LWW-by-sort, not a special case.
 
     5. **Bookkeeping** — ``state["id"]`` is set to the ``task_id`` shared by
-       all events; ``state["_applied_event_count"]`` records how many events
+       all events (fallback when the fold produced no snapshot that carried an
+       ``id`` key); ``state["_applied_event_count"]`` records how many events
        were actually applied after deduplication.
 
     Args:
@@ -180,8 +209,11 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
 
     Returns:
         A plain ``dict`` representing the current task snapshot.  Keys come
-        from payload merges plus the ``id`` and ``_applied_event_count``
-        bookkeeping fields.
+        from payload merges/replacements plus the ``id`` and
+        ``_applied_event_count`` bookkeeping fields.  Use
+        :func:`fold_is_complete` to determine whether the result was
+        reconstructed from a full snapshot (trustworthy) or only from legacy
+        deltas (may be incomplete).
     """
     ordered = sorted(evs, key=lambda e: (e.get("at", ""), e.get("event_id", "")))
     seen: set[tuple[str, str]] = set()
@@ -197,17 +229,43 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
                 continue
             seen.add(dedup_key)
 
-        # Shallow last-write-wins merge — apply every payload key unconditionally.
-        # Terminal stickiness is emergent: a later event without a ``status`` key
-        # simply does not overwrite an existing terminal status; a later event
-        # that explicitly sets a new status does overwrite it.  No suppression
-        # logic is needed; pure sort-order LWW is the full spec.
-        for k, v in (e.get("payload") or {}).items():
-            state[k] = v
+        payload = e.get("payload") or {}
+        if _is_snapshot_payload(payload):
+            # Full-task snapshot: replace the accumulated state wholesale.
+            # The snapshot carries the complete task at this point in time, so
+            # any fields from earlier events are stale and should be dropped.
+            state = dict(payload)
+        else:
+            # Legacy Phase-1 delta: shallow last-write-wins merge.  Terminal
+            # stickiness is emergent — a later delta without a ``status`` key
+            # simply does not overwrite an existing terminal status.
+            for k, v in payload.items():
+                state[k] = v
 
         applied += 1
 
-    # Set after the loop so ``id`` is always present, even for an empty event list.
-    state["id"] = evs[0]["task_id"] if evs else None
+    # ``state["id"]`` may already be set if a snapshot payload carried it.
+    # Fall back to the shared task_id from the event envelope so it is always
+    # present, even for a delta-only fold or an empty event list.
+    state["id"] = state.get("id") or (evs[0]["task_id"] if evs else None)
     state["_applied_event_count"] = applied
     return state
+
+
+def fold_is_complete(state: dict[str, Any]) -> bool:
+    """True iff the fold reconstructed a full schema-valid task.
+
+    A complete fold means **at least one full-task snapshot** has been applied
+    (the folded state carries both the task schema marker and an id) — so the
+    result has the full schema, whether the latest event was that snapshot or a
+    later delta that merged a few fields on top of it.  It is NOT "the latest
+    event was a snapshot": a delta arriving after a snapshot still leaves a
+    complete fold.  Phase 2b uses this to decide whether to trust the fold
+    result or fall back to the mutable task file for a task whose events are
+    delta-only (not yet snapshotted by the dual-write path).
+
+    Returns False for:
+    * delta-only folds (Phase-1 events, no snapshot ever emitted for this task)
+    * the empty-list sentinel (``{"id": None, "_applied_event_count": 0}``)
+    """
+    return bool(state.get("schema")) and bool(state.get("id"))
