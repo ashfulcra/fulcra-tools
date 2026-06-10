@@ -367,9 +367,18 @@ def _listener_armed(agent: str) -> bool:
     carries timeout=5. Any error reads as "not armed"; the worst failure mode
     is a redundant, idempotent re-install."""
     try:
-        plist = scheduler_env.launchagents_dir() / _plist_name_for(agent)
-        if plist.exists():
-            return True
+        if scheduler_env.is_macos():
+            plist = scheduler_env.launchagents_dir() / _plist_name_for(agent)
+            if not plist.exists():
+                return False
+            out = subprocess.run(["launchctl", "list"], capture_output=True,
+                                 text=True, timeout=5)
+            labels = {
+                parts[-1]
+                for line in (out.stdout or "").splitlines()
+                if (parts := line.split())
+            }
+            return out.returncode == 0 and _label_for(agent) in labels
         out = subprocess.run(["crontab", "-l"], capture_output=True, text=True,
                              timeout=5)
         return out.returncode == 0 and _cron_marker_for(agent) in (out.stdout or "")
@@ -392,7 +401,15 @@ def ensure_listener(*, agent: str) -> None:
             return
         if _listener_armed(agent):
             return
-        install_listener(agent=agent)
+        plan = install_listener(agent=agent)
+        if plan.get("mechanism") == "launchd":
+            plist = (plan.get("writes") or [None])[0]
+            if plist:
+                try:
+                    subprocess.run(["launchctl", "load", "-w", plist],
+                                   capture_output=True, timeout=10, check=False)
+                except Exception:
+                    pass
     except Exception:
         pass
 

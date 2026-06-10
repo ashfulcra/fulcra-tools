@@ -5607,6 +5607,42 @@ class TestEnsureListener(unittest.TestCase):
             listener.ensure_listener(agent="a:h:r")
         self.assertEqual(len(calls), 1)
 
+    def test_ensure_listener_loads_launchd_plist_after_install(self):
+        from fulcra_coord import listener
+        plan = {"mechanism": "launchd", "writes": ["/tmp/a.plist"]}
+        with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "1"}), \
+             patch.object(listener, "_listener_armed", return_value=False), \
+             patch.object(listener, "install_listener", return_value=plan), \
+             patch.object(listener.subprocess, "run") as run:
+            listener.ensure_listener(agent="a:h:r")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0],
+                         ["launchctl", "load", "-w", "/tmp/a.plist"])
+
+    def test_listener_armed_requires_loaded_launchd_job(self):
+        from fulcra_coord import listener
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = Path(tmp) / listener._plist_name_for("a:h:r")
+            plist.write_text("<plist/>")
+
+            missing = subprocess.CompletedProcess(
+                ["launchctl", "list"], 0, stdout="", stderr="")
+            loaded = subprocess.CompletedProcess(
+                ["launchctl", "list"], 0,
+                stdout=f"123\t0\t{listener._label_for('a:h:r')}\n", stderr="")
+
+            with patch.object(listener.scheduler_env, "is_macos", return_value=True), \
+                 patch.object(listener.scheduler_env, "launchagents_dir",
+                              return_value=Path(tmp)), \
+                 patch.object(listener.subprocess, "run", return_value=missing):
+                self.assertFalse(listener._listener_armed("a:h:r"))
+
+            with patch.object(listener.scheduler_env, "is_macos", return_value=True), \
+                 patch.object(listener.scheduler_env, "launchagents_dir",
+                              return_value=Path(tmp)), \
+                 patch.object(listener.subprocess, "run", return_value=loaded):
+                self.assertTrue(listener._listener_armed("a:h:r"))
+
     def test_ensure_listener_noop_when_armed(self):
         from fulcra_coord import listener
         with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "1"}), \
