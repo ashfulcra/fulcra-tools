@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity
 from . import role_ops as _role_ops
+from . import selfupdate as _selfupdate
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
 from .textfmt import age_str as _age_str
@@ -240,6 +241,25 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     roles = list(getattr(args, "role", None) or [])
     if getattr(args, "can_review", False):
         roles.append("review")
+
+    # VERSION SELF-INCORPORATION (operator directive 2026-06-10: "i'm not
+    # going to go around and wake the entire fleet for each incremental
+    # upgrade"): check the bus version pointer and update BEFORE the presence
+    # write, so the roster reflects post-update staleness. UNthrottled here —
+    # a fresh session must never boot stale because a tick checked recently.
+    # If an update ran it takes effect next invocation (no re-exec); if this
+    # host is behind and COULDN'T update, the stale marker renders as a
+    # '(vX behind canonical Y)' summary suffix — staleness stays VISIBLE on
+    # the roster (the spec's degrade-gracefully rail). Doubly guarded: the
+    # callee never raises, and this block must never fail a session boot.
+    try:
+        _selfupdate.maybe_self_update(backend=backend)
+        stale = _selfupdate.stale_summary_suffix()
+        if stale:
+            summary = f"{summary} {stale}".strip()
+    except Exception:
+        pass
+
     record = schema.make_presence(me, workstreams=workstreams, summary=summary,
                                   capabilities=roles or None,
                                   session=os.environ.get("FULCRA_COORD_SESSION") or None)

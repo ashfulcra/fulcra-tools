@@ -17,6 +17,11 @@ running when hooks were installed must onboard manually — run these now:
      doc mentions is missing, your install is stale — from the package dir run
      `git pull && uv tool install --reinstall --force .` (use `--reinstall`: uv
      skips the rebuild when the version is unchanged).
+   - **0.15.3+ self-propagates:** once on 0.15.3 or later, the CLI updates
+     itself from the bus version manifest at session start / listener ticks
+     (default ON; configure `update.json` with your checkout path — see the
+     README "Self-update" section). The manual update above is only needed to
+     cross onto 0.15.3 or on hosts opted out via `FULCRA_COORD_SELF_UPDATE=0`.
 2. Wire future sessions (idempotent): `fulcra-coord install-claude-code --global`
 3. **Declare a clear, stable, human-legible identity** so directives reach you
    and the human can tell who's who on the bus:

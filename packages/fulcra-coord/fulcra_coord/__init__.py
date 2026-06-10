@@ -12,7 +12,7 @@ import os
 # accurate AND so `uv tool install --force` actually rebuilds — uv skips the
 # rebuild when the version is unchanged, which is what silently froze older
 # installs at an old subcommand set. SemVer-ish: minor for additive surfaces.
-__version__ = "0.15.2"
+__version__ = "0.15.3"
 
 SCHEMA_VERSION = "fulcra.coordination.task.v1"
 DEFAULT_REMOTE_ROOT = "/coordination"

@@ -14,6 +14,7 @@ from . import cli as _cli
 # core from importing the mirror — entry.py sits above core, so this is the
 # one place the production-side bridge may be wired in.
 from . import forge_mirror as _forge_mirror
+from . import selfupdate as _selfupdate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -417,6 +418,21 @@ def build_parser() -> argparse.ArgumentParser:
                              "installed CLI has a given subcommand before using it)")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- announce-version ----
+    sp = sub.add_parser("announce-version",
+                        help="Publish this build's version as the canonical "
+                             "version manifest (runtime/version.json) — the "
+                             "maintainer runs this at each release so the "
+                             "fleet self-updates instead of needing manual "
+                             "'UPDATE NOW' broadcasts. The manifest is a "
+                             "POINTER (version + commit + min-supported), "
+                             "never code or commands.")
+    sp.add_argument("--min-supported", dest="min_supported", default=None,
+                    metavar="VERSION",
+                    help="Optional compatibility floor: the oldest version "
+                         "still expected to read the bus correctly")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- health ----
     sp = sub.add_parser("health",
                         help="Fleet coordination-system health dashboard")
@@ -697,6 +713,10 @@ COMMAND_MAP = {
     "review-done": _cli.cmd_review_done,
     "respond": _cli.cmd_respond,
     "forge-mirror": _forge_mirror.cmd_forge_mirror,
+    # Like forge-mirror, announce-version dispatches straight from its own
+    # module: it is a maintainer-only release tool, not a coordination verb
+    # cli.py needs to re-export.
+    "announce-version": _selfupdate.cmd_announce_version,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "restore": _cli.cmd_restore,
