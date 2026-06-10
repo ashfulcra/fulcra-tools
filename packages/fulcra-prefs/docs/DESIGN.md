@@ -1,5 +1,8 @@
 # fulcra-prefs — design (v0 draft, 2026-06-10)
 
+> Historical draft. The reviewed design lives in
+> [`SPEC.md`](SPEC.md); use that document for implementation work.
+
 User-owned preference layer on Fulcra: **typed preference signals with decay, a
 deterministic solver for group decisions, consent-gated execution, callable over
 MCP by any agent** — per-platform overrides, auto-capture, auto-reconcile,

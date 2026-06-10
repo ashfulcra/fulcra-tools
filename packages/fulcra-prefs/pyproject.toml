@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "fulcra-prefs"
 version = "0.1.0"
 description = "User-owned preference signals, compiled projections, and consent-gated preference solving on Fulcra."
-readme = "docs/DESIGN.md"
+readme = "docs/SPEC.md"
 requires-python = ">=3.11"
 dependencies = []
 
