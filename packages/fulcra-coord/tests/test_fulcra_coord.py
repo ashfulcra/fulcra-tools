@@ -11356,6 +11356,35 @@ def test_loop_health_check_ignores_sublog_shards(coord_backend):
     assert report["overdue"] == 1
 
 
+def test_loop_health_check_counts_out_of_band(coord_backend):
+    """Phase 2: a loop I opened whose evidence sub-log is nonempty counts as
+    out_of_band — and the evidence NEVER changes the open/overdue accounting
+    (mirrored signals are detection-only; closure stays bus-response-only)."""
+    from fulcra_coord import cli, loop_ops
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        flagged = _seed_open_review_loop(coord_backend, opener="me:h:r")
+        _seed_open_review_loop(coord_backend, opener="me:h:r", hours_old=1)
+        assert loop_ops.append_loop_evidence(
+            flagged["id"],
+            {"forge": "github", "kind": "comment-verdict",
+             "summary": "approved on the forge"},
+            backend=coord_backend)
+        report = cli._loop_health_check(backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert report["out_of_band"] == 1
+    # Evidence is invisible to the open/overdue fold: both loops still open,
+    # the 48h one still overdue.
+    assert report["open_loops"] == 2
+    assert report["overdue"] == 1
+    assert report["awaiting_me"] == 0
+
+
 def test_reconcile_populates_loop_health(coord_backend):
     """A reconcile records the loop-health report beside event_parity in the
     per-host health record — and a check exception NEVER changes the exit code."""
@@ -11448,6 +11477,68 @@ def test_status_awaiting_you_uses_current_agent_health_only(coord_backend, capsy
     assert "2 coordination loop(s) overdue" in out
     assert "1 awaiting you" in out
     assert "9 awaiting you" not in out
+
+
+def test_status_renders_out_of_band_count(coord_backend, capsys):
+    """Phase 2: the loop warning appends ` · K out-of-band` when K>0 — sourced
+    from the CURRENT agent's health record only (out_of_band is the requester's
+    own awaiting_others signal, same identity keying as awaiting_me — the
+    a6d79f95 cross-agent-leak fix applies here too)."""
+    from fulcra_coord import query, remote
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        remote.upload_json(
+            {"host": "host-a", "agent": "other:h:r",
+             "loop_health": {"open_loops": 9, "overdue": 2, "awaiting_me": 9,
+                             "out_of_band": 9}},
+            remote.health_remote_path("host-a"), backend=coord_backend,
+        )
+        remote.upload_json(
+            {"host": "host-b", "agent": "me:h:r",
+             "loop_health": {"open_loops": 3, "overdue": 1, "awaiting_me": 1,
+                             "out_of_band": 2}},
+            remote.health_remote_path("host-b"), backend=coord_backend,
+        )
+        rc = query.cmd_status(types.SimpleNamespace(workstream=None, agent=None,
+                                                    format="table"),
+                              backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "· 2 out-of-band" in out
+    assert "9 out-of-band" not in out
+
+
+def test_status_omits_out_of_band_when_zero(coord_backend, capsys):
+    """The ` · K out-of-band` suffix renders ONLY when K>0 — a zero count adds
+    nothing to the existing warning line."""
+    from fulcra_coord import query, remote
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        remote.upload_json(
+            {"host": "host-a", "agent": "me:h:r",
+             "loop_health": {"open_loops": 2, "overdue": 1, "awaiting_me": 1,
+                             "out_of_band": 0}},
+            remote.health_remote_path("host-a"), backend=coord_backend,
+        )
+        rc = query.cmd_status(types.SimpleNamespace(workstream=None, agent=None,
+                                                    format="table"),
+                              backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 coordination loop(s) overdue" in out
+    assert "out-of-band" not in out
 
 
 def test_status_no_loop_warning_when_clean(coord_backend, capsys):

@@ -342,6 +342,20 @@ def directive_response_path(directive_id: str, event_id: str) -> str:
     return f"{directive_responses_prefix(directive_id)}{event_id}.json"
 
 
+def directive_evidence_prefix(directive_id: str) -> str:
+    """Prefix of a directive's EVIDENCE sub-log — the third sub-log, holding
+    forge-MIRRORED signals (a PR merge, a forge review verdict). One file per
+    mirrored event — append-only shards, same clobber-safety rationale as the
+    responses sub-log. Consumed ONLY by detection (out-of-band flags on the
+    loop board); the closure fold never reads this prefix — mirrored evidence
+    must never close a loop (closure is bus-response-only)."""
+    return f"{directives_prefix()}{directive_id}/evidence/"
+
+
+def directive_evidence_path(directive_id: str, event_id: str) -> str:
+    return f"{directive_evidence_prefix(directive_id)}{event_id}.json"
+
+
 def health_remote_path(host_slug: str) -> str:
     """Per-host self-reported health record path. Takes an ALREADY-SLUGGED id
     (views.agent_slug). Only that host writes its own file -> zero cross-host

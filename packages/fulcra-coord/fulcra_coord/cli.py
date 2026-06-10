@@ -826,12 +826,20 @@ def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
     The fold itself is the pure ``loops.loop_board`` over THIS host's resolved
     agent: ``awaiting_me`` = open loops directed at me, ``awaiting_others`` =
     open loops I opened that nobody answered (with per-kind-SLA overdue flags).
-    Returned shape: ``{open_loops, overdue, awaiting_me}`` where ``open_loops``
-    is |awaiting_me| + |awaiting_others| and ``overdue`` counts the overdue
-    subset of ``awaiting_others`` — the loops-never-ANSWERED counterpart to the
-    undelivered (never-ARRIVED) check beside it in the health record.
+    Returned shape: ``{open_loops, overdue, awaiting_me, out_of_band}`` where
+    ``open_loops`` is |awaiting_me| + |awaiting_others| and ``overdue`` counts
+    the overdue subset of ``awaiting_others`` — the loops-never-ANSWERED
+    counterpart to the undelivered (never-ARRIVED) check beside it in the
+    health record. ``out_of_band`` (phase 2) counts the awaiting_others
+    subset whose EVIDENCE sub-log is nonempty: a forge-mirrored answer exists
+    off the bus, so the requester should close the loop explicitly, citing it
+    (mirrored evidence never closes anything — fold_loop's invariant).
 
-    Cost: one ``list_json`` sweep of the directives prefix.
+    Cost: one ``list_json`` sweep of the directives prefix, plus one evidence-
+    prefix list per loop in MY awaiting_others set — NOT per directive on the
+    bus. awaiting_others is computed first (no evidence) precisely so the
+    probes are bounded by my own open asks; each probe is individually
+    best-effort (a failed list reads as "no evidence", never an error).
     """
     prefix = remote.directives_prefix()
     try:
@@ -849,13 +857,29 @@ def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
         if isinstance(rec, dict):
             records.append(rec)
     me = identity.resolve_agent(None)
-    board = _loops.loop_board(me, records, now=datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    # Evidence probes, BOUNDED: first fold awaiting_others WITHOUT evidence to
+    # get the candidate ids (my own open asks — a small set), then list each
+    # candidate's evidence prefix. Never one list per directive on the bus.
+    evidence_ids: set[str] = set()
+    for s in _loops.awaiting_others(me, records, now=now):
+        lid = s.get("id")
+        if not lid:
+            continue
+        try:
+            if remote.list_json(remote.directive_evidence_prefix(lid),
+                                backend=backend):
+                evidence_ids.add(lid)
+        except Exception:
+            continue   # best-effort: an unreadable prefix is "no evidence"
+    board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
     awaiting_me = board["awaiting_me"]
     awaiting_others = board["awaiting_others"]
     return {
         "open_loops": len(awaiting_me) + len(awaiting_others),
         "overdue": sum(1 for x in awaiting_others if x.get("overdue")),
         "awaiting_me": len(awaiting_me),
+        "out_of_band": sum(1 for x in awaiting_others if x.get("out_of_band")),
     }
 
 
