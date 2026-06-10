@@ -11109,6 +11109,50 @@ class TestUnroutedPrReviews(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Layering: loops.py must not import any up-layer module.
+# ---------------------------------------------------------------------------
+
+class TestLoopsLayering(unittest.TestCase):
+
+    def test_loops_imports_no_up_layer_module(self):
+        # loops.py is the PURE lifecycle layer: schema + stdlib only. An import
+        # of remote/cli/views/lifecycle/inbox/writepipe/listener here would let
+        # I/O leak into the reducer — the exact creep the spec forbids.
+        # (Same ast-scan idiom as test_directive_dualwrite.py's
+        # TestDirectivesLayering pin for directives.py.)
+        import ast
+        pkg = Path(__file__).resolve().parents[1] / "fulcra_coord"
+        src = (pkg / "loops.py").read_text(encoding="utf-8")
+        forbidden = {"remote", "cli", "views", "lifecycle", "inbox",
+                     "writepipe", "routing_ops", "listener", "loop_ops",
+                     "directives"}
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.ImportFrom):
+                if (node.level or 0) >= 1:
+                    if node.module:
+                        imported.add(node.module.split(".")[0])
+                    else:
+                        for a in node.names:
+                            imported.add(a.name.split(".")[0])
+                elif (node.module or "").split(".")[0] == "fulcra_coord":
+                    parts = node.module.split(".")
+                    if len(parts) >= 2:
+                        imported.add(parts[1])
+                    else:
+                        for a in node.names:
+                            imported.add(a.name.split(".")[0])
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    parts = a.name.split(".")
+                    if parts[0] == "fulcra_coord" and len(parts) >= 2:
+                        imported.add(parts[1])
+        offenders = imported & forbidden
+        self.assertEqual(offenders, set(),
+                         f"loops.py imports up-layer modules: {offenders}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
