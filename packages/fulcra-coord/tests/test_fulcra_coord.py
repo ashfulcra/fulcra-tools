@@ -11109,6 +11109,73 @@ class TestUnroutedPrReviews(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Layering: loops.py / loop_ops.py must not import any up-layer module.
+# ---------------------------------------------------------------------------
+
+def _first_party_imports(module_filename: str) -> set:
+    """The set of fulcra_coord sibling-module names a package module imports.
+
+    AST scan (never imports the module under test, so a layering violation
+    can't crash the scanner) covering both relative (``from . import x`` /
+    ``from .x import y``) and absolute (``import fulcra_coord.x`` /
+    ``from fulcra_coord.x import y``) forms. Same idiom as
+    test_directive_dualwrite.py's TestDirectivesLayering pin for directives.py.
+    """
+    import ast
+    pkg = Path(__file__).resolve().parents[1] / "fulcra_coord"
+    src = (pkg / module_filename).read_text(encoding="utf-8")
+    imported: set = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom):
+            if (node.level or 0) >= 1:
+                if node.module:
+                    imported.add(node.module.split(".")[0])
+                else:
+                    for a in node.names:
+                        imported.add(a.name.split(".")[0])
+            elif (node.module or "").split(".")[0] == "fulcra_coord":
+                parts = node.module.split(".")
+                if len(parts) >= 2:
+                    imported.add(parts[1])
+                else:
+                    for a in node.names:
+                        imported.add(a.name.split(".")[0])
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                parts = a.name.split(".")
+                if parts[0] == "fulcra_coord" and len(parts) >= 2:
+                    imported.add(parts[1])
+    return imported
+
+
+class TestLoopsLayering(unittest.TestCase):
+
+    def test_loops_imports_no_up_layer_module(self):
+        # loops.py is the PURE lifecycle layer: schema + stdlib only. An import
+        # of remote/cli/views/lifecycle/inbox/writepipe/listener here would let
+        # I/O leak into the reducer — the exact creep the spec forbids.
+        forbidden = {"remote", "cli", "views", "lifecycle", "inbox",
+                     "writepipe", "routing_ops", "listener", "loop_ops",
+                     "directives"}
+        offenders = _first_party_imports("loops.py") & forbidden
+        self.assertEqual(offenders, set(),
+                         f"loops.py imports up-layer modules: {offenders}")
+
+    def test_loop_ops_imports_no_up_layer_module(self):
+        # loop_ops.py is the thin I/O layer over loops.py (the return-leg
+        # writer): it may reach DOWN (schema/remote/loops/log/output and
+        # directives/identity), but an import of cli/views/lifecycle/inbox/
+        # writepipe/routing_ops/listener/query/presence would couple the
+        # closed-loop write path to command/rendering layers — the same creep
+        # the directives.py pin forbids.
+        forbidden = {"cli", "views", "lifecycle", "inbox", "writepipe",
+                     "routing_ops", "listener", "query", "presence"}
+        offenders = _first_party_imports("loop_ops.py") & forbidden
+        self.assertEqual(offenders, set(),
+                         f"loop_ops.py imports up-layer modules: {offenders}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

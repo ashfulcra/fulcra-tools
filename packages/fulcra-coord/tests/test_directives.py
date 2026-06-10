@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fulcra_coord import schema
 from fulcra_coord.schema import (
     DIRECTIVE_SCHEMA,
     make_directive,
@@ -102,9 +103,13 @@ class TestMakeDirectiveKeySet(unittest.TestCase):
         self.assertEqual(missing, set(), f"Missing keys: {missing}")
 
     def test_no_extra_keys(self):
+        # The builder emits the required keys PLUS the additive loop keys
+        # (spec 2026-06-09) — and nothing else. Pinning against _LOOP_KEYS
+        # keeps this a strict key-set pin while allowing the loop evolution.
         d = _good_directive()
         extra = set(d.keys()) - self.REQUIRED_KEYS
-        self.assertEqual(extra, set(), f"Unexpected extra keys: {extra}")
+        self.assertEqual(extra, schema._LOOP_KEYS,
+                         f"Unexpected extra keys: {extra - schema._LOOP_KEYS}")
 
 
 class TestMakeDirectiveValues(unittest.TestCase):
@@ -531,3 +536,54 @@ def test_validate_directive_missing_created_at_reports_missing_field_not_format(
     # Should NOT have any "format" error for created_at.
     format_errs = [e for e in errs if "format" in e.lower() and "created_at" in e]
     assert len(format_errs) == 0, f"Should not have format error when field is missing, got: {format_errs}"
+
+
+class TestLoopFieldsOnDirective(unittest.TestCase):
+    """Spec 2026-06-09: the Directive family EVOLVES into the loop record.
+    New fields are ADDITIVE + OPTIONAL: old records (without them) stay valid,
+    new records (with them) validate clean."""
+
+    def test_make_directive_accepts_loop_fields(self):
+        d = schema.make_directive(
+            directive_type="review", from_agent="a:h:r", audience="b:h:r",
+            title="review my PR", workstream="general",
+            kind="review", state="requested", expects_response=True,
+            sla_hours=24,
+        )
+        self.assertEqual(d["kind"], "review")
+        self.assertEqual(d["state"], "requested")
+        self.assertTrue(d["expects_response"])
+        self.assertEqual(d["sla_hours"], 24)
+        self.assertIsNone(d["outcome"])          # outcome only ever set by a bus response
+        self.assertEqual(schema.validate_directive(d), [])
+
+    def test_make_directive_defaults_loop_fields_to_legacy(self):
+        d = schema.make_directive(
+            directive_type="tell", from_agent="a:h:r", audience="b:h:r",
+            title="fyi", workstream="general",
+        )
+        # Defaults preserve legacy semantics: no kind/state machine engaged.
+        self.assertIsNone(d["kind"])
+        self.assertIsNone(d["state"])
+        self.assertFalse(d["expects_response"])
+        self.assertIsNone(d["outcome"])
+        self.assertIsNone(d["sla_hours"])
+        self.assertEqual(schema.validate_directive(d), [])
+
+    def test_old_record_without_loop_keys_still_validates(self):
+        d = schema.make_directive(
+            directive_type="tell", from_agent="a:h:r", audience="b:h:r",
+            title="legacy", workstream="general",
+        )
+        for k in ("kind", "state", "outcome", "expects_response", "sla_hours"):
+            d.pop(k, None)   # simulate a record written by a pre-loop host
+        self.assertEqual(schema.validate_directive(d), [])
+
+    def test_unknown_kind_rejected_by_validator(self):
+        d = schema.make_directive(
+            directive_type="tell", from_agent="a:h:r", audience="b:h:r",
+            title="x", workstream="general", kind="review",
+        )
+        d["kind"] = "not-a-kind"
+        errs = schema.validate_directive(d)
+        self.assertTrue(any("kind" in e for e in errs))
