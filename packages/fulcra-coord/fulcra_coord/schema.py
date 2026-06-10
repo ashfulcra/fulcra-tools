@@ -736,13 +736,27 @@ def apply_transition(
     # on a slightly-malformed body (missing one of these) rebuilds tags instead
     # of KeyError-ing mid-write and leaving the task half-updated. Defaults match
     # build_tags' own ("" / P9) so a normal task is unaffected.
+    # BUG 3 (live-found 2026-06-10): preserve SECONDARY kind tags. Multi-kind
+    # membership markers like kind:review / kind:review-verdict are routing-
+    # load-bearing — collapsing every kind: tag to the single extracted primary
+    # (kind:ops sorts before kind:review) meant a reviewer CLAIMING a review
+    # (proposed->active) silently dropped kind:review, after which
+    # is_review_directive() was False and review-done could not resolve the
+    # original request. The read side (routing.is_review_directive) already
+    # documents this exact hazard; carry every non-primary kind: tag through
+    # as an extra so the write side honors it too.
+    _primary_kind = _extract_kind_from_tags(task.get("tags", []))
+    _secondary_kinds = [
+        t for t in task.get("tags", [])
+        if t.startswith("kind:") and t != f"kind:{_primary_kind}"
+    ]
     task["tags"] = build_tags(
         status=new_status,
         workstream=task.get("workstream", ""),
         agent=task.get("owner_agent", ""),
-        kind=_extract_kind_from_tags(task.get("tags", [])),
+        kind=_primary_kind,
         priority=task.get("priority", "P9"),
-        extra=_extra or None,
+        extra=(_extra + _secondary_kinds) or None,
     )
 
     # Append event (bounded to MAX_EVENTS_INLINE)
