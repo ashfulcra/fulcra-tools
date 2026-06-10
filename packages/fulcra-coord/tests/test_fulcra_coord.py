@@ -5590,6 +5590,48 @@ class TestInstallListenerCmd(unittest.TestCase):
             self.target, "com.fulcra.coord.listener.codex-h-r.plist")))
 
 
+class TestEnsureListener(unittest.TestCase):
+    """Self-healing re-arm (spec 2026-06-09 Task 7): connect idempotently
+    re-installs a missing listener, best-effort, never raising. Each test
+    forces FULCRA_COORD_ENSURE_LISTENER=1 because conftest defaults it to 0
+    (so no test that reaches cmd_connect can ever probe/write the REAL
+    ~/Library/LaunchAgents or live crontab)."""
+
+    def test_ensure_listener_installs_when_missing(self):
+        from fulcra_coord import listener
+        calls = []
+        with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "1"}), \
+             patch.object(listener, "_listener_armed", return_value=False), \
+             patch.object(listener, "install_listener",
+                          side_effect=lambda **kw: calls.append(kw) or 0):
+            listener.ensure_listener(agent="a:h:r")
+        self.assertEqual(len(calls), 1)
+
+    def test_ensure_listener_noop_when_armed(self):
+        from fulcra_coord import listener
+        with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "1"}), \
+             patch.object(listener, "_listener_armed", return_value=True), \
+             patch.object(listener, "install_listener") as inst:
+            listener.ensure_listener(agent="a:h:r")
+        inst.assert_not_called()
+
+    def test_ensure_listener_never_raises(self):
+        from fulcra_coord import listener
+        with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "1"}), \
+             patch.object(listener, "_listener_armed",
+                          side_effect=RuntimeError("boom")):
+            listener.ensure_listener(agent="a:h:r")   # must not raise
+
+    def test_ensure_listener_env_opt_out(self):
+        from fulcra_coord import listener
+        with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "0"}), \
+             patch.object(listener, "_listener_armed") as armed, \
+             patch.object(listener, "install_listener") as inst:
+            listener.ensure_listener(agent="a:h:r")
+        armed.assert_not_called()
+        inst.assert_not_called()
+
+
 class TestWebhookNotifier(unittest.TestCase):
     """Cross-platform push notifier: webhook (ntfy/slack/discord/json) + native
     desktop, both best-effort and independent. Network + subprocess fully mocked.
@@ -5861,6 +5903,40 @@ class TestNotifyInbox(unittest.TestCase):
             self.assertEqual(emit.call_args[0][1], 1)
             seen = set(json.loads(self._seen_path("codex:h:r").read_text()))
             self.assertEqual(seen, {a["id"], b["id"], c["id"]})
+
+    def test_notify_message_includes_overdue_loop_count(self):
+        """An overdue open loop OPENED BY the notifying agent rides the inbox
+        notification as a " · N overdue" suffix (spec 2026-06-09 Task 7).
+        Asserted at the delivered-message level (the suffix is composed in
+        cmd_notify_inbox, formatted by listener.emit_notification). A sub-log
+        shard is seeded beside the record to pin the top-level-only filter."""
+        from fulcra_coord import remote
+        from fulcra_coord.cli import cmd_notify_inbox
+        cache.write_cached_task(_directive("codex:h:r"))  # makes notify fire
+        prefix = remote.directives_prefix()
+        loop = {
+            "id": "DIR-OVERDUE-1", "kind": "review", "state": "requested",
+            "from": "codex:h:r", "audience": "other:h:r",
+            "title": "please review", "expects_response": True,
+            "created_at": "2026-01-01T00:00:00Z",  # far past the 24h review SLA
+        }
+
+        def fake_list_json(p, *, backend=None, **kw):
+            if p == prefix:
+                return [(prefix + "DIR-OVERDUE-1.json", loop),
+                        # ack shard: must be filtered out, never folded
+                        (prefix + "DIR-OVERDUE-1/acks/codex-h-r.json", {"agent": "x"})]
+            return []
+
+        with patch("fulcra_coord.remote.list_json", side_effect=fake_list_json), \
+             patch("fulcra_coord.listener._deliver") as dl:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        inbox_msgs = [c[0][0] for c in dl.call_args_list
+                      if "directive(s) waiting" in c[0][0]]
+        self.assertEqual(len(inbox_msgs), 1)
+        self.assertIn("1 overdue", inbox_msgs[0])
 
 
 class TestNotifyBlockedOnYou(unittest.TestCase):
