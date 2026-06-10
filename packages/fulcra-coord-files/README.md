@@ -39,6 +39,17 @@ Exported: `stat`, `download`, `download_json`, `upload`, `upload_json`,
 `delete`, `list_files`, `list_json`, `stat_changed`, `check_cli_available`,
 `check_file_commands`, `probe_reachable`, `check_remote_access`.
 
+### Failure observability: `store.last_upload_error`
+
+`fulcra_coord_files.store.last_upload_error` holds the stderr tail (last 200
+chars) of the most recent **failed** upload — `None` until an upload fails. It
+exists because `upload` returns a bare bool used by dozens of callers (a richer
+return would ripple everywhere) and the transport must stay free of any logging
+import back into `fulcra-coord`. Read it as a **live module attribute**
+immediately after a `False` return (re-exports of the value won't track
+mutation). Best-effort by design: never cleared on success, and under parallel
+uploads the last failing writer wins — a diagnostic hint, not per-call truth.
+
 ## Back-compat
 
 `fulcra_coord.remote` re-exports every symbol moved here, so existing callers
