@@ -113,6 +113,12 @@ class TestParseRecords:
         assert [r["id"] for r in mod._parse_records(arr)] == ["a", "b"]
         assert mod._parse_records(b"") == []
 
+    def test_malformed_and_non_object_payloads_are_ignored(self):
+        nd = b'{"id": "a"}\nnot-json\n42\n["x"]\n{"id": "b"}\n'
+        arr = b'[{"id": "a"}, 42, ["x"], null, {"id": "b"}]'
+        assert [r["id"] for r in mod._parse_records(nd)] == ["a", "b"]
+        assert [r["id"] for r in mod._parse_records(arr)] == ["a", "b"]
+
 
 class TestRunDeletes:
     def test_journal_resume_skips_done(self, tmp_path):
@@ -204,3 +210,22 @@ class TestFetchDuplicates:
         assert plan.delete == []
         assert list(plan.keep.values()) == ["r1"]
         assert plan.total_attention_records == 1
+
+
+class TestFetchTruncation:
+    def test_execute_mode_hard_fails_on_suspected_truncation(self, monkeypatch):
+        body = "\n".join(json.dumps({"id": str(i)}) for i in range(4000)).encode()
+        monkeypatch.setattr(mod, "_http", lambda m, u, t: (200, body))
+        s = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        e = datetime(2026, 4, 2, tzinfo=timezone.utc)
+
+        with pytest.raises(RuntimeError, match="possible pagination truncation"):
+            mod.fetch_window("tok", s, e, fail_on_truncation=True)
+
+    def test_dry_run_allows_suspected_truncation_for_manifest_review(self, monkeypatch):
+        body = "\n".join(json.dumps({"id": str(i)}) for i in range(4000)).encode()
+        monkeypatch.setattr(mod, "_http", lambda m, u, t: (200, body))
+        s = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        e = datetime(2026, 4, 2, tzinfo=timezone.utc)
+
+        assert len(mod.fetch_window("tok", s, e, fail_on_truncation=False)) == 4000
