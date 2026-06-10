@@ -38,10 +38,8 @@ from .inject import render_block
 from .outbox import Outbox
 from .schema import Signal, canonical_json, parse_record
 from .solver import solve
-from .store import (FulcraStore, COMPILED_PATH, CONSENT_PATH, META_PATH,
-                    PREFS_ROOT, platform_path)
-
-SIGNALS_CACHE_PREFIX = f"{PREFS_ROOT}/signals-cache"
+from .store import (FulcraStore, build_record, COMPILED_PATH, CONSENT_PATH,
+                    META_PATH, PREFS_ROOT, SIGNALS_CACHE_PREFIX, platform_path)
 
 
 def _store(api) -> FulcraStore:
@@ -116,20 +114,32 @@ def cmd_capture(args, api, outbox_dir, now) -> int:
         kind=args.kind, scope=args.scope, confidence=args.confidence,
         half_life_days=args.half_life, platform=args.platform,
         agent=args.agent, session=args.session, supersedes=args.supersedes)
-    _append_signal_cache(store, sig)
+    try:
+        _append_signal_cache(store, sig)
+    except Exception as e:
+        # Cache-write failure must never abort a successful capture. The signal
+        # is already posted (or spooled) — losing the shard only means compile
+        # won't see it until the next flush+compile cycle. Warn, don't crash.
+        print(f"fulcra-prefs: warning: could not write signal cache shard: {e}",
+              file=sys.stderr)
     print(f"captured {sig.id}", file=sys.stderr)
     return 0
 
 
 def cmd_compile(args, api, outbox_dir, now) -> int:
     store = _store(api)
-    if not _require_meta(store):
+    meta = _require_meta(store)
+    if not meta:
         return 2
     Outbox(outbox_dir).flush(store)
     docs = compile_signals(_load_cached_signals(store), now)
     store.write_json(COMPILED_PATH, docs["global"])
     for p, doc in docs["platforms"].items():
         store.write_json(platform_path(p), doc)
+    # Watermark meta.json so callers can tell when a compile last ran
+    # without reading the full compiled doc.
+    meta["last_compile"] = now.isoformat()
+    store.write_json(META_PATH, meta)
     print(f"compiled {len(docs['global']['keys'])} keys, "
           f"{len(docs['platforms'])} platform views", file=sys.stderr)
     return 0
@@ -152,14 +162,7 @@ def cmd_get(args, api, outbox_dir, now) -> int:
             except (OSError, ConnectionError, TimeoutError):
                 # Ledger guarantee: never disclose unlogged. Spool the
                 # disclosure so it lands on the next flush, then proceed.
-                record = {"data": json.dumps(sig.to_payload()),
-                          "metadata": {"content_type": "application/json",
-                                       "data_type": meta["data_type"],
-                                       "recorded_at": sig.observed_at,
-                                       "source": [sig.id,
-                                                  f"com.fulcra-prefs.capture.{sig.platform}"]},
-                          "specversion": 1}
-                Outbox(outbox_dir).spool(record)
+                Outbox(outbox_dir).spool(build_record(sig, meta["data_type"]))
                 print("fulcra-prefs: disclosure log deferred to outbox "
                       "(ingest unreachable)", file=sys.stderr)
     print(canonical_json(doc))
@@ -190,12 +193,22 @@ def cmd_consent(args, api, outbox_dir, now) -> int:
 
 
 def cmd_inject(args, api, outbox_dir, now) -> int:
-    store = _store(api)
-    doc = store.read_json(platform_path(args.platform)) \
-        or store.read_json(COMPILED_PATH)
-    block = render_block(doc, platform=args.platform)
-    if block:
-        print(block)
+    """Render the preference block for a session bootstrap.
+
+    Per SPEC.md errors & edges: inject must NEVER break a session start.
+    Any exception (network outage, missing file, corrupt JSON) is caught
+    here; no output reaches stdout and a one-line warning goes to stderr.
+    The caller (a session pre-prompt hook) ignores stderr.
+    """
+    try:
+        store = _store(api)
+        doc = store.read_json(platform_path(args.platform)) \
+            or store.read_json(COMPILED_PATH)
+        block = render_block(doc, platform=args.platform)
+        if block:
+            print(block)
+    except Exception as e:
+        print(f"fulcra-prefs: inject warning: {e}", file=sys.stderr)
     return 0
 
 

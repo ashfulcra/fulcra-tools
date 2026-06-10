@@ -1,6 +1,13 @@
 """Local spool for records that failed to ingest (tier-1 resilience: a capture
 never loses data because the network blinked). One JSON file per record;
-flush() re-posts and deletes on success, keeps on failure."""
+flush() re-posts and deletes on success, keeps on failure.
+
+On a successful re-POST, flush() also back-fills the signals-cache shard so
+that a subsequent compile sees the signal without needing a live get-records
+call. The shard naming mirrors cli._append_signal_cache exactly: the full
+temp-id (record["metadata"]["source"][0]) is the filename stem, matching the
+path written at capture time. Consent-kind records (disclosure logs) are not
+back-filled — they have no cache shard by design."""
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -23,6 +30,7 @@ class Outbox:
                 for p in sorted(self.root.glob("*.json"))]
 
     def flush(self, store) -> int:
+        from .store import SIGNALS_CACHE_PREFIX
         flushed = 0
         for p in sorted(self.root.glob("*.json")):
             record = json.loads(p.read_text())
@@ -33,4 +41,23 @@ class Outbox:
                 continue                     # keep spooled; retry next flush
             p.unlink()
             flushed += 1
+            # Back-fill the signals-cache shard so a subsequent compile sees
+            # this signal. Mirrors cli._append_signal_cache naming exactly:
+            # the full source[0] id is the filename stem. Skip consent records
+            # (disclosure logs) — they have no shard by design.
+            sources = record["metadata"]["source"]
+            temp_id = sources[0]
+            try:
+                payload = json.loads(record["data"])
+            except (ValueError, KeyError):
+                continue
+            if payload.get("kind") == "consent":
+                continue
+            shard_env = {
+                "id": None,
+                "recorded_at": record["metadata"]["recorded_at"],
+                "sources": sources,
+                "data": record["data"],
+            }
+            store.write_json(f"{SIGNALS_CACHE_PREFIX}/{temp_id}.json", shard_env)
         return flushed

@@ -29,6 +29,9 @@ def test_capture_then_compile_then_get(env, capsys):
     assert call("compile") == 0
     compiled = store.read_json(COMPILED_PATH)
     assert "dining.cuisine.thai" in compiled["keys"]
+    # M3: compile watermark — meta.json must carry last_compile after compile
+    meta = store.read_json(META_PATH)
+    assert meta.get("last_compile") == NOW.isoformat()
     assert call("get") == 0
     out = json.loads(capsys.readouterr().out)
     assert out["keys"]["dining.cuisine.thai"]["value"] == {"liked": True}
@@ -58,6 +61,22 @@ def test_inject_prints_block_or_nothing(env, capsys):
     call("compile")
     call("inject", "--platform", "claude-code")
     assert "# User preferences (fulcra-prefs)" in capsys.readouterr().out
+
+
+def test_inject_never_crashes_on_store_error(fake_api, tmp_path, capsys):
+    """M7: cmd_inject must never propagate exceptions; it must return 0 and
+    produce no stdout even when the store raises (e.g. ingest/network outage).
+    The session bootstrap hook relies on this contract."""
+    # Simulate a store that blows up on read_json
+    class BrokenAPI:
+        def resolve_filepath(self, path, **kw):
+            raise OSError("simulated network failure")
+    rc = run(["inject", "--platform", "claude-code"],
+             api=BrokenAPI(), outbox_dir=tmp_path / "outbox", now=NOW)
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""          # nothing to stdout — session unharmed
+    assert "inject warning" in captured.err
 
 def test_solve_from_files(env, tmp_path, capsys):
     call, *_ = env
@@ -99,3 +118,28 @@ def test_get_for_audience_spools_disclosure_when_ingest_down(env, tmp_path, caps
     out = json.loads(capsys.readouterr().out)
     assert list(out["keys"]) == ["dining.cuisine.thai"]
     assert len(Outbox(tmp_path / "outbox").pending()) == 1
+
+
+# C2 end-to-end: capture during outage (no traceback, exit 0), then compile
+# after recovery (flush runs inside cmd_compile) → get shows the key.
+
+def test_capture_during_outage_compile_after_recovery(env, capsys):
+    """C2 regression: a signal captured while ingest is down must survive
+    through outbox flush → signals-cache back-fill → compile → get."""
+    call, fake_api, store = env
+    # Capture while ingest is down: should exit 0 with no traceback.
+    fake_api.fail_ingest = True
+    assert call("capture", "--key", "dining.cuisine.thai", "--value",
+                '{"liked": true}', "--strength", "0.8",
+                "--platform", "claude-code") == 0
+    # No record ingested yet; outbox has one entry.
+    assert len(fake_api.ingested) == 0
+    capsys.readouterr()   # discard capture stderr
+    # Recovery: ingest is back up; compile flushes outbox first.
+    fake_api.fail_ingest = False
+    assert call("compile") == 0
+    capsys.readouterr()
+    # get must show the key.
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"]
