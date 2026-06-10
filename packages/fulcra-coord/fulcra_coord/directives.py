@@ -430,6 +430,20 @@ def dual_write(
                     directive["routing"] = routes
             except Exception:
                 pass  # leave routing as make_directive's empty default
+            # Loop return leg (spec 2026-06-09): fold the RESPONSE sub-log into
+            # the snapshot too, so a re-mirror of an already-answered loop
+            # reflects its closure (outcome + terminal state) instead of
+            # reopening it. Lazy import — loop_ops imports directives, so a
+            # module-level back-import here would cycle (and trip the layering
+            # fitness pin). Best-effort like the folds above.
+            try:
+                from . import loop_ops
+                responses = loop_ops.read_loop_responses(directive_id,
+                                                         backend=backend)
+                if responses:
+                    directive = loop_ops.fold_loop(directive, backend=backend)
+            except Exception:
+                pass  # snapshot stays pre-fold; shards remain the truth
         ok = remote.upload_json(
             directive, remote.directive_remote_path(directive["id"]), backend=backend
         )

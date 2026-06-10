@@ -597,3 +597,31 @@ def test_directive_write_failure_does_not_fail_review_done(coord_backend, monkey
     assert rc == 0, "review-done task write must survive a directive-write failure"
     assert _list_directive_ids(coord_backend) == []
     assert any(k.get("status") == "directive_write_failed" for a, k in seen), seen
+
+
+# ---------------------------------------------------------------------------
+# Loop return-leg fold in dual_write (spec 2026-06-09 Task 6): a re-mirror of
+# an already-answered loop reflects its closure instead of reopening it.
+# ---------------------------------------------------------------------------
+
+def test_dual_write_folds_responses_into_snapshot(coord_backend):
+    from fulcra_coord import directives
+    t = _task()
+    t["tags"] = sorted(set(t.get("tags", []) + [routing.REVIEW_TAG]))
+
+    # First mirror: an OPEN review loop (no responses yet).
+    directives.dual_write(t, command="request-review", backend=coord_backend)
+    directive_id = directives.stable_directive_id(t["id"])
+    snap = _read_directive(coord_backend, directive_id)
+    assert snap and loops.is_open_loop(snap) and snap["outcome"] is None
+
+    # A verdict lands on the response sub-log; a LATER re-mirror of the same
+    # task (any edit re-running dual_write) must fold it in — closed snapshot,
+    # outcome set — not resurrect the pre-response open state.
+    assert loop_ops.append_loop_response(
+        directive_id, {"by": "agent-b", "outcome": {"verdict": "approve"}},
+        backend=coord_backend)
+    directives.dual_write(t, command="request-review", backend=coord_backend)
+    snap = _read_directive(coord_backend, directive_id)
+    assert snap["outcome"]["verdict"] == "approve"
+    assert not loops.is_open_loop(snap)

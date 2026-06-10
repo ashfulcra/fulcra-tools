@@ -80,3 +80,50 @@ def test_dispatch_loop_handshake_on_the_bus(coord_backend):
         backend=coord_backend)
     assert folded["outcome"]["verdict"] == "delivered"
     assert not loops.is_open_loop(folded)
+
+
+def test_request_review_to_review_done_closes_loop_on_bus(coord_backend):
+    """The live-bug killer: the actual request-review -> review-done command
+    pair produces a bus-closed review loop. Uses the commands end-to-end.
+
+    Arg names are bound to the REAL parser surfaces in entry.py:
+      * request-review: pr (dest of the ARTIFACT positional), repo, agent
+        (the author), candidate_list, dry_run, format.
+      * review-done: artifact, verdict (choices approve|changes), note, repo,
+        to, from (reserved word — set via setattr), dry_run, format.
+    """
+    from fulcra_coord import routing_ops, presence
+
+    # A live, review-capable reviewer in presence (so routing resolves).
+    rec = schema.make_presence(RESPONDER, capabilities=["review"])
+    presence._write_presence(rec, backend=coord_backend)
+
+    rr = SimpleNamespace(pr="42", repo="org/repo", agent=REQUESTER,
+                         candidate_list=None, dry_run=False, format="table")
+    assert routing_ops.cmd_request_review(rr, backend=coord_backend) == 0
+
+    # The dual-written directive is a kindful OPEN review loop.
+    recs = [r for _p, r in remote.list_json(remote.directives_prefix(),
+                                            backend=coord_backend)
+            if isinstance(r, dict) and r.get("directive_type") == "review"]
+    assert recs, "request-review must dual-write a review directive"
+    loop = recs[0]
+    assert loop["kind"] == "review" and loops.is_open_loop(loop)
+
+    rd = SimpleNamespace(artifact="42", verdict="approve",
+                         note="suite green", repo=None, to=None,
+                         dry_run=False, format="table")
+    setattr(rd, "from", RESPONDER)
+    assert routing_ops.cmd_review_done(rd, backend=coord_backend) == 0
+
+    # The verdict landed as a bus response event and the loop folds CLOSED.
+    folded = loop_ops.fold_loop(
+        remote.download_json(remote.directive_remote_path(loop["id"]),
+                             backend=coord_backend) or loop,
+        backend=coord_backend)
+    assert folded["outcome"], "verdict must land as a bus response event"
+    assert not loops.is_open_loop(folded)
+    # The response sub-log of the ORIGINAL review loop carries the verdict.
+    events = loop_ops.read_loop_responses(loop["id"], backend=coord_backend)
+    assert events and events[-1]["outcome"]["verdict"] == "approve"
+    assert events[-1]["by"] == RESPONDER
