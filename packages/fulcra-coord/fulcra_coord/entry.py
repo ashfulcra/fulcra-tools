@@ -435,6 +435,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Install into ~/.claude/settings.json (default)")
     sp.add_argument("--uninstall", action="store_true", help="Remove the managed hooks")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+    # Host wake-exec add-on: seed this agent's entry in the per-adopter
+    # wake.json so the durable listener can SPAWN a headless session when
+    # directed work arrives (not just notify). The written command is a
+    # documented placeholder the operator must review — the config file is the
+    # customization point.
+    sp.add_argument("--with-wake", dest="with_wake", action="store_true",
+                    help="Also write a wake.json entry so the host listener can "
+                         "wake this agent (spawn a headless session) when "
+                         "directed work arrives. Review the written command — "
+                         "it runs unattended with the host's default permissions")
+    sp.add_argument("--agent", "-a", dest="agent", default=None, metavar="AGENT",
+                    help="Agent id the wake entry is keyed by (default: "
+                         "$FULCRA_COORD_AGENT or derived). Only used with "
+                         "--with-wake")
 
     # ---- install-openclaw ----
     sp = sub.add_parser("install-openclaw",
