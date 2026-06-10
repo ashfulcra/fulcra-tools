@@ -196,6 +196,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
                     help="Capturing agent (owner); default: derived/env agent")
 
+    # ---- handoff ----
+    sp = sub.add_parser("handoff",
+                        help="Hand work to another agent/role WITH its resume "
+                             "state: opens a kind=dispatch loop whose payload "
+                             "carries a continuity checkpoint ref. The "
+                             "recipient's claim surfaces the ref (+ rendered "
+                             "resume brief when fulcra-continuity is "
+                             "installed); closing the loop = the work continued")
+    sp.add_argument("--to", dest="to", default=None, metavar="AGENT|@ROLE",
+                    help="Recipient: an agent id or a @role audience")
+    sp.add_argument("--checkpoint", default=None, metavar="REF|FILE",
+                    help="Continuity checkpoint to carry: an opaque ref "
+                         "(forwarded verbatim) or a local checkpoint JSON "
+                         "file (published to the remote continuity tree; the "
+                         "remote path becomes the ref)")
+    sp.add_argument("--title", required=True, metavar="TITLE",
+                    help="Short durable objective of the handed-off work")
+    sp.add_argument("--summary", "-s", default="", metavar="SUMMARY")
+    sp.add_argument("--next", "-n", default="", metavar="NEXT_ACTION")
+    sp.add_argument("--workstream", "-w", default="general", metavar="WS")
+    sp.add_argument("--priority", "-p", default="P2", metavar="PRIORITY",
+                    help="P0|P1|P2|P3")
+    sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
+                    help="Handing-off agent (owner); default: derived/env agent")
+
     # ---- broadcast ----
     sp = sub.add_parser("broadcast",
                         help="Direct work at EVERY agent: create a proposed "
@@ -700,6 +725,7 @@ COMMAND_MAP = {
     "tell": _cli.cmd_tell,
     "broadcast": _cli.cmd_broadcast,
     "later": _cli.cmd_later,
+    "handoff": _cli.cmd_handoff,
     "assign": _cli.cmd_assign,
     "inbox": _cli.cmd_inbox,
     "start": _cli.cmd_start,

@@ -215,6 +215,11 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         print(f"        from: {frm}")
         if s.get("next_action"):
             print(f"        next: {s['next_action'][:70]}")
+        # Continuity handoff (spec 2026-06-10): show the resume point so the
+        # recipient knows this directive carries where-the-sender-left-off
+        # BEFORE claiming it (the brief itself renders at claim time).
+        if s.get("checkpoint_ref"):
+            print(f"        checkpoint: {s['checkpoint_ref']}")
     if hidden:
         print(f"\n  ({hidden} older broadcast{'s' if hidden != 1 else ''} "
               f"hidden — --all to show)")

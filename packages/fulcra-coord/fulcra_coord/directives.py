@@ -408,6 +408,18 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
     acked = _acked_by_from_task(task)
     if acked:
         directive["acked_by"] = acked
+    # Continuity payload (spec 2026-06-10): a `handoff` stores the checkpoint
+    # ref on the authoritative task (the request-review task["pr"] pattern);
+    # mirror it onto the loop record VERBATIM so the loop itself is the
+    # delivery vehicle. Set post-construction like acked_by — the keys are
+    # optional/additive (schema._CONTINUITY_KEYS), so pre-continuity records
+    # never grow them. checkpoint_ref is an OPAQUE STRING (str() only, never
+    # parsed); checkpoint_inline is the publish-failure fallback body and is
+    # carried as-is.
+    if task.get("checkpoint_ref"):
+        directive["checkpoint_ref"] = str(task["checkpoint_ref"])
+    if task.get("checkpoint_inline") is not None:
+        directive["checkpoint_inline"] = task["checkpoint_inline"]
     return directive
 
 
