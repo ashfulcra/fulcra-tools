@@ -11286,6 +11286,24 @@ class TestLoopsLayering(unittest.TestCase):
         self.assertEqual(offenders, set(),
                          f"loop_ops.py imports up-layer modules: {offenders}")
 
+    def test_no_core_module_imports_forge_mirror(self):
+        # REVERSE fitness pin (phase 2): forge_mirror.py is the ONE sanctioned
+        # forge poller — a PRODUCTION-side bridge that may import core, but
+        # core may NEVER import it. If any core module reached into the
+        # mirror, forge polling would creep back into the coordination layer
+        # (the exact ad-hoc-poller disease the bridge exists to centralize),
+        # and closure logic could grow a forge dependency. Scan direction is
+        # inverted vs the pins above: each core module's import set must not
+        # contain forge_mirror.
+        core = ["cli.py", "views.py", "loops.py", "loop_ops.py", "inbox.py",
+                "query.py", "presence.py", "lifecycle.py", "listener.py",
+                "routing_ops.py", "directives.py", "writepipe.py",
+                "schema.py", "remote.py"]
+        offenders = sorted(
+            m for m in core if "forge_mirror" in _first_party_imports(m))
+        self.assertEqual(offenders, [],
+                         f"core module(s) import forge_mirror: {offenders}")
+
 
 # ---------------------------------------------------------------------------
 # Coordination-loop health (spec 2026-06-09 Task 5): reconcile's report-only
