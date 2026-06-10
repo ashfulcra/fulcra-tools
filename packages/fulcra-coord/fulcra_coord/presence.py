@@ -148,6 +148,20 @@ def _load_presence_agents(backend: Optional[list[str]] = None) -> list[dict[str,
     warn (degraded, never blind)."""
     agg = remote.download_json(remote.presence_view_path(), backend=backend)
     if not agg:
+        _warn("presence aggregate is missing — reading per-agent presence "
+              "records directly")
+        try:
+            records = [
+                rec for _, rec in remote.list_json(
+                    remote.presence_prefix(), backend=backend)
+                if rec.get("agent")
+            ]
+        except Exception:
+            records = []
+        if records:
+            return records
+        _warn("presence aggregate is missing AND the per-agent listing failed "
+              "or was empty — treating presence as unavailable")
         return []
     agents = list(agg.get("agents", []) or [])
     stale_min = views.view_staleness_minutes(agg)

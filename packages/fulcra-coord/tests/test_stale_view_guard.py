@@ -305,6 +305,29 @@ class TestPresenceStaleGuard(unittest.TestCase):
         self.assertEqual(winner, reviewer,
                          "a live reviewer must not be invisible behind a stale aggregate")
 
+    def test_missing_aggregate_reads_per_agent_records(self):
+        # A partial connect/reconcile can leave the durable per-agent presence
+        # record present while the aggregate is missing. Liveness-sensitive
+        # readers must use the durable records instead of treating the whole
+        # roster as empty.
+        from fulcra_coord.presence import _load_presence_agents
+        reviewer = "rev:h:r"
+        fresh_record = schema.make_presence(reviewer, capabilities=["review"])
+
+        def fake_list_json(prefix, *, backend=None, **kw):
+            assert prefix == remote.presence_prefix()
+            return [(f"{prefix}rev-h-r.json", fresh_record)]
+
+        with mock.patch("fulcra_coord.remote.download_json", return_value=None), \
+             mock.patch("fulcra_coord.remote.list_json",
+                        side_effect=fake_list_json), \
+             mock.patch("fulcra_coord.presence._warn") as warned:
+            agents = _load_presence_agents(backend=["false"])
+        self.assertTrue(warned.called)
+        winner = views.resolve_live_recipient([reviewer], agents, floor="idle")
+        self.assertEqual(winner, reviewer,
+                         "a live reviewer must not be invisible behind a missing aggregate")
+
     def test_fresh_aggregate_skips_listing(self):
         from fulcra_coord.presence import _load_presence_agents
         agg = views.build_presence([schema.make_presence("rev:h:r")])  # fresh

@@ -12007,6 +12007,29 @@ def test_role_health_uses_the_staleness_guarded_presence_read(coord_backend):
     assert by_name["guarded-role"]["vacant"] is False
 
 
+def test_role_health_missing_presence_aggregate_uses_durable_records(coord_backend):
+    """A missing presence aggregate must not make every leased role VACANT.
+
+    The durable per-agent presence records are the truth. If a partial
+    connect/reconcile uploaded presence/<agent>.json but failed to upload
+    views/presence.json, role health still has to see the live holder or it can
+    falsely escalate vacancy."""
+    from fulcra_coord import cli, remote
+    _seed_role(coord_backend, "aggregate-missing-role")
+    _seed_lease(coord_backend, "aggregate-missing-role", "live:h:r")
+    rec = schema.make_presence("live:h:r")
+    assert remote.upload_json(
+        rec, remote.presence_remote_path("live-h-r"), backend=coord_backend)
+
+    report = cli._role_health_check(backend=coord_backend)
+
+    by_name = {r["name"]: r for r in report["roles"]}
+    assert by_name["aggregate-missing-role"]["vacant"] is False
+    assert [h["agent"] for h in by_name["aggregate-missing-role"]["holders"]] == [
+        "live:h:r"
+    ]
+
+
 def test_role_vacancy_past_sla_escalates_to_maintainer(coord_backend):
     """A role vacant past sla_hours emits ONE escalation directive addressed
     to the role's maintainer (not the operator's plate) — and re-running the
