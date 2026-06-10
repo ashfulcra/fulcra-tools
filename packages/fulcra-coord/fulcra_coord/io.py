@@ -288,10 +288,15 @@ def _load_all_tasks_by_listing(
     task_ids = [tid for tid in task_ids if tid]
     if not task_ids:
         return None
-    # Cache base first, freshly-fetched bodies overlay it — the same merge
-    # discipline (and id-less-body guard, A2) as _load_all_tasks.
+    listed_ids = set(task_ids)
+    # Cache base for LISTED ids first, freshly-fetched bodies overlay it — the
+    # same merge discipline (and id-less-body guard, A2) as _load_all_tasks.
+    # Do not seed every cached task: this path is specifically driven by the
+    # authoritative raw tasks/ listing, and including cache entries absent from
+    # that listing would resurrect locally stale/deleted tasks during fallback.
     task_map: dict[str, dict[str, Any]] = {
-        tid: t for t in cache.list_cached_tasks() if (tid := t.get("id"))
+        tid: t for t in cache.list_cached_tasks()
+        if (tid := t.get("id")) and tid in listed_ids
     }
     max_workers = min(16, max(4, len(task_ids)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:

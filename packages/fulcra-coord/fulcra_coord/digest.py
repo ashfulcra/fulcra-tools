@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import remote, views, identity, digest_schedule, remote_root
+from . import remote, views, identity, digest_schedule
 from . import annotations as lifecycle_annotations
 from . import loops as _loops
 # Shared records-sweep + bounded-evidence-probe pair (_loop_board_summary).
@@ -29,6 +29,7 @@ from . import loops as _loops
 from .loop_ops import load_loop_records, evidence_ids_for
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
+from .presence import _load_presence_agents
 from .timeutil import iso_z as _iso_z
 
 _DIGEST_BLOCK_CAP = 8
@@ -337,8 +338,7 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     since = _digest_window_since(window, now)
 
     summaries = _load_task_summaries(backend=backend)
-    agg = remote.download_json(remote.presence_view_path(), backend=backend)
-    presence = (agg or {}).get("agents", []) if agg else []
+    presence = _load_presence_agents(backend=backend)
 
     # v1 push surface: compute the fleet assessment once (best-effort; a read
     # failure leaves infra=None and the digest renders without the line) and pass
