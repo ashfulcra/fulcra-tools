@@ -1,0 +1,45 @@
+---
+name: fulcra-prefs
+description: "Read, capture, and apply the user's cross-platform preferences stored in Fulcra. Routes by agent capability: CLI (preferred), raw HTTP, or MCP read-only."
+homepage: "https://github.com/ashfulcra/fulcra-tools/tree/main/packages/fulcra-prefs"
+license: "MIT"
+user-invocable: true
+metadata: { "openclaw": { "emoji": "⚙️" } }
+---
+
+# fulcra-prefs
+
+The user's preferences and facts live in their Fulcra account as typed,
+decaying signals, compiled into per-platform preference documents. Your job:
+LOAD them at session start, APPLY them, and CAPTURE new ones.
+
+## Pick your path
+
+1. **You can run shell commands** → use the CLI. Setup once:
+   `uv tool install fulcra-prefs` (and `fulcra auth login` if not authed).
+   - Load: `fulcra-prefs inject --platform <your-platform>` → prepend output
+     to your working context. Empty output = no prefs yet; continue silently.
+   - Capture: `fulcra-prefs capture --key <ns.key> --value '<json>'
+     --strength <-1..1> --platform <your-platform>` (see
+     references/fulcra-prefs-capture.md for when and what to capture).
+   - Refresh: `fulcra-prefs compile` (run after captures; cheap).
+2. **You can make HTTP requests but not run commands** → follow
+   references/fulcra-prefs-tier2-http.md (device-flow auth + direct API).
+3. **You only have the Fulcra MCP** → you can read user data the MCP exposes,
+   but preference write/read of the compiled docs is not available via MCP
+   today. Tell the user to run onboarding from a CLI-capable agent.
+
+## Onboarding a new user
+
+If `inject`/`get` report not-onboarded: run `fulcra-prefs onboard` (requires
+`fulcra auth login` first — account auto-creates on first login). For a full
+guided platform onboarding, hand off to the fulcra-onboarding skill:
+https://github.com/fulcradynamics/agent-skills/blob/main/skills/fulcra-onboarding/SKILL.md
+
+## Rules
+
+- NEVER print or store the user's access token.
+- Respect scopes: per-platform overrides beat global; negative weight =
+  aversion (don't suggest what they dislike).
+- Capture is consent-adjacent: only capture what the user said or confirmed —
+  see the capture reference for the heuristics.
