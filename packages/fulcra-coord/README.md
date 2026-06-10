@@ -112,6 +112,7 @@ fulcra-coord done TASK-... \
 | `install-listener` | Install a scheduled `notify-inbox` listener (launchd on macOS, crontab elsewhere) — the durable, per-agent way to notice directed work while idle (`--agent`, `--interval-min N`, default 10). See `adapters/claude-code/LISTENER.md` |
 | `notify-inbox` | Poll the inbox for an agent; if directives exist, write a surface file the next SessionStart injects and emit a best-effort notification (the call the listener runs each tick). With a per-adopter `wake.json` entry it can also **wake** the agent — spawn a configured command, throttled + single-flighted (see "Host wake") |
 
+| `announce-version` | **Maintainer, at each release:** publish this build's version as the canonical manifest (`runtime/version.json`) with verify-after-write. The manifest is a version *pointer* (version + commit + optional `--min-supported`), never code or commands — see [Self-update](#self-update) |
 All hook installers resolve a concretely-callable `fulcra-coord` invocation at install time and bake it into the materialized scripts (absolute on-PATH path, else `<python> -m fulcra_coord`), so hooks work under `uv tool` / source installs, not just `pip`-on-PATH. The committed adapter copies keep a literal placeholder.
 
 ## Configuration
@@ -143,6 +144,8 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_COORD_ANNOTATIONS` | `off` | Emit lifecycle annotations to the Fulcra **Agent Tasks** timeline track: `off` (default, inert), `http` (alias `api`, **recommended** — writes directly over the Fulcra HTTP API via stdlib `urllib`, needs only a Fulcra token), or `cli` (legacy CLI shell-out). Resolution order: this env var (when set) > the persisted config (`fulcra-coord annotations on`, at `<XDG_CONFIG_HOME>/fulcra-coord/annotations`) > `off`. **Persist it once with `fulcra-coord annotations on`** so every agent emits without exporting this in each shell; set the env var to override a single session. See [docs/annotations.md](docs/annotations.md). |
 | `FULCRA_API_BASE` | `https://api.fulcradynamics.com` | Fulcra HTTP API base for the `http` annotation transport. |
 | `FULCRA_ACCESS_TOKEN` | _(unset)_ | Bearer token for the `http` annotation transport; when unset the writer falls back to `fulcra auth print-access-token`. |
+| `FULCRA_COORD_SELF_UPDATE` | `1` (on) | **Version self-incorporation** — default ON. Every `connect` (session start) and every throttled `notify-inbox` tick compares the installed version against the canonical manifest at `runtime/version.json` and, when behind, runs the locally configured update (see [Self-update](#self-update)). Set `0` to opt this host out |
+| `FULCRA_COORD_SELF_UPDATE_INTERVAL_H` | `6` | Listener-tick throttle: at most one self-update check per this many hours (mtime marker in the cache dir). `connect` is never throttled — a fresh session always checks |
 | `FULCRA_COORD_SESSION_KEY` | — | Generic session pointer key for non-Claude-Code agents (OpenClaw passes its `sessionKey` here); `CLAUDE_CODE_SESSION_ID` takes precedence |
 | `FULCRA_OPENCLAW_HOOKS_ROOT` | `~/.openclaw/hooks` | OpenClaw automation-hooks dir for `install-openclaw` |
 | `FULCRA_OPENCLAW_PLUGIN_DIR` | `~/.openclaw/plugins/fulcra-coord` | Target dir for the materialized Track B plugin sources (`install-openclaw --with-plugin`); overridable via `--plugin-dir` |
@@ -675,6 +678,54 @@ Mechanics and safety rails:
 - The command runs **unattended with the host's default permissions** — review
   your wake.json entry before relying on it, and pause any entry with
   `"enabled": false`.
+
+## Self-update
+
+**Default ON** (operator call, 2026-06-10 — "i'm not going to go around and
+wake the entire fleet for each incremental upgrade"); opt a host out with
+`FULCRA_COORD_SELF_UPDATE=0`. The maintainer publishes a version manifest at
+each release (`fulcra-coord announce-version` → `runtime/version.json`), and
+every host checks it at the two places it already passes through:
+
+- **`connect` (session start)** — unthrottled, runs **before** the presence
+  write so the roster reflects post-update state. A successful update logs
+  `updated to X — takes effect next invocation` and continues; there is no
+  mid-session re-exec — the *next* session/wake runs the new code.
+- **`notify-inbox` (the durable listener tick)** — throttled to one check per
+  `FULCRA_COORD_SELF_UPDATE_INTERVAL_H` (default 6h). This is what keeps an
+  operator-absent host current.
+
+**The pointer rule (non-negotiable safety boundary).** The bus carries a
+version *pointer*, never a code payload: the manifest is
+`{schema, package_version, release_commit, min_supported, published_at}` and
+its validator **rejects any extra key**, so a tampered manifest cannot smuggle
+an instruction. The update command itself comes from **local config only** —
+nothing read off the bus ever reaches an exec boundary.
+
+**Configuring what "update" means** (`${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/`):
+
+```jsonc
+// update.json — the built-in safe default: name your canonical checkout.
+// fulcra-coord then runs, with argv built in code from this path:
+//   git -C <checkout> pull --ff-only
+//   uv tool install --reinstall --force <checkout>/packages/fulcra-coord
+{ "checkout": "/path/to/fulcra-tools" }
+
+// update-cmd.json — full override for non-standard installs (wins over update.json)
+{ "cmd": ["/path/to/my-updater", "--flag"], "cwd": "/optional/dir" }
+```
+
+There is deliberately **no default checkout path** — the package cannot know
+where your canonical clone lives, and guessing wrong would `git pull` someone
+else's directory.
+
+**Visible degradation, never breakage.** A host that is behind but cannot
+update (no config, or the update failed) warns once, writes a local stale
+marker, and its presence summary carries **`(vX behind canonical Y)`** on the
+roster — staleness is visible to the operator instead of silently rotting.
+Every failure path is best-effort: a self-update problem can never fail a
+session boot or a polling tick. Update output is appended to
+`<cache-dir>/self-update.log`; each step is bounded at 300s.
 
 ## Docs
 
