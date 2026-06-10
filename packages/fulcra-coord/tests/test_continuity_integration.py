@@ -406,6 +406,126 @@ class TestClaimAndConnectResume:
         assert "role-resume-ref-9" in out
 
 
+class TestParkIsBestEffort:
+    """``park`` — the PreCompact/SessionEnd hook body: checkpoint every held
+    role via the OPTIONAL fulcra-continuity CLI and point the role's
+    checkpoint_ref at the published ref. CONTRACT: never blocks or fails
+    session exit — always exit 0, silent no-op when continuity is missing or
+    no role is held."""
+
+    def _hold_role(self, coord_backend, agent="arcbot:hetzner:openclaw",
+                   role="arc-maintainer"):
+        from fulcra_coord import presence
+        rec = schema.make_presence(agent, capabilities=[role])
+        assert presence._write_presence(rec, backend=coord_backend)
+        return agent, role
+
+    def test_park_with_continuity_missing_is_silent_noop(
+            self, coord_backend, capsys):
+        from fulcra_coord import role_ops
+        agent, role = self._hold_role(coord_backend)
+        # NB: assert on the CLI-invocation helper, not subprocess.run —
+        # subprocess is a process-global module shared with the fake-backend
+        # transport, so patching .run would intercept the bus I/O too.
+        with patch("fulcra_coord.continuity_ops.shutil.which",
+                   return_value=None), \
+             patch("fulcra_coord.continuity_ops._write_role_checkpoint_via_cli") as run:
+            rc = cli.cmd_park(_ns(agent=agent, summary=""),
+                              backend=coord_backend)
+        assert rc == 0
+        run.assert_not_called()
+        assert capsys.readouterr().out == ""
+        assert role_ops.read_role(role, backend=coord_backend) is None
+
+    def test_park_with_no_held_roles_is_silent_noop(self, coord_backend,
+                                                    capsys):
+        with patch("fulcra_coord.continuity_ops.shutil.which") as which:
+            rc = cli.cmd_park(_ns(agent="nobody:host:repo", summary=""),
+                              backend=coord_backend)
+        assert rc == 0
+        which.assert_not_called()   # roles probed BEFORE the CLI probe
+        assert capsys.readouterr().out == ""
+
+    def test_park_checkpoints_each_held_role_and_updates_its_ref(
+            self, coord_backend, capsys):
+        from fulcra_coord import role_ops
+        agent, role = self._hold_role(coord_backend)
+        checkpoint = {
+            "schema_version": "fulcra.continuity.checkpoint.v1",
+            "checkpoint_id": "CHK-park-1",
+            "identity": {"workstream_id": role, "agent_id": agent,
+                         "coord_task_id": f"ROLE-{role}",
+                         "coord_owner_agent": agent},
+        }
+        with patch("fulcra_coord.continuity_ops.shutil.which",
+                   return_value="/usr/local/bin/fulcra-continuity"), \
+             patch("fulcra_coord.continuity_ops._write_role_checkpoint_via_cli",
+                   return_value=checkpoint):
+            rc = cli.cmd_park(_ns(agent=agent, summary=""),
+                              backend=coord_backend)
+        assert rc == 0
+        rec = role_ops.read_role(role, backend=coord_backend)
+        ref = rec["checkpoint_ref"]
+        assert "/continuity/" in ref and "/checkpoints/" in ref
+        # The checkpoint body actually landed at the ref (cross-host resume).
+        assert remote.download_json(ref, backend=coord_backend)[
+            "checkpoint_id"] == "CHK-park-1"
+        assert f"Parked role '{role}'" in capsys.readouterr().out
+
+    def test_park_never_exits_nonzero_even_when_everything_raises(
+            self, coord_backend):
+        agent, _role = self._hold_role(coord_backend)
+        with patch("fulcra_coord.continuity_ops.shutil.which",
+                   return_value="/usr/local/bin/fulcra-continuity"), \
+             patch("fulcra_coord.continuity_ops._write_role_checkpoint_via_cli",
+                   side_effect=RuntimeError("boom")):
+            rc = cli.cmd_park(_ns(agent=agent, summary=""),
+                              backend=coord_backend)
+        assert rc == 0
+
+    def test_park_cli_failure_skips_role_without_touching_its_ref(
+            self, coord_backend):
+        from fulcra_coord import role_ops
+        agent, role = self._hold_role(coord_backend)
+        role_ops.upsert_role(
+            schema.make_role(role, "x", checkpoint_ref="prior-ref"),
+            backend=coord_backend)
+        with patch("fulcra_coord.continuity_ops.shutil.which",
+                   return_value="/usr/local/bin/fulcra-continuity"), \
+             patch("fulcra_coord.continuity_ops._write_role_checkpoint_via_cli",
+                   return_value=None):
+            rc = cli.cmd_park(_ns(agent=agent, summary=""),
+                              backend=coord_backend)
+        assert rc == 0
+        rec = role_ops.read_role(role, backend=coord_backend)
+        assert rec["checkpoint_ref"] == "prior-ref"   # a failed park keeps
+        # the last good resume point rather than clobbering it with nothing.
+
+
+class TestParkRidesTheSessionExitHooks:
+    """The claude-code adapter's PreCompact + SessionEnd hooks must carry the
+    best-effort park line — BACKGROUNDED (&) so it can never block session
+    exit, and BEFORE the session-task early-exits so a session that holds a
+    role but owns no coord task still parks."""
+
+    def test_hooks_carry_a_backgrounded_park_line(self):
+        from fulcra_coord import claude_code as cc
+        for body in (cc.PRE_COMPACT_SH, cc.SESSION_END_SH):
+            park_lines = [ln for ln in body.splitlines() if " park " in ln]
+            assert park_lines, "hook is missing the park line"
+            assert any(ln.rstrip().endswith("&") for ln in park_lines), \
+                "park must be backgrounded — it may never block session exit"
+
+    def test_park_runs_before_the_session_task_early_exit(self):
+        from fulcra_coord import claude_code as cc
+        for body in (cc.PRE_COMPACT_SH, cc.SESSION_END_SH):
+            park_at = body.index(" park ")
+            task_exit_at = body.index('[ -z "$TASK" ] && exit 0')
+            assert park_at < task_exit_at, (
+                "park must fire even when the session has no coord task — "
+                "holding a role is enough")
+
+
 class TestCoordNeverImportsFulcraContinuity:
     """PIN: the checkpoint schema belongs to the fulcra-continuity package.
     coord may subprocess its CLI; it may NEVER import it (an import couples

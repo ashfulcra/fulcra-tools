@@ -32,12 +32,23 @@ edge cycles (presence is not imported here).
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
-from . import continuity, schema
+from . import continuity, identity, remote, schema, views
 from . import role_ops as _role_ops
 from .output import err as _err, info as _info, warn as _warn
+
+#: Wall-clock budget for ONE fulcra-continuity CLI invocation inside `park`.
+#: Park runs in session-exit hooks; a hung CLI must not hold the session
+#: hostage, so every subprocess is bounded (and the hook line additionally
+#: backgrounds the whole command).
+_PARK_CLI_TIMEOUT_S = 15.0
 
 
 def set_role_checkpoint_ref(
@@ -145,3 +156,113 @@ def cmd_checkpoint(args: Any, backend: Optional[list[str]] = None) -> int:
     for line in lines:
         _info(line)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# park — the session-exit hook body (spec item 3)
+# ---------------------------------------------------------------------------
+
+
+def _held_roles(me: str, *, backend: Optional[list[str]] = None) -> list[str]:
+    """The roles this agent currently declares, read from its OWN durable
+    presence record (the same source inbox._my_roles uses for @role
+    delivery — capabilities double as role claims since the roles spec).
+    Best-effort: any failure → [] → park is a silent no-op."""
+    try:
+        rec = remote.download_json(
+            remote.presence_remote_path(views.agent_slug(me)), backend=backend)
+        if not isinstance(rec, dict):
+            return []
+        return [c for c in (rec.get("capabilities") or []) if c]
+    except Exception:
+        return []
+
+
+def _write_role_checkpoint_via_cli(
+    exe: str, role: str, me: str, *, objective: str = "",
+    timeout: float = _PARK_CLI_TIMEOUT_S,
+) -> Optional[dict[str, Any]]:
+    """Run ``fulcra-continuity checkpoint`` for one held role, returning the
+    parsed checkpoint JSON (an opaque blob to coord) or None.
+
+    The identity fields tie the checkpoint to the ROLE (workstream=the role,
+    task `ROLE-<name>`), so the bus tree keys it under a stable per-role
+    prefix and retention's continuity walker GC-bounds the archives exactly
+    like task checkpoints. Timeout-bounded + never raises (hook path)."""
+    tmp_dir = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="fulcra-coord-park-")
+        out = Path(tmp_dir) / "checkpoint.json"
+        proc = subprocess.run(
+            [exe, "checkpoint",
+             "--task-id", f"ROLE-{role}",
+             "--title", f"Park checkpoint for role '{role}'",
+             "--objective", objective or
+             f"Where role '{role}' left off (parked by {me}).",
+             "--owner-agent", me,
+             "--workstream-id", role,
+             "--agent-id", me,
+             "--source", "fulcra-coord:park",
+             "--out", str(out)],
+            capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0 or not out.is_file():
+            return None
+        data = json.loads(out.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def cmd_park(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Best-effort session-exit checkpoint of every role this session holds.
+
+    The PreCompact/SessionEnd hook body (spec item 3): if this session holds
+    role(s) AND the optional fulcra-continuity CLI is installed, write a
+    continuity checkpoint per role, publish it to the remote continuity tree
+    (coord's bridge), and point the role's ``checkpoint_ref`` at it — closing
+    the "session died mid-work" gap: the next session that claims the role
+    gets the resume brief at claim time.
+
+    CONTRACT: NEVER blocks or fails session exit. Always returns 0; every
+    step is guarded; the one subprocess per role is timeout-bounded; missing
+    CLI / no held roles / any bus failure are all SILENT no-ops (a hook that
+    warns on every exit on hosts without continuity would be noise)."""
+    try:
+        me = identity.resolve_agent(getattr(args, "agent", None))
+        roles = _held_roles(me, backend=backend)
+        if not roles:
+            return 0
+        exe = shutil.which("fulcra-continuity")
+        if not exe:
+            return 0
+        summary = getattr(args, "summary", "") or ""
+        for role in roles:
+            try:
+                checkpoint = _write_role_checkpoint_via_cli(
+                    exe, role, me, objective=summary)
+                if not checkpoint:
+                    continue
+                cid = str(checkpoint.get("checkpoint_id") or "")
+                idy = checkpoint.get("identity") or {}
+                archive = continuity.checkpoint_remote_path(cid, idy)
+                if not remote.upload_json(checkpoint, archive,
+                                          backend=backend):
+                    continue
+                # latest.json refresh is best-effort (the resume/--with-
+                # continuity read point); the role ref is the archive path.
+                try:
+                    remote.upload_json(
+                        checkpoint, continuity.latest_remote_path(idy),
+                        backend=backend)
+                except Exception:
+                    pass
+                if set_role_checkpoint_ref(role, archive, backend=backend):
+                    _info(f"Parked role '{role}': {archive}")
+            except Exception:
+                continue  # next role; park must finish the sweep regardless
+        return 0
+    except Exception:
+        return 0  # the contract: park can never fail a session exit

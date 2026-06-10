@@ -25,10 +25,11 @@ from . import loops as _loops
 from . import roles as _roles
 from . import role_ops as _role_ops
 from . import continuity_ops as _continuity_ops
-# Role-checkpoint command (continuity spec 2026-06-10). Re-exported so the
-# `checkpoint` dispatch (entry.py) resolves through the same _cli.cmd_*
-# convention as every other command. continuity_ops.py never imports cli.
-from .continuity_ops import cmd_checkpoint  # noqa: F401
+# Role-checkpoint + park commands (continuity spec 2026-06-10). Re-exported so
+# the `checkpoint`/`park` dispatch (entry.py) resolves through the same
+# _cli.cmd_* convention as every other command. continuity_ops.py never
+# imports cli.
+from .continuity_ops import cmd_checkpoint, cmd_park  # noqa: F401
 # Leaf-utility modules extracted from this file. Re-exported under the historical
 # underscore-prefixed names so every internal call site AND the test patch targets
 # (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
