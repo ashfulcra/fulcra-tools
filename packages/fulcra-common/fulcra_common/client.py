@@ -205,15 +205,24 @@ class BaseFulcraClient:
             return body
         return body.get("data", []) or []
 
-    def fetch_existing_source_ids(
+    def fetch_existing_source_groups(
         self,
         start: datetime,
         end: datetime,
         *,
         data_type: str = "DurationAnnotation",
         only_for_defs: set[str] | None = None,
-    ) -> set[str]:
-        """Return the set of source-id strings present in [start, end].
+    ) -> list[set[str]]:
+        """Return one set of source-id strings PER RECORD in [start, end].
+
+        Each set is the union of the record's top-level `sources` array and
+        its `metadata.source` array. Keeping the per-record grouping (rather
+        than flattening) lets callers reason about WHICH record carries a
+        given source id — e.g. the same-source-replay vs cross-source-twin
+        distinction in the media import pipeline needs to know whether the
+        record that claims a content fingerprint also carries a source id
+        from the same importer namespace. Records with no sources at all
+        are omitted (they contribute nothing to dedup).
 
         `only_for_defs`: when set, restrict to records whose top-level
         `source_id` is in this set. This is the dedup-vs-orphan story for
@@ -222,12 +231,35 @@ class BaseFulcraClient:
         None for built-in data types, which have no definition to filter on.
         """
         records = self.fetch_records(start, end, data_type=data_type)
-        out: set[str] = set()
+        groups: list[set[str]] = []
         for rec in records:
             if only_for_defs is not None and rec.get("source_id") not in only_for_defs:
                 continue
+            group: set[str] = set()
             for s in rec.get("sources") or []:
-                out.add(s)
+                group.add(s)
             for s in (rec.get("metadata") or {}).get("source") or []:
-                out.add(s)
+                group.add(s)
+            if group:
+                groups.append(group)
+        return groups
+
+    def fetch_existing_source_ids(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        data_type: str = "DurationAnnotation",
+        only_for_defs: set[str] | None = None,
+    ) -> set[str]:
+        """Return the FLAT set of source-id strings present in [start, end].
+
+        Thin union over `fetch_existing_source_groups` — same fetch, same
+        `only_for_defs` filtering, just without the per-record grouping.
+        """
+        out: set[str] = set()
+        for group in self.fetch_existing_source_groups(
+            start, end, data_type=data_type, only_for_defs=only_for_defs
+        ):
+            out |= group
         return out

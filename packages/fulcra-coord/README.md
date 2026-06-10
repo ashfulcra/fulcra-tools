@@ -208,6 +208,37 @@ end to end; `question`/`signoff` are registered now and built when first needed.
 A record-level SLA overrides the kind default; `idea` and `tell` have no SLA and
 are never flagged overdue.
 
+**Backlog (`later`).** When something should happen *eventually* — a "do later"
+item handed to an agent mid-session — capture it on the bus, not in session
+memory:
+
+```bash
+fulcra-coord later "Try sharding the search index" -s "came up during the retention work"
+```
+
+This creates a `kind=idea` loop in the `captured` state, addressed to the
+`@backlog` role audience. Because `@backlog` is a role nobody holds by default,
+the item is durable and board-visible (the ideas pipeline counts it; `search`
+finds it) without landing in anyone's inbox — and a future backlog-groomer
+agent can `connect --role backlog` to receive the whole backlog at once. Ideas
+expect no response, so they never clutter the open-loop ledger. When an item's
+time comes, route it with the ordinary `assign TASK-ID <agent>`; the loop's
+state folds from `captured` to `routed`.
+
+**Dispatch asks (`tell --expects-response`).** A plain `tell` is an FYI: the
+recipient acks it and life goes on. Add `--expects-response` when you are
+*asking for work back*:
+
+```bash
+fulcra-coord tell that-agent "Port the digest emitter" --expects-response
+```
+
+This opens a `kind=dispatch` loop (`assigned`, SLA-tracked at the registry
+default) that stays open — visible in your `board`'s awaiting-others column,
+flagged `⚠ overdue` past its SLA — until the recipient closes it on the bus
+with `respond <loop-id> --outcome … --evidence …`. Broadcasts deliberately
+cannot carry the flag: a fan-out FYI must not open a loop per agent.
+
 **The closed-loop guarantee.** A loop that expects a response stays **OPEN until
 a response lands on the bus** — nothing else closes it:
 
