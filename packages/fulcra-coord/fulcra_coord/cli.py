@@ -59,7 +59,7 @@ from .presence import (
 # Read-only situational-awareness commands extracted from this file. Re-exported so
 # the command dispatch (entry.py) and the test imports of these commands keep
 # resolving. query.py never imports cli.
-from .query import cmd_status, cmd_agents, cmd_needs_me, cmd_resume
+from .query import cmd_status, cmd_board, cmd_agents, cmd_needs_me, cmd_resume
 # Task write pipeline extracted from this file. Re-exported under the historical
 # names so every write command (cmd_start/update/block/pause/done/abandon/tell/
 # broadcast/assign/inbox/request-review) that calls _write_task_and_views, plus the
@@ -81,8 +81,11 @@ from .routing_ops import (
 )
 # Coordination-loop return leg (spec 2026-06-09). Re-exported so the `respond`
 # command dispatch (entry.py) resolves through the same _cli.cmd_* convention as
-# every other command. loop_ops.py never imports cli.
-from .loop_ops import cmd_respond
+# every other command. loop_ops.py never imports cli. load_loop_records /
+# evidence_ids_for are the shared records-sweep + bounded-evidence-probe pair
+# consumed by _loop_health_check here and by query/digest (which may not import
+# cli) — the single home for the top-level-shard filter.
+from .loop_ops import cmd_respond, load_loop_records, evidence_ids_for
 # Operator situational-awareness output (digest push + health pull) extracted from
 # this file. Re-exported so the digest/health/install-digest dispatch, cmd_doctor's
 # _assess_fleet fold, and the test patch targets keep resolving. digest.py never
@@ -816,46 +819,38 @@ def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
     it in the same try/except so a failure here can NEVER change reconcile's
     exit code — the result, present or absent, is health debt only.
 
-    THE TOP-LEVEL-ONLY FILTER (load-bearing, same as ``_directive_parity_check``):
-    ``remote.directives_prefix()`` holds SUB-LOG SUBTREES (``<id>/acks/``,
-    ``<id>/routing/``, ``<id>/responses/``) beside the top-level
-    ``directives/<id>.json`` loop records. Only a path that, after stripping the
-    prefix, has NO further ``/`` and ends in ``.json`` is a loop record — a
-    shard counted as a record would inflate every count.
+    Records load + evidence probes live in ``loop_ops.load_loop_records`` /
+    ``loop_ops.evidence_ids_for`` (the single home for the load-bearing
+    top-level-shard filter and the bounded-probe discipline — shared with the
+    board and the digest, which may not import this module).
 
     The fold itself is the pure ``loops.loop_board`` over THIS host's resolved
     agent: ``awaiting_me`` = open loops directed at me, ``awaiting_others`` =
     open loops I opened that nobody answered (with per-kind-SLA overdue flags).
-    Returned shape: ``{open_loops, overdue, awaiting_me}`` where ``open_loops``
-    is |awaiting_me| + |awaiting_others| and ``overdue`` counts the overdue
-    subset of ``awaiting_others`` — the loops-never-ANSWERED counterpart to the
-    undelivered (never-ARRIVED) check beside it in the health record.
-
-    Cost: one ``list_json`` sweep of the directives prefix.
+    Returned shape: ``{open_loops, overdue, awaiting_me, out_of_band}`` where
+    ``open_loops`` is |awaiting_me| + |awaiting_others| and ``overdue`` counts
+    the overdue subset of ``awaiting_others`` — the loops-never-ANSWERED
+    counterpart to the undelivered (never-ARRIVED) check beside it in the
+    health record. ``out_of_band`` (phase 2) counts the awaiting_others
+    subset whose EVIDENCE sub-log is nonempty: a forge-mirrored answer exists
+    off the bus, so the requester should close the loop explicitly, citing it
+    (mirrored evidence never closes anything — fold_loop's invariant).
     """
-    prefix = remote.directives_prefix()
     try:
-        listed = remote.list_json(prefix, backend=backend)
+        records = load_loop_records(backend=backend)
     except Exception:
-        listed = []
-    records: list[dict] = []
-    for path, rec in listed:
-        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
-        rel = path[len(prefix):] if path.startswith(prefix) else path
-        if "/" in rel:
-            continue  # ack/routing/response shard — never a loop record
-        if not rel.endswith(".json"):
-            continue
-        if isinstance(rec, dict):
-            records.append(rec)
+        records = []   # report-only: an unreadable bus reads as "no loops"
     me = identity.resolve_agent(None)
-    board = _loops.loop_board(me, records, now=datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
+    board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
     awaiting_me = board["awaiting_me"]
     awaiting_others = board["awaiting_others"]
     return {
         "open_loops": len(awaiting_me) + len(awaiting_others),
         "overdue": sum(1 for x in awaiting_others if x.get("overdue")),
         "awaiting_me": len(awaiting_me),
+        "out_of_band": sum(1 for x in awaiting_others if x.get("out_of_band")),
     }
 
 

@@ -241,16 +241,38 @@ def awaiting_me(me: str, records: list[dict[str, Any]], *, now) -> list[dict[str
             if is_open_loop(r) and r.get("audience") == me]
 
 
-def awaiting_others(me: str, records: list[dict[str, Any]], *, now) -> list[dict[str, Any]]:
+def awaiting_others(
+    me: str, records: list[dict[str, Any]], *, now,
+    evidence_ids: Optional[set[str]] = None,
+) -> list[dict[str, Any]]:
     """Open loops I OPENED that nobody has answered — with overdue flags. The
     symmetric counterpart to the undelivered-directive check (#127): that
-    catches sends that never arrived; this catches sends never ANSWERED."""
-    return [_summary(r, now) for r in records
-            if is_open_loop(r) and r.get("from") == me]
+    catches sends that never arrived; this catches sends never ANSWERED.
+
+    ``evidence_ids`` (phase 2) is the set of loop ids whose evidence sub-log
+    is nonempty — the CALLER does that I/O (this fold stays pure); each
+    summary gains ``out_of_band``: True iff this open loop's id is in the set.
+    The flag is the REQUESTER's signal ("an answer exists off the bus — close
+    your loop explicitly, citing it"), which is why only awaiting_others
+    carries it: awaiting_me lists loops where I'm the responder, and a
+    mirrored verdict changes nothing about what I owe. Default None ⇒ every
+    summary reads False (back-compat: existing callers unchanged)."""
+    out: list[dict[str, Any]] = []
+    for r in records:
+        if is_open_loop(r) and r.get("from") == me:
+            s = _summary(r, now)
+            s["out_of_band"] = bool(evidence_ids and s.get("id") in evidence_ids)
+            out.append(s)
+    return out
 
 
-def loop_board(me: str, records: list[dict[str, Any]], *, now) -> dict[str, Any]:
-    """The coordination board projection (core, projection-side only)."""
+def loop_board(
+    me: str, records: list[dict[str, Any]], *, now,
+    evidence_ids: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """The coordination board projection (core, projection-side only).
+    ``evidence_ids`` threads through to awaiting_others (out-of-band flags);
+    see its docstring."""
     in_flight: dict[str, int] = {}
     ideas: dict[str, int] = {}
     for r in records:
@@ -264,7 +286,8 @@ def loop_board(me: str, records: list[dict[str, Any]], *, now) -> dict[str, Any]
             in_flight[kind] = in_flight.get(kind, 0) + 1
     return {
         "awaiting_me": awaiting_me(me, records, now=now),
-        "awaiting_others": awaiting_others(me, records, now=now),
+        "awaiting_others": awaiting_others(me, records, now=now,
+                                           evidence_ids=evidence_ids),
         "in_flight_by_kind": in_flight,
         "ideas_pipeline": ideas,
     }

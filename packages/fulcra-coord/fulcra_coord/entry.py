@@ -8,6 +8,12 @@ import sys
 
 from . import __version__
 from . import cli as _cli
+# The one sanctioned forge poller (phase 2) dispatches DIRECTLY from here, not
+# via a cli re-export like every other command: cli.py is a core module, and
+# the reverse fitness pin (test_no_core_module_imports_forge_mirror) forbids
+# core from importing the mirror — entry.py sits above core, so this is the
+# one place the production-side bridge may be wired in.
+from . import forge_mirror as _forge_mirror
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("status", help="Show coordination status")
     sp.add_argument("--workstream", "-w", metavar="WS", help="Filter by workstream")
     sp.add_argument("--agent", "-a", metavar="AGENT", help="Filter by agent")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
+    # ---- board ----
+    sp = sub.add_parser("board",
+                        help="Render the coordination-loop board: loops awaiting "
+                             "you, your unanswered asks (⚠ overdue / ◈ out-of-band), "
+                             "open loops by kind, and the ideas pipeline")
+    sp.add_argument("--agent", "-a", metavar="AGENT",
+                    help="Whose board (default: $FULCRA_COORD_AGENT or derived)")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- agents ----
@@ -294,6 +309,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Terminal outcome/verdict (e.g. approve, delivered, answered)")
     sp.add_argument("--evidence", "-e", default="", metavar="EVIDENCE")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
+    # ---- forge-mirror ----
+    sp = sub.add_parser(
+        "forge-mirror",
+        help="Mirror verdict-shaped GitHub signals (merge, review states, "
+             "verdict comments) for open review loops into the evidence "
+             "sub-log — marked source=forge-mirror, flags the loop "
+             "out-of-band, NEVER closes it (the requester closes "
+             "explicitly, citing the evidence)")
+    sp.add_argument("--once", action="store_true",
+                    help="Run a single sweep — the default and only mode. "
+                         "Scheduling rides the existing listener/digest "
+                         "cadence later; this is deliberately not a daemon.")
+    sp.add_argument("--repo", default=None, metavar="REPO",
+                    help="Only probe loops whose artifact_ref targets REPO")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- reconcile ----
@@ -567,6 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMAND_MAP = {
     "status": _cli.cmd_status,
+    "board": _cli.cmd_board,
     "agents": _cli.cmd_agents,
     "connect": _cli.cmd_connect,
     "workstream": _cli.cmd_workstream,
@@ -585,6 +617,7 @@ COMMAND_MAP = {
     "request-review": _cli.cmd_request_review,
     "review-done": _cli.cmd_review_done,
     "respond": _cli.cmd_respond,
+    "forge-mirror": _forge_mirror.cmd_forge_mirror,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "restore": _cli.cmd_restore,

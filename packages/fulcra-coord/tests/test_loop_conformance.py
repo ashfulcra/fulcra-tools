@@ -62,6 +62,54 @@ def test_full_loop_handshake_on_the_bus(coord_backend):
     assert folded2["outcome"] is None
 
 
+def test_mirrored_evidence_never_closes_a_loop(coord_backend):
+    """THE phase-2 invariant: an evidence shard — even a verdict-shaped one —
+    NEVER closes a loop. fold_loop reads ONLY the responses sub-log; the
+    evidence sub-log is consumed by detection alone (out-of-band flags).
+    Closure stays bus-response-only: the requester closes a flagged loop
+    explicitly (respond), citing the evidence — never silently. If a future
+    change lets fold_loop (or anything in the closure path) consume the
+    evidence prefix, this fails."""
+    d = schema.make_directive(
+        directive_type="review", from_agent=REQUESTER, audience=RESPONDER,
+        title="review branch feat/z", workstream="general",
+        kind="review", state="requested", expects_response=True, sla_hours=24,
+    )
+    assert remote.upload_json(d, remote.directive_remote_path(d["id"]),
+                              backend=coord_backend)
+
+    # A forge-mirrored verdict lands as an evidence shard — the strongest
+    # possible out-of-band signal (approve verdict, merged PR, the works).
+    assert loop_ops.append_loop_evidence(
+        d["id"],
+        {"forge": "github", "kind": "comment-verdict",
+         "outcome": {"verdict": "approve"},
+         "summary": "Codex review: APPROVE; PR merged",
+         "url": "https://github.com/org/repo/pull/9"},
+        backend=coord_backend)
+
+    # The loop folds OPEN with NO outcome: mirrored evidence is invisible to
+    # the closure fold.
+    folded = loop_ops.fold_loop(
+        remote.download_json(remote.directive_remote_path(d["id"]),
+                             backend=coord_backend),
+        backend=coord_backend)
+    assert loops.is_open_loop(folded)
+    assert folded["outcome"] is None
+
+    # Only the explicit bus response (the requester/responder citing the
+    # evidence) closes it — the sanctioned path.
+    args = SimpleNamespace(loop_id=d["id"], outcome="approve",
+                           evidence="per forge-mirror evidence: PR 9 approved",
+                           agent=RESPONDER, format="table")
+    assert loop_ops.cmd_respond(args, backend=coord_backend) == 0
+    folded = loop_ops.fold_loop(
+        remote.download_json(remote.directive_remote_path(d["id"]),
+                             backend=coord_backend),
+        backend=coord_backend)
+    assert not loops.is_open_loop(folded)
+
+
 def test_dispatch_loop_handshake_on_the_bus(coord_backend):
     d = schema.make_directive(
         directive_type="tell", from_agent="boss:h:r", audience="worker:h:r",

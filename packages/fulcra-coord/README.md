@@ -231,6 +231,32 @@ your response. Each reconcile tick records a `loop_health` block (open / overdue
 the overdue count to its notification (`… · 2 overdue`), so a lapsed loop rides
 the alert the operator already sees.
 
+**The board.** `fulcra-coord board` is the operator's glance view of every open
+loop, in four sections: loops awaiting you, your own unanswered asks, open
+non-idea loops by kind, and the ideas pipeline by state. Your unanswered asks
+carry trailing flags — `⚠ overdue` for a loop past its SLA with no answer,
+`◈ out-of-band` for a loop whose answer exists off the bus (see the forge
+mirror below). `--format json` prints the raw board projection for scripting.
+
+```bash
+fulcra-coord board
+
+  Awaiting me (1)
+    DIR-20260608-...  [review]  Review the retention sweep
+  Awaiting others (2)
+    DIR-20260607-...  [dispatch]  Port the digest emitter ⚠ overdue
+    DIR-20260609-...  [review]  Review PR #42 ◈ out-of-band
+```
+
+**The forge mirror.** `fulcra-coord forge-mirror --once` is the **one**
+sanctioned forge poller — core is fitness-pinned to never import it. It sweeps
+open review loops and mirrors verdict-shaped GitHub signals (a merge, a review
+state, a verdict comment) into the loop's evidence sub-log, force-marked
+`source: forge-mirror`. Mirrored evidence **never** closes a loop: it flags the
+loop `◈ out-of-band` on the board so the requester closes it explicitly
+(`respond`), citing the evidence. The mirror makes a slipped discipline
+visible; the bus response remains the only thing that closes anything.
+
 **Self-healing listener.** The response leg is only useful if someone is
 listening for it, so `connect` idempotently re-arms the per-agent `notify-inbox`
 job whenever it finds it missing — a dead listener heals on the next session
