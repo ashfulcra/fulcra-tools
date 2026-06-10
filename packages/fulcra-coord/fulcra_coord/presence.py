@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity
 from . import role_ops as _role_ops
+from . import continuity_ops as _continuity_ops
 from . import selfupdate as _selfupdate
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
@@ -275,6 +276,13 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     for role_name in record["capabilities"]:
         try:
             _role_ops.claim_role(role_name, me, backend=backend)
+            # Role claim → resume (continuity spec 2026-06-10): connect IS the
+            # spawn-session → claim-role moment of the ArcBot backbone, so a
+            # role that carries a checkpoint_ref prints its where-it-left-off
+            # (ref + best-effort brief) here too — same helper as `roles
+            # claim`, so the two lease paths can't diverge. Inside the same
+            # per-claim guard: a resume problem never fails a session boot.
+            _continuity_ops.print_role_resume(role_name, backend=backend)
         except Exception:
             pass
 

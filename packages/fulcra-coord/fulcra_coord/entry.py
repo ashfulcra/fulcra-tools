@@ -325,6 +325,21 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Optional transcript/session log path for resume context")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
 
+    # ---- checkpoint ----
+    sp = sub.add_parser("checkpoint",
+                        help="Read or update a ROLE's durable resume point "
+                             "(registry checkpoint_ref). With --ref: set it "
+                             "(preserving every other field); without: show "
+                             "the current ref + best-effort resume brief. "
+                             "Claiming the role (roles claim / connect "
+                             "--role) prints the same resume.")
+    sp.add_argument("--role", required=True, metavar="NAME",
+                    help="The role whose checkpoint_ref to read/update")
+    sp.add_argument("--ref", default=None, metavar="REF",
+                    help="Opaque checkpoint ref (e.g. the remote continuity "
+                         "path handoff/park publish). Omit to show current.")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- done ----
     sp = sub.add_parser("done", help="Mark a task as done (requires evidence)")
     sp.add_argument("task_id", metavar="TASK-ID")
@@ -733,6 +748,7 @@ COMMAND_MAP = {
     "block": _cli.cmd_block,
     "pause": _cli.cmd_pause,
     "snapshot": _cli.cmd_snapshot,
+    "checkpoint": _cli.cmd_checkpoint,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
     "request-review": _cli.cmd_request_review,
