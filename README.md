@@ -61,12 +61,6 @@ long-running agent work.
 | **Fulcra Coord** | Shared agent-coordination layer — independent agents (Claude Code, Codex, OpenClaw, ChatGPT, CI) coordinate durable tasks over Fulcra Files as a bus, with no shared memory or direct calls. Lifecycle hooks, cross-agent inbox + broadcast directives, a `fulcra-coord agents` status digest, and a durable per-agent listener. Forge-agnostic: the review/merge handshake rides the bus (`request-review`/`review-done`), so GitHub is optional. | [`packages/fulcra-coord/README.md`](packages/fulcra-coord/README.md) · [`SKILL.md`](packages/fulcra-coord/SKILL.md) (agents) |
 | **Fulcra Continuity** | Turns a long-running agent task into a structured **checkpoint** another session or agent can resume from without guessing — objective, decisions, artifacts, open questions, next actions, memory writes — so work survives compaction or a handoff (the "Context Cliff Rescue"). A standalone library + CLI (`checkpoint` / `resume`) that **pairs with Fulcra Coord without depending on it**: they share one checkpoint schema, so coord's `snapshot` / `pause --snapshot` / `resume --with-continuity` write and read the same shape. | [`packages/fulcra-continuity/README.md`](packages/fulcra-continuity/README.md) |
 
-> **Related standalone repos.** The **Hermes "press play" demo** (per-guest
-> ephemeral Hermes agents that onboard each person into their own Fulcra
-> account) lives in its own repos, not this monorepo: `fulcra-hermes-vercel`
-> (the active Vercel Sandbox port), `fulcra-litellm` (its LLM gateway), and
-> `fulcra-hermes-daytona` (the deprecated original Daytona port).
-
 > **More coming.** Ash's other Fulcra projects will be added here as they are
 > consolidated into this repo — each as its own row above, linking to
 > its own overview.
