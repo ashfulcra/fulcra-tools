@@ -101,6 +101,7 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
         presence_unavailable = False
         loops_overdue = 0
         loops_awaiting_me = 0
+        loops_out_of_band = 0
         current_agent = identity.resolve_agent(getattr(args, "agent", None))
         for _, rec in remote.list_json(remote.health_prefix(), backend=backend):
             if isinstance(rec, dict):
@@ -120,8 +121,16 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
                 if isinstance(lh, dict):
                     loops_overdue = max(loops_overdue, int(lh.get("overdue") or 0))
                     if rec.get("agent") == current_agent:
+                        # Identity-specific counts (the a6d79f95 fix): both
+                        # awaiting_me AND out_of_band are THIS agent's own
+                        # ledger — awaiting_me lists loops the reader owes,
+                        # out_of_band flags the reader's own open asks whose
+                        # answer landed off the bus. Another agent's counts
+                        # must never render as "you".
                         loops_awaiting_me = max(
                             loops_awaiting_me, int(lh.get("awaiting_me") or 0))
+                        loops_out_of_band = max(
+                            loops_out_of_band, int(lh.get("out_of_band") or 0))
         if worst:
             # A real, confirmed count takes precedence — that's the live dead-inbox
             # signal a maintainer must act on.
@@ -132,12 +141,18 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
             # Stay LOUD about the outage without crying wolf about rotting inboxes.
             print("\n  WARN: presence aggregate unavailable on a recent reconcile "
                   "— directive delivery could not be checked.")
-        if loops_overdue or loops_awaiting_me:
+        if loops_overdue or loops_awaiting_me or loops_out_of_band:
             # Open-loop debt: loops past their SLA with no answer, and open
             # loops directed at the reader. Same one-line, nonzero-only style
-            # as the undelivered warning above.
-            print(f"\n  WARN: {loops_overdue} coordination loop(s) overdue "
-                  f"· {loops_awaiting_me} awaiting you")
+            # as the undelivered warning above. The out-of-band suffix appears
+            # ONLY when nonzero: the reader's own open asks whose answer was
+            # mirrored from the forge — go close them explicitly (respond),
+            # citing the evidence; the mirror never closes anything.
+            line = (f"\n  WARN: {loops_overdue} coordination loop(s) overdue "
+                    f"· {loops_awaiting_me} awaiting you")
+            if loops_out_of_band:
+                line += f" · {loops_out_of_band} out-of-band"
+            print(line)
     except Exception:
         pass
 

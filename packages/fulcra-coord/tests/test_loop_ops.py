@@ -69,6 +69,53 @@ def test_cmd_respond_unknown_loop_is_an_error(coord_backend):
     assert loop_ops.cmd_respond(args, backend=coord_backend) == 1
 
 
+# ---------------------------------------------------------------------------
+# Evidence sub-log (phase 2 Task 1): the THIRD sub-log, for forge-mirrored
+# signals. Same shard idioms as responses (round-trip, no clobber) PLUS the
+# trust property: the writer force-stamps source=forge-mirror — a caller can
+# never forge first-party-ness. Closure-immunity lives in
+# test_loop_conformance.py (the invariant test).
+# ---------------------------------------------------------------------------
+
+
+def test_append_and_read_evidence_events(coord_backend):
+    d = _seed_review_loop(coord_backend)
+    ok = loop_ops.append_loop_evidence(
+        d["id"],
+        {"forge": "github", "kind": "comment-verdict", "summary": "LGTM on PR"},
+        backend=coord_backend)
+    assert ok
+    events = loop_ops.read_loop_evidence(d["id"], backend=coord_backend)
+    assert len(events) == 1
+    assert events[0]["summary"] == "LGTM on PR"
+    assert events[0]["at"]          # stamped server-side by the writer
+    assert events[0]["source"] == "forge-mirror"
+    # The evidence sub-log is DISJOINT from the responses sub-log: a mirrored
+    # event never appears where the closure fold reads.
+    assert loop_ops.read_loop_responses(d["id"], backend=coord_backend) == []
+
+
+def test_concurrent_evidence_never_clobber(coord_backend):
+    d = _seed_review_loop(coord_backend)
+    loop_ops.append_loop_evidence(d["id"], {"forge": "github", "summary": "e1"},
+                                  backend=coord_backend)
+    loop_ops.append_loop_evidence(d["id"], {"forge": "github", "summary": "e2"},
+                                  backend=coord_backend)
+    events = loop_ops.read_loop_evidence(d["id"], backend=coord_backend)
+    assert {e["summary"] for e in events} == {"e1", "e2"}
+
+
+def test_evidence_source_cannot_be_forged(coord_backend):
+    # A caller claiming first-party-ness gets overwritten: the writer FORCE-sets
+    # source=forge-mirror unconditionally, so mirrored events are always marked.
+    d = _seed_review_loop(coord_backend)
+    assert loop_ops.append_loop_evidence(
+        d["id"], {"source": "first-party", "summary": "sneaky"},
+        backend=coord_backend)
+    events = loop_ops.read_loop_evidence(d["id"], backend=coord_backend)
+    assert events[0]["source"] == "forge-mirror"
+
+
 def test_outcome_fold_is_bus_only(coord_backend):
     # The fold derives outcome/closure ONLY from bus response events — there is
     # no other input. A loop with no response events folds to outcome None/open.
