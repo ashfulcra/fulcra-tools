@@ -337,8 +337,19 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
         if task.get("repo"):
             artifact_ref["repo"] = task["repo"]
 
+    directive_type = _directive_type_for(task)
+    loop_kind = None
+    loop_state = None
+    loop_expects_response = False
+    loop_sla_hours = None
+    if directive_type == "review":
+        loop_kind = "review"
+        loop_state = "requested"
+        loop_expects_response = True
+        loop_sla_hours = 24
+
     directive = schema.make_directive(
-        directive_type=_directive_type_for(task),
+        directive_type=directive_type,
         from_agent=from_agent,
         audience=audience,
         title=task.get("title") or "(untitled)",
@@ -352,6 +363,10 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
         due=task.get("due"),
         task_id=task_id,
         directive_id=directive_id,
+        kind=loop_kind,
+        state=loop_state,
+        expects_response=loop_expects_response,
+        sla_hours=loop_sla_hours,
     )
     # make_directive starts acked_by empty; carry the task's acks onto the mirror
     # so the directive reflects who has already acknowledged it.
