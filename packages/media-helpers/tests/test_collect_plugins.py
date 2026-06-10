@@ -2317,8 +2317,9 @@ def test_deezer_plugin_run_imports_and_advances_watermark(monkeypatch):
     assert st.watermark == "2026-05-22T10:00:00+00:00"
 
 
-def test_deezer_plugin_rewinds_watermark_by_one_hour(monkeypatch):
-    """When a watermark is set, since = watermark - 1h."""
+def test_deezer_plugin_rewinds_watermark_for_late_scrobbles(monkeypatch):
+    """When a watermark is set, since = watermark - 24h (the late-arriving
+    scrobble rewind — see since_from_watermark)."""
     from datetime import datetime, timezone
 
     received_since = {}
@@ -2351,7 +2352,7 @@ def test_deezer_plugin_rewinds_watermark_by_one_hour(monkeypatch):
     )
     DEEZER_PLUGIN.run(ctx)
 
-    expected = datetime(2026, 5, 22, 11, 0, 0, tzinfo=timezone.utc)
+    expected = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
     assert received_since["since"] == expected
 
 
@@ -4290,3 +4291,24 @@ def test_lastfm_emits_annotation_event_on_successful_writes(monkeypatch):
     assert evt["ok"] is True
     # The summary should reference the tag name and count
     assert "lastfm" in evt["summary"].lower() or "3" in evt["summary"]
+
+
+def test_since_from_watermark_rewinds_24h():
+    """Late-arriving scrobbles: a phone listening offline uploads its plays to
+    Last.fm when the app next foregrounds — hours, not minutes, late. A 1-hour
+    rewind permanently missed those (confirmed live: a 2026-06-07 15:38
+    scrobble absent from Fulcra while its 14:34 sibling landed). The rewind is
+    24h; det-id readback makes the wider refetch idempotent and it costs at
+    most ~one extra API page per run.
+    """
+    from fulcra_media.plugins._common import since_from_watermark
+
+    class St:
+        watermark = "2026-06-07T18:00:00Z"
+
+    class Ctx:
+        state = St()
+
+    out = since_from_watermark(Ctx())
+    assert out is not None
+    assert out.isoformat() == "2026-06-06T18:00:00+00:00"
