@@ -102,3 +102,66 @@ class TestOpenClosed:
         for k in ("kind", "state", "outcome", "expects_response", "sla_hours"):
             d.pop(k, None)
         assert not loops.is_open_loop(d)
+
+
+# ---------------------------------------------------------------------------
+# Detection folds + board projection (spec 2026-06-09 Task 5) — still pure:
+# `now` is injected, records are plain dicts, no I/O anywhere.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+NOW = datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _aged(d, hours):
+    d["created_at"] = (NOW - timedelta(hours=hours)).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+    return d
+
+
+class TestDetectionFolds:
+    def test_awaiting_me_lists_open_loops_directed_at_me(self):
+        mine = _loop("review", audience="me:h:r")
+        other = _loop("review", audience="you:h:r")
+        out = loops.awaiting_me("me:h:r", [mine, other], now=NOW)
+        assert [x["id"] for x in out] == [mine["id"]]
+
+    def test_awaiting_others_flags_overdue_by_sla(self):
+        # NOTE: `from` is a reserved word, so it can't be a bare keyword — but
+        # dict-unpacking into the helper's **over legally carries it.
+        fresh = _loop("review", **{"from": "me:h:r"})
+        stale = _aged(_loop("review", **{"from": "me:h:r"}), hours=48)  # sla 24
+        out = loops.awaiting_others("me:h:r", [fresh, stale], now=NOW)
+        by_id = {x["id"]: x for x in out}
+        assert by_id[stale["id"]]["overdue"] is True
+        assert by_id[fresh["id"]]["overdue"] is False
+
+    def test_closed_loops_never_surface(self):
+        d = _loop("review", state="closed", **{"from": "me:h:r"})
+        assert loops.awaiting_others("me:h:r", [d], now=NOW) == []
+        assert loops.awaiting_me("me:h:r", [d], now=NOW) == []
+
+    def test_no_sla_means_never_overdue(self):
+        # A loop with NO effective SLA — neither on the record nor as a kind
+        # default (idea has none; expects=True opens it so it reaches the fold
+        # at all) — never goes overdue, no matter how old. Kinds WITH a default
+        # (review 24h / dispatch 72h) fall back to it when the record carries
+        # None — that path is pinned by the stale-review test above.
+        d = _aged(_loop("idea", expects=True, **{"from": "me:h:r"}), hours=999)
+        d["sla_hours"] = None
+        out = loops.awaiting_others("me:h:r", [d], now=NOW)
+        assert out[0]["overdue"] is False
+
+    def test_board_shape(self):
+        items = [
+            _loop("review", audience="me:h:r"),
+            _aged(_loop("dispatch", **{"from": "me:h:r"}), hours=100),
+            _loop("idea", state="viable", expects=False),
+        ]
+        board = loops.loop_board("me:h:r", items, now=NOW)
+        assert set(board) == {"awaiting_me", "awaiting_others",
+                              "in_flight_by_kind", "ideas_pipeline"}
+        assert board["in_flight_by_kind"]["review"] == 1
+        assert board["ideas_pipeline"]["viable"] == 1
+        assert board["awaiting_others"][0]["overdue"] is True
