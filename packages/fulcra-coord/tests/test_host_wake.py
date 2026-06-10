@@ -163,6 +163,7 @@ class TestMaybeWake(_WakeEnvBase):
         popen.assert_called_once()
         args, kwargs = popen.call_args
         self.assertEqual(args[0], ["/bin/echo", "hello"])
+        self.assertIsNone(kwargs.get("cwd"))
         self.assertTrue(kwargs.get("start_new_session"),
                         "wake must spawn DETACHED (start_new_session=True)")
         env = kwargs.get("env") or {}
@@ -172,6 +173,22 @@ class TestMaybeWake(_WakeEnvBase):
         self.assertGreater(marker.stat().st_mtime, old + 1)
         self.assertEqual(wake._wake_pidfile_path(self.AGENT).read_text().strip(),
                          "4242")
+
+    def test_spawn_uses_configured_working_directory(self):
+        cwd = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(cwd, ignore_errors=True))
+        _write_config({"agent-a:": _entry(["/bin/echo", "hello"], cwd=cwd)})
+        popen = self._popen_mock()
+        with patch("fulcra_coord.wake.Popen", popen):
+            self.assertTrue(wake.maybe_wake(self.AGENT, 2))
+        self.assertEqual(popen.call_args.kwargs.get("cwd"), cwd)
+
+    def test_invalid_working_directory_no_spawn(self):
+        _write_config({"agent-a:": _entry(cwd="/definitely/not/a/worktree")})
+        popen = self._popen_mock()
+        with patch("fulcra_coord.wake.Popen", popen):
+            self.assertFalse(wake.maybe_wake(self.AGENT, 2))
+        popen.assert_not_called()
 
     def test_first_wake_with_no_marker_spawns(self):
         _write_config({"agent-a:": _entry()})

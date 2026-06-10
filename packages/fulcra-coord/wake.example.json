@@ -8,6 +8,7 @@
       "--dangerously-skip-permissions",
       "BUS WAKE: you are claude-code:EXAMPLE-HOST:repo. Process your fulcra-coord inbox: direct-list tasks/, act on directives/verdicts per AGENTS.md rules, close loops with evidence, then exit."
     ],
+    "cwd": "/path/to/your/fulcra-tools-worktree",
     "min_interval_min": 15,
     "max_runtime_s": 900,
     "enabled": true,
@@ -20,6 +21,7 @@
       "exec",
       "BUS WAKE: you are codex:EXAMPLE-HOST:main. Process your fulcra-coord inbox: direct-list tasks/, act on directives/verdicts per AGENTS.md rules, close loops with evidence, then exit."
     ],
+    "cwd": "/path/to/your/fulcra-tools-worktree",
     "min_interval_min": 15,
     "max_runtime_s": 900,
     "enabled": true
@@ -33,6 +35,7 @@
       "--prompt",
       "BUS WAKE: process your fulcra-coord inbox, then exit."
     ],
+    "cwd": "/path/to/your/openclaw-worktree",
     "min_interval_min": 30,
     "max_runtime_s": 900,
     "enabled": false
