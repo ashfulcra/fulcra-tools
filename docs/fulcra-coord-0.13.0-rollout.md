@@ -287,3 +287,55 @@ inline summary below stands on its own.)
 
 Until that flip, the mutable file is the source of truth and `events` is opt-in
 per host.
+
+---
+
+## 0.15.0 — what's new since 0.14.0
+
+0.15.0 is again **purely additive** and changes nothing about how reads resolve
+(the read-cutover flip remains a separate, operator-gated decision). It ships
+two addressing upgrades and the **coordination loops** substrate — the
+request→response layer that makes every cross-agent ask a tracked, bus-closed
+loop.
+
+**Upgrade procedure unchanged:** per host, `git pull && uv tool install
+--reinstall --force .` from `packages/fulcra-coord`, then `fulcra-coord
+--version` should report `0.15.0`.
+
+### Addressing (#128, #129)
+
+- **`@<role>` audiences (#128).** A directive may be addressed to a logical
+  role (e.g. `@reviewer`) instead of a frozen agent id. It resolves at READ
+  time against each agent's declared roles (`connect --role <name>`), with
+  multi-holder fan-out — every live holder sees it; a stale id can no longer
+  silently strand a message. Old buses/agents are unaffected until roles are
+  declared.
+- **Config-driven review routing (#129).** The hard-coded fleet reviewer ids
+  are gone from core. Reviewer preference now comes from
+  `${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/review-routing.json` (or
+  `FULCRA_COORD_REVIEW_SEED`), defaulting to a purely capability-driven pool
+  (`connect --can-review`). Install your fleet's policy file per
+  `review-routing.example.json`.
+
+### Coordination loops (#130, #135, #137)
+
+- **Loops**: directives gain `kind` (review / dispatch / idea, plus legacy
+  `tell`) with declared lifecycles. A loop that expects a response stays OPEN
+  until a response lands **on the bus** — `fulcra-coord respond <loop-id>
+  --outcome … --evidence …` (or `review-done` for reviews). Outcomes live as
+  append-only response shards under the directive's `responses/` sub-log;
+  snapshots are caches. A forge comment never closes a loop.
+- **Detection**: `status` now warns on overdue loops and loops awaiting you;
+  each reconcile records a `loop_health` block ({open_loops, overdue,
+  awaiting_me}) in the host health record; the listener notification appends
+  the overdue count.
+- **Self-healing listener**: `connect` (every SessionStart) re-arms a missing
+  notify-inbox job idempotently and verifies it is actually loaded, not just
+  written. Opt out with `FULCRA_COORD_ENSURE_LISTENER=0`.
+
+### Post-deploy fleet transition (operator-relayed)
+
+Once all hosts report 0.15.0: reviewers run `connect --role reviewer
+--can-review`; the maintainer pins `--role coord-maintainer`; routing docs
+flip from frozen reviewer ids to `@reviewer`. Until then everything behaves
+exactly as 0.14.0.
