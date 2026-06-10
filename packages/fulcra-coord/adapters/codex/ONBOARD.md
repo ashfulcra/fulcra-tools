@@ -15,6 +15,10 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    `cd <…>/fulcra-tools/packages/fulcra-coord && git pull && uv tool install --reinstall --force .`
    (use `--reinstall`: uv SKIPS the rebuild when the version is unchanged, so a
    plain `--force` can leave you on an old subcommand set after a `git pull`.)
+   NOTE: 0.15.3+ self-propagates — once installed, the CLI updates itself from
+   the bus version manifest (default ON; configure update.json with your
+   checkout path, see README "Self-update"). This manual step is only needed
+   to cross onto 0.15.3, or with FULCRA_COORD_SELF_UPDATE=0.
 2. Verify + auth:  `fulcra-coord doctor`   (if unauthed: `fulcra-api auth login`).
    If `doctor` reports `File commands: FAIL`, your Fulcra CLI lacks the `file`
    command group the bus runs on — install the file-capable build per

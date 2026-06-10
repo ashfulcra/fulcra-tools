@@ -28,9 +28,9 @@ import time
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from fulcra_coord import __version__, cache, remote, schema, selfupdate
+from fulcra_coord import __version__, remote, schema, selfupdate
 
 
 def _manifest(version="99.0.0", commit="deadbeef", min_supported=None):
