@@ -1,7 +1,7 @@
 # Ash's Fulcra Tools
 
 WARNING: Everything in this repo was vibe coded by Fulcra's lawyer, 
-using Fulcra's file and data stream primitives. 
+using Fulcra's file and datastream primitives. 
 
 Nothing in this repo is official Fulcra software, and it may or may
 not be supported in the future. 
