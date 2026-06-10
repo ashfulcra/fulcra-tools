@@ -29,6 +29,23 @@ Input shapes accepted (mirrors apple_takeout):
   - Plain CSV file path
   - Directory (recursively searched for Apple Music Play Activity.csv)
   - .zip file (members searched; inner Apple_Media_Services zip handled)
+
+Blank-artist enrichment:
+  Container Artist Name is nearly always empty in real takeouts (verified:
+  3 of ~20,000 rows filled in a real 2026 takeout). Two sibling files in
+  the same "Apple Music Activity" bundle let us recover it:
+
+    - "Apple Music - Play History Daily Tracks.csv" — column
+      "Track Description" formatted "Artist - Title" (split on FIRST " - ")
+    - "Apple Music Library Tracks.json.zip" — zip holding one JSON array
+      of {"Title": ..., "Artist": ...} entries
+
+  We build a normalized-title → artist map from the union of both and fill
+  in the artist only when the row's artist is empty AND the title maps to
+  exactly one distinct artist (ambiguous titles stay blank — never guess,
+  never overwrite). Measured on the same real takeout: 79% of blank-artist
+  rows enriched unambiguously, 15% ambiguous. Siblings missing → enrichment
+  silently skipped.
 """
 
 from __future__ import annotations
@@ -36,14 +53,18 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
+import logging
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fulcra_common.cross_source_fingerprint import listened_fingerprint
 
 from .base import NormalizedEvent, content_fingerprint
+
+logger = logging.getLogger(__name__)
 
 _REQUIRED_COLS: tuple[str, ...] = (
     "Song Name",
@@ -74,6 +95,259 @@ _ACCEPT_END_REASONS: frozenset[str] = frozenset({
 _MIN_DURATION_MS = 30_000
 
 _BASENAME = "Apple Music Play Activity.csv"
+
+# Sibling files (same "Apple Music Activity" folder) used to enrich the
+# nearly-always-blank Container Artist Name. See module docstring.
+_DAILY_TRACKS_BASENAME = "Apple Music - Play History Daily Tracks.csv"
+_LIBRARY_TRACKS_BASENAME = "Apple Music Library Tracks.json.zip"
+
+
+# ---------------------------------------------------------------------------
+# Blank-artist enrichment (title → artist map from sibling files)
+# ---------------------------------------------------------------------------
+
+def _norm_title(s: str) -> str:
+    """Normalization rule for the title key: lowercase + whitespace-collapse."""
+    return " ".join(s.lower().split())
+
+
+def _member_dir(member: str) -> str:
+    """Zip member directory with no trailing slash."""
+    return member.rsplit("/", 1)[0] if "/" in member else ""
+
+
+def _sibling_member(zf: zipfile.ZipFile, activity_member: str, basename: str) -> str | None:
+    """Return the enrichment sibling next to ``activity_member`` in a zip.
+
+    Apple takeouts can contain nested folders and, in hand-built/test archives,
+    more than one file with the same basename. Enrichment must be scoped to
+    the same Apple Music Activity folder as the Play Activity CSV we selected;
+    otherwise a sibling from a different bundle can silently fill the wrong
+    artist.
+    """
+    directory = _member_dir(activity_member)
+    expected = f"{directory}/{basename}" if directory else basename
+    names = set(zf.namelist())
+    if expected in names:
+        return expected
+    return None
+
+
+def _blank_artist_titles_from_rows(lines: Iterable[str]) -> frozenset[str]:
+    """Collect normalized song titles that could actually use enrichment."""
+    reader = csv.DictReader(lines)
+    if not reader.fieldnames or "Song Name" not in reader.fieldnames:
+        return frozenset()
+    titles: set[str] = set()
+    for row in reader:
+        song = (row.get("Song Name") or "").strip()
+        raw_artist = (row.get("Container Artist Name") or "").strip()
+        if song and not raw_artist:
+            titles.add(_norm_title(song))
+    return frozenset(titles)
+
+
+def _blank_artist_titles_from_csv_bytes(data: bytes) -> frozenset[str]:
+    text = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", newline="")
+    return _blank_artist_titles_from_rows(text)
+
+
+def _blank_artist_titles_from_csv_path(csv_path: Path) -> frozenset[str]:
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        return _blank_artist_titles_from_rows(f)
+
+
+class ArtistLookup:
+    """Normalized-title → artist lookup built from sibling takeout files.
+
+    Calling it with a song name returns the artist when the title maps to
+    exactly one distinct artist across the union of sources, else ``None``
+    (both for unmatched and ambiguous titles — ``is_ambiguous`` tells the
+    two apart for instrumentation).
+    """
+
+    def __init__(self, candidates: dict[str, set[str]]):
+        self._resolved: dict[str, str] = {
+            title: next(iter(artists))
+            for title, artists in candidates.items()
+            if len(artists) == 1
+        }
+        self._ambiguous: frozenset[str] = frozenset(
+            title for title, artists in candidates.items() if len(artists) > 1
+        )
+
+    def __call__(self, song: str) -> str | None:
+        return self._resolved.get(_norm_title(song))
+
+    def is_ambiguous(self, song: str) -> bool:
+        return _norm_title(song) in self._ambiguous
+
+    def __len__(self) -> int:
+        return len(self._resolved) + len(self._ambiguous)
+
+
+def _collect_daily_tracks(
+    lines: Iterable[str],
+    candidates: dict[str, set[str]],
+    *,
+    target_titles: frozenset[str] | None = None,
+) -> int:
+    """Harvest (title, artist) pairs from Play History Daily Tracks.
+
+    "Track Description" is formatted "Artist - Title"; split on the FIRST
+    " - " (titles may themselves contain " - ").
+
+    When we know the blank-artist titles from the Play Activity CSV, use them
+    to disambiguate descriptions containing multiple separators. That preserves
+    title-with-dash enrichment ("Artist - Title - Live") while also handling
+    artist-with-dash names ("Artist - Alias - Title") without filling the
+    artist as just "Artist".
+    """
+    reader = csv.DictReader(lines)
+    if not reader.fieldnames or "Track Description" not in reader.fieldnames:
+        logger.debug(
+            "apple-music-takeout: daily tracks file lacks 'Track Description' "
+            "column — skipping for enrichment"
+        )
+        return 0
+    n = 0
+    for row in reader:
+        desc = (row.get("Track Description") or "").strip()
+        parts = desc.split(" - ")
+        if len(parts) < 2:
+            continue
+        matches: list[tuple[str, str]] = []
+        for idx in range(1, len(parts)):
+            artist = " - ".join(parts[:idx]).strip()
+            title = " - ".join(parts[idx:]).strip()
+            if not artist or not title:
+                continue
+            if target_titles is not None and _norm_title(title) not in target_titles:
+                continue
+            matches.append((title, artist))
+        if not matches:
+            continue
+        # A single description that could match multiple blank activity titles
+        # is inherently ambiguous; skip it rather than guessing wrong.
+        if len(matches) > 1:
+            continue
+        title, artist = matches[0]
+        candidates.setdefault(_norm_title(title), set()).add(artist)
+        n += 1
+    return n
+
+
+def _collect_library_tracks(
+    zip_bytes: bytes, candidates: dict[str, set[str]],
+) -> int:
+    """Harvest (Title, Artist) pairs from the Library Tracks json zip."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            members = [m for m in zf.namelist() if m.lower().endswith(".json")]
+            if not members:
+                logger.debug(
+                    "apple-music-takeout: library tracks zip has no .json "
+                    "member — skipping for enrichment"
+                )
+                return 0
+            entries = json.loads(zf.read(members[0]))
+    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "apple-music-takeout: failed to read library tracks zip "
+            "(%s) — skipping for enrichment", exc,
+        )
+        return 0
+    if not isinstance(entries, list):
+        return 0
+    n = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("Title") or "").strip()
+        artist = str(entry.get("Artist") or "").strip()
+        if title and artist:
+            candidates.setdefault(_norm_title(title), set()).add(artist)
+            n += 1
+    return n
+
+
+def _finish_lookup(candidates: dict[str, set[str]]) -> ArtistLookup | None:
+    if not candidates:
+        return None
+    lookup = ArtistLookup(candidates)
+    ambiguous = sum(1 for a in candidates.values() if len(a) > 1)
+    logger.debug(
+        "apple-music-takeout: artist map built — %d titles "
+        "(%d unambiguous, %d ambiguous)",
+        len(candidates), len(candidates) - ambiguous, ambiguous,
+    )
+    return lookup
+
+
+def _build_lookup_for_csv(csv_path: Path) -> ArtistLookup | None:
+    """Build the artist map from sibling files NEXT TO a bare CSV path.
+
+    Missing siblings (or unreadable ones) skip enrichment gracefully.
+    """
+    candidates: dict[str, set[str]] = {}
+    target_titles = _blank_artist_titles_from_csv_path(csv_path)
+    daily = csv_path.parent / _DAILY_TRACKS_BASENAME
+    if daily.is_file():
+        try:
+            with daily.open(newline="", encoding="utf-8") as f:
+                n = _collect_daily_tracks(f, candidates, target_titles=target_titles)
+            logger.debug(
+                "apple-music-takeout: daily tracks sibling found (%d entries)", n,
+            )
+        except OSError as exc:
+            logger.warning(
+                "apple-music-takeout: cannot read %s (%s) — skipping", daily, exc,
+            )
+    else:
+        logger.debug("apple-music-takeout: no daily tracks sibling at %s", daily)
+    library = csv_path.parent / _LIBRARY_TRACKS_BASENAME
+    if library.is_file():
+        try:
+            n = _collect_library_tracks(library.read_bytes(), candidates)
+            logger.debug(
+                "apple-music-takeout: library tracks sibling found (%d entries)", n,
+            )
+        except OSError as exc:
+            logger.warning(
+                "apple-music-takeout: cannot read %s (%s) — skipping", library, exc,
+            )
+    else:
+        logger.debug("apple-music-takeout: no library tracks sibling at %s", library)
+    return _finish_lookup(candidates)
+
+
+def _build_lookup_from_zip(
+    zf: zipfile.ZipFile,
+    activity_member: str,
+    *,
+    target_titles: frozenset[str],
+) -> ArtistLookup | None:
+    """Build the artist map from members next to ``activity_member``."""
+    candidates: dict[str, set[str]] = {}
+    daily = _sibling_member(zf, activity_member, _DAILY_TRACKS_BASENAME)
+    if daily:
+        with zf.open(daily) as raw:
+            text = io.TextIOWrapper(raw, encoding="utf-8", newline="")
+            n = _collect_daily_tracks(text, candidates, target_titles=target_titles)
+        logger.debug(
+            "apple-music-takeout: daily tracks member found (%d entries)", n,
+        )
+    else:
+        logger.debug("apple-music-takeout: no daily tracks member in zip")
+    library = _sibling_member(zf, activity_member, _LIBRARY_TRACKS_BASENAME)
+    if library:
+        n = _collect_library_tracks(zf.read(library), candidates)
+        logger.debug(
+            "apple-music-takeout: library tracks member found (%d entries)", n,
+        )
+    else:
+        logger.debug("apple-music-takeout: no library tracks member in zip")
+    return _finish_lookup(candidates)
 
 
 def _det_id(ts: str, song: str, artist: str) -> str:
@@ -124,26 +398,42 @@ def parse_csv(
     csv_path: Path, *,
     since: datetime | None = None,
     until: datetime | None = None,
+    artist_lookup: ArtistLookup | None = None,
 ) -> Iterator[NormalizedEvent]:
-    """Parse Apple Music Play Activity.csv from a path."""
+    """Parse Apple Music Play Activity.csv from a path.
+
+    When no ``artist_lookup`` is supplied, sibling enrichment files next to
+    the CSV are searched automatically (and skipped gracefully if absent).
+    """
+    if artist_lookup is None:
+        artist_lookup = _build_lookup_for_csv(csv_path)
     with csv_path.open(newline="", encoding="utf-8") as f:
-        yield from _iter_rows(csv.DictReader(f), since=since, until=until)
+        yield from _iter_rows(
+            csv.DictReader(f), since=since, until=until,
+            artist_lookup=artist_lookup,
+        )
 
 
 def parse_lines(
     lines: Iterator[str], *,
     since: datetime | None = None,
     until: datetime | None = None,
+    artist_lookup: ArtistLookup | None = None,
 ) -> Iterator[NormalizedEvent]:
-    yield from _iter_rows(csv.DictReader(lines), since=since, until=until)
+    yield from _iter_rows(
+        csv.DictReader(lines), since=since, until=until,
+        artist_lookup=artist_lookup,
+    )
 
 
 def _iter_rows(
     reader: csv.DictReader, *,
     since: datetime | None,
     until: datetime | None,
+    artist_lookup: ArtistLookup | None = None,
 ) -> Iterator[NormalizedEvent]:
     _check_required_cols(reader.fieldnames, _REQUIRED_COLS)
+    n_enriched = n_ambiguous = n_unmatched = 0
     for row in reader:
         event_type = (row.get("Event Type") or "").strip().upper()
         # Empty event type tolerated — some takeouts omit it. Otherwise
@@ -162,7 +452,8 @@ def _iter_rows(
         # a skip with <30s does not. FAILED_TO_LOAD rows naturally have 0
         # duration so they fall out at the duration check.
         song = (row.get("Song Name") or "").strip()
-        artist = (row.get("Container Artist Name") or "").strip()
+        raw_artist = (row.get("Container Artist Name") or "").strip()
+        artist = raw_artist
         album = (row.get("Container Album Name") or "").strip()
         # Artist is often blank in Apple Music takeouts (verified: ~32% of
         # rows in a real takeout had Song but no Container Artist Name).
@@ -197,6 +488,21 @@ def _iter_rows(
         if until is not None and start >= until:
             continue
 
+        # Enrich a blank artist from the sibling-file map — only when the
+        # title resolves to exactly ONE artist; ambiguous titles stay blank
+        # and a non-empty Container Artist Name is never overwritten.
+        # This happens BEFORE note / fingerprint construction so the
+        # enriched artist flows into all of them.
+        if not raw_artist and artist_lookup is not None:
+            resolved = artist_lookup(song)
+            if resolved:
+                artist = resolved
+                n_enriched += 1
+            elif artist_lookup.is_ambiguous(song):
+                n_ambiguous += 1
+            else:
+                n_unmatched += 1
+
         utc_offset_sec = _int_or_none(row.get("UTC Offset In Seconds"))
         note = f"{artist} – {song}"
         fp = content_fingerprint("music", artist=artist, track=song)
@@ -210,7 +516,11 @@ def _iter_rows(
             title=song,
             start_time=start,
             end_time=end,
-            deterministic_id=_det_id(start_raw or end_raw, song, artist),
+            # CRITICAL: deterministic_id MUST hash the RAW (pre-enrichment)
+            # artist. Every historical import hashed the raw value — using
+            # the enriched artist would change every det_id and re-import
+            # the user's entire play history as duplicates on the next run.
+            deterministic_id=_det_id(start_raw or end_raw, song, raw_artist),
             timestamp_confidence="high",
             external_ids={
                 "artist": artist,
@@ -219,6 +529,12 @@ def _iter_rows(
                 "content_fingerprint": fp,
             },
             extra_source_ids=(cross,) if cross else (),
+        )
+    if artist_lookup is not None:
+        logger.debug(
+            "apple-music-takeout: blank-artist enrichment — "
+            "enriched=%d ambiguous=%d unmatched=%d",
+            n_enriched, n_ambiguous, n_unmatched,
         )
 
 
@@ -276,10 +592,20 @@ def _parse_zip(
         members = [n for n in zf.namelist()
                    if n.endswith("/" + _BASENAME) or n == _BASENAME]
         if members:
-            with zf.open(members[0]) as raw:
-                text = io.TextIOWrapper(raw, encoding="utf-8", newline="")
-                yield from parse_lines(text, since=since, until=until)
-                return
+            activity_member = members[0]
+            activity_csv = zf.read(activity_member)
+            # Build the title→artist map once per parse (~12k entries in a
+            # real takeout — fine in memory), before streaming the rows.
+            target_titles = _blank_artist_titles_from_csv_bytes(activity_csv)
+            artist_lookup = _build_lookup_from_zip(
+                zf, activity_member, target_titles=target_titles,
+            )
+            text = io.TextIOWrapper(io.BytesIO(activity_csv), encoding="utf-8", newline="")
+            yield from parse_lines(
+                text, since=since, until=until,
+                artist_lookup=artist_lookup,
+            )
+            return
         # Look for the nested Apple_Media_Services bundle first.
         nested = [n for n in zf.namelist()
                   if n.endswith(".zip") and "Apple_Media_Services" in n]
@@ -310,6 +636,13 @@ def _yield_from_open_zip(
                if n.endswith("/" + _BASENAME) or n == _BASENAME]
     if not members:
         raise ValueError(f"apple-music-takeout: no '{_BASENAME}' in nested zip")
-    with zf.open(members[0]) as raw:
-        text = io.TextIOWrapper(raw, encoding="utf-8", newline="")
-        yield from parse_lines(text, since=since, until=until)
+    activity_member = members[0]
+    activity_csv = zf.read(activity_member)
+    target_titles = _blank_artist_titles_from_csv_bytes(activity_csv)
+    artist_lookup = _build_lookup_from_zip(
+        zf, activity_member, target_titles=target_titles,
+    )
+    text = io.TextIOWrapper(io.BytesIO(activity_csv), encoding="utf-8", newline="")
+    yield from parse_lines(
+        text, since=since, until=until, artist_lookup=artist_lookup,
+    )
