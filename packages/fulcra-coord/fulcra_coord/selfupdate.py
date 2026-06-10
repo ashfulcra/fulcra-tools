@@ -107,6 +107,25 @@ def is_behind(installed: str, manifest: Any) -> bool:
     return pad(mine) < pad(theirs)
 
 
+def _valid_manifest_not_behind(installed: str, manifest: Any) -> bool:
+    """True only when a trusted manifest proves this install is current/ahead.
+
+    ``is_behind`` intentionally returns False for malformed/absent manifests so
+    garbage can never trigger an update. That fail-closed False is not proof the
+    host is current, though: clearing an existing stale marker on garbage would
+    hide a known-behind host from the roster during a manifest outage.
+    """
+    if schema.validate_version_manifest(manifest):
+        return False
+    mine = _version_tuple(installed)
+    theirs = _version_tuple(manifest["package_version"])
+    if mine is None or theirs is None:
+        return False
+    width = max(len(mine), len(theirs))
+    pad = lambda t: t + (0,) * (width - len(t))  # noqa: E731
+    return pad(mine) >= pad(theirs)
+
+
 # ---------------------------------------------------------------------------
 # Local state: config, markers, log
 # ---------------------------------------------------------------------------
@@ -310,9 +329,12 @@ def maybe_self_update(*, backend: Optional[list[str]] = None,
             _touch_throttle_marker()
         manifest = _download_manifest(backend)
         if not is_behind(__version__, manifest):
-            # Current (or the manifest is absent/garbage — fail-closed): drop
-            # any stale marker so the roster suffix heals itself.
-            _clear_stale_marker()
+            # Valid current/ahead manifest: drop any stale marker so the roster
+            # suffix heals itself. Invalid/absent manifest is fail-closed (no
+            # update) but NOT proof of freshness, so preserve any existing
+            # stale marker rather than making a known-behind host invisible.
+            if _valid_manifest_not_behind(__version__, manifest):
+                _clear_stale_marker()
             return "current"
         canonical = manifest["package_version"]
         plan = _resolve_update_plan()
