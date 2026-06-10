@@ -10,6 +10,36 @@ This repo contains various helper projects and tools built on top of Fulcra.
 Each project keeps its own overview, build,
 and tests; this README is the index that points you to them.
 
+## Getting started with Fulcra
+
+[Fulcra](https://fulcradynamics.com) is a personal data platform: your health,
+location, calendar, media, attention, and any custom data streams you define,
+in one store that you own, with an API your agents can use. It's free up to
+5 GB of storage — for you *and* your agents.
+
+```bash
+uv tool install fulcra-api   # installs the `fulcra` CLI
+fulcra auth login            # browser sign-in; an account is created on first login
+```
+
+From there, `fulcra user-info` confirms you're in, `fulcra catalog` shows
+what's queryable, and `fulcra --help` covers the rest (data queries, custom
+data types, tags, files).
+
+- **Want a guided setup?** Give your agent the
+  [fulcra-onboarding skill](https://github.com/fulcradynamics/agent-skills/blob/main/skills/fulcra-onboarding/SKILL.md)
+  — it walks a new user through auth, first custom data types, first records,
+  and a dashboard.
+- **Agent integrating with the platform?**
+  [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps every primitive (auth,
+  files, annotations, queries, MCP) by agent capability — CLI, raw HTTP, or
+  MCP-only.
+- **Docs:** [docs.fulcradynamics.com](https://docs.fulcradynamics.com).
+
+The packages below let you do more — ingest new data sources, capture your
+browsing attention, coordinate agents over a shared bus, and checkpoint
+long-running agent work.
+
 > **Working in this repo with an AI agent (Claude, Codex, Cursor, …)?**
 > Read [`AGENTS.md`](AGENTS.md) first. It documents the non-obvious
 > environmental requirements — the required `uv` extras, the launchd daemon,
