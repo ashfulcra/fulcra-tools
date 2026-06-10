@@ -38,6 +38,33 @@ def test_fetch_existing_source_ids_collects_from_records(recording_transport):
     }
 
 
+def test_fetch_existing_source_groups_keeps_per_record_grouping(recording_transport):
+    """The record-grouped sibling of fetch_existing_source_ids: one set per
+    record (union of sources + metadata.source), records with no sources
+    omitted. The flat function is a union over these groups."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response(200, [
+            {
+                "sources": ["com.fulcra.media.lastfm.v1.aaa"],
+                "metadata": {"source": ["com.fulcra.content.listened.v1.fff"]},
+            },
+            {"sources": ["com.fulcra.media.netflix.bbb"]},
+            {"metadata": {}},  # no sources at all → omitted
+        ])
+
+    transport = recording_transport(handler)
+    client = FulcraClient(transport=transport)
+    start = datetime(2026, 5, 12, tzinfo=timezone.utc)
+    end = datetime(2026, 5, 13, tzinfo=timezone.utc)
+    groups = client.fetch_existing_source_groups(start=start, end=end)
+    assert groups == [
+        {"com.fulcra.media.lastfm.v1.aaa", "com.fulcra.content.listened.v1.fff"},
+        {"com.fulcra.media.netflix.bbb"},
+    ]
+    flat = client.fetch_existing_source_ids(start=start, end=end)
+    assert flat == groups[0] | groups[1]
+
+
 def test_fetch_existing_source_ids_empty_when_no_records(recording_transport):
     transport = recording_transport(lambda r: json_response(200, []))
     client = FulcraClient(transport=transport)

@@ -142,11 +142,14 @@ def test_run_import_claim_none_behaves_as_before(recording_transport):
     assert post_count["n"] == 1
 
 
-def test_run_import_claim_dedups_same_run_cross_source_twin(recording_transport):
+def test_run_import_claim_same_run_fingerprint_collision_posts_both(recording_transport):
     """Two events in ONE run share a com.fulcra.content.* fingerprint but
     have different deterministic_ids — neither is in Fulcra yet (readback
-    passes for both). A real per-event claim (atomic INSERT OR IGNORE on the
-    shared key) lets exactly one through; the twin is skipped."""
+    passes for both). A run is a single plugin, so a same-run fingerprint
+    collision is a same-source quick replay (two real plays inside one
+    5-minute bucket), NOT a cross-source twin: BOTH must post. The second
+    event's already-claimed fingerprint is stripped before its claim, so it
+    claims (and posts with) only its remaining keys."""
     post_bodies: list = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -164,9 +167,8 @@ def test_run_import_claim_dedups_same_run_cross_source_twin(recording_transport)
     twin_a = _ev_with_extra(1, (shared_fp,))  # det id0001
     twin_b = _ev_with_extra(2, (shared_fp,))  # det id0002, same fingerprint
 
-    # A real claim store: a set of already-claimed keys. The first event to
-    # claim records all its keys; the second sees the shared fingerprint and
-    # is rejected — exactly the forwarded_events INSERT OR IGNORE semantics.
+    # A real claim store: a set of already-claimed keys, mirroring the
+    # forwarded_events INSERT OR IGNORE semantics.
     claimed: set[str] = set()
 
     def claim(keys: set[str]) -> bool:
@@ -177,10 +179,25 @@ def test_run_import_claim_dedups_same_run_cross_source_twin(recording_transport)
 
     result = client.run_import([twin_a, twin_b], state, chunk_size=10,
                                claim=claim)
-    # Exactly one of the twins posted; the other was skipped by the claim.
-    assert result.posted == 1
-    assert result.skipped_existing == 1
+    # Both replays posted (one batch POST); the fingerprint was claimed once.
+    assert result.posted == 2
+    assert result.skipped_existing == 0
     assert len(post_bodies) == 1
+    assert claimed == {
+        "com.fulcra.media.netflix.id0001",
+        "com.fulcra.media.netflix.id0002",
+        shared_fp,
+    }
+    # The second event's fingerprint was stripped from the wire body so
+    # query-time source-merging can't collapse the replay into the original.
+    lines = post_bodies[0].splitlines()
+    assert len(lines) == 2
+    import json as _json
+    sources_by_line = [
+        _json.loads(line)["metadata"]["source"] for line in lines
+    ]
+    fp_carriers = [s for s in sources_by_line if shared_fp in s]
+    assert len(fp_carriers) == 1
 
 
 def test_run_import_check_only_does_not_call_claim(recording_transport):
