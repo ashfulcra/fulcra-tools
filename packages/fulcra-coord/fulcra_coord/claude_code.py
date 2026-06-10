@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import wake
 from .cli_invocation import PLACEHOLDER_ARGV  # re-exported for adapter/test use
 
 SESSION_START_SH = r'''#!/usr/bin/env bash
@@ -369,4 +370,110 @@ def install_claude_code(*, scope: str = "global", uninstall: bool = False,
     settings["hooks"] = hooks
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Host wake-exec adapter (--with-wake).
+#
+# The core wake mechanism (fulcra_coord.wake) is platform-neutral by pinned
+# invariant — it must never know what it spawns. So the ONLY place a concrete
+# Claude Code command may live is per-adopter config, and this is the installer
+# that seeds it: a documented-placeholder entry in
+# ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/wake.json that the OPERATOR is
+# expected to review (the spawned session runs with the host's default
+# permissions). The default argv is deliberately small — a `claude -p` run with
+# a self-contained prompt — because the config file IS the customization point:
+# binary path, permission flags, timeouts, model choice all belong in the
+# operator's wake.json edit, not in more installer flags.
+# ---------------------------------------------------------------------------
+
+def _default_wake_prompt(agent: str) -> str:
+    """The documented placeholder prompt for a headless wake session: name the
+    agent identity (so the fresh session resolves the right inbox), point it at
+    the standing rules, demand evidence-closed loops, and END — a wake session
+    is disposable by design; continuity lives on the bus, not in the session."""
+    return (f"BUS WAKE: you are {agent}. Process your fulcra-coord inbox: "
+            "direct-list tasks/, act on directives/verdicts per AGENTS.md "
+            "rules, close loops with evidence, then exit.")
+
+
+def default_wake_entry(agent: str) -> dict[str, Any]:
+    """The seed wake.json entry for ``agent``. Conservative defaults: at most
+    one wake per 15 min, 900s advisory runtime budget, enabled (the operator
+    just asked for it via --with-wake; the loud review note covers consent)."""
+    return {
+        # --dangerously-skip-permissions is the DELIBERATE default (operator
+        # decision 2026-06-10): a woken session that stalls on permission
+        # prompts is a smart notifier, not a worker — the point of host-wake is
+        # acting unattended. Risk is bounded: it only processes bus directives,
+        # on the operator's own machines, under AGENTS.md rules. Soften per
+        # host by editing this entry in wake.json (the customization point).
+        "cmd": ["claude", "-p", "--dangerously-skip-permissions",
+                _default_wake_prompt(agent)],
+        # Host schedulers usually run from HOME or /; a woken Claude session
+        # needs the worktree that installed this entry so AGENTS.md, MCP/plugin
+        # config, and local repo tools are in scope.
+        "cwd": str(Path.cwd()),
+        "min_interval_min": 15,
+        "max_runtime_s": 900,
+        "enabled": True,
+    }
+
+
+def install_wake(agent: str, *, uninstall: bool = False,
+                 dry_run: bool = False) -> dict[str, Any]:
+    """Merge (or remove) ``agent``'s wake entry in wake.json.
+
+    Merge semantics — the file is shared per-adopter policy, so surgery only:
+
+      * other agents' entries are NEVER touched;
+      * an existing entry for THIS agent is PRESERVED, not overwritten — the
+        config file is the operator's customization point and a reinstall must
+        not undo their tuned cmd/interval (``plan["preserved"]`` reports it);
+      * uninstall pops only this agent's key;
+      * dry-run computes the resulting file but writes nothing;
+      * an unparseable existing file is backed up to ``wake.json.bak`` before
+        being replaced (mirrors the settings.json merge) so operator content
+        is never silently destroyed.
+
+    The path comes from ``wake._wake_config_path()`` — the SAME helper the
+    runtime loader uses, so installer and mechanism can never disagree on
+    where config lives.
+    """
+    path = wake._wake_config_path()
+    plan: dict[str, Any] = {"config": str(path), "agent": agent,
+                            "uninstall": uninstall, "dry_run": dry_run,
+                            "preserved": False, "would_write": None}
+
+    cfg: Any = {}
+    corrupt_bytes: "bytes | None" = None
+    if path.is_file():
+        try:
+            cfg = json.loads(path.read_text())
+        except ValueError:
+            corrupt_bytes = path.read_bytes()
+            cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    if uninstall:
+        cfg.pop(agent, None)
+    elif agent in cfg and isinstance(cfg[agent], dict):
+        # Reinstall over an operator-tuned entry: keep theirs.
+        plan["preserved"] = True
+    else:
+        cfg[agent] = default_wake_entry(agent)
+
+    plan["would_write"] = cfg
+    if dry_run:
+        return plan
+
+    if corrupt_bytes is not None:
+        try:
+            path.with_suffix(path.suffix + ".bak").write_bytes(corrupt_bytes)
+        except OSError:
+            pass  # the backup is best-effort; the merge still proceeds
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2) + "\n")
     return plan

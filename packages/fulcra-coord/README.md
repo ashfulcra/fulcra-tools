@@ -104,13 +104,13 @@ fulcra-coord done TASK-... \
 | `search` | Search tasks by text |
 | `doctor` | Check configuration and connectivity |
 | `install-shim` | Install CLI shim to `~/.local/bin/` |
-| `install-claude-code` | Install Claude Code lifecycle hooks (global by default) |
+| `install-claude-code` | Install Claude Code lifecycle hooks (global by default); add `--with-wake` to also seed this agent's host-wake entry in `wake.json` so the listener can spawn a headless session when directed work arrives (see "Host wake" below — review the written command) |
 | `install-openclaw` | Install OpenClaw Track A artifacts (boot/heartbeat prompts + shutdown/bootstrap hooks); add `--with-plugin` to also materialize the Track B Plugin-SDK plugin; add `--with-heartbeat --with-listener --agent <id>` to bundle the durable bus-pickup path (reuses `install-heartbeat` + the per-agent `install-listener`) in one command, so a fresh OpenClaw agent hears directed work without a separate step (the OpenClaw analogue of `ensure-codex-watch`) |
 | `install-codex` | Install Codex lifecycle hooks (SessionStart + PreCompact) into `~/.codex/hooks.json`. No Stop hook by design — Codex end-parking is delegated to the heartbeat |
 | `ensure-codex-watch` | Idempotently (re)arm Codex coordination in one shot — installs Codex hooks, the per-agent inbox listener, best-effort `launchctl load`s it (`--no-load` to skip), optionally refreshes presence (`--no-connect`). Codex SessionStart runs it backgrounded each app start so a missing listener self-heals. Idempotent (`--agent`, `--set-identity`, `--can-review`, `--interval-min N`, `--dry-run`) |
 | `install-heartbeat` | Install a scheduled `reconcile` heartbeat (launchd on macOS, crontab elsewhere) — the safety net that sweeps stale tasks for crashed / end-hook-less agents (`--interval-min N`) |
 | `install-listener` | Install a scheduled `notify-inbox` listener (launchd on macOS, crontab elsewhere) — the durable, per-agent way to notice directed work while idle (`--agent`, `--interval-min N`, default 10). See `adapters/claude-code/LISTENER.md` |
-| `notify-inbox` | Poll the inbox for an agent; if directives exist, write a surface file the next SessionStart injects and emit a best-effort notification (the call the listener runs each tick). Notify-only |
+| `notify-inbox` | Poll the inbox for an agent; if directives exist, write a surface file the next SessionStart injects and emit a best-effort notification (the call the listener runs each tick). With a per-adopter `wake.json` entry it can also **wake** the agent — spawn a configured command, throttled + single-flighted (see "Host wake") |
 
 All hook installers resolve a concretely-callable `fulcra-coord` invocation at install time and bake it into the materialized scripts (absolute on-PATH path, else `<python> -m fulcra_coord`), so hooks work under `uv tool` / source installs, not just `pip`-on-PATH. The committed adapter copies keep a literal placeholder.
 
@@ -541,10 +541,13 @@ extraction is behavior-preserving end to end.
   coordination suite surfaces directed work (`tell` / `assign`) the instant a
   session opens (the SessionStart hook's "📥 Directives for you" section); the
   listener is how an *idle* agent notices a directive that arrives between
-  sessions. It's notify-only: a scheduled `fulcra-coord notify-inbox` polls the
-  inbox and, if there are open directives, writes a surface file the next
-  SessionStart injects and emits a desktop notification — it never runs the
-  directive. The native Claude Code mechanism is a scheduled remote agent (the
+  sessions. By default it's notify-only: a scheduled `fulcra-coord notify-inbox`
+  polls the inbox and, if there are open directives, writes a surface file the
+  next SessionStart injects and emits a desktop notification — it never runs
+  the directive itself. With an opt-in per-adopter `wake.json` entry it can
+  additionally **wake the agent runtime** (spawn your configured command,
+  throttled and single-flighted) so pending work gets processed with nobody at
+  the keyboard — see "Host wake" below. The native Claude Code mechanism is a scheduled remote agent (the
   harness scheduler); `install-listener` is the harness-free launchd/cron
   fallback, and OpenClaw folds `notify-inbox` into its heartbeat. The listener is
   **per-agent**, not per-machine: its launchd label / plist / cron marker are
@@ -610,6 +613,68 @@ extraction is behavior-preserving end to end.
   (default `~/.openclaw/plugins/fulcra-coord/`); building + registering needs
   `npm`/`tsc` + `openclaw plugins install .`, which the CLI can't do — see
   `adapters/openclaw/plugin/README.md` for the steps.
+
+### Host wake (wake.json)
+
+The listener can now **wake your agent runtime, not just notify you**. Without
+it, `notify-inbox` detects directed work while an agent is idle but can only
+write a surface file and ping a webhook/desktop — delivery that still depends
+on *you* opening the next session. With a wake entry configured, a tick that
+finds pending work **spawns a command of your choosing** (typically "start a
+headless agent session, process the inbox, exit") with nobody at the keyboard —
+directives and review verdicts get handled while you're doing other things.
+Sessions stay disposable; the bus, the checkpoints, and the host wake carry the
+continuity.
+
+The mechanism is platform-neutral core (a pinned invariant — no agent-runtime
+command strings ship in `fulcra_coord/`); **what** gets spawned is entirely
+your policy in `${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/wake.json`:
+
+```json
+{
+  "<agent-id-or-prefix>": {
+    "cmd": ["claude", "-p", "BUS WAKE: you are <agent>. Process your fulcra-coord inbox… then exit."],
+    "cwd": "/path/to/the/worktree",
+    "min_interval_min": 15,
+    "max_runtime_s": 900,
+    "enabled": true
+  }
+}
+```
+
+Keys are agent ids or prefixes — **longest prefix wins**, so `"claude-code:"`
+covers every host/repo instance and a longer key overrides for one host. With
+no file (or a malformed one, or `"enabled": false`) the listener degrades to
+exactly the notify-only behavior — the loader is fail-safe like
+`review-routing.json`. Per-platform examples live in **your** wake.json; the
+repo ships `wake.example.json` with claude-code / codex / openclaw entries
+**clearly marked as examples** to copy from. `fulcra-coord install-claude-code
+--with-wake` seeds the claude-code entry for you (and prints a loud review
+note).
+
+Mechanics and safety rails:
+
+- The spawn is **detached** (`start_new_session`) so it can never block a
+  polling tick; stdout/stderr append to the listener logs dir as
+  `wake-<agent-slug>.log`. The spawned process receives `FULCRA_COORD_AGENT`
+  (whose inbox fired) and `FULCRA_COORD_WAKE_PENDING` (the pending count) in
+  its env — everything else it reads from the bus.
+- Set `cwd` to the worktree/project directory the runtime should start in.
+  `install-claude-code --with-wake` seeds it to the directory where you ran the
+  installer, so a woken session sees the right `AGENTS.md`, MCP/plugin config,
+  and local tooling. A missing `cwd` preserves legacy hand-written configs; an
+  invalid `cwd` disables that wake instead of launching in the wrong context.
+- **Throttle**: at most one wake per `min_interval_min` (default 15), tracked
+  by a per-agent marker in the local cache. A failed spawn does not arm the
+  throttle, so the next tick retries.
+- **Single-flight**: a per-agent pidfile skips the spawn while a previous wake
+  is still running; stale pidfiles are ignored.
+- **Runaway protection is the spawned command's job**: `max_runtime_s`
+  documents your runtime budget, but fulcra-coord deliberately runs no process
+  manager — cap runtime with the spawned CLI's own timeout flags.
+- The command runs **unattended with the host's default permissions** — review
+  your wake.json entry before relying on it, and pause any entry with
+  `"enabled": false`.
 
 ## Docs
 
