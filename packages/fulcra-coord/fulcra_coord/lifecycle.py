@@ -17,6 +17,7 @@ commands that remain there, so duplicating the one-liner avoids a back-import.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 # NB: `remote` looks unused since the raw presence-aggregate download for
@@ -45,7 +46,8 @@ _TASK_ID_TITLE_RE = re.compile(r"^TASK-\d{8}-")
 
 
 def cmd_tell(args: Any, backend: Optional[list[str]] = None,
-             *, marker_tag: Optional[str] = None) -> int:
+             *, marker_tag: Optional[str] = None,
+             task_fields: Optional[dict[str, Any]] = None) -> int:
     """Create a directive task addressed at another agent (sugar over `start`).
 
     A directive is a `proposed` task with assignee=<the target agent> and
@@ -56,6 +58,12 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None,
     loop-kind membership tag (e.g. ``routing.IDEA_TAG``) appended to the task's
     tags so the directive dual-write maps the right loop kind — the same
     marker-tag pattern routing_ops uses for ``REVIEW_TAG``.
+
+    ``task_fields`` (internal, for sugar commands like ``handoff``): extra
+    payload fields set on the task AFTER construction — the same post-make_task
+    pattern request-review uses for ``task["pr"]``. Exists so a sugar command
+    can ride this single creation/validation/upload/dual-write path instead of
+    forking its own copy just to add one payload key.
     """
     assignee = getattr(args, "assignee", None)
     title = args.title
@@ -123,6 +131,10 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None,
         # Mirror routing_ops's REVIEW_TAG append: an EXTRA membership tag the
         # dual-write mapper reads — never the task's ``kind`` field.
         task["tags"] = sorted(set(task.get("tags", []) + [marker_tag]))
+    if task_fields:
+        # Sugar-payload fields (e.g. handoff's checkpoint_ref) — set verbatim,
+        # post-construction, exactly like request-review's task["pr"].
+        task.update(task_fields)
     if getattr(args, "expects_response", False):
         # --expects-response makes this an ASK, not an FYI: the dispatch marker
         # makes the dual-write mirror it as an OPEN kind=dispatch loop
@@ -222,6 +234,69 @@ def cmd_later(args: Any, backend: Optional[list[str]] = None) -> int:
     if not getattr(args, "priority", None):
         args.priority = "P3"
     return cmd_tell(args, backend=backend, marker_tag=routing.IDEA_TAG)
+
+
+def cmd_handoff(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Hand work to another agent/role WITH its resume state (sugar over
+    ``tell``, the way ``later`` is).
+
+    Spec 2026-06-10 (continuity integration): a handoff is a ``kind=dispatch``
+    expects_response loop whose payload carries ``checkpoint_ref`` — the
+    producing session's continuity checkpoint. The recipient's pickup surfaces
+    the ref (and, when the optional ``fulcra-continuity`` CLI is installed,
+    the rendered resume brief); closing the loop = the work continued. This is
+    the ArcBot always-on backbone: a respawned session is only useful if it
+    can resume the dead one's work, and the bus — not a hand-rolled
+    ``.session-resume.md`` — is where that state must travel.
+
+    ``--checkpoint`` accepts EITHER an opaque ref (forwarded verbatim — coord
+    never parses refs) OR a local checkpoint JSON file. The local-file case
+    exists because the fulcra-continuity CLI writes local paths only (the
+    verified storage reality): a local path is useless on another host, so we
+    PUBLISH it to the remote ``continuity/...`` tree via coord's bridge and
+    carry the remote ARCHIVE path as the ref. If that publish fails, the
+    checkpoint body rides INLINE in the loop payload (small docs are fine
+    inline) so a transport blip can't strand the handoff.
+
+    Implemented by delegating to cmd_tell with the DISPATCH marker +
+    expects_response (the ``tell --expects-response`` machinery), so handoff
+    shares the one creation/validation/upload/dual-write path."""
+    to = getattr(args, "to", None)
+    if not to:
+        _err("handoff requires a recipient: pass --to <agent|@role>.")
+        return 1
+
+    task_fields: dict[str, Any] = {}
+    ref = getattr(args, "checkpoint", None)
+    if ref:
+        try:
+            is_local = Path(ref).is_file()
+        except Exception:
+            is_local = False
+        if is_local:
+            remote_ref, body = continuity.publish_checkpoint_file(
+                ref, backend=backend)
+            if remote_ref:
+                _info(f"Checkpoint published to bus: {remote_ref}")
+                ref = remote_ref
+            elif body is not None:
+                # Publish failed but the body is readable: carry it inline so
+                # the recipient can still resume; keep the local path as the
+                # (provenance-only) ref.
+                _warn("Checkpoint publish to the bus failed — carrying the "
+                      "checkpoint INLINE in the loop payload.")
+                task_fields["checkpoint_inline"] = body
+            else:
+                _warn(f"--checkpoint {ref} is not readable JSON — forwarding "
+                      "the ref opaquely.")
+        task_fields["checkpoint_ref"] = str(ref)
+
+    args.assignee = to
+    args.expects_response = True   # a handoff is an ASK by definition
+    if not getattr(args, "workstream", None):
+        args.workstream = "general"
+    return cmd_tell(args, backend=backend,
+                    task_fields=task_fields or None)
 
 
 def cmd_broadcast(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -439,6 +514,27 @@ def cmd_update(args: Any, backend: Optional[list[str]] = None) -> int:
             "Run 'fulcra-coord reconcile' after Fulcra access recovers."
         )
         return 1
+
+    # Continuity resume at pickup (spec 2026-06-10): a CLAIM of a handoff
+    # directive is exactly the moment the recipient needs the producer's
+    # where-I-left-off, so surface the checkpoint ref — and, when the optional
+    # fulcra-continuity CLI is installed (probed inside the helper), the
+    # rendered resume brief. ONLY on a genuine pickup (not progress notes):
+    # re-printing the brief on every update would be noise. Fully best-effort
+    # and guarded — a brief problem must never fail a successful claim.
+    if lifecycle == "pickup" and task.get("checkpoint_ref"):
+        ref = task["checkpoint_ref"]
+        _info(f"  Continuity checkpoint: {ref}")
+        try:
+            brief = continuity.render_brief_via_cli(task["checkpoint_inline"]) \
+                if task.get("checkpoint_inline") \
+                else continuity.render_brief_for_ref(ref, backend=backend)
+            if brief:
+                _info("  Resume brief:")
+                for line in brief.rstrip("\n").splitlines():
+                    _info(f"    {line}")
+        except Exception:
+            pass  # the ref line above is the floor; the brief is best-effort
 
     _info(f"Updated: {task_id}")
     return 0
