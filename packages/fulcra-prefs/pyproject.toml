@@ -12,6 +12,9 @@ dependencies = [
     "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
 ]
 
+[project.scripts]
+fulcra-prefs = "fulcra_prefs.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4,<8",
