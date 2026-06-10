@@ -1521,6 +1521,95 @@ class TestExtraTagsPreservedOnTransition(unittest.TestCase):
                          "With no extra tags, all tags must be standard prefixed tags")
 
 
+class TestSecondaryKindTagsPreservedOnTransition(unittest.TestCase):
+    """Regression: apply_transition must not clobber SECONDARY kind: tags.
+
+    Review tasks carry TWO kind: tags — the base schema kind (e.g. kind:ops)
+    and the kind:review routing membership marker added by request-review.
+    Before the fix, the transition tag-rebuild excluded ALL kind:-prefixed
+    tags from the preserved extras, then rebuilt with the single primary from
+    _extract_kind_from_tags (kind:ops sorts before kind:review) — so the FIRST
+    transition (a reviewer CLAIMING the review, proposed->active) silently
+    dropped kind:review, is_review_directive() flipped False, and review-done
+    could no longer resolve the request. Live-found 2026-06-10.
+    """
+
+    def _review_task(self) -> dict:
+        from fulcra_coord import routing
+        t = _sample_task()  # kind:ops, status proposed
+        t["tags"] = sorted(set(t["tags"] + [routing.REVIEW_TAG]))
+        return t
+
+    def test_kind_review_survives_claim_transition(self):
+        t = self._review_task()
+        t2 = apply_transition(t, "active", by="reviewer:h:r")
+        self.assertIn("kind:review", t2["tags"],
+                      "kind:review marker must survive a claim (proposed->active)")
+        self.assertIn("kind:ops", t2["tags"],
+                      "primary kind must survive alongside the review marker")
+
+    def test_is_review_directive_still_true_after_transition(self):
+        from fulcra_coord import routing
+        t = self._review_task()
+        t2 = apply_transition(t, "active", by="reviewer:h:r")
+        self.assertTrue(routing.is_review_directive(t2),
+                        "claimed review must still read as a review directive")
+
+    def test_plain_task_rebuild_unchanged(self):
+        """Regression guard: a single-kind task's rebuild is byte-identical to
+        before — exactly one kind: tag, full standard set, no duplicates."""
+        t = _sample_task()
+        t2 = apply_transition(t, "active", by="agent-a")
+        kind_tags = [tag for tag in t2["tags"] if tag.startswith("kind:")]
+        self.assertEqual(kind_tags, ["kind:ops"],
+                         "plain task must keep exactly one kind: tag")
+        for expected in ("workstream:devops", "agent:claude-code",
+                         "status:active", "priority:P2"):
+            self.assertIn(expected, t2["tags"])
+        self.assertEqual(len(t2["tags"]), len(set(t2["tags"])),
+                         "no duplicate tags after rebuild")
+
+
+def test_review_resolves_after_assignee_claims(coord_backend):
+    """End-to-end live repro (2026-06-10): request-review creates the review
+    task; the assignee CLAIMS it (update --status active, the real cmd path);
+    _resolve_review_request must STILL find it — before the fix the claim's
+    tag rebuild dropped kind:review and review-done reported
+    '<unresolved — pass --to>', so the verdict could not close the loop."""
+    from types import SimpleNamespace
+    from fulcra_coord import lifecycle, presence, routing, routing_ops, schema
+
+    author = "author:hostA:repo"
+    reviewer = "reviewer:hostB:repo"
+
+    # A live, review-capable reviewer in presence (so routing resolves).
+    rec = schema.make_presence(reviewer, capabilities=["review"])
+    presence._write_presence(rec, backend=coord_backend)
+
+    rr = SimpleNamespace(pr="42", repo="org/repo", agent=author,
+                         candidate_list=None, dry_run=False, format="table")
+    assert routing_ops.cmd_request_review(rr, backend=coord_backend) == 0
+
+    # Sanity: resolvable before the claim, and tagged kind:review.
+    before = routing_ops._resolve_review_request("42", backend=coord_backend)
+    assert before is not None and routing.is_review_directive(before)
+
+    # The reviewer claims the review — the real `update --status active` path.
+    claim = SimpleNamespace(task_id=before["id"], summary="claiming the review",
+                            blocked_on=None, status="active", agent=reviewer)
+    setattr(claim, "next", None)
+    assert lifecycle.cmd_update(claim, backend=coord_backend) == 0
+
+    # THE BUG: after the claim, the review request must still resolve.
+    after = routing_ops._resolve_review_request("42", backend=coord_backend)
+    assert after is not None, (
+        "claimed review no longer resolves — kind:review was clobbered "
+        "by the transition tag rebuild")
+    assert after["id"] == before["id"]
+    assert after["status"] == "active"
+    assert routing.is_review_directive(after)
+
+
 # ---------------------------------------------------------------------------
 # Transition table completeness
 # ---------------------------------------------------------------------------
