@@ -197,6 +197,21 @@ def download_json(
         return None
 
 
+# Best-effort failure observable: the stderr tail (last 200 chars) of the most
+# recent FAILED upload, or None if no upload has failed since import. Why an
+# attribute and not a richer return value: ``upload`` returns a bare bool and is
+# called from dozens of sites across the coordination package — changing its
+# signature for one diagnostic would ripple everywhere, and the transport must
+# stay dependency-clean (no ops-log import back into fulcra_coord, which would
+# create a coord -> files -> coord cycle). Callers that care (reconcile's
+# view-upload retry path) read it immediately after a False return and feed it
+# to their own logging. Deliberately NEVER cleared on success: it means "the
+# most recent failure's reason", and clearing would race a concurrent failing
+# upload's freshly-written reason. Under parallel uploads the last failing
+# writer wins — fine for a diagnostic hint, do not treat it as per-call truth.
+last_upload_error: Optional[str] = None
+
+
 def upload(
     content: str,
     remote_path: str,
@@ -204,7 +219,12 @@ def upload(
     backend: Optional[list[str]] = None,
     timeout: Optional[int] = None,
 ) -> bool:
-    """Upload string content to remote_path. Returns True on success."""
+    """Upload string content to remote_path. Returns True on success.
+
+    On failure, records a short reason in the module-level ``last_upload_error``
+    observable (see its comment above) before returning False.
+    """
+    global last_upload_error
     cmd = backend or _backend_cmd()
     tmp_path: Optional[str] = None
     try:
@@ -221,8 +241,17 @@ def upload(
             text=True,
             timeout=timeout or _write_timeout(),
         )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        if result.returncode != 0:
+            # Keep the TAIL: CLI/backend errors put the actionable message
+            # (HTTP status, throttle hint) at the end of a possibly-long trace.
+            err_tail = (result.stderr or "").strip()[-200:]
+            last_upload_error = err_tail or f"exit {result.returncode}"
+            return False
+        return True
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        # Timeouts are a primary failure mode under backend burst throttling —
+        # record them too so the observable never reads stale on a fresh failure.
+        last_upload_error = f"{type(e).__name__}: {e}"[-200:]
         return False
     finally:
         if tmp_path:

@@ -57,3 +57,39 @@ def test_list_json_returns_all_uploaded(tmp_path):
     paths = {path for path, _ in results}
     assert f"{base}/e1.json" in paths
     assert f"{base}/e2.json" in paths
+
+
+def _failing_backend(stderr_text: str) -> list[str]:
+    """An explicit backend command that fails with ``stderr_text`` on stderr —
+    simulates the CLI surfacing a backend throttle/5xx (the live failure mode
+    that motivated ``store.last_upload_error``)."""
+    return [
+        sys.executable,
+        "-c",
+        f"import sys; sys.stderr.write({stderr_text!r}); sys.exit(1)",
+    ]
+
+
+def test_last_upload_error_captures_stderr_on_failure():
+    """A non-zero upload returncode records the stderr tail in the module-level
+    ``last_upload_error`` observable (and upload still returns False)."""
+    from fulcra_coord_files import store
+
+    store.last_upload_error = None
+    bad = _failing_backend("HTTP 503: throttled, slow down")
+    assert store.upload("body", "/coordination/views/x.json", backend=bad) is False
+    assert store.last_upload_error is not None
+    assert "503" in store.last_upload_error
+
+
+def test_last_upload_error_is_truncated_to_tail():
+    """Only the LAST 200 chars of stderr are kept — the tail is where CLI
+    errors put the actionable message, and the observable must stay tiny."""
+    from fulcra_coord_files import store
+
+    store.last_upload_error = None
+    bad = _failing_backend("x" * 500 + " final-error-tail")
+    assert store.upload("body", "/coordination/views/x.json", backend=bad) is False
+    assert store.last_upload_error is not None
+    assert len(store.last_upload_error) <= 200
+    assert store.last_upload_error.endswith("final-error-tail")
