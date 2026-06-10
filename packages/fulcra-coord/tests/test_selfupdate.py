@@ -198,6 +198,21 @@ class TestMaybeSelfUpdate(_CfgEnvBase):
             self.assertEqual(selfupdate.maybe_self_update(), "current")
         self.assertEqual(selfupdate.stale_summary_suffix(), "")
 
+    def test_invalid_manifest_preserves_existing_stale_marker(self):
+        """Fail-closed garbage must not erase a known-behind roster suffix.
+
+        ``is_behind`` returns False for invalid manifests so they cannot trigger
+        an update, but that is not evidence the host is current. During a
+        manifest outage/tamper, an already-stale host must stay visible.
+        """
+        selfupdate._write_stale_marker("0.1.0", "0.2.0")
+        with patch("fulcra_coord.selfupdate._download_manifest",
+                   return_value={"package_version": "999.0.0"}):
+            self.assertEqual(selfupdate.maybe_self_update(), "current")
+        suffix = selfupdate.stale_summary_suffix()
+        self.assertIn("0.1.0", suffix)
+        self.assertIn("0.2.0", suffix)
+
     def test_behind_with_cmd_config_spawns_exact_argv_and_logs(self):
         """The update command comes from LOCAL config only — exact argv, exact
         cwd, output to the cache-dir log (the visible breadcrumb)."""
