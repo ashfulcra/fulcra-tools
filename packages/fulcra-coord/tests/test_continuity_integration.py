@@ -283,6 +283,129 @@ class TestSummaryCarriesRef:
         assert schema.task_summary(s)["checkpoint_ref"] == "opaque-ref-123"
 
 
+class TestRoleCheckpoint:
+    """``checkpoint --role X [--ref R]`` — the role registry's checkpoint_ref
+    is the role's durable "where I left off" (roles phase 2). It must update
+    ONLY that field: a role's runbook/SLA/maintainer survive every
+    checkpoint."""
+
+    def _seed_role(self, coord_backend) -> dict:
+        from fulcra_coord import role_ops
+        rec = schema.make_role(
+            "arc-maintainer", "Keeps Arc healthy",
+            standing_instructions="Read the runbook; check the heartbeat.",
+            policy="exclusive", sla_hours=24, maintainer="ash")
+        assert role_ops.upsert_role(rec, backend=coord_backend)
+        return rec
+
+    def test_checkpoint_role_round_trip_preserves_registry_fields(
+            self, coord_backend):
+        from fulcra_coord import role_ops
+        before = self._seed_role(coord_backend)
+        args = _ns(role="arc-maintainer", ref="opaque-chk-ref-1",
+                   format="table")
+        rc = cli.cmd_checkpoint(args, backend=coord_backend)
+        assert rc == 0
+        after = role_ops.read_role("arc-maintainer", backend=coord_backend)
+        assert after["checkpoint_ref"] == "opaque-chk-ref-1"
+        for field in ("description", "standing_instructions", "policy",
+                      "sla_hours", "maintainer", "created_at"):
+            assert after[field] == before[field], field
+
+    def test_checkpoint_unregistered_role_self_registers(self, coord_backend):
+        from fulcra_coord import role_ops
+        args = _ns(role="fresh-role", ref="opaque-chk-ref-2", format="table")
+        rc = cli.cmd_checkpoint(args, backend=coord_backend)
+        assert rc == 0
+        rec = role_ops.read_role("fresh-role", backend=coord_backend)
+        assert rec["checkpoint_ref"] == "opaque-chk-ref-2"
+
+    def test_checkpoint_without_ref_shows_current(self, coord_backend, capsys):
+        self._seed_role(coord_backend)
+        cli.cmd_checkpoint(_ns(role="arc-maintainer", ref="the-ref",
+                               format="table"), backend=coord_backend)
+        capsys.readouterr()
+        rc = cli.cmd_checkpoint(_ns(role="arc-maintainer", ref=None,
+                                    format="table"), backend=coord_backend)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "the-ref" in out
+
+    def test_roles_set_preserves_checkpoint_ref(self, coord_backend, capsys):
+        """Tightening one knob via `roles set` must never wipe the role's
+        resume point (the _pick/preserve contract extended to this field)."""
+        from fulcra_coord import role_ops
+        self._seed_role(coord_backend)
+        cli.cmd_checkpoint(_ns(role="arc-maintainer", ref="keep-me",
+                               format="table"), backend=coord_backend)
+        args = _ns(roles_action="set", name="arc-maintainer",
+                   description=None, instructions=None, policy=None,
+                   sla_hours=48, maintainer=None, format="table")
+        rc = cli.cmd_roles(args, backend=coord_backend)
+        assert rc == 0
+        after = role_ops.read_role("arc-maintainer", backend=coord_backend)
+        assert after["sla_hours"] == 48
+        assert after["checkpoint_ref"] == "keep-me"
+
+
+class TestClaimAndConnectResume:
+    """Role claim → resume: when the claimed role's registry record carries a
+    checkpoint_ref, both lease paths (`roles claim` and `connect --role`)
+    print the ref + best-effort rendered brief — the where-I-left-off that
+    survives session death."""
+
+    def _role_with_ref(self, coord_backend) -> None:
+        from fulcra_coord import role_ops
+        rec = schema.make_role("arc-maintainer", "Keeps Arc healthy",
+                               checkpoint_ref="role-resume-ref-9")
+        assert role_ops.upsert_role(rec, backend=coord_backend)
+
+    def test_roles_claim_prints_ref_and_brief(self, coord_backend, capsys):
+        self._role_with_ref(coord_backend)
+        args = _ns(roles_action="claim", name="arc-maintainer",
+                   agent="arcbot:hetzner:openclaw", format="table")
+        with patch("fulcra_coord.continuity.render_brief_for_ref",
+                   return_value="Resume brief for ROLE-arc\n"):
+            rc = cli.cmd_roles(args, backend=coord_backend)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "role-resume-ref-9" in out
+        assert "Resume brief for ROLE-arc" in out
+
+    def test_roles_claim_without_ref_prints_no_resume(self, coord_backend,
+                                                      capsys):
+        from fulcra_coord import role_ops
+        role_ops.upsert_role(schema.make_role("plain-role", "no resume"),
+                             backend=coord_backend)
+        args = _ns(roles_action="claim", name="plain-role",
+                   agent="arcbot:hetzner:openclaw", format="table")
+        rc = cli.cmd_roles(args, backend=coord_backend)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "checkpoint" not in out.lower()
+
+    def test_claim_resume_failure_never_fails_the_claim(self, coord_backend):
+        self._role_with_ref(coord_backend)
+        args = _ns(roles_action="claim", name="arc-maintainer",
+                   agent="arcbot:hetzner:openclaw", format="table")
+        with patch("fulcra_coord.continuity.render_brief_for_ref",
+                   side_effect=RuntimeError("boom")):
+            rc = cli.cmd_roles(args, backend=coord_backend)
+        assert rc == 0
+
+    def test_connect_with_role_prints_ref(self, coord_backend, capsys):
+        self._role_with_ref(coord_backend)
+        args = _ns(agent="arcbot:hetzner:openclaw", format="table",
+                   summary="", workstream=None, role=["arc-maintainer"],
+                   can_review=False)
+        with patch("fulcra_coord.continuity.render_brief_for_ref",
+                   return_value=None):
+            rc = cli.cmd_connect(args, backend=coord_backend)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "role-resume-ref-9" in out
+
+
 class TestCoordNeverImportsFulcraContinuity:
     """PIN: the checkpoint schema belongs to the fulcra-continuity package.
     coord may subprocess its CLI; it may NEVER import it (an import couples
