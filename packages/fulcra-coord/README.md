@@ -634,6 +634,7 @@ your policy in `${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/wake.json`:
 {
   "<agent-id-or-prefix>": {
     "cmd": ["claude", "-p", "BUS WAKE: you are <agent>. Process your fulcra-coord inbox… then exit."],
+    "cwd": "/path/to/the/worktree",
     "min_interval_min": 15,
     "max_runtime_s": 900,
     "enabled": true
@@ -658,6 +659,11 @@ Mechanics and safety rails:
   `wake-<agent-slug>.log`. The spawned process receives `FULCRA_COORD_AGENT`
   (whose inbox fired) and `FULCRA_COORD_WAKE_PENDING` (the pending count) in
   its env — everything else it reads from the bus.
+- Set `cwd` to the worktree/project directory the runtime should start in.
+  `install-claude-code --with-wake` seeds it to the directory where you ran the
+  installer, so a woken session sees the right `AGENTS.md`, MCP/plugin config,
+  and local tooling. A missing `cwd` preserves legacy hand-written configs; an
+  invalid `cwd` disables that wake instead of launching in the wrong context.
 - **Throttle**: at most one wake per `min_interval_min` (default 15), tracked
   by a per-agent marker in the local cache. A failed spawn does not arm the
   throttle, so the next tick retries.

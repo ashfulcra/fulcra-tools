@@ -67,6 +67,7 @@ class TestInstallWake(_ConfigEnvBase):
         self.assertEqual(entry["cmd"][2], "--dangerously-skip-permissions")
         self.assertIn(self.AGENT, entry["cmd"][3])
         self.assertIn("inbox", entry["cmd"][3])
+        self.assertEqual(entry["cwd"], str(Path.cwd()))
         self.assertEqual(entry["min_interval_min"], 15)
         self.assertEqual(entry["max_runtime_s"], 900)
         self.assertTrue(entry["enabled"])
@@ -187,6 +188,7 @@ class TestWakeExampleConfig(unittest.TestCase):
         self.assertGreaterEqual(len(entries), 2)
         for e in entries:
             self.assertIsInstance(e["cmd"], list)
+            self.assertIn("cwd", e)
 
 
 if __name__ == "__main__":  # pragma: no cover

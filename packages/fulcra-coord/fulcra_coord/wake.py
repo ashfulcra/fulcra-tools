@@ -22,6 +22,7 @@ prefix::
     {
       "<agent-id-or-prefix>": {
         "cmd": ["...argv..."],        # REQUIRED: what to spawn (list of strings)
+        "cwd": "/path/to/worktree",    # optional: working dir for the spawn
         "min_interval_min": 15,        # throttle: at most one wake per interval
         "max_runtime_s": 900,          # ADVISORY (see below); not enforced here
         "enabled": true
@@ -179,6 +180,25 @@ def _valid_cmd(entry: dict) -> Optional[list[str]]:
     return None
 
 
+def _valid_cwd(entry: dict) -> tuple[bool, Optional[str]]:
+    """Return (ok, cwd) for an optional wake working directory.
+
+    Host schedulers often run from HOME or /, while a woken runtime needs the
+    worktree that supplied AGENTS.md, MCP/plugin config, and local tools.
+    Missing cwd preserves pre-field behavior for hand-written legacy configs;
+    malformed/stale cwd disables the wake rather than launching in the wrong
+    project context.
+    """
+    raw = entry.get("cwd")
+    if raw is None:
+        return True, None
+    if isinstance(raw, str) and raw:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            return True, str(p)
+    return False, None
+
+
 def maybe_wake(agent: str, pending: int) -> bool:
     """Spawn the configured wake command for ``agent`` if pending work warrants
     it. Returns True iff a process was spawned. NEVER raises (fail-safe: this
@@ -200,6 +220,9 @@ def maybe_wake(agent: str, pending: int) -> bool:
             return False
         cmd = _valid_cmd(entry)
         if cmd is None:
+            return False
+        cwd_ok, cwd = _valid_cwd(entry)
+        if not cwd_ok:
             return False
 
         # Throttle: at most one spawn per min_interval_min (marker mtime).
@@ -230,7 +253,7 @@ def maybe_wake(agent: str, pending: int) -> bool:
         env["FULCRA_COORD_WAKE_PENDING"] = str(pending)
         with log.open("ab") as fh:
             proc = Popen(cmd, stdin=DEVNULL, stdout=fh, stderr=fh,
-                         start_new_session=True, env=env)
+                         start_new_session=True, env=env, cwd=cwd)
 
         # Record state only AFTER a successful spawn: a failed Popen leaves the
         # throttle unarmed so the next tick retries.

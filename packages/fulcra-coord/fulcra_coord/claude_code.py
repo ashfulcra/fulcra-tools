@@ -382,10 +382,10 @@ def install_claude_code(*, scope: str = "global", uninstall: bool = False,
 # that seeds it: a documented-placeholder entry in
 # ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/wake.json that the OPERATOR is
 # expected to review (the spawned session runs with the host's default
-# permissions). The default argv is deliberately minimal — a bare `claude -p`
-# with a self-contained prompt — because the config file IS the customization
-# point: binary path, permission flags, timeouts, model choice all belong in
-# the operator's wake.json edit, not in more installer flags.
+# permissions). The default argv is deliberately small — a `claude -p` run with
+# a self-contained prompt — because the config file IS the customization point:
+# binary path, permission flags, timeouts, model choice all belong in the
+# operator's wake.json edit, not in more installer flags.
 # ---------------------------------------------------------------------------
 
 def _default_wake_prompt(agent: str) -> str:
@@ -411,6 +411,10 @@ def default_wake_entry(agent: str) -> dict[str, Any]:
         # host by editing this entry in wake.json (the customization point).
         "cmd": ["claude", "-p", "--dangerously-skip-permissions",
                 _default_wake_prompt(agent)],
+        # Host schedulers usually run from HOME or /; a woken Claude session
+        # needs the worktree that installed this entry so AGENTS.md, MCP/plugin
+        # config, and local repo tools are in scope.
+        "cwd": str(Path.cwd()),
         "min_interval_min": 15,
         "max_runtime_s": 900,
         "enabled": True,
