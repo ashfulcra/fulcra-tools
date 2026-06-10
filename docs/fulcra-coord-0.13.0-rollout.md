@@ -361,3 +361,11 @@ install --reinstall --force .` from `packages/fulcra-coord`; verify
   digest, and `fulcra-coord forge-mirror --once` — the one sanctioned forge
   poller, mirroring verdict-shaped GitHub signals as marked evidence that can
   never close a loop.
+
+- **Backlog on the bus (#144).** `fulcra-coord later "title" -s "context"` captures
+  a "do later" item as a durable, portable backlog entry (an idea-kind loop
+  addressed to the `@backlog` role audience — zero inbox spam, visible in the
+  board's ideas pipeline, claimable by any agent that declares `--role backlog`).
+  `tell --expects-response` creates SLA-tracked dispatch asks that close only via
+  a bus response. Convention (AGENTS.md): operator "do later" items always go on
+  the bus via `later` — never only in session memory.
