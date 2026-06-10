@@ -75,6 +75,15 @@ non-code deliverable) on the bus; verdicts ride the bus
 sugar a human/agent invokes separately. Enforced by
 `packages/fulcra-coord/tests/test_forge_agnostic.py`.
 
+## Backlog convention
+When the operator gives you a "do later" / backlog item, put it ON THE BUS:
+`fulcra-coord later "<title>" -s "<context>"`. Backlog lives on the bus — never
+only in session memory — so it survives compaction and is portable across
+sessions and agents. `later` parks the item on the `@backlog` role audience
+(durable + visible on the `board`'s ideas pipeline, spams nobody's inbox); when
+its time comes, route it with the ordinary `assign TASK-ID <agent>`. (Subagent
+work, by contrast, stays OFF the bus.)
+
 ## Repo homes
 This monorepo (Fulcra-internal for now) is **only for things that make Fulcra
 useful for other people**. Fulcra-related infra that isn't useful-to-others
