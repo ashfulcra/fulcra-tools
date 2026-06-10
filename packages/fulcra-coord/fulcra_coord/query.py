@@ -1,15 +1,18 @@
 """Read-only situational-awareness commands for fulcra-coord.
 
-The operator's at-a-glance surfaces: ``status`` (the board), ``agents`` (who is on
-what, folding in presence), ``needs-me`` (directives + blocked-on-you addressed to
-me, with first-seen tracking), and ``resume`` (what to pick up after a restart).
-All four read the compact summaries aggregate (one download, no per-task body
-fetch) and render via the shared relative-time formatters — they never mutate bus
-state.
+The operator's at-a-glance surfaces: ``status`` (the task board), ``board`` (the
+coordination-LOOP board: awaiting-me / awaiting-others / in-flight / ideas),
+``agents`` (who is on what, folding in presence), ``needs-me`` (directives +
+blocked-on-you addressed to me, with first-seen tracking), and ``resume`` (what to
+pick up after a restart). All read-only: ``status``/``agents``/``needs-me``/
+``resume`` read the compact summaries aggregate (one download, no per-task body
+fetch); ``board`` reads the top-level directive records. They render via the
+shared relative-time formatters and never mutate bus state.
 
 Extracted from cli.py behind stable re-exports; depends only on lower layers
-(remote / views / schema / identity / cache / listener, the io summaries loader, and
-the output / textfmt leaf utils) and never imports cli, so the split has no cycle.
+(remote / views / schema / identity / cache / listener / the pure loops folds, the
+io summaries loader, and the output / textfmt leaf utils) and never imports cli,
+so the split has no cycle.
 """
 
 from __future__ import annotations
@@ -18,6 +21,11 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import remote, views, schema, identity, cache, continuity
+from . import loops as _loops
+# Shared records-sweep + bounded-evidence-probe pair (cmd_board). loop_ops is
+# BELOW this module (it never imports query/cli) — the single home for the
+# load-bearing top-level-shard filter all three loop surfaces need.
+from .loop_ops import load_loop_records, evidence_ids_for
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
@@ -101,6 +109,7 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
         presence_unavailable = False
         loops_overdue = 0
         loops_awaiting_me = 0
+        loops_out_of_band = 0
         current_agent = identity.resolve_agent(getattr(args, "agent", None))
         for _, rec in remote.list_json(remote.health_prefix(), backend=backend):
             if isinstance(rec, dict):
@@ -120,8 +129,16 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
                 if isinstance(lh, dict):
                     loops_overdue = max(loops_overdue, int(lh.get("overdue") or 0))
                     if rec.get("agent") == current_agent:
+                        # Identity-specific counts (the a6d79f95 fix): both
+                        # awaiting_me AND out_of_band are THIS agent's own
+                        # ledger — awaiting_me lists loops the reader owes,
+                        # out_of_band flags the reader's own open asks whose
+                        # answer landed off the bus. Another agent's counts
+                        # must never render as "you".
                         loops_awaiting_me = max(
                             loops_awaiting_me, int(lh.get("awaiting_me") or 0))
+                        loops_out_of_band = max(
+                            loops_out_of_band, int(lh.get("out_of_band") or 0))
         if worst:
             # A real, confirmed count takes precedence — that's the live dead-inbox
             # signal a maintainer must act on.
@@ -132,14 +149,97 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
             # Stay LOUD about the outage without crying wolf about rotting inboxes.
             print("\n  WARN: presence aggregate unavailable on a recent reconcile "
                   "— directive delivery could not be checked.")
-        if loops_overdue or loops_awaiting_me:
+        if loops_overdue or loops_awaiting_me or loops_out_of_band:
             # Open-loop debt: loops past their SLA with no answer, and open
             # loops directed at the reader. Same one-line, nonzero-only style
-            # as the undelivered warning above.
-            print(f"\n  WARN: {loops_overdue} coordination loop(s) overdue "
-                  f"· {loops_awaiting_me} awaiting you")
+            # as the undelivered warning above. The out-of-band suffix appears
+            # ONLY when nonzero: the reader's own open asks whose answer was
+            # mirrored from the forge — go close them explicitly (respond),
+            # citing the evidence; the mirror never closes anything.
+            line = (f"\n  WARN: {loops_overdue} coordination loop(s) overdue "
+                    f"· {loops_awaiting_me} awaiting you")
+            if loops_out_of_band:
+                line += f" · {loops_out_of_band} out-of-band"
+            print(line)
     except Exception:
         pass
+
+    print()
+    return 0
+
+
+def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Render the coordination-loop board for one agent (spec step 7).
+
+    The OPERATOR view of the same pure ``loops.loop_board`` fold reconcile's
+    health record uses — four sections: loops awaiting me, my unanswered asks
+    (with ⚠ overdue / ◈ out-of-band trailing flags), open non-idea loops by
+    kind, and the ideas pipeline by state. ``--format json`` prints the raw
+    board dict. Read-only and rc 0 always — this is a glance surface, and a
+    half-readable bus must still render whatever it can, never a stack trace.
+
+    Records load + evidence probes live in ``loop_ops.load_loop_records`` /
+    ``loop_ops.evidence_ids_for`` (the single home for the load-bearing
+    top-level-shard filter and the bounded-probe discipline; loop_ops is
+    below this module, which must never import cli)."""
+    me = identity.resolve_agent(getattr(args, "agent", None))
+    out_format = getattr(args, "format", "table")
+    now = datetime.now(timezone.utc)
+
+    try:
+        records = load_loop_records(backend=backend)
+    except Exception:
+        records = []   # glance surface: a half-readable bus still renders
+
+    evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
+
+    board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
+
+    if out_format == "json":
+        _print_json(board)
+        return 0
+
+    aw_me = board["awaiting_me"]
+    aw_others = board["awaiting_others"]
+    in_flight = board["in_flight_by_kind"]
+    ideas = board["ideas_pipeline"]
+
+    if not (aw_me or aw_others or in_flight or ideas):
+        _info("(no open coordination loops)")
+        return 0
+
+    def _loop_line(s: dict) -> str:
+        return (f"    {s.get('id','')}  [{s.get('kind','?')}]  "
+                f"{(s.get('title') or '')[:50]}")
+
+    print(f"\n{'='*60}")
+    print(f"  Coordination board — {me}")
+    print(f"{'='*60}")
+
+    print(f"\n  Awaiting me ({len(aw_me)})")
+    for s in aw_me:
+        print(_loop_line(s))
+
+    print(f"\n  Awaiting others ({len(aw_others)})")
+    for s in aw_others:
+        # Orthogonal trailing flags: ⚠ = past the kind/record SLA with no
+        # answer; ◈ = a mirrored answer exists OFF the bus (close it
+        # explicitly via respond/review-done, citing the evidence — the
+        # mirror never closes anything).
+        flags = ""
+        if s.get("overdue"):
+            flags += " ⚠ overdue"
+        if s.get("out_of_band"):
+            flags += " ◈ out-of-band"
+        print(_loop_line(s) + flags)
+
+    print("\n  In flight by kind")
+    for kind in sorted(in_flight):
+        print(f"    {kind}: {in_flight[kind]}")
+
+    print("\n  Ideas pipeline")
+    for state in sorted(ideas):
+        print(f"    {state}: {ideas[state]}")
 
     print()
     return 0

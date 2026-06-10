@@ -170,6 +170,34 @@ class TestDetectionFolds:
         assert by_id[bad_sla["id"]]["overdue"] is False
         assert by_id[naive_time["id"]]["overdue"] is False
 
+    def test_awaiting_others_marks_out_of_band(self):
+        # Phase 2: evidence_ids is the set of loop ids whose evidence sub-log
+        # is nonempty (the caller does the I/O — this fold stays pure). A loop
+        # with mirrored evidence gets out_of_band True; the rest False. The
+        # flag is the REQUESTER's signal: "an answer exists off the bus — go
+        # close your loop, citing it."
+        seen = _loop("review", **{"from": "me:h:r"})
+        unseen = _loop("review", **{"from": "me:h:r"})
+        out = loops.awaiting_others("me:h:r", [seen, unseen], now=NOW,
+                                    evidence_ids={seen["id"]})
+        by_id = {x["id"]: x for x in out}
+        assert by_id[seen["id"]]["out_of_band"] is True
+        assert by_id[unseen["id"]]["out_of_band"] is False
+
+    def test_out_of_band_defaults_false_without_evidence_ids(self):
+        # Back-compat: existing callers pass no evidence_ids and every summary
+        # reads out_of_band False — the key is always present, never missing.
+        d = _loop("review", **{"from": "me:h:r"})
+        out = loops.awaiting_others("me:h:r", [d], now=NOW)
+        assert out[0]["out_of_band"] is False
+
+    def test_loop_board_threads_evidence_ids(self):
+        flagged = _aged(_loop("review", **{"from": "me:h:r"}), hours=48)
+        board = loops.loop_board("me:h:r", [flagged], now=NOW,
+                                 evidence_ids={flagged["id"]})
+        assert board["awaiting_others"][0]["out_of_band"] is True
+        assert board["awaiting_others"][0]["overdue"] is True  # orthogonal flags
+
     def test_board_shape(self):
         items = [
             _loop("review", audience="me:h:r"),

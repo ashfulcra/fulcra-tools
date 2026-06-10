@@ -8,9 +8,9 @@ views.assess_infra_health and the summaries aggregate; they read + annotate, nev
 mutating task state.
 
 Extracted from cli.py behind stable re-exports; depends only on lower layers
-(remote / views / identity / digest_schedule / annotations + the io summaries loader
-and the output / timeutil leaf utils) and never imports cli, so the split has no
-cycle. _build_health_record (the reconcile-side health WRITE) and the inbox-coupled
+(remote / views / identity / digest_schedule / annotations / the pure loops folds +
+the io summaries loader and the output / timeutil leaf utils) and never imports
+cli, so the split has no cycle. _build_health_record (the reconcile-side health WRITE) and the inbox-coupled
 notify path deliberately stay in cli; cmd_doctor reaches _assess_fleet here via the
 re-export.
 """
@@ -22,6 +22,11 @@ from typing import Any, Optional
 
 from . import remote, views, identity, digest_schedule, remote_root
 from . import annotations as lifecycle_annotations
+from . import loops as _loops
+# Shared records-sweep + bounded-evidence-probe pair (_loop_board_summary).
+# loop_ops is BELOW this module (it never imports digest/cli) — the single
+# home for the load-bearing top-level-shard filter all three loop surfaces need.
+from .loop_ops import load_loop_records, evidence_ids_for
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
 from .timeutil import iso_z as _iso_z
@@ -107,6 +112,35 @@ def cmd_health(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+def _loop_board_summary(*, now: datetime,
+                        backend: Optional[list[str]] = None) -> dict:
+    """Coordination-loop counts for the digest's one-line section — the SAME
+    pure ``loops.loop_board`` fold the health record uses, over the digest's
+    own agent identity (the reader the "awaiting-you" count belongs to).
+
+    Records load + bounded evidence probes live in
+    ``loop_ops.load_loop_records`` / ``loop_ops.evidence_ids_for`` (the single
+    home for the load-bearing top-level-shard filter; loop_ops is below this
+    module, which never imports cli — the split invariant).
+
+    May raise on a broken records read (load_loop_records is deliberately not
+    best-effort) — the CALLER (cmd_digest) wraps the whole call so any failure
+    simply omits the section, leaving the digest unchanged (the infra-line
+    discipline)."""
+    records = load_loop_records(backend=backend)
+    me = identity.resolve_agent()
+    evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
+    board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
+    aw_me = board["awaiting_me"]
+    aw_others = board["awaiting_others"]
+    return {
+        "open_loops": len(aw_me) + len(aw_others),
+        "overdue": sum(1 for x in aw_others if x.get("overdue")),
+        "awaiting_me": len(aw_me),
+        "out_of_band": sum(1 for x in aw_others if x.get("out_of_band")),
+    }
+
+
 def _digest_lines(items: list[dict[str, Any]], fmt) -> list[str]:
     """Render up to _DIGEST_BLOCK_CAP items via ``fmt`` (item -> str), appending a
     '+N more' tail when the list is longer. Bounds every block identically."""
@@ -176,6 +210,22 @@ def _render_digest(digest: dict[str, Any], *, window: str) -> tuple[str, str]:
         sections.append("")
         sections.append("Stale (no update past threshold) (" + str(len(stale)) + "):")
         sections.extend(_digest_lines(stale, _s))
+
+    # Coordination-loops line (phase 2): one compact line from the pre-computed
+    # loop_board counts (cmd_digest does the fold, best-effort — this renderer
+    # stays pure). Skipped when the fold failed (key None/absent) AND when
+    # every count is zero — a clean bus adds no section, the same
+    # empty-blocks-are-skipped rule the task blocks above follow. Note
+    # open_loops = awaiting_me + awaiting_others, so a zero open_loops means
+    # nothing is overdue/out-of-band/awaiting either.
+    loop_counts = digest.get("loops")
+    if loop_counts and loop_counts.get("open_loops"):
+        sections.append("")
+        sections.append(
+            f"Coordination loops: {loop_counts.get('open_loops', 0)} open "
+            f"· {loop_counts.get('overdue', 0)} overdue "
+            f"· {loop_counts.get('out_of_band', 0)} out-of-band "
+            f"· awaiting-you: {loop_counts.get('awaiting_me', 0)}")
 
     # Infra line (v1 PUSH surface): one compact line from a pre-computed
     # assess_infra_health dict. The digest scheduler runs independently of
@@ -300,6 +350,17 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
 
     digest = views.build_operator_digest(
         summaries, presence, human=human, now=now, since=since, infra=infra)
+
+    # Coordination-loops counts (phase 2): the same fold the health record
+    # uses, over THIS digest's agent identity. FULLY best-effort, mirroring
+    # the infra line above — any failure leaves digest["loops"] None and the
+    # rendered digest unchanged (a scheduled tick must never crash on an
+    # optional section). Stamped onto the built digest (not threaded through
+    # the pure builder) so views.build_operator_digest's surface is untouched.
+    try:
+        digest["loops"] = _loop_board_summary(now=now, backend=backend)
+    except Exception:
+        digest["loops"] = None
 
     if out_format == "json":
         _print_json(digest)

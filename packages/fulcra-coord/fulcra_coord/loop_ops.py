@@ -1,10 +1,15 @@
-"""Loop return-leg I/O: response sub-log + the `respond` command.
+"""Loop return-leg I/O: response + evidence sub-logs + the `respond` command.
 
 The CLOSED-LOOP GUARANTEE's write half (spec 2026-06-09): an outcome exists
 ONLY as a bus response event under ``directives/<id>/responses/`` — one shard
 per response (append-only, concurrent responders never clobber; same pattern
 as directives.append_directive_route). The LWW snapshot's `outcome`/`state` is
 a best-effort CACHE of the sub-log fold, never the truth.
+
+Phase 2 adds the EVIDENCE sub-log (``directives/<id>/evidence/``): forge-
+mirrored signals, force-stamped ``source=forge-mirror``, consumed only by
+detection (out-of-band flags) — never by ``fold_loop`` (see the invariant
+block there): mirrored evidence can never close a loop.
 
 Layering: imports schema/remote/log/loops — never cli/views/lifecycle/inbox
 (fitness-pinned like directives.py).
@@ -69,6 +74,115 @@ def read_loop_responses(
     return [rec for _at, _eid, rec in events]
 
 
+def append_loop_evidence(
+    directive_id: str, evidence: dict[str, Any], *,
+    backend: Optional[list[str]] = None,
+) -> bool:
+    """Append ONE mirrored-evidence event to a loop's evidence sub-log
+    (append-only shard, ``directives/<id>/evidence/``).
+
+    Same shard discipline as ``append_loop_response``: stamps ``at`` and an
+    ``event_id`` if absent; each event lands as its OWN file so concurrent
+    mirror sweeps never overwrite one another; best-effort — True on a
+    confirmed upload, False on any failure (never raises).
+
+    THE one deliberate difference: ``source`` is FORCE-set to ``forge-mirror``
+    unconditionally — callers cannot forge first-party-ness. Every event in
+    this sub-log is, by construction, a mirrored off-bus signal; nothing that
+    reads it can ever mistake mirrored evidence for a bus-native response."""
+    try:
+        event = dict(evidence)
+        event["source"] = "forge-mirror"   # forced — see docstring
+        event.setdefault("at", _now_z())
+        event_id = event.get("event_id") or uuid.uuid4().hex
+        event["event_id"] = str(event_id)
+        return bool(remote.upload_json(
+            event, remote.directive_evidence_path(directive_id, event["event_id"]),
+            backend=backend))
+    except Exception:
+        return False
+
+
+def read_loop_evidence(
+    directive_id: str, *, backend: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Every evidence shard for a loop, sorted by (at, event id) — the same
+    machine-agnostic stable order as read_loop_responses. Best-effort: [].
+    Consumed by DETECTION only (out-of-band flags) — never by the closure
+    fold (see the invariant block on fold_loop)."""
+    try:
+        records = remote.list_json(remote.directive_evidence_prefix(directive_id),
+                                   backend=backend)
+    except Exception:
+        return []
+    events: list[tuple[str, str, dict[str, Any]]] = []
+    for path, rec in records:
+        if isinstance(rec, dict):
+            events.append((rec.get("at", "") or "", Path(path).stem, rec))
+    events.sort(key=lambda t: (t[0], t[1]))
+    return [rec for _at, _eid, rec in events]
+
+
+def load_loop_records(
+    *, backend: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Every TOP-LEVEL loop record on the bus — one ``list_json`` sweep of the
+    directives prefix with the top-level-only filter applied.
+
+    THE TOP-LEVEL-ONLY FILTER (load-bearing — the single home for this rule,
+    consumed by the loop health check, the board, and the digest section):
+    ``remote.directives_prefix()`` holds SUB-LOG SUBTREES (``<id>/acks/``,
+    ``<id>/routing/``, ``<id>/responses/``, ``<id>/evidence/``) beside the
+    top-level ``directives/<id>.json`` loop records. Only a path that, after
+    stripping the prefix, has NO further ``/`` and ends in ``.json`` is a loop
+    record — a shard counted as a record would inflate every count.
+
+    Deliberately NOT best-effort: a broken prefix read RAISES so each surface
+    keeps its own error discipline (health/board swallow to ``[]`` at the call
+    site; the digest lets its caller omit the whole section)."""
+    prefix = remote.directives_prefix()
+    listed = remote.list_json(prefix, backend=backend)
+    records: list[dict[str, Any]] = []
+    for path, rec in listed:
+        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        if "/" in rel:
+            continue  # ack/routing/response/evidence shard — never a loop record
+        if not rel.endswith(".json"):
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def evidence_ids_for(
+    me: str, records: list[dict[str, Any]], *, now: datetime,
+    backend: Optional[list[str]] = None,
+) -> set[str]:
+    """The subset of MY awaiting_others loop ids whose evidence sub-log is
+    nonempty — the detection input that flags a loop ◈ out-of-band (a forge-
+    mirrored answer exists OFF the bus; mirrored evidence never closes
+    anything — fold_loop's invariant).
+
+    Probes are BOUNDED: awaiting_others is folded first WITHOUT evidence to
+    get the candidate ids (my own open asks — a small set), then each
+    candidate's evidence prefix is listed. Never one list per directive on
+    the bus. Each probe is individually best-effort (a failed list reads as
+    "no evidence", never an error)."""
+    evidence_ids: set[str] = set()
+    for s in loops.awaiting_others(me, records, now=now):
+        lid = s.get("id")
+        if not lid:
+            continue
+        try:
+            if remote.list_json(remote.directive_evidence_prefix(lid),
+                                backend=backend):
+                evidence_ids.add(lid)
+        except Exception:
+            continue   # best-effort: an unreadable prefix is "no evidence"
+    return evidence_ids
+
+
 def _walk_to_terminal(kind: str, state: str) -> str:
     """Nearest terminal state reachable from ``state`` via legal transitions.
 
@@ -100,6 +214,15 @@ def _walk_to_terminal(kind: str, state: str) -> str:
     return state
 
 
+# CRITICAL INVARIANT (phase 2): fold_loop reads ONLY the responses sub-log,
+# NEVER the evidence sub-log. Mirrored evidence (source=forge-mirror, written
+# by append_loop_evidence) is detection input — it flags a loop out-of-band on
+# the board, and NOTHING more. If this fold ever consumed the evidence prefix,
+# a forge comment could silently close a loop, resurrecting the exact
+# out-of-band-verdict bug the loop substrate exists to kill. Closure is
+# bus-response-only: the requester closes a flagged loop EXPLICITLY (respond),
+# citing the evidence. Pinned by
+# tests/test_loop_conformance.py::test_mirrored_evidence_never_closes_a_loop.
 def fold_loop(
     record: dict[str, Any], *, backend: Optional[list[str]] = None
 ) -> dict[str, Any]:
