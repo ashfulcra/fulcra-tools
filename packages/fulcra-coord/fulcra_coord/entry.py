@@ -340,6 +340,21 @@ def build_parser() -> argparse.ArgumentParser:
                          "path handoff/park publish). Omit to show current.")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- park ----
+    sp = sub.add_parser("park",
+                        help="Best-effort session-exit checkpoint of every "
+                             "role this session holds: writes a continuity "
+                             "checkpoint per held role (needs the optional "
+                             "fulcra-continuity CLI), publishes it to the "
+                             "bus, and points the role's checkpoint_ref at "
+                             "it. Silent no-op without continuity or held "
+                             "roles; NEVER exits nonzero (hook-safe).")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Whose held roles to park (default: "
+                         "$FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--summary", "-s", default="", metavar="TEXT",
+                    help="Optional objective line for the checkpoint(s)")
+
     # ---- done ----
     sp = sub.add_parser("done", help="Mark a task as done (requires evidence)")
     sp.add_argument("task_id", metavar="TASK-ID")
@@ -749,6 +764,7 @@ COMMAND_MAP = {
     "pause": _cli.cmd_pause,
     "snapshot": _cli.cmd_snapshot,
     "checkpoint": _cli.cmd_checkpoint,
+    "park": _cli.cmd_park,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
     "request-review": _cli.cmd_request_review,
