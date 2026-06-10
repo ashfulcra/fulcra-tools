@@ -39,8 +39,6 @@ class Outbox:
                                       method="POST")
             except (OSError, ConnectionError, TimeoutError):
                 continue                     # keep spooled; retry next flush
-            p.unlink()
-            flushed += 1
             # Back-fill the signals-cache shard so a subsequent compile sees
             # this signal. Mirrors cli._append_signal_cache naming exactly:
             # the full source[0] id is the filename stem. Skip consent records
@@ -52,6 +50,8 @@ class Outbox:
             except (ValueError, KeyError):
                 continue
             if payload.get("kind") == "consent":
+                p.unlink()
+                flushed += 1
                 continue
             shard_env = {
                 "id": None,
@@ -59,5 +59,10 @@ class Outbox:
                 "sources": sources,
                 "data": record["data"],
             }
-            store.write_json(f"{SIGNALS_CACHE_PREFIX}/{temp_id}.json", shard_env)
+            try:
+                store.write_json(f"{SIGNALS_CACHE_PREFIX}/{temp_id}.json", shard_env)
+            except (OSError, ConnectionError, TimeoutError):
+                continue                 # keep spooled; retry back-fill later
+            p.unlink()
+            flushed += 1
         return flushed

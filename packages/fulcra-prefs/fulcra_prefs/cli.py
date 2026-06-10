@@ -114,12 +114,14 @@ def cmd_capture(args, api, outbox_dir, now) -> int:
         kind=args.kind, scope=args.scope, confidence=args.confidence,
         half_life_days=args.half_life, platform=args.platform,
         agent=args.agent, session=args.session, supersedes=args.supersedes)
+    outbox = Outbox(outbox_dir)
     try:
         _append_signal_cache(store, sig)
-    except Exception as e:
+    except (OSError, ConnectionError, TimeoutError) as e:
         # Cache-write failure must never abort a successful capture. The signal
-        # is already posted (or spooled) — losing the shard only means compile
-        # won't see it until the next flush+compile cycle. Warn, don't crash.
+        # is already posted (or spooled), but v1 compile reads cache shards, so
+        # also spool the record for a later flush/back-fill.
+        outbox.spool(build_record(sig, meta["data_type"]))
         print(f"fulcra-prefs: warning: could not write signal cache shard: {e}",
               file=sys.stderr)
     print(f"captured {sig.id}", file=sys.stderr)

@@ -27,7 +27,11 @@ VERIFIED against fulcra_api/core.py (v0.1.30, file-commands branch):
 """
 import io
 import json
+import sys
+from pathlib import Path
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 class FakeResponse:
@@ -43,6 +47,7 @@ class FakeFulcraAPI:
         self.files: dict[str, bytes] = {}      # path -> content (normalized to absolute)
         self.ingested: list[dict] = []         # posted record bodies
         self.fail_ingest = False
+        self.fail_upload = False
 
     @staticmethod
     def _abs(path: str) -> str:
@@ -66,6 +71,8 @@ class FakeFulcraAPI:
         return FakeResponse(self.files[path])
 
     def upload_file(self, data: io.BufferedReader, file_type, file_size, filepath):
+        if self.fail_upload:
+            raise OSError("simulated file upload outage")
         filepath = self._abs(filepath)
         self.files[filepath] = data.read()
         return {"url": "fake://uploaded", "id": f"v-{filepath}"}
