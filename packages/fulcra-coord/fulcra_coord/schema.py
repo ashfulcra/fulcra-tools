@@ -634,6 +634,155 @@ def validate_directive(d: dict) -> list[str]:
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Role registry record (roles-as-durable-identity, spec 2026-06-10)
+# ---------------------------------------------------------------------------
+
+ROLE_SCHEMA = "fulcra.coordination.role.v1"
+ROLE_LEASE_SCHEMA = "fulcra.coordination.role_lease.v1"
+
+# Holder policies. WHY only two:
+#   shared    — fan-out: every fresh lease-holder is a holder (the #128
+#               @role-audience default; reviews, triage, anything pooled).
+#   exclusive — one active holder; a claim while another FRESH lease exists is
+#               CONTESTED (visible, never silently double-held). A stale lease
+#               is claimable immediately — sessions die, roles must not.
+_ROLE_POLICIES = {"shared", "exclusive"}
+
+_ROLE_KEYS = {
+    "schema", "name", "description", "standing_instructions", "policy",
+    "sla_hours", "maintainer", "checkpoint_ref", "holders",
+    "created_at", "updated_at",
+}
+
+
+def make_role(
+    name: str,
+    description: str,
+    *,
+    standing_instructions: str = "",
+    policy: str = "shared",
+    sla_hours: Optional[int] = None,
+    maintainer: Optional[str] = None,
+    checkpoint_ref: Optional[str] = None,
+    dt: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Build a role registry record (``roles/<name>.json``). Mirrors
+    make_directive in style: validate enums up front, stamp bus timestamps,
+    return a plain dict.
+
+    THE INVERSION (spec 2026-06-10): the ROLE is the durable identity; a
+    session is an ephemeral lease on it. ``standing_instructions`` is the job
+    description — runbooks, conventions, where the role's state lives — so ANY
+    fresh session that claims the role knows what to do. ``maintainer`` is the
+    escalation edge: who gets the directive when the role sits vacant past
+    ``sla_hours``. ``checkpoint_ref`` is RESERVED for continuity phase 2
+    (claim → resume) so that phase lands additively; nothing reads it yet.
+
+    GENERALIZATION RULE (non-negotiable): core ships the MECHANISM only —
+    role names are adopter data written through this constructor at runtime,
+    never constants in source (pinned by tests/test_roles.py).
+
+    ``holders`` is a PROJECTION (current lease-holders), never authoritative:
+    the per-agent lease sub-log + presence freshness is the truth; this field
+    exists so a bare registry read is self-describing. Starts empty."""
+    if not name or not str(name).strip():
+        raise ValueError("name must be a non-empty string.")
+    if policy not in _ROLE_POLICIES:
+        raise ValueError(
+            f"Invalid policy {policy!r}. Valid: {sorted(_ROLE_POLICIES)}")
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    now_iso = dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return {
+        "schema": ROLE_SCHEMA,
+        "name": str(name).strip(),
+        "description": description or "",
+        "standing_instructions": standing_instructions or "",
+        "policy": policy,
+        "sla_hours": sla_hours,
+        "maintainer": maintainer,
+        "checkpoint_ref": checkpoint_ref,
+        "holders": [],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+
+def validate_role(r: dict) -> list[str]:
+    """Return a list of human-readable validation problems (empty = valid).
+
+    Mirrors validate_directive exactly in style: collect ALL problems (missing
+    + unexpected keys, empty required strings, enum/type violations, timestamp
+    format) rather than raising at the first — the CLI can then show an
+    operator everything wrong with a registry record in one pass.
+
+    ``description``/``standing_instructions`` may legitimately be EMPTY
+    strings (a claim on an unregistered role self-registers a minimal record);
+    only their TYPE is checked."""
+    errors: list[str] = []
+
+    missing = sorted(_ROLE_KEYS - set(r.keys()))
+    extra = sorted(set(r.keys()) - _ROLE_KEYS)
+    for field in missing:
+        errors.append(f"Missing required field: {field!r}")
+    for field in extra:
+        errors.append(f"Unexpected field: {field!r}")
+
+    for field in ("name", "policy", "schema", "created_at", "updated_at"):
+        if field not in r:
+            continue
+        val = r[field]
+        if not val or (isinstance(val, str) and val.strip() == ""):
+            errors.append(f"Required field {field!r} must be non-empty.")
+
+    schema = r.get("schema", "")
+    if schema and schema != ROLE_SCHEMA:
+        errors.append(f"Wrong schema {schema!r}; expected {ROLE_SCHEMA!r}.")
+
+    policy = r.get("policy", "")
+    if policy and policy not in _ROLE_POLICIES:
+        errors.append(
+            f"Unknown policy {policy!r}. Valid: {sorted(_ROLE_POLICIES)}")
+
+    if (
+        "sla_hours" in r
+        and r.get("sla_hours") is not None
+        and not isinstance(r.get("sla_hours"), (int, float))
+    ):
+        errors.append("Field 'sla_hours' must be a number or None.")
+    for field in ("description", "standing_instructions"):
+        if field in r and not isinstance(r.get(field), str):
+            errors.append(f"Field {field!r} must be a string.")
+    for field in ("maintainer", "checkpoint_ref"):
+        if (
+            field in r
+            and r.get(field) is not None
+            and not isinstance(r.get(field), str)
+        ):
+            errors.append(f"Field {field!r} must be a string or None.")
+    if "holders" in r and not isinstance(r.get("holders"), list):
+        errors.append("Field 'holders' must be a list.")
+
+    # Same bus-timestamp convention check as validate_directive.
+    for field in ("created_at", "updated_at"):
+        val = r.get(field)
+        if isinstance(val, str) and val.strip():
+            ok = val.endswith("Z")
+            if ok:
+                try:
+                    datetime.fromisoformat(val.replace("Z", "+00:00"))
+                except ValueError:
+                    ok = False
+            if not ok:
+                errors.append(
+                    f"Field {field!r} must be an ISO-8601 UTC timestamp "
+                    f"ending in 'Z' (got {val!r})."
+                )
+
+    return errors
+
+
 def build_tags(
     *,
     status: str,

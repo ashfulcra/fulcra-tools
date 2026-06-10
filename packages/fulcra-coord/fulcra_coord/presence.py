@@ -22,6 +22,7 @@ import os
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity
+from . import role_ops as _role_ops
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
 from .textfmt import age_str as _age_str
@@ -229,6 +230,19 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
                                   capabilities=roles or None,
                                   session=os.environ.get("FULCRA_COORD_SESSION") or None)
     _write_presence(record, backend=backend)
+
+    # Roles-as-durable-identity (spec 2026-06-10): each declared role is ALSO
+    # a lease CLAIM on that role — additive on top of the capabilities field
+    # (which routing keeps reading unchanged). The lease shard is what makes
+    # the role read HELD on the board/health; its freshness then rides this
+    # very presence record's heartbeat, so no extra keep-alive is ever needed.
+    # Per-claim best-effort: a lease failure (or even a raising role_ops) must
+    # never fail the session boot, mirroring _write_presence's contract.
+    for role_name in record["capabilities"]:
+        try:
+            _role_ops.claim_role(role_name, me, backend=backend)
+        except Exception:
+            pass
 
     # Self-healing listener re-arm (spec 2026-06-09): connect runs on every
     # session start, so this is the idempotent "heal a dead listener" hook.
