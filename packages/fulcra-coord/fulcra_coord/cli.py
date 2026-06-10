@@ -72,7 +72,7 @@ from .writepipe import (
 # cmd_reconcile's _sweep_review_routes call, the request-review dispatch, and the
 # test patch targets keep resolving. routing_ops.py never imports cli.
 from .routing_ops import (
-    _canonical_reviewer, _review_pool, _append_route_event_and_assignee,
+    _review_pool, _append_route_event_and_assignee,
     _force_block_for_human, _escalate_review_to_human, cmd_request_review,
     cmd_review_done, _resolve_review_author,
     _reroute_minutes, _reroute_max, _accepted_stall_hours,

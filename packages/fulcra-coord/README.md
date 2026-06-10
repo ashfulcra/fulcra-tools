@@ -142,6 +142,43 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_OPENCLAW_HOOKS_ROOT` | `~/.openclaw/hooks` | OpenClaw automation-hooks dir for `install-openclaw` |
 | `FULCRA_OPENCLAW_PLUGIN_DIR` | `~/.openclaw/plugins/fulcra-coord` | Target dir for the materialized Track B plugin sources (`install-openclaw --with-plugin`); overridable via `--plugin-dir` |
 
+## Roles & review-routing
+
+**Declaring what an agent can do.** An agent advertises its capabilities at
+connect time: `fulcra-coord connect --role <role>` records `<role>` (repeatable)
+in the agent's presence `capabilities`, and roles are arbitrary — `review`,
+`deploy`, `triage`, whatever your fleet uses. `connect --can-review` is sugar for
+`--role review`. Capabilities are part of the same presence record the bus
+already keeps, so they carry liveness with them.
+
+**How review requests are routed.** `fulcra-coord request-review <artifact>
+[--repo <repo>]` builds a preference-ordered candidate pool — the configured
+reviewer **seed** (optional, see below) followed by every live/idle agent that
+declared the `review` capability — and assigns the directive to the first agent
+that is currently live or idle. If no candidate is live, the request escalates to
+the human via `block --on-user`, so a review never silently vanishes. A
+reconcile-time sweep reroutes a never-acted review off a reviewer that has since
+gone dark, and escalates to the human once the reroute cap is hit. `<artifact>`
+is an opaque ref — a PR#, MR#, branch, commit SHA, URL, or patch id — so routing
+is forge-agnostic; `--repo` is optional.
+
+**Configuring a preferred-reviewer seed (optional).** The pool is purely
+capability-driven by default — you do **not** need any config to use review
+routing. To bias routing toward specific reviewers, drop a
+`review-routing.json` at `${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/` with a
+top-level `seed` (and optional `author_overrides` keyed by an author-id prefix);
+see [`review-routing.example.json`](review-routing.example.json) for the shape.
+The env var `FULCRA_COORD_REVIEW_SEED` (comma-separated agent ids) overrides the
+file's top-level seed for a single session. The seed is a preference/tie-break
+only — a live `review`-capable agent still gets the work, and an empty seed
+degrades to pure capability routing. Put **your** fleet's reviewer ids in this
+config; never hard-code them in source.
+
+> Coming soon: role-addressing — directives addressed to `@<role>` audiences,
+> resolved to the live holders of that role at delivery time (multi-holder
+> fan-out). It lands in a separate in-review PR; review-routing above does not
+> depend on it.
+
 ## Remote layout
 
 ```

@@ -10035,41 +10035,40 @@ class TestRoutingEvents(unittest.TestCase):
 
 
 class TestReviewPool(unittest.TestCase):
-    def test_canonical_reviewer_for_arc_author(self):
-        from fulcra_coord import cli
-        self.assertEqual(cli._canonical_reviewer("claude-code:ArcBot:something"),
-                         "claude-code:ArcBot:Arc-Code-Review")
+    def test_pool_seeds_from_config_even_when_undeclared(self):
+        from fulcra_coord import cli, routing_ops as ro
+        with patch.object(ro, "_review_seeds", lambda a: ["seed:h:r"]):
+            presence = [{"agent": "x:y:z", "capabilities": ["review"]}]
+            pool = cli._review_pool(author="who:h:r", presence=presence)
+            self.assertEqual(pool[0], "seed:h:r")
+            self.assertIn("x:y:z", pool)
 
-    def test_canonical_reviewer_for_everyone_else(self):
-        from fulcra_coord import cli
-        self.assertEqual(cli._canonical_reviewer("codex:Mac.localdomain:main"),
-                         "codex:Mac.localdomain:main")
-        self.assertEqual(cli._canonical_reviewer("openclaw:discord:devops"),
-                         "codex:Mac.localdomain:main")
-
-    def test_pool_seeds_canonical_even_when_undeclared(self):
-        from fulcra_coord import cli
-        presence = [{"agent": "x:y:z", "last_seen": "...", "capabilities": ["review"]}]
-        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
-        self.assertEqual(pool[0], "codex:Mac.localdomain:main")  # canonical first
-        self.assertIn("x:y:z", pool)
+    def test_pool_empty_seed_is_capability_only(self):
+        from fulcra_coord import cli, routing_ops as ro
+        with patch.object(ro, "_review_seeds", lambda a: []):
+            presence = [{"agent": "rev:h:r", "capabilities": ["review"]},
+                        {"agent": "no:h:r", "capabilities": []}]
+            pool = cli._review_pool(author="who:h:r", presence=presence)
+            self.assertEqual(pool, ["rev:h:r"])
 
     def test_pool_excludes_non_review_capable_and_devops(self):
-        from fulcra_coord import cli
-        presence = [
-            {"agent": "openclaw:discord:devops", "last_seen": "...", "capabilities": []},
-            {"agent": "rev:h:r", "last_seen": "...", "capabilities": ["review"]},
-        ]
-        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
-        self.assertNotIn("openclaw:discord:devops", pool)
-        self.assertIn("rev:h:r", pool)
+        from fulcra_coord import cli, routing_ops as ro
+        with patch.object(ro, "_review_seeds", lambda a: []):
+            presence = [
+                {"agent": "openclaw:discord:devops", "last_seen": "...", "capabilities": []},
+                {"agent": "rev:h:r", "last_seen": "...", "capabilities": ["review"]},
+            ]
+            pool = cli._review_pool(author="who:h:r", presence=presence)
+            self.assertNotIn("openclaw:discord:devops", pool)
+            self.assertIn("rev:h:r", pool)
 
-    def test_pool_no_duplicate_when_canonical_also_declares(self):
-        from fulcra_coord import cli
-        presence = [{"agent": "codex:Mac.localdomain:main", "last_seen": "...",
-                     "capabilities": ["review"]}]
-        pool = cli._review_pool(author="codex:Mac.localdomain:main", presence=presence)
-        self.assertEqual(pool.count("codex:Mac.localdomain:main"), 1)
+    def test_pool_no_duplicate_when_seed_also_declares(self):
+        from fulcra_coord import cli, routing_ops as ro
+        with patch.object(ro, "_review_seeds", lambda a: ["dup:h:r"]):
+            presence = [{"agent": "dup:h:r", "last_seen": "...",
+                         "capabilities": ["review"]}]
+            pool = cli._review_pool(author="who:h:r", presence=presence)
+            self.assertEqual(pool.count("dup:h:r"), 1)
 
 
 # ---------------------------------------------------------------------------
