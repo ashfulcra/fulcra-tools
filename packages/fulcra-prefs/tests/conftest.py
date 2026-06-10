@@ -1,12 +1,14 @@
 """FakeFulcraAPI mirrors the exact fulcra_api.core.FulcraAPI methods the
 store uses: list_files / resolve_filepath / download_file / upload_file /
 fulcra_api (generic request). Keep method signatures in lockstep with the
-real library (fulcra-api>=0.1.33).
+real library (fulcra-api git file-commands branch, v0.1.30).
 
-VERIFIED against /tmp/fulcra-api-python/fulcra_api/core.py (v0.1.30):
+VERIFIED against fulcra_api/core.py (v0.1.30, file-commands branch):
 
-- resolve_filepath(filepath, all_versions=False): raises Exception when the
-  file is not found (does NOT return []). store.py wraps it in try/except.
+- resolve_filepath(filepath): returns ONE dict (the file record) when found.
+  Raises Exception("File not found in Fulcra Library: <filepath>") when the
+  file is absent. Does NOT return a list — callers do match["id"], not
+  matches[0]["id"].
 
 - list_files(path="/"): returns a dict {"files": [...], ...},
   NOT a plain list. store.py extracts result["files"].
@@ -17,7 +19,7 @@ VERIFIED against /tmp/fulcra-api-python/fulcra_api/core.py (v0.1.30):
 - upload_file(data, file_type, file_size, filepath): signature matches.
 
 - fulcra_api(url_path, method="GET", query=None, data=None,
-             return_http_response=False): real positional order is
+             return_raw_response=False): real positional order is
   (url_path, method, query, data, ...) — plan fake had query/data before method.
   Corrected here. store.py calls with keyword args so no runtime breakage either
   way, but the fake should faithfully mirror the real lib for documentation
@@ -45,11 +47,13 @@ class FakeFulcraAPI:
     # --- file library (matches fulcra_api.core.FulcraAPI shapes) ---
 
     def resolve_filepath(self, filepath, all_versions=False):
-        """Returns list of file dicts if found. Raises Exception if not found,
-        mirroring the real library's behaviour (it never returns [])."""
+        """Returns ONE dict (the file record) when found.
+        Raises Exception("File not found in Fulcra Library: <filepath>") when
+        absent — matching the real library's exact error message and shape.
+        Callers do match["id"], NOT matches[0]["id"]."""
         if filepath not in self.files:
-            raise Exception(f"File not found in Fulcra: {filepath}")
-        return [{"id": f"v-{filepath}", "name": filepath.rsplit('/', 1)[-1]}]
+            raise Exception(f"File not found in Fulcra Library: {filepath}")
+        return {"id": f"v-{filepath}", "name": filepath.rsplit('/', 1)[-1]}
 
     def download_file(self, file_id):
         path = file_id[2:]                      # "v-<path>"

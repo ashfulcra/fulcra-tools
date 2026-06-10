@@ -25,7 +25,7 @@ def _active(grant: dict, audience: str, now: datetime) -> bool:
 def filter_for_audience(doc: dict, grants: list[dict], audience: str,
                         now: datetime) -> dict:
     live = [g for g in grants if _active(g, audience, now)]
-    # NOTE: grant 'level' (read|solve) is intentionally not enforced here; the CLI layer differentiates.
+    # NOTE: grant 'level' (read|solve) is recorded but not yet enforced anywhere; enforcement arrives with cross-user sharing post-v1.
     keys = {k: v for k, v in doc.get("keys", {}).items()
             if any(fnmatch(k, g["key_glob"]) for g in live)}  # fnmatch '*' crosses dots: 'dining.*' matches all depths
     return {**doc, "keys": keys}

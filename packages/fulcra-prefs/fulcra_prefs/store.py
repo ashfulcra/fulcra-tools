@@ -3,13 +3,17 @@
 to /ingest/v1/record — the library has no record-write helper yet (see
 FULCRA-PRIMITIVES.md); switch to CLI/lib annotation commands when they land.
 
-Real-library shape notes (fulcra_api.core.FulcraAPI, verified v0.1.30):
+Real-library shape notes (fulcra_api.core.FulcraAPI, verified v0.1.30,
+file-commands branch):
 
-  resolve_filepath(filepath, all_versions=False) -> list[dict]
-    Raises Exception when the file is not found rather than returning [].
-    read_json catches the exception and returns None to signal "missing".
+  resolve_filepath(filepath) -> dict
+    Returns ONE dict (the file record) when found; raises
+    Exception("File not found in Fulcra Library: <filepath>") when absent.
+    Does NOT return a list — read_json does match["id"], not matches[0]["id"].
+    read_json catches the "File not found" exception and returns None to
+    signal "missing"; transport errors (OSError subclasses) propagate.
 
-  list_files(path="/", state="uploaded") -> dict {"files": [...], ...}
+  list_files(path="/") -> dict {"files": [...], ...}
     Returns a wrapper dict, NOT a plain list. list_json extracts ["files"].
 
   download_file(file_id) -> http.client.HTTPResponse
@@ -26,10 +30,32 @@ import io
 import json
 from .schema import Signal, canonical_json, temp_signal_id, CAPTURE_SOURCE_PREFIX
 
+
+def build_record(sig: Signal, data_type: str) -> dict:
+    """Canonical record envelope for ingest/outbox spool.
+
+    Single authoritative place for record shape: ingest_signal, capture's
+    outbox spool, and cmd_get's disclosure spool all call this. Using
+    canonical_json for the data field ensures deterministic byte output
+    (sorted keys, fixed float precision) regardless of call site.
+    """
+    sid = sig.id or temp_signal_id(sig.key, sig.observed_at, sig.platform)
+    return {
+        "data": canonical_json(sig.to_payload()),
+        "metadata": {
+            "content_type": "application/json",
+            "data_type": data_type,
+            "recorded_at": sig.observed_at,
+            "source": [sid, f"{CAPTURE_SOURCE_PREFIX}{sig.platform}"],
+        },
+        "specversion": 1,
+    }
+
 PREFS_ROOT = "prefs"
 META_PATH = f"{PREFS_ROOT}/meta.json"
 COMPILED_PATH = f"{PREFS_ROOT}/compiled.json"
 CONSENT_PATH = f"{PREFS_ROOT}/consent.json"
+SIGNALS_CACHE_PREFIX = f"{PREFS_ROOT}/signals-cache"
 
 
 def platform_path(platform: str) -> str:
@@ -43,19 +69,19 @@ class FulcraStore:
     def read_json(self, path: str):
         """Return the parsed JSON at path, or None if the file does not exist.
 
-        The real fulcra_api.resolve_filepath raises Exception rather than
-        returning [] when a file is absent, so we catch that to give callers
-        a clean None-means-missing interface.
+        resolve_filepath(path) returns ONE dict when found, and raises
+        Exception("File not found in Fulcra Library: ...") when absent.
+        We catch only that specific message so transport failures (OSError
+        subclasses) still propagate — callers must not confuse an outage
+        with a legitimately missing file.
         """
         try:
-            matches = self._api.resolve_filepath(path)
-        except Exception:
-            # resolve_filepath raises when the file is not found in Fulcra;
-            # treat any exception here as "file absent" and return None.
-            return None
-        if not matches:
-            return None
-        resp = self._api.download_file(matches[0]["id"])
+            match = self._api.resolve_filepath(path)
+        except Exception as e:
+            if "File not found" in str(e):
+                return None
+            raise
+        resp = self._api.download_file(match["id"])
         return json.loads(resp.read().decode())
 
     def write_json(self, path: str, obj) -> None:
@@ -81,15 +107,5 @@ class FulcraStore:
         return out
 
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
-        sid = sig.id or temp_signal_id(sig.key, sig.observed_at, sig.platform)
-        record = {
-            "data": json.dumps(sig.to_payload()),
-            "metadata": {
-                "content_type": "application/json",
-                "data_type": data_type,
-                "recorded_at": sig.observed_at,
-                "source": [sid, f"{CAPTURE_SOURCE_PREFIX}{sig.platform}"],
-            },
-            "specversion": 1,
-        }
+        record = build_record(sig, data_type)
         self._api.fulcra_api("/ingest/v1/record", data=record, method="POST")

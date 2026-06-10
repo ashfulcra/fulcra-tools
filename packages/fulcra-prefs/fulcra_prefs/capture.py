@@ -2,11 +2,10 @@
 spooled to the outbox — the temp signal id in metadata.source survives, so
 supersedes references stay valid after a later flush (SPEC.md, db46fb5)."""
 from __future__ import annotations
-import json
 from datetime import datetime
 from .outbox import Outbox
-from .schema import Signal, temp_signal_id, CAPTURE_SOURCE_PREFIX
-from .store import FulcraStore
+from .schema import Signal, temp_signal_id
+from .store import FulcraStore, build_record
 
 
 def capture_signal(store: FulcraStore, outbox: Outbox, *, data_type: str,
@@ -26,12 +25,5 @@ def capture_signal(store: FulcraStore, outbox: Outbox, *, data_type: str,
     try:
         store.ingest_signal(sig, data_type=data_type)
     except (OSError, ConnectionError, TimeoutError):
-        record = {"data": json.dumps(sig.to_payload()),
-                  "metadata": {"content_type": "application/json",
-                               "data_type": data_type,
-                               "recorded_at": observed,
-                               "source": [sig.id,
-                                          f"{CAPTURE_SOURCE_PREFIX}{platform}"]},
-                  "specversion": 1}
-        outbox.spool(record)
+        outbox.spool(build_record(sig, data_type))
     return sig
