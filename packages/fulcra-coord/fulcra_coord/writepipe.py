@@ -20,20 +20,64 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import random
 import uuid
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity, session_link
+from . import cache, remote, schema, views, identity, session_link, env_int
 from . import annotations as lifecycle_annotations
 from . import eventlog, events as _events
 from . import log as ops_log
 from .io import _load_summaries_for_rebuild, _updated_at_key
+from .output import warn as _warn
 from .timeutil import now_iso as _now_iso
 
 
 # Event-only / acked_by-only keys are reconciled by the union helper, never by
 # the wholesale field carry — copying them would clobber the union.
 _MERGE_EVENT_KEYS = {"events", "acked_by"}
+
+
+def _retry_sleep(seconds: float) -> None:
+    """Jitter sleep before a task-body upload retry. A module-level wrapper (not
+    an inline ``time.sleep``) ONLY so tests can patch it out and assert on the
+    jitter — the same patch-point idiom as cli._retry_sleep (#141)."""
+    import time
+    time.sleep(seconds)
+
+
+def _upload_task_body(
+    task: dict[str, Any], task_path: str, *, backend: Optional[list[str]] = None
+) -> bool:
+    """Upload the AUTHORITATIVE task body, retrying ONCE on failure.
+
+    WHY (2026-06-10, four losses in one evening): under backend write-throttling
+    the single-write path (tell/later/done) intermittently failed its one upload
+    attempt; the body never reached the bus while the sender saw success-shaped
+    output, and recipients only got the message at a much-later reconcile. The
+    reconcile-pool retry (#141 / FULCRA_COORD_UPLOAD_RETRY) covers VIEW uploads
+    only — this is its single-write sibling for the task body, the one write
+    that actually delivers the message.
+
+    A RAISING upload is treated as a failed attempt, not an escape hatch: if it
+    propagated, the caller's cached-locally / needs-reconcile contract would be
+    bypassed entirely (same rationale as the view pool's S3 guard). The retry
+    sleeps a 0.5–2.0s jitter first to de-sync from the burst that got us
+    throttled. ``FULCRA_COORD_WRITE_RETRY`` (default 1) set to ``0`` restores
+    the single attempt. A second failure is final — the caller falls through to
+    today's unchanged cached-locally path.
+    """
+    try:
+        ok = remote.upload_json(task, task_path, backend=backend)
+    except Exception:
+        ok = False
+    if not ok and env_int("FULCRA_COORD_WRITE_RETRY", 1) != 0:
+        _retry_sleep(random.uniform(0.5, 2.0))
+        try:
+            ok = remote.upload_json(task, task_path, backend=backend)
+        except Exception:
+            ok = False
+    return ok
 
 
 def _stamp_session_pointer(task: dict[str, Any]) -> None:
@@ -140,8 +184,9 @@ def _write_task_and_views(
     }
     cache.write_op_marker(op_id, op_marker)
 
-    # Upload task file
-    task_ok = remote.upload_json(task, task_path, backend=backend)
+    # Upload task file — the AUTHORITATIVE write (one jittered retry inside;
+    # the view/event/directive side-writes below stay best-effort/unchanged).
+    task_ok = _upload_task_body(task, task_path, backend=backend)
     if not task_ok:
         op_marker["status"] = "failed"
         op_marker["needs_reconcile"] = True
@@ -149,8 +194,38 @@ def _write_task_and_views(
         ops_log.log_op(command, task_id, status="error", error="Task upload failed")
         return False
 
-    # Post-stat for version tracking
+    # Post-stat for version tracking. This stat DOUBLES as verify-after-write:
+    # the 2026-06-10 losses showed an upload can return success-shaped output
+    # with nothing on the bus, so "upload returned True" is not proof of
+    # delivery — a visible stat is. Reusing the version-tracking stat keeps the
+    # fast path at exactly one post-upload round-trip (no extra HEAD).
     post_stat = remote.stat(task_path, backend=backend)
+    unverified = False
+    if post_stat is None and env_int("FULCRA_COORD_WRITE_VERIFY", 1) != 0:
+        # UNVERIFIED: stat can't see the file (absent, or stat itself failed —
+        # indistinguishable, and both mean we cannot claim delivery). One more
+        # jittered re-upload + re-stat, then warn. Gated by
+        # FULCRA_COORD_WRITE_VERIFY (default ON) so a backend whose stat is
+        # flaky-by-design can opt out without losing the upload retry above.
+        _retry_sleep(random.uniform(0.5, 2.0))
+        try:
+            remote.upload_json(task, task_path, backend=backend)
+        except Exception:
+            pass  # the re-stat below is the arbiter, not the upload's claim
+        post_stat = remote.stat(task_path, backend=backend)
+        if post_stat is None:
+            unverified = True
+            # UNMISSABLE by contract: the sender must SEE that the recipient
+            # may not. But NEVER flip the exit code — the body is cached
+            # locally and the needs_reconcile marker (kept below) lets the
+            # standard reconcile self-heal repair it, exactly like the
+            # cached-locally failure path.
+            _warn(
+                f"DELIVERY NOT CONFIRMED: {task_id} — upload reported success "
+                f"but the write is not visible on the bus. Body cached "
+                f"locally; recipients may not see it until the next "
+                f"successful reconcile."
+            )
     if post_stat:
         cache.write_meta(task_path, post_stat)
 
@@ -239,10 +314,21 @@ def _write_task_and_views(
             f"Run 'fulcra-coord reconcile' to repair views."
         )
 
-    op_marker["status"] = "done"
-    cache.write_op_marker(op_id, op_marker)
-    cache.clear_op_marker(op_id)
-    ops_log.log_op(command, task_id, status="ok")
+    if unverified:
+        # Keep the marker alive with needs_reconcile so the standard reconcile
+        # pass owns the repair — the same self-heal vehicle as a failed upload,
+        # because an unverified write IS possibly a failed upload that lied.
+        op_marker["status"] = "unverified"
+        op_marker["needs_reconcile"] = True
+        cache.write_op_marker(op_id, op_marker)
+        ops_log.log_op(command, task_id, status="unverified",
+                       error="Upload reported success but post-write stat "
+                             "could not confirm the body on the bus")
+    else:
+        op_marker["status"] = "done"
+        cache.write_op_marker(op_id, op_marker)
+        cache.clear_op_marker(op_id)
+        ops_log.log_op(command, task_id, status="ok")
 
     _emit_lifecycle(command, task, lifecycle, backend=backend)
 
