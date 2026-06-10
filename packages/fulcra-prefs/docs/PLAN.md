@@ -130,6 +130,16 @@ def test_parse_record_uses_temp_id_when_unpersisted():
            "data": json.dumps(sig.to_payload())}
     assert parse_record(env).id == "com.fulcra-prefs.sig.0000-aaaa"
 
+def test_parse_record_preserves_source_ids_for_supersedes_aliases():
+    sig = make_signal()
+    env = {"id": "rec-001", "recorded_at": "2026-06-01T12:00:00+00:00",
+           "sources": ["com.fulcra-prefs.sig.0000-aaaa",
+                       "com.fulcra-prefs.capture.claude-code"],
+           "data": json.dumps(sig.to_payload())}
+    back = parse_record(env)
+    assert back.id == "rec-001"
+    assert "com.fulcra-prefs.sig.0000-aaaa" in back.source_ids
+
 def test_temp_signal_id_is_deterministic_for_same_inputs():
     a = temp_signal_id("dining.cuisine.thai", "2026-06-01T12:00:00+00:00", "claude-code")
     b = temp_signal_id("dining.cuisine.thai", "2026-06-01T12:00:00+00:00", "claude-code")
@@ -162,7 +172,7 @@ stable id (persisted record id, else deterministic temp id)."""
 from __future__ import annotations
 import hashlib
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
 
 SCHEMA_V = 1
 KINDS = ("preference", "fact", "consent")
@@ -211,6 +221,7 @@ class Signal:
     agent: str | None
     session: str | None
     supersedes: str | None
+    source_ids: tuple[str, ...] = field(default_factory=tuple, compare=False)
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -251,13 +262,14 @@ def parse_record(env: dict) -> Signal:
         platform=src.get("platform", "unknown"),
         agent=src.get("agent"), session=src.get("session"),
         supersedes=payload.get("supersedes"),
+        source_ids=tuple(sources),
     )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run --package fulcra-prefs pytest packages/fulcra-prefs/tests/test_schema.py -v`
-Expected: 8 PASS
+Expected: 9 PASS
 
 - [ ] **Step 5: Commit**
 
@@ -406,6 +418,27 @@ def test_superseded_signals_dropped_including_chains():
     assert entry["value"] == {"gen": 3}
     assert entry["n_signals"] == 1   # superseded signals are gone, not merged
 
+def test_supersedes_temp_id_still_drops_persisted_record():
+    # Spec contract: `supersedes` may reference either the local temp id or the
+    # persisted Fulcra record id. Once a record is persisted, its temp id still
+    # appears in metadata.source and must remain a valid alias.
+    old = make_signal(id="rec-a", value={"gen": 1},
+                      source_ids=("com.fulcra-prefs.sig.temp-a",))
+    new = make_signal(id="rec-b", value={"gen": 2},
+                      supersedes="com.fulcra-prefs.sig.temp-a")
+    docs = compile_signals([old, new], NOW)
+    assert docs["global"]["keys"]["dining.cuisine.thai"]["value"] == {"gen": 2}
+
+def test_supersedes_dangling_ref_does_not_drop_replacement():
+    sig = make_signal(id="rec-b", value={"gen": 2}, supersedes="missing-id")
+    docs = compile_signals([sig], NOW)
+    assert docs["global"]["keys"]["dining.cuisine.thai"]["value"] == {"gen": 2}
+
+def test_supersedes_cycle_drops_all_cycle_members():
+    a = make_signal(id="rec-a", value={"gen": 1}, supersedes="rec-b")
+    b = make_signal(id="rec-b", value={"gen": 2}, supersedes="rec-a")
+    assert compile_signals([a, b], NOW)["global"]["keys"] == {}
+
 def test_platform_scope_overlays_global():
     g = make_signal(id="rec-g", value={"v": "global"})
     p = make_signal(id="rec-p", scope="platform:claude-code", value={"v": "cc"})
@@ -442,9 +475,13 @@ from .decay import effective_weight, is_stale
 from .schema import Signal, SCHEMA_V
 
 
+def _signal_ids(sig: Signal) -> set[str]:
+    return {x for x in (sig.id, *sig.source_ids) if x}
+
+
 def _live_signals(signals: list[Signal]) -> list[Signal]:
     superseded = {s.supersedes for s in signals if s.supersedes}
-    return [s for s in signals if (s.id or "") not in superseded]
+    return [s for s in signals if not (_signal_ids(s) & superseded)]
 
 
 def _entry(sig: Signal, weight: float, n: int, now: datetime) -> dict:
@@ -489,7 +526,7 @@ def compile_signals(signals: list[Signal], now: datetime) -> dict:
 - [ ] **Step 4: Run to verify pass**
 
 Run: `uv run --package fulcra-prefs pytest packages/fulcra-prefs/tests/test_compile.py -v`
-Expected: 7 PASS
+Expected: 10 PASS
 
 - [ ] **Step 5: Commit**
 
@@ -875,6 +912,11 @@ class FakeFulcraAPI:
         self.files[filepath] = data.read()
         return {"url": "fake://uploaded", "id": f"v-{filepath}"}
 
+    def list_files(self, folder_path):
+        prefix = folder_path.rstrip("/") + "/"
+        return [{"id": f"v-{path}", "path": path, "name": path.rsplit("/", 1)[-1]}
+                for path in sorted(self.files) if path.startswith(prefix)]
+
     # --- generic API request (matches FulcraAPI.fulcra_api) ---
     def fulcra_api(self, path, query=None, data=None, method="GET",
                    return_http_response=False):
@@ -905,6 +947,12 @@ def test_write_then_read_json_roundtrip(fake_api):
     store = FulcraStore(fake_api)
     store.write_json("prefs/compiled.json", {"v": 1, "keys": {}})
     assert store.read_json("prefs/compiled.json") == {"v": 1, "keys": {}}
+
+def test_list_json_reads_folder_children_deterministically(fake_api):
+    store = FulcraStore(fake_api)
+    store.write_json("prefs/signals-cache/b.json", {"id": "b"})
+    store.write_json("prefs/signals-cache/a.json", {"id": "a"})
+    assert [rec["id"] for rec in store.list_json("prefs/signals-cache")] == ["a", "b"]
 
 def test_read_missing_returns_none(fake_api):
     assert FulcraStore(fake_api).read_json("prefs/compiled.json") is None
@@ -970,6 +1018,16 @@ class FulcraStore:
         self._api.upload_file(io.BytesIO(body), "application/json",
                               len(body), path)
 
+    def list_json(self, folder_path: str) -> list[dict]:
+        """List direct JSON children under a folder. Used by the v1 signals-cache
+        workaround as one-file-per-signal shards, avoiding a shared remote RMW
+        file that concurrent captures could clobber."""
+        out = []
+        for rec in self._api.list_files(folder_path):
+            resp = self._api.download_file(rec["id"])
+            out.append(json.loads(resp.read().decode()))
+        return out
+
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         sid = sig.id or temp_signal_id(sig.key, sig.observed_at, sig.platform)
         record = {
@@ -988,7 +1046,7 @@ class FulcraStore:
 - [ ] **Step 5: Run to verify pass**
 
 Run: `uv run --package fulcra-prefs pytest packages/fulcra-prefs/tests/test_store.py -v`
-Expected: 5 PASS
+Expected: 6 PASS
 
 - [ ] **Step 6: Commit**
 
@@ -1272,6 +1330,7 @@ from datetime import datetime, timezone
 import pytest
 from fulcra_prefs.cli import run
 from fulcra_prefs.store import FulcraStore, META_PATH, COMPILED_PATH, CONSENT_PATH
+from test_schema import make_signal
 
 NOW = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
 
@@ -1345,6 +1404,15 @@ def test_missing_meta_gives_actionable_error(fake_api, tmp_path, capsys):
               "--platform", "x"], api=fake_api, outbox_dir=tmp_path, now=NOW)
     assert rc == 2
     assert "onboard" in capsys.readouterr().err
+
+def test_signal_cache_shards_do_not_clobber_each_other(env):
+    from fulcra_prefs.cli import _append_signal_cache, _load_cached_signals
+    call, fake_api, store = env
+    _append_signal_cache(store, make_signal(id="sig-a", key="k.a"))
+    _append_signal_cache(store, make_signal(id="sig-b", key="k.b"))
+    assert "prefs/signals-cache/sig-a.json" in fake_api.files
+    assert "prefs/signals-cache/sig-b.json" in fake_api.files
+    assert {s.id for s in _load_cached_signals(store)} == {"sig-a", "sig-b"}
 ```
 
 - [ ] **Step 3: Run to verify failure**
@@ -1360,13 +1428,14 @@ Expected: FAIL — `ModuleNotFoundError: fulcra_prefs.cli`
 for tests; main() binds the real FulcraAPI (reusing the user's `fulcra auth
 login` credentials), the real outbox dir, and the real clock.
 
-Signal reads in v1 go through the compile cache in the store: capture appends
-to Fulcra; compile re-reads ALL signals. Because the fulcra-api library has
-no record-read-by-definition helper for arbitrary windows wired here yet,
-v1 compile sources signals from (a) records ingested this process (api
-echo), (b) the previous compiled doc's signal cache `prefs/signals-cache.json`
-maintained by capture/compile. This cache is an implementation detail —
-documented in code — and is replaced by real get-records reads when the CLI
+Signal reads in v1 go through a compile cache in the file library: capture
+posts the canonical signal to Fulcra and writes one independent cache shard per
+signal id under `prefs/signals-cache/`. Because the fulcra-api library has no
+record-read-by-definition helper for arbitrary windows wired here yet, compile
+lists those cache shards. Do NOT use one shared `signals-cache.json` file:
+that would be a remote read-modify-write race across concurrently-capturing
+platforms and would violate SPEC.md's atomic-capture rationale. The shard cache
+is an implementation detail replaced by real get-records reads when CLI
 annotation commands land (tracked on the bus)."""
 from __future__ import annotations
 import argparse
@@ -1384,7 +1453,7 @@ from .solver import solve
 from .store import (FulcraStore, COMPILED_PATH, CONSENT_PATH, META_PATH,
                     PREFS_ROOT, platform_path)
 
-SIGNALS_CACHE_PATH = f"{PREFS_ROOT}/signals-cache.json"
+SIGNALS_CACHE_PREFIX = f"{PREFS_ROOT}/signals-cache"
 
 
 def _store(api) -> FulcraStore:
@@ -1401,15 +1470,17 @@ def _require_meta(store: FulcraStore) -> dict | None:
 
 
 def _load_cached_signals(store: FulcraStore) -> list[Signal]:
-    cache = store.read_json(SIGNALS_CACHE_PATH) or {"records": []}
-    return [parse_record(env) for env in cache["records"]]
+    return [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
 
 
 def _append_signal_cache(store: FulcraStore, sig: Signal) -> None:
-    cache = store.read_json(SIGNALS_CACHE_PATH) or {"records": []}
-    cache["records"].append({"id": sig.id, "recorded_at": sig.observed_at,
-                             "sources": [sig.id], "data": json.dumps(sig.to_payload())})
-    store.write_json(SIGNALS_CACHE_PATH, cache)
+    # One file per signal id: concurrent captures write disjoint paths instead
+    # of racing on a shared cache blob. The cache record mirrors get-records
+    # enough for parse_record and preserves the temp id in sources.
+    sid = sig.id
+    env = {"id": sid, "recorded_at": sig.observed_at,
+           "sources": [sid], "data": json.dumps(sig.to_payload())}
+    store.write_json(f"{SIGNALS_CACHE_PREFIX}/{sid}.json", env)
 
 
 def cmd_onboard(args, api, now) -> int:
@@ -1607,12 +1678,12 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run to verify pass**
 
 Run: `uv run --package fulcra-prefs pytest packages/fulcra-prefs/tests/test_cli.py -v`
-Expected: 5 PASS
+Expected: 6 PASS
 
 - [ ] **Step 6: Run the whole suite**
 
 Run: `uv run --package fulcra-prefs pytest packages/fulcra-prefs/tests -v`
-Expected: all tests pass (≈40)
+Expected: all tests pass (≈44)
 
 - [ ] **Step 7: Commit**
 
