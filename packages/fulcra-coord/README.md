@@ -174,10 +174,12 @@ only — a live `review`-capable agent still gets the work, and an empty seed
 degrades to pure capability routing. Put **your** fleet's reviewer ids in this
 config; never hard-code them in source.
 
-> Coming soon: role-addressing — directives addressed to `@<role>` audiences,
-> resolved to the live holders of that role at delivery time (multi-holder
-> fan-out). It lands in a separate in-review PR; review-routing above does not
-> depend on it.
+**Role-addressed directives.** A directive may also target an `@<role>` audience
+instead of a concrete agent id. Role audiences resolve at inbox/read time against
+each agent's declared capabilities, so every live holder of that role sees the
+ask and agents without the role do not. Use this for post-deploy fleet aliases
+such as `@reviewer`; until agents declare the matching role, older concrete-id
+routing continues to behave as before.
 
 ## Coordination loops
 
