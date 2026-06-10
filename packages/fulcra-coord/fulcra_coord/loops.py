@@ -134,7 +134,13 @@ def loop_kind_of(record: dict[str, Any]) -> str:
     """A record's loop kind; records written before the loop fields existed
     (no/None `kind`) read as the legacy `tell` kind — the spec's mixed-fleet
     floor ("old records read as kind:tell with the legacy lifecycle")."""
-    return record.get("kind") or "tell"
+    kind = record.get("kind") or "tell"
+    return kind if kind in KINDS else "tell"
+
+
+def _has_unknown_kind(record: dict[str, Any]) -> bool:
+    kind = record.get("kind")
+    return kind is not None and kind not in KINDS
 
 
 # Legacy directive status -> tell-lifecycle state, for records that predate the
@@ -161,6 +167,8 @@ def expects_response(record: dict[str, Any]) -> bool:
     """Whether this loop must stay open until a bus response arrives. Explicit
     field wins; absent (legacy) falls back to the kind default — which for the
     legacy `tell` kind is False, so old records are never retro-opened."""
+    if _has_unknown_kind(record):
+        return False
     val = record.get("expects_response")
     if val is not None:
         return bool(val)
@@ -191,9 +199,11 @@ def _hours_old(record: dict[str, Any], now) -> Optional[float]:
     raw = record.get("created_at") or ""
     try:
         created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if created.tzinfo is None and getattr(now, "tzinfo", None) is not None:
+            created = created.replace(tzinfo=now.tzinfo)
+        return (now - created).total_seconds() / 3600.0
     except Exception:
         return None
-    return (now - created).total_seconds() / 3600.0
 
 
 def _is_overdue(record: dict[str, Any], now) -> bool:
@@ -206,7 +216,11 @@ def _is_overdue(record: dict[str, Any], now) -> bool:
     if sla is None:
         return False
     age = _hours_old(record, now)
-    return age is not None and age > float(sla)
+    try:
+        sla_float = float(sla)
+    except (TypeError, ValueError):
+        return False
+    return age is not None and age > sla_float
 
 
 def _summary(record: dict[str, Any], now) -> dict[str, Any]:

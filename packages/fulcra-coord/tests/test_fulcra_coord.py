@@ -11283,18 +11283,59 @@ def test_status_warns_on_overdue_loops(coord_backend, capsys):
     """`status` surfaces the loop line from the persisted health surface (the
     same direction the undelivered warning reads — query.py never imports cli)."""
     from fulcra_coord import query, remote
+    current_agent = "me:h:r"
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = current_agent
     remote.upload_json(
-        {"host": "host-a",
+        {"host": "host-a", "agent": current_agent,
          "loop_health": {"open_loops": 2, "overdue": 1, "awaiting_me": 1}},
         remote.health_remote_path("host-a"), backend=coord_backend,
     )
-    rc = query.cmd_status(types.SimpleNamespace(workstream=None, agent=None,
-                                                format="table"),
-                          backend=coord_backend)
+    try:
+        rc = query.cmd_status(types.SimpleNamespace(workstream=None, agent=None,
+                                                    format="table"),
+                              backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
     assert rc == 0
     out = capsys.readouterr().out
     assert "1 coordination loop(s) overdue" in out
     assert "1 awaiting you" in out
+
+
+def test_status_awaiting_you_uses_current_agent_health_only(coord_backend, capsys):
+    """Overdue is bus-wide, but awaiting_me is identity-specific. Do not label
+    another host/agent's awaiting_me count as "awaiting you"."""
+    from fulcra_coord import query, remote
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        remote.upload_json(
+            {"host": "host-a", "agent": "other:h:r",
+             "loop_health": {"open_loops": 9, "overdue": 2, "awaiting_me": 9}},
+            remote.health_remote_path("host-a"), backend=coord_backend,
+        )
+        remote.upload_json(
+            {"host": "host-b", "agent": "me:h:r",
+             "loop_health": {"open_loops": 1, "overdue": 0, "awaiting_me": 1}},
+            remote.health_remote_path("host-b"), backend=coord_backend,
+        )
+        rc = query.cmd_status(types.SimpleNamespace(workstream=None, agent=None,
+                                                    format="table"),
+                              backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "2 coordination loop(s) overdue" in out
+    assert "1 awaiting you" in out
+    assert "9 awaiting you" not in out
 
 
 def test_status_no_loop_warning_when_clean(coord_backend, capsys):

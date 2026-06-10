@@ -5,6 +5,7 @@ the fitness test in test_fulcra_coord.py).
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 
@@ -109,8 +110,6 @@ class TestOpenClosed:
 # `now` is injected, records are plain dicts, no I/O anywhere.
 # ---------------------------------------------------------------------------
 
-from datetime import datetime, timedelta, timezone
-
 NOW = datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -152,6 +151,24 @@ class TestDetectionFolds:
         d["sla_hours"] = None
         out = loops.awaiting_others("me:h:r", [d], now=NOW)
         assert out[0]["overdue"] is False
+
+    def test_malformed_loop_records_do_not_break_projection(self):
+        # Live bus reads must be tolerant: a future/unknown kind, malformed SLA,
+        # or naive timestamp should not make the health fold disappear.
+        unknown = _aged(_loop("review", **{"from": "me:h:r"}), hours=999)
+        unknown["kind"] = "future-kind"
+        bad_sla = _aged(_loop("review", **{"from": "me:h:r"}), hours=999)
+        bad_sla["sla_hours"] = "not-a-number"
+        naive_time = _loop("review", **{"from": "me:h:r"})
+        naive_time["created_at"] = "2026-06-09T12:00:00"
+
+        board = loops.loop_board("me:h:r", [unknown, bad_sla, naive_time], now=NOW)
+
+        # Unknown kind falls back to legacy tell (non-response) and drops out.
+        assert all(x["id"] != unknown["id"] for x in board["awaiting_others"])
+        by_id = {x["id"]: x for x in board["awaiting_others"]}
+        assert by_id[bad_sla["id"]]["overdue"] is False
+        assert by_id[naive_time["id"]]["overdue"] is False
 
     def test_board_shape(self):
         items = [
