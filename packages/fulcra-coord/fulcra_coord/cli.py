@@ -59,7 +59,7 @@ from .presence import (
 # Read-only situational-awareness commands extracted from this file. Re-exported so
 # the command dispatch (entry.py) and the test imports of these commands keep
 # resolving. query.py never imports cli.
-from .query import cmd_status, cmd_agents, cmd_needs_me, cmd_resume
+from .query import cmd_status, cmd_board, cmd_agents, cmd_needs_me, cmd_resume
 # Task write pipeline extracted from this file. Re-exported under the historical
 # names so every write command (cmd_start/update/block/pause/done/abandon/tell/
 # broadcast/assign/inbox/request-review) that calls _write_task_and_views, plus the

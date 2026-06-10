@@ -481,6 +481,113 @@ class TestRenderInfraLine(unittest.TestCase):
         self.assertIn("infra", note)
 
 
+class TestRenderLoopsLine(unittest.TestCase):
+    """The phase-2 coordination-loops section: one compact line, rendered only
+    when the fold produced counts (same optional-section discipline as infra)."""
+
+    def test_loops_line_renders_all_four_counts(self):
+        digest = {"blocked_on_you": [], "upcoming": [], "per_agent": [],
+                  "stale": [],
+                  "loops": {"open_loops": 3, "overdue": 1, "out_of_band": 2,
+                            "awaiting_me": 1}}
+        name, note = cli._render_digest(digest, window="evening")
+        self.assertIn(
+            "Coordination loops: 3 open · 1 overdue · 2 out-of-band "
+            "· awaiting-you: 1", note)
+
+    def test_no_loops_key_renders_nothing_extra(self):
+        digest = {"blocked_on_you": [], "upcoming": [], "per_agent": [],
+                  "stale": [], "loops": None}
+        name, note = cli._render_digest(digest, window="evening")
+        self.assertNotIn("Coordination loops", note)
+
+    def test_all_zero_loops_section_is_skipped(self):
+        # A clean bus stays clean: zero open loops add no section (the
+        # "empty blocks are skipped" rule the other digest blocks follow).
+        digest = {"blocked_on_you": [], "upcoming": [], "per_agent": [],
+                  "stale": [],
+                  "loops": {"open_loops": 0, "overdue": 0, "out_of_band": 0,
+                            "awaiting_me": 0}}
+        name, note = cli._render_digest(digest, window="evening")
+        self.assertNotIn("Coordination loops", note)
+
+
+# ---------------------------------------------------------------------------
+# Digest loops section, end to end (phase 2 Task 3): pytest-style functions on
+# coord_backend (the unittest classes above patch I/O; the loops fold reads the
+# directives prefix, which the fake backend serves directly).
+# ---------------------------------------------------------------------------
+
+
+def _digest_args(**over):
+    ns = types.SimpleNamespace(window="evening", format="table",
+                               dry_run=True, human="ash")
+    for k, v in over.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _seed_overdue_review_loop(backend, *, opener="me:h:r"):
+    """One OPEN kind:review loop opened by `opener` 48h ago against a 24h SLA
+    (open + overdue), uploaded as a top-level directive record."""
+    from fulcra_coord import remote
+    d = schema.make_directive(
+        directive_type="review", from_agent=opener, audience="rev:h:r",
+        title="review PR 9", workstream="general",
+        kind="review", state="requested", expects_response=True, sla_hours=24,
+    )
+    d["created_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=48)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    assert remote.upload_json(d, remote.directive_remote_path(d["id"]),
+                              backend=backend)
+    return d
+
+
+def test_digest_includes_loops_section_when_loops_exist(coord_backend, capsys):
+    """A dry-run digest on a bus with one open+overdue loop of mine carries
+    the one-line coordination-loops section, counts sourced from the same
+    fold the health record uses (me = the digest's own agent identity)."""
+    from fulcra_coord import digest as digest_mod
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        _seed_overdue_review_loop(coord_backend, opener="me:h:r")
+        rc = digest_mod.cmd_digest(_digest_args(), backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert ("Coordination loops: 1 open · 1 overdue · 0 out-of-band "
+            "· awaiting-you: 0") in out
+
+
+def test_digest_omits_loops_section_when_fold_raises(coord_backend, capsys):
+    """BEST-EFFORT: a raising loop fold must leave the digest otherwise
+    intact — the section is simply absent, rc stays 0 (a scheduled tick must
+    never error out on the optional section)."""
+    from fulcra_coord import digest as digest_mod
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        _seed_overdue_review_loop(coord_backend, opener="me:h:r")
+        with patch("fulcra_coord.loops.loop_board",
+                   side_effect=RuntimeError("boom")):
+            rc = digest_mod.cmd_digest(_digest_args(), backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Coordination loops" not in out
+    assert "[dry-run]" in out  # the digest itself still rendered
+
+
 class TestVersion(unittest.TestCase):
     def test_version_is_0_14_0(self):
         from fulcra_coord import __version__
