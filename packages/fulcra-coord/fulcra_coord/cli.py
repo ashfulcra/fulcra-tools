@@ -78,6 +78,10 @@ from .routing_ops import (
     _reroute_minutes, _reroute_max, _accepted_stall_hours,
     _review_accepted_by_assignee, _classify_review, _sweep_review_routes,
 )
+# Coordination-loop return leg (spec 2026-06-09). Re-exported so the `respond`
+# command dispatch (entry.py) resolves through the same _cli.cmd_* convention as
+# every other command. loop_ops.py never imports cli.
+from .loop_ops import cmd_respond
 # Operator situational-awareness output (digest push + health pull) extracted from
 # this file. Re-exported so the digest/health/install-digest dispatch, cmd_doctor's
 # _assess_fleet fold, and the test patch targets keep resolving. digest.py never
