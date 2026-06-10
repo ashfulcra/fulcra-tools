@@ -317,6 +317,46 @@ def _notify_new_needs_me(backend: Optional[list[str]] = None) -> None:
     cache.cache_root().mkdir(parents=True, exist_ok=True)
     seen_path.write_text(json.dumps(sorted(current_ids)))
 
+def _overdue_loop_suffix(me: str, backend: Optional[list[str]] = None) -> str:
+    """Best-effort " · N overdue" notification suffix: open loops `me` OPENED
+    whose per-kind SLA has lapsed (spec 2026-06-09 Task 7), folded by
+    ``loops.awaiting_others`` over the directives prefix — the listener-side
+    twin of reconcile's ``_loop_health_check`` overdue count, riding the
+    notification the operator actually sees.
+
+    Empty string when N == 0 or when the scan fails for ANY reason, so the
+    inbox notification reads exactly as before whenever loops can't be counted
+    (fail-safe: a polling tick must never grow a new failure mode). Closure
+    notifications ("loop closed") are deliberately NOT here: announcing a
+    closure exactly once needs a durable seen-marker (like the blocked-on-you
+    seen-set) and is deferred until one exists.
+
+    Cost: one ``list_json`` sweep of the directives prefix per notifying tick
+    (the same sweep reconcile's health check already pays). Lazy imports keep
+    the module load graph flat — this only runs inside a tick."""
+    try:
+        from datetime import datetime, timezone
+        from . import loops
+        prefix = remote.directives_prefix()
+        records: list[dict[str, Any]] = []
+        for path, rec in remote.list_json(prefix, backend=backend):
+            # TOP-LEVEL-ONLY FILTER, duplicated from cli._loop_health_check
+            # (a shared helper would invert the cli -> inbox layering): the
+            # prefix holds ack/routing/response SUB-LOG SHARDS beside the
+            # top-level loop records; only a prefix-relative path with no
+            # inner "/" that ends in .json is a loop record.
+            rel = path[len(prefix):] if path.startswith(prefix) else path
+            if "/" in rel or not rel.endswith(".json"):
+                continue
+            if isinstance(rec, dict):
+                records.append(rec)
+        overdue = sum(1 for x in loops.awaiting_others(
+            me, records, now=datetime.now(timezone.utc)) if x.get("overdue"))
+        return f" · {overdue} overdue" if overdue else ""
+    except Exception:
+        return ""  # best-effort: fall back to the plain count message
+
+
 def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """Poll the inbox for an agent; on non-empty, surface + notify (Part 3).
 
@@ -350,7 +390,11 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         current_ids = {i["id"] for i in items}
         new_ids = current_ids - seen
         if new_ids:
-            listener.emit_notification(me, len(new_ids))
+            # Loop signal rides the same notification (spec 2026-06-09 Task 7):
+            # count semantics stay untouched; the suffix is best-effort and ""
+            # whenever the loop scan fails or finds nothing overdue.
+            listener.emit_notification(
+                me, len(new_ids), extra=_overdue_loop_suffix(me, backend=backend))
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         seen_path.write_text(json.dumps(sorted(current_ids)))
         # ALSO notice anything newly blocked on the human (Part 5). Independent

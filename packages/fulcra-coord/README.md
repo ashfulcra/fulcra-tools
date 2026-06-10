@@ -179,6 +179,70 @@ config; never hard-code them in source.
 > fan-out). It lands in a separate in-review PR; review-routing above does not
 > depend on it.
 
+## Coordination loops
+
+**Any ask that crosses an agent/session boundary is a directive-with-a-lifecycle.**
+A review request, a dispatch to another agent, a question, an idea being routed —
+these are not separate record families; they are one loop record whose `kind`
+field selects a per-kind state machine from a registry (`loops.KINDS`). Adding a
+work-type means registering a kind, not adding a schema or module. Records
+written before loops existed read as the legacy `tell` kind, so a mixed fleet
+keeps working untouched.
+
+| Kind | Lifecycle | Expects response | SLA default |
+|---|---|---|---|
+| `tell` | `sent → acked → closed` | no (legacy/FYI default) | — |
+| `review` | `requested → acked → in_review → responded → closed` | yes | 24h |
+| `dispatch` | `assigned → accepted\|declined → in_progress → delivered → closed` | yes | 72h |
+| `idea` | `captured → maturing → viable → routed → active → done\|dropped` | no (a pipeline, not an ask) | — |
+| `question` / `signoff` | `asked → answered → closed` | yes | 48h |
+
+Lifecycles are permissive where it matters: a `review` can jump straight from
+`requested` to `responded` (no forced ack dance), a `declined` dispatch can be
+reassigned, and every machine guarantees a terminal state is reachable from
+every state — a loop can never be stranded. `review`/`dispatch`/`idea` are wired
+end to end; `question`/`signoff` are registered now and built when first needed.
+A record-level SLA overrides the kind default; `idea` and `tell` have no SLA and
+are never flagged overdue.
+
+**The closed-loop guarantee.** A loop that expects a response stays **OPEN until
+a response lands on the bus** — nothing else closes it:
+
+```bash
+fulcra-coord respond <loop-id> --outcome approve --evidence "PR #42 verified"
+```
+
+(`review-done` is the review-specific close primitive; `respond` is the generic
+return leg for everything else.) Each response is an append-only shard under the
+directive's `responses/` sub-log, so concurrent responders — a `@role` fan-out
+answering at once — never clobber each other. The loop snapshot's `outcome` and
+`state` are a best-effort **cache** of the sub-log fold, never the truth. And to
+state it plainly: a forge comment, a pushed commit, or any out-of-band message
+**never** closes a loop. The verdict that exists only as a PR comment is, from
+the bus's point of view, a verdict that never happened — that is the exact
+failure mode this design exists to kill. Closing a loop is one command from any
+state; no lifecycle dance is ever required to land an outcome.
+
+**Visibility.** `status` warns when coordination loops are overdue or awaiting
+your response. Each reconcile tick records a `loop_health` block (open / overdue
+/ awaiting-me counts) in the per-host health record. The inbox listener appends
+the overdue count to its notification (`… · 2 overdue`), so a lapsed loop rides
+the alert the operator already sees.
+
+**Self-healing listener.** The response leg is only useful if someone is
+listening for it, so `connect` idempotently re-arms the per-agent `notify-inbox`
+job whenever it finds it missing — a dead listener heals on the next session
+instead of staying silently dead. It is best-effort and quiet (never blocks
+connect); opt out with `FULCRA_COORD_ENSURE_LISTENER=0` where the host scheduler
+is managed elsewhere.
+
+**Rule of the road.** Do the work wherever it lives — a forge, a doc, a sandbox.
+But the *signal* — the verdict, the result, the answer — returns on the bus.
+That single discipline is what makes cross-agent coordination visible,
+auditable, and loss-proof: the requester consumes the bus, never polls the
+platform, and the overdue detector catches any loop where the discipline
+slipped.
+
 ## Remote layout
 
 ```
