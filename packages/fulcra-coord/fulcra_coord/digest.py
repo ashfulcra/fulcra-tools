@@ -23,6 +23,10 @@ from typing import Any, Optional
 from . import remote, views, identity, digest_schedule, remote_root
 from . import annotations as lifecycle_annotations
 from . import loops as _loops
+# Shared records-sweep + bounded-evidence-probe pair (_loop_board_summary).
+# loop_ops is BELOW this module (it never imports digest/cli) — the single
+# home for the load-bearing top-level-shard filter all three loop surfaces need.
+from .loop_ops import load_loop_records, evidence_ids_for
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
 from .timeutil import iso_z as _iso_z
@@ -114,42 +118,18 @@ def _loop_board_summary(*, now: datetime,
     pure ``loops.loop_board`` fold the health record uses, over the digest's
     own agent identity (the reader the "awaiting-you" count belongs to).
 
-    The records load + bounded evidence probes copy cli._loop_health_check's
-    idiom rather than importing it (digest.py never imports cli — the split
-    invariant). TOP-LEVEL-ONLY FILTER (load-bearing): the directives prefix
-    holds sub-log subtrees (``<id>/acks/``, ``<id>/routing/``,
-    ``<id>/responses/``, ``<id>/evidence/``) beside the top-level
-    ``directives/<id>.json`` loop records; a shard counted as a record would
-    inflate every count. Evidence probes are bounded by MY awaiting_others
-    set (computed first, without evidence) and individually best-effort.
+    Records load + bounded evidence probes live in
+    ``loop_ops.load_loop_records`` / ``loop_ops.evidence_ids_for`` (the single
+    home for the load-bearing top-level-shard filter; loop_ops is below this
+    module, which never imports cli — the split invariant).
 
-    May raise on a broken records read — the CALLER (cmd_digest) wraps the
-    whole call so any failure simply omits the section, leaving the digest
-    unchanged (the infra-line discipline)."""
-    prefix = remote.directives_prefix()
-    listed = remote.list_json(prefix, backend=backend)
-    records: list[dict] = []
-    for path, rec in listed:
-        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
-        rel = path[len(prefix):] if path.startswith(prefix) else path
-        if "/" in rel:
-            continue  # ack/routing/response/evidence shard — never a loop record
-        if not rel.endswith(".json"):
-            continue
-        if isinstance(rec, dict):
-            records.append(rec)
+    May raise on a broken records read (load_loop_records is deliberately not
+    best-effort) — the CALLER (cmd_digest) wraps the whole call so any failure
+    simply omits the section, leaving the digest unchanged (the infra-line
+    discipline)."""
+    records = load_loop_records(backend=backend)
     me = identity.resolve_agent()
-    evidence_ids: set[str] = set()
-    for s in _loops.awaiting_others(me, records, now=now):
-        lid = s.get("id")
-        if not lid:
-            continue
-        try:
-            if remote.list_json(remote.directive_evidence_prefix(lid),
-                                backend=backend):
-                evidence_ids.add(lid)
-        except Exception:
-            continue   # best-effort: an unreadable prefix is "no evidence"
+    evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
     board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
     aw_me = board["awaiting_me"]
     aw_others = board["awaiting_others"]

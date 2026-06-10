@@ -22,6 +22,10 @@ from typing import Any, Optional
 
 from . import remote, views, schema, identity, cache, continuity
 from . import loops as _loops
+# Shared records-sweep + bounded-evidence-probe pair (cmd_board). loop_ops is
+# BELOW this module (it never imports query/cli) — the single home for the
+# load-bearing top-level-shard filter all three loop surfaces need.
+from .loop_ops import load_loop_records, evidence_ids_for
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
@@ -174,49 +178,20 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
     board dict. Read-only and rc 0 always — this is a glance surface, and a
     half-readable bus must still render whatever it can, never a stack trace.
 
-    TOP-LEVEL-ONLY FILTER (load-bearing, same idiom as cli._loop_health_check
-    — copied, not imported, because query.py must never import cli): the
-    directives prefix holds SUB-LOG SUBTREES (``<id>/acks/``, ``<id>/routing/``,
-    ``<id>/responses/``, ``<id>/evidence/``) beside the top-level
-    ``directives/<id>.json`` loop records; only a path with no further ``/``
-    after the prefix that ends in ``.json`` is a loop record.
-
-    Evidence probes are BOUNDED the same way as the health check: fold
-    awaiting_others WITHOUT evidence first to get MY open asks (a small set),
-    then list each candidate's evidence prefix — never one list per directive
-    on the bus. Each probe is individually best-effort (a failed list reads as
-    "no evidence")."""
+    Records load + evidence probes live in ``loop_ops.load_loop_records`` /
+    ``loop_ops.evidence_ids_for`` (the single home for the load-bearing
+    top-level-shard filter and the bounded-probe discipline; loop_ops is
+    below this module, which must never import cli)."""
     me = identity.resolve_agent(getattr(args, "agent", None))
     out_format = getattr(args, "format", "table")
     now = datetime.now(timezone.utc)
 
-    prefix = remote.directives_prefix()
     try:
-        listed = remote.list_json(prefix, backend=backend)
+        records = load_loop_records(backend=backend)
     except Exception:
-        listed = []
-    records: list[dict] = []
-    for path, rec in listed:
-        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
-        rel = path[len(prefix):] if path.startswith(prefix) else path
-        if "/" in rel:
-            continue  # ack/routing/response/evidence shard — never a loop record
-        if not rel.endswith(".json"):
-            continue
-        if isinstance(rec, dict):
-            records.append(rec)
+        records = []   # glance surface: a half-readable bus still renders
 
-    evidence_ids: set[str] = set()
-    for s in _loops.awaiting_others(me, records, now=now):
-        lid = s.get("id")
-        if not lid:
-            continue
-        try:
-            if remote.list_json(remote.directive_evidence_prefix(lid),
-                                backend=backend):
-                evidence_ids.add(lid)
-        except Exception:
-            continue   # best-effort: an unreadable prefix is "no evidence"
+    evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
 
     board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
 

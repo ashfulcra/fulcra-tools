@@ -123,6 +123,66 @@ def read_loop_evidence(
     return [rec for _at, _eid, rec in events]
 
 
+def load_loop_records(
+    *, backend: Optional[list[str]] = None
+) -> list[dict[str, Any]]:
+    """Every TOP-LEVEL loop record on the bus — one ``list_json`` sweep of the
+    directives prefix with the top-level-only filter applied.
+
+    THE TOP-LEVEL-ONLY FILTER (load-bearing — the single home for this rule,
+    consumed by the loop health check, the board, and the digest section):
+    ``remote.directives_prefix()`` holds SUB-LOG SUBTREES (``<id>/acks/``,
+    ``<id>/routing/``, ``<id>/responses/``, ``<id>/evidence/``) beside the
+    top-level ``directives/<id>.json`` loop records. Only a path that, after
+    stripping the prefix, has NO further ``/`` and ends in ``.json`` is a loop
+    record — a shard counted as a record would inflate every count.
+
+    Deliberately NOT best-effort: a broken prefix read RAISES so each surface
+    keeps its own error discipline (health/board swallow to ``[]`` at the call
+    site; the digest lets its caller omit the whole section)."""
+    prefix = remote.directives_prefix()
+    listed = remote.list_json(prefix, backend=backend)
+    records: list[dict[str, Any]] = []
+    for path, rec in listed:
+        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        if "/" in rel:
+            continue  # ack/routing/response/evidence shard — never a loop record
+        if not rel.endswith(".json"):
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def evidence_ids_for(
+    me: str, records: list[dict[str, Any]], *, now: datetime,
+    backend: Optional[list[str]] = None,
+) -> set[str]:
+    """The subset of MY awaiting_others loop ids whose evidence sub-log is
+    nonempty — the detection input that flags a loop ◈ out-of-band (a forge-
+    mirrored answer exists OFF the bus; mirrored evidence never closes
+    anything — fold_loop's invariant).
+
+    Probes are BOUNDED: awaiting_others is folded first WITHOUT evidence to
+    get the candidate ids (my own open asks — a small set), then each
+    candidate's evidence prefix is listed. Never one list per directive on
+    the bus. Each probe is individually best-effort (a failed list reads as
+    "no evidence", never an error)."""
+    evidence_ids: set[str] = set()
+    for s in loops.awaiting_others(me, records, now=now):
+        lid = s.get("id")
+        if not lid:
+            continue
+        try:
+            if remote.list_json(remote.directive_evidence_prefix(lid),
+                                backend=backend):
+                evidence_ids.add(lid)
+        except Exception:
+            continue   # best-effort: an unreadable prefix is "no evidence"
+    return evidence_ids
+
+
 def _walk_to_terminal(kind: str, state: str) -> str:
     """Nearest terminal state reachable from ``state`` via legal transitions.
 
