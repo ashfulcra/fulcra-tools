@@ -7826,24 +7826,23 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_14_0(self):
-        # 0.14.0: three additive, default-safe feature lines landed on top of
-        # the 0.13.0 event-sourcing substrate, all without flipping the
-        # read-cutover (that stays operator-gated).
-        #   - Event-liveness observability (#123): reconcile now emits parity
-        #     coverage + fold-completeness counts (`tasks_total`,
-        #     `tasks_with_events`, `folds_complete`), an `event_fold_read_error`
-        #     signal, and `event_dual_write.append_failures_recent` in the
-        #     health record.
-        #   - Ancillary-state retention (#124): the ops log rotates by size and
-        #     orphaned `.prov.json` provenance sidecars are pruned in the
-        #     retention pass.
-        #   - Phase 3b directive dual-write (#125): directive-creating commands
-        #     now mirror a first-class `directives/<id>.json` LWW record plus a
-        #     clobber-safe, append-only ack/route sub-log, with a report-only
-        #     `_directive_parity_check`.
+    def test_version_is_0_15_0(self):
+        # 0.15.0: five additive feature lines landed after the 0.14.0 cut, all
+        # default-safe, none flipping the read-cutover (still operator-gated).
+        #   - @<role> audiences (#128): late-bound role addressing with
+        #     multi-holder fan-out, resolved at read time from presence
+        #     capabilities (`connect --role`).
+        #   - Config-driven review routing (#129): hard-coded fleet reviewer ids
+        #     removed from core; seed comes from review-routing.json /
+        #     FULCRA_COORD_REVIEW_SEED, defaulting to capability-driven.
+        #   - Coordination loops (#130/#135/#137): directives gain kind +
+        #     lifecycle + bus-native response shards (`respond`/review-done close
+        #     loops ON THE BUS), overdue/awaiting-me detection + loop_health,
+        #     and the self-healing listener re-arm on connect.
+        # This pin exists so feature lines can't keep merging without a
+        # deployable, detectable release (the 0.13/0.14 lesson).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.14.0")
+        self.assertEqual(__version__, "0.15.0")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
