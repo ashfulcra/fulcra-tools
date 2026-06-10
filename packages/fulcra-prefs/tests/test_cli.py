@@ -103,8 +103,8 @@ def test_signal_cache_shards_do_not_clobber_each_other(env):
     call, fake_api, store = env
     _append_signal_cache(store, make_signal(id="sig-a", key="k.a"))
     _append_signal_cache(store, make_signal(id="sig-b", key="k.b"))
-    assert "prefs/signals-cache/sig-a.json" in fake_api.files
-    assert "prefs/signals-cache/sig-b.json" in fake_api.files
+    assert "/prefs/signals-cache/sig-a.json" in fake_api.files
+    assert "/prefs/signals-cache/sig-b.json" in fake_api.files
     assert {s.id for s in _load_cached_signals(store)} == {"sig-a", "sig-b"}
 
 def test_get_for_audience_spools_disclosure_when_ingest_down(env, tmp_path, capsys):

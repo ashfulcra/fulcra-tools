@@ -58,6 +58,12 @@ CONSENT_PATH = f"{PREFS_ROOT}/consent.json"
 SIGNALS_CACHE_PREFIX = f"{PREFS_ROOT}/signals-cache"
 
 
+def _abs(path: str) -> str:
+    """The file API requires absolute paths for uploads (422 otherwise,
+    verified live 2026-06-10); reads tolerate both. Normalize everything."""
+    return path if path.startswith("/") else "/" + path
+
+
 def platform_path(platform: str) -> str:
     return f"{PREFS_ROOT}/platforms/{platform}.json"
 
@@ -76,7 +82,7 @@ class FulcraStore:
         with a legitimately missing file.
         """
         try:
-            match = self._api.resolve_filepath(path)
+            match = self._api.resolve_filepath(_abs(path))
         except Exception as e:
             if "File not found" in str(e):
                 return None
@@ -87,7 +93,7 @@ class FulcraStore:
     def write_json(self, path: str, obj) -> None:
         body = canonical_json(obj).encode()
         self._api.upload_file(io.BytesIO(body), "application/json",
-                              len(body), path)
+                              len(body), _abs(path))
 
     def list_json(self, folder_path: str) -> list[dict]:
         """List direct JSON children under a folder. Used by the v1 signals-cache
@@ -97,7 +103,7 @@ class FulcraStore:
         The real fulcra_api.list_files returns {"files": [...]} — a wrapper dict,
         not a plain list — so we extract the "files" key before iterating.
         """
-        result = self._api.list_files(folder_path)
+        result = self._api.list_files(_abs(folder_path))
         # Real library wraps results: {"files": [...], ...}
         file_records = result["files"] if isinstance(result, dict) else result
         out = []
