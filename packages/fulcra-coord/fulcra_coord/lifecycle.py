@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity, continuity
+from . import cache, remote, routing, schema, views, identity, continuity
 from . import annotations as lifecycle_annotations
 from .io import _load_task
 from .output import info as _info, warn as _warn, err as _err
@@ -38,12 +38,18 @@ def _derive_agent() -> str:
 _TASK_ID_TITLE_RE = re.compile(r"^TASK-\d{8}-")
 
 
-def cmd_tell(args: Any, backend: Optional[list[str]] = None) -> int:
+def cmd_tell(args: Any, backend: Optional[list[str]] = None,
+             *, marker_tag: Optional[str] = None) -> int:
     """Create a directive task addressed at another agent (sugar over `start`).
 
     A directive is a `proposed` task with assignee=<the target agent> and
     owner_agent = --from (the directing agent) or unset. It lands in the target's
     inbox until they ack or claim it.
+
+    ``marker_tag`` (internal, for sugar commands like ``later``): an extra
+    loop-kind membership tag (e.g. ``routing.IDEA_TAG``) appended to the task's
+    tags so the directive dual-write maps the right loop kind — the same
+    marker-tag pattern routing_ops uses for ``REVIEW_TAG``.
     """
     assignee = getattr(args, "assignee", None)
     title = args.title
@@ -105,6 +111,11 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None) -> int:
         _err(str(e))
         return 1
 
+    if marker_tag:
+        # Mirror routing_ops's REVIEW_TAG append: an EXTRA membership tag the
+        # dual-write mapper reads — never the task's ``kind`` field.
+        task["tags"] = sorted(set(task.get("tags", []) + [marker_tag]))
+
     errs = schema.validate_task(task)
     if errs:
         _err("Task schema errors:\n  " + "\n  ".join(errs))
@@ -162,6 +173,41 @@ def _dual_write_directive(
     """
     from . import directives  # lazy import: avoid import cost / cycle at module load
     directives.dual_write(task, command=command, backend=backend)
+
+
+def cmd_later(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Capture a "do later" item as a backlog idea ON THE BUS (sugar over `tell`).
+
+    Operator requirement (2026-06-10): when the operator hands an agent a
+    deferred task, the agent must put it on the bus — the bus is where backlog
+    lives, so it stays portable across sessions and agents instead of dying
+    with one session's memory.
+
+    WHY the ``@backlog`` audience: it is a ROLE audience that nobody holds —
+      * the item sits DURABLY on the bus (a real proposed task), and because
+        role matching delivers ``@<role>`` only to agents that DECLARED the
+        role (#128), it inbox-spams NOBODY;
+      * it stays VISIBLE: the board's ideas_pipeline counts it (the dual-written
+        directive is a kind=idea captured loop) and `search` finds it;
+      * a future backlog-groomer agent can `connect --role backlog` and receive
+        the entire backlog in its inbox — no migration needed.
+
+    Routing a backlog item to a worker later is the EXISTING
+    ``assign TASK-ID <agent>`` (an audience change that already re-dual-writes);
+    a concrete assignee folds the idea loop's state captured→routed.
+
+    Implemented by pinning assignee=@backlog + the kind:idea marker tag and
+    delegating to cmd_tell, so capture shares the one creation/validation/
+    upload/dual-write path (the cmd_broadcast pattern). Backlog-flavored
+    defaults applied here (not in the parser) so direct callers get them too:
+    workstream "general", priority P3 (it's deferred work by definition).
+    """
+    args.assignee = routing.BACKLOG_AUDIENCE
+    if not getattr(args, "workstream", None):
+        args.workstream = "general"
+    if not getattr(args, "priority", None):
+        args.priority = "P3"
+    return cmd_tell(args, backend=backend, marker_tag=routing.IDEA_TAG)
 
 
 def cmd_broadcast(args: Any, backend: Optional[list[str]] = None) -> int:

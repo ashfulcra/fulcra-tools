@@ -17,6 +17,16 @@ from typing import Any, Optional
 from .views import _parse_dt  # the ONE parsed-datetime helper (never lexical)
 
 REVIEW_TAG = "kind:review"
+# Loop-kind membership markers, same pattern as REVIEW_TAG: an EXTRA tag on the
+# legacy directive-task (never the task's ``kind`` field) that the dual-write
+# mapper reads to pick the directive's loop kind. ``kind:idea`` marks a backlog
+# capture (`fulcra-coord later`); the directive mirrors as kind=idea.
+IDEA_TAG = "kind:idea"
+# The role audience backlog captures are addressed to. A ROLE nobody holds by
+# default: the item sits durably on the bus, inbox-spams NOBODY (role matching
+# delivers @role only to declared holders), and a future backlog-groomer agent
+# can `connect --role backlog` to receive the whole backlog.
+BACKLOG_AUDIENCE = "@backlog"
 ROUTE_EVENT_TYPES = ("routed", "rerouted")
 
 
