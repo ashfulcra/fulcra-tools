@@ -75,6 +75,16 @@ non-code deliverable) on the bus; verdicts ride the bus
 sugar a human/agent invokes separately. Enforced by
 `packages/fulcra-coord/tests/test_forge_agnostic.py`.
 
+## In-session listening (coord bus)
+Long-running interactive sessions arm a background watcher that polls the bus
+**directly** — raw `tasks/` listings, never the view files — for new work
+addressed to them. The materialized views (`views/summaries.json`,
+`views/presence.json`) refresh only when an upload succeeds, so they may lag
+hours under backend pressure; and the listener app's notification cannot wake
+a session — only the session's own direct poll can. (The CLI read commands
+self-heal via `FULCRA_COORD_VIEW_STALE_MIN`, but an in-session watcher should
+not depend on views at all.)
+
 ## Backlog convention
 When the operator gives you a "do later" / backlog item, put it ON THE BUS:
 `fulcra-coord later "<title>" -s "<context>"`. Backlog lives on the bus — never

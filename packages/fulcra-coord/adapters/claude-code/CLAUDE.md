@@ -121,6 +121,13 @@ create mean you're sharing a checkout — move out before committing.
    open questions, next actions, and repo/ref/path or Fulcra remote artifacts
    instead of local-only paths. See
    `packages/fulcra-coord/docs/continuity-handoff.md`.
+11. **In-session listening polls the bus DIRECTLY.** A long-running interactive
+   session arms a background watcher that polls raw `tasks/` listings — never
+   the view files — for new work addressed to it. Views (`summaries`,
+   `presence`) may lag for hours under backend pressure (2026-06-10: stale
+   views hid 6 review verdicts + 2 direct messages from every polling agent),
+   and the listener app's notification cannot wake a session — only the
+   session's own direct poll can.
 
 ## Code review & merge (global — every repo)
 **Nothing merges without an independent review by a *different agent identity*
