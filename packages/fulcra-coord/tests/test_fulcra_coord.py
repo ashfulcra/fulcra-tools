@@ -9772,6 +9772,136 @@ class TestReconcileParallelUpload(unittest.TestCase):
                              "queued views past the deadline must not start uploads")
 
 
+class TestReconcileUploadRetry(unittest.TestCase):
+    """Bounded in-tick retry for reconcile view uploads (burst-throttling fix).
+
+    Live 0.15.0 evidence (two hosts): under reconcile's parallel upload burst a
+    ROTATING subset of views fails each tick (backend throttling / transient
+    5xx) while single raw uploads succeed in <1s. Each failed view burned its
+    timeout and failed the tick — self-healing next tick, but EVERY tick was
+    partially failing and views went stale. The fix: each failed view upload is
+    retried ONCE after a short jitter sleep, but only when there is real
+    deadline headroom; a second failure is final and keeps the exact pre-fix
+    semantics (failures list -> markers preserved -> exit 1).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        # Tests control the knob explicitly; never inherit it from the host env.
+        os.environ.pop("FULCRA_COORD_UPLOAD_RETRY", None)
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+        os.environ.pop("FULCRA_COORD_UPLOAD_RETRY", None)
+
+    # Two small views keep the pool deterministic; the index view is the one
+    # we make flaky (it ends in /index.json after _view_name_to_remote).
+    _VIEWS = {"index": {"tasks": []}, "active": {"tasks": []}}
+
+    @staticmethod
+    def _flaky_uploader(fail_suffix, fail_first_n):
+        """upload_json fake: paths ending in ``fail_suffix`` fail their first
+        ``fail_first_n`` calls and succeed afterwards (None = fail forever).
+        Returns (fn, per-path call counts) — counts are the retry oracle."""
+        import threading
+        counts: dict = {}
+        lock = threading.Lock()
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            with lock:
+                counts[path] = counts.get(path, 0) + 1
+                n = counts[path]
+            if path.endswith(fail_suffix):
+                if fail_first_n is None or n <= fail_first_n:
+                    return False
+            return True
+
+        return upload_json, counts
+
+    def _run_reconcile(self, uploader, sleep_mock):
+        from fulcra_coord.cli import cmd_reconcile
+        with patch("fulcra_coord.cli._load_all_tasks", return_value=[]), \
+             patch("fulcra_coord.cli.views.build_all_views",
+                   return_value=dict(self._VIEWS)), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=uploader), \
+             patch("fulcra_coord.cli._retry_sleep", sleep_mock), \
+             patch("fulcra_coord.cli._reconcile_presence"), \
+             patch("fulcra_coord.cli._info") as info:
+            rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+        return rc, info
+
+    @staticmethod
+    def _index_attempts(counts):
+        return sum(n for p, n in counts.items() if p.endswith("/index.json"))
+
+    def test_fail_once_then_recover_on_retry(self):
+        """A transient (fail-once) view upload recovers in-tick: the view is
+        NOT a failure, reconcile exits 0, and the recovery is reported."""
+        from unittest.mock import MagicMock
+        uploader, counts = self._flaky_uploader("/index.json", fail_first_n=1)
+        rc, info = self._run_reconcile(uploader, MagicMock())
+
+        self.assertEqual(rc, 0, "a recovered-on-retry view must not fail the tick")
+        self.assertEqual(self._index_attempts(counts), 2,
+                         "exactly one retry after the transient failure")
+        messages = [str(c.args[0]) for c in info.call_args_list if c.args]
+        self.assertTrue(any("recovered on retry" in m for m in messages),
+                        f"recovery must be reported; got: {messages}")
+
+    def test_fail_twice_is_final_failure_rc1(self):
+        """A view that fails the attempt AND the retry stays a failed view:
+        exit 1 (markers preserved by the unchanged downstream path), exactly
+        one retry (bounded — never a retry loop), and the final failure leaves
+        a diagnosable ops-log record."""
+        from unittest.mock import MagicMock
+        uploader, counts = self._flaky_uploader("/index.json", fail_first_n=None)
+        rc, _ = self._run_reconcile(uploader, MagicMock())
+
+        self.assertEqual(rc, 1, "a twice-failed view upload must surface as exit 1")
+        self.assertEqual(self._index_attempts(counts), 2,
+                         "retry is bounded to exactly one extra attempt")
+        ops = cache.read_ops_log()
+        self.assertTrue(any(e.get("status") == "view_upload_failed" for e in ops),
+                        "final upload failure must land in the local ops log")
+
+    def test_retry_disabled_via_env(self):
+        """FULCRA_COORD_UPLOAD_RETRY=0 restores the pre-fix single attempt."""
+        from unittest.mock import MagicMock
+        os.environ["FULCRA_COORD_UPLOAD_RETRY"] = "0"
+        uploader, counts = self._flaky_uploader("/index.json", fail_first_n=None)
+        sleep = MagicMock()
+        rc, _ = self._run_reconcile(uploader, sleep)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._index_attempts(counts), 1,
+                         "retry disabled => exactly one attempt")
+        sleep.assert_not_called()
+
+    def test_no_retry_without_deadline_headroom(self):
+        """With a nearly-expired deadline (2s budget < jitter + per-upload
+        floor + 2s slack) the retry must be skipped entirely — no jitter sleep,
+        single attempt — so the retry can never push reconcile past its
+        deadline ceiling."""
+        from unittest.mock import MagicMock
+        uploader, counts = self._flaky_uploader("/index.json", fail_first_n=None)
+        sleep = MagicMock()
+        old_timeout = os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS")
+        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "2"
+        try:
+            rc, _ = self._run_reconcile(uploader, sleep)
+        finally:
+            if old_timeout is None:
+                del os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"]
+            else:
+                os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = old_timeout
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._index_attempts(counts), 1,
+                         "no headroom => no retry attempt")
+        sleep.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Debug sweep rounds 2-3 (v0.5.6)
 # ---------------------------------------------------------------------------
