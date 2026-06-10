@@ -24,7 +24,7 @@ def test_read_missing_returns_none(fake_api):
 def test_written_bytes_are_canonical(fake_api):
     store = FulcraStore(fake_api)
     store.write_json("prefs/meta.json", {"b": 1.23456789, "a": 1})
-    assert fake_api.files["prefs/meta.json"] == b'{"a":1,"b":1.234568}'
+    assert fake_api.files["/prefs/meta.json"] == b'{"a":1,"b":1.234568}'
 
 def test_ingest_signal_posts_data_record_v1(fake_api):
     store = FulcraStore(fake_api)

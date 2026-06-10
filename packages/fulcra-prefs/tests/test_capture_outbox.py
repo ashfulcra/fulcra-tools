@@ -65,8 +65,8 @@ def test_flush_backfills_signals_cache_shard(fake_api, tmp_path):
     fake_api.fail_ingest = False
     flushed = box.flush(store)
     assert flushed == 1
-    # Shard must exist under prefs/signals-cache/ with the temp id as the stem.
-    shard_key = f"prefs/signals-cache/{sig.id}.json"
+    # Shard must exist under /prefs/signals-cache/ (absolute path) with the temp id as the stem.
+    shard_key = f"/prefs/signals-cache/{sig.id}.json"
     assert shard_key in fake_api.files, \
         f"expected shard {shard_key!r} in fake_api.files; got {list(fake_api.files)}"
 

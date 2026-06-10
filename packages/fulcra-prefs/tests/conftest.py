@@ -40,9 +40,14 @@ class FakeResponse:
 
 class FakeFulcraAPI:
     def __init__(self):
-        self.files: dict[str, bytes] = {}      # path -> content
+        self.files: dict[str, bytes] = {}      # path -> content (normalized to absolute)
         self.ingested: list[dict] = []         # posted record bodies
         self.fail_ingest = False
+
+    @staticmethod
+    def _abs(path: str) -> str:
+        """Normalize paths to absolute (leading slash) to match real API contract."""
+        return path if path.startswith("/") else "/" + path
 
     # --- file library (matches fulcra_api.core.FulcraAPI shapes) ---
 
@@ -51,6 +56,7 @@ class FakeFulcraAPI:
         Raises Exception("File not found in Fulcra Library: <filepath>") when
         absent — matching the real library's exact error message and shape.
         Callers do match["id"], NOT matches[0]["id"]."""
+        filepath = self._abs(filepath)
         if filepath not in self.files:
             raise Exception(f"File not found in Fulcra Library: {filepath}")
         return {"id": f"v-{filepath}", "name": filepath.rsplit('/', 1)[-1]}
@@ -60,6 +66,7 @@ class FakeFulcraAPI:
         return FakeResponse(self.files[path])
 
     def upload_file(self, data: io.BufferedReader, file_type, file_size, filepath):
+        filepath = self._abs(filepath)
         self.files[filepath] = data.read()
         return {"url": "fake://uploaded", "id": f"v-{filepath}"}
 
@@ -67,6 +74,7 @@ class FakeFulcraAPI:
         """Returns {"files": [...]} dict mirroring the real library's shape.
         The real list_files wraps results in a top-level dict; callers must
         extract result["files"]."""
+        path = self._abs(path)
         prefix = path.rstrip("/") + "/"
         files = [
             {"id": f"v-{p}", "path": p, "name": p.rsplit("/", 1)[-1]}
