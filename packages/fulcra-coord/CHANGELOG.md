@@ -10,6 +10,46 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — host wake-exec: the listener can wake an agent runtime, not just notify
+
+**Why:** operator directive (2026-06-10): "that needs to be part of the
+product. this can't die if i do other stuff for a bit. the whole point was to
+enable multiple simultaneous workflows better." The host listener
+(launchd/cron `notify-inbox`) detects actionable bus work but could only
+NOTIFY — when the operator was away and a session was idle/dead, directives
+and review verdicts sat unprocessed. In-session watchers die with the session;
+only Codex had an exec-style self-heal (`ensure-codex-watch`), and even that
+arms a listener rather than starting a runtime.
+
+**What:**
+- **Core mechanism** (`fulcra_coord/wake.py`, platform-neutral — pinned by a
+  grep test, zero agent-runtime strings in core): every `notify-inbox` tick
+  with pending work consults the optional per-adopter
+  `${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/wake.json` (longest-prefix match
+  on agent id; fail-safe loader modeled on `review-routing.json`) and spawns
+  the configured `cmd` DETACHED, with `FULCRA_COORD_AGENT` +
+  `FULCRA_COORD_WAKE_PENDING` in its env and output appended to the listener
+  logs dir (`wake-<agent-slug>.log`). Safety rails: per-agent
+  `min_interval_min` throttle marker (armed only after a successful spawn),
+  single-flight pidfile (a still-running wake skips the next), full
+  try/except so a wake problem can never break a polling tick. No config →
+  byte-for-byte the old notify-only behavior. Runaway protection is the
+  spawned command's own job (`max_runtime_s` is documented intent; core ships
+  no process manager).
+- **Adapter** (`install-claude-code --with-wake`): seeds this agent's
+  wake.json entry with a documented placeholder command (`claude -p "BUS
+  WAKE: …process your fulcra-coord inbox…then exit"`), merging surgically —
+  other agents' entries and an operator-customized entry for the same agent
+  are never clobbered; uninstall removes only this agent's key. Prints a loud
+  post-install note: the command runs UNATTENDED with the host's default
+  permissions — review wake.json (it is the customization point for binary
+  path / permission + timeout flags).
+- `wake.example.json` ships in the repo with claude-code / codex / openclaw
+  entries clearly marked as EXAMPLES.
+- Test hermeticity: the suite now isolates `XDG_CONFIG_HOME` too — otherwise
+  a test driving a notify-inbox tick on an operator machine could read the
+  REAL wake.json and spawn a REAL agent runtime mid-suite.
+
 ## [Unreleased] — single task writes retry once and verify delivery (silent single-write loss)
 
 **Why:** Live evidence (2026-06-10, four occurrences in one evening): under
@@ -48,7 +88,6 @@ attempt.
   backend fails every first upload, which would otherwise add ~70s of pure
   sleep to the suite); jitter-asserting tests patch `writepipe._retry_sleep`
   themselves.
-
 ## [Unreleased] — roles as durable identity: registry, leases, vacancy escalation
 
 **Why:** Sessions are ephemeral (Claude Code / Codex sessions die, sleep, get
