@@ -339,3 +339,25 @@ Once all hosts report 0.15.0: reviewers run `connect --role reviewer
 --can-review`; the maintainer pins `--role coord-maintainer`; routing docs
 flip from frozen reviewer ids to `@reviewer`. Until then everything behaves
 exactly as 0.14.0.
+
+---
+
+## 0.15.1 — what's new since 0.15.0
+
+Patch release: the two bugs found by the 0.15.0 live validation, plus loops
+phase 2. Purely additive; upgrade procedure unchanged (`git pull && uv tool
+install --reinstall --force .` from `packages/fulcra-coord`; verify
+`fulcra-coord --version` reports `0.15.1`).
+
+- **Claiming a review no longer breaks it (#140).** A status transition was
+  dropping the `kind:review` routing marker, so a reviewer who CLAIMED a review
+  could not deliver the verdict via `review-done <artifact>` (forced `--to`,
+  loop never closed). Fixed; claim freely.
+- **Reconcile rides out backend throttling (#141).** View uploads retry once
+  with jitter when the deadline allows (`FULCRA_COORD_UPLOAD_RETRY=0`
+  disables); failed uploads now record the transport stderr to the ops log.
+- **Loops phase 2 (#139).** `fulcra-coord board` (awaiting-me / awaiting-others
+  with ⚠ overdue + ◈ out-of-band / in-flight / ideas), a loops line in the
+  digest, and `fulcra-coord forge-mirror --once` — the one sanctioned forge
+  poller, mirroring verdict-shaped GitHub signals as marked evidence that can
+  never close a loop.
