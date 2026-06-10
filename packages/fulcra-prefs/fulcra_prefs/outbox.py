@@ -12,6 +12,7 @@ class Outbox:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def spool(self, record: dict) -> Path:
+        # Same key+observed_at+platform => same temp id => same filename: identical re-captures dedup by overwrite (intentional).
         sid = record["metadata"]["source"][0].rsplit(".", 1)[-1]
         p = self.root / f"{sid}.json"
         p.write_text(json.dumps(record, sort_keys=True))
@@ -28,7 +29,7 @@ class Outbox:
             try:
                 store._api.fulcra_api("/ingest/v1/record", data=record,
                                       method="POST")
-            except Exception:
+            except (OSError, ConnectionError, TimeoutError):
                 continue                     # keep spooled; retry next flush
             p.unlink()
             flushed += 1

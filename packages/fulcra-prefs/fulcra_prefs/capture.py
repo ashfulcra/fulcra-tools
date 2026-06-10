@@ -22,9 +22,10 @@ def capture_signal(store: FulcraStore, outbox: Outbox, *, data_type: str,
                  confidence=confidence, half_life_days=half_life_days,
                  observed_at=observed, platform=platform, agent=agent,
                  session=session, supersedes=supersedes)
+    # Only transport failures spool; programming errors must propagate loudly.
     try:
         store.ingest_signal(sig, data_type=data_type)
-    except Exception:
+    except (OSError, ConnectionError, TimeoutError):
         record = {"data": json.dumps(sig.to_payload()),
                   "metadata": {"content_type": "application/json",
                                "data_type": data_type,
