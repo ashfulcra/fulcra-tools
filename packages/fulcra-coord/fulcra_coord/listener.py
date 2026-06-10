@@ -29,8 +29,8 @@ Three scheduling mechanisms, one per environment:
     not per-machine. Because each job polls one agent's inbox
     (``notify-inbox --agent X``), the launchd label / plist basename / cron marker
     are all derived from ``agent_slug(agent)`` (the same slug as the inbox view
-    files — one source of truth). Co-located agents (e.g. ``codex:Mac:main`` and
-    ``claude-code:Mac:fulcra-tools``) therefore get DISTINCT coexisting jobs; a
+    files — one source of truth). Co-located agents (e.g. ``codex:<host>:main`` and
+    ``claude-code:<host>:fulcra-tools``) therefore get DISTINCT coexisting jobs; a
     second agent's install no longer clobbers the first's. (The heartbeat stays a
     correct singleton — one reconcile sweep per machine — and is untouched.) A
     pre-0.5.3 machine-global job is migrated on install: superseded if it watched

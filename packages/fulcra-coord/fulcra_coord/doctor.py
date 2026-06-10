@@ -29,7 +29,7 @@ from .digest import _assess_fleet
 def cmd_capabilities(args: Any, backend: Optional[list[str]] = None) -> int:
     """Print this build's version + the commands it supports — a capability probe.
 
-    ArcBot-2 flagged that onboarding instructions can drift ahead of the
+    A reviewer flagged that onboarding instructions can drift ahead of the
     installed CLI: a doc tells an agent to run a subcommand its build doesn't
     have yet. This gives onboarding a machine-readable check —
     ``capabilities --format json`` returns ``{name, version, commands}`` so a
