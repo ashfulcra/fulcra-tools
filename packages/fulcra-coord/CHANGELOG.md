@@ -10,6 +10,48 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.15.3 / Unreleased] — version self-incorporation: the fleet stays current from a bus pointer
+
+**Why:** operator directive (2026-06-10): "i'm not going to go around and
+wake the entire fleet for each incremental upgrade." Every release needed a
+manual "UPDATE NOW" broadcast plus per-host hand-holding; hosts that missed
+it silently froze on an old subcommand set. Now the bus carries a canonical
+version manifest and every host incorporates new releases automatically —
+**default ON** (an explicit operator call, superseding the reconciled spec's
+gated/opt-in note), env opt-out `FULCRA_COORD_SELF_UPDATE=0`.
+
+**What:**
+- **Version manifest on the bus** (`runtime/version.json`, schema
+  `fulcra.coordination.version.v1`): published by the new maintainer command
+  `fulcra-coord announce-version` at each release — announces the INSTALLED
+  `__version__` + best-effort `git rev-parse HEAD`, verify-after-write
+  (post-upload stat, the writepipe pattern). **The pointer rule** (the
+  reconciled spec's non-negotiable safety boundary): the manifest is a
+  version *pointer* — version string + commit sha + optional
+  `min_supported` — never code, commands, or URLs; its validator REJECTS
+  any extra key (pinned by test), and a malformed/tampered manifest reads
+  as "never behind" (fail-closed).
+- **The check** (`fulcra_coord/selfupdate.py`): `connect` (session start,
+  unthrottled, BEFORE the presence write) and the `notify-inbox` listener
+  tick (throttled, one check per `FULCRA_COORD_SELF_UPDATE_INTERVAL_H`,
+  default 6h) compare the installed version against the manifest. Behind →
+  run the update from **local config only**: `update-cmd.json`
+  `{"cmd": [...], "cwd": ...}` wins; else `update.json`
+  `{"checkout": "/path/to/fulcra-tools"}` drives the built-in default
+  (`git -C <checkout> pull --ff-only` + `uv tool install --reinstall
+  --force <checkout>/packages/fulcra-coord`) with argv built in code from
+  the configured path — nothing read off the bus ever reaches an exec
+  boundary. Bounded 300s/step, output appended to `<cache>/self-update.log`.
+  A successful update takes effect on the NEXT invocation (no re-exec).
+- **Visible degradation, never breakage:** behind-but-can't-update (no
+  config, or the update failed) warns once, writes a local stale marker,
+  and the presence summary carries `(vX behind canonical Y)` on the roster.
+  Both call sites are fully best-effort — a self-update problem can never
+  fail a session boot or a polling tick.
+- **Rollout:** 0.15.3 is the first self-propagating release — once a host
+  is on 0.15.3+ (one last manual update) it incorporates every later
+  release automatically.
+
 ## [Unreleased] — host wake-exec: the listener can wake an agent runtime, not just notify
 
 **Why:** operator directive (2026-06-10): "that needs to be part of the

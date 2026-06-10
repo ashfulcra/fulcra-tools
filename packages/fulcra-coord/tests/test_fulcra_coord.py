@@ -7915,14 +7915,15 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_2(self):
-        # 0.15.2: URGENT cut — #147 staleness-guarded reads. Under backend
-        # write-throttling (95% burst failure observed 2026-06-10), views go
-        # hours stale and every pre-#147 host reads BLIND (invisible verdicts,
-        # directives, review requests). This cut gets the direct-listing
-        # fallback to the fleet ahead of the in-flight #150/roles work.
+    def test_version_is_0_15_3(self):
+        # 0.15.3: version self-incorporation (operator directive 2026-06-10:
+        # "i'm not going to go around and wake the entire fleet for each
+        # incremental upgrade"). announce-version publishes the canonical
+        # manifest; connect + the listener tick self-update from it, default
+        # ON. The FIRST self-propagating release: hosts need one last manual
+        # update onto 0.15.3, after which every later release auto-applies.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.2")
+        self.assertEqual(__version__, "0.15.3")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
