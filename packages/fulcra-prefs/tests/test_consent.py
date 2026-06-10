@@ -35,3 +35,9 @@ def test_disclosure_signal_records_what_was_shared():
     assert sig.key == "consent.disclosure.ea-agent"
     assert sig.value == {"keys": ["dining.cuisine.thai"], "audience": "ea-agent"}
     assert sig.observed_at == "2026-06-10T12:00:00+00:00"
+
+def test_naive_expires_string_treated_as_utc_not_crash():
+    live = grant(expires="2099-01-01T00:00:00")      # naive, far future
+    dead = grant(expires="2020-01-01T00:00:00")      # naive, past
+    assert filter_for_audience(DOC, [live], "ea-agent", NOW)["keys"] != {}
+    assert filter_for_audience(DOC, [dead], "ea-agent", NOW)["keys"] == {}
