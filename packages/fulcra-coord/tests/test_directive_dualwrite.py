@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fulcra_coord import schema, remote, routing, views
+from fulcra_coord import schema, remote, routing, views, loops, loop_ops
 from fulcra_coord.schema import validate_directive
 
 
@@ -129,6 +129,17 @@ class TestDirectiveFromTask:
         t["tags"] = sorted(set(t.get("tags", []) + [routing.REVIEW_TAG]))
         d = directives.directive_from_task(t)
         assert d["directive_type"] == "review"
+
+    def test_review_directive_is_open_review_loop(self):
+        from fulcra_coord import directives
+        t = _task()
+        t["tags"] = sorted(set(t.get("tags", []) + [routing.REVIEW_TAG]))
+        d = directives.directive_from_task(t)
+        assert d["kind"] == "review"
+        assert d["state"] == "requested"
+        assert d["expects_response"] is True
+        assert d["sla_hours"] == 24
+        assert loops.is_open_loop(d)
 
     def test_from_audience_and_backref(self):
         from fulcra_coord import directives
@@ -484,8 +495,40 @@ def test_request_review_dual_writes_review_directive(coord_backend, monkeypatch)
     d = _read_directive(coord_backend, ids[0])
     assert d is not None
     assert d["directive_type"] == "review"
+    assert d["kind"] == "review"
+    assert d["expects_response"] is True
+    assert loops.is_open_loop(d)
     assert d["artifact_ref"] == {"ref": "42", "repo": "fulcra-tools"}
     assert validate_directive(d) == [], validate_directive(d)
+
+
+def test_review_done_closes_original_review_loop(coord_backend, monkeypatch):
+    from fulcra_coord import routing_ops
+    _patch_presence(monkeypatch, routing_ops)
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "claude-code:author:r")
+    assert routing_ops.cmd_request_review(_rr_args(), backend=coord_backend) == 0
+    review_id = next(
+        did for did in _list_directive_ids(coord_backend)
+        if _read_directive(coord_backend, did)["directive_type"] == "review"
+    )
+
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "codex:rev:main")
+    rc = routing_ops.cmd_review_done(
+        _rd_args(artifact="42", verdict="approve", repo="fulcra-tools",
+                 note="suite green"),
+        backend=coord_backend)
+
+    assert rc == 0
+    events = loop_ops.read_loop_responses(review_id, backend=coord_backend)
+    assert len(events) == 1
+    assert events[0]["by"] == "codex:rev:main"
+    assert events[0]["outcome"] == {"verdict": "approve", "note": "suite green"}
+    folded = loop_ops.fold_loop(_read_directive(coord_backend, review_id),
+                                backend=coord_backend)
+    assert folded["outcome"]["verdict"] == "approve"
+    assert not loops.is_open_loop(folded)
 
 
 def test_directive_write_failure_does_not_fail_request_review(coord_backend, monkeypatch):

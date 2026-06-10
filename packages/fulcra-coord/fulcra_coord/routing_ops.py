@@ -319,8 +319,8 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
 REVIEW_VERDICT_TAG = "kind:review-verdict"
 
 
-def _resolve_review_author(artifact: str, *, backend=None) -> Optional[str]:
-    """Find the AUTHOR who requested review of this artifact, or None.
+def _resolve_review_request(artifact: str, *, backend=None) -> Optional[dict[str, Any]]:
+    """Find the open kind:review task for this artifact, or None.
 
     request-review records the author as ``owner_agent`` on the routed
     kind:review directive and stores the opaque artifact ref verbatim in
@@ -344,10 +344,17 @@ def _resolve_review_author(artifact: str, *, backend=None) -> Optional[str]:
             continue
         if str(t.get("pr")) != target:  # EXACT stored-ref match, no substrings
             continue
-        author = t.get("owner_agent")
-        if author:
-            return author
+        return t
     return None
+
+
+def _resolve_review_author(artifact: str, *, backend=None) -> Optional[str]:
+    """Find the AUTHOR who requested review of this artifact, or None."""
+    request = _resolve_review_request(artifact, backend=backend)
+    if not request:
+        return None
+    author = request.get("owner_agent")
+    return author if author else None
 
 
 def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -377,8 +384,12 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     artifact_display = (f"#{artifact}" if str(artifact).isdigit() else str(artifact))
 
     # Resolve the author the verdict is directed at. --to is the explicit override;
-    # otherwise derive it from the original review request. Never guess.
-    author = to or _resolve_review_author(artifact, backend=backend)
+    # otherwise derive it from the original review request. Never guess. Keep the
+    # original request too so review-done can close its mirrored review loop via a
+    # bus response shard; the verdict directive below remains for mixed-fleet
+    # readers that do not fold loops yet.
+    review_request = None if to else _resolve_review_request(artifact, backend=backend)
+    author = to or ((review_request or {}).get("owner_agent") if review_request else None)
 
     # --dry-run must NEVER hard-fail: it's a planning/preview mode, so an
     # unresolved author prints the plan with a "<unresolved — pass --to>"
@@ -432,6 +443,32 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
         # Shared low-layer writer; never fails the authoritative task write.
         from . import directives
         directives.dual_write(task, command="review-done", backend=backend)
+        if review_request and review_request.get("id"):
+            from . import loop_ops
+            loop_id = directives.stable_directive_id(review_request["id"])
+            loop_record = remote.download_json(remote.directive_remote_path(loop_id),
+                                               backend=backend)
+            if isinstance(loop_record, dict):
+                outcome: dict[str, Any] = {"verdict": verdict}
+                if note:
+                    outcome["note"] = note
+                response_ok = loop_ops.append_loop_response(
+                    loop_id, {"by": reviewer, "outcome": outcome}, backend=backend)
+                if not response_ok:
+                    _warn(f"review-done response write failed for {artifact_display}; "
+                          "review loop may still be open")
+                    try:
+                        ops_log.log_op("review-done", loop_id,
+                                       status="response_write_failed")
+                    except Exception:
+                        pass
+                    return 1
+                try:
+                    folded = loop_ops.fold_loop(loop_record, backend=backend)
+                    remote.upload_json(folded, remote.directive_remote_path(loop_id),
+                                       backend=backend)
+                except Exception:
+                    pass
     _info(f"Review verdict ({verdict}) on {artifact_display} sent to {author}.")
     return 0 if ok else 1
 
