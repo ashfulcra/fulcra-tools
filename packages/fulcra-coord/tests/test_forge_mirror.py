@@ -198,3 +198,21 @@ def test_repo_filter_excludes_other_repos(coord_backend):
     assert rc == 0
     assert gh_calls == []
     assert loop_ops.read_loop_evidence(d["id"], backend=coord_backend) == []
+
+
+def test_production_ref_shape_is_probed(coord_backend):
+    """REGRESSION: production records (directives.directive_from_task ~:336)
+    store the opaque artifact as artifact_ref["ref"], not "pr". Keying the
+    mirror on "pr" alone silently skipped every real request-review loop —
+    the mirror must accept the production shape."""
+    d = _seed_loop(coord_backend,
+                   artifact_ref={"ref": "101", "repo": "ashfulcra/fulcra-tools"})
+    gh_calls: list = []
+    with patch("fulcra_coord.forge_mirror.subprocess.run",
+               side_effect=_gh_fake(_VERDICT_PAYLOAD, gh_calls=gh_calls)):
+        rc = forge_mirror.cmd_forge_mirror(_args(), backend=coord_backend)
+    assert rc == 0
+    assert len(gh_calls) == 1                       # the loop WAS probed
+    evidence = loop_ops.read_loop_evidence(d["id"], backend=coord_backend)
+    assert evidence                                  # and evidence landed
+    assert all(e["source"] == "forge-mirror" for e in evidence)

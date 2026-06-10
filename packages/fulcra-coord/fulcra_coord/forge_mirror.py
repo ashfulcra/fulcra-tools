@@ -175,10 +175,17 @@ def cmd_forge_mirror(args: Any, backend: Optional[list[str]] = None) -> int:
         if loops.loop_kind_of(r) != "review" or not loops.is_open_loop(r):
             continue
         ref = r.get("artifact_ref")
-        if not (isinstance(ref, dict) and "pr" in ref and "repo" in ref):
+        # Production records (directives.directive_from_task) store the opaque
+        # artifact under "ref"; "pr" is tolerated for forward-compat/hand-built
+        # records. Keying on "pr" alone silently skipped every real loop.
+        if not isinstance(ref, dict) or "repo" not in ref:
             skipped += 1   # open review loop, but nothing probeable on a forge
             continue
-        pr, repo = ref["pr"], ref["repo"]
+        pr = ref.get("pr") or ref.get("ref")
+        repo = ref["repo"]
+        if not pr:
+            skipped += 1
+            continue
         if repo_filter and str(repo) != str(repo_filter):
             skipped += 1
             continue
