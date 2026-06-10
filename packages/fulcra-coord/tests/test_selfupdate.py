@@ -313,6 +313,82 @@ class TestMaybeSelfUpdate(_CfgEnvBase):
 
 
 # ---------------------------------------------------------------------------
+# Wiring: connect (ordering + roster suffix) and the listener tick
+# ---------------------------------------------------------------------------
+
+class TestConnectWiring(_CfgEnvBase):
+    def _args(self, **kw):
+        base = dict(agent="claude-code:h:r", workstream=None, summary="",
+                    format="json", can_review=False, role=None)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_update_attempt_precedes_presence_write(self):
+        """The roster must reflect POST-update staleness, so the check runs
+        BEFORE the presence write — patch both and record call order."""
+        from fulcra_coord.presence import cmd_connect
+        order = []
+        with patch("fulcra_coord.selfupdate.maybe_self_update",
+                   side_effect=lambda **kw: order.append("update") or "current"), \
+             patch("fulcra_coord.presence._write_presence",
+                   side_effect=lambda rec, backend=None: order.append("presence") or True), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
+                   return_value=[]):
+            cmd_connect(self._args(), backend=["false"])
+        self.assertEqual(order[0], "update")
+        self.assertIn("presence", order)
+        self.assertLess(order.index("update"), order.index("presence"))
+
+    def test_stale_marker_suffixes_connect_summary(self):
+        """Visible degradation: when the host is behind and couldn't update,
+        the presence summary carries '(vX behind canonical Y)' on the roster."""
+        from fulcra_coord.presence import cmd_connect
+        captured = {}
+        with patch("fulcra_coord.selfupdate.maybe_self_update",
+                   side_effect=lambda **kw: selfupdate._write_stale_marker(
+                       __version__, "99.0.0") or "degraded-no-config"), \
+             patch("fulcra_coord.presence._write_presence",
+                   side_effect=lambda rec, backend=None: captured.update(rec=rec) or True), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
+                   return_value=[]):
+            cmd_connect(self._args(summary="building things"), backend=["false"])
+        self.assertIn("building things", captured["rec"]["summary"])
+        self.assertIn(f"(v{__version__} behind canonical 99.0.0)",
+                      captured["rec"]["summary"])
+
+    def test_selfupdate_failure_never_fails_connect(self):
+        from fulcra_coord.presence import cmd_connect
+        with patch("fulcra_coord.selfupdate.maybe_self_update",
+                   side_effect=RuntimeError("boom")), \
+             patch("fulcra_coord.presence._write_presence", return_value=True), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
+                   return_value=[]):
+            self.assertEqual(cmd_connect(self._args(), backend=["false"]), 0)
+
+
+class TestListenerTickWiring(_CfgEnvBase):
+    def test_notify_inbox_calls_throttled_check(self):
+        from fulcra_coord.inbox import cmd_notify_inbox
+        with patch("fulcra_coord.inbox._load_inbox", return_value=[]), \
+             patch("fulcra_coord.inbox._notify_new_needs_me"), \
+             patch("fulcra_coord.selfupdate.maybe_self_update",
+                   return_value="throttled") as msu:
+            args = types.SimpleNamespace(agent="claude-code:h:r")
+            self.assertEqual(cmd_notify_inbox(args, backend=["false"]), 0)
+        msu.assert_called_once()
+        self.assertTrue(msu.call_args.kwargs.get("throttle"))
+
+    def test_tick_survives_selfupdate_explosion(self):
+        from fulcra_coord.inbox import cmd_notify_inbox
+        with patch("fulcra_coord.inbox._load_inbox", return_value=[]), \
+             patch("fulcra_coord.inbox._notify_new_needs_me"), \
+             patch("fulcra_coord.selfupdate.maybe_self_update",
+                   side_effect=RuntimeError("boom")):
+            args = types.SimpleNamespace(agent="claude-code:h:r")
+            self.assertEqual(cmd_notify_inbox(args, backend=["false"]), 0)
+
+
+# ---------------------------------------------------------------------------
 # announce-version — the maintainer's release-time publish
 # ---------------------------------------------------------------------------
 

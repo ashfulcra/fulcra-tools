@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity, listener, wake
+from . import cache, remote, schema, views, identity, listener, selfupdate, wake
 from .io import _cache_remote_task, _load_task, _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
 from .writepipe import _view_name_to_remote, _write_task_and_views
@@ -411,6 +411,15 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # of the agent's own inbox: a tick with an empty inbox can still alert on
         # a new blocked-on-you item. Best-effort within the same fail-safe guard.
         _notify_new_needs_me(backend=backend)
+        # VERSION SELF-INCORPORATION (operator directive 2026-06-10): the
+        # durable listener is the call site that keeps an OPERATOR-ABSENT host
+        # current — exactly the host that would otherwise freeze on an old
+        # build until someone manually woke it. Throttled (default one check
+        # per 6h, FULCRA_COORD_SELF_UPDATE_INTERVAL_H) because ticks run every
+        # few minutes and the manifest is one remote read; the callee itself
+        # never raises (fail-safe contract), and runs LAST so an update can
+        # never delay this tick's notify/wake delivery.
+        selfupdate.maybe_self_update(backend=backend, throttle=True)
     except Exception as e:
         # A polling tick that fails must not bring down the scheduler; report to
         # stderr and exit clean (fail-safe contract).
