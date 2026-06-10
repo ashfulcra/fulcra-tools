@@ -15,6 +15,7 @@ from . import cache, remote, schema, views, log as ops_log, heartbeat, identity
 from . import env_int
 from . import events as _events, eventlog as _eventlog
 from . import directives as _directives
+from . import loops as _loops
 # Leaf-utility modules extracted from this file. Re-exported under the historical
 # underscore-prefixed names so every internal call site AND the test patch targets
 # (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
@@ -806,6 +807,58 @@ def _directive_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     }
 
 
+def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
+    """Open/overdue coordination-loop counts for the health record (spec
+    2026-06-09 Task 5).
+
+    REPORT-ONLY and best-effort, mirroring ``_event_parity_check`` /
+    ``_directive_parity_check``: it never mutates anything, and the caller wraps
+    it in the same try/except so a failure here can NEVER change reconcile's
+    exit code — the result, present or absent, is health debt only.
+
+    THE TOP-LEVEL-ONLY FILTER (load-bearing, same as ``_directive_parity_check``):
+    ``remote.directives_prefix()`` holds SUB-LOG SUBTREES (``<id>/acks/``,
+    ``<id>/routing/``, ``<id>/responses/``) beside the top-level
+    ``directives/<id>.json`` loop records. Only a path that, after stripping the
+    prefix, has NO further ``/`` and ends in ``.json`` is a loop record — a
+    shard counted as a record would inflate every count.
+
+    The fold itself is the pure ``loops.loop_board`` over THIS host's resolved
+    agent: ``awaiting_me`` = open loops directed at me, ``awaiting_others`` =
+    open loops I opened that nobody answered (with per-kind-SLA overdue flags).
+    Returned shape: ``{open_loops, overdue, awaiting_me}`` where ``open_loops``
+    is |awaiting_me| + |awaiting_others| and ``overdue`` counts the overdue
+    subset of ``awaiting_others`` — the loops-never-ANSWERED counterpart to the
+    undelivered (never-ARRIVED) check beside it in the health record.
+
+    Cost: one ``list_json`` sweep of the directives prefix.
+    """
+    prefix = remote.directives_prefix()
+    try:
+        listed = remote.list_json(prefix, backend=backend)
+    except Exception:
+        listed = []
+    records: list[dict] = []
+    for path, rec in listed:
+        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        if "/" in rel:
+            continue  # ack/routing/response shard — never a loop record
+        if not rel.endswith(".json"):
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    me = identity.resolve_agent(None)
+    board = _loops.loop_board(me, records, now=datetime.now(timezone.utc))
+    awaiting_me = board["awaiting_me"]
+    awaiting_others = board["awaiting_others"]
+    return {
+        "open_loops": len(awaiting_me) + len(awaiting_others),
+        "overdue": sum(1 for x in awaiting_others if x.get("overdue")),
+        "awaiting_me": len(awaiting_me),
+    }
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
     import time
@@ -1008,6 +1061,19 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             # break reconcile either); record["directive_parity"] is simply absent.
             try:
                 _warn(f"  Directive-parity check skipped (error): {_dpe}")
+            except Exception:
+                pass
+        # Coordination-loop health sub-pass (spec 2026-06-09 Task 5): open /
+        # overdue / awaiting-me counts from the pure board fold — the
+        # never-ANSWERED counterpart to the undelivered (never-ARRIVED) check
+        # below. REPORT-ONLY and best-effort, wrapped exactly like the parity
+        # passes above: the result, present or absent, NEVER changes
+        # reconcile's exit code, and the error is surfaced rather than eaten.
+        try:
+            record["loop_health"] = _loop_health_check(backend=backend)
+        except Exception as _lhe:
+            try:
+                _warn(f"  Loop-health check skipped (error): {_lhe}")
             except Exception:
                 pass
         # SAFETY NET: directives addressed to an OFFLINE/stale agent that were

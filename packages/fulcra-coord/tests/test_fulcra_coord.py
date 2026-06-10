@@ -11176,6 +11176,144 @@ class TestLoopsLayering(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Coordination-loop health (spec 2026-06-09 Task 5): reconcile's report-only
+# `_loop_health_check` sub-pass + the `status` surface. pytest-style functions
+# (not TestCase) because they use the coord_backend fixture, mirroring the
+# test_directive_parity.py / test_undelivered_directive.py idiom.
+# ---------------------------------------------------------------------------
+
+
+def _seed_open_review_loop(backend, *, opener="me:h:r", audience="rev:h:r",
+                           hours_old=48):
+    """An OPEN kind:review loop opened `hours_old` hours ago (sla 24 -> overdue
+    when hours_old > 24), uploaded as a top-level directive record."""
+    from fulcra_coord import remote
+    d = schema.make_directive(
+        directive_type="review", from_agent=opener, audience=audience,
+        title="review PR 9", workstream="general",
+        kind="review", state="requested", expects_response=True, sla_hours=24,
+    )
+    d["created_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=hours_old)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    assert remote.upload_json(d, remote.directive_remote_path(d["id"]),
+                              backend=backend)
+    return d
+
+
+def test_loop_health_check_counts_overdue(coord_backend):
+    """One open review loop opened by ME, 48h old against a 24h SLA -> the
+    report counts it open AND overdue (awaiting_others side; nothing awaits me)."""
+    from fulcra_coord import cli
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        _seed_open_review_loop(coord_backend, opener="me:h:r")
+        report = cli._loop_health_check(backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert report["overdue"] == 1
+    assert report["open_loops"] == 1
+    assert report["awaiting_me"] == 0
+
+
+def test_loop_health_check_ignores_sublog_shards(coord_backend):
+    """The check enumerates TOP-LEVEL directive records only — a response shard
+    under directives/<id>/responses/ must never be counted as a loop record
+    (same load-bearing filter as _directive_parity_check)."""
+    from fulcra_coord import cli, loop_ops
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        d = _seed_open_review_loop(coord_backend, opener="me:h:r")
+        # A response shard from someone ELSE's loop bookkeeping lands under the
+        # same prefix; it must not inflate (or close) anything by mere presence.
+        assert loop_ops.append_loop_response(
+            "DIR-OTHER", {"by": "x:h:r", "outcome": {"verdict": "done"}},
+            backend=coord_backend)
+        report = cli._loop_health_check(backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert report["open_loops"] == 1
+    assert report["overdue"] == 1
+
+
+def test_reconcile_populates_loop_health(coord_backend):
+    """A reconcile records the loop-health report beside event_parity in the
+    per-host health record — and a check exception NEVER changes the exit code."""
+    from unittest import mock as _mock
+    from fulcra_coord import cli, remote, views as _views, identity as _identity
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        _seed_open_review_loop(coord_backend, opener="me:h:r")
+        rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+        assert rc == 0
+        slug = _views.agent_slug(
+            cli._build_health_record(
+                now=datetime.now(timezone.utc), duration_s=0.0, tasks_loaded=0,
+                views_refreshed=0, repair_backlog=0, retention_last_run=None,
+                listener_last_fire=None, bus_task_count=0,
+            ).get("host") or _identity.resolve_agent())
+        rec = remote.download_json(remote.health_remote_path(slug),
+                                   backend=coord_backend)
+        assert isinstance(rec, dict)
+        lh = rec.get("loop_health")
+        assert isinstance(lh, dict)
+        assert lh["overdue"] == 1
+        # Failure isolation: a raising check never changes reconcile's exit code.
+        with _mock.patch.object(cli, "_loop_health_check",
+                                side_effect=RuntimeError("boom")):
+            assert cli.cmd_reconcile(types.SimpleNamespace(),
+                                     backend=coord_backend) == 0
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+def test_status_warns_on_overdue_loops(coord_backend, capsys):
+    """`status` surfaces the loop line from the persisted health surface (the
+    same direction the undelivered warning reads — query.py never imports cli)."""
+    from fulcra_coord import query, remote
+    remote.upload_json(
+        {"host": "host-a",
+         "loop_health": {"open_loops": 2, "overdue": 1, "awaiting_me": 1}},
+        remote.health_remote_path("host-a"), backend=coord_backend,
+    )
+    rc = query.cmd_status(types.SimpleNamespace(workstream=None, agent=None,
+                                                format="table"),
+                          backend=coord_backend)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 coordination loop(s) overdue" in out
+    assert "1 awaiting you" in out
+
+
+def test_status_no_loop_warning_when_clean(coord_backend, capsys):
+    """status prints NO loop line when every host reports zero overdue/awaiting."""
+    from fulcra_coord import query, remote
+    remote.upload_json(
+        {"host": "host-a",
+         "loop_health": {"open_loops": 0, "overdue": 0, "awaiting_me": 0}},
+        remote.health_remote_path("host-a"), backend=coord_backend,
+    )
+    rc = query.cmd_status(types.SimpleNamespace(workstream=None, agent=None,
+                                                format="table"),
+                          backend=coord_backend)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "coordination loop" not in out
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

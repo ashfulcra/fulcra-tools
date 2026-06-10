@@ -15,6 +15,7 @@ question+signoff are registered now but only review/dispatch/idea get wired
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Optional
 
 # kind -> lifecycle declaration.
@@ -175,3 +176,81 @@ def is_open_loop(record: dict[str, Any]) -> bool:
         return False
     kind = loop_kind_of(record)
     return loop_state_of(record) not in terminal_states(kind)
+
+
+# ---------------------------------------------------------------------------
+# Detection folds + board projection (spec 2026-06-09 Task 5) — the symmetric
+# counterpart to the undelivered-directive check (#127): that catches sends
+# that never ARRIVED; these catch loops never ANSWERED (per-kind SLA) and
+# loops awaiting ME. Still pure: `now` is injected, the only inputs are
+# record dicts — the cli wiring does the I/O and passes the caller's id.
+# ---------------------------------------------------------------------------
+
+
+def _hours_old(record: dict[str, Any], now) -> Optional[float]:
+    raw = record.get("created_at") or ""
+    try:
+        created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return (now - created).total_seconds() / 3600.0
+
+
+def _is_overdue(record: dict[str, Any], now) -> bool:
+    """Record SLA wins; a None/absent record SLA falls back to the kind's
+    default horizon (review 24h, dispatch 72h, ...). A kind with no default
+    (idea, tell) — or an unparseable created_at — is never overdue."""
+    sla = record.get("sla_hours")
+    if sla is None:
+        sla = KINDS[loop_kind_of(record)]["sla_hours"]
+    if sla is None:
+        return False
+    age = _hours_old(record, now)
+    return age is not None and age > float(sla)
+
+
+def _summary(record: dict[str, Any], now) -> dict[str, Any]:
+    return {
+        "id": record.get("id"), "kind": loop_kind_of(record),
+        "state": loop_state_of(record), "title": record.get("title"),
+        "from": record.get("from"), "audience": record.get("audience"),
+        "overdue": _is_overdue(record, now),
+    }
+
+
+def awaiting_me(me: str, records: list[dict[str, Any]], *, now) -> list[dict[str, Any]]:
+    """Open loops DIRECTED AT me that I haven't closed — my side of the ledger.
+    Exact-audience match here; @role/broadcast resolution happens at the inbox
+    layer (views.inbox_for), which is the delivery surface — this fold is the
+    accounting surface."""
+    return [_summary(r, now) for r in records
+            if is_open_loop(r) and r.get("audience") == me]
+
+
+def awaiting_others(me: str, records: list[dict[str, Any]], *, now) -> list[dict[str, Any]]:
+    """Open loops I OPENED that nobody has answered — with overdue flags. The
+    symmetric counterpart to the undelivered-directive check (#127): that
+    catches sends that never arrived; this catches sends never ANSWERED."""
+    return [_summary(r, now) for r in records
+            if is_open_loop(r) and r.get("from") == me]
+
+
+def loop_board(me: str, records: list[dict[str, Any]], *, now) -> dict[str, Any]:
+    """The coordination board projection (core, projection-side only)."""
+    in_flight: dict[str, int] = {}
+    ideas: dict[str, int] = {}
+    for r in records:
+        kind = loop_kind_of(r)
+        if kind == "idea":
+            state = loop_state_of(r)
+            if state not in terminal_states("idea"):
+                ideas[state] = ideas.get(state, 0) + 1
+            continue
+        if is_open_loop(r):
+            in_flight[kind] = in_flight.get(kind, 0) + 1
+    return {
+        "awaiting_me": awaiting_me(me, records, now=now),
+        "awaiting_others": awaiting_others(me, records, now=now),
+        "in_flight_by_kind": in_flight,
+        "ideas_pipeline": ideas,
+    }
