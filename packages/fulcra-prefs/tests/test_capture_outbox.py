@@ -85,3 +85,23 @@ def test_flush_backfill_visible_to_compile(fake_api, tmp_path):
     sigs = [parse_record(env) for env in shards]
     docs = compile_signals(sigs, NOW)
     assert "dining.cuisine.thai" in docs["global"]["keys"]
+
+
+def test_flush_keeps_spool_when_backfill_cache_write_fails(fake_api, tmp_path):
+    """If ingest recovers but the file-library cache write is still down,
+    keep the spool. Otherwise v1 compile loses the signal."""
+    store = FulcraStore(fake_api)
+    box = Outbox(tmp_path / "outbox")
+    fake_api.fail_ingest = True
+    sig = _capture(fake_api, tmp_path)
+    fake_api.fail_ingest = False
+    fake_api.fail_upload = True
+    assert box.flush(store) == 0
+    assert len(box.pending()) == 1
+    assert len(fake_api.ingested) == 1
+    assert f"/prefs/signals-cache/{sig.id}.json" not in fake_api.files
+
+    fake_api.fail_upload = False
+    assert box.flush(store) == 1
+    assert box.pending() == []
+    assert f"/prefs/signals-cache/{sig.id}.json" in fake_api.files

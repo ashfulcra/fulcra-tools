@@ -143,3 +143,28 @@ def test_capture_during_outage_compile_after_recovery(env, capsys):
     assert call("get") == 0
     out = json.loads(capsys.readouterr().out)
     assert "dining.cuisine.thai" in out["keys"]
+
+
+def test_successful_capture_spools_when_cache_write_fails(fake_api, tmp_path, capsys):
+    """Ingest success plus file-cache outage must not lose the compile-visible
+    signal. Capture spools the record so a later compile can back-fill."""
+    store = FulcraStore(fake_api)
+    store.write_json(META_PATH, {"definition_id": "def-123",
+                                 "data_type": "MomentAnnotation/def-123", "v": 1})
+    outbox_dir = tmp_path / "outbox"
+    def call(*argv):
+        return run(list(argv), api=fake_api, outbox_dir=outbox_dir, now=NOW)
+
+    fake_api.fail_upload = True
+    assert call("capture", "--key", "dining.cuisine.thai", "--value",
+                '{"liked": true}', "--strength", "0.8",
+                "--platform", "claude-code") == 0
+    assert len(fake_api.ingested) == 1
+    assert len(Outbox(outbox_dir).pending()) == 1
+
+    fake_api.fail_upload = False
+    assert call("compile") == 0
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"]
+    assert Outbox(outbox_dir).pending() == []
