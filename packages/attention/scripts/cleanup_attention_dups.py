@@ -151,7 +151,8 @@ def iter_chunks(start: datetime, end: datetime, days: int = CHUNK_DAYS):
 
 
 def fetch_window(token: str, start: datetime, end: datetime,
-                 chunk_days: int = CHUNK_DAYS) -> list[dict]:
+                 chunk_days: int = CHUNK_DAYS,
+                 fail_on_truncation: bool = False) -> list[dict]:
     """Fetch DurationAnnotation records for [start, end), chunked."""
     records: list[dict] = []
     for lo, hi in iter_chunks(start, end, days=chunk_days):
@@ -164,11 +165,13 @@ def fetch_window(token: str, start: datetime, end: datetime,
             raise RuntimeError(f"fetch {lo:%Y-%m-%d}: HTTP {status}")
         chunk = _parse_records(body)
         if len(chunk) >= TRUNCATION_SUSPECT:
-            log.warning(
+            msg = (
                 "chunk %s..%s returned %d records — possible pagination "
-                "truncation; re-run with a smaller chunk via --chunk-days",
-                _iso(lo), _iso(hi), len(chunk),
+                "truncation; re-run with a smaller chunk via --chunk-days"
             )
+            if fail_on_truncation:
+                raise RuntimeError(msg % (_iso(lo), _iso(hi), len(chunk)))
+            log.warning(msg, _iso(lo), _iso(hi), len(chunk))
         log.debug("chunk %s: %d records", _iso(lo), len(chunk))
         records.extend(chunk)
     return records
@@ -181,16 +184,18 @@ def _parse_records(body: bytes) -> list[dict]:
         return []
     if text.startswith("["):
         data = json.loads(text)
-        return data if isinstance(data, list) else []
+        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
     out = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            out.append(json.loads(line))
+            item = json.loads(line)
         except ValueError:
             continue
+        if isinstance(item, dict):
+            out.append(item)
     return out
 
 
@@ -446,7 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     start, end = _parse_iso(args.start), _parse_iso(args.end)
 
     log.info("scanning %s .. %s", args.start, args.end)
-    records = fetch_window(token, start, end, chunk_days=args.chunk_days)
+    records = fetch_window(
+        token, start, end, chunk_days=args.chunk_days,
+        fail_on_truncation=args.execute,
+    )
     plan = build_plan(records)
     print(summarize(plan))
 
