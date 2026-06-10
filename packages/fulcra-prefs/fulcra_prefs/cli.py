@@ -147,7 +147,21 @@ def cmd_get(args, api, outbox_dir, now) -> int:
         if meta and doc["keys"]:
             sig = disclosure_signal(sorted(doc["keys"]), args.audience,
                                     platform=args.platform or "cli", now=now)
-            store.ingest_signal(sig, data_type=meta["data_type"])
+            try:
+                store.ingest_signal(sig, data_type=meta["data_type"])
+            except (OSError, ConnectionError, TimeoutError):
+                # Ledger guarantee: never disclose unlogged. Spool the
+                # disclosure so it lands on the next flush, then proceed.
+                record = {"data": json.dumps(sig.to_payload()),
+                          "metadata": {"content_type": "application/json",
+                                       "data_type": meta["data_type"],
+                                       "recorded_at": sig.observed_at,
+                                       "source": [sig.id,
+                                                  f"com.fulcra-prefs.capture.{sig.platform}"]},
+                          "specversion": 1}
+                Outbox(outbox_dir).spool(record)
+                print("fulcra-prefs: disclosure log deferred to outbox "
+                      "(ingest unreachable)", file=sys.stderr)
     print(canonical_json(doc))
     return 0
 
