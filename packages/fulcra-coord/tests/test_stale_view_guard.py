@@ -198,6 +198,28 @@ class TestSummariesStaleGuard(unittest.TestCase):
         self.assertIn(self.t2["id"], {i["id"] for i in items},
                       "directive invisible in the stale view must surface in inbox")
 
+    def test_direct_listing_does_not_resurrect_unlisted_cached_tasks(self):
+        # The stale fallback is driven by the authoritative raw tasks/ listing.
+        # If it seeds from *all* local cache entries, a locally cached task that
+        # is no longer listed remotely can reappear in inbox/status during the
+        # very fallback meant to bypass stale views.
+        from fulcra_coord import cache
+        stale_cached = _task("stale local cache only", assignee="me:h:r")
+        view = views.build_summaries([self.t1])
+        view["generated_at"] = _iso(_now() - timedelta(hours=2))
+        fake = _SummariesBackendFake(view, [self.t1, self.t2])
+
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, {"XDG_CACHE_HOME": td}):
+            cache.write_cached_task(stale_cached)
+
+            with mock.patch("fulcra_coord.io._warn"):
+                got = self._run(fake)
+
+        ids = {s["id"] for s in got}
+        self.assertEqual(ids, {self.t1["id"], self.t2["id"]})
+        self.assertNotIn(stale_cached["id"], ids)
+
     def test_absent_generated_at_keeps_fast_path(self):
         # Old bus: the aggregate predates the stamp → trust it (back-compat).
         view = views.build_summaries([self.t1])
@@ -346,6 +368,101 @@ class TestPresenceStaleGuard(unittest.TestCase):
         self.assertEqual(rc, 0)
         report = json.loads(buf.getvalue())
         self.assertEqual(report["winner"], reviewer)
+
+    def test_agents_surface_uses_stale_guarded_presence(self):
+        # `agents` is the operator's "what is everyone doing" surface. It must not
+        # show a stale presence-only roster while fresh per-agent records exist.
+        from fulcra_coord.query import cmd_agents
+        reviewer = "rev:h:r"
+        agg = self._stale_aggregate(reviewer, last_seen_hours_ago=3)
+        fresh_record = schema.make_presence(
+            reviewer, workstreams=["review"], summary="fresh review loop")
+
+        def fake_list_json(prefix, *, backend=None, **kw):
+            return [(f"{prefix}rev-h-r.json", fresh_record)]
+
+        import io as _io
+        from contextlib import redirect_stdout
+        buf = _io.StringIO()
+        args = types.SimpleNamespace(mine=None, format="json")
+        with mock.patch("fulcra_coord.query._load_task_summaries", return_value=[]), \
+             mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
+             mock.patch("fulcra_coord.remote.list_json",
+                        side_effect=fake_list_json), \
+             mock.patch("fulcra_coord.presence._warn"), \
+             redirect_stdout(buf):
+            rc = cmd_agents(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        report = json.loads(buf.getvalue())
+        presence_only = {a["agent"]: a for a in report["presence_only"]}
+        self.assertIn(reviewer, presence_only)
+        self.assertEqual(presence_only[reviewer]["summary"], "fresh review loop")
+        self.assertEqual(presence_only[reviewer]["liveness"], "live")
+
+    def test_resume_surface_uses_stale_guarded_presence(self):
+        # Resume's "other agents" room-state section must also read fresh per-agent
+        # records when the aggregate is stale.
+        from fulcra_coord.query import cmd_resume
+        me = "me:h:r"
+        reviewer = "rev:h:r"
+        agg = self._stale_aggregate(reviewer, last_seen_hours_ago=3)
+        fresh_record = schema.make_presence(
+            reviewer, workstreams=["review"], summary="fresh review loop")
+
+        def fake_list_json(prefix, *, backend=None, **kw):
+            return [(f"{prefix}rev-h-r.json", fresh_record)]
+
+        import io as _io
+        from contextlib import redirect_stdout
+        buf = _io.StringIO()
+        args = types.SimpleNamespace(agent=me, format="json",
+                                     with_continuity=False)
+        with mock.patch("fulcra_coord.query._load_task_summaries", return_value=[]), \
+             mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
+             mock.patch("fulcra_coord.remote.list_json",
+                        side_effect=fake_list_json), \
+             mock.patch("fulcra_coord.presence._warn"), \
+             redirect_stdout(buf):
+            rc = cmd_resume(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        report = json.loads(buf.getvalue())
+        other = {a["agent"]: a for a in report["other_agents"]}
+        self.assertIn(reviewer, other)
+        self.assertEqual(other[reviewer]["summary"], "fresh review loop")
+        self.assertEqual(other[reviewer]["liveness"], "live")
+
+    def test_digest_surface_uses_stale_guarded_presence(self):
+        # The scheduled operator digest is another "what are agents doing" surface;
+        # it should not summarize stale aggregate liveness when fresh records exist.
+        from fulcra_coord.digest import cmd_digest
+        reviewer = "rev:h:r"
+        agg = self._stale_aggregate(reviewer, last_seen_hours_ago=3)
+        fresh_record = schema.make_presence(
+            reviewer, workstreams=["review"], summary="fresh review loop")
+
+        def fake_list_json(prefix, *, backend=None, **kw):
+            return [(f"{prefix}rev-h-r.json", fresh_record)]
+
+        import io as _io
+        from contextlib import redirect_stdout
+        buf = _io.StringIO()
+        args = types.SimpleNamespace(window="ondemand", format="json",
+                                     dry_run=False, human="ash")
+        with mock.patch("fulcra_coord.digest._load_task_summaries", return_value=[]), \
+             mock.patch("fulcra_coord.digest._assess_fleet", return_value=None), \
+             mock.patch("fulcra_coord.digest._loop_board_summary", return_value=None), \
+             mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
+             mock.patch("fulcra_coord.remote.list_json",
+                        side_effect=fake_list_json), \
+             mock.patch("fulcra_coord.presence._warn"), \
+             redirect_stdout(buf):
+            rc = cmd_digest(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        report = json.loads(buf.getvalue())
+        per_agent = {a["agent"]: a for a in report["per_agent"]}
+        self.assertIn(reviewer, per_agent)
+        self.assertEqual(per_agent[reviewer]["summary"], "fresh review loop")
+        self.assertEqual(per_agent[reviewer]["liveness"], "live")
 
 
 if __name__ == "__main__":

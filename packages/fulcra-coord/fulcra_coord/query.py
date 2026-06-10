@@ -28,6 +28,7 @@ from . import loops as _loops
 from .loop_ops import load_loop_records, evidence_ids_for
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
+from .presence import _load_presence_agents
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
 
 
@@ -316,16 +317,14 @@ def cmd_agents(args: Any, backend: Optional[list[str]] = None) -> int:
     # leaves `agents` behaving exactly as before (backward compatible).
     presence_by_agent: dict[str, dict[str, Any]] = {}
     try:
-        agg = remote.download_json(remote.presence_view_path(), backend=backend)
-        if agg:
-            roster = views.build_presence([
-                {k: v for k, v in a.items() if k != "liveness"}
-                for a in agg.get("agents", [])
-            ])
-            for a in roster["agents"]:
-                if mine and a.get("agent") != mine:
-                    continue
-                presence_by_agent[a["agent"]] = a
+        roster = views.build_presence([
+            {k: v for k, v in a.items() if k != "liveness"}
+            for a in _load_presence_agents(backend=backend)
+        ])
+        for a in roster["agents"]:
+            if mine and a.get("agent") != mine:
+                continue
+            presence_by_agent[a["agent"]] = a
     except Exception:
         presence_by_agent = {}
 
@@ -538,13 +537,11 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     # so resume behaves exactly as before on an older bus).
     other_agents = []
     try:
-        agg = remote.download_json(remote.presence_view_path(), backend=backend)
-        if agg:
-            roster = views.build_presence([
-                {k: v for k, v in a.items() if k != "liveness"}
-                for a in agg.get("agents", [])
-            ])
-            other_agents = [a for a in roster["agents"] if a.get("agent") != me]
+        roster = views.build_presence([
+            {k: v for k, v in a.items() if k != "liveness"}
+            for a in _load_presence_agents(backend=backend)
+        ])
+        other_agents = [a for a in roster["agents"] if a.get("agent") != me]
     except Exception:
         other_agents = []
 
