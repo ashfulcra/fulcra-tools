@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 import pytest
 from fulcra_prefs.cli import run
+from fulcra_prefs.outbox import Outbox
 from fulcra_prefs.store import FulcraStore, META_PATH, COMPILED_PATH, CONSENT_PATH
 from test_schema import make_signal
 
@@ -86,3 +87,15 @@ def test_signal_cache_shards_do_not_clobber_each_other(env):
     assert "prefs/signals-cache/sig-a.json" in fake_api.files
     assert "prefs/signals-cache/sig-b.json" in fake_api.files
     assert {s.id for s in _load_cached_signals(store)} == {"sig-a", "sig-b"}
+
+def test_get_for_audience_spools_disclosure_when_ingest_down(env, tmp_path, capsys):
+    call, fake_api, store = env
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")
+    call("compile")
+    call("consent", "grant", "--key-glob", "dining.*", "--audience", "ea")
+    fake_api.fail_ingest = True
+    assert call("get", "--for", "ea") == 0          # doc still printed
+    out = json.loads(capsys.readouterr().out)
+    assert list(out["keys"]) == ["dining.cuisine.thai"]
+    assert len(Outbox(tmp_path / "outbox").pending()) == 1
