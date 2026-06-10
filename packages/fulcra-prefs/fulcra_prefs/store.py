@@ -28,7 +28,8 @@ file-commands branch):
 from __future__ import annotations
 import io
 import json
-from .schema import Signal, canonical_json, temp_signal_id, CAPTURE_SOURCE_PREFIX
+from .schema import (Signal, canonical_json, temp_signal_id,
+                     CAPTURE_SOURCE_PREFIX, ANNOTATION_SOURCE_PREFIX)
 
 
 def build_record(sig: Signal, data_type: str) -> dict:
@@ -38,15 +39,32 @@ def build_record(sig: Signal, data_type: str) -> dict:
     outbox spool, and cmd_get's disclosure spool all call this. Using
     canonical_json for the data field ensures deterministic byte output
     (sorted keys, fixed float precision) regardless of call site.
+
+    data_type format — split on the first "/":
+      - The base type (e.g. "MomentAnnotation") is the FulcraDataTypes enum
+        value the API accepts. Sending "MomentAnnotation/<uuid>" causes a 422.
+      - The optional suffix is the definition id; when present it rides in
+        metadata.source as "com.fulcradynamics.annotation.<definition_id>",
+        matching the production wire.ts pattern (packages/attention/chrome/src/
+        relayless/wire.ts lines 203-206): source = [sid, annotation-linkage].
+        We append our extra capture-platform marker after those two, giving:
+        source = [sid, annotation-linkage, capture-marker].
+      - meta.json stores "data_type": "MomentAnnotation/<id>" as a read-side
+        shorthand; only build_record decomposes it for the wire.
     """
     sid = sig.id or temp_signal_id(sig.key, sig.observed_at, sig.platform)
+    base_type, _, definition_id = data_type.partition("/")
+    source: list[str] = [sid]
+    if definition_id:
+        source.append(f"{ANNOTATION_SOURCE_PREFIX}{definition_id}")
+    source.append(f"{CAPTURE_SOURCE_PREFIX}{sig.platform}")
     return {
         "data": canonical_json(sig.to_payload()),
         "metadata": {
             "content_type": "application/json",
-            "data_type": data_type,
+            "data_type": base_type,
             "recorded_at": sig.observed_at,
-            "source": [sid, f"{CAPTURE_SOURCE_PREFIX}{sig.platform}"],
+            "source": source,
         },
         "specversion": 1,
     }

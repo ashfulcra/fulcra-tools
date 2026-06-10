@@ -31,8 +31,23 @@ def test_ingest_signal_posts_data_record_v1(fake_api):
     store.ingest_signal(make_signal(id=None), data_type="MomentAnnotation/def-123")
     rec = fake_api.ingested[0]
     assert rec["specversion"] == 1
-    assert rec["metadata"]["data_type"] == "MomentAnnotation/def-123"
+    # data_type must be the bare enum value — the API rejects compound strings
+    assert rec["metadata"]["data_type"] == "MomentAnnotation"
     assert rec["metadata"]["recorded_at"] == "2026-06-01T12:00:00+00:00"
+    # source[0]: temp signal id; source[1]: annotation linkage (definition id
+    # from the part after the "/" in data_type); source[2]: capture marker
+    assert rec["metadata"]["source"][0].startswith("com.fulcra-prefs.sig.")
+    assert rec["metadata"]["source"][1] == "com.fulcradynamics.annotation.def-123"
+    assert rec["metadata"]["source"][2] == "com.fulcra-prefs.capture.claude-code"
+    assert json.loads(rec["data"])["key"] == "dining.cuisine.thai"
+
+def test_ingest_signal_bare_data_type_has_no_annotation_source(fake_api):
+    """When data_type has no slash (no definition id), source is [sid, capture-marker]
+    — the annotation linkage entry is omitted rather than emitting an empty string."""
+    store = FulcraStore(fake_api)
+    store.ingest_signal(make_signal(id=None), data_type="MomentAnnotation")
+    rec = fake_api.ingested[0]
+    assert rec["metadata"]["data_type"] == "MomentAnnotation"
+    assert len(rec["metadata"]["source"]) == 2
     assert rec["metadata"]["source"][0].startswith("com.fulcra-prefs.sig.")
     assert rec["metadata"]["source"][1] == "com.fulcra-prefs.capture.claude-code"
-    assert json.loads(rec["data"])["key"] == "dining.cuisine.thai"

@@ -11,6 +11,7 @@ KINDS = ("preference", "fact", "consent")
 FLOAT_DP = 6
 TEMP_ID_PREFIX = "com.fulcra-prefs.sig."
 CAPTURE_SOURCE_PREFIX = "com.fulcra-prefs.capture."
+ANNOTATION_SOURCE_PREFIX = "com.fulcradynamics.annotation."
 
 
 def _normalize(obj):
