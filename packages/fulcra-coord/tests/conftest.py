@@ -97,9 +97,22 @@ def _hermetic_cache_and_backend():
     if prev_ensure is None:
         os.environ["FULCRA_COORD_ENSURE_LISTENER"] = "0"
 
+    # Speed net: the single-write retry/verify path (writepipe._upload_task_body
+    # and the verify-after-write re-upload) sleeps a REAL 0.5–2.0s jitter before
+    # each retry. Under the ``false`` safety-net backend every unmocked task
+    # write FAILS its first upload and would burn that jitter — measured at
+    # roughly +70s across the suite when the retry landed. No test's semantics
+    # depend on actually sleeping (the jitter exists purely to de-sync
+    # production retry bursts), so no-op it by default; tests that assert on the
+    # jitter value patch ``writepipe._retry_sleep`` themselves and override this.
+    from fulcra_coord import writepipe as _writepipe
+    prev_retry_sleep = _writepipe._retry_sleep
+    _writepipe._retry_sleep = lambda seconds: None
+
     try:
         yield tmp
     finally:
+        _writepipe._retry_sleep = prev_retry_sleep
         if prev_xdg is None:
             os.environ.pop("XDG_CACHE_HOME", None)
         else:
