@@ -49,10 +49,14 @@ def _now_z() -> str:
 # Keep in sync with:
 #   views.BROADCAST              == "*"
 #   routing.REVIEW_TAG           == "kind:review"
+#   routing.IDEA_TAG             == "kind:idea"
+#   routing.BACKLOG_AUDIENCE     == "@backlog"
 #   routing_ops.REVIEW_VERDICT_TAG == "kind:review-verdict"
 BROADCAST = "*"
 REVIEW_TAG = "kind:review"
 _VERDICT_TAG = "kind:review-verdict"
+IDEA_TAG = "kind:idea"
+BACKLOG_AUDIENCE = "@backlog"
 
 
 def _has_inbox_ack(task: dict[str, Any]) -> bool:
@@ -347,6 +351,21 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
         loop_state = "requested"
         loop_expects_response = True
         loop_sla_hours = 24
+    elif IDEA_TAG in (task.get("tags") or []):
+        # Backlog capture (`later`): an idea-kind loop. Ideas are a PIPELINE,
+        # not an ask — expects_response stays False so they never appear in
+        # awaiting_me/awaiting_others (is_open_loop returns False), and there
+        # is no SLA. directive_type stays "tell": the wire enum is closed;
+        # `kind` carries the semantics.
+        loop_kind = "idea"
+        # State mapping on the snapshot: still parked on @backlog → captured;
+        # routed to a concrete agent (the existing `assign`) → routed. NOTE
+        # captured→routed is NOT a legal single transition in the idea
+        # lifecycle (captured→{maturing,viable,dropped}); that's fine here
+        # because this mapping is a FOLD, not a transition-walk —
+        # directive_from_task stamps the state the task implies directly, it
+        # doesn't replay the machine.
+        loop_state = "captured" if audience == BACKLOG_AUDIENCE else "routed"
 
     directive = schema.make_directive(
         directive_type=directive_type,
