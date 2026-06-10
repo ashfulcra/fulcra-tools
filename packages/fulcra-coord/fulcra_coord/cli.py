@@ -13,6 +13,12 @@ from typing import Any, Optional
 
 from . import cache, remote, schema, views, log as ops_log, heartbeat, identity
 from . import env_int
+# Direct store-module import for ONE read-only diagnostic: the transport's
+# ``last_upload_error`` failure observable (see its comment in the store).
+# It must be read as a LIVE module attribute — ``remote``'s function re-exports
+# would not track the store mutating it — and importing the store here adds no
+# new dependency edge (cli already reaches it through ``remote``).
+from fulcra_coord_files import store as _files_store
 from . import events as _events, eventlog as _eventlog
 from . import directives as _directives
 from . import loops as _loops
@@ -859,8 +865,17 @@ def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
     }
 
 
+def _retry_sleep(seconds: float) -> None:
+    """Jitter sleep before a view-upload retry. A module-level wrapper (not an
+    inline ``time.sleep``) ONLY so tests can patch it out — patching the global
+    ``time.sleep`` would also stall the other pool workers' real waits."""
+    import time
+    time.sleep(seconds)
+
+
 def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     """Repair views and resolve pending operation markers."""
+    import random
     import time
     _info("Reconciling coordination views...")
     t0 = time.monotonic()
@@ -910,6 +925,20 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # failure (False OR a raise) lands in `failures`, and the partial-upload
     # handling below is unchanged.
     failures = []
+    # Bounded in-tick retry (live 0.15.0 evidence, two hosts): under this very
+    # burst a ROTATING subset of views fails each tick — backend throttling /
+    # transient 5xx — while single raw uploads succeed in <1s. One jittered
+    # retry converts those transients into successes instead of failing the
+    # tick (which preserved markers and self-healed next tick, but left EVERY
+    # tick partially failing and views stale). Bounded to ONE retry, gated on
+    # real deadline headroom, and call-site-local by design: store.upload is
+    # shared by many paths whose single-write callers already have their own
+    # ops-log/self-heal discipline — a transport-level retry would silently
+    # double every timeout everywhere.
+    retry_enabled = env_int("FULCRA_COORD_UPLOAD_RETRY", 1) != 0
+    retry_stats = {"recovered": 0}
+    import threading
+    retry_lock = threading.Lock()
 
     def _upload_one(item):
         view_name, view_data = item
@@ -931,6 +960,41 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                                     timeout=int(remaining))
         except Exception:
             ok = False
+        if not ok and retry_enabled:
+            # Jitter de-syncs the retry burst from the original burst that got
+            # us throttled (and from the other workers' retries).
+            jitter = random.uniform(0.5, 2.0)
+            remaining = deadline - time.monotonic()
+            # Deadline-headroom gate: the retry only runs if the jitter sleep,
+            # the 1s per-upload budget floor (the BUG 6b guard above), AND 2s
+            # of slack all fit before the global deadline. The deadline stays
+            # a hard ceiling — a retry can never be what pushes reconcile past
+            # it, so the no-headroom case fails exactly as before the fix.
+            if remaining > jitter + 1.0 + 2.0:
+                _retry_sleep(jitter)
+                remaining = deadline - time.monotonic()
+                if remaining >= 1:
+                    try:
+                        ok = remote.upload_json(view_data, vpath, backend=backend,
+                                                timeout=int(remaining))
+                    except Exception:
+                        ok = False
+                    if ok:
+                        with retry_lock:
+                            retry_stats["recovered"] += 1
+        if not ok:
+            # FINAL failure (attempt + any retry exhausted): leave a diagnosable
+            # trace beyond the view name. ``last_upload_error`` is the
+            # transport's best-effort stderr-tail observable (see its comment in
+            # fulcra_coord_files.store) — under the parallel pool it may carry a
+            # sibling failure's reason, which is still the right throttle hint.
+            # Best-effort: a logging error must never turn into a crashed view.
+            try:
+                ops_log.log_op("reconcile", view_name,
+                               status="view_upload_failed",
+                               error=getattr(_files_store, "last_upload_error", None))
+            except Exception:
+                pass
         return view_name, ok
 
     max_workers = min(8, len(view_items)) or 1
@@ -938,6 +1002,13 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         for view_name, ok in pool.map(_upload_one, view_items):
             if not ok:
                 failures.append(view_name)
+
+    recovered = retry_stats["recovered"]
+    if recovered:
+        # Reported even on a fully-green tick: a steady recovered count is the
+        # signal that the backend is throttling the burst (the condition this
+        # retry exists for) — invisible if only surfaced next to failures.
+        _info(f"  View uploads: {recovered} recovered on retry.")
 
     if time.monotonic() - t0 > timeout:
         _err("Reconcile timeout exceeded mid-upload.")
@@ -978,7 +1049,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         _warn(f"  Retention pass error (skipped): {e}")
 
     if failures:
-        _warn(f"  View upload failures: {failures}")
+        retry_note = f" ({recovered} recovered on retry)" if recovered else ""
+        _warn(f"  View upload failures: {failures}{retry_note}")
         ops_log.log_op("reconcile", status="partial", detail=f"failed views: {failures}")
         # Do NOT clear op markers — views are still broken and need another reconcile run.
         return 1

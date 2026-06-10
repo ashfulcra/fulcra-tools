@@ -10,6 +10,33 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — reconcile view uploads retry once with jitter under burst throttling
+
+**Why:** Live 0.15.0 evidence (two hosts): every `reconcile` tick was failing a
+ROTATING subset of view uploads under its parallel upload burst (run 1: 13
+`inbox/*` views; run 2: index + 6 `workstreams/*`; different sets each run),
+while single raw uploads of the same tiny payloads succeeded in <1s — classic
+backend throttling / transient 5xx under burst. Each failed view burned its
+timeout and failed the tick. The markers-preserved/exit-1 path self-healed on
+the next tick, but with EVERY tick partially failing, views stayed stale and
+reconcile sat pinned at its ~90s deadline ceiling.
+
+**What:**
+- `cmd_reconcile`'s upload pool retries a failed view upload ONCE after a
+  0.5–2s jitter sleep, but only when the jitter + a 1s per-upload budget floor
+  + 2s of slack all fit before the global deadline — the deadline remains a
+  hard ceiling, and a second failure is final (unchanged failure semantics:
+  markers preserved, exit 1). Call-site-local by design: `store.upload` serves
+  many single-write callers with their own self-heal discipline, so a
+  transport-level retry would silently double every timeout everywhere.
+- New env knob `FULCRA_COORD_UPLOAD_RETRY` (default `1`; `0` disables) restores
+  the pre-fix single attempt.
+- Transport observability: `fulcra_coord_files.store` now records the stderr
+  tail (last 200 chars) of the most recent failed upload in a module-level
+  `last_upload_error` attribute; reconcile logs it to the local ops log
+  (`status=view_upload_failed`) on each final view-upload failure, so a
+  rotating-failure tick leaves a diagnosable trace, not just view names.
+
 ## [Unreleased] — `resume` flags PRs you opened but never routed for review
 
 **Why:** A reviewer can only act on a review that was *routed* — `request-review`
