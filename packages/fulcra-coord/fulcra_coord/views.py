@@ -114,6 +114,54 @@ def _presence_grace_seconds(grace: Optional[float] = None) -> float:
                      PRESENCE_GRACE_SECONDS_DEFAULT, override=grace)
 
 
+# Staleness ceiling (minutes) for the materialized READ views (the summaries
+# aggregate and the presence aggregate). Views refresh only when a write/
+# reconcile successfully UPLOADS them, so under backend write-throttling they
+# can lag the durable task/presence files by hours while reads keep trusting
+# them — the 2026-06-10 stale-view blindness (inboxes looked empty, a live
+# reviewer looked dead). Past this age, readers fall back to listing the
+# durable files directly. 20 minutes ≈ several reconcile cadences: a healthy
+# bus never trips it, a throttled one degrades to slower-but-correct reads.
+VIEW_STALE_MIN_DEFAULT = 20.0
+
+
+def _view_stale_min(stale_min: Optional[float] = None) -> float:
+    """Resolve the view-staleness ceiling (minutes): explicit arg > env > default.
+
+    ``FULCRA_COORD_VIEW_STALE_MIN=0`` (or negative) disables the guard entirely
+    — reads trust the materialized views unconditionally, the pre-guard
+    behavior."""
+    return env_float("FULCRA_COORD_VIEW_STALE_MIN", VIEW_STALE_MIN_DEFAULT,
+                     override=stale_min)
+
+
+def view_staleness_minutes(view: dict[str, Any], now: Optional[datetime] = None,
+                           stale_min: Optional[float] = None) -> Optional[float]:
+    """Age of a materialized view in minutes IF it is stale, else ``None``.
+
+    ``None`` (read = "trust the view") in three cases:
+      * the guard is disabled (``FULCRA_COORD_VIEW_STALE_MIN`` <= 0);
+      * the view has NO ``generated_at`` — an older bus that predates the
+        stamp. Back-compat: behave exactly as before the guard existed;
+      * the view is younger than the ceiling.
+
+    A PRESENT-but-unparseable ``generated_at`` ages to +inf (via ``_age_hours``)
+    and so reads as stale — the same fail-toward-surfacing choice ``is_stale``
+    makes: a new-format bus emitting garbage stamps degrades to the slower
+    direct read (visible via the caller's warn) rather than silently trusting a
+    view of unknown age."""
+    threshold = _view_stale_min(stale_min)
+    if threshold <= 0:
+        return None
+    generated_at = view.get("generated_at")
+    if not generated_at:
+        return None
+    if now is None:
+        now = _now()
+    age_min = _age_hours(generated_at, now) * 60.0
+    return age_min if age_min >= threshold else None
+
+
 def _inbox_age_days(age_days: Optional[float] = None) -> float:
     """Resolve the broadcast inbox age cutoff (days): explicit arg > env > default.
 
@@ -1281,6 +1329,14 @@ def build_summaries(tasks: list[dict[str, Any]],
         "schema": "fulcra.coordination.summaries.v1",
         "view": "summaries",
         "updated_at": updated_at,
+        # Freshness stamp for the stale-view read guard (2026-06-10 blindness
+        # fix). Mirrors the resolved updated_at — every call site resolves it to
+        # build wall-clock — but is a SEPARATE key so (a) readers get an explicit
+        # "when was this materialized" contract independent of updated_at's view
+        # semantics and (b) its absence cleanly identifies a pre-guard bus
+        # (view_staleness_minutes treats absent as back-compat-fresh). Additive:
+        # old readers ignore it.
+        "generated_at": updated_at,
         "summaries": [task_summary(t) for t in tasks],
     }
 
@@ -1416,6 +1472,9 @@ def build_presence(records: list[dict[str, Any]], now: Optional[datetime] = None
         "schema": PRESENCE_VIEW_SCHEMA,
         "view": "presence",
         "updated_at": updated_at,
+        # Freshness stamp for the stale-view read guard — same contract as
+        # build_summaries: build wall-clock, additive, absent on an older bus.
+        "generated_at": updated_at,
         "agents": agents,
     }
 
