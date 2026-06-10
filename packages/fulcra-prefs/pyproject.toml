@@ -6,18 +6,26 @@ build-backend = "hatchling.build"
 name = "fulcra-prefs"
 version = "0.1.0"
 description = "User-owned preference signals, compiled projections, and consent-gated preference solving on Fulcra."
-readme = "docs/SPEC.md"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+]
+
+[project.scripts]
+fulcra-prefs = "fulcra_prefs.cli:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4,<8",
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["fulcra_prefs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --import-mode=importlib"
+addopts = "-ra --strict-markers"
