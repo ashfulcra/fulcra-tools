@@ -363,6 +363,22 @@ _DIRECTIVE_KEYS = {
     "routing", "created_at", "updated_at", "task_id",
 }
 
+# Loop fields (spec 2026-06-09-coordination-loops-design.md) — ADDITIVE and
+# OPTIONAL. The Directive family evolves into the coordination LOOP record:
+# `kind` selects a per-kind lifecycle (registry in loops.py), `state` is the
+# lifecycle position, `outcome` is the bus-delivered response payload (set ONLY
+# by a response event — never at creation), `expects_response` marks a loop
+# that must stay open until a bus-native response arrives, `sla_hours` drives
+# overdue detection. OPTIONAL (not in _DIRECTIVE_KEYS' required set) so records
+# written by pre-loop hosts — which lack these keys — remain valid forever:
+# the mixed-fleet floor is "new readers handle old records".
+_LOOP_KEYS = {"kind", "state", "outcome", "expects_response", "sla_hours"}
+
+# Loop kinds the validator accepts. The authoritative registry (lifecycles,
+# defaults) lives in loops.py; this set exists only so a typo'd kind is caught
+# at validation. `tell` is the legacy/FYI kind old records map onto.
+_LOOP_KINDS = {"tell", "review", "dispatch", "idea", "question", "signoff"}
+
 
 def make_directive_id(directive_type: str, dt: Optional[datetime] = None) -> str:
     """Generate a collision-resistant, day-sortable directive ID.
@@ -404,6 +420,10 @@ def make_directive(
     due: Optional[str] = None,
     task_id: Optional[str] = None,
     directive_id: Optional[str] = None,
+    kind: Optional[str] = None,
+    state: Optional[str] = None,
+    expects_response: bool = False,
+    sla_hours: Optional[int] = None,
     dt: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """Build a first-class directive record. ADDITIVE — nothing consumes it yet.
@@ -446,6 +466,8 @@ def make_directive(
         raise ValueError(
             f"Invalid status {status!r}. Valid: {sorted(_DIRECTIVE_STATUSES)}"
         )
+    if kind is not None and kind not in _LOOP_KINDS:
+        raise ValueError(f"Invalid kind {kind!r}. Valid: {sorted(_LOOP_KINDS)}")
 
     if dt is None:
         dt = datetime.now(timezone.utc)
@@ -484,6 +506,15 @@ def make_directive(
         # Back-reference to the legacy task-with-assignee during Phase 3b
         # dual-write. None once migration is complete and directives are primary.
         "task_id": task_id,
+        # --- Loop fields (additive; see _LOOP_KEYS note) ---
+        "kind": kind,
+        "state": state,
+        # outcome is NEVER set at creation: the closed-loop guarantee says the
+        # outcome arrives only as a bus response event (loop_ops.cmd_respond /
+        # review-done). Creating it as None makes that invariant inspectable.
+        "outcome": None,
+        "expects_response": bool(expects_response),
+        "sla_hours": sla_hours,
     }
 
 
@@ -502,7 +533,7 @@ def validate_directive(d: dict) -> list[str]:
     errors: list[str] = []
 
     missing = sorted(_DIRECTIVE_KEYS - set(d.keys()))
-    extra = sorted(set(d.keys()) - _DIRECTIVE_KEYS)
+    extra = sorted(set(d.keys()) - _DIRECTIVE_KEYS - _LOOP_KEYS)
     for field in missing:
         errors.append(f"Missing required field: {field!r}")
     for field in extra:
@@ -554,6 +585,11 @@ def validate_directive(d: dict) -> list[str]:
         errors.append(
             f"Unknown priority {priority!r}. Valid: {sorted(VALID_PRIORITIES)}"
         )
+
+    # kind enum — present-and-non-empty only (absent = legacy record = fine).
+    kind = d.get("kind")
+    if kind and kind not in _LOOP_KINDS:
+        errors.append(f"Unknown kind {kind!r}. Valid: {sorted(_LOOP_KINDS)}")
 
     if "acked_by" in d and not isinstance(d.get("acked_by"), list):
         errors.append("Field 'acked_by' must be a list.")
