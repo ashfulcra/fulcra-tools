@@ -77,8 +77,12 @@ created at onboard, tagged `fulcra-prefs`; UUID cached in `prefs/meta.json`
 - `strength` is signed: aversions are negative.
 - `half_life_days: null` = durable fact — no decay; compile flags staleness
   by age instead.
+- Signal id = Fulcra record id once persisted; before persistence, local
+  outbox entries use a deterministic `metadata.source` id as their temporary
+  id. `supersedes` may reference either form and is resolved after upload.
 - Record envelope: `recorded_at` = observation time;
-  `source` = `["com.fulcra-prefs.capture.<platform>"]`.
+  `source` = deterministic id first, then
+  `["com.fulcra-prefs.capture.<platform>"]`.
 
 **Files:**
 
@@ -104,9 +108,9 @@ History/audit = the file library's native versioning (`file stat`).
    (platform beats global).
 
 Determinism contract: canonical JSON output (sorted keys, fixed float
-precision) — identical `(signals, now)` produce **byte-identical** files.
-Runs at every tier-1 session start; optional cron (documented, not installed
-by v1).
+precision, stable signal-id sort before conflict resolution) — identical
+`(signals, now)` produce **byte-identical** files. Runs at every tier-1
+session start; optional cron (documented, not installed by v1).
 
 ## Solver (deterministic group decisions)
 
