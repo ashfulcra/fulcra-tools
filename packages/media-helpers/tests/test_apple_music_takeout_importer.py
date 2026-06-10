@@ -331,6 +331,41 @@ def test_zip_enriches_blank_artist_from_daily_tracks(tmp_path):
     assert live.external_ids["artist"] == "A-ha"
 
 
+def test_daily_tracks_split_handles_artist_containing_separator(tmp_path):
+    # A naive split on the first " - " would treat the artist as just
+    # "A-ha" and the title as "Archive - Take On Me", then fail to enrich
+    # the real "Take On Me" play. Use the Play Activity title set to choose
+    # the only split whose title is actually present.
+    zpath = _takeout_zip(
+        tmp_path,
+        activity_rows=[_row(song="Take On Me", artist="")],
+        daily_descriptions=["A-ha - Archive - Take On Me"],
+    )
+    events = list(amt.parse_any(zpath))
+    assert len(events) == 1
+    assert events[0].external_ids["artist"] == "A-ha - Archive"
+    assert events[0].note == "A-ha - Archive – Take On Me"
+
+
+def test_zip_enrichment_uses_sibling_next_to_selected_activity_csv(tmp_path):
+    # If a zip contains more than one Apple Music Activity folder, the lookup
+    # must not borrow a same-basename sibling from a different folder.
+    zpath = tmp_path / "multi.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(
+            "A/Apple Music Play Activity.csv",
+            (_HEADER + "\n" + _row(song="Take On Me", artist="") + "\n").encode(),
+        )
+        zf.writestr(
+            "B/Apple Music - Play History Daily Tracks.csv",
+            _daily_tracks_csv(["A-ha - Take On Me"]),
+        )
+
+    events = list(amt.parse_any(zpath))
+    assert len(events) == 1
+    assert events[0].external_ids["artist"] == ""
+
+
 def test_zip_enriches_from_library_tracks_json_zip_only(tmp_path):
     zpath = _takeout_zip(
         tmp_path,

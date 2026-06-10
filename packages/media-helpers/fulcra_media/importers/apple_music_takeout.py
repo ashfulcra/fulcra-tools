@@ -111,6 +111,52 @@ def _norm_title(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+def _member_dir(member: str) -> str:
+    """Zip member directory with no trailing slash."""
+    return member.rsplit("/", 1)[0] if "/" in member else ""
+
+
+def _sibling_member(zf: zipfile.ZipFile, activity_member: str, basename: str) -> str | None:
+    """Return the enrichment sibling next to ``activity_member`` in a zip.
+
+    Apple takeouts can contain nested folders and, in hand-built/test archives,
+    more than one file with the same basename. Enrichment must be scoped to
+    the same Apple Music Activity folder as the Play Activity CSV we selected;
+    otherwise a sibling from a different bundle can silently fill the wrong
+    artist.
+    """
+    directory = _member_dir(activity_member)
+    expected = f"{directory}/{basename}" if directory else basename
+    names = set(zf.namelist())
+    if expected in names:
+        return expected
+    return None
+
+
+def _blank_artist_titles_from_rows(lines: Iterable[str]) -> frozenset[str]:
+    """Collect normalized song titles that could actually use enrichment."""
+    reader = csv.DictReader(lines)
+    if not reader.fieldnames or "Song Name" not in reader.fieldnames:
+        return frozenset()
+    titles: set[str] = set()
+    for row in reader:
+        song = (row.get("Song Name") or "").strip()
+        raw_artist = (row.get("Container Artist Name") or "").strip()
+        if song and not raw_artist:
+            titles.add(_norm_title(song))
+    return frozenset(titles)
+
+
+def _blank_artist_titles_from_csv_bytes(data: bytes) -> frozenset[str]:
+    text = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", newline="")
+    return _blank_artist_titles_from_rows(text)
+
+
+def _blank_artist_titles_from_csv_path(csv_path: Path) -> frozenset[str]:
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        return _blank_artist_titles_from_rows(f)
+
+
 class ArtistLookup:
     """Normalized-title → artist lookup built from sibling takeout files.
 
@@ -141,12 +187,21 @@ class ArtistLookup:
 
 
 def _collect_daily_tracks(
-    lines: Iterable[str], candidates: dict[str, set[str]],
+    lines: Iterable[str],
+    candidates: dict[str, set[str]],
+    *,
+    target_titles: frozenset[str] | None = None,
 ) -> int:
     """Harvest (title, artist) pairs from Play History Daily Tracks.
 
     "Track Description" is formatted "Artist - Title"; split on the FIRST
     " - " (titles may themselves contain " - ").
+
+    When we know the blank-artist titles from the Play Activity CSV, use them
+    to disambiguate descriptions containing multiple separators. That preserves
+    title-with-dash enrichment ("Artist - Title - Live") while also handling
+    artist-with-dash names ("Artist - Alias - Title") without filling the
+    artist as just "Artist".
     """
     reader = csv.DictReader(lines)
     if not reader.fieldnames or "Track Description" not in reader.fieldnames:
@@ -158,13 +213,27 @@ def _collect_daily_tracks(
     n = 0
     for row in reader:
         desc = (row.get("Track Description") or "").strip()
-        artist, sep, title = desc.partition(" - ")
-        if not sep:
+        parts = desc.split(" - ")
+        if len(parts) < 2:
             continue
-        artist, title = artist.strip(), title.strip()
-        if artist and title:
-            candidates.setdefault(_norm_title(title), set()).add(artist)
-            n += 1
+        matches: list[tuple[str, str]] = []
+        for idx in range(1, len(parts)):
+            artist = " - ".join(parts[:idx]).strip()
+            title = " - ".join(parts[idx:]).strip()
+            if not artist or not title:
+                continue
+            if target_titles is not None and _norm_title(title) not in target_titles:
+                continue
+            matches.append((title, artist))
+        if not matches:
+            continue
+        # A single description that could match multiple blank activity titles
+        # is inherently ambiguous; skip it rather than guessing wrong.
+        if len(matches) > 1:
+            continue
+        title, artist = matches[0]
+        candidates.setdefault(_norm_title(title), set()).add(artist)
+        n += 1
     return n
 
 
@@ -221,11 +290,12 @@ def _build_lookup_for_csv(csv_path: Path) -> ArtistLookup | None:
     Missing siblings (or unreadable ones) skip enrichment gracefully.
     """
     candidates: dict[str, set[str]] = {}
+    target_titles = _blank_artist_titles_from_csv_path(csv_path)
     daily = csv_path.parent / _DAILY_TRACKS_BASENAME
     if daily.is_file():
         try:
             with daily.open(newline="", encoding="utf-8") as f:
-                n = _collect_daily_tracks(f, candidates)
+                n = _collect_daily_tracks(f, candidates, target_titles=target_titles)
             logger.debug(
                 "apple-music-takeout: daily tracks sibling found (%d entries)", n,
             )
@@ -251,26 +321,27 @@ def _build_lookup_for_csv(csv_path: Path) -> ArtistLookup | None:
     return _finish_lookup(candidates)
 
 
-def _build_lookup_from_zip(zf: zipfile.ZipFile) -> ArtistLookup | None:
-    """Build the artist map from sibling members inside an open zip."""
+def _build_lookup_from_zip(
+    zf: zipfile.ZipFile,
+    activity_member: str,
+    *,
+    target_titles: frozenset[str],
+) -> ArtistLookup | None:
+    """Build the artist map from members next to ``activity_member``."""
     candidates: dict[str, set[str]] = {}
-    daily = [n for n in zf.namelist()
-             if n.endswith("/" + _DAILY_TRACKS_BASENAME)
-             or n == _DAILY_TRACKS_BASENAME]
+    daily = _sibling_member(zf, activity_member, _DAILY_TRACKS_BASENAME)
     if daily:
-        with zf.open(daily[0]) as raw:
+        with zf.open(daily) as raw:
             text = io.TextIOWrapper(raw, encoding="utf-8", newline="")
-            n = _collect_daily_tracks(text, candidates)
+            n = _collect_daily_tracks(text, candidates, target_titles=target_titles)
         logger.debug(
             "apple-music-takeout: daily tracks member found (%d entries)", n,
         )
     else:
         logger.debug("apple-music-takeout: no daily tracks member in zip")
-    library = [n for n in zf.namelist()
-               if n.endswith("/" + _LIBRARY_TRACKS_BASENAME)
-               or n == _LIBRARY_TRACKS_BASENAME]
+    library = _sibling_member(zf, activity_member, _LIBRARY_TRACKS_BASENAME)
     if library:
-        n = _collect_library_tracks(zf.read(library[0]), candidates)
+        n = _collect_library_tracks(zf.read(library), candidates)
         logger.debug(
             "apple-music-takeout: library tracks member found (%d entries)", n,
         )
@@ -521,16 +592,20 @@ def _parse_zip(
         members = [n for n in zf.namelist()
                    if n.endswith("/" + _BASENAME) or n == _BASENAME]
         if members:
+            activity_member = members[0]
+            activity_csv = zf.read(activity_member)
             # Build the title→artist map once per parse (~12k entries in a
             # real takeout — fine in memory), before streaming the rows.
-            artist_lookup = _build_lookup_from_zip(zf)
-            with zf.open(members[0]) as raw:
-                text = io.TextIOWrapper(raw, encoding="utf-8", newline="")
-                yield from parse_lines(
-                    text, since=since, until=until,
-                    artist_lookup=artist_lookup,
-                )
-                return
+            target_titles = _blank_artist_titles_from_csv_bytes(activity_csv)
+            artist_lookup = _build_lookup_from_zip(
+                zf, activity_member, target_titles=target_titles,
+            )
+            text = io.TextIOWrapper(io.BytesIO(activity_csv), encoding="utf-8", newline="")
+            yield from parse_lines(
+                text, since=since, until=until,
+                artist_lookup=artist_lookup,
+            )
+            return
         # Look for the nested Apple_Media_Services bundle first.
         nested = [n for n in zf.namelist()
                   if n.endswith(".zip") and "Apple_Media_Services" in n]
@@ -561,9 +636,13 @@ def _yield_from_open_zip(
                if n.endswith("/" + _BASENAME) or n == _BASENAME]
     if not members:
         raise ValueError(f"apple-music-takeout: no '{_BASENAME}' in nested zip")
-    artist_lookup = _build_lookup_from_zip(zf)
-    with zf.open(members[0]) as raw:
-        text = io.TextIOWrapper(raw, encoding="utf-8", newline="")
-        yield from parse_lines(
-            text, since=since, until=until, artist_lookup=artist_lookup,
-        )
+    activity_member = members[0]
+    activity_csv = zf.read(activity_member)
+    target_titles = _blank_artist_titles_from_csv_bytes(activity_csv)
+    artist_lookup = _build_lookup_from_zip(
+        zf, activity_member, target_titles=target_titles,
+    )
+    text = io.TextIOWrapper(io.BytesIO(activity_csv), encoding="utf-8", newline="")
+    yield from parse_lines(
+        text, since=since, until=until, artist_lookup=artist_lookup,
+    )
