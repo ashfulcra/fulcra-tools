@@ -26,6 +26,30 @@ from .writepipe import _view_name_to_remote, _write_task_and_views
 def _derive_agent() -> str:
     return identity.resolve_agent()
 
+def _my_roles(me: str, backend: Optional[list[str]] = None) -> set[str]:
+    """The set of roles `me` currently HOLDS, read from its OWN presence record.
+
+    This is what makes role-audience (``@<role>``) directives deliverable: a
+    directive addressed to a role lands in this agent's inbox iff the role is in
+    this set (views.inbox_for). We read the durable per-agent ``presence/<slug>.json``
+    (via presence._load_own_presence — the same single read path `workstream`
+    uses) and take its ``capabilities``.
+
+    BACKWARD-COMPATIBLE / FAIL-SAFE: an agent that never declared roles, an old
+    presence record predating the ``capabilities`` field (None), or any read
+    failure all collapse to the EMPTY set — so no role directives are surfaced
+    and a role-resolution read can never crash the inbox. ``presence`` is
+    lazy-imported so importing inbox stays cheap and the module-load graph flat.
+    """
+    try:
+        from . import presence  # lazy: keep inbox import light, avoid load-order risk
+        rec = presence._load_own_presence(me, backend=backend)
+    except Exception:
+        return set()
+    if not rec:
+        return set()
+    return {c for c in (rec.get("capabilities") or []) if c}
+
 def _load_task_from_summary(summary: dict[str, Any], *,
                             backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
     """Load a task body using the exact durable path carried by a summary."""
@@ -161,7 +185,11 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     # one read and COUNTED HIDDEN by a later one. One timestamp keeps them
     # consistent — an id is either shown or counted hidden, never both.
     now = views._now()
-    items = views.inbox_for(me, all_tasks, now=now, include_aged=show_all)
+    # Load `me`'s declared roles so role-audience (@<role>) directives this agent
+    # HOLDS resolve into its inbox (delivery-time role resolution). Empty for an
+    # agent with no declared roles — fully backward-compatible.
+    roles = _my_roles(me, backend=backend)
+    items = views.inbox_for(me, all_tasks, now=now, include_aged=show_all, roles=roles)
     hidden = 0 if show_all else views.aged_out_inbox_count(me, all_tasks, now=now)
 
     if out_format == "json":
@@ -219,10 +247,14 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None,
     # ack set, which the summary now carries (acked_by) — no event log / body
     # fetch needed. Falls back to a full load on an older bus.
     all_tasks = _load_task_summaries(backend=backend)
+    # Role resolution: load `me`'s declared roles so a directive addressed to a
+    # role this agent HOLDS (@<role>) is delivered here, not lost. Empty set for
+    # an agent with no roles / old presence record — backward-compatible.
+    roles = _my_roles(me, backend=backend)
     # include_aged bypasses the broadcast age-out filter (the `inbox --all` path);
     # the default read hides stale informational broadcasts so they stop
     # cluttering the inbox / SessionStart, without touching any task.
-    return views.inbox_for(me, all_tasks, include_aged=include_aged)
+    return views.inbox_for(me, all_tasks, include_aged=include_aged, roles=roles)
 
 def _inbox_surface_path(agent: str):
     """Where the listener drops pending directives for the next SessionStart to
