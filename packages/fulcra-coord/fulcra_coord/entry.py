@@ -131,6 +131,25 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Resolve a LIVE recipient declaring CAP instead of a fixed assignee")
     sp.add_argument("--floor", choices=["live", "idle"], default="idle",
                     help="Minimum liveness for --route-capability resolution (default: idle)")
+    sp.add_argument("--expects-response", dest="expects_response",
+                    action="store_true",
+                    help="Make this an ASK, not an FYI: opens a kind=dispatch "
+                         "loop (SLA-tracked) that stays open until the "
+                         "recipient closes it with `respond`")
+
+    # ---- later ----
+    sp = sub.add_parser("later",
+                        help="Capture a 'do later' item as backlog ON THE BUS: "
+                             "a kind=idea loop addressed to the @backlog role "
+                             "(durable + board-visible, spams nobody's inbox; "
+                             "route it later with `assign`)")
+    sp.add_argument("title", metavar="TITLE", help="Short durable backlog item")
+    sp.add_argument("--summary", "-s", default="", metavar="SUMMARY")
+    sp.add_argument("--workstream", "-w", default="general", metavar="WS")
+    sp.add_argument("--priority", "-p", default="P3", metavar="PRIORITY",
+                    help="P0|P1|P2|P3 (default: P3 — it's deferred work)")
+    sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
+                    help="Capturing agent (owner); default: derived/env agent")
 
     # ---- broadcast ----
     sp = sub.add_parser("broadcast",
@@ -605,6 +624,7 @@ COMMAND_MAP = {
     "presence": _cli.cmd_presence,
     "tell": _cli.cmd_tell,
     "broadcast": _cli.cmd_broadcast,
+    "later": _cli.cmd_later,
     "assign": _cli.cmd_assign,
     "inbox": _cli.cmd_inbox,
     "start": _cli.cmd_start,

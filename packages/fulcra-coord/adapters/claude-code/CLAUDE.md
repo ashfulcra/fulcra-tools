@@ -108,7 +108,14 @@ create mean you're sharing a checkout — move out before committing.
    PreCompact checkpoints before context loss, SessionEnd parks your task.
    Your job is to keep `next_action` and `--summary` *meaningful* via `update`
    at real milestones, so those automatic checkpoints capture useful state.
-9. **Continuity is the cold-start handoff layer.** For work that may transfer to
+9. **Backlog convention — "do later" items go ON THE BUS.** When the operator
+   hands you a deferred task, run
+   `fulcra-coord later "<title>" -s "<context>"` — never park it only in
+   session memory, where compaction eats it. `later` addresses the item to the
+   `@backlog` role (durable, visible in the `board` ideas pipeline, spams
+   nobody); route it later with the ordinary `assign`. Subagent work, by
+   contrast, stays off the bus.
+10. **Continuity is the cold-start handoff layer.** For work that may transfer to
    another agent or survive compaction, make checkpoints self-describing and
    portable: include what Fulcra Continuity is, coord task identity, decisions,
    open questions, next actions, and repo/ref/path or Fulcra remote artifacts
