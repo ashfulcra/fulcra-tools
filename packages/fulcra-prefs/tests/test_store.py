@@ -11,7 +11,8 @@ def test_write_then_read_json_roundtrip(fake_api):
     store.write_json("prefs/compiled.json", {"v": 1, "keys": {}})
     assert store.read_json("prefs/compiled.json") == {"v": 1, "keys": {}}
 
-def test_list_json_reads_folder_children_deterministically(fake_api):
+def test_list_json_reads_folder_children(fake_api):
+    # NOTE: the [a, b] ordering comes from the fake's sorted(); the real server makes no ordering promise. Compile is input-order-independent, so nothing depends on this order.
     store = FulcraStore(fake_api)
     store.write_json("prefs/signals-cache/b.json", {"id": "b"})
     store.write_json("prefs/signals-cache/a.json", {"id": "a"})
