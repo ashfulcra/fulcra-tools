@@ -7915,23 +7915,18 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_0(self):
-        # 0.15.0: five additive feature lines landed after the 0.14.0 cut, all
-        # default-safe, none flipping the read-cutover (still operator-gated).
-        #   - @<role> audiences (#128): late-bound role addressing with
-        #     multi-holder fan-out, resolved at read time from presence
-        #     capabilities (`connect --role`).
-        #   - Config-driven review routing (#129): hard-coded fleet reviewer ids
-        #     removed from core; seed comes from review-routing.json /
-        #     FULCRA_COORD_REVIEW_SEED, defaulting to capability-driven.
-        #   - Coordination loops (#130/#135/#137): directives gain kind +
-        #     lifecycle + bus-native response shards (`respond`/review-done close
-        #     loops ON THE BUS), overdue/awaiting-me detection + loop_health,
-        #     and the self-healing listener re-arm on connect.
-        # This pin exists so feature lines can't keep merging without a
-        # deployable, detectable release (the 0.13/0.14 lesson).
+    def test_version_is_0_15_1(self):
+        # 0.15.1: the live-test fixes + loops phase 2, cut while the findings
+        # were hot (the 0.13/0.14 merge-without-bump guard).
+        #   - #139 loops phase 2: forge-mirror (one sanctioned poller; evidence
+        #     NEVER closes a loop), out-of-band detection, board + digest.
+        #   - #140 kind:review tag-clobber fix: claiming a review no longer
+        #     breaks review-done resolution / loop closure (live-test find).
+        #   - #141 reconcile upload retry: deadline-gated single retry with
+        #     jitter under backend burst throttling (live-evidenced) +
+        #     store.last_upload_error observability.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.0")
+        self.assertEqual(__version__, "0.15.1")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
