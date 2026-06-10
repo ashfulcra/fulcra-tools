@@ -34,10 +34,9 @@ version-tracking stat, it does not add a round-trip.
 
 import io as _io
 import contextlib
+from types import SimpleNamespace
 
-import pytest
-
-from fulcra_coord import cache, remote, schema, writepipe
+from fulcra_coord import cache, cli, remote, schema, writepipe
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +195,54 @@ def test_verify_missing_write_warns_delivery_not_confirmed(coord_backend, monkey
     ), f"expected a needs_reconcile marker for the unverified write, got {markers}"
     # And the body is cached locally (the self-heal source).
     assert cache.read_cached_task(t["id"]) is not None
+
+
+def test_reconcile_replays_unverified_cached_task_body(coord_backend, monkeypatch):
+    """An unverified task-body write is not fixed by a view rebuild alone.
+
+    Regression: the first implementation left a needs_reconcile marker but
+    reconcile never replayed the cached task body. It would rebuild/clear views
+    from remote state and could drop the very task it promised to self-heal.
+    """
+    t = _make_task()
+    task_path = remote.task_remote_path(t["id"])
+    real_upload = remote.upload_json
+    real_stat = remote.stat
+
+    def upload_claims_success_without_writing(data, path, **kw):
+        if path == task_path:
+            return True
+        return real_upload(data, path, **kw)
+
+    def task_body_never_visible(path, **kw):
+        if path == task_path:
+            return None
+        return real_stat(path, **kw)
+
+    monkeypatch.setattr(remote, "upload_json", upload_claims_success_without_writing)
+    monkeypatch.setattr(remote, "stat", task_body_never_visible)
+    monkeypatch.setattr(writepipe, "_retry_sleep", lambda seconds: None)
+
+    ok, err = _write(t, coord_backend)
+    assert ok is True
+    assert "DELIVERY NOT CONFIRMED" in err
+    assert remote.download_json(task_path, backend=coord_backend) is None
+    assert any(
+        m.get("task_id") == t["id"]
+        and m.get("status") == "unverified"
+        and m.get("needs_reconcile")
+        for m in cache.list_op_markers()
+    )
+
+    monkeypatch.setattr(remote, "upload_json", real_upload)
+    monkeypatch.setattr(remote, "stat", real_stat)
+
+    assert cli.cmd_reconcile(SimpleNamespace(), backend=coord_backend) == 0
+    assert remote.download_json(task_path, backend=coord_backend)["id"] == t["id"]
+    assert not [
+        m for m in cache.list_op_markers()
+        if m.get("task_id") == t["id"] and m.get("needs_reconcile")
+    ]
 
 
 def test_verify_recovers_on_reupload_no_warn(coord_backend, monkeypatch):
