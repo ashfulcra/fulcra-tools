@@ -11576,6 +11576,129 @@ def test_status_no_loop_warning_when_clean(coord_backend, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Board rendering (spec step 7, phase 2 Task 3): the `board` command — the
+# operator rendering of the SAME pure loops.loop_board fold the health record
+# uses. pytest-style functions on coord_backend, mirroring the loop-health
+# tests above (same seeding idiom, same env handling).
+# ---------------------------------------------------------------------------
+
+
+def _seed_idea_loop(backend, *, state="viable", opener="someone:h:r"):
+    """An idea-kind record in a non-terminal pipeline state, uploaded as a
+    top-level directive record (ideas count in the board's pipeline section)."""
+    from fulcra_coord import remote
+    d = schema.make_directive(
+        directive_type="tell", from_agent=opener, audience="x:h:r",
+        title="an idea", workstream="general", kind="idea", state=state,
+    )
+    assert remote.upload_json(d, remote.directive_remote_path(d["id"]),
+                              backend=backend)
+    return d
+
+
+def _seed_board(backend):
+    """The canonical four-corner board for me:h:r — one loop awaiting me, one
+    of mine overdue, one of mine with mirrored evidence (out-of-band), one
+    idea in `viable`. Returns the seeded records keyed by role."""
+    from fulcra_coord import loop_ops
+    awaiting_me = _seed_open_review_loop(
+        backend, opener="other:h:r", audience="me:h:r", hours_old=1)
+    overdue = _seed_open_review_loop(
+        backend, opener="me:h:r", audience="rev:h:r", hours_old=48)
+    evidenced = _seed_open_review_loop(
+        backend, opener="me:h:r", audience="rev:h:r", hours_old=1)
+    assert loop_ops.append_loop_evidence(
+        evidenced["id"],
+        {"forge": "github", "kind": "comment-verdict",
+         "summary": "approved on the forge"},
+        backend=backend)
+    idea = _seed_idea_loop(backend)
+    return {"awaiting_me": awaiting_me, "overdue": overdue,
+            "evidenced": evidenced, "idea": idea}
+
+
+def test_board_json_renders_all_four_sections(coord_backend, capsys):
+    """`board --format json` prints the raw loop_board dict: awaiting_me /
+    awaiting_others (overdue + out_of_band flags set) / in_flight_by_kind /
+    ideas_pipeline — evidence flags out-of-band, never closes (both of my
+    asks stay listed open)."""
+    from fulcra_coord import query
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        seeded = _seed_board(coord_backend)
+        rc = query.cmd_board(types.SimpleNamespace(agent=None, format="json"),
+                             backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    board = json.loads(capsys.readouterr().out)
+    assert set(board) >= {"awaiting_me", "awaiting_others",
+                          "in_flight_by_kind", "ideas_pipeline"}
+    assert [s["id"] for s in board["awaiting_me"]] == [seeded["awaiting_me"]["id"]]
+    by_id = {s["id"]: s for s in board["awaiting_others"]}
+    assert set(by_id) == {seeded["overdue"]["id"], seeded["evidenced"]["id"]}
+    assert by_id[seeded["overdue"]["id"]]["overdue"] is True
+    assert by_id[seeded["overdue"]["id"]]["out_of_band"] is False
+    assert by_id[seeded["evidenced"]["id"]]["out_of_band"] is True
+    assert by_id[seeded["evidenced"]["id"]]["overdue"] is False
+    # All three review loops are still OPEN (evidence never closes a loop).
+    assert board["in_flight_by_kind"] == {"review": 3}
+    assert board["ideas_pipeline"] == {"viable": 1}
+
+
+def test_board_table_renders_flags_and_sections(coord_backend, capsys):
+    """The table view shows all four section headers and the ⚠ overdue /
+    ◈ out-of-band trailing flags on the awaiting-others lines."""
+    from fulcra_coord import query
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        _seed_board(coord_backend)
+        rc = query.cmd_board(types.SimpleNamespace(agent=None, format="table"),
+                             backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Awaiting me (1)" in out
+    assert "Awaiting others (2)" in out
+    assert "In flight by kind" in out
+    assert "Ideas pipeline" in out
+    assert "⚠ overdue" in out
+    assert "◈ out-of-band" in out
+    assert "review: 3" in out
+    assert "viable: 1" in out
+
+
+def test_board_empty_bus_renders_cleanly(coord_backend, capsys):
+    """A bus with no loop records renders the clean empty message — rc 0,
+    never a stack trace (board is a read surface)."""
+    from fulcra_coord import query
+    rc = query.cmd_board(types.SimpleNamespace(agent=None, format="table"),
+                         backend=coord_backend)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "(no open coordination loops)" in out
+
+
+def test_board_is_wired_into_map():
+    """`board` dispatches like every other query command: parser registered
+    with --agent/--format, COMMAND_MAP points at the cli re-export."""
+    from fulcra_coord import cli, entry
+    assert entry.COMMAND_MAP["board"] is cli.cmd_board
+    args = entry.build_parser().parse_args(["board"])
+    assert args.format == "table"
+    assert args.agent is None
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

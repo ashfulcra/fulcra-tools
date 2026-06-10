@@ -44,6 +44,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--agent", "-a", metavar="AGENT", help="Filter by agent")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- board ----
+    sp = sub.add_parser("board",
+                        help="Render the coordination-loop board: loops awaiting "
+                             "you, your unanswered asks (⚠ overdue / ◈ out-of-band), "
+                             "open loops by kind, and the ideas pipeline")
+    sp.add_argument("--agent", "-a", metavar="AGENT",
+                    help="Whose board (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- agents ----
     sp = sub.add_parser("agents",
                         help="Cross-agent digest: what each agent is working on "
@@ -589,6 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMAND_MAP = {
     "status": _cli.cmd_status,
+    "board": _cli.cmd_board,
     "agents": _cli.cmd_agents,
     "connect": _cli.cmd_connect,
     "workstream": _cli.cmd_workstream,

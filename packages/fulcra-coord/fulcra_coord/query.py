@@ -1,15 +1,18 @@
 """Read-only situational-awareness commands for fulcra-coord.
 
-The operator's at-a-glance surfaces: ``status`` (the board), ``agents`` (who is on
-what, folding in presence), ``needs-me`` (directives + blocked-on-you addressed to
-me, with first-seen tracking), and ``resume`` (what to pick up after a restart).
-All four read the compact summaries aggregate (one download, no per-task body
-fetch) and render via the shared relative-time formatters — they never mutate bus
-state.
+The operator's at-a-glance surfaces: ``status`` (the task board), ``board`` (the
+coordination-LOOP board: awaiting-me / awaiting-others / in-flight / ideas),
+``agents`` (who is on what, folding in presence), ``needs-me`` (directives +
+blocked-on-you addressed to me, with first-seen tracking), and ``resume`` (what to
+pick up after a restart). All read-only: ``status``/``agents``/``needs-me``/
+``resume`` read the compact summaries aggregate (one download, no per-task body
+fetch); ``board`` reads the top-level directive records. They render via the
+shared relative-time formatters and never mutate bus state.
 
 Extracted from cli.py behind stable re-exports; depends only on lower layers
-(remote / views / schema / identity / cache / listener, the io summaries loader, and
-the output / textfmt leaf utils) and never imports cli, so the split has no cycle.
+(remote / views / schema / identity / cache / listener / the pure loops folds, the
+io summaries loader, and the output / textfmt leaf utils) and never imports cli,
+so the split has no cycle.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import remote, views, schema, identity, cache, continuity
+from . import loops as _loops
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
@@ -155,6 +159,112 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
             print(line)
     except Exception:
         pass
+
+    print()
+    return 0
+
+
+def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Render the coordination-loop board for one agent (spec step 7).
+
+    The OPERATOR view of the same pure ``loops.loop_board`` fold reconcile's
+    health record uses — four sections: loops awaiting me, my unanswered asks
+    (with ⚠ overdue / ◈ out-of-band trailing flags), open non-idea loops by
+    kind, and the ideas pipeline by state. ``--format json`` prints the raw
+    board dict. Read-only and rc 0 always — this is a glance surface, and a
+    half-readable bus must still render whatever it can, never a stack trace.
+
+    TOP-LEVEL-ONLY FILTER (load-bearing, same idiom as cli._loop_health_check
+    — copied, not imported, because query.py must never import cli): the
+    directives prefix holds SUB-LOG SUBTREES (``<id>/acks/``, ``<id>/routing/``,
+    ``<id>/responses/``, ``<id>/evidence/``) beside the top-level
+    ``directives/<id>.json`` loop records; only a path with no further ``/``
+    after the prefix that ends in ``.json`` is a loop record.
+
+    Evidence probes are BOUNDED the same way as the health check: fold
+    awaiting_others WITHOUT evidence first to get MY open asks (a small set),
+    then list each candidate's evidence prefix — never one list per directive
+    on the bus. Each probe is individually best-effort (a failed list reads as
+    "no evidence")."""
+    me = identity.resolve_agent(getattr(args, "agent", None))
+    out_format = getattr(args, "format", "table")
+    now = datetime.now(timezone.utc)
+
+    prefix = remote.directives_prefix()
+    try:
+        listed = remote.list_json(prefix, backend=backend)
+    except Exception:
+        listed = []
+    records: list[dict] = []
+    for path, rec in listed:
+        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        if "/" in rel:
+            continue  # ack/routing/response/evidence shard — never a loop record
+        if not rel.endswith(".json"):
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+
+    evidence_ids: set[str] = set()
+    for s in _loops.awaiting_others(me, records, now=now):
+        lid = s.get("id")
+        if not lid:
+            continue
+        try:
+            if remote.list_json(remote.directive_evidence_prefix(lid),
+                                backend=backend):
+                evidence_ids.add(lid)
+        except Exception:
+            continue   # best-effort: an unreadable prefix is "no evidence"
+
+    board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
+
+    if out_format == "json":
+        _print_json(board)
+        return 0
+
+    aw_me = board["awaiting_me"]
+    aw_others = board["awaiting_others"]
+    in_flight = board["in_flight_by_kind"]
+    ideas = board["ideas_pipeline"]
+
+    if not (aw_me or aw_others or in_flight or ideas):
+        _info("(no open coordination loops)")
+        return 0
+
+    def _loop_line(s: dict) -> str:
+        return (f"    {s.get('id','')}  [{s.get('kind','?')}]  "
+                f"{(s.get('title') or '')[:50]}")
+
+    print(f"\n{'='*60}")
+    print(f"  Coordination board — {me}")
+    print(f"{'='*60}")
+
+    print(f"\n  Awaiting me ({len(aw_me)})")
+    for s in aw_me:
+        print(_loop_line(s))
+
+    print(f"\n  Awaiting others ({len(aw_others)})")
+    for s in aw_others:
+        # Orthogonal trailing flags: ⚠ = past the kind/record SLA with no
+        # answer; ◈ = a mirrored answer exists OFF the bus (close it
+        # explicitly via respond/review-done, citing the evidence — the
+        # mirror never closes anything).
+        flags = ""
+        if s.get("overdue"):
+            flags += " ⚠ overdue"
+        if s.get("out_of_band"):
+            flags += " ◈ out-of-band"
+        print(_loop_line(s) + flags)
+
+    print("\n  In flight by kind")
+    for kind in sorted(in_flight):
+        print(f"    {kind}: {in_flight[kind]}")
+
+    print("\n  Ideas pipeline")
+    for state in sorted(ideas):
+        print(f"    {state}: {ideas[state]}")
 
     print()
     return 0
