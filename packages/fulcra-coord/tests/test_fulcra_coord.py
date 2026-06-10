@@ -7915,18 +7915,14 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_1(self):
-        # 0.15.1: the live-test fixes + loops phase 2, cut while the findings
-        # were hot (the 0.13/0.14 merge-without-bump guard).
-        #   - #139 loops phase 2: forge-mirror (one sanctioned poller; evidence
-        #     NEVER closes a loop), out-of-band detection, board + digest.
-        #   - #140 kind:review tag-clobber fix: claiming a review no longer
-        #     breaks review-done resolution / loop closure (live-test find).
-        #   - #141 reconcile upload retry: deadline-gated single retry with
-        #     jitter under backend burst throttling (live-evidenced) +
-        #     store.last_upload_error observability.
+    def test_version_is_0_15_2(self):
+        # 0.15.2: URGENT cut — #147 staleness-guarded reads. Under backend
+        # write-throttling (95% burst failure observed 2026-06-10), views go
+        # hours stale and every pre-#147 host reads BLIND (invisible verdicts,
+        # directives, review requests). This cut gets the direct-listing
+        # fallback to the fleet ahead of the in-flight #150/roles work.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.1")
+        self.assertEqual(__version__, "0.15.2")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):

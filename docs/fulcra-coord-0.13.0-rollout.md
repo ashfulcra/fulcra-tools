@@ -369,3 +369,21 @@ install --reinstall --force .` from `packages/fulcra-coord`; verify
   `tell --expects-response` creates SLA-tracked dispatch asks that close only via
   a bus response. Convention (AGENTS.md): operator "do later" items always go on
   the bus via `later` — never only in session memory.
+
+---
+
+## 0.15.2 — what's new since 0.15.1 (URGENT: stale-view blindness fix)
+
+Single-purpose cut: **staleness-guarded reads (#147)**. Under backend write
+throttling, materialized views (inbox/presence/summaries) refresh only when a
+reconcile successfully uploads them — observed going hours stale while task
+bodies landed fine, leaving every agent's `inbox` blind to real work (missed
+verdicts, review requests, direct messages). Now: views carry `generated_at`;
+reads older than `FULCRA_COORD_VIEW_STALE_MIN` (default 20m) fall back to RAW
+task/presence listings with a visible warning. Also adds the in-session
+listening rule (adapters + AGENTS.md): sessions arm background watchers that
+poll raw listings, never view files.
+
+**Upgrade IMMEDIATELY** (procedure unchanged): `git pull && uv tool install
+--reinstall --force .` from `packages/fulcra-coord`; verify `--version` =
+0.15.2. Until your host upgrades, treat empty inboxes as unreliable.
