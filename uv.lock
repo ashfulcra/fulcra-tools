@@ -509,6 +509,9 @@ provides-extras = ["macos", "dev"]
 name = "fulcra-prefs"
 version = "0.1.0"
 source = { editable = "packages/fulcra-prefs" }
+dependencies = [
+    { name = "fulcra-api" },
+]
 
 [package.optional-dependencies]
 dev = [
@@ -516,7 +519,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" }]
+requires-dist = [
+    { name = "fulcra-api", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+]
 provides-extras = ["dev"]
 
 [[package]]
