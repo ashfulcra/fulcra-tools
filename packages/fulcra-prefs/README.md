@@ -7,6 +7,40 @@ export path keeps every disclosure logged — what the spec calls the Privacy Le
 It is built entirely on Fulcra annotation records and the Fulcra file library,
 with no separate database and no vendor lock-in beyond your own Fulcra account.
 
+Agents append tiny typed events → a deterministic compiler folds them into
+per-platform truth → every agent boots with that truth injected → groups decide
+over consented slices, with every disclosure on the record.
+
+---
+
+## The idea: two layers
+
+**Layer 1 — signals (the history).** Every preference, fact, or consent event is
+one immutable, timestamped record on your Fulcra timeline. `capture` builds a
+typed signal — kind, dot-namespaced key, scope (`global` or
+`platform:claude-code`), signed strength (−1..1, where negative means aversion),
+confidence, and a half-life — then POSTs it to the Fulcra ingest API as a
+`MomentAnnotation` record linked to your "Preference Signals" definition. If the
+network's down, the signal spools to a local outbox and uploads on the next run.
+Nothing is lost, and the deterministic temp-id means even a "this replaces my old
+preference" reference survives the offline gap.
+
+**Layer 2 — compiled docs (the current state).** `compile` is a pure function
+that reduces all signals to "what's true now":
+
+1. **Decay.** `weight = strength × 2^(−age / half_life)`. A 0.9-strength signal
+   with a 90-day half-life is worth ~0.45 after 90 days. Facts (`half_life: null`)
+   don't decay but are flagged stale after 180 days.
+2. **Supersedes.** Corrections drop the replaced signal; chains are followed;
+   cycles are silently dropped.
+3. **Conflicts.** Highest absolute decayed weight wins; ties break to the newer
+   signal (then signal id for full determinism).
+4. **Scope overlay.** Platform-scoped signals beat global ones; one compiled doc
+   per platform is written alongside the global doc.
+
+Output is byte-identical for the same signals at the same instant, regardless of
+input order — tested, not aspirational (see `tests/test_determinism.py`).
+
 ---
 
 ## Install & auth
@@ -90,6 +124,15 @@ overlays under `prefs/platforms/`. The output is byte-identical for the same
 inputs regardless of input order — the determinism contract tested in
 `tests/test_determinism.py`. Full design rationale: [`docs/SPEC.md`](docs/SPEC.md).
 
+How agents consume the compiled doc: `inject` prints a compact preference block
+at session start (e.g. `- comms.tone.concise: {"preferred": true} [+0.90]`). It
+is a file read — no math, no API call. Because every platform reads the same
+compiled file, preferences are consistent across Claude Code, Codex, ChatGPT, or
+any other agent you run. Shell-less agents that can't run the CLI follow the
+raw-HTTP recipes in `skill/references/fulcra-prefs-tier2-http.md`: same
+device-flow auth, capture = one POST, read = one file download. No agent
+re-derives the compiler math — the compiled file is the shared source of truth.
+
 ---
 
 ## The skill
@@ -123,6 +166,12 @@ Where `options.json` is e.g.:
 And `docs.json` is `{"alice": <compiled doc>, "bob": <compiled doc>}`. The
 output is a ranked list plus a human-readable trace explaining every score and
 veto — the trace is the deliverable, not a debug artefact.
+
+The solver ranks deterministically: weighted-sum scoring, hard-veto on any
+participant's strong aversion (anyone at or below the veto threshold kills an
+option outright), lexicographic tie-breaks, no LLM in the loop. A trace line
+might read: `bbq-barn: VETOED by bob on dining.cuisine.bbq (−0.80)` — so the
+why is auditable without replaying the math.
 
 ---
 

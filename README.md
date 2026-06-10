@@ -30,6 +30,10 @@ data types, tags, files).
   [fulcra-onboarding skill](https://github.com/fulcradynamics/agent-skills/blob/main/skills/fulcra-onboarding/SKILL.md)
   — it walks a new user through auth, first custom data types, first records,
   and a dashboard.
+- **Want your agents to share your preferences?** Once you're authed,
+  [`fulcra-prefs`](packages/fulcra-prefs/README.md) gives every agent you use
+  one decaying, consent-gated preference store — two commands to start, and a
+  session hook that boots Claude Code with your preferences loaded.
 - **Agent integrating with the platform?**
   [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps every primitive (auth,
   files, annotations, queries, MCP) by agent capability — CLI, raw HTTP, or
