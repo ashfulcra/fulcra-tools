@@ -356,6 +356,63 @@ def directive_evidence_path(directive_id: str, event_id: str) -> str:
     return f"{directive_evidence_prefix(directive_id)}{event_id}.json"
 
 
+# ---------------------------------------------------------------------------
+# Role path helpers (roles-as-durable-identity, spec 2026-06-10)
+# ---------------------------------------------------------------------------
+#
+# THE INVERSION: the ROLE is the durable identity; a session is an ephemeral
+# lease on it. The registry record (``roles/<name>.json``) is operator data —
+# what the role is for, its standing instructions, vacancy SLA, maintainer.
+# Leases live in a per-agent SUB-LOG under the role, exactly like the
+# directive ack sub-log: one file PER CLAIMING AGENT, so an agent re-claiming
+# overwrites only its OWN lease (idempotent refresh) and two agents claiming
+# the same role NEVER collide — no shared mutable holder list, no clobber on
+# the CAS-less bus. Lease FRESHNESS is not stored here at all: a lease is
+# fresh iff its holder's presence is fresh (no new heartbeat machinery).
+
+
+def roles_prefix() -> str:
+    """List prefix for the role registry. Holds top-level ``<name>.json``
+    registry records BESIDE per-role subtrees (``<name>/leases/``,
+    ``<name>/escalations/``) — listings must apply the same top-level-only
+    filter the directives prefix needs (see role_ops.list_roles)."""
+    return f"{remote_root()}/roles/"
+
+
+def role_record_path(name: str) -> str:
+    """Canonical storage path for one role's registry record. Keyed by the
+    slugified role name (role names are operator-typed strings; the slug keeps
+    arbitrary input portable as a path segment, mirroring the ack sub-log)."""
+    return f"{roles_prefix()}{_filename_slug(name)}.json"
+
+
+def role_leases_prefix(name: str) -> str:
+    """List prefix for one role's per-agent lease files (the holder union =
+    list it, exactly like the ack union)."""
+    return f"{roles_prefix()}{_filename_slug(name)}/leases/"
+
+
+def role_lease_path(name: str, agent: str) -> str:
+    """Storage path for ONE agent's lease on a role.
+
+    One file per claiming agent (keyed by the slugified agent id) so a
+    re-claim overwrites only that agent's OWN lease and two different agents
+    never collide — 'claiming a shared role must not evict the other holders'
+    is true BY CONSTRUCTION (the directive_ack_path property)."""
+    return f"{role_leases_prefix(name)}{_filename_slug(agent)}.json"
+
+
+def role_escalation_marker_path(name: str, day: str) -> str:
+    """First-writer-wins DAILY vacancy-escalation marker for one role.
+
+    Keyed by the UTC date (``YYYY-MM-DD``) so a role vacant past its SLA
+    escalates to its maintainer ONCE PER DAY, not once per reconcile tick —
+    the digest-marker dedup pattern (_claim_digest_marker), applied per role.
+    Lives under the role's subtree so the top-level registry filter already
+    excludes it from listings."""
+    return f"{roles_prefix()}{_filename_slug(name)}/escalations/{day}.json"
+
+
 def health_remote_path(host_slug: str) -> str:
     """Per-host self-reported health record path. Takes an ALREADY-SLUGGED id
     (views.agent_slug). Only that host writes its own file -> zero cross-host
