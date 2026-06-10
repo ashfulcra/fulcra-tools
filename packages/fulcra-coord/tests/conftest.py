@@ -56,6 +56,7 @@ def _hermetic_cache_and_backend():
     prev_xdg = os.environ.get("XDG_CACHE_HOME")
     prev_backend = os.environ.get("FULCRA_COORD_BACKEND")
     prev_annotations = os.environ.get("FULCRA_COORD_ANNOTATIONS")
+    prev_ensure = os.environ.get("FULCRA_COORD_ENSURE_LISTENER")
 
     tmp = tempfile.mkdtemp(prefix="fulcra-coord-test-cache-")
     os.environ["XDG_CACHE_HOME"] = tmp
@@ -86,6 +87,16 @@ def _hermetic_cache_and_backend():
     if prev_annotations is None:
         os.environ["FULCRA_COORD_ANNOTATIONS"] = "off"
 
+    # Safety net for the HOST-SCHEDULER path: ``cmd_connect`` best-effort
+    # re-arms a missing listener (listener.ensure_listener, spec 2026-06-09).
+    # XDG_CACHE_HOME isolation does NOT cover it — the armed-probe reads the
+    # REAL ~/Library/LaunchAgents / live ``crontab -l``, and a "missing"
+    # verdict would WRITE a real plist on the test machine. Default the
+    # opt-out ON for every test; the ensure_listener tests force it back to
+    # "1" via patch.dict (with the probe/installer mocked).
+    if prev_ensure is None:
+        os.environ["FULCRA_COORD_ENSURE_LISTENER"] = "0"
+
     try:
         yield tmp
     finally:
@@ -103,6 +114,11 @@ def _hermetic_cache_and_backend():
             os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         else:
             os.environ["FULCRA_COORD_ANNOTATIONS"] = prev_annotations
+
+        if prev_ensure is None:
+            os.environ.pop("FULCRA_COORD_ENSURE_LISTENER", None)
+        else:
+            os.environ["FULCRA_COORD_ENSURE_LISTENER"] = prev_ensure
 
         shutil.rmtree(tmp, ignore_errors=True)
 
