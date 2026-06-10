@@ -10,6 +10,39 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — staleness-guarded reads: stale views fall back to direct listings
+
+**Why:** Live 2026-06-10 evidence (the highest-severity find of that night's
+systematic debugging): every read surface (`inbox`, `presence`/liveness,
+`board`) trusts materialized views that refresh ONLY when a write/reconcile
+successfully uploads them. Under backend write-throttling (20–80% upload
+failures per tick), the views went HOURS stale while task bodies landed fine —
+so every agent polling `inbox` saw nothing (6 review verdicts, 2 direct
+messages, and a review request sat invisible), and `request-review` reported
+"no reviewer live" while the reviewer WAS live (stale presence aggregate). The
+durable Tier-0 layer worked; the read path lied.
+
+**What:**
+- `views/summaries.json` and `views/presence.json` are now stamped
+  `generated_at` (ISO Z) at build time. Additive — old readers ignore it, and
+  a view without the stamp (older CLI) is trusted exactly as before.
+- `_load_task_summaries` (the fast path under `inbox`/`needs-me`/`status`/…)
+  checks that stamp: older than `FULCRA_COORD_VIEW_STALE_MIN` (new env knob,
+  default 20 minutes; `0` disables) → ignore the view and read the durable
+  `tasks/` files via a RAW listing (`_load_all_tasks_by_listing` — not the
+  index/next/search views, which go stale together with summaries), with a
+  `WARN` so staleness is visible, not silent. Deliberately unbounded: slower
+  but complete — no cap may silently drop tasks.
+- Same guard for the presence roster: liveness-sensitive consumers
+  (`request-review`, the review-routing reconcile sweep, `tell
+  --route-capability`, `presence`) now read through
+  `presence._load_presence_agents`, which falls back to listing the per-agent
+  `presence/*.json` records (the same enumeration the reconcile rebuild uses)
+  when the aggregate is stale.
+- Degraded-not-blind floor: if the direct listing ALSO fails (or returns
+  empty — indistinguishable from a backend without a working `list`), the
+  stale view is still used, with a louder warn. Stale data beats no data.
+
 ## [Unreleased] — reconcile view uploads retry once with jitter under burst throttling
 
 **Why:** Live 0.15.0 evidence (two hosts): every `reconcile` tick was failing a

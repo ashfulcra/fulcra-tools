@@ -22,6 +22,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, routing, env_float
+# Staleness-guarded roster read: under backend write-throttling the presence
+# AGGREGATE lags the durable per-agent records by hours, so routing against it
+# reported "no reviewer live" while the reviewer was live (2026-06-10). The
+# guarded loader falls back to listing presence/*.json when the aggregate is
+# stale. presence sits on lower layers only (io/views/remote), so this import
+# introduces no cycle.
+from .presence import _load_presence_agents
 from .io import _cache_remote_task, _load_all_tasks
 from .output import info as _info, print_json as _print_json, warn as _warn
 from .timeutil import iso_z as _iso_z
@@ -235,8 +242,9 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     out_format = getattr(args, "format", "table")
     author = identity.resolve_agent(getattr(args, "agent", None))
     try:
-        agg = remote.download_json(remote.presence_view_path(), backend=backend)
-        presence = (agg or {}).get("agents", []) if agg else []
+        # Staleness-guarded: falls back to per-agent presence records when the
+        # aggregate is stale, so a live reviewer is never reported dead.
+        presence = _load_presence_agents(backend=backend)
     except Exception:
         presence = []  # treat as no live candidate -> escalate
     override = getattr(args, "candidate_list", None)
@@ -590,8 +598,10 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None):
     budget_floor = (deadline - _SWEEP_DEADLINE_HEADROOM_SECONDS
                     if deadline is not None else None)
     try:
-        agg = remote.download_json(remote.presence_view_path(), backend=backend)
-        presence = (agg or {}).get("agents", []) if agg else []
+        # Staleness-guarded (same rationale as cmd_request_review): the sweep's
+        # reroute/escalate verdicts hinge on last_seen, and a stale aggregate
+        # would escalate reviews a live reviewer should receive.
+        presence = _load_presence_agents(backend=backend)
     except Exception:
         presence = []
     deferred = 0

@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import cache, log as ops_log, read_source, remote, schema, views
+from .output import warn as _warn
 
 
 def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
@@ -219,13 +220,99 @@ def _load_task_summaries(backend: Optional[list[str]] = None) -> list[dict[str, 
     ``views/summaries.json``. When the download is absent/None we FALL BACK to the
     full ``_load_all_tasks`` path and summarize locally — correctness over speed —
     so an older bus keeps working (just without the speedup) until its next write
-    materializes the aggregate."""
+    materializes the aggregate.
+
+    STALE-VIEW GUARD (2026-06-10 blindness fix): the aggregate refreshes ONLY
+    when a write/reconcile successfully uploads it. Under backend write-throttling
+    it went HOURS stale while task bodies landed fine — so every read that
+    trusted it (inbox, needs-me, status…) was blind to new work that was sitting
+    durably on the bus. When the view carries a ``generated_at`` older than
+    ``FULCRA_COORD_VIEW_STALE_MIN`` (default 20m), we ignore it and read the
+    durable ``tasks/`` files directly (``_load_all_tasks_by_listing`` — a raw
+    listing, never the equally-stale index views). Slower (one listing + N body
+    fetches via the pool) but CORRECT, and the warn makes the degradation
+    visible. A view with NO ``generated_at`` is a pre-stamp bus → trusted as
+    before (back-compat); if the direct listing itself fails, the stale view is
+    still better than nothing → use it with a louder warn (degraded, not blind)."""
     summaries_view = remote.download_json(
         remote.view_remote_path("summaries"), backend=backend)
     if summaries_view and summaries_view.get("summaries") is not None:
+        stale_min = views.view_staleness_minutes(summaries_view)
+        if stale_min is None:
+            return summaries_view["summaries"]
+        _warn(f"summaries view is {int(stale_min)}m stale — "
+              "reading task bodies directly")
+        direct = _load_all_tasks_by_listing(backend=backend)
+        if direct:
+            return [schema.task_summary(t) for t in direct]
+        _warn(f"summaries view is {int(stale_min)}m stale AND the direct task "
+              "listing failed — using the stale view (results may be incomplete)")
         return summaries_view["summaries"]
     # Older bus: no aggregate yet — fall back to the authoritative full load.
     return [schema.task_summary(t) for t in _load_all_tasks(backend=backend)]
+
+
+def _load_all_tasks_by_listing(
+    backend: Optional[list[str]] = None,
+) -> Optional[list[dict[str, Any]]]:
+    """Full task load driven by a RAW ``tasks/`` listing — no view files at all.
+
+    The stale-view fallback path. ``_load_all_tasks`` seeds its id set from the
+    index / search-index / next views, which go stale together with the
+    summaries aggregate under the exact failure this fallback exists for
+    (2026-06-10: every view upload throttled while task bodies landed fine), so
+    it cannot be the rescue here. The per-task files are the durable,
+    un-clobberable truth — the same enumeration the write path's S2 self-heal
+    uses — so listing them is immune to view lag by construction.
+
+    Bodies are fetched concurrently through ``_cache_remote_task`` (same pool
+    shape and best-effort guards as ``_load_all_tasks``), unioned over the local
+    cache base so a body whose individual download fails still surfaces from
+    cache when this agent has seen it. Deliberately UNBOUNDED: a cap that
+    truncates the listing would silently drop tasks — the precise blindness this
+    path exists to cure; slower-but-complete is the contract.
+
+    Returns ``None`` when the listing RAISES or comes back EMPTY — an empty
+    listing on a bus whose (stale) view still names tasks is indistinguishable
+    from a backend without a working ``list``, and the caller must never
+    downgrade stale data to NO data."""
+    try:
+        prefix = f"{remote.remote_root()}/tasks/"
+        paths = remote.list_files(prefix, backend=backend)
+    except Exception:
+        return None
+    task_ids = [
+        p.rsplit("/", 1)[-1][: -len(".json")]
+        for p in paths if p.endswith(".json")
+    ]
+    task_ids = [tid for tid in task_ids if tid]
+    if not task_ids:
+        return None
+    listed_ids = set(task_ids)
+    # Cache base for LISTED ids first, freshly-fetched bodies overlay it — the
+    # same merge discipline (and id-less-body guard, A2) as _load_all_tasks.
+    # Do not seed every cached task: this path is specifically driven by the
+    # authoritative raw tasks/ listing, and including cache entries absent from
+    # that listing would resurrect locally stale/deleted tasks during fallback.
+    task_map: dict[str, dict[str, Any]] = {
+        tid: t for t in cache.list_cached_tasks()
+        if (tid := t.get("id")) and tid in listed_ids
+    }
+    max_workers = min(16, max(4, len(task_ids)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_cache_remote_task, tid, backend=backend): tid
+            for tid in task_ids
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            # Best-effort per body: one failed fetch must not abort the load.
+            try:
+                t = fut.result()
+            except Exception:
+                t = None
+            if t and t.get("id"):
+                task_map[t["id"]] = t
+    return list(task_map.values())
 
 
 def _load_summaries_for_rebuild(
