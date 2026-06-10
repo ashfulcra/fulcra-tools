@@ -6,8 +6,9 @@ The bus-mutation command surface: the directive creators (``tell`` / ``broadcast
 schema, then writes through the single ``_write_task_and_views`` pipeline.
 
 Extracted from cli.py behind stable re-exports; depends only on lower layers (the
-write pipeline, the io loader, the routing escalation, the presence onboarding hint,
-plus cache/remote/schema/views/identity/annotations and the output leaf utils) and
+write pipeline, the io loader, the routing escalation, the presence onboarding hint
++ guarded roster loader, plus cache/remote/schema/views/identity/annotations and
+the output leaf utils) and
 never imports cli, so the split has no cycle. ``_derive_agent`` is a thin stateless
 alias over ``identity.resolve_agent``; cli keeps its own identical copy for the
 commands that remain there, so duplicating the one-liner avoids a back-import.
@@ -18,13 +19,18 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from . import cache, remote, routing, schema, views, identity, continuity
+# NB: `remote` looks unused since the raw presence-aggregate download for
+# --route-capability moved behind presence._load_presence_agents, but it is a
+# LOAD-BEARING test patch surface: the directive dual-write tests monkeypatch
+# `lifecycle.remote.upload_json` to fail the transport under this module's
+# commands. Keep it bound here.
+from . import cache, remote, routing, schema, views, identity, continuity  # noqa: F401
 from . import annotations as lifecycle_annotations
 from .io import _load_task
 from .output import info as _info, warn as _warn, err as _err
 from .writepipe import _write_task_and_views
 from .routing_ops import _escalate_review_to_human
-from .presence import _maybe_warn_legacy_identity
+from .presence import _load_presence_agents, _maybe_warn_legacy_identity
 
 
 def _derive_agent() -> str:
@@ -72,8 +78,10 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None,
     route_capability = getattr(args, "route_capability", None)
     if route_capability:
         try:
-            agg = remote.download_json(remote.presence_view_path(), backend=backend)
-            presence = (agg or {}).get("agents", []) if agg else []
+            # Staleness-guarded roster read (falls back to per-agent records
+            # when the aggregate lags under backend throttling), so a live
+            # capability-holder is never skipped for a stale last_seen.
+            presence = _load_presence_agents(backend=backend)
         except Exception:
             presence = []  # treat as no live candidate -> escalate
         pool = [r["agent"] for r in presence

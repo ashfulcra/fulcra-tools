@@ -123,6 +123,52 @@ def _upsert_presence_aggregate(
         pass  # aggregate is opportunistic; reconcile heals it
 
 
+def _load_presence_agents(backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
+    """Staleness-guarded read of the presence roster (``views/presence.json``).
+
+    THE single roster read for liveness-sensitive consumers (`presence`,
+    review routing, capability routing). The aggregate refreshes only when a
+    connect/reconcile successfully uploads it; under backend write-throttling
+    it lags the durable per-agent records by hours, so the stored ``last_seen``
+    under-reports liveness — the 2026-06-10 failure where ``request-review``
+    said "no reviewer live" while the reviewer's own ``presence/<slug>.json``
+    was fresh. When the aggregate's ``generated_at`` is older than
+    ``FULCRA_COORD_VIEW_STALE_MIN`` (views.view_staleness_minutes), list the
+    per-agent ``presence/*.json`` files directly — the same authoritative
+    enumeration ``_reconcile_presence`` rebuilds from — and use those.
+
+    Returns RAW agent records: entries from the aggregate may carry a stored
+    ``liveness`` annotation, listed per-agent records carry none. That is fine
+    for every consumer — the routing resolver recomputes liveness from
+    ``last_seen`` (it never trusts the stored tier), and ``cmd_presence`` strips
+    and re-derives it. Degradation order: no aggregate at all → ``[]`` (today's
+    behavior); stale aggregate + working listing → fresh per-agent records;
+    stale aggregate + failed/empty listing → the stale aggregate with a louder
+    warn (degraded, never blind)."""
+    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+    if not agg:
+        return []
+    agents = list(agg.get("agents", []) or [])
+    stale_min = views.view_staleness_minutes(agg)
+    if stale_min is None:
+        return agents
+    _warn(f"presence aggregate is {int(stale_min)}m stale — "
+          "reading per-agent presence records directly")
+    try:
+        records = [
+            rec for _, rec in remote.list_json(
+                remote.presence_prefix(), backend=backend)
+            if rec.get("agent")
+        ]
+    except Exception:
+        records = []
+    if records:
+        return records
+    _warn(f"presence aggregate is {int(stale_min)}m stale AND the per-agent "
+          "listing failed — using the stale roster (liveness may under-report)")
+    return agents
+
+
 def _write_presence(
     record: dict[str, Any], backend: Optional[list[str]] = None) -> bool:
     """Write a presence record to its per-agent file + upsert the aggregate.
@@ -280,13 +326,15 @@ def cmd_presence(args: Any, backend: Optional[list[str]] = None) -> int:
     that answers "what is every agent on" even for agents with no active task.
     Empty/missing roster → a clear "nothing recorded yet" message."""
     out_format = getattr(args, "format", "table")
-    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+    # Staleness-guarded roster read (falls back to per-agent records when the
+    # aggregate has gone stale under backend throttling — see the loader).
+    agents = _load_presence_agents(backend=backend)
     # Re-derive liveness at read time so the age reflects NOW, not the moment the
     # aggregate was last written (the stored liveness can have drifted to stale).
     records = [
         {k: v for k, v in a.items() if k != "liveness"}
-        for a in (agg or {}).get("agents", [])
-    ] if agg else []
+        for a in agents
+    ]
     view = views.build_presence(records)
 
     if out_format == "json":
