@@ -413,6 +413,17 @@ def role_escalation_marker_path(name: str, day: str) -> str:
     return f"{roles_prefix()}{_filename_slug(name)}/escalations/{day}.json"
 
 
+def version_manifest_path() -> str:
+    """Canonical version-manifest record (``runtime/version.json``) — the bus's
+    version POINTER (spec 2026-06-08 safety boundary: the bus says WHICH version
+    is canonical, never WHAT to run). Written only by the maintainer's
+    ``announce-version`` at release time; read by every session-start /
+    listener-tick self-update check. One well-known mutable file (like the
+    views): last-writer-wins is correct here because only the maintainer
+    writes it and a newer announce SHOULD supersede an older one."""
+    return f"{remote_root()}/runtime/version.json"
+
+
 def health_remote_path(host_slug: str) -> str:
     """Per-host self-reported health record path. Takes an ALREADY-SLUGGED id
     (views.agent_slug). Only that host writes its own file -> zero cross-host
