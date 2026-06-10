@@ -136,15 +136,28 @@ def _forge_violations(source: str, filename: str) -> list[str]:
     return violations
 
 
+# THE one sanctioned exception (phase 2): forge_mirror.py IS the designed
+# forge bridge — the single place the system may drive ``gh``, mirroring
+# verdict-shaped forge signals into the evidence sub-log (marked
+# source=forge-mirror, never closing a loop). Exempting it here does NOT
+# weaken the invariant; its containment is enforced from the other direction
+# by the reverse fitness pin (test_fulcra_coord.py::TestLoopsLayering::
+# test_no_core_module_imports_forge_mirror): no core module may import it, so
+# forge calls can never leak from the bridge back into the core.
+_SANCTIONED_FORGE_BRIDGE = "forge_mirror.py"
+
+
 def _core_source_files() -> list[Path]:
-    """Every CORE module: ``fulcra_coord/*.py``.
+    """Every CORE module: ``fulcra_coord/*.py`` minus the one sanctioned
+    forge bridge (see ``_SANCTIONED_FORGE_BRIDGE`` above).
 
     Deliberately top-level only — NOT tests/, adapters/, or docs/. Adapters are
     where a forge integration WOULD live if one existed; the invariant guards the
     core, not the optional edges.
     """
     pkg_dir = Path(__file__).resolve().parent.parent / "fulcra_coord"
-    return sorted(pkg_dir.glob("*.py"))
+    return sorted(p for p in pkg_dir.glob("*.py")
+                  if p.name != _SANCTIONED_FORGE_BRIDGE)
 
 
 class ForgeAgnosticCoreTest(unittest.TestCase):
