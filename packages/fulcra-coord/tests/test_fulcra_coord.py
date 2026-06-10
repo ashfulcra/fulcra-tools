@@ -11912,6 +11912,260 @@ def test_board_is_wired_into_map():
 
 
 # ---------------------------------------------------------------------------
+# Role vacancy surfacing (spec 2026-06-10): reconcile's report-only
+# `_role_health_check` sub-pass + the board's Roles section. Vacancy is the
+# new dark-agent signal — not "agent X is dark" but "FUNCTION X is unstaffed".
+# Same pytest-on-coord_backend idiom as the loop-health/board tests above.
+# ---------------------------------------------------------------------------
+
+
+def _seed_role(backend, name, *, policy="shared", sla_hours=None,
+               maintainer=None, created_hours_ago=100.0):
+    from fulcra_coord import remote, role_ops
+    r = schema.make_role(name, f"the {name} role", policy=policy,
+                         sla_hours=sla_hours, maintainer=maintainer)
+    r["created_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=created_hours_ago)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    assert role_ops.upsert_role(r, backend=backend)
+    return r
+
+
+def _seed_lease(backend, role_name, agent, *, hours_old=0.0):
+    """Write a lease shard directly (claim_role stamps `at`=now; aging a lease
+    needs a hand-written shard) — same path claim_role writes."""
+    from fulcra_coord import remote
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours_old)
+          ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    lease = {"schema": schema.ROLE_LEASE_SCHEMA, "role": role_name,
+             "agent": agent, "at": at}
+    assert remote.upload_json(lease, remote.role_lease_path(role_name, agent),
+                              backend=backend)
+    return lease
+
+
+def _seed_presence(backend, agent, *, hours_old=0.0):
+    """Durable per-agent presence + aggregate, via the production writer so
+    the staleness-guarded roster read sees exactly what connect writes."""
+    from fulcra_coord import presence
+    last_seen = (datetime.now(timezone.utc) - timedelta(hours=hours_old)
+                 ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    rec = schema.make_presence(agent, workstreams=[], summary="",
+                               last_seen=last_seen)
+    presence._write_presence(rec, backend=backend)
+    return rec
+
+
+def test_role_health_check_reports_held_vacant_contested(coord_backend):
+    from fulcra_coord import cli
+    _seed_role(coord_backend, "held-role")
+    _seed_lease(coord_backend, "held-role", "live:h:r")
+    _seed_role(coord_backend, "vacant-role")
+    _seed_lease(coord_backend, "vacant-role", "dead:h:r")
+    _seed_role(coord_backend, "contested-role", policy="exclusive")
+    _seed_lease(coord_backend, "contested-role", "live:h:r")
+    _seed_lease(coord_backend, "contested-role", "live2:h:r")
+    _seed_presence(coord_backend, "live:h:r")
+    _seed_presence(coord_backend, "live2:h:r")
+    _seed_presence(coord_backend, "dead:h:r", hours_old=9)
+
+    report = cli._role_health_check(backend=coord_backend)
+
+    by_name = {r["name"]: r for r in report["roles"]}
+    assert by_name["held-role"]["vacant"] is False
+    assert [h["agent"] for h in by_name["held-role"]["holders"]] == ["live:h:r"]
+    assert by_name["vacant-role"]["vacant"] is True
+    assert by_name["vacant-role"]["vacant_since"]
+    assert by_name["contested-role"]["contested"] is True
+    assert report["vacant"] == 1
+    assert report["contested"] == 1
+
+
+def test_role_health_check_empty_registry_is_quiet(coord_backend):
+    from fulcra_coord import cli
+    report = cli._role_health_check(backend=coord_backend)
+    assert report == {"roles": [], "vacant": 0, "contested": 0, "escalated": 0}
+
+
+def test_role_health_uses_the_staleness_guarded_presence_read(coord_backend):
+    """Lease freshness MUST ride the staleness-guarded roster read (post-#147)
+    — _load_presence_agents — or vacancy detection inherits the stale-view
+    blindness (a live holder reads dead because the aggregate lagged)."""
+    from unittest import mock
+    from fulcra_coord import cli
+    _seed_role(coord_backend, "guarded-role")
+    _seed_lease(coord_backend, "guarded-role", "live:h:r")
+    fresh = (datetime.now(timezone.utc)).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+    with mock.patch.object(
+        cli, "_load_presence_agents",
+        return_value=[{"agent": "live:h:r", "last_seen": fresh}],
+    ) as guarded:
+        report = cli._role_health_check(backend=coord_backend)
+    assert guarded.called, "role health must read presence via the guarded loader"
+    by_name = {r["name"]: r for r in report["roles"]}
+    assert by_name["guarded-role"]["vacant"] is False
+
+
+def test_role_vacancy_past_sla_escalates_to_maintainer(coord_backend):
+    """A role vacant past sla_hours emits ONE escalation directive addressed
+    to the role's maintainer (not the operator's plate) — and re-running the
+    check the same day does NOT emit a second one (daily marker idempotence:
+    once per vacancy-day, not once per reconcile tick)."""
+    from fulcra_coord import cli, loop_ops
+    _seed_role(coord_backend, "stale-role", sla_hours=24,
+               maintainer="ops:h:r")
+    _seed_lease(coord_backend, "stale-role", "dead:h:r", hours_old=30)
+    # dead:h:r has no presence at all -> lease lapsed -> vacant since 30h ago.
+
+    report1 = cli._role_health_check(backend=coord_backend)
+    report2 = cli._role_health_check(backend=coord_backend)   # same day re-run
+
+    assert report1["escalated"] == 1
+    assert report2["escalated"] == 0    # marker claimed — once per day
+    records = loop_ops.load_loop_records(backend=coord_backend)
+    escalations = [r for r in records if r.get("audience") == "ops:h:r"]
+    assert len(escalations) == 1
+    assert "stale-role" in escalations[0].get("title", "")
+
+
+def test_role_vacancy_within_sla_does_not_escalate(coord_backend):
+    from fulcra_coord import cli, loop_ops
+    _seed_role(coord_backend, "fresh-vacancy", sla_hours=24,
+               maintainer="ops:h:r")
+    _seed_lease(coord_backend, "fresh-vacancy", "dead:h:r", hours_old=2)
+    report = cli._role_health_check(backend=coord_backend)
+    assert report["escalated"] == 0
+    assert loop_ops.load_loop_records(backend=coord_backend) == []
+
+
+def test_role_vacancy_without_maintainer_never_escalates(coord_backend):
+    # No maintainer = no escalation edge: the vacancy still counts/renders,
+    # but there is nowhere to route a directive (and nothing to spam).
+    from fulcra_coord import cli, loop_ops
+    _seed_role(coord_backend, "orphan-role", sla_hours=24)
+    _seed_lease(coord_backend, "orphan-role", "dead:h:r", hours_old=300)
+    report = cli._role_health_check(backend=coord_backend)
+    assert report["escalated"] == 0
+    assert report["vacant"] == 1
+    assert loop_ops.load_loop_records(backend=coord_backend) == []
+
+
+def test_reconcile_populates_role_health(coord_backend):
+    """The reconcile tick folds the role-health block into the per-host health
+    record, mirroring loop_health (report-only, never changes the exit code)."""
+    from unittest import mock
+    from fulcra_coord import cli, remote
+    _seed_role(coord_backend, "some-role")
+    captured = {}
+    real_upload = remote.upload_json
+
+    def _capture(record, path, **kwargs):
+        if "/health/" in path and isinstance(record, dict):
+            captured["record"] = record
+        return real_upload(record, path, **kwargs)
+
+    with mock.patch.object(remote, "upload_json", side_effect=_capture):
+        rc = cli.cmd_reconcile(mock.Mock(), backend=coord_backend)
+    assert rc == 0
+    assert "record" in captured, "no health record was uploaded"
+    assert "role_health" in captured["record"]
+    assert captured["record"]["role_health"]["vacant"] == 1
+
+
+def test_reconcile_exit_code_unaffected_by_role_health_exception(coord_backend):
+    from unittest import mock
+    from fulcra_coord import cli
+    with mock.patch.object(cli, "_role_health_check",
+                           side_effect=RuntimeError("boom")):
+        rc = cli.cmd_reconcile(mock.Mock(), backend=coord_backend)
+    assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Board: the Roles section — HELD / VACANT <duration>⚠ / CONTESTED
+# ---------------------------------------------------------------------------
+
+
+def _seed_three_state_roles(backend):
+    _seed_role(backend, "held-role")
+    _seed_lease(backend, "held-role", "live:h:r")
+    _seed_role(backend, "vacant-role", sla_hours=24)
+    _seed_lease(backend, "vacant-role", "dead:h:r", hours_old=30)
+    _seed_role(backend, "contested-role", policy="exclusive")
+    _seed_lease(backend, "contested-role", "live:h:r")
+    _seed_lease(backend, "contested-role", "live2:h:r")
+    _seed_presence(backend, "live:h:r")
+    _seed_presence(backend, "live2:h:r")
+
+
+def test_board_renders_roles_in_all_three_states(coord_backend, capsys):
+    from fulcra_coord import query
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        _seed_three_state_roles(coord_backend)
+        rc = query.cmd_board(types.SimpleNamespace(agent=None, format="table"),
+                             backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Roles" in out
+    assert "HELD by live:h:r" in out
+    assert "VACANT" in out
+    assert "⚠" in out          # vacant-role is past its 24h SLA
+    assert "CONTESTED" in out
+
+
+def test_board_json_includes_roles_section(coord_backend, capsys):
+    from fulcra_coord import query
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        _seed_three_state_roles(coord_backend)
+        rc = query.cmd_board(types.SimpleNamespace(agent=None, format="json"),
+                             backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+    assert rc == 0
+    board = json.loads(capsys.readouterr().out)
+    by_name = {r["name"]: r for r in board["roles"]}
+    assert by_name["held-role"]["vacant"] is False
+    assert by_name["vacant-role"]["vacant"] is True
+    assert by_name["contested-role"]["contested"] is True
+
+
+def test_board_with_only_roles_still_renders(coord_backend, capsys):
+    """A registry with no open loops must still render the Roles section —
+    roles are board state, not an appendix to loops."""
+    from fulcra_coord import query
+    _seed_role(coord_backend, "lonely-role")
+    rc = query.cmd_board(types.SimpleNamespace(agent=None, format="table"),
+                         backend=coord_backend)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "lonely-role" in out
+    assert "(no open coordination loops)" not in out
+
+
+def test_board_empty_registry_omits_roles_section(coord_backend, capsys):
+    from fulcra_coord import query
+    rc = query.cmd_board(types.SimpleNamespace(agent=None, format="table"),
+                         backend=coord_backend)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "(no open coordination loops)" in out
+    assert "Roles" not in out
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

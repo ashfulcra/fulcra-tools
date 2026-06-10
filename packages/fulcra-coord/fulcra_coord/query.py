@@ -22,10 +22,14 @@ from typing import Any, Optional
 
 from . import remote, views, schema, identity, cache, continuity
 from . import loops as _loops
+from . import roles as _roles
 # Shared records-sweep + bounded-evidence-probe pair (cmd_board). loop_ops is
 # BELOW this module (it never imports query/cli) — the single home for the
 # load-bearing top-level-shard filter all three loop surfaces need.
 from .loop_ops import load_loop_records, evidence_ids_for
+# Role registry/lease reads for the board's Roles section. role_ops is below
+# this module (it never imports query/cli), same layering as loop_ops.
+from . import role_ops as _role_ops
 from .io import _load_task_summaries
 from .output import info as _info, print_json as _print_json
 from .presence import _load_presence_agents
@@ -196,6 +200,44 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
 
     board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
 
+    # Roles section (spec 2026-06-10): per registered role, fold its lease
+    # sub-log against the STALENESS-GUARDED presence roster (post-#147 —
+    # reading the raw aggregate would make a live holder render VACANT under
+    # backend throttling) into HELD / VACANT / CONTESTED. Same pure fold +
+    # injected thresholds as cli._role_health_check, so the board and the
+    # health record can never disagree about who holds what. Best-effort: an
+    # unreadable registry renders no Roles section, never a stack trace.
+    roles_section: list[dict[str, Any]] = []
+    try:
+        registry = _role_ops.list_roles(backend=backend)
+        if registry:
+            presence_by_agent = {
+                a.get("agent"): a
+                for a in _load_presence_agents(backend=backend)
+                if isinstance(a, dict) and a.get("agent")
+            }
+            stale_hours = views._stale_hours()
+            grace = views._presence_grace_seconds()
+            for role in registry:
+                name = role.get("name") or ""
+                leases = _role_ops.read_leases(name, backend=backend)
+                status = _roles.role_status(role, leases, presence_by_agent,
+                                            now, stale_hours=stale_hours,
+                                            grace_seconds=grace)
+                roles_section.append({
+                    "name": name,
+                    "policy": role.get("policy"),
+                    "holders": status["holders"],
+                    "vacant": status["vacant"],
+                    "vacant_since": status["vacant_since"],
+                    "contested": status["contested"],
+                    "escalation_due": _roles.vacancy_escalation_due(
+                        role, status, now),
+                })
+    except Exception:
+        roles_section = []
+    board["roles"] = roles_section
+
     if out_format == "json":
         _print_json(board)
         return 0
@@ -205,7 +247,7 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
     in_flight = board["in_flight_by_kind"]
     ideas = board["ideas_pipeline"]
 
-    if not (aw_me or aw_others or in_flight or ideas):
+    if not (aw_me or aw_others or in_flight or ideas or roles_section):
         _info("(no open coordination loops)")
         return 0
 
@@ -241,6 +283,24 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
     print("\n  Ideas pipeline")
     for state in sorted(ideas):
         print(f"    {state}: {ideas[state]}")
+
+    if roles_section:
+        # HELD by <agents> | VACANT <duration> (⚠ when past the role's SLA —
+        # an escalation to the maintainer is due/sent) | CONTESTED (an
+        # exclusive role with >1 FRESH lease — visible, never silently
+        # double-held).
+        print("\n  Roles")
+        for r in roles_section:
+            if r["contested"]:
+                holders = ", ".join(h["agent"] for h in r["holders"])
+                line = f"CONTESTED — exclusive, fresh leases: {holders}"
+            elif r["vacant"]:
+                line = f"VACANT {_age_str(r.get('vacant_since') or '')}"
+                if r.get("escalation_due"):
+                    line += " ⚠"
+            else:
+                line = "HELD by " + ", ".join(h["agent"] for h in r["holders"])
+            print(f"    {r['name']}: {line}")
 
     print()
     return 0
