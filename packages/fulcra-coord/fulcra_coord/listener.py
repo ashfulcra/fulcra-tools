@@ -355,6 +355,48 @@ def install_listener(*, agent: str, interval_min: int = INTERVAL_MIN_DEFAULT,
     return plan
 
 
+def _listener_armed(agent: str) -> bool:
+    """Is a notify-inbox job installed for THIS agent on THIS host? Probes the
+    SAME artifacts ``install_listener`` writes — the per-agent launchd plist in
+    ~/Library/LaunchAgents and the per-agent managed crontab marker, both keyed
+    by ``agent_slug`` — so there is one source of truth and no second registry
+    to drift.
+
+    Best-effort and BOUNDED: connect runs in SessionStart hooks fleet-wide, so
+    a hang here must be impossible — the only subprocess (``crontab -l``)
+    carries timeout=5. Any error reads as "not armed"; the worst failure mode
+    is a redundant, idempotent re-install."""
+    try:
+        plist = scheduler_env.launchagents_dir() / _plist_name_for(agent)
+        if plist.exists():
+            return True
+        out = subprocess.run(["crontab", "-l"], capture_output=True, text=True,
+                             timeout=5)
+        return out.returncode == 0 and _cron_marker_for(agent) in (out.stdout or "")
+    except Exception:
+        return False
+
+
+def ensure_listener(*, agent: str) -> None:
+    """Self-healing re-arm (spec 2026-06-09): session-start idempotently
+    re-installs the listener if it is missing, so a dead listener heals on the
+    next session instead of staying silently dead — the operational hole behind
+    the out-of-band-verdict failure (no listener was running at all).
+
+    BEST-EFFORT and quiet: never raises, never blocks connect. Generalizes the
+    ensure-codex-watch pattern to every agent. Opt-out via
+    FULCRA_COORD_ENSURE_LISTENER=0 (mixed environments where the host scheduler
+    is managed elsewhere)."""
+    try:
+        if os.environ.get("FULCRA_COORD_ENSURE_LISTENER", "1").strip() == "0":
+            return
+        if _listener_armed(agent):
+            return
+        install_listener(agent=agent)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Cross-platform notification delivery.
 #
@@ -504,15 +546,20 @@ def _deliver(message: str, *, title: str = "fulcra-coord") -> None:
     _emit_native(message, title)
 
 
-def emit_notification(agent: str, count: int) -> None:
+def emit_notification(agent: str, count: int, *, extra: str = "") -> None:
     """Best-effort push that `count` directives await `agent`.
 
     Formats the fixed inbox-count string and routes it through ``_deliver`` —
     a webhook POST (when configured) plus a native desktop notification, both
     best-effort. Swallows every error: a failed notification must never break
     the scheduled job (fail-safe contract). Pure side-effect, no return —
-    callers decide whether to call it (skip on empty/already-seen inbox)."""
-    msg = f"{count} directive(s) waiting in your fulcra-coord inbox"
+    callers decide whether to call it (skip on empty/already-seen inbox).
+
+    ``extra`` is an optional pre-composed suffix appended verbatim to the
+    count message (e.g. the overdue-loop signal " · 1 overdue", spec
+    2026-06-09 Task 7). The CALLER owns its composition — this stays a dumb
+    formatter so the count semantics can never drift with the loop scan."""
+    msg = f"{count} directive(s) waiting in your fulcra-coord inbox{extra}"
     _deliver(msg, title="fulcra-coord")
 
 

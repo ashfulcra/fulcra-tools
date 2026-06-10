@@ -184,6 +184,19 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
                                   session=os.environ.get("FULCRA_COORD_SESSION") or None)
     _write_presence(record, backend=backend)
 
+    # Self-healing listener re-arm (spec 2026-06-09): connect runs on every
+    # session start, so this is the idempotent "heal a dead listener" hook.
+    # Doubly guarded (ensure_listener itself never raises) and BOUNDED — its
+    # only subprocess probe carries timeout=5 — because connect runs in
+    # SessionStart hooks fleet-wide and must never hang or fail a session boot.
+    # Opt-out: FULCRA_COORD_ENSURE_LISTENER=0. Lazy import keeps the presence
+    # module's load graph flat.
+    try:
+        from . import listener
+        listener.ensure_listener(agent=me)
+    except Exception:
+        pass
+
     if out_format == "json":
         _print_json(record)
         return 0
