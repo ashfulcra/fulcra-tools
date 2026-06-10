@@ -1,0 +1,36 @@
+"""Build + ingest one signal. On ingest failure the fully-formed record is
+spooled to the outbox — the temp signal id in metadata.source survives, so
+supersedes references stay valid after a later flush (SPEC.md, db46fb5)."""
+from __future__ import annotations
+import json
+from datetime import datetime
+from .outbox import Outbox
+from .schema import Signal, temp_signal_id, CAPTURE_SOURCE_PREFIX
+from .store import FulcraStore
+
+
+def capture_signal(store: FulcraStore, outbox: Outbox, *, data_type: str,
+                   now: datetime, key: str, value, strength: float,
+                   kind: str = "preference", scope: str = "global",
+                   confidence: float = 1.0, half_life_days: float | None = 90.0,
+                   platform: str = "unknown", agent: str | None = None,
+                   session: str | None = None,
+                   supersedes: str | None = None) -> Signal:
+    observed = now.isoformat()
+    sig = Signal(id=temp_signal_id(key, observed, platform), kind=kind, key=key,
+                 scope=scope, value=value, strength=strength,
+                 confidence=confidence, half_life_days=half_life_days,
+                 observed_at=observed, platform=platform, agent=agent,
+                 session=session, supersedes=supersedes)
+    try:
+        store.ingest_signal(sig, data_type=data_type)
+    except Exception:
+        record = {"data": json.dumps(sig.to_payload()),
+                  "metadata": {"content_type": "application/json",
+                               "data_type": data_type,
+                               "recorded_at": observed,
+                               "source": [sig.id,
+                                          f"{CAPTURE_SOURCE_PREFIX}{platform}"]},
+                  "specversion": 1}
+        outbox.spool(record)
+    return sig
