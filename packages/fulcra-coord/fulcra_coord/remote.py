@@ -331,6 +331,17 @@ def directive_route_path(directive_id: str, event_id: str) -> str:
     return f"{directive_routing_prefix(directive_id)}{event_id}.json"
 
 
+def directive_responses_prefix(directive_id: str) -> str:
+    """Prefix of a directive's RESPONSE sub-log (the loop return leg). One file
+    per response event — append-only shards, same clobber-safety rationale as
+    the routing sub-log."""
+    return f"{directives_prefix()}{directive_id}/responses/"
+
+
+def directive_response_path(directive_id: str, event_id: str) -> str:
+    return f"{directive_responses_prefix(directive_id)}{event_id}.json"
+
+
 def health_remote_path(host_slug: str) -> str:
     """Per-host self-reported health record path. Takes an ALREADY-SLUGGED id
     (views.agent_slug). Only that host writes its own file -> zero cross-host

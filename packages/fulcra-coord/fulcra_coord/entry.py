@@ -283,6 +283,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Print what would be posted; write nothing")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- respond ----
+    sp = sub.add_parser("respond",
+                        help="Close/answer a coordination loop ON THE BUS — the "
+                             "generic return leg (review verdicts use review-done; "
+                             "this covers dispatch results, answers, signoffs)")
+    sp.add_argument("loop_id", metavar="LOOP-ID",
+                    help="The directive/loop id (DIR-... or LOOP-...)")
+    sp.add_argument("--outcome", "-o", default="done", metavar="OUTCOME",
+                    help="Terminal outcome/verdict (e.g. approve, delivered, answered)")
+    sp.add_argument("--evidence", "-e", default="", metavar="EVIDENCE")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- reconcile ----
     sub.add_parser("reconcile", help="Repair views and resolve pending operation markers")
 
@@ -571,6 +584,7 @@ COMMAND_MAP = {
     "abandon": _cli.cmd_abandon,
     "request-review": _cli.cmd_request_review,
     "review-done": _cli.cmd_review_done,
+    "respond": _cli.cmd_respond,
     "reconcile": _cli.cmd_reconcile,
     "search": _cli.cmd_search,
     "restore": _cli.cmd_restore,
