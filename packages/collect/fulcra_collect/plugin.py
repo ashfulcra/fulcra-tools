@@ -285,6 +285,16 @@ class RunContext:
     so a batch POST that FAILS can release the claims it just took, letting
     the next run retry those durable-timeline events instead of skipping
     them forever. ``None`` when no daemon db is available."""
+    _set_credential: Callable[[str, str], None] | None = field(default=None, repr=False)
+    """Keychain write-back seam. ``ctx.credentials`` is a read-only snapshot
+    taken when the worker built this context — a plugin that rotates an OAuth
+    token mid-run (e.g. Trakt's single-use refresh tokens) needs a way to
+    persist the new secrets or the next run is locked out forever. The worker
+    supplies ``lambda k, v: credentials.set_secret(plugin_id, k, v)`` here;
+    media-helpers plugins call the bound ``ctx.set_credential`` method instead
+    of importing fulcra_collect.credentials directly (same inversion as
+    ``_claim_dedup_keys``). ``None`` in contexts that never write secrets
+    (health checks, permission checks, standalone CLI)."""
 
     def claim_dedup_keys(self, keys: set[str]) -> bool:
         """Atomically claim a set of dedup keys for one event, returning
@@ -301,6 +311,31 @@ class RunContext:
         if self._claim_dedup_keys is None:
             return True
         return self._claim_dedup_keys(set(keys))
+
+    def set_credential(self, key: str, value: str) -> None:
+        """Persist a credential to this plugin's keychain namespace.
+
+        Used by plugins that rotate secrets mid-run — the canonical case is
+        Trakt's OAuth refresh, where the refresh token is single-use and the
+        rotated pair MUST be persisted immediately or the user is forced to
+        re-run the whole sign-in wizard. Note this does NOT update the
+        ``credentials`` dict snapshot on this context; callers should keep
+        using the value they just wrote.
+
+        Backed by the injected ``_set_credential`` callable. When no backend
+        was supplied (health/permission-check contexts, standalone CLI) this
+        is a logged no-op — the plugin still works for the rest of the run
+        with the in-memory token; only persistence is skipped. It is wired
+        as a bound method (not the raw callable) so callers can use
+        ``ctx.set_credential`` uniformly regardless of backend — same
+        pattern as ``claim_dedup_keys``."""
+        if self._set_credential is None:
+            self.log.debug(
+                "set_credential(%r): no credential write backend on this "
+                "RunContext — skipping persistence", key,
+            )
+            return
+        self._set_credential(key, value)
 
     def unclaim_dedup_keys(self, keys: set[str]) -> None:
         """Release a set of previously-claimed dedup keys (the inverse of

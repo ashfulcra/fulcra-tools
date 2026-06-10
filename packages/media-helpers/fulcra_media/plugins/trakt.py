@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import httpx
+
 from fulcra_collect.plugin import Credential, Plugin, RunContext, SetupStep
 from fulcra_csv import ClusterPolicy, apply_cluster_policy, find_low_conf_twins
 
@@ -40,12 +42,109 @@ def apply_twin_decisions(events: list, discard_source_ids: set[str]) -> list:
     ]
 
 
+_REAUTH_MESSAGE = (
+    "trakt: access token expired and refresh failed — re-connect Trakt "
+    "in the Fulcra Collect web UI wizard"
+)
+
+
+def _trakt_headers(access_token: str, client_id: str) -> dict[str, str]:
+    """Build Trakt API headers for the keychain-credential path. Mirrors
+    the header shape of ``TraktAuth.headers`` (the legacy file path)."""
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "trakt-api-version": "2",
+        "trakt-api-key": client_id,
+        "Content-Type": "application/json",
+    }
+
+
+def _refresh_keychain_tokens(
+    ctx: RunContext, *, client_id: str, client_secret: str, refresh_token: str,
+) -> str:
+    """Exchange the stored refresh token for a new token pair and persist
+    BOTH rotated tokens via ``ctx.set_credential``. Returns the new access
+    token.
+
+    This is the keychain-path twin of ``TraktAuth._refresh`` (the legacy
+    file path, ~/.config/fulcra-media/trakt.json) — same POST shape against
+    the same endpoint. Raises RuntimeError with a re-connect instruction
+    when Trakt rejects the refresh (the refresh token itself expired or was
+    revoked), so plugin_state.last_error is actionable instead of a bare 401.
+    """
+    resp = httpx.post(
+        f"{trakt_importer.TRAKT_BASE}/oauth/token",
+        json={
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        ctx.log.error(
+            "trakt: token refresh failed (HTTP %d) — user must re-connect "
+            "via the web UI wizard", resp.status_code,
+        )
+        raise RuntimeError(_REAUTH_MESSAGE)
+    tok = resp.json()
+    # HAZARD: Trakt refresh tokens are SINGLE-USE. The old refresh token is
+    # dead the moment this response arrives — if the rotated pair is not
+    # persisted before anything else can fail (the retry fetch, normalize,
+    # import...), the keychain still holds the dead token and every future
+    # run is locked out until the user redoes the full sign-in wizard.
+    # Persist BOTH tokens immediately, before any other work.
+    ctx.set_credential("access_token", tok["access_token"])
+    ctx.set_credential("refresh_token", tok["refresh_token"])
+    ctx.log.info("trakt: token refresh succeeded; rotated tokens persisted")
+    return tok["access_token"]
+
+
+def _fetch_keychain_history(ctx: RunContext, access_token: str,
+                            client_id: str) -> list[dict]:
+    """Fetch Trakt history with keychain credentials, refreshing the access
+    token and retrying ONCE on a 401.
+
+    The keychain stores no expiry timestamp (unlike the legacy file path's
+    ``created_at``/``expires_in``), so refresh is reactive: attempt the
+    fetch, and only on a 401 run the refresh grant. Any other HTTP error
+    propagates unchanged.
+    """
+    headers = _trakt_headers(access_token, client_id)
+    try:
+        return list(trakt_importer.fetch_history_with_headers(headers))
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 401:
+            raise
+        refresh_token = ctx.credentials.get("refresh_token")
+        client_secret = ctx.credentials.get("client_secret")
+        if not (refresh_token and client_secret):
+            ctx.log.error(
+                "trakt: got 401 but refresh credentials are missing "
+                "(refresh_token present=%s, client_secret present=%s)",
+                bool(refresh_token), bool(client_secret),
+            )
+            raise RuntimeError(_REAUTH_MESSAGE) from exc
+        ctx.log.info("trakt: access token expired (401) — attempting refresh")
+        new_access_token = _refresh_keychain_tokens(
+            ctx, client_id=client_id, client_secret=client_secret,
+            refresh_token=refresh_token,
+        )
+        headers = _trakt_headers(new_access_token, client_id)
+        return list(trakt_importer.fetch_history_with_headers(headers))
+
+
 def _run_trakt(ctx: RunContext) -> None:
     """Fetch Trakt watch history and import it, applying cluster and twin-dedup policy.
 
     Authentication: credentials are resolved in the following order:
       1. Keychain (set via the web-UI onboarding wizard OAuth flow — the new path).
          Reads ctx.credentials["access_token"] and ctx.credentials["client_id"].
+         On a 401 (expired access token, ~90 days), refreshes via the stored
+         refresh_token + client_secret, persists the rotated token pair back
+         to the keychain through ctx.set_credential, and retries once.
       2. File-based TraktAuth (~/.config/fulcra-media/trakt.json) — the legacy
          path used by the old CLI wizard. Preserved for users who set up via
          `fulcra-media wizard trakt` before the web UI existed.
@@ -84,13 +183,10 @@ def _run_trakt(ctx: RunContext) -> None:
     client_id = ctx.credentials.get("client_id")
     if access_token and client_id:
         # New path: credentials came from the web-UI OAuth flow (keychain).
-        api_headers = {
-            "Authorization": f"Bearer {access_token}",
-            "trakt-api-version": "2",
-            "trakt-api-key": client_id,
-            "Content-Type": "application/json",
-        }
-        items = list(trakt_importer.fetch_history_with_headers(api_headers))
+        # Unlike the legacy TraktAuth file path (which checks expiry up
+        # front), this path refreshes reactively on a 401 and retries once
+        # — the keychain stores no expiry timestamp.
+        items = _fetch_keychain_history(ctx, access_token, client_id)
     else:
         # Legacy path: try the file-based creds from the old CLI wizard.
         try:

@@ -100,17 +100,23 @@ def newest_event_iso(events: list) -> str | None:
 
 
 def since_from_watermark(ctx: RunContext) -> datetime | None:
-    """Return watermark - 1h as a tz-aware datetime, or None for full backfill.
+    """Return watermark - 24h as a tz-aware datetime, or None for full backfill.
 
-    The 1-hour rewind hedges against late server-side reordering (same policy
-    as Last.fm). Source-id dedup in the ingest layer discards any resulting
-    duplicates. Used by Last.fm- and Deezer-shaped scheduled plugins.
+    The rewind hedges against LATE-ARRIVING scrobbles, not just server-side
+    reordering: a phone that listened offline uploads its plays to Last.fm
+    when the app next foregrounds — hours late. The original 1-hour rewind
+    permanently missed those (confirmed live 2026-06-07: a 15:38 scrobble
+    uploaded late never landed in Fulcra while its on-time 14:34 sibling
+    did). 24h covers the dominant late-upload case; det-id readback in the
+    ingest layer discards the re-fetched duplicates, and the wider window
+    costs at most ~one extra API page per run at scrobble volumes. Used by
+    Last.fm- and Deezer-shaped scheduled plugins.
     """
     if not ctx.state.watermark:
         return None
     return datetime.fromisoformat(
         ctx.state.watermark.replace("Z", "+00:00")
-    ) - timedelta(hours=1)
+    ) - timedelta(hours=24)
 
 
 # ---------------------------------------------------------------------------
