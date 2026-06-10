@@ -54,7 +54,7 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
 
     total = len(all_tasks)
     print(f"\n{'='*60}")
-    print(f"  Fulcra Coordination Status")
+    print("  Fulcra Coordination Status")
     if workstream_filter:
         print(f"  Workstream: {workstream_filter}")
     if agent_filter:
@@ -99,6 +99,9 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
     try:
         worst = 0
         presence_unavailable = False
+        loops_overdue = 0
+        loops_awaiting_me = 0
+        current_agent = identity.resolve_agent(getattr(args, "agent", None))
         for _, rec in remote.list_json(remote.health_prefix(), backend=backend):
             if isinstance(rec, dict):
                 ud = rec.get("undelivered_directives")
@@ -109,6 +112,16 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
                     # "couldn't check," never as the undelivered flood.
                     if ud.get("presence_unavailable"):
                         presence_unavailable = True
+                # Coordination-loop health (spec 2026-06-09 Task 5): the same
+                # max-across-hosts read as the undelivered count — one record
+                # per machine over the same bus, so the largest count is the
+                # live signal. Written by reconcile's _loop_health_check.
+                lh = rec.get("loop_health")
+                if isinstance(lh, dict):
+                    loops_overdue = max(loops_overdue, int(lh.get("overdue") or 0))
+                    if rec.get("agent") == current_agent:
+                        loops_awaiting_me = max(
+                            loops_awaiting_me, int(lh.get("awaiting_me") or 0))
         if worst:
             # A real, confirmed count takes precedence — that's the live dead-inbox
             # signal a maintainer must act on.
@@ -119,6 +132,12 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
             # Stay LOUD about the outage without crying wolf about rotting inboxes.
             print("\n  WARN: presence aggregate unavailable on a recent reconcile "
                   "— directive delivery could not be checked.")
+        if loops_overdue or loops_awaiting_me:
+            # Open-loop debt: loops past their SLA with no answer, and open
+            # loops directed at the reader. Same one-line, nonzero-only style
+            # as the undelivered warning above.
+            print(f"\n  WARN: {loops_overdue} coordination loop(s) overdue "
+                  f"· {loops_awaiting_me} awaiting you")
     except Exception:
         pass
 
@@ -260,7 +279,7 @@ def cmd_agents(args: Any, backend: Optional[list[str]] = None) -> int:
                 print(f"          next: {t['next_action'][:70]}")
 
     if presence_only:
-        print(f"\n  --- Present (no active task) ---")
+        print("\n  --- Present (no active task) ---")
         for p in presence_only:
             ws = ", ".join(p.get("workstreams", [])) or "(none)"
             age = _age_str(p.get("last_seen", ""))
