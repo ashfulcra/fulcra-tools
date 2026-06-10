@@ -10,6 +10,44 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — roles as durable identity: registry, leases, vacancy escalation
+
+**Why:** Sessions are ephemeral (Claude Code / Codex sessions die, sleep, get
+respawned) and identity drifts with them — directives addressed to dead
+session ids, role-holding that evaporates when a session does, routing
+knowledge announced as broadcasts nobody machine-reads. The 2026-06-10 spec
+inverts the model: **the ROLE is the durable identity; a session is an
+ephemeral lease on it.**
+
+**What:**
+- **Role registry** (`roles/<name>.json`): `fulcra-coord roles set <name>`
+  records what a role is for, its `standing_instructions` (the job description
+  any fresh claimer follows), `policy` (`shared` fan-out / `exclusive`
+  single-holder), `sla_hours`, and `maintainer` (the vacancy escalation edge).
+  `checkpoint_ref` is reserved for the continuity phase (claim → resume).
+  Zero role names ship in core — roles are adopter data (pinned by a
+  generalization test).
+- **Leases ride presence** (`roles/<name>/leases/<agent-slug>.json`): one
+  file per holder, so claims never clobber each other on the CAS-less bus and
+  a re-claim refreshes only the claimer's own lease. A lease is fresh iff its
+  holder's PRESENCE is fresh — no new heartbeat machinery; a dead session's
+  leases lapse with its presence. `connect --role X` now also claims X
+  (additive; the `capabilities` field and routing are unchanged). Claims on
+  unregistered roles self-register a minimal record, so a fresh bus never
+  rejects a session boot.
+- **Vacancy is the new dark-agent signal**: `board` gains a Roles section
+  (`HELD by <agent>` / `VACANT <duration>` ⚠ past SLA / `CONTESTED` when an
+  exclusive role has >1 fresh lease), and reconcile's health record gains
+  `role_health` (report-only, mirrors `loop_health`). A role vacant past its
+  `sla_hours` escalates a directive to its **maintainer** — once per day via
+  a first-writer-wins marker, not once per reconcile tick. Lease-freshness
+  reads ride the staleness-guarded presence loader (below), so a live holder
+  can never render dead under backend throttling.
+- New `roles.py` (pure folds, stdlib-only, thresholds injected by parameter)
+  + `role_ops.py` (best-effort I/O: claim/release/read + registry CRUD with
+  verify-after-write), following the loops.py/loop_ops.py split and
+  fitness-pinned the same way.
+
 ## [Unreleased] — staleness-guarded reads: stale views fall back to direct listings
 
 **Why:** Live 2026-06-10 evidence (the highest-severity find of that night's

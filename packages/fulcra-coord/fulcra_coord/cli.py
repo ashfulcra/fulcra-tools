@@ -28,7 +28,7 @@ from . import role_ops as _role_ops
 # underscore-prefixed names so every internal call site AND the test patch targets
 # (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
 # timeutil.py do not import cli, so there is no import cycle.
-from .output import err as _err, warn as _warn, info as _info
+from .output import err as _err, warn as _warn, info as _info, print_json as _print_json
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
 # Retention / archival subsystem extracted from this file. Re-exported under the
@@ -992,6 +992,159 @@ def _role_health_check(
         })
     return {"roles": out, "vacant": vacant, "contested": contested,
             "escalated": escalated}
+
+
+def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
+    """The role registry surface: list (default), ``set``, ``claim``, ``release``.
+
+    * (bare)  — registry + live status per role: HELD by whom / VACANT how
+      long (⚠ past SLA) / CONTESTED. This is the DISCOVERY surface the spec
+      calls for: senders learn what roles exist instead of guessing session
+      ids — the machine-readable answer to broadcast-and-hope routing.
+    * ``set <name> [--description --instructions --policy --sla-hours
+      --maintainer]`` — operator CRUD (upsert). An UPDATE preserves every
+      field not explicitly passed (and the original ``created_at``), so
+      tightening one knob never wipes the runbook.
+    * ``claim <name>`` / ``release <name>`` — the manual lease path (connect
+      ``--role`` is the automatic one). After a claim the status is re-read
+      through the staleness-guarded roster so an exclusive double-hold warns
+      CONTESTED right at the claimer, not just on the next board glance.
+
+    Status folding reuses the exact pure fold + injected thresholds the
+    health check and board use — three surfaces, one judgment."""
+    out_format = getattr(args, "format", "table")
+    action = getattr(args, "roles_action", None)
+
+    if action == "set":
+        name = (getattr(args, "name", "") or "").strip()
+        existing = _role_ops.read_role(name, backend=backend) or {}
+
+        def _pick(arg_name: str, field: str, default):
+            val = getattr(args, arg_name, None)
+            return val if val is not None else existing.get(field, default)
+
+        try:
+            record = schema.make_role(
+                name,
+                _pick("description", "description", ""),
+                standing_instructions=_pick("instructions",
+                                            "standing_instructions", ""),
+                policy=_pick("policy", "policy", "shared"),
+                sla_hours=_pick("sla_hours", "sla_hours", None),
+                maintainer=_pick("maintainer", "maintainer", None),
+                checkpoint_ref=existing.get("checkpoint_ref"),
+            )
+        except ValueError as e:
+            _err(f"roles set: {e}")
+            return 1
+        if existing.get("created_at"):
+            record["created_at"] = existing["created_at"]
+        if not _role_ops.upsert_role(record, backend=backend):
+            _err(f"roles set: registry write for '{name}' could not be "
+                 "verified — re-run (the record may not have landed)")
+            return 1
+        if out_format == "json":
+            _print_json(record)
+        else:
+            _info(f"Role '{record['name']}' registered "
+                  f"(policy={record['policy']}, sla="
+                  f"{record['sla_hours'] or '—'}, "
+                  f"maintainer={record['maintainer'] or '—'})")
+        return 0
+
+    if action in ("claim", "release"):
+        name = (getattr(args, "name", "") or "").strip()
+        me = identity.resolve_agent(getattr(args, "agent", None))
+        if action == "claim":
+            if not _role_ops.claim_role(name, me, backend=backend):
+                _err(f"roles claim: lease write failed for '{name}'")
+                return 1
+            # Post-claim contested check, through the guarded roster (the
+            # claim itself stays presence-blind by layering — see role_ops).
+            try:
+                role = _role_ops.read_role(name, backend=backend) or {}
+                status = _roles.role_status(
+                    role, _role_ops.read_leases(name, backend=backend),
+                    {a.get("agent"): a
+                     for a in _load_presence_agents(backend=backend)
+                     if isinstance(a, dict) and a.get("agent")},
+                    datetime.now(timezone.utc),
+                    stale_hours=views._stale_hours(),
+                    grace_seconds=views._presence_grace_seconds())
+                if status["contested"]:
+                    others = [h["agent"] for h in status["holders"]
+                              if h["agent"] != me]
+                    _warn(f"⚠ role '{name}' is now CONTESTED — exclusive with "
+                          f"fresh lease(s) from {others}; coordinate a release")
+            except Exception:
+                pass
+            _info(f"Claimed role '{name}' for {me}")
+            return 0
+        if not _role_ops.release_role(name, me, backend=backend):
+            _err(f"roles release: no lease of yours to release on '{name}'")
+            return 1
+        _info(f"Released role '{name}' for {me}")
+        return 0
+
+    # Default: list the registry with live status folded in.
+    registry = _role_ops.list_roles(backend=backend)
+    now = datetime.now(timezone.utc)
+    presence_by_agent = {
+        a.get("agent"): a
+        for a in _load_presence_agents(backend=backend)
+        if isinstance(a, dict) and a.get("agent")
+    }
+    stale_hours = views._stale_hours()
+    grace = views._presence_grace_seconds()
+    merged: list[dict] = []
+    for role in registry:
+        name = role.get("name") or ""
+        status = _roles.role_status(
+            role, _role_ops.read_leases(name, backend=backend),
+            presence_by_agent, now, stale_hours=stale_hours,
+            grace_seconds=grace)
+        row = dict(role)
+        row.update(status)
+        row["escalation_due"] = _roles.vacancy_escalation_due(
+            role, status, now)
+        merged.append(row)
+
+    if out_format == "json":
+        _print_json({"roles": merged})
+        return 0
+
+    if not merged:
+        _info("No roles registered yet. Create one: "
+              "fulcra-coord roles set <name> --description '...'")
+        return 0
+
+    print(f"\n{'='*60}")
+    print("  Fulcra Coordination — Roles")
+    print(f"{'='*60}")
+    for r in merged:
+        if r["contested"]:
+            holders = ", ".join(h["agent"] for h in r["holders"])
+            state = f"CONTESTED — exclusive, fresh leases: {holders}"
+        elif r["vacant"]:
+            state = f"VACANT {_age_str(r.get('vacant_since') or '')}"
+            if r["escalation_due"]:
+                state += " ⚠"
+        else:
+            state = "HELD by " + ", ".join(h["agent"] for h in r["holders"])
+        print(f"\n  {r['name']}  [{r.get('policy')}]  {state}")
+        if r.get("description"):
+            print(f"    {r['description'][:80]}")
+        meta = []
+        if r.get("sla_hours") is not None:
+            meta.append(f"sla: {r['sla_hours']}h")
+        if r.get("maintainer"):
+            meta.append(f"maintainer: {r['maintainer']}")
+        if meta:
+            print(f"    {' · '.join(meta)}")
+        if r.get("standing_instructions"):
+            print(f"    instructions: {r['standing_instructions'][:80]}")
+    print()
+    return 0
 
 
 def _retry_sleep(seconds: float) -> None:
