@@ -14,6 +14,7 @@ members = [
     "fulcra-dayone",
     "fulcra-media-helpers",
     "fulcra-menubar",
+    "fulcra-prefs",
 ]
 
 [[package]]
@@ -503,6 +504,20 @@ requires-dist = [
     { name = "tomlkit", specifier = ">=0.12" },
 ]
 provides-extras = ["macos", "dev"]
+
+[[package]]
+name = "fulcra-prefs"
+version = "0.1.0"
+source = { editable = "packages/fulcra-prefs" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" }]
+provides-extras = ["dev"]
 
 [[package]]
 name = "h11"
