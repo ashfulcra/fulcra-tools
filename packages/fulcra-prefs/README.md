@@ -1,5 +1,11 @@
 # fulcra-prefs
 
+> **Alpha.** This is v0.1 — it works end-to-end against the live Fulcra API
+> (and is tested hard), but the signal schema, file layout, and CLI surface may
+> still change without a migration path. Expect to re-onboard or recompile
+> across early versions. Don't build anything load-bearing on it yet; do try it
+> and file issues.
+
 `fulcra-prefs` is a user-owned preference layer on top of Fulcra: you capture
 typed signals (preferences, facts, consent) with half-life decay, which are
 compiled deterministically into per-platform preference documents; a consent-gated
