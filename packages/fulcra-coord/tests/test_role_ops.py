@@ -201,3 +201,118 @@ def test_connect_lease_claim_failure_never_fails_the_session_boot(coord_backend)
             os.environ.pop("FULCRA_COORD_AGENT", None)
         else:
             os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+# ---------------------------------------------------------------------------
+# CLI: `fulcra-coord roles` (list/set/claim/release)
+# ---------------------------------------------------------------------------
+
+
+def _roles_args(action=None, name=None, **over):
+    base = dict(roles_action=action, format="table", agent=None,
+                description=None, instructions=None, policy=None,
+                sla_hours=None, maintainer=None)
+    if name is not None:
+        base["name"] = name
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_cmd_roles_set_creates_and_list_renders(coord_backend, capsys):
+    from fulcra_coord import cli
+    rc = cli.cmd_roles(_roles_args(
+        "set", "reviewer", description="reviews artifacts",
+        instructions="run the runbook", policy="exclusive",
+        sla_hours=24, maintainer="ops:h:r"), backend=coord_backend)
+    assert rc == 0
+    role = role_ops.read_role("reviewer", backend=coord_backend)
+    assert role["policy"] == "exclusive"
+    assert role["standing_instructions"] == "run the runbook"
+    assert role["sla_hours"] == 24
+    capsys.readouterr()
+
+    rc = cli.cmd_roles(_roles_args(), backend=coord_backend)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "reviewer" in out
+    assert "VACANT" in out          # nobody has claimed it yet
+    assert "ops:h:r" in out         # the maintainer edge is visible
+
+
+def test_cmd_roles_set_update_preserves_unspecified_fields(coord_backend):
+    from fulcra_coord import cli
+    cli.cmd_roles(_roles_args("set", "reviewer", description="d",
+                              policy="exclusive"), backend=coord_backend)
+    created = role_ops.read_role("reviewer", backend=coord_backend)["created_at"]
+    rc = cli.cmd_roles(_roles_args("set", "reviewer", sla_hours=24),
+                       backend=coord_backend)
+    assert rc == 0
+    role = role_ops.read_role("reviewer", backend=coord_backend)
+    assert role["sla_hours"] == 24
+    assert role["policy"] == "exclusive"       # untouched by the update
+    assert role["description"] == "d"          # untouched by the update
+    assert role["created_at"] == created       # creation stamp survives upsert
+
+
+def test_cmd_roles_set_rejects_bad_policy(coord_backend):
+    from fulcra_coord import cli
+    rc = cli.cmd_roles(_roles_args("set", "reviewer", policy="solo"),
+                       backend=coord_backend)
+    assert rc == 1
+    assert role_ops.read_role("reviewer", backend=coord_backend) is None
+
+
+def test_cmd_roles_claim_and_release(coord_backend):
+    from fulcra_coord import cli
+    cli.cmd_roles(_roles_args("set", "reviewer", description="d"),
+                  backend=coord_backend)
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        rc = cli.cmd_roles(_roles_args("claim", "reviewer"),
+                           backend=coord_backend)
+        assert rc == 0
+        leases = role_ops.read_leases("reviewer", backend=coord_backend)
+        assert [l["agent"] for l in leases] == ["me:h:r"]
+        rc = cli.cmd_roles(_roles_args("release", "reviewer"),
+                           backend=coord_backend)
+        assert rc == 0
+        assert role_ops.read_leases("reviewer", backend=coord_backend) == []
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+def test_cmd_roles_json_list_includes_status(coord_backend, capsys):
+    import json as _json
+    from fulcra_coord import cli
+    cli.cmd_roles(_roles_args("set", "reviewer", description="d"),
+                  backend=coord_backend)
+    capsys.readouterr()
+    rc = cli.cmd_roles(_roles_args(format="json"), backend=coord_backend)
+    assert rc == 0
+    payload = _json.loads(capsys.readouterr().out)
+    by_name = {r["name"]: r for r in payload["roles"]}
+    assert by_name["reviewer"]["vacant"] is True
+    assert by_name["reviewer"]["holders"] == []
+    assert by_name["reviewer"]["standing_instructions"] == ""
+
+
+def test_roles_is_wired_into_map():
+    from fulcra_coord import cli, entry
+    assert entry.COMMAND_MAP["roles"] is cli.cmd_roles
+    p = entry.build_parser()
+    args = p.parse_args(["roles"])
+    assert args.roles_action is None
+    args = p.parse_args(["roles", "set", "reviewer", "--policy", "exclusive",
+                         "--sla-hours", "24", "--maintainer", "ops:h:r",
+                         "--description", "d", "--instructions", "i"])
+    assert args.roles_action == "set"
+    assert args.name == "reviewer"
+    assert args.sla_hours == 24
+    args = p.parse_args(["roles", "claim", "reviewer"])
+    assert args.roles_action == "claim"
+    args = p.parse_args(["roles", "release", "reviewer"])
+    assert args.roles_action == "release"

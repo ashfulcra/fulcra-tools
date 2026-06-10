@@ -81,6 +81,7 @@ fulcra-coord done TASK-... \
 |---|---|
 | `status` | Show current coordination state (all or filtered) |
 | `agents` | Cross-agent digest: what each agent is working on, grouped by owner, stale-marked (`--mine AGENT`, `--format json`) |
+| `roles` | Role registry + lease status — the durable identities sessions claim leases on. Bare `roles` lists every registered role with live HELD / VACANT / CONTESTED status (the discovery surface: learn what roles exist instead of guessing session ids); `roles set <name> [--description] [--instructions] [--policy shared\|exclusive] [--sla-hours N] [--maintainer <who>]` upserts a registry record (an update preserves fields you don't pass); `roles claim <name>` / `roles release <name>` manage this agent's own lease (`connect --role` claims automatically). See [Roles & review-routing](#roles--review-routing) |
 | `tell` | Direct work at another agent: create a `proposed` directive task assigned to them (`tell <assignee> "<title>" [--from <me>] [--next] [--workstream] [--priority]`) |
 | `broadcast` | Direct work at **every** agent: create a `proposed` directive with the wildcard assignee `*` (`broadcast "<title>" [--from <me>] [--next] [--workstream] [--priority]`). It lands in every agent's inbox and is acknowledged **per-agent** — one agent's `inbox --ack` clears it for that agent only, so no agent loses or duplicates the directive. Use `tell` for one agent, `broadcast` for all (e.g. "update fulcra-coord when main changes") |
 | `assign` | Set or redirect the `assignee` on an existing task (`assign <task-id> <assignee>`) |
@@ -145,6 +146,39 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_OPENCLAW_PLUGIN_DIR` | `~/.openclaw/plugins/fulcra-coord` | Target dir for the materialized Track B plugin sources (`install-openclaw --with-plugin`); overridable via `--plugin-dir` |
 
 ## Roles & review-routing
+
+**Roles are the durable identity; sessions are leases.** Agent sessions are
+ephemeral — they die, sleep, and get respawned, and any identity pinned to a
+session id drifts with it. A **role** (`reviewer`, `deployer`, `backlog-groomer`
+— whatever your fleet needs; none ship in core, all roles are *your* registry
+data) is the thing that persists. Register one with
+`fulcra-coord roles set <name> --description '...' --instructions '...'`:
+
+- **`standing_instructions` onboard fresh sessions.** The registry record
+  carries the job — runbooks, conventions, where the role's state lives — so
+  any new session that claims the role knows what to do without being told.
+- **Leases ride presence.** `connect --role <name>` (or `roles claim <name>`)
+  writes a per-agent lease on the role; the lease stays fresh exactly as long
+  as the holder's presence heartbeat does. There is no extra keep-alive to
+  run — when a session dies, its presence goes stale and its leases lapse with
+  it, and the role reads **VACANT** on `board` / in the health record.
+- **Vacancy routes to the role's `maintainer`.** Give a role `--sla-hours N`
+  and `--maintainer <who>` (an agent id, an `@role`, or your human handle):
+  if it sits vacant past the SLA, an escalation directive lands in the
+  maintainer's inbox — once per day, not per reconcile tick. This generalizes
+  "agent X is dark" into the thing that actually matters: "function X is
+  unstaffed".
+- **`--policy exclusive` keeps single-holder roles honest.** Two fresh leases
+  on an exclusive role render **CONTESTED** (visible, never silently
+  double-held); a stale lease is simply claimable. The default `shared` policy
+  fans out to every fresh holder.
+- **`checkpoint_ref` is reserved** for the continuity phase: a session
+  claiming a role will pull the role's latest checkpoint and resume its work.
+  Nothing reads it yet; the field exists so that lands additively.
+
+`fulcra-coord roles` is also the **discovery** surface: senders list the
+registry to learn what roles exist instead of guessing session ids, and
+`@role` directives (below) resolve against the live lease-holders.
 
 **Declaring what an agent can do.** An agent advertises its capabilities at
 connect time: `fulcra-coord connect --role <role>` records `<role>` (repeatable)
@@ -325,6 +359,14 @@ slipped.
   digest/
     markers/{date}-{window}.json ← per-window operator-digest dedup marker
                                    (first-writer-wins; any agent, any machine)
+  roles/
+    {name}.json               ← role registry record (description, standing
+                                 instructions, policy, sla_hours, maintainer)
+    {name}/leases/{agent-slug}.json ← one lease file PER HOLDER (a re-claim
+                                       refreshes only the claimer's own file;
+                                       freshness = the holder's presence)
+    {name}/escalations/{date}.json  ← daily vacancy-escalation dedup marker
+                                       (first-writer-wins, like digest markers)
 ```
 
 `index.json`'s `counts.inbox` folds a per-assignee directive count so a hook can see "you have N directives" without loading every inbox view.

@@ -111,6 +111,50 @@ def build_parser() -> argparse.ArgumentParser:
                              "what right now, with last-seen age + live/idle/stale")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- roles ----
+    sp = sub.add_parser("roles",
+                        help="Role registry + lease status: the durable "
+                             "identities sessions claim leases on. Bare "
+                             "`roles` lists every role with HELD/VACANT/"
+                             "CONTESTED status; set/claim/release manage them.")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+    rsub = sp.add_subparsers(dest="roles_action")
+    rsp_set = rsub.add_parser(
+        "set", help="Create or update a role registry record (upsert; an "
+                    "update preserves fields you don't pass)")
+    rsp_set.add_argument("name", metavar="NAME", help="The role, e.g. reviewer")
+    rsp_set.add_argument("--description", "-d", default=None, metavar="TEXT",
+                         help="What this role is for")
+    rsp_set.add_argument("--instructions", default=None, metavar="TEXT",
+                         help="Standing instructions — the job description any "
+                              "fresh session that claims the role follows")
+    rsp_set.add_argument("--policy", choices=["shared", "exclusive"],
+                         default=None,
+                         help="shared = fan-out to every fresh holder; "
+                              "exclusive = one holder (double-hold reads "
+                              "CONTESTED)")
+    rsp_set.add_argument("--sla-hours", dest="sla_hours", type=int,
+                         default=None, metavar="H",
+                         help="Vacancy SLA: vacant longer than this escalates "
+                              "to the maintainer (daily)")
+    rsp_set.add_argument("--maintainer", default=None, metavar="WHO",
+                         help="Who fixes a vacancy (an agent id, @role, or the "
+                              "human handle) — the escalation edge")
+    rsp_set.add_argument("--format", choices=["table", "json"], default="table")
+    rsp_claim = rsub.add_parser(
+        "claim", help="Claim a lease on a role for this agent (connect --role "
+                      "does this automatically; the lease stays fresh while "
+                      "your presence does)")
+    rsp_claim.add_argument("name", metavar="NAME")
+    rsp_claim.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    rsp_claim.add_argument("--format", choices=["table", "json"], default="table")
+    rsp_release = rsub.add_parser(
+        "release", help="Release this agent's own lease on a role (other "
+                        "holders are never touched)")
+    rsp_release.add_argument("name", metavar="NAME")
+    rsp_release.add_argument("--agent", "-a", default=None, metavar="AGENT")
+    rsp_release.add_argument("--format", choices=["table", "json"], default="table")
+
     # ---- tell ----
     sp = sub.add_parser("tell",
                         help="Direct work at another agent: create a proposed "
@@ -622,6 +666,7 @@ COMMAND_MAP = {
     "connect": _cli.cmd_connect,
     "workstream": _cli.cmd_workstream,
     "presence": _cli.cmd_presence,
+    "roles": _cli.cmd_roles,
     "tell": _cli.cmd_tell,
     "broadcast": _cli.cmd_broadcast,
     "later": _cli.cmd_later,
