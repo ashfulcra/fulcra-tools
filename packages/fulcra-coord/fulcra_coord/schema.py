@@ -339,6 +339,79 @@ def make_presence(
 
 
 # ---------------------------------------------------------------------------
+# Version manifest (version self-incorporation, operator directive 2026-06-10)
+# ---------------------------------------------------------------------------
+
+VERSION_MANIFEST_SCHEMA = "fulcra.coordination.version.v1"
+
+# THE POINTER RULE (the reconciled spec's non-negotiable safety boundary,
+# docs/superpowers/specs/2026-06-08-greenfield-reconciled.md): the bus carries
+# a version POINTER, never a code payload. This key set is CLOSED — version
+# string + commit sha + compatibility floor + metadata, and NOTHING else. No
+# cmd, no argv, no script, no URL: an agent updates the KNOWN package from its
+# LOCALLY configured trusted source; it never executes anything a bus record
+# hands it. validate_version_manifest REJECTS any extra key (pinned by test)
+# so a tampered manifest cannot even parse as valid, let alone instruct.
+_VERSION_MANIFEST_KEYS = frozenset(
+    {"schema", "package_version", "release_commit", "min_supported",
+     "published_at"})
+
+
+def make_version_manifest(
+    package_version: str,
+    release_commit: str,
+    min_supported: Optional[str] = None,
+) -> dict[str, Any]:
+    """Build the canonical version-manifest record (``runtime/version.json``).
+
+    Published by the maintainer's ``announce-version`` at each release so the
+    fleet self-incorporates instead of needing per-host "UPDATE NOW" pings
+    (operator, 2026-06-10: "i'm not going to go around and wake the entire
+    fleet for each incremental upgrade"). ``release_commit`` is best-effort
+    provenance (may be ``""`` when the announcing host has no git checkout);
+    ``min_supported`` is the optional compatibility floor an older reader can
+    compare itself against. See _VERSION_MANIFEST_KEYS for why this record
+    can never carry more than these fields."""
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return {
+        "schema": VERSION_MANIFEST_SCHEMA,
+        "package_version": str(package_version),
+        "release_commit": str(release_commit or ""),
+        "min_supported": min_supported if min_supported else None,
+        "published_at": now,
+    }
+
+
+def validate_version_manifest(m: Any) -> list[str]:
+    """Validate a version manifest; returns a list of problems ([] = valid).
+
+    Stricter than the sibling validators in one deliberate way: UNKNOWN KEYS
+    ARE ERRORS. Every other record family is additive (old readers ignore new
+    fields), but this record's entire safety story is being a pointer — a
+    field this validator doesn't know is, by definition, not a pointer, so the
+    self-update check must treat the record as garbage (never behind)."""
+    errors: list[str] = []
+    if not isinstance(m, dict):
+        return ["manifest is not an object"]
+    extra = set(m.keys()) - _VERSION_MANIFEST_KEYS
+    if extra:
+        errors.append(f"unexpected keys (pointer rule): {sorted(extra)}")
+    if m.get("schema") != VERSION_MANIFEST_SCHEMA:
+        errors.append(f"schema must be {VERSION_MANIFEST_SCHEMA}")
+    pv = m.get("package_version")
+    if not isinstance(pv, str) or not pv.strip():
+        errors.append("package_version must be a non-empty string")
+    if not isinstance(m.get("release_commit"), str):
+        errors.append("release_commit must be a string (may be empty)")
+    ms = m.get("min_supported")
+    if ms is not None and (not isinstance(ms, str) or not ms.strip()):
+        errors.append("min_supported must be null or a non-empty string")
+    if not isinstance(m.get("published_at"), str):
+        errors.append("published_at must be a string timestamp")
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # First-class Directive record (Phase 3a — additive, nothing reads/writes yet)
 # ---------------------------------------------------------------------------
 
