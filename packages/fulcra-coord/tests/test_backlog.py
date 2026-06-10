@@ -1,4 +1,5 @@
-"""Backlog capture on the bus: `fulcra-coord later` → kind=idea loops.
+"""The two remaining loop-kind wirings: backlog (`later` → kind=idea) and
+dispatch asks (`tell --expects-response` → kind=dispatch).
 
 Operator requirement (2026-06-10): "do later" tasks must live ON THE BUS so the
 backlog is portable across sessions/agents — never only in one agent's session
@@ -189,3 +190,86 @@ def test_later_parser_and_dispatch():
     assert args.workstream == "general"
     assert args.priority == "P3"
     assert getattr(args, "from") is None
+
+
+# ---------------------------------------------------------------------------
+# Dispatch asks: tell --expects-response → an OPEN kind=dispatch loop
+# ---------------------------------------------------------------------------
+
+def _tell_args(**overrides) -> SimpleNamespace:
+    base = dict(
+        title="Port the digest emitter",
+        assignee="agent-b",
+        workstream="devops",
+        priority="P2",
+        summary="please port it",
+        expects_response=False,
+    )
+    base.update(overrides)
+    ns = SimpleNamespace(**base)
+    setattr(ns, "from", overrides.get("from_agent", "agent-a"))
+    return ns
+
+
+def test_tell_expects_response_dual_writes_open_dispatch_loop(coord_backend):
+    rc = lifecycle.cmd_tell(_tell_args(expects_response=True),
+                            backend=coord_backend)
+    assert rc == 0
+    task = _the_task(coord_backend)
+    assert routing.DISPATCH_TAG in task["tags"]
+    d = _read_directive_for(coord_backend, task["id"])
+    assert d["directive_type"] == "tell"   # wire enum closed; kind carries it
+    assert d["kind"] == "dispatch"
+    assert d["state"] == "assigned"
+    assert d["expects_response"] is True
+    # SLA comes from the registry default, not a local hardcode.
+    assert d["sla_hours"] == loops.KINDS["dispatch"]["sla_hours"]
+
+
+def test_plain_tell_stays_a_legacy_tell(coord_backend):
+    rc = lifecycle.cmd_tell(_tell_args(), backend=coord_backend)
+    assert rc == 0
+    task = _the_task(coord_backend)
+    assert routing.DISPATCH_TAG not in task["tags"]
+    d = _read_directive_for(coord_backend, task["id"])
+    assert d["kind"] is None
+    assert d["expects_response"] is False
+
+
+def test_tell_parser_gains_expects_response_but_broadcast_does_not():
+    from fulcra_coord import entry
+    parser = entry.build_parser()
+    args = parser.parse_args(["tell", "agent-b", "do x", "--expects-response"])
+    assert args.expects_response is True
+    args = parser.parse_args(["tell", "agent-b", "do x"])
+    assert args.expects_response is False
+    # broadcast is fan-out FYI — it must NOT grow an open-loop flag.
+    args = parser.parse_args(["broadcast", "heads up"])
+    assert not getattr(args, "expects_response", False)
+
+
+def test_dispatch_loop_e2e_open_then_respond_closes(coord_backend):
+    # The full dispatch round trip: tell --expects-response opens the loop in
+    # the sender's awaiting_others; the recipient's `respond` (the existing
+    # generic return leg) folds it closed and clears the ledger.
+    rc = lifecycle.cmd_tell(_tell_args(expects_response=True),
+                            backend=coord_backend)
+    assert rc == 0
+    records = loop_ops.load_loop_records(backend=coord_backend)
+    open_asks = loops.awaiting_others("agent-a", records, now=NOW)
+    assert len(open_asks) == 1
+    assert open_asks[0]["kind"] == "dispatch"
+    loop_id = open_asks[0]["id"]
+
+    rc = loop_ops.cmd_respond(
+        SimpleNamespace(loop_id=loop_id, outcome="delivered",
+                        evidence="branch pushed + tests green",
+                        agent="agent-b", format="table"),
+        backend=coord_backend)
+    assert rc == 0
+
+    records = loop_ops.load_loop_records(backend=coord_backend)
+    assert loops.awaiting_others("agent-a", records, now=NOW) == []
+    d = _read_directive_for(coord_backend, _the_task(coord_backend)["id"])
+    assert d["state"] == "closed"
+    assert d["outcome"]["verdict"] == "delivered"

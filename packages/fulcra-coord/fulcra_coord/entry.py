@@ -131,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Resolve a LIVE recipient declaring CAP instead of a fixed assignee")
     sp.add_argument("--floor", choices=["live", "idle"], default="idle",
                     help="Minimum liveness for --route-capability resolution (default: idle)")
+    sp.add_argument("--expects-response", dest="expects_response",
+                    action="store_true",
+                    help="Make this an ASK, not an FYI: opens a kind=dispatch "
+                         "loop (SLA-tracked) that stays open until the "
+                         "recipient closes it with `respond`")
 
     # ---- later ----
     sp = sub.add_parser("later",
