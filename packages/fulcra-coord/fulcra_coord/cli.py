@@ -22,11 +22,13 @@ from fulcra_coord_files import store as _files_store
 from . import events as _events, eventlog as _eventlog
 from . import directives as _directives
 from . import loops as _loops
+from . import roles as _roles
+from . import role_ops as _role_ops
 # Leaf-utility modules extracted from this file. Re-exported under the historical
 # underscore-prefixed names so every internal call site AND the test patch targets
 # (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
 # timeutil.py do not import cli, so there is no import cycle.
-from .output import err as _err, warn as _warn, info as _info
+from .output import err as _err, warn as _warn, info as _info, print_json as _print_json
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
 from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
 # Retention / archival subsystem extracted from this file. Re-exported under the
@@ -61,6 +63,7 @@ from .presence import (
     _maybe_warn_legacy_identity, _derive_workstreams_from_open_tasks,
     _upsert_presence_aggregate, _write_presence, _load_own_presence, cmd_connect,
     _split_workstreams, cmd_workstream, cmd_presence, _reconcile_presence,
+    _load_presence_agents,
 )
 # Read-only situational-awareness commands extracted from this file. Re-exported so
 # the command dispatch (entry.py) and the test imports of these commands keep
@@ -860,6 +863,290 @@ def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
     }
 
 
+def _maybe_escalate_role_vacancy(
+    role: dict, status: dict, now: datetime, *,
+    backend: Optional[list[str]] = None,
+) -> bool:
+    """Best-effort escalation of one SLA-breaching vacancy to the role's
+    maintainer. Returns True iff THIS call emitted the directive.
+
+    IDEMPOTENCE: first-writer-wins DAILY marker
+    (``roles/<name>/escalations/<YYYY-MM-DD>.json``) — the _claim_digest_marker
+    protocol verbatim: an existing marker means today's escalation already
+    went out (this tick or another host's), so NO-OP; a marker claim failure
+    also no-ops so a flaky bus never risks a double. One directive per
+    vacancy-DAY, not per 20-minute reconcile tick — a vacancy that persists
+    re-pings the maintainer daily instead of flooding their inbox.
+
+    ROUTING: the directive goes to the role's ``maintainer`` (which may itself
+    be an @role), NOT the operator's plate unless the maintainer chain ends
+    there — the generalization of "agent is dark" into "function is unstaffed,
+    whoever owns staffing it should know". No maintainer ⇒ nowhere to route ⇒
+    warn-only (the vacancy still counts/renders on board + health)."""
+    name = role.get("name") or ""
+    maintainer = role.get("maintainer")
+    if not maintainer:
+        _warn(f"  role '{name}' vacant past SLA but has NO maintainer — "
+              "set one via `roles set --maintainer` to enable escalation")
+        return False
+    try:
+        day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        marker_path = remote.role_escalation_marker_path(name, day)
+        if remote.download_json(marker_path, backend=backend) is not None:
+            return False   # already escalated today (any host)
+        marker = {
+            "schema": "fulcra.coordination.role_escalation_marker.v1",
+            "role": name,
+            "date": day,
+            "by": identity.resolve_agent(),
+            "claimed_at": _iso_z(now),
+        }
+        if not remote.upload_json(marker, marker_path, backend=backend):
+            return False   # uncertain claim: skip, never risk a double
+        vacant_for = _age_str(status.get("vacant_since") or "")
+        directive = schema.make_directive(
+            directive_type="tell",
+            from_agent=identity.resolve_agent(),
+            audience=maintainer,
+            title=f"Role '{name}' VACANT past SLA",
+            workstream="coordination",
+            summary=(f"Role '{name}' has been vacant for {vacant_for} "
+                     f"(SLA {role.get('sla_hours')}h). "
+                     f"{role.get('description') or ''}").strip(),
+            next_action=(f"Restaff it: have an agent run "
+                         f"`fulcra-coord roles claim {name}` (or connect "
+                         f"--role {name}), or adjust the registry record."),
+            priority="P1",
+        )
+        ok = bool(remote.upload_json(
+            directive, remote.directive_remote_path(directive["id"]),
+            backend=backend))
+        if ok:
+            _warn(f"  ⚠ role '{name}' vacant past SLA — escalation directive "
+                  f"sent to {maintainer}")
+        return ok
+    except Exception:
+        return False   # best-effort: escalation must never break the sweep
+
+
+def _role_health_check(
+    *, backend: Optional[list[str]] = None
+) -> dict:
+    """Role registry status for the health record — vacancy is the new
+    dark-agent signal (spec 2026-06-10): not "agent X is dark" but "FUNCTION X
+    is unstaffed".
+
+    REPORT-ONLY and best-effort, mirroring ``_loop_health_check``: the caller
+    wraps it so a failure can NEVER change reconcile's exit code. The ONE
+    write it triggers — the SLA-vacancy escalation directive — is itself
+    best-effort and idempotent (see _maybe_escalate_role_vacancy), so the
+    sub-pass stays safe to re-run every tick.
+
+    STALENESS-GUARDED presence (post-#147, load-bearing): lease freshness IS
+    presence freshness, so this check reads the roster through
+    ``_load_presence_agents`` — the guarded loader that falls back to listing
+    the durable per-agent records when the aggregate lags. Reading the raw
+    aggregate here would re-inherit the stale-view blindness: a live holder
+    would read dead and the role would falsely escalate as VACANT.
+
+    The fold itself is the pure ``roles.role_status`` with the SAME liveness
+    thresholds routing uses (stale_hours + wall-clock grace), injected by
+    parameter — one definition of "fresh" across the whole tool. Returned
+    shape: ``{roles: [{name, policy, holders, vacant, vacant_since,
+    contested, escalation_due}], vacant, contested, escalated}``."""
+    registry = _role_ops.list_roles(backend=backend)
+    if not registry:
+        return {"roles": [], "vacant": 0, "contested": 0, "escalated": 0}
+    now = datetime.now(timezone.utc)
+    presence_by_agent = {
+        a.get("agent"): a
+        for a in _load_presence_agents(backend=backend)
+        if isinstance(a, dict) and a.get("agent")
+    }
+    stale_hours = views._stale_hours()
+    grace = views._presence_grace_seconds()
+    out: list[dict] = []
+    vacant = contested = escalated = 0
+    for role in registry:
+        name = role.get("name") or ""
+        leases = _role_ops.read_leases(name, backend=backend)
+        status = _roles.role_status(role, leases, presence_by_agent, now,
+                                    stale_hours=stale_hours,
+                                    grace_seconds=grace)
+        due = _roles.vacancy_escalation_due(role, status, now)
+        if status["vacant"]:
+            vacant += 1
+        if status["contested"]:
+            contested += 1
+        if due and _maybe_escalate_role_vacancy(role, status, now,
+                                                backend=backend):
+            escalated += 1
+        out.append({
+            "name": name,
+            "policy": role.get("policy"),
+            "holders": status["holders"],
+            "vacant": status["vacant"],
+            "vacant_since": status["vacant_since"],
+            "contested": status["contested"],
+            "escalation_due": due,
+        })
+    return {"roles": out, "vacant": vacant, "contested": contested,
+            "escalated": escalated}
+
+
+def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
+    """The role registry surface: list (default), ``set``, ``claim``, ``release``.
+
+    * (bare)  — registry + live status per role: HELD by whom / VACANT how
+      long (⚠ past SLA) / CONTESTED. This is the DISCOVERY surface the spec
+      calls for: senders learn what roles exist instead of guessing session
+      ids — the machine-readable answer to broadcast-and-hope routing.
+    * ``set <name> [--description --instructions --policy --sla-hours
+      --maintainer]`` — operator CRUD (upsert). An UPDATE preserves every
+      field not explicitly passed (and the original ``created_at``), so
+      tightening one knob never wipes the runbook.
+    * ``claim <name>`` / ``release <name>`` — the manual lease path (connect
+      ``--role`` is the automatic one). After a claim the status is re-read
+      through the staleness-guarded roster so an exclusive double-hold warns
+      CONTESTED right at the claimer, not just on the next board glance.
+
+    Status folding reuses the exact pure fold + injected thresholds the
+    health check and board use — three surfaces, one judgment."""
+    out_format = getattr(args, "format", "table")
+    action = getattr(args, "roles_action", None)
+
+    if action == "set":
+        name = (getattr(args, "name", "") or "").strip()
+        existing = _role_ops.read_role(name, backend=backend) or {}
+
+        def _pick(arg_name: str, field: str, default):
+            val = getattr(args, arg_name, None)
+            return val if val is not None else existing.get(field, default)
+
+        try:
+            record = schema.make_role(
+                name,
+                _pick("description", "description", ""),
+                standing_instructions=_pick("instructions",
+                                            "standing_instructions", ""),
+                policy=_pick("policy", "policy", "shared"),
+                sla_hours=_pick("sla_hours", "sla_hours", None),
+                maintainer=_pick("maintainer", "maintainer", None),
+                checkpoint_ref=existing.get("checkpoint_ref"),
+            )
+        except ValueError as e:
+            _err(f"roles set: {e}")
+            return 1
+        if existing.get("created_at"):
+            record["created_at"] = existing["created_at"]
+        if not _role_ops.upsert_role(record, backend=backend):
+            _err(f"roles set: registry write for '{name}' could not be "
+                 "verified — re-run (the record may not have landed)")
+            return 1
+        if out_format == "json":
+            _print_json(record)
+        else:
+            _info(f"Role '{record['name']}' registered "
+                  f"(policy={record['policy']}, sla="
+                  f"{record['sla_hours'] or '—'}, "
+                  f"maintainer={record['maintainer'] or '—'})")
+        return 0
+
+    if action in ("claim", "release"):
+        name = (getattr(args, "name", "") or "").strip()
+        me = identity.resolve_agent(getattr(args, "agent", None))
+        if action == "claim":
+            if not _role_ops.claim_role(name, me, backend=backend):
+                _err(f"roles claim: lease write failed for '{name}'")
+                return 1
+            # Post-claim contested check, through the guarded roster (the
+            # claim itself stays presence-blind by layering — see role_ops).
+            try:
+                role = _role_ops.read_role(name, backend=backend) or {}
+                status = _roles.role_status(
+                    role, _role_ops.read_leases(name, backend=backend),
+                    {a.get("agent"): a
+                     for a in _load_presence_agents(backend=backend)
+                     if isinstance(a, dict) and a.get("agent")},
+                    datetime.now(timezone.utc),
+                    stale_hours=views._stale_hours(),
+                    grace_seconds=views._presence_grace_seconds())
+                if status["contested"]:
+                    others = [h["agent"] for h in status["holders"]
+                              if h["agent"] != me]
+                    _warn(f"⚠ role '{name}' is now CONTESTED — exclusive with "
+                          f"fresh lease(s) from {others}; coordinate a release")
+            except Exception:
+                pass
+            _info(f"Claimed role '{name}' for {me}")
+            return 0
+        if not _role_ops.release_role(name, me, backend=backend):
+            _err(f"roles release: no lease of yours to release on '{name}'")
+            return 1
+        _info(f"Released role '{name}' for {me}")
+        return 0
+
+    # Default: list the registry with live status folded in.
+    registry = _role_ops.list_roles(backend=backend)
+    now = datetime.now(timezone.utc)
+    presence_by_agent = {
+        a.get("agent"): a
+        for a in _load_presence_agents(backend=backend)
+        if isinstance(a, dict) and a.get("agent")
+    }
+    stale_hours = views._stale_hours()
+    grace = views._presence_grace_seconds()
+    merged: list[dict] = []
+    for role in registry:
+        name = role.get("name") or ""
+        status = _roles.role_status(
+            role, _role_ops.read_leases(name, backend=backend),
+            presence_by_agent, now, stale_hours=stale_hours,
+            grace_seconds=grace)
+        row = dict(role)
+        row.update(status)
+        row["escalation_due"] = _roles.vacancy_escalation_due(
+            role, status, now)
+        merged.append(row)
+
+    if out_format == "json":
+        _print_json({"roles": merged})
+        return 0
+
+    if not merged:
+        _info("No roles registered yet. Create one: "
+              "fulcra-coord roles set <name> --description '...'")
+        return 0
+
+    print(f"\n{'='*60}")
+    print("  Fulcra Coordination — Roles")
+    print(f"{'='*60}")
+    for r in merged:
+        if r["contested"]:
+            holders = ", ".join(h["agent"] for h in r["holders"])
+            state = f"CONTESTED — exclusive, fresh leases: {holders}"
+        elif r["vacant"]:
+            state = f"VACANT {_age_str(r.get('vacant_since') or '')}"
+            if r["escalation_due"]:
+                state += " ⚠"
+        else:
+            state = "HELD by " + ", ".join(h["agent"] for h in r["holders"])
+        print(f"\n  {r['name']}  [{r.get('policy')}]  {state}")
+        if r.get("description"):
+            print(f"    {r['description'][:80]}")
+        meta = []
+        if r.get("sla_hours") is not None:
+            meta.append(f"sla: {r['sla_hours']}h")
+        if r.get("maintainer"):
+            meta.append(f"maintainer: {r['maintainer']}")
+        if meta:
+            print(f"    {' · '.join(meta)}")
+        if r.get("standing_instructions"):
+            print(f"    instructions: {r['standing_instructions'][:80]}")
+    print()
+    return 0
+
+
 def _retry_sleep(seconds: float) -> None:
     """Jitter sleep before a view-upload retry. A module-level wrapper (not an
     inline ``time.sleep``) ONLY so tests can patch it out — patching the global
@@ -1141,6 +1428,20 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         except Exception as _lhe:
             try:
                 _warn(f"  Loop-health check skipped (error): {_lhe}")
+            except Exception:
+                pass
+        # Role-health sub-pass (spec 2026-06-10): registry status per role —
+        # HELD / VACANT / CONTESTED — with the SLA-vacancy escalation riding
+        # inside it (idempotent via the daily marker). Vacancy is the
+        # generalized dark-agent signal: "function is unstaffed", not "agent
+        # is dark". REPORT-ONLY and best-effort, wrapped exactly like the
+        # loop-health pass above: the result, present or absent, NEVER
+        # changes reconcile's exit code, and the error is surfaced, not eaten.
+        try:
+            record["role_health"] = _role_health_check(backend=backend)
+        except Exception as _rhe:
+            try:
+                _warn(f"  Role-health check skipped (error): {_rhe}")
             except Exception:
                 pass
         # SAFETY NET: directives addressed to an OFFLINE/stale agent that were
