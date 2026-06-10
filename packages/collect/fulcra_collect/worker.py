@@ -187,6 +187,11 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         _fulcra_client_factory=_make_fulcra_definition_client,
         _claim_dedup_keys=_claim_dedup_keys,
         _unclaim_dedup_keys=_unclaim_dedup_keys,
+        # Keychain write-back: lets a plugin persist rotated secrets (e.g.
+        # Trakt's single-use OAuth refresh tokens) without importing
+        # fulcra_collect.credentials itself.
+        _set_credential=lambda key, value: credentials.set_secret(
+            plugin.id, key, value),
     )
     missing = sorted(c.key for c in plugin.required_credentials
                      if not ctx.credentials.get(c.key))
