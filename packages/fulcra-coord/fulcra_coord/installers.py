@@ -52,10 +52,19 @@ def _report_resolved_cli(plan: dict[str, Any]) -> None:
 
 
 def cmd_install_claude_code(args: Any, backend: Optional[list[str]] = None) -> int:
-    """Install/uninstall Claude Code lifecycle hooks for coordination."""
+    """Install/uninstall Claude Code lifecycle hooks for coordination.
+
+    Structure note (the same early-return gotcha cmd_install_openclaw fixed):
+    the hooks summary must NOT ``return 0`` early on dry-run/uninstall, because
+    the ``--with-wake`` add-on below has to run in ALL THREE modes — a dry-run
+    that doesn't preview the wake entry, or an uninstall that leaves it armed
+    (spawning headless sessions for an agent whose hooks are gone), would be
+    silently wrong. So the summary is emitted without short-circuiting and the
+    single ``return 0`` is at the end."""
     scope = "project" if getattr(args, "scope", "global") == "project" else "global"
     plan = claude_code.install_claude_code(
         scope=scope, uninstall=args.uninstall, dry_run=args.dry_run)
+    # Emit the hooks summary WITHOUT returning — the wake add-on must still run.
     if args.dry_run:
         _info("[dry-run] Would write to: " + plan["settings"])
         _info("[dry-run] Hook scripts: " + plan["hooks_dir"])
@@ -65,16 +74,57 @@ def cmd_install_claude_code(args: Any, backend: Optional[list[str]] = None) -> i
         if plan.get("would_write") is not None:
             _info("[dry-run] Resulting settings.json:")
             _info(_json.dumps(plan["would_write"], indent=2))
-        return 0
-    if args.uninstall:
+    elif args.uninstall:
         _info(f"Removed fulcra-coord hooks from {plan['settings']}")
-        return 0
-    _info(f"Installed Claude Code hooks ({scope}) -> {plan['settings']}")
-    for e in plan["events"]:
-        _info(f"  + {e}")
-    _report_resolved_cli(plan)
-    _info("New Claude Code sessions will now surface in-flight work and checkpoint automatically.")
-    _info("Verify auth/connectivity with: fulcra-coord doctor")
+    else:
+        _info(f"Installed Claude Code hooks ({scope}) -> {plan['settings']}")
+        for e in plan["events"]:
+            _info(f"  + {e}")
+        _report_resolved_cli(plan)
+        _info("New Claude Code sessions will now surface in-flight work and checkpoint automatically.")
+
+    # HOST WAKE add-on (operator directive 2026-06-10: "this can't die if i do
+    # other stuff for a bit"): seed this agent's wake.json entry so the durable
+    # listener can SPAWN a headless session when directed work arrives, instead
+    # of only notifying. The mechanism is platform-neutral core (fulcra_coord
+    # .wake); this flag is the one place the concrete `claude -p ...` command
+    # is written — into per-adopter config the operator must review.
+    if getattr(args, "with_wake", False):
+        agent = getattr(args, "agent", None) or _derive_agent()
+        wplan = claude_code.install_wake(
+            agent, uninstall=args.uninstall, dry_run=args.dry_run)
+        if args.dry_run:
+            import json as _json
+            verb = "remove wake entry for" if args.uninstall \
+                else "write wake entry for"
+            _info(f"[dry-run] Would {verb} {agent} in {wplan['config']}")
+            _info("[dry-run] Resulting wake.json:")
+            _info(_json.dumps(wplan["would_write"], indent=2))
+        elif args.uninstall:
+            _info(f"Removed wake entry for {agent} from {wplan['config']}")
+        else:
+            if wplan["preserved"]:
+                _info(f"Wake entry for {agent} already exists in "
+                      f"{wplan['config']} — preserved your customized entry.")
+            else:
+                _info(f"Wrote wake entry for {agent} -> {wplan['config']}")
+            # The loud consent note. The wake command is powerful: the listener
+            # will exec it UNATTENDED whenever pending bus work is found.
+            _info("")
+            _info("  *** REVIEW THE WAKE COMMAND BEFORE RELYING ON IT ***")
+            _info(f"  The listener will now spawn the `cmd` in {wplan['config']}")
+            _info("  UNATTENDED whenever pending bus work is found for this "
+                  "agent. The spawned session runs with this host's default "
+                  "permissions.")
+            _info("  Open that file to confirm/customize the command (binary "
+                  "path, permission and timeout flags, model). Set "
+                  '"enabled": false to pause it.')
+            _info("  Runaway protection is the command's own job — cap runtime "
+                  "with the spawned CLI's timeout flags; fulcra-coord only "
+                  "throttles (min_interval_min) and single-flights wakes.")
+
+    if not args.dry_run and not args.uninstall:
+        _info("Verify auth/connectivity with: fulcra-coord doctor")
     return 0
 
 

@@ -1,0 +1,43 @@
+{
+  "_comment": "EXAMPLE wake policy for fulcra-coord host wake-exec \u2014 every entry below is an EXAMPLE; copy this file to ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/wake.json and keep only the entries you actually want, with YOUR agent-id prefixes. With NO file present the listener is notify-only (exactly the pre-wake behavior). Keys are agent ids or prefixes (longest prefix wins, so 'claude-code:' covers every host/repo instance and a longer key overrides for one host). `cmd` is the argv the listener spawns DETACHED when pending bus work is found for a matching agent; it runs UNATTENDED with the host's default permissions, so review it. The spawned process gets FULCRA_COORD_AGENT and FULCRA_COORD_WAKE_PENDING in its env. `min_interval_min` throttles to at most one wake per interval; `max_runtime_s` documents your runtime budget but is enforced by the SPAWNED command's own timeout flags (fulcra-coord deliberately runs no process manager \u2014 it only throttles and single-flights). Set `enabled` to false to pause an entry without deleting it. `fulcra-coord install-claude-code --with-wake` seeds the claude-code entry for you.",
+  "claude-code:EXAMPLE-HOST:": {
+    "_comment": "EXAMPLE \u2014 Claude Code headless wake. Customize the binary path / permission + timeout flags for your host.",
+    "cmd": [
+      "claude",
+      "-p",
+      "--dangerously-skip-permissions",
+      "BUS WAKE: you are claude-code:EXAMPLE-HOST:repo. Process your fulcra-coord inbox: direct-list tasks/, act on directives/verdicts per AGENTS.md rules, close loops with evidence, then exit."
+    ],
+    "cwd": "/path/to/your/fulcra-tools-worktree",
+    "min_interval_min": 15,
+    "max_runtime_s": 900,
+    "enabled": true,
+    "_note": "--dangerously-skip-permissions is the deliberate default (a stalling woken session is a notifier, not a worker); remove it per host to require approvals."
+  },
+  "codex:EXAMPLE-HOST:": {
+    "_comment": "EXAMPLE \u2014 Codex exec-mode wake.",
+    "cmd": [
+      "codex",
+      "exec",
+      "BUS WAKE: you are codex:EXAMPLE-HOST:main. Process your fulcra-coord inbox: direct-list tasks/, act on directives/verdicts per AGENTS.md rules, close loops with evidence, then exit."
+    ],
+    "cwd": "/path/to/your/fulcra-tools-worktree",
+    "min_interval_min": 15,
+    "max_runtime_s": 900,
+    "enabled": true
+  },
+  "openclaw:EXAMPLE-HOST:": {
+    "_comment": "EXAMPLE \u2014 OpenClaw gateways usually poll the bus from their own heartbeat already; only add a wake entry if this gateway is not always-on. This one is disabled to illustrate the pause switch.",
+    "cmd": [
+      "openclaw",
+      "agent",
+      "run",
+      "--prompt",
+      "BUS WAKE: process your fulcra-coord inbox, then exit."
+    ],
+    "cwd": "/path/to/your/openclaw-worktree",
+    "min_interval_min": 30,
+    "max_runtime_s": 900,
+    "enabled": false
+  }
+}

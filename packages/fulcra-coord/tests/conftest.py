@@ -54,12 +54,24 @@ def _hermetic_cache_and_backend():
     """Redirect XDG_CACHE_HOME to a throwaway dir for the duration of one test,
     and default the file-ops backend to a safe no-op. Restores prior env after."""
     prev_xdg = os.environ.get("XDG_CACHE_HOME")
+    prev_cfg = os.environ.get("XDG_CONFIG_HOME")
     prev_backend = os.environ.get("FULCRA_COORD_BACKEND")
     prev_annotations = os.environ.get("FULCRA_COORD_ANNOTATIONS")
     prev_ensure = os.environ.get("FULCRA_COORD_ENSURE_LISTENER")
 
     tmp = tempfile.mkdtemp(prefix="fulcra-coord-test-cache-")
     os.environ["XDG_CACHE_HOME"] = tmp
+
+    # ALSO isolate XDG_CONFIG_HOME. Before host-wake this was a pollution risk
+    # (tests could read the operator's real persisted identity / annotation
+    # mode); with ${XDG_CONFIG_HOME}/fulcra-coord/wake.json it becomes a SPAWN
+    # hazard: any test that drives a notify-inbox tick with a non-empty inbox
+    # would load the operator's REAL wake.json and could launch a real agent
+    # runtime mid-suite. Pointing config at a fresh tmp dir makes every test
+    # see "no config" — the same world a fresh CI box sees — unless the test
+    # writes its own config inside the redirected dir (which still wins).
+    cfg_tmp = tempfile.mkdtemp(prefix="fulcra-coord-test-config-")
+    os.environ["XDG_CONFIG_HOME"] = cfg_tmp
 
     # Safety net: if a test reaches an unmocked remote file op, ``false`` exits
     # non-output / 0 instead of invoking the real Fulcra CLI. Only set when the
@@ -118,6 +130,11 @@ def _hermetic_cache_and_backend():
         else:
             os.environ["XDG_CACHE_HOME"] = prev_xdg
 
+        if prev_cfg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = prev_cfg
+
         if prev_backend is None:
             os.environ.pop("FULCRA_COORD_BACKEND", None)
         else:
@@ -134,6 +151,7 @@ def _hermetic_cache_and_backend():
             os.environ["FULCRA_COORD_ENSURE_LISTENER"] = prev_ensure
 
         shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(cfg_tmp, ignore_errors=True)
 
 
 @pytest.fixture

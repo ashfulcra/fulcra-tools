@@ -6,8 +6,8 @@ blocked-on-you items (notify once per item via a seen-set, never re-firing). Rea
 the summaries aggregate and writes acks through the single write pipeline.
 
 Extracted from cli.py behind stable re-exports; depends only on lower layers (io
-loaders, the write pipeline, output, cache/remote/schema/views/identity/listener)
-and never imports cli, so the split has no cycle. ``_inbox_surface_path`` is
+loaders, the write pipeline, output, cache/remote/schema/views/identity/listener/
+wake) and never imports cli, so the split has no cycle. ``_inbox_surface_path`` is
 re-exported because the reconcile-side ``_build_health_record`` (still in cli) reads
 the listener's last-fire mtime from it; ``_derive_agent`` is the usual thin alias.
 """
@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity, listener
+from . import cache, remote, schema, views, identity, listener, wake
 from .io import _cache_remote_task, _load_task, _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
 from .writepipe import _view_name_to_remote, _write_task_and_views
@@ -397,6 +397,16 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
                 me, len(new_ids), extra=_overdue_loop_suffix(me, backend=backend))
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         seen_path.write_text(json.dumps(sorted(current_ids)))
+        # HOST WAKE (operator directive 2026-06-10: "this can't die if i do
+        # other stuff for a bit"): with pending work and a per-adopter wake.json
+        # entry for this agent, spawn the configured command detached — the
+        # listener can now WAKE an agent runtime, not just notify. Keyed off the
+        # TOTAL pending count (not the new-ids dedup above) on purpose: an
+        # already-notified directive that is still sitting unprocessed is
+        # exactly the case a wake exists for; wake.maybe_wake's own
+        # min-interval throttle + single-flight pidfile prevent spam. Fail-safe
+        # (never raises) by contract — no config means exactly the old behavior.
+        wake.maybe_wake(me, len(items))
         # ALSO notice anything newly blocked on the human (Part 5). Independent
         # of the agent's own inbox: a tick with an empty inbox can still alert on
         # a new blocked-on-you item. Best-effort within the same fail-safe guard.
