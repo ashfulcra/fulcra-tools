@@ -115,6 +115,12 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None,
         # Mirror routing_ops's REVIEW_TAG append: an EXTRA membership tag the
         # dual-write mapper reads — never the task's ``kind`` field.
         task["tags"] = sorted(set(task.get("tags", []) + [marker_tag]))
+    if getattr(args, "expects_response", False):
+        # --expects-response makes this an ASK, not an FYI: the dispatch marker
+        # makes the dual-write mirror it as an OPEN kind=dispatch loop
+        # (assigned, SLA-tracked) that only a bus `respond` closes. tell-only —
+        # broadcast never grows this flag (fan-out FYI must not open N loops).
+        task["tags"] = sorted(set(task.get("tags", []) + [routing.DISPATCH_TAG]))
 
     errs = schema.validate_task(task)
     if errs:

@@ -10,8 +10,8 @@ legacy task stays authoritative and nothing READS directives for correctness yet
 
 This module is the PURE mapping core, deliberately testable from plain task
 dicts with no I/O. LAYERING: it may import only DOWN/peer modules
-(``schema`` / ``remote`` / ``timeutil`` and pure constants from ``routing`` /
-``views``); it MUST NOT import the up-layer (``lifecycle`` / ``cli`` / ``views``
+(``schema`` / ``remote`` / ``timeutil`` / the pure ``loops`` registry, and pure
+constants from ``routing`` / ``views``); it MUST NOT import the up-layer (``lifecycle`` / ``cli`` / ``views``
 builders that pull I/O / ``writepipe`` / ``inbox``) — the package fitness test
 enforces this. We import only the leaf TAG CONSTANTS and the ``BROADCAST``
 sentinel from ``routing`` / ``views`` (both pure values, not behaviour), so the
@@ -28,6 +28,11 @@ from typing import Any, Optional
 from . import schema
 from . import remote
 from . import log as ops_log
+# loops is the PURE kind registry (stdlib-only; its own fitness pin forbids it
+# importing directives, so this direction is acyclic and the directives.py pin
+# allows it). Imported for the registry SLA defaults — the dispatch mapping
+# must read loops.KINDS rather than hardcode a copy of the horizon.
+from . import loops
 
 
 def _now_z() -> str:
@@ -50,12 +55,14 @@ def _now_z() -> str:
 #   views.BROADCAST              == "*"
 #   routing.REVIEW_TAG           == "kind:review"
 #   routing.IDEA_TAG             == "kind:idea"
+#   routing.DISPATCH_TAG         == "kind:dispatch"
 #   routing.BACKLOG_AUDIENCE     == "@backlog"
 #   routing_ops.REVIEW_VERDICT_TAG == "kind:review-verdict"
 BROADCAST = "*"
 REVIEW_TAG = "kind:review"
 _VERDICT_TAG = "kind:review-verdict"
 IDEA_TAG = "kind:idea"
+DISPATCH_TAG = "kind:dispatch"
 BACKLOG_AUDIENCE = "@backlog"
 
 
@@ -366,6 +373,15 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
         # directive_from_task stamps the state the task implies directly, it
         # doesn't replay the machine.
         loop_state = "captured" if audience == BACKLOG_AUDIENCE else "routed"
+    elif DISPATCH_TAG in (task.get("tags") or []):
+        # Dispatch ask (`tell --expects-response`): an OPEN loop that only a
+        # bus response (loop_ops.cmd_respond) closes. SLA from the registry
+        # default — never hardcoded here, so retuning the dispatch horizon is
+        # a one-line registry change.
+        loop_kind = "dispatch"
+        loop_state = "assigned"
+        loop_expects_response = True
+        loop_sla_hours = loops.KINDS["dispatch"]["sla_hours"]
 
     directive = schema.make_directive(
         directive_type=directive_type,
