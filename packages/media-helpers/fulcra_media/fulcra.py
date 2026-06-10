@@ -12,6 +12,7 @@ soft-delete, and event readback come from the base.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,46 @@ if TYPE_CHECKING:
     from .importers.base import NormalizedEvent
 
 __all__ = ["FulcraClient", "ImportResult"]
+
+_MEDIA_NAMESPACE = "com.fulcra.media."
+
+
+def _importer_namespace_prefix(det_id: str) -> str | None:
+    """Per-importer namespace prefix of a deterministic_id, or None.
+
+    Importer det-ids share the shape ``com.fulcra.media.<importer>.<rest>``
+    where ``<rest>`` varies across importers: ``v1.<sha16>`` (lastfm,
+    deezer, spotify-extended, ...), ``v2.<sha16>`` (netflix), a bare
+    ``<sha16>`` with NO version segment (netflix-rich), ``v1.history.<id>``
+    (trakt), ``v1.<service id>`` (strava). The one stable invariant is the
+    importer segment immediately after ``com.fulcra.media.`` — so the
+    prefix is derived as ``com.fulcra.media.<importer>.`` rather than by
+    stripping a trailing ``v1.<hash>``, which several importers don't have.
+
+    Returns None for anything that doesn't fit the shape; callers fall
+    back to the conservative skip-on-fingerprint-match behaviour.
+    """
+    if not det_id.startswith(_MEDIA_NAMESPACE):
+        return None
+    rest = det_id[len(_MEDIA_NAMESPACE):]
+    importer_seg, _, tail = rest.partition(".")
+    if not importer_seg or not tail:
+        return None
+    return f"{_MEDIA_NAMESPACE}{importer_seg}."
+
+
+def _without_sources(e: "NormalizedEvent", drop: set[str]) -> "NormalizedEvent":
+    """Copy of ``e`` with ``drop`` removed from extra_source_ids.
+
+    A COPY, never an in-place mutation: callers of run_import reuse their
+    event list afterwards (record_twins_after_post → record_imported_events
+    reads external_ids / start_time off the same objects), so the originals
+    must stay intact.
+    """
+    return replace(
+        e,
+        extra_source_ids=tuple(s for s in e.extra_source_ids if s not in drop),
+    )
 
 
 class FulcraClient(BaseFulcraClient):
@@ -132,18 +173,21 @@ class FulcraClient(BaseFulcraClient):
         `claim`: an OPTIONAL per-event write-dedup claim, injected by the
         daemon (``ctx.claim_dedup_keys``) so media-helpers never imports
         ``fulcra-collect``. For each event that SURVIVES the readback-skip,
-        ``claim`` is called with that event's full dedup-key set
+        ``claim`` is called with that event's dedup-key set
         (``{deterministic_id} ∪ extra_source_ids``); the event is POSTed
         only when ``claim`` returns ``True``. This closes the window the
-        readback alone can't: two concurrent runs, or two cross-source
-        twins in the SAME run that share a ``com.fulcra.content.*``
-        fingerprint, would each pass the readback (neither is in Fulcra
-        yet) — the claim, an atomic INSERT OR IGNORE against a shared
-        PRIMARY KEY, lets exactly one of them through. A claimed-but-skipped
-        event counts as ``skipped_existing`` (it's a duplicate of a sibling
-        being written this very run). When ``claim is None`` (standalone CLI
-        imports outside the daemon) behaviour is exactly as before:
-        readback-skip only, no per-event claim.
+        readback alone can't: two concurrent runs sharing a key would each
+        pass the readback (neither is in Fulcra yet) — the claim, an atomic
+        INSERT OR IGNORE against a shared PRIMARY KEY, lets exactly one of
+        them through. Fingerprints already claimed EARLIER IN THIS RUN are
+        stripped from the event before its claim: a run is a single plugin,
+        so a same-run fingerprint collision is a same-source quick replay
+        (two real plays in one 5-minute bucket), not a cross-source twin —
+        the replay still posts, claiming its remaining keys. A
+        claimed-but-skipped event counts as ``skipped_existing``. When
+        ``claim is None`` (standalone CLI imports outside the daemon)
+        behaviour is exactly as before: readback-skip only, no per-event
+        claim.
 
         `unclaim`: the OPTIONAL inverse of ``claim``, injected alongside it
         (``ctx.unclaim_dedup_keys``). Claims are taken BEFORE the batch POST
@@ -186,25 +230,67 @@ class FulcraClient(BaseFulcraClient):
                     f"com.fulcradynamics.annotation.{def_id}"
                 )
 
+        # Dedup keys claimed by THIS run so far (across chunks). A run is a
+        # single plugin, so a fingerprint-claim collision against a key in
+        # this set is a same-source quick replay BY CONSTRUCTION — see the
+        # claim block below.
+        run_claimed_keys: set[str] = set()
+
         for i in range(0, len(events_sorted), chunk_size):
             chunk = events_sorted[i : i + chunk_size]
             win_start = min(e.start_time for e in chunk) - timedelta(minutes=window_pad_minutes)
             win_end = max(e.end_time for e in chunk) + timedelta(minutes=window_pad_minutes)
 
-            existing = self.fetch_existing_source_ids(
+            existing_groups = self.fetch_existing_source_groups(
                 win_start, win_end, only_for_defs=current_def_source_ids or None
             )
-            # Skip an event if ANY of its dedup keys is already present — the
-            # per-plugin deterministic_id OR a cross-source content fingerprint
-            # (com.fulcra.content.*.v1.<hash>) carried in extra_source_ids. The
-            # fingerprints are already in `existing` via fetch_existing_source_ids
-            # (it reads both the sources and metadata.source arrays). An event
-            # with no extra_source_ids therefore behaves exactly as before:
-            # skip iff deterministic_id in existing.
-            new_events = [
-                e for e in chunk
-                if not ({e.deterministic_id, *e.extra_source_ids} & existing)
-            ]
+            existing: set[str] = set()
+            for grp in existing_groups:
+                existing |= grp
+
+            # Readback dedup, per event:
+            #   1. deterministic_id already present → true duplicate → skip.
+            #   2. A cross-source content fingerprint
+            #      (com.fulcra.content.*.v1.<hash>) in extra_source_ids
+            #      matches an existing record R. Two very different things
+            #      hash to the same fingerprint because it buckets timestamps
+            #      to 5 minutes:
+            #        - same listen reported by TWO services (cross-source
+            #          twin) → skip, as before;
+            #        - the SAME service reporting two real plays inside one
+            #          bucket (a quick replay — e.g. Last.fm, "Born to Be
+            #          Alive" played at 15:00:17 and again at 15:03:36 on
+            #          2026-06-07; the old key-intersection skip silently
+            #          dropped the second play). When EVERY existing record
+            #          claiming the fingerprint also carries a source id
+            #          from this event's own importer namespace, it's a
+            #          replay: POST it, with the matched fingerprint STRIPPED
+            #          from the wire source array — otherwise query-time
+            #          source-merging would collapse the replay into the
+            #          original record. The strip happens on a COPY; the
+            #          caller's events are never mutated.
+            #      If the importer prefix can't be derived, or any claiming
+            #      record is from a different importer, fall back to the
+            #      conservative skip.
+            #   An event with no extra_source_ids behaves exactly as before:
+            #   skip iff deterministic_id in existing.
+            new_events = []
+            for e in chunk:
+                if e.deterministic_id in existing:
+                    continue  # true duplicate
+                matched_fps = {f for f in e.extra_source_ids if f in existing}
+                if not matched_fps:
+                    new_events.append(e)
+                    continue
+                prefix = _importer_namespace_prefix(e.deterministic_id)
+                same_source = prefix is not None and all(
+                    any(src.startswith(prefix) for src in grp)
+                    for grp in existing_groups
+                    if grp & matched_fps
+                )
+                if same_source:
+                    new_events.append(_without_sources(e, matched_fps))
+                # else: cross-source twin (or unprovable) → skip.
             skipped += len(chunk) - len(new_events)
 
             # Per-event write-dedup claim (component 3). For each event that
@@ -224,10 +310,30 @@ class FulcraClient(BaseFulcraClient):
             if claim is not None and not check_only:
                 claimed_events = []
                 for e in new_events:
+                    # Batch-internal same-source replay: a run is a single
+                    # plugin, so a fingerprint claimed EARLIER IN THIS RUN
+                    # belongs to a sibling event from the same importer —
+                    # by construction a quick replay, never a cross-source
+                    # twin. Strip those fingerprints (on a copy) up front
+                    # and claim only the remaining keys; the det_id must
+                    # still claim successfully or the event is a true dup.
+                    already_ours = set(e.extra_source_ids) & run_claimed_keys
+                    if already_ours:
+                        e = _without_sources(e, already_ours)
                     keyset = {e.deterministic_id, *e.extra_source_ids}
                     if claim(keyset):
                         claimed_events.append(e)
                         newly_claimed_keys |= keyset
+                        run_claimed_keys |= keyset
+                    # else: conservative edge, OLD behaviour preserved. The
+                    # collision is on the det_id (true dup / concurrent run)
+                    # or on a fingerprint claimed by a CONCURRENT process —
+                    # one not claimed by this run and not visible in the
+                    # readback grouping, so we cannot prove it's same-source.
+                    # Skipping here can still drop a genuine replay in the
+                    # narrow window where the original play was forwarded but
+                    # hasn't surfaced in the readback yet; we accept that
+                    # over risking a cross-source double-write.
                 skipped += len(new_events) - len(claimed_events)
                 new_events = claimed_events
 
