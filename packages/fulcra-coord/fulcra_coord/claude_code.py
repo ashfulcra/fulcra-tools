@@ -403,7 +403,14 @@ def default_wake_entry(agent: str) -> dict[str, Any]:
     one wake per 15 min, 900s advisory runtime budget, enabled (the operator
     just asked for it via --with-wake; the loud review note covers consent)."""
     return {
-        "cmd": ["claude", "-p", _default_wake_prompt(agent)],
+        # --dangerously-skip-permissions is the DELIBERATE default (operator
+        # decision 2026-06-10): a woken session that stalls on permission
+        # prompts is a smart notifier, not a worker — the point of host-wake is
+        # acting unattended. Risk is bounded: it only processes bus directives,
+        # on the operator's own machines, under AGENTS.md rules. Soften per
+        # host by editing this entry in wake.json (the customization point).
+        "cmd": ["claude", "-p", "--dangerously-skip-permissions",
+                _default_wake_prompt(agent)],
         "min_interval_min": 15,
         "max_runtime_s": 900,
         "enabled": True,

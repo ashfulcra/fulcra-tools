@@ -59,12 +59,14 @@ class TestInstallWake(_ConfigEnvBase):
         cfg = self._config()
         self.assertIn(self.AGENT, cfg)
         entry = cfg[self.AGENT]
-        # The documented placeholder command: headless claude run, prompt names
-        # the agent and tells it to process the inbox then exit.
+        # Operator-decided default (2026-06-10): full-auto headless run — a
+        # woken session that stalls on permission prompts is a notifier, not a
+        # worker. The flag is removable per host in wake.json.
         self.assertEqual(entry["cmd"][0], "claude")
         self.assertEqual(entry["cmd"][1], "-p")
-        self.assertIn(self.AGENT, entry["cmd"][2])
-        self.assertIn("inbox", entry["cmd"][2])
+        self.assertEqual(entry["cmd"][2], "--dangerously-skip-permissions")
+        self.assertIn(self.AGENT, entry["cmd"][3])
+        self.assertIn("inbox", entry["cmd"][3])
         self.assertEqual(entry["min_interval_min"], 15)
         self.assertEqual(entry["max_runtime_s"], 900)
         self.assertTrue(entry["enabled"])
