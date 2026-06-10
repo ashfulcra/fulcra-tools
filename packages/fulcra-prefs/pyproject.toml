@@ -20,4 +20,4 @@ packages = ["fulcra_prefs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --import-mode=importlib"
+addopts = "-ra --strict-markers"
