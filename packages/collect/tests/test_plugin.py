@@ -673,3 +673,35 @@ def test_fulcra_token_falls_back_to_cli_when_no_keychain_token(monkeypatch):
                         lambda self: "cli-fallback-token")
     ctx = _make_bare_ctx()
     assert ctx.fulcra_token() == "cli-fallback-token"
+
+
+# ---------------------------------------------------------------------------
+# RunContext.set_credential() — keychain write-back seam
+# ---------------------------------------------------------------------------
+
+def test_set_credential_is_noop_when_no_backend():
+    """Without an injected backend (health/permission contexts, standalone
+    CLI), set_credential() is a silent no-op — the plugin keeps running
+    with its in-memory token; only persistence is skipped."""
+    ctx = _make_bare_ctx()
+    # Must not raise even though _set_credential is None.
+    ctx.set_credential("access_token", "rotated-token")
+
+
+def test_set_credential_delegates_to_injected_backend():
+    """With a backend injected (the worker's set_secret lambda),
+    set_credential() forwards key and value verbatim."""
+    written: list[tuple[str, str]] = []
+    ctx = RunContext(
+        plugin_id="trakt",
+        config={},
+        credentials={},
+        state=None,
+        log=logging.getLogger("test"),
+        _emit=lambda evt: None,
+        _set_credential=lambda key, value: written.append((key, value)),
+    )
+    ctx.set_credential("access_token", "new-access")
+    ctx.set_credential("refresh_token", "new-refresh")
+    assert written == [("access_token", "new-access"),
+                       ("refresh_token", "new-refresh")]
