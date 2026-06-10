@@ -1169,6 +1169,47 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     if needs_repair:
         _info(f"  {len(needs_repair)} operation(s) need view repair.")
 
+    body_repair_failures = []
+    for m in needs_repair:
+        if m.get("status") not in ("failed", "unverified"):
+            continue
+        tid = m.get("task_id")
+        if not tid:
+            continue
+        cached_task = cache.read_cached_task(tid)
+        if not cached_task:
+            body_repair_failures.append(tid)
+            continue
+        task_path = remote.task_remote_path(tid)
+        try:
+            ok = remote.upload_json(cached_task, task_path, backend=backend)
+        except Exception:
+            ok = False
+        if not ok:
+            body_repair_failures.append(tid)
+            continue
+        try:
+            post_stat = remote.stat(task_path, backend=backend)
+            if post_stat:
+                cache.write_meta(task_path, post_stat)
+        except Exception:
+            pass
+
+    if body_repair_failures:
+        _warn(
+            "  Task body repair failures: "
+            f"{sorted(set(body_repair_failures))}"
+        )
+        ops_log.log_op(
+            "reconcile",
+            status="task_body_repair_failed",
+            detail=f"failed task body repairs: {sorted(set(body_repair_failures))}",
+        )
+        # Do NOT clear op markers. These are authoritative-body repair debts, not
+        # mere view debts, so rebuilding views from cache would only make a
+        # still-missing task look delivered.
+        return 1
+
     try:
         all_tasks = _load_all_tasks(backend=backend)
     except Exception as e:

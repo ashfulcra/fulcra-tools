@@ -10,6 +10,45 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — single task writes retry once and verify delivery (silent single-write loss)
+
+**Why:** Live evidence (2026-06-10, four occurrences in one evening): under
+backend write-throttling, single task/directive writes (`tell` / `later` /
+`done`) intermittently failed AFTER the CLI printed success-looking output —
+the body never landed on the bus, the local cache held it, and it self-healed
+only at a much-later reconcile (minutes to hours). Senders believed messages
+were delivered; recipients never saw them (a review-queue directive, a `later`
+backlog item, two loop closes). At least one case printed the directive-created
+banner with **no** cached-locally warn, meaning the upload returned ambiguous
+success with nothing on the bus. The reconcile-pool retry
+(`FULCRA_COORD_UPLOAD_RETRY`) covers VIEW uploads only — the AUTHORITATIVE
+task-body upload in `writepipe._write_task_and_views` had a single, unverified
+attempt.
+
+**What:**
+- The task-body upload (the authoritative write — best-effort view/event/
+  directive side-writes unchanged) retries ONCE after a 0.5–2.0s jitter sleep
+  on a False **or raising** upload. New knob `FULCRA_COORD_WRITE_RETRY`
+  (default `1`; `0` disables). A second failure is final and falls through to
+  the exact pre-existing cached-locally path (return False, marker
+  failed+needs_reconcile, caller warns).
+- **Verify-after-write:** after a successful-looking upload, the existing
+  post-write version-tracking `remote.stat` doubles as delivery verification
+  (no extra round-trip on the fast path). A `None` stat — file absent or stat
+  failed, both meaning delivery cannot be claimed — triggers one more jittered
+  re-upload + re-stat; if STILL unverified, an unmissable
+  `DELIVERY NOT CONFIRMED: <task-id>` warning is printed to stderr, the op
+  marker is kept with `needs_reconcile` (so the standard reconcile self-heal
+  owns the repair, same vehicle as a failed upload), and the ops log records
+  `status=unverified`. The command's exit code NEVER flips for an unverified
+  write that cached locally — the self-heal contract stands, but the sender now
+  SEES it. New knob `FULCRA_COORD_WRITE_VERIFY` (default `1`; `0` disables for
+  backends whose stat is unreliable, without losing the upload retry).
+- Test conftest no-ops the jitter sleep by default (the `false` safety-net
+  backend fails every first upload, which would otherwise add ~70s of pure
+  sleep to the suite); jitter-asserting tests patch `writepipe._retry_sleep`
+  themselves.
+
 ## [Unreleased] — roles as durable identity: registry, leases, vacancy escalation
 
 **Why:** Sessions are ephemeral (Claude Code / Codex sessions die, sleep, get
@@ -47,7 +86,6 @@ ephemeral lease on it.**
   + `role_ops.py` (best-effort I/O: claim/release/read + registry CRUD with
   verify-after-write), following the loops.py/loop_ops.py split and
   fitness-pinned the same way.
-
 ## [Unreleased] — staleness-guarded reads: stale views fall back to direct listings
 
 **Why:** Live 2026-06-10 evidence (the highest-severity find of that night's
@@ -80,7 +118,6 @@ durable Tier-0 layer worked; the read path lied.
 - Degraded-not-blind floor: if the direct listing ALSO fails (or returns
   empty — indistinguishable from a backend without a working `list`), the
   stale view is still used, with a louder warn. Stale data beats no data.
-
 ## [Unreleased] — reconcile view uploads retry once with jitter under burst throttling
 
 **Why:** Live 0.15.0 evidence (two hosts): every `reconcile` tick was failing a
