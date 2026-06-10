@@ -8,7 +8,7 @@ VERIFIED against /tmp/fulcra-api-python/fulcra_api/core.py (v0.1.30):
 - resolve_filepath(filepath, all_versions=False): raises Exception when the
   file is not found (does NOT return []). store.py wraps it in try/except.
 
-- list_files(path="/", state="uploaded"): returns a dict {"files": [...], ...},
+- list_files(path="/"): returns a dict {"files": [...], ...},
   NOT a plain list. store.py extracts result["files"].
 
 - download_file(file_id): returns http.client.HTTPResponse with .read() method.
@@ -59,7 +59,7 @@ class FakeFulcraAPI:
         self.files[filepath] = data.read()
         return {"url": "fake://uploaded", "id": f"v-{filepath}"}
 
-    def list_files(self, path="/", state="uploaded"):
+    def list_files(self, path="/"):
         """Returns {"files": [...]} dict mirroring the real library's shape.
         The real list_files wraps results in a top-level dict; callers must
         extract result["files"]."""
@@ -73,9 +73,9 @@ class FakeFulcraAPI:
 
     # --- generic API request (matches FulcraAPI.fulcra_api) ---
     # Real signature: fulcra_api(url_path, method="GET", query=None, data=None,
-    #                            return_http_response=False)
+    #                            return_raw_response=False)
     def fulcra_api(self, path, method="GET", query=None, data=None,
-                   return_http_response=False):
+                   return_raw_response=False):
         if path == "/ingest/v1/record" and method == "POST":
             if self.fail_ingest:
                 raise ConnectionError("simulated ingest outage")
