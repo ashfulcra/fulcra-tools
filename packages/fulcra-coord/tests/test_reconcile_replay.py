@@ -134,3 +134,54 @@ def test_replay_still_uploads_when_remote_is_absent(coord_backend):
                                   backend=coord_backend)
     assert on_bus is not None
     assert on_bus["current_summary"] == "old summary from A"
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-11 bug hunt S7: per-view upload budget. Each view upload in the
+# reconcile pool used to receive the WHOLE remaining reconcile deadline as
+# its subprocess timeout — one wedged backend call could then consume the
+# entire tick's budget (and the retry could do it again), starving every
+# other view. The per-view budget must be min(remaining, _write_timeout()),
+# resolved through the function (env-tunable, post-#157), never a constant.
+# ---------------------------------------------------------------------------
+
+def _capture_view_upload_timeouts(coord_backend, monkeypatch):
+    """Run cmd_reconcile with one seeded task; return the explicit ``timeout``
+    values passed to remote.upload_json. Only the view-upload pool passes an
+    explicit timeout in cmd_reconcile, so the capture isolates exactly it."""
+    from fulcra_coord.cli import cmd_reconcile
+    t = schema.make_task(title="budget probe", workstream="general",
+                         agent="a:h:r", summary="probe")
+    assert remote.upload_json(t, remote.task_remote_path(t["id"]),
+                              backend=coord_backend)
+    captured: list[int] = []
+    real_upload = remote.upload_json
+
+    def capturing(data, path, backend=None, timeout=None):
+        if timeout is not None:
+            captured.append(timeout)
+        return real_upload(data, path, backend=backend, timeout=timeout)
+
+    monkeypatch.setattr(remote, "upload_json", capturing)
+    assert cmd_reconcile(types.SimpleNamespace(), backend=coord_backend) == 0
+    assert captured, "the view-upload pool never ran"
+    return captured
+
+
+def test_view_upload_budget_capped_at_write_timeout(coord_backend, monkeypatch):
+    # Plenty of deadline headroom (~80s remaining) -> every per-view budget
+    # is exactly the transport write timeout, not the whole deadline.
+    monkeypatch.setenv("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "80")
+    monkeypatch.setattr(remote, "_write_timeout", lambda: 60)
+    captured = _capture_view_upload_timeouts(coord_backend, monkeypatch)
+    assert all(t == 60 for t in captured), captured
+
+
+def test_view_upload_budget_shrinks_to_remaining_deadline(coord_backend,
+                                                          monkeypatch):
+    # Tight deadline (10s) below the write timeout -> the remaining deadline
+    # is the binding constraint (hard ceiling preserved).
+    monkeypatch.setenv("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "10")
+    monkeypatch.setattr(remote, "_write_timeout", lambda: 60)
+    captured = _capture_view_upload_timeouts(coord_backend, monkeypatch)
+    assert all(1 <= t <= 10 for t in captured), captured
