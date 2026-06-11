@@ -12,6 +12,47 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Write path: transport read failures are no longer treated as absence
+
+**The class (2026-06-11 adversarial audit):** the transport primitives
+(`fulcra-coord-files` `store.stat`/`download`/`list_files`) intentionally
+return `None`/`[]` for BOTH "the remote says this doesn't exist" and "the read
+failed" — and three write-path call sites acted on that `None` as if it were
+proof of absence, turning one transient 504 into a destructive write. The
+correct idiom already existed in one place (`role_ops.read_role`'s
+`READ_ERROR` sentinel: failed download → stat probe → `probe_reachable`
+before anyone may act on "absent"); this change applies the same discipline
+to the write pipeline. The reachability probe is spent only on the failure
+path, so the happy path costs no extra spawns.
+
+- **`writepipe._write_task_and_views` (F1):** a pre-stat `None` was read as
+  "new task, skip the merge check" — so agent A holding a stale body whose
+  pre-stat 504'd would blind-LWW over agent B's just-landed `done`. Now a
+  `None` pre-stat costs one body download: a readable body forces the merge;
+  a missing body counts as absent only when the bus probes reachable. When
+  reads are failing and absence is unconfirmed (including the fold-sourced
+  branch's "file gone, nothing to merge against" hole, and a stat-visible
+  body that won't download), the write FAILS instead: cached locally with a
+  `failed`/`needs_reconcile` marker, so reconcile's merge-aware body-repair
+  delivers the edit later by merging — never by clobbering.
+- **`io._load_summaries_for_rebuild` (F2):** an unreadable summaries
+  aggregate was conflated with "older bus without the aggregate" and fell
+  back to `_load_all_tasks` — which itself silently degrades to LOCAL CACHE
+  ONLY when the index read fails — so a cold-cache host's next write uploaded
+  ALL views rebuilt from its partial cache with a fresh `generated_at`,
+  silently blanking the bus's read surface (the stale-view guard can't catch
+  fresh-but-truncated). Now only a CONFIRMED-absent aggregate takes the
+  legacy fallback (and only when that fallback load isn't itself degraded);
+  otherwise the write uploads the TASK BODY only and raises `NeedsReconcile`
+  with the marker kept — the same machinery as a partial view upload.
+- **`cmd_reconcile` (F3):** `_load_all_tasks` now exposes the cache-only
+  degrade (`load_degraded` on its returned list), and a reconcile tick whose
+  task load degraded SKIPS the view rebuild/upload phase entirely and fails
+  loudly — a reconcile that can't see the bus must not rewrite the bus's
+  views (the marker-driven body repairs earlier in the tick still run). A
+  genuinely fresh/empty bus (index confirmed absent, bus reachable) is not
+  degraded and reconciles as before.
+
 ### Transport timeout defaults raised to match real latency
 
 **Why (2026-06-11 root cause):** measured platform latency for fulcra-api calls

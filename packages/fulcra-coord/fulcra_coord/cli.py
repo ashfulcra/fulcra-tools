@@ -1557,9 +1557,11 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
 
     try:
         all_tasks = _load_all_tasks(backend=backend)
+        load_degraded = bool(getattr(all_tasks, "load_degraded", False))
     except Exception as e:
         _warn(f"Could not load remote index: {e}")
         all_tasks = cache.list_cached_tasks()
+        load_degraded = True
 
     _info(f"  {len(all_tasks)} task(s) loaded.")
 
@@ -1568,6 +1570,25 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
 
     if stale_claims:
         _warn(f"  Stale claims detected: {stale_claims}")
+
+    if load_degraded:
+        # 2026-06-11 write-path read-error audit (F3): the task load fell back
+        # to LOCAL CACHE ONLY because the remote index could not be READ (not
+        # because the bus is genuinely fresh/empty — that case is probed apart
+        # inside _load_all_tasks and is not degraded). Rebuilding + uploading
+        # the views from this host's partial cache would TRUNCATE the bus's
+        # global read surface — and since reconcile re-discovers tasks through
+        # those very views, a dropped task could never come back. A reconcile
+        # that can't see the bus must not rewrite the bus's views: skip the
+        # whole view rebuild/upload phase this tick and fail loudly (the
+        # body-repair pass above already ran — it needs only the markers'
+        # cached bodies, not the full set). Markers stay for the next tick.
+        _err("  Remote task index unreadable — view rebuild skipped this tick "
+             "(rebuilding from local cache alone would truncate the bus's views).")
+        ops_log.log_op("reconcile", status="degraded",
+                       detail="index unreadable; cache-only task set — view "
+                              "rebuild/upload skipped")
+        return 1
 
     if time.monotonic() - t0 > timeout:
         _err("Reconcile timeout exceeded.")
