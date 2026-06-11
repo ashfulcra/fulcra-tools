@@ -597,7 +597,6 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None,
     rebuilt from the durable per-agent records — at least as fresh as anything
     the guarded loader would return; ``None`` keeps the self-load for direct
     callers."""
-    import time
     from . import routing
     if now is None:
         now = datetime.now(timezone.utc)

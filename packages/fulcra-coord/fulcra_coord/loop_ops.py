@@ -17,21 +17,18 @@ Layering: imports schema/remote/log/loops — never cli/views/lifecycle/inbox
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from . import remote, loops
 from . import log as ops_log
 from .output import info as _info, warn as _warn, print_json as _print_json
-
-
-def _now_z() -> str:
-    """Current UTC instant as an ISO-8601 ``...Z`` stamp (the bus's clock
-    format). Inlined like directives._now_z to keep the low-layer import
-    surface minimal."""
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z")
+# The bus clock format ("UTC, microsecond precision, trailing Z") has ONE home:
+# timeutil — a pure stdlib leaf, so binding it here costs no layering edge (the
+# loop_ops import pin forbids only up-layer modules). Bound under the local
+# historical name; this replaced an inlined duplicate of the same function.
+from .timeutil import now_iso as _now_z
 
 
 def append_loop_response(
