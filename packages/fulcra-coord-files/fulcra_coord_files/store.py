@@ -668,14 +668,15 @@ def check_file_commands(backend: Optional[list[str]] = None) -> tuple[bool, str]
     """Probe whether the resolved Fulcra CLI exposes the ``file`` command group.
 
     WHY THIS EXISTS (the #1 fresh-agent onboarding failure):
-    The public PyPI ``fulcra-api`` build (e.g. 0.1.32) does NOT ship the ``file``
-    command group, yet the entire coordination bus is driven by ``fulcra file``
-    ops (upload/download/stat/list). A freshly-onboarded agent that pip-installs
-    ``fulcra-api`` and runs ``fulcra-coord`` then sees every bus op fail
-    *silently* with no clear signal why. This probe gives doctor a dedicated,
-    legible signal so the failure points straight at the fix: install a
-    file-capable build (the ``file-management`` branch of
-    ``fulcradynamics/fulcra-api-python`` — see docs/fulcra-cli-branch.md).
+    The entire coordination bus is driven by ``fulcra file`` ops
+    (upload/download/stat/list), and early public ``fulcra-api`` builds
+    (e.g. 0.1.32) did NOT ship the ``file`` command group — a freshly-onboarded
+    agent then saw every bus op fail *silently* with no clear signal why. The
+    standard build ships ``file`` today, but the probe stays load-bearing: a
+    stale install or a ``FULCRA_CLI_COMMAND`` pointed at a binary without
+    ``file`` reproduces the same silent failure. This probe gives doctor a
+    dedicated, legible signal so the failure points straight at the fix
+    (see docs/fulcra-cli-branch.md).
 
     Distinct from ``check_cli_available``: that helper probes whatever
     ``_backend_cmd()`` resolves to, which in tests is the *fake backend* (it
