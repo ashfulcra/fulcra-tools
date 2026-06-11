@@ -88,6 +88,21 @@ def _version_tuple(v: Any) -> Optional[tuple[int, ...]]:
     return tuple(parts)
 
 
+def _is_plain_version(v: Any) -> bool:
+    """True iff ``v`` is a plain dotted-numeric version ('0.15.3') — the ONLY
+    shape the fleet's comparison fully understands.
+
+    2026-06-11 bug hunt C8: dev/prerelease builds either fail
+    ``_version_tuple`` outright ('0.16.0.dev0' — the dev0 segment has no
+    leading digit) or silently compare equal to their release ('0.16.0rc1'
+    -> (0, 16, 0)). Announcing such a version made ``is_behind`` read False
+    on every host: the whole fleet froze on its current version with no error
+    anywhere. The announce side refuses these up front; the read side treats
+    them as a visible degradation (status 'unparseable-manifest')."""
+    return (isinstance(v, str)
+            and re.fullmatch(r"\d+(\.\d+)*", v.strip()) is not None)
+
+
 def is_behind(installed: str, manifest: Any) -> bool:
     """Is ``installed`` strictly behind the manifest's canonical version?
 
@@ -457,8 +472,8 @@ def maybe_self_update(*, backend: Optional[list[str]] = None,
     passes False so a fresh session always checks.
 
     Returns a status token (for logs/tests): disabled | throttled | current |
-    updated | degraded-no-config | wrong-branch | attempt-throttled | locked |
-    update-failed | error. A successful update does NOT re-exec — this process
+    updated | degraded-no-config | unparseable-manifest | wrong-branch |
+    attempt-throttled | locked | update-failed | error. A successful update does NOT re-exec — this process
     logs 'takes effect next invocation' and continues on its already-imported
     code; the next wake/session runs new.
 
@@ -479,6 +494,21 @@ def maybe_self_update(*, backend: Optional[list[str]] = None,
             # re-pay the manifest round-trip for 6 hours straight.
             _touch_throttle_marker()
         manifest = _download_manifest(backend)
+        # 2026-06-11 bug hunt C8 (c): a schema-VALID manifest whose version
+        # is not plain X.Y.Z (an announced dev/prerelease build) used to read
+        # as fail-closed "current" — every host silently froze on its
+        # installed version with nothing on any roster. Still fail closed on
+        # the UPDATE (we cannot compare against it, so we must not act), but
+        # degrade VISIBLY: write the stale marker so connect renders the host
+        # as pinned against the unparseable canonical instead of nothing.
+        if (not schema.validate_version_manifest(manifest)
+                and not _is_plain_version(manifest["package_version"])):
+            _write_stale_marker(__version__, str(manifest["package_version"]))
+            print(f"[fulcra-coord] self-update: canonical version "
+                  f"{manifest['package_version']!r} is not a plain X.Y.Z "
+                  f"release — cannot compare, not updating (marked stale)",
+                  file=sys.stderr)
+            return "unparseable-manifest"
         if not is_behind(__version__, manifest):
             # Valid current/ahead manifest: drop any stale marker so the roster
             # suffix heals itself. Invalid/absent manifest is fail-closed (no
@@ -555,12 +585,27 @@ def maybe_self_update(*, backend: Optional[list[str]] = None,
 # ---------------------------------------------------------------------------
 
 def _local_release_commit() -> str:
-    """Best-effort ``git rev-parse HEAD`` of the announcing host's cwd —
-    provenance only (nothing consumes it programmatically), so any failure
-    (no git, not a checkout) degrades to ''."""
+    """Best-effort release-commit provenance for the manifest.
+
+    2026-06-11 bug hunt C8 (b): resolve HEAD from the CONFIGURED checkout
+    (``update.json`` "checkout") when one exists — announce-version can be
+    run from any cwd (a scratch dir, a different repo entirely), and stamping
+    THAT directory's HEAD as the release commit produced provenance that did
+    not match the build being announced. Only when no checkout is configured
+    do we fall back to the cwd, with a warn so the maintainer knows the
+    stamped commit may be unrelated. Provenance only (nothing consumes it
+    programmatically), so any git failure still degrades to ''."""
+    argv = ["git", "rev-parse", "HEAD"]
+    checkout = _load_json_config("update.json").get("checkout")
+    if isinstance(checkout, str) and checkout and Path(checkout).is_dir():
+        argv = ["git", "-C", checkout, "rev-parse", "HEAD"]
+    else:
+        print("[fulcra-coord] announce-version: no update.json checkout "
+              "configured — resolving the release commit from the current "
+              "directory (provenance may not match the canonical checkout)",
+              file=sys.stderr)
     try:
-        result = _run_proc(["git", "rev-parse", "HEAD"], capture_output=True,
-                           text=True, timeout=10)
+        result = _run_proc(argv, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception:
@@ -576,7 +621,28 @@ def cmd_announce_version(args: Any, backend: Optional[list[str]] = None) -> int:
     version that could drift. Verify-after-write (the writepipe post-stat
     pattern): the upload only counts once a stat confirms the record landed,
     because a silently-missing manifest would freeze the whole fleet's
-    self-update without any error anywhere."""
+    self-update without any error anywhere.
+
+    2026-06-11 bug hunt C8 (a): REFUSES to announce a version that is not
+    plain X.Y.Z. A dev/prerelease ``__version__`` ('0.16.0.dev0') reads as
+    never-behind on every host (is_behind fail-closes on the unparseable
+    segment), so announcing it silently froze the entire fleet's
+    self-update. ``--allow-prerelease`` overrides with a loud warning for
+    the rare deliberate case (e.g. exercising the degraded path itself)."""
+    if not _is_plain_version(__version__):
+        if not getattr(args, "allow_prerelease", False):
+            print(f"ERROR: refusing to announce non-release version "
+                  f"{__version__!r}. The fleet's is_behind() only understands "
+                  f"plain X.Y.Z, so announcing a dev/prerelease build silently "
+                  f"FREEZES every host's self-update (2026-06-11 bug hunt C8). "
+                  f"Pass --allow-prerelease to override deliberately.",
+                  file=sys.stderr)
+            return 1
+        print(f"WARNING: announcing prerelease version {__version__!r} "
+              f"(--allow-prerelease). Hosts cannot compare against it and "
+              f"will NOT self-update toward it — they will surface "
+              f"'unparseable-manifest' staleness markers until a plain "
+              f"X.Y.Z release is announced.", file=sys.stderr)
     manifest = schema.make_version_manifest(
         __version__,
         _local_release_commit(),

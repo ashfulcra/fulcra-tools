@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import json
 import random
 import uuid
 from typing import Any, Optional
@@ -469,16 +470,28 @@ def _try_merge(
     """
     local_status = local.get("status")
     remote_status = remote_task.get("status")
-    local_event_times = {e["at"] for e in local.get("events", [])}
-    remote_event_times = {e["at"] for e in remote_task.get("events", [])}
+    # 2026-06-11 bug hunt S8: events are bus data and can arrive malformed —
+    # hard-indexing e["at"] KeyError-ed the merge MID-WRITE on a single
+    # at-less event. Skip-on-missing here; the union below keeps such events
+    # with sentinel ordering (oldest) so nothing is silently lost.
+    local_event_times = {e["at"] for e in local.get("events", []) if "at" in e}
+    remote_event_times = {e["at"] for e in remote_task.get("events", [])
+                          if "at" in e}
 
     if local_status != remote_status:
+        # S8 sentinel choice for the transition detection: an at-less
+        # status-shaped event cannot be ordered against the other side, so it
+        # reads as ancient/shared — NEVER as evidence of a new transition.
+        # The alternative (counting it as new) would manufacture spurious
+        # both-sides-changed conflicts out of malformed data.
         local_has_new_status_change = any(
-            e.get("type") in schema.VALID_STATUSES and e["at"] not in remote_event_times
+            e.get("type") in schema.VALID_STATUSES
+            and "at" in e and e["at"] not in remote_event_times
             for e in local.get("events", [])
         )
         remote_has_new_status_change = any(
-            e.get("type") in schema.VALID_STATUSES and e["at"] not in local_event_times
+            e.get("type") in schema.VALID_STATUSES
+            and "at" in e and e["at"] not in local_event_times
             for e in remote_task.get("events", [])
         )
 
@@ -682,13 +695,29 @@ def _union_events_and_acked(
     remote_event_times: set,
 ) -> None:
     """Union events from both sides (dedup by `at`, sort, truncate) and union
-    acked_by. Idempotent regardless of which side `merged` started from."""
+    acked_by. Idempotent regardless of which side `merged` started from.
+
+    2026-06-11 bug hunt S8: an event missing ``at`` (malformed bus data) used
+    to KeyError this union mid-write. Such an event cannot be time-deduped or
+    time-ordered, so it is kept with SENTINEL ordering — treated as OLDEST
+    (placed first, and therefore dropped first by the inline cap) and deduped
+    by its JSON shape so the union stays idempotent and deterministic."""
     by_time: dict[str, dict[str, Any]] = {}
     for ev in local.get("events", []):
-        by_time[ev["at"]] = ev
+        if "at" in ev:
+            by_time[ev["at"]] = ev
     for ev in remote_task.get("events", []):
-        by_time.setdefault(ev["at"], ev)
-    events = sorted(by_time.values(), key=lambda e: e["at"])
+        if "at" in ev:
+            by_time.setdefault(ev["at"], ev)
+    atless: list[dict[str, Any]] = []
+    seen_atless: set[str] = set()
+    for ev in list(local.get("events", [])) + list(remote_task.get("events", [])):
+        if "at" not in ev:
+            key = json.dumps(ev, sort_keys=True, default=str)
+            if key not in seen_atless:
+                seen_atless.add(key)
+                atless.append(ev)
+    events = atless + sorted(by_time.values(), key=lambda e: e["at"])
     merged["events"] = events[-schema.MAX_EVENTS_INLINE:]
 
     acked = set(local.get("acked_by") or []) | set(remote_task.get("acked_by") or [])
@@ -720,11 +749,25 @@ def _repair_merged_tags(
         for tag in (task.get("tags") or [])
         if not is_standard_tag(tag)
     ]
+    primary_kind = schema._extract_kind_from_tags(merged.get("tags") or [])
+    # 2026-06-11 bug hunt C7 (mirrors apply_transition's _secondary_kinds
+    # carry): every non-primary kind: tag from either side must survive the
+    # rebuild. Multi-kind membership is routing-load-bearing, and a SECOND
+    # standard kind (kind:feature beside kind:ops) is excluded from `extra`
+    # above precisely because it IS a standard tag — without this explicit
+    # carry it vanished from the merged task. build_tags dedups via
+    # sorted(set(...)), so overlap with `extra` is harmless.
+    secondary_kinds = [
+        tag
+        for task in (local, remote_task, merged)
+        for tag in (task.get("tags") or [])
+        if tag.startswith("kind:") and tag != f"kind:{primary_kind}"
+    ]
     merged["tags"] = schema.build_tags(
         status=merged.get("status", ""),
         workstream=merged.get("workstream", ""),
         agent=merged.get("owner_agent", ""),
-        kind=schema._extract_kind_from_tags(merged.get("tags") or []),
+        kind=primary_kind,
         priority=merged.get("priority", ""),
-        extra=extra or None,
+        extra=(extra + secondary_kinds) or None,
     )

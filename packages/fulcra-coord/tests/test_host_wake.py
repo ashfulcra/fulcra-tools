@@ -251,14 +251,89 @@ class TestMaybeWake(_WakeEnvBase):
             self.assertTrue(wake.maybe_wake(self.AGENT, 1))
         popen.assert_called_once()
 
+    # -- 2026-06-11 bug hunt S3: PID recycling, TOCTOU, marker-failure leak ----
+    def test_stale_by_age_pidfile_is_reclaimed(self):
+        """A pidfile older than max_runtime_s is STALE even when its pid looks
+        alive — pids recycle, so after the runtime ceiling a 'live' pid is far
+        more likely an unrelated process than our wake (S3 PID-recycling)."""
+        _write_config({"agent-a:": _entry(max_runtime_s=900)})
+        pidfile = wake._wake_pidfile_path(self.AGENT)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(str(os.getpid()))  # alive — but the file is ancient
+        old = time.time() - 3600              # 1h > max_runtime_s=900
+        os.utime(pidfile, (old, old))
+        popen = self._popen_mock()
+        with patch("fulcra_coord.wake.Popen", popen):
+            self.assertTrue(wake.maybe_wake(self.AGENT, 1))
+        popen.assert_called_once()
+
+    def test_fresh_pidfile_with_live_pid_still_skips(self):
+        """Companion pin: a fresh (within max_runtime_s) pidfile with a live
+        pid keeps single-flight semantics."""
+        _write_config({"agent-a:": _entry(max_runtime_s=900)})
+        pidfile = wake._wake_pidfile_path(self.AGENT)
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(str(os.getpid()))
+        popen = self._popen_mock()
+        with patch("fulcra_coord.wake.Popen", popen):
+            self.assertFalse(wake.maybe_wake(self.AGENT, 3))
+        popen.assert_not_called()
+
+    def test_concurrent_ticks_spawn_exactly_once(self):
+        """S3 TOCTOU: two ticks racing through the exists()/alive() check used
+        to BOTH spawn. The pidfile is now created O_CREAT|O_EXCL BEFORE the
+        spawn (the inter-tick mutex); a second tick arriving inside the
+        winner's spawn window must skip. Simulated by firing a nested tick
+        from within the winner's Popen call — the exact race window."""
+        _write_config({"agent-a:": _entry()})
+        nested_results = []
+
+        def popen_side_effect(*a, **kw):
+            nested_results.append(wake.maybe_wake(self.AGENT, 3))
+            proc = MagicMock()
+            proc.pid = 4242
+            return proc
+
+        with patch("fulcra_coord.wake.Popen", side_effect=popen_side_effect):
+            self.assertTrue(wake.maybe_wake(self.AGENT, 3))
+        # The nested (concurrent) tick lost the mutex and did not spawn.
+        self.assertEqual(nested_results, [False])
+
+    def test_throttle_marker_armed_before_spawn(self):
+        """S3 marker-failure leak: the throttle marker must be armed BEFORE
+        Popen. If it were written after and the write failed, a crashing
+        marker path would allow immediate respawn every tick (a spawn storm
+        of full agent runtimes). The inverse failure — marker armed but spawn
+        failed — merely delays one interval, the right side to fail on."""
+        _write_config({"agent-a:": _entry()})
+        marker = wake._wake_marker_path(self.AGENT)
+        seen = []
+
+        def popen_side_effect(*a, **kw):
+            seen.append(marker.exists())   # observed AT spawn time
+            proc = MagicMock()
+            proc.pid = 4242
+            return proc
+
+        with patch("fulcra_coord.wake.Popen", side_effect=popen_side_effect):
+            self.assertTrue(wake.maybe_wake(self.AGENT, 1))
+        self.assertEqual(seen, [True])
+
     # -- fail-safe contract ----------------------------------------------------
-    def test_popen_raising_never_propagates_and_leaves_no_marker(self):
+    def test_popen_raising_never_propagates_and_arms_throttle(self):
+        """A raising Popen must not propagate (fail-safe contract). Updated for
+        the 2026-06-11 bug hunt S3: the throttle marker is now armed BEFORE the
+        spawn, so a failed spawn leaves it armed — the retry waits one interval
+        instead of hammering a broken command every tick. (The pre-S3 pin of
+        'failed spawn leaves no marker' is the inverse failure mode S3
+        deliberately trades away.) The pidfile mutex, though, must be released
+        so the retry isn't blocked for max_runtime_s."""
         _write_config({"agent-a:": _entry()})
         with patch("fulcra_coord.wake.Popen",
                    side_effect=OSError("no such binary")):
             self.assertFalse(wake.maybe_wake(self.AGENT, 3))  # must not raise
-        # A failed spawn must NOT arm the throttle: the next tick retries.
-        self.assertFalse(wake._wake_marker_path(self.AGENT).exists())
+        self.assertTrue(wake._wake_marker_path(self.AGENT).exists())
+        self.assertFalse(wake._wake_pidfile_path(self.AGENT).exists())
 
 
 class TestWakeMechanismIsPlatformNeutral(unittest.TestCase):
