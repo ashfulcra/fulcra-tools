@@ -10,6 +10,56 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — continuity integration: checkpoint refs ride the loops and roles
+
+**Why:** spec `docs/superpowers/specs/2026-06-10-continuity-integration-design.md`.
+Two things changed: (1) the plan to move most sessions to the always-on
+ArcBot box under remote control is **gated on continuity working** — a
+respawned session is only useful if it can resume the dead one's work; (2)
+the roles spec reserved `checkpoint_ref` for exactly this phase. Session
+resume state lived in hand-rolled `.session-resume.md` files — off-bus and
+invisible. Now a continuity checkpoint is a **payload ref on the
+coordination primitives** (loops + roles), not a side-tree only retention
+knows about.
+
+**Storage reality (the spec's open question, resolved):** the standalone
+`fulcra-continuity` CLI writes checkpoints to LOCAL paths only; the remote
+`continuity/...` bus tree exists because **coord's own bridge**
+(`fulcra_coord/continuity.py`) uploads the same checkpoint JSON shape there
+(that's the tree the retention walker prunes). So refs are remote paths and
+cross-host resume works: a handoff handed a local checkpoint file publishes
+it to the bus first (the immutable archive path becomes the ref), with an
+inline-payload fallback when the publish fails.
+
+**What:**
+- **`fulcra-coord handoff [--to <agent|@role>] [--checkpoint <ref|file>]
+  --title ...`** — hand work to another agent WITH its resume state: an
+  ordinary `kind=dispatch` expects_response loop whose payload carries
+  `checkpoint_ref`. Local checkpoint files are published to the bus tree;
+  opaque refs pass through verbatim (pinned: coord never parses refs). The
+  recipient's `inbox` shows `checkpoint:`; claiming the task prints the ref
+  + (when the optional `fulcra-continuity` CLI is installed — probed with
+  `shutil.which`, invoked as a subprocess) the rendered resume brief.
+- **`fulcra-coord checkpoint --role X [--ref R]`** — the role registry's
+  `checkpoint_ref` becomes live (roles phase 2): set it (read-modify-write
+  preserving every other field) or show it + best-effort brief. **Role
+  claim → resume:** `roles claim X` and `connect --role X` print the
+  claimed role's checkpoint ref + brief — the role's "where I left off"
+  survives every session death.
+- **`fulcra-coord park`** — best-effort session-exit checkpoint of every
+  held role: writes a continuity checkpoint per role via the optional CLI
+  (timeout-bounded), publishes it to the bus, updates the role's
+  `checkpoint_ref`. NEVER exits nonzero; missing CLI / no held roles / bus
+  failures are silent no-ops. The Claude Code PreCompact + SessionEnd hooks
+  call it BACKGROUNDED and before their session-task early-exits, so a
+  session that holds a role but owns no coord task still parks — and a
+  continuity problem can never block a session exit.
+- **Decoupling pins (tested):** coord never imports `fulcra_continuity`
+  (AST fitness test — the schema belongs to that package; subprocess is the
+  only seam), and refs are opaque strings forwarded verbatim. Directive
+  records grow OPTIONAL additive `checkpoint_ref`/`checkpoint_inline` keys
+  (the `_LOOP_KEYS` mixed-fleet floor: pre-continuity records stay valid).
+
 ## [0.15.3 / Unreleased] — version self-incorporation: the fleet stays current from a bus pointer
 
 **Why:** operator directive (2026-06-10): "i'm not going to go around and

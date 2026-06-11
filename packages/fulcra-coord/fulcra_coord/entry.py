@@ -196,6 +196,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
                     help="Capturing agent (owner); default: derived/env agent")
 
+    # ---- handoff ----
+    sp = sub.add_parser("handoff",
+                        help="Hand work to another agent/role WITH its resume "
+                             "state: opens a kind=dispatch loop whose payload "
+                             "carries a continuity checkpoint ref. The "
+                             "recipient's claim surfaces the ref (+ rendered "
+                             "resume brief when fulcra-continuity is "
+                             "installed); closing the loop = the work continued")
+    sp.add_argument("--to", dest="to", default=None, metavar="AGENT|@ROLE",
+                    help="Recipient: an agent id or a @role audience")
+    sp.add_argument("--checkpoint", default=None, metavar="REF|FILE",
+                    help="Continuity checkpoint to carry: an opaque ref "
+                         "(forwarded verbatim) or a local checkpoint JSON "
+                         "file (published to the remote continuity tree; the "
+                         "remote path becomes the ref)")
+    sp.add_argument("--title", required=True, metavar="TITLE",
+                    help="Short durable objective of the handed-off work")
+    sp.add_argument("--summary", "-s", default="", metavar="SUMMARY")
+    sp.add_argument("--next", "-n", default="", metavar="NEXT_ACTION")
+    sp.add_argument("--workstream", "-w", default="general", metavar="WS")
+    sp.add_argument("--priority", "-p", default="P2", metavar="PRIORITY",
+                    help="P0|P1|P2|P3")
+    sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
+                    help="Handing-off agent (owner); default: derived/env agent")
+
     # ---- broadcast ----
     sp = sub.add_parser("broadcast",
                         help="Direct work at EVERY agent: create a proposed "
@@ -299,6 +324,36 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--transcript-path", default="", metavar="PATH",
                     help="Optional transcript/session log path for resume context")
     sp.add_argument("--agent", "-a", default=None, metavar="AGENT")
+
+    # ---- checkpoint ----
+    sp = sub.add_parser("checkpoint",
+                        help="Read or update a ROLE's durable resume point "
+                             "(registry checkpoint_ref). With --ref: set it "
+                             "(preserving every other field); without: show "
+                             "the current ref + best-effort resume brief. "
+                             "Claiming the role (roles claim / connect "
+                             "--role) prints the same resume.")
+    sp.add_argument("--role", required=True, metavar="NAME",
+                    help="The role whose checkpoint_ref to read/update")
+    sp.add_argument("--ref", default=None, metavar="REF",
+                    help="Opaque checkpoint ref (e.g. the remote continuity "
+                         "path handoff/park publish). Omit to show current.")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
+
+    # ---- park ----
+    sp = sub.add_parser("park",
+                        help="Best-effort session-exit checkpoint of every "
+                             "role this session holds: writes a continuity "
+                             "checkpoint per held role (needs the optional "
+                             "fulcra-continuity CLI), publishes it to the "
+                             "bus, and points the role's checkpoint_ref at "
+                             "it. Silent no-op without continuity or held "
+                             "roles; NEVER exits nonzero (hook-safe).")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Whose held roles to park (default: "
+                         "$FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--summary", "-s", default="", metavar="TEXT",
+                    help="Optional objective line for the checkpoint(s)")
 
     # ---- done ----
     sp = sub.add_parser("done", help="Mark a task as done (requires evidence)")
@@ -700,6 +755,7 @@ COMMAND_MAP = {
     "tell": _cli.cmd_tell,
     "broadcast": _cli.cmd_broadcast,
     "later": _cli.cmd_later,
+    "handoff": _cli.cmd_handoff,
     "assign": _cli.cmd_assign,
     "inbox": _cli.cmd_inbox,
     "start": _cli.cmd_start,
@@ -707,6 +763,8 @@ COMMAND_MAP = {
     "block": _cli.cmd_block,
     "pause": _cli.cmd_pause,
     "snapshot": _cli.cmd_snapshot,
+    "checkpoint": _cli.cmd_checkpoint,
+    "park": _cli.cmd_park,
     "done": _cli.cmd_done,
     "abandon": _cli.cmd_abandon,
     "request-review": _cli.cmd_request_review,

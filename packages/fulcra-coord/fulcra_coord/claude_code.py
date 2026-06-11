@@ -205,6 +205,13 @@ FULCRA_COORD=(__FULCRA_COORD_ARGV__)
 INPUT="$(cat 2>/dev/null)"
 SID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
 TP="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("transcript_path",""))' 2>/dev/null)"
+# Continuity park (best-effort, BACKGROUNDED so it can never delay compaction;
+# runs BEFORE the session-task early-exits because a session can hold a ROLE
+# with no coord task). If this session holds role(s) and the optional
+# fulcra-continuity CLI is installed, checkpoint each held role and point its
+# registry checkpoint_ref at the published snapshot. `park` itself never
+# exits nonzero; missing continuity / no roles is a silent no-op.
+"${FULCRA_COORD[@]}" park >/dev/null 2>&1 &
 [ -z "$SID" ] && SID="$CLAUDE_CODE_SESSION_ID"
 [ -z "$SID" ] && exit 0
 TASK="$("${FULCRA_COORD[@]}" __session-task "$SID" 2>/dev/null)"
@@ -227,6 +234,12 @@ set +e
 FULCRA_COORD=(__FULCRA_COORD_ARGV__)
 INPUT="$(cat 2>/dev/null)"
 SID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
+# Continuity park (best-effort, BACKGROUNDED so it can never block session
+# exit; BEFORE the session-task early-exits because a session can hold a ROLE
+# with no coord task). Checkpoints each held role via the optional
+# fulcra-continuity CLI and updates the role's checkpoint_ref — the resume
+# point the next claimer of the role gets. Never exits nonzero.
+"${FULCRA_COORD[@]}" park >/dev/null 2>&1 &
 [ -z "$SID" ] && SID="$CLAUDE_CODE_SESSION_ID"
 [ -z "$SID" ] && exit 0
 TASK="$("${FULCRA_COORD[@]}" __session-task "$SID" 2>/dev/null)"

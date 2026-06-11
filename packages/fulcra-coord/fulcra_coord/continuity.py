@@ -8,9 +8,15 @@ and continuity can interoperate while remaining independently useful.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from . import remote_root
@@ -128,6 +134,132 @@ def read_latest_for_task(
 ) -> Optional[dict[str, Any]]:
     identity = identity_for_task(task, agent=agent)
     return remote.download_json(latest_remote_path(identity), backend=backend)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint refs as loop/role payload (spec 2026-06-10-continuity-integration)
+#
+# STORAGE REALITY this section encodes (verified 2026-06-10): the standalone
+# ``fulcra-continuity`` CLI writes checkpoints to LOCAL paths only; the REMOTE
+# ``{root}/continuity/...`` bus tree exists because THIS bridge uploads to it
+# (write_checkpoint above — the tree the retention walker prunes). So "make a
+# checkpoint portable" means: publish the local JSON to the remote tree via
+# this bridge and hand out the REMOTE archive path as the ref. Coord treats
+# the checkpoint body as an OPAQUE JSON BLOB throughout — it never imports
+# fulcra_continuity (fitness-pinned) and never interprets fields beyond the
+# identity/id it needs to derive the storage path (the same fields
+# write_checkpoint already keys the tree by).
+# ---------------------------------------------------------------------------
+
+
+def publish_checkpoint_file(
+    path: str, *, backend: Optional[list[str]] = None
+) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    """Publish a LOCAL checkpoint JSON file to the remote continuity tree.
+
+    Returns ``(remote_ref, checkpoint_dict)``:
+      * ``remote_ref`` — the IMMUTABLE archive path (``.../checkpoints/<id>.json``)
+        on success, None when the file is unreadable or the upload failed. The
+        archive path (not ``latest.json``) is deliberate: a handoff ref must
+        keep meaning THIS snapshot even after the producer checkpoints again.
+      * ``checkpoint_dict`` — the parsed JSON when readable (even on upload
+        failure), so the caller can fall back to carrying it INLINE in the
+        loop payload rather than stranding the handoff on a local-only path.
+
+    Best-effort never-raise (None/None on any failure): this rides the
+    ``handoff`` send path, which must degrade, not crash."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    try:
+        identity = data.get("identity") or {}
+        checkpoint_id = str(data.get("checkpoint_id") or "") or uuid.uuid4().hex
+        archive_path = checkpoint_remote_path(checkpoint_id, identity)
+        latest_path = latest_remote_path(identity)
+        archived = remote.upload_json(data, archive_path, backend=backend)
+        # latest.json is the read point resume/--with-continuity already uses;
+        # refresh it best-effort, but the HANDOFF ref is the archive path and
+        # only the archive upload gates success.
+        remote.upload_json(data, latest_path, backend=backend)
+        return (archive_path if archived else None), data
+    except Exception:
+        return None, data
+
+
+def resolve_checkpoint_ref(
+    ref: str, *, backend: Optional[list[str]] = None
+) -> Optional[dict[str, Any]]:
+    """Fetch the checkpoint JSON a ref points at — local file first (the
+    producer's own host), then the remote bus (the cross-host case). The ref
+    stays OPAQUE: we only ever hand it whole to the filesystem or the
+    transport, never parse structure out of it. Best-effort: None."""
+    if not ref:
+        return None
+    try:
+        p = Path(ref)
+        if p.is_file():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+    except Exception:
+        pass
+    try:
+        data = remote.download_json(ref, backend=backend)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def render_brief_via_cli(
+    checkpoint: dict[str, Any], *, timeout: float = 10.0
+) -> Optional[str]:
+    """Render a resume brief by SHELLING OUT to the optional fulcra-continuity
+    CLI (``fulcra-continuity resume <file>``). The CLI owns the checkpoint
+    schema and its rendering; coord deliberately does not re-implement either
+    (and must never import the package — subprocess is the sanctioned seam).
+
+    Best-effort never-raise: a missing CLI (shutil.which miss), a non-zero
+    exit, a timeout, or any I/O error all return None — callers degrade to
+    printing the bare ref."""
+    exe = shutil.which("fulcra-continuity")
+    if not exe:
+        return None
+    tmp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".checkpoint.json", delete=False,
+                encoding="utf-8") as tmp:
+            json.dump(checkpoint, tmp)
+            tmp_name = tmp.name
+        proc = subprocess.run(
+            [exe, "resume", tmp_name],
+            capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            return None
+        return proc.stdout or None
+    except Exception:
+        return None
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+
+def render_brief_for_ref(
+    ref: str, *, backend: Optional[list[str]] = None
+) -> Optional[str]:
+    """Resolve a ref to its checkpoint JSON and render the resume brief via
+    the optional CLI. One call for every "surface the where-I-left-off at
+    claim time" site (task pickup, role claim, connect). Best-effort: None
+    when the ref doesn't resolve or the CLI isn't installed/working."""
+    checkpoint = resolve_checkpoint_ref(ref, backend=backend)
+    if not checkpoint:
+        return None
+    return render_brief_via_cli(checkpoint)
 
 
 def summarize_checkpoint(checkpoint: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:

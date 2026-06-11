@@ -6,6 +6,12 @@ set +e
 FULCRA_COORD=(__FULCRA_COORD_ARGV__)
 INPUT="$(cat 2>/dev/null)"
 SID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
+# Continuity park (best-effort, BACKGROUNDED so it can never block session
+# exit; BEFORE the session-task early-exits because a session can hold a ROLE
+# with no coord task). Checkpoints each held role via the optional
+# fulcra-continuity CLI and updates the role's checkpoint_ref — the resume
+# point the next claimer of the role gets. Never exits nonzero.
+"${FULCRA_COORD[@]}" park >/dev/null 2>&1 &
 [ -z "$SID" ] && SID="$CLAUDE_CODE_SESSION_ID"
 [ -z "$SID" ] && exit 0
 TASK="$("${FULCRA_COORD[@]}" __session-task "$SID" 2>/dev/null)"
