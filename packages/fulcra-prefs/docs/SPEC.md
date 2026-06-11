@@ -76,7 +76,8 @@ created at onboard, tagged `fulcra-prefs`; UUID cached in `prefs/meta.json`
 
 - `strength` is signed: aversions are negative.
 - `half_life_days: null` = durable fact — no decay; compile flags staleness
-  by age instead.
+  by age instead. Any other value must be **> 0** (a 0 would divide by zero in
+  every later compile); the Signal model rejects zero/negative at construction.
 - Signal id = Fulcra record id once persisted; before persistence, local
   outbox entries use a deterministic `metadata.source` id as their temporary
   id. `supersedes` may reference either form and is resolved after upload.

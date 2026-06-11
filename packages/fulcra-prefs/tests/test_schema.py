@@ -68,3 +68,15 @@ def test_invalid_kind_rejected():
 def test_invalid_scope_rejected():
     with pytest.raises(ValueError):
         make_signal(scope="galaxy")
+
+
+def test_nonpositive_half_life_rejected():
+    """BUG C: half_life_days <= 0 makes effective_weight divide by zero
+    (2 ** (-age/0)). Worse, the bad signal would be cached, so EVERY later
+    compile would crash permanently. Reject it at construction so the poisoned
+    signal never reaches the cache. None (no decay) stays valid."""
+    with pytest.raises(ValueError):
+        make_signal(half_life_days=0.0)
+    with pytest.raises(ValueError):
+        make_signal(half_life_days=-30.0)
+    make_signal(half_life_days=None)   # no-decay sentinel still allowed

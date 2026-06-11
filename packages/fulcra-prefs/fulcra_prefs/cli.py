@@ -2,15 +2,16 @@
 for tests; main() binds the real FulcraAPI (reusing the user's `fulcra auth
 login` credentials), the real outbox dir, and the real clock.
 
-Signal reads in v1 go through a compile cache in the file library: capture
-posts the canonical signal to Fulcra and writes one independent cache shard per
-signal id under `prefs/signals-cache/`. Because the fulcra-api library has no
-record-read-by-definition helper for arbitrary windows wired here yet, compile
-lists those cache shards. Do NOT use one shared `signals-cache.json` file:
-that would be a remote read-modify-write race across concurrently-capturing
-platforms and would violate SPEC.md's atomic-capture rationale. The shard cache
-is an implementation detail replaced by real get-records reads when CLI
-annotation commands land (tracked on the bus).
+Signal reads: compile reads authoritatively via get-records
+(store.read_signal_records) so captures from any platform are visible, UNIONed
+with a write-through per-signal shard cache under `prefs/signals-cache/` (one
+file per signal id — never a shared `signals-cache.json`, which would be a
+remote read-modify-write race across concurrently-capturing platforms, against
+SPEC.md's atomic-capture rationale). The shard cache covers offline-captured-
+not-yet-ingested signals and ingest->read indexing lag; compile GCs a shard once
+its record is confirmed in get-records, keeping the cache bounded. The remaining
+workaround is the write side (no record delete/replace yet — corrections are
+`supersedes`); native revocation lands when CLI annotation record commands do.
 
 INTEGRATION DEVIATIONS from plan sketch (verified against fulcra-api 0.1.33):
   1. Credential wiring: FulcraAPI takes credentials= and refresh_callback= at
@@ -36,10 +37,10 @@ from .compileprefs import compile_signals
 from .consent import disclosure_signal, filter_for_audience
 from .inject import render_block
 from .outbox import Outbox
-from .schema import Signal, canonical_json, parse_record
+from .schema import Signal, canonical_json, parse_record, TEMP_ID_PREFIX
 from .solver import solve
 from .store import (FulcraStore, build_record, COMPILED_PATH, CONSENT_PATH,
-                    META_PATH, PREFS_ROOT, SIGNALS_CACHE_PREFIX, platform_path)
+                    META_PATH, SIGNALS_CACHE_PREFIX, platform_path)
 
 
 def _store(api) -> FulcraStore:
@@ -55,8 +56,51 @@ def _require_meta(store: FulcraStore) -> dict | None:
     return meta
 
 
-def _load_cached_signals(store: FulcraStore) -> list[Signal]:
-    return [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
+def _dedup_key(sig: Signal) -> str:
+    # One capture has two representations: the authoritative get-records record
+    # (id = Fulcra record id) and its write-through cache shard (id = temp id).
+    # Both carry the temp id in sources, so key on that temp id to collapse them;
+    # fall back to the signal id when there's no temp id (e.g. a synthetic shard).
+    for s in sig.source_ids:
+        if s.startswith(TEMP_ID_PREFIX):
+            return s
+    return sig.id or ""
+
+
+def _gather_signals(store: FulcraStore, meta: dict | None = None
+                    ) -> tuple[list[Signal], set[str]]:
+    """Return (merged signals, confirmed capture-keys).
+
+    Merged = union of the authoritative record read (visible to ALL platforms,
+    incl. tier-2) and the local shard cache (covers offline-captured-not-yet-
+    ingested and ingest->read indexing lag), deduped by capture identity;
+    records are listed first so they win the dedup over their shard twin.
+    Confirmed = the dedup keys that came from get-records — i.e. captures the
+    authoritative source has, whose write-through shards are now safe to GC."""
+    records = store.read_signal_records(meta.get("definition_id")) if meta else []
+    shards = [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
+    by_id: dict[str, Signal] = {}
+    for sig in (*records, *shards):
+        by_id.setdefault(_dedup_key(sig), sig)
+    return list(by_id.values()), {_dedup_key(s) for s in records}
+
+
+def _gc_confirmed_shards(store: FulcraStore, confirmed: set[str]) -> int:
+    """Delete cache shards whose capture is confirmed in get-records. Shard
+    filenames are the temp id (== the records' dedup key), so we prune by name
+    without downloading. Unconfirmed shards (read outage / indexing lag) are
+    kept — they may be the only copy of a signal. Best-effort: a failed delete
+    is retried on the next compile, never fatal."""
+    pruned = 0
+    for name, fid in store.list_file_ids(SIGNALS_CACHE_PREFIX):
+        stem = name[:-5] if name.endswith(".json") else name
+        if stem in confirmed:
+            try:
+                store.delete_file(fid)
+                pruned += 1
+            except Exception:
+                continue
+    return pruned
 
 
 def _append_signal_cache(store: FulcraStore, sig: Signal) -> None:
@@ -103,28 +147,102 @@ def cmd_onboard(args, api, now) -> int:
     return 0
 
 
+def _capture_one(store, outbox, meta, now, **kw) -> Signal:
+    """Capture a single signal (ingest + write-through shard). Shared by
+    `capture` and `capture-batch`. A cache-shard write failure never aborts a
+    successful capture — the record is spooled for a later flush/back-fill (the
+    signal is already posted or itself spooled by capture_signal)."""
+    sig = capture_signal(store, outbox, data_type=meta["data_type"], now=now, **kw)
+    try:
+        _append_signal_cache(store, sig)
+    except (OSError, ConnectionError, TimeoutError) as e:
+        outbox.spool(build_record(sig, meta["data_type"]))
+        print(f"fulcra-prefs: warning: could not write signal cache shard: {e}",
+              file=sys.stderr)
+    return sig
+
+
 def cmd_capture(args, api, outbox_dir, now) -> int:
     store = _store(api)
     meta = _require_meta(store)
     if not meta:
         return 2
-    sig = capture_signal(
-        store, Outbox(outbox_dir), data_type=meta["data_type"], now=now,
+    sig = _capture_one(
+        store, Outbox(outbox_dir), meta, now,
         key=args.key, value=json.loads(args.value), strength=args.strength,
         kind=args.kind, scope=args.scope, confidence=args.confidence,
         half_life_days=args.half_life, platform=args.platform,
         agent=args.agent, session=args.session, supersedes=args.supersedes)
-    outbox = Outbox(outbox_dir)
-    try:
-        _append_signal_cache(store, sig)
-    except (OSError, ConnectionError, TimeoutError) as e:
-        # Cache-write failure must never abort a successful capture. The signal
-        # is already posted (or spooled), but v1 compile reads cache shards, so
-        # also spool the record for a later flush/back-fill.
-        outbox.spool(build_record(sig, meta["data_type"]))
-        print(f"fulcra-prefs: warning: could not write signal cache shard: {e}",
-              file=sys.stderr)
     print(f"captured {sig.id}", file=sys.stderr)
+    return 0
+
+
+def _normalize_batch_spec(spec: object, index: int, args
+                          ) -> tuple[dict | None, str | None]:
+    if not isinstance(spec, dict):
+        return None, f"--file item {index} must be an object"
+    missing = [k for k in ("key", "value", "strength") if k not in spec]
+    if missing:
+        return None, (f"--file item {index} missing required field(s): "
+                      f"{', '.join(missing)}")
+    try:
+        strength = float(spec["strength"])
+        confidence = float(spec.get("confidence", 1.0))
+        hl = spec.get("half_life_days", 90.0)
+        half_life_days = None if hl is None else float(hl)
+    except (TypeError, ValueError) as e:
+        return None, f"--file item {index} has invalid numeric field: {e}"
+    normalized = {
+        "key": spec["key"],
+        "value": spec["value"],
+        "strength": strength,
+        "kind": spec.get("kind", "preference"),
+        "scope": spec.get("scope", "global"),
+        "confidence": confidence,
+        "half_life_days": half_life_days,
+        "platform": args.platform,
+        "agent": spec.get("agent", args.agent),
+        "session": spec.get("session", args.session),
+        "supersedes": spec.get("supersedes"),
+    }
+    try:
+        Signal(id=None, observed_at="1970-01-01T00:00:00+00:00",
+               source_ids=(), **normalized)
+    except ValueError as e:
+        return None, f"--file item {index} is invalid: {e}"
+    return normalized, None
+
+
+def cmd_capture_batch(args, api, outbox_dir, now) -> int:
+    """Auto-capture mechanism: record many signals an agent noticed in one
+    consented call. `--file` is a JSON array of specs (key, value, strength, and
+    optional kind/scope/confidence/half_life_days/agent/session/supersedes).
+    Lower-confidence INFERRED signals are safe — compile weights selection by
+    confidence so they won't override explicit ones."""
+    store = _store(api)
+    meta = _require_meta(store)
+    if not meta:
+        return 2
+    try:
+        specs = json.loads(Path(args.file).read_text())
+    except (OSError, ValueError) as e:
+        print(f"fulcra-prefs: could not read --file: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(specs, list):
+        print("fulcra-prefs: --file must contain a JSON array of signal specs",
+              file=sys.stderr)
+        return 2
+    normalized_specs = []
+    for i, spec in enumerate(specs, start=1):
+        normalized, err = _normalize_batch_spec(spec, i, args)
+        if err:
+            print(f"fulcra-prefs: {err}", file=sys.stderr)
+            return 2
+        normalized_specs.append(normalized)
+    outbox = Outbox(outbox_dir)
+    for spec in normalized_specs:
+        _capture_one(store, outbox, meta, now, **spec)
+    print(f"captured {len(normalized_specs)} signal(s)", file=sys.stderr)
     return 0
 
 
@@ -134,7 +252,8 @@ def cmd_compile(args, api, outbox_dir, now) -> int:
     if not meta:
         return 2
     Outbox(outbox_dir).flush(store)
-    docs = compile_signals(_load_cached_signals(store), now)
+    signals, confirmed = _gather_signals(store, meta)
+    docs = compile_signals(signals, now)
     store.write_json(COMPILED_PATH, docs["global"])
     for p, doc in docs["platforms"].items():
         store.write_json(platform_path(p), doc)
@@ -142,16 +261,28 @@ def cmd_compile(args, api, outbox_dir, now) -> int:
     # without reading the full compiled doc.
     meta["last_compile"] = now.isoformat()
     store.write_json(META_PATH, meta)
+    # GC: prune write-through shards now confirmed in the authoritative read,
+    # bounding the cache and keeping compile from re-downloading dead shards.
+    pruned = _gc_confirmed_shards(store, confirmed)
     print(f"compiled {len(docs['global']['keys'])} keys, "
-          f"{len(docs['platforms'])} platform views", file=sys.stderr)
+          f"{len(docs['platforms'])} platform views"
+          + (f", pruned {pruned} cached shard(s)" if pruned else ""),
+          file=sys.stderr)
     return 0
 
 
 def cmd_get(args, api, outbox_dir, now) -> int:
     store = _store(api)
-    path = platform_path(args.platform) if args.platform else COMPILED_PATH
-    doc = store.read_json(path) or {"v": 1, "compiled_at": now.isoformat(),
-                                    "keys": {}}
+    # A platform view is global + overlay. Compile only writes platforms/<p>.json
+    # when <p> has a platform:-scoped signal, so for an override-less platform we
+    # must fall back to the global doc (mirrors cmd_inject) — returning an empty
+    # doc here would silently withhold the user's global prefs on the export path.
+    doc = None
+    if args.platform:
+        doc = store.read_json(platform_path(args.platform))
+    if doc is None:
+        doc = store.read_json(COMPILED_PATH)
+    doc = doc or {"v": 1, "compiled_at": now.isoformat(), "keys": {}}
     if args.audience:
         grants = (store.read_json(CONSENT_PATH) or {"grants": []})["grants"]
         doc = filter_for_audience(doc, grants, args.audience, now)
@@ -243,6 +374,13 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("--session")
     c.add_argument("--supersedes")
 
+    cb = sub.add_parser("capture-batch",
+                        help="capture many signals from a JSON array file")
+    cb.add_argument("--file", required=True, help="path to a JSON array of signal specs")
+    cb.add_argument("--platform", required=True)
+    cb.add_argument("--agent")
+    cb.add_argument("--session")
+
     sub.add_parser("compile")
 
     g = sub.add_parser("get")
@@ -279,6 +417,7 @@ def run(argv, api, outbox_dir, now) -> int:
     args = _parser().parse_args(argv)
     handlers = {"onboard": lambda: cmd_onboard(args, api, now),
                 "capture": lambda: cmd_capture(args, api, outbox_dir, now),
+                "capture-batch": lambda: cmd_capture_batch(args, api, outbox_dir, now),
                 "compile": lambda: cmd_compile(args, api, outbox_dir, now),
                 "get": lambda: cmd_get(args, api, outbox_dir, now),
                 "consent": lambda: cmd_consent(args, api, outbox_dir, now),

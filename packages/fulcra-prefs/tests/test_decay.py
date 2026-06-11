@@ -21,6 +21,18 @@ def test_no_half_life_means_no_decay():
     s = make_signal(half_life_days=None, observed_at="2020-01-01T00:00:00+00:00")
     assert effective_weight(s, NOW) == 0.8
 
+def test_naive_observed_at_does_not_crash_against_aware_now():
+    """BUG B: observed_at may arrive tz-naive (real get-records timestamps, a
+    hand-written cache shard) while `now` is tz-aware (production uses
+    datetime.now(timezone.utc)). _age_days must not raise TypeError on the
+    subtraction — consent._active already guards this; decay must too."""
+    s = make_signal(observed_at="2026-03-12T12:00:00", half_life_days=90.0)  # naive
+    # exactly one half-life before NOW (2026-06-10) when read as UTC
+    assert abs(effective_weight(s, NOW) - 0.4) < 1e-9
+    assert not is_stale(make_signal(half_life_days=None,
+                                    observed_at="2026-06-01T00:00:00"), NOW)
+
+
 def test_staleness_flag_only_for_undecaying_old_signals():
     old = "2020-01-01T00:00:00+00:00"
     assert is_stale(make_signal(half_life_days=None, observed_at=old), NOW)

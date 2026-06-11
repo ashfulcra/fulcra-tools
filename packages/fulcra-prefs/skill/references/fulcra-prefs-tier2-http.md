@@ -19,8 +19,10 @@ Background: FULCRA-PRIMITIVES.md at the repo root.
 
 ## 2. Read the compiled preferences (one GET each)
 
-1. `GET /input/v1/file_upload?path=prefs&state=uploaded` → find
-   `compiled.json` (or `platforms/<your-platform>.json`) and its id.
+1. `GET /input/v1/file_upload?path=prefs&state=uploaded` → find your doc and its
+   id. Prefer `platforms/<your-platform>.json` (global + your overrides); if it
+   isn't there you simply have no platform-specific overrides — fall back to
+   `compiled.json` (the global doc), don't treat its absence as "no prefs".
 2. `GET /input/v1/file_upload/{id}/download` → the compiled doc. Apply it:
    keys are namespaced prefs, `weight` in [-1,1], negative = aversion,
    `stale: true` = verify with the user before relying on it.
@@ -58,4 +60,6 @@ Retry once on failure, then tell the user the capture didn't stick.
 ## 4. What you cannot do at this tier
 
 Compile and solve run only where code runs (CLI-capable agents or cron).
-Your captures appear in compiled docs after the next compile elsewhere.
+Your single ingest POST is enough: compile reads signals straight from
+get-records, so a capture you make here shows up in everyone's compiled docs
+after the next compile elsewhere — you do NOT need to write any cache file.

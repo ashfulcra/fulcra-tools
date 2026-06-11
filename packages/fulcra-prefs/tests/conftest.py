@@ -26,7 +26,6 @@ VERIFIED against fulcra_api/core.py (v0.1.30, file-commands branch):
   accuracy.
 """
 import io
-import json
 import sys
 from pathlib import Path
 import pytest
@@ -48,6 +47,7 @@ class FakeFulcraAPI:
         self.ingested: list[dict] = []         # posted record bodies
         self.fail_ingest = False
         self.fail_upload = False
+        self.fail_read = False
 
     @staticmethod
     def _abs(path: str) -> str:
@@ -77,6 +77,11 @@ class FakeFulcraAPI:
         self.files[filepath] = data.read()
         return {"url": "fake://uploaded", "id": f"v-{filepath}"}
 
+    def delete_file(self, file_id):
+        # file_id is "v-<abspath>" (see resolve_filepath / upload_file).
+        path = file_id[2:]
+        self.files.pop(path, None)
+
     def list_files(self, path="/"):
         """Returns {"files": [...]} dict mirroring the real library's shape.
         The real list_files wraps results in a top-level dict; callers must
@@ -101,6 +106,25 @@ class FakeFulcraAPI:
             self.ingested.append(data)
             return b"{}"
         raise NotImplementedError(path)
+
+    # --- record reads (mirrors FulcraAPI.moment_annotations) ---
+    # Real signature: moment_annotations(start_time, end_time, source=None,
+    # fulcra_userid=None) -> list of record dicts. We synthesize the read side
+    # from posted ingest bodies so a capture round-trips (ingest -> read) the
+    # way the live API does: each posted DataRecordV1 comes back with a server
+    # record id, its recorded_at, its sources, and the JSON payload in `data`.
+    def moment_annotations(self, start_time=None, end_time=None, source=None,
+                           fulcra_userid=None):
+        if self.fail_read:
+            raise ConnectionError("simulated get-records outage")
+        out = []
+        for i, body in enumerate(self.ingested):
+            md = body["metadata"]
+            out.append({"id": f"rec-{i:04d}",
+                        "recorded_at": md["recorded_at"],
+                        "sources": md["source"],
+                        "data": body["data"]})
+        return out
 
 
 @pytest.fixture

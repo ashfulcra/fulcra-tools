@@ -22,6 +22,10 @@ LOAD them at session start, APPLY them, and CAPTURE new ones.
    - Capture: `fulcra-prefs capture --key <ns.key> --value '<json>'
      --strength <-1..1> --platform <your-platform>` (see
      references/fulcra-prefs-capture.md for when and what to capture).
+   - Auto-capture: notice preferences passively and record them in one call at
+     session end — `fulcra-prefs capture-batch --file <json-array> --platform
+     <your-platform>`; mark inferred items lower `confidence` (compile won't let
+     a guess override an explicit pref). See the capture reference.
    - Refresh: `fulcra-prefs compile` (run after captures; cheap).
 2. **You can make HTTP requests but not run commands** → follow
    references/fulcra-prefs-tier2-http.md (device-flow auth + direct API).

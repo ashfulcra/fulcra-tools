@@ -28,7 +28,8 @@ file-commands branch):
 from __future__ import annotations
 import io
 import json
-from .schema import (Signal, canonical_json, temp_signal_id,
+from concurrent.futures import ThreadPoolExecutor
+from .schema import (Signal, canonical_json, parse_record, temp_signal_id,
                      CAPTURE_SOURCE_PREFIX, ANNOTATION_SOURCE_PREFIX)
 
 
@@ -124,12 +125,71 @@ class FulcraStore:
         result = self._api.list_files(_abs(folder_path))
         # Real library wraps results: {"files": [...], ...}
         file_records = result["files"] if isinstance(result, dict) else result
-        out = []
-        for rec in file_records:
+        if not file_records:
+            return []
+
+        def _fetch(rec):
             resp = self._api.download_file(rec["id"])
-            out.append(json.loads(resp.read().decode()))
-        return out
+            return json.loads(resp.read().decode())
+
+        # Shard downloads are independent GETs and compile sorts by signal id,
+        # so result order is irrelevant — fetch concurrently to keep compile
+        # from scaling as N sequential round-trips. Bounded pool to avoid
+        # hammering the API. ex.map preserves order and re-raises the first
+        # download error, matching the previous sequential semantics.
+        if len(file_records) == 1:
+            return [_fetch(file_records[0])]
+        with ThreadPoolExecutor(max_workers=min(8, len(file_records))) as ex:
+            return list(ex.map(_fetch, file_records))
+
+    def list_file_ids(self, folder_path: str) -> list[tuple[str, str]]:
+        """(name, file_id) for direct children of a folder, WITHOUT downloading
+        contents — used by cache GC, which prunes shards by filename (the temp
+        id) so it never needs to read them."""
+        result = self._api.list_files(_abs(folder_path))
+        recs = result["files"] if isinstance(result, dict) else result
+        return [(r.get("name", ""), r["id"]) for r in (recs or [])]
+
+    def delete_file(self, file_id: str) -> None:
+        self._api.delete_file(file_id)
 
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         record = build_record(sig, data_type)
         self._api.fulcra_api("/ingest/v1/record", data=record, method="POST")
+
+    def read_signal_records(self, definition_id: str | None,
+                            start_time=None, end_time=None) -> list[Signal]:
+        """Authoritative signal read via get-records, so captures from ANY
+        platform are visible to compile — including shell-less tier-2 agents
+        that only POST to /ingest and never write a cache shard. Records are
+        matched to our definition by the annotation-linkage source.
+
+        Resilient by design: a transport error returns [] so compile can still
+        proceed from the shard cache (never worse than the cache-only path this
+        augments). Records that don't parse as our signals are skipped, not
+        fatal. The payload field is read defensively (`data` then `note`):
+        the live get-records shape for ingested DataRecordV1 records is pinned
+        by the live-smoke round-trip, not assumed here.
+        """
+        if not definition_id:
+            return []
+        linkage = f"{ANNOTATION_SOURCE_PREFIX}{definition_id}"
+        try:
+            records = self._api.moment_annotations(start_time, end_time)
+        except (OSError, ConnectionError, TimeoutError):
+            return []
+        out: list[Signal] = []
+        for rec in (records or []):
+            sources = rec.get("sources") or []
+            if linkage not in sources:
+                continue
+            payload = rec.get("data")
+            if payload is None:
+                payload = rec.get("note")
+            env = {"id": rec.get("id"), "recorded_at": rec.get("recorded_at"),
+                   "sources": sources, "data": payload}
+            try:
+                out.append(parse_record(env))
+            except (KeyError, ValueError, TypeError):
+                continue   # not one of our signals / unexpected shape
+        return out
