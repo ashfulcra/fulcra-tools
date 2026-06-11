@@ -19,6 +19,7 @@ caller (the onboarding nudge fires on connect); cli re-exports it for ``start``.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity
@@ -415,6 +416,13 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+# 2026-06-11 bug hunt S6: the stale-version suffix selfupdate/connect appends
+# to the presence summary ('… (v0.15.2 behind canonical 0.16.0)'). Anchored to
+# end-of-string so only the BAKED-IN trailing copy is ever stripped — never
+# the operator's own words mid-summary.
+_STALE_SUFFIX_RE = re.compile(r"\s*\(v\S+ behind canonical \S+\)\s*$")
+
+
 def _split_workstreams(raw: Optional[str]) -> list[str]:
     """Split a comma-separated ``--workstream`` value into a clean list. Empty
     tokens (e.g. a trailing comma) are dropped; make_presence normalizes the rest."""
@@ -441,7 +449,16 @@ def cmd_workstream(args: Any, backend: Optional[list[str]] = None) -> int:
 
     current = _load_own_presence(me, backend=backend)
     cur_workstreams = list((current or {}).get("workstreams", []))
-    cur_summary = (current or {}).get("summary", "")
+    # 2026-06-11 bug hunt S6: strip the trailing stale-version suffix from the
+    # PRESERVED summary. Connect bakes '(vX behind canonical Y)' into the
+    # stored summary text when the stale marker is set, and re-derives it
+    # from the marker on every connect — but set/add/clear preserved the
+    # stored text verbatim, so the suffix was carried forever (even after
+    # the host updated). Stripping here is lossless: the suffix's single
+    # source of truth is the marker, and connect re-appends it while the
+    # host is genuinely behind.
+    cur_summary = _STALE_SUFFIX_RE.sub(
+        "", (current or {}).get("summary", "") or "")
 
     if action is None:
         # Show current presence (no mutation).
