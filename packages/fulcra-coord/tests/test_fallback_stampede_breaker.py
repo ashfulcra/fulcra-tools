@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from fulcra_coord import cache, remote, schema, views
+from fulcra_coord import io as coord_io
 from fulcra_coord.io import _load_task_summaries
 
 
@@ -157,6 +158,30 @@ class TestFallbackStampedeBreaker(unittest.TestCase):
         got, _ = self._run()
         self.assertEqual({s["id"] for s in got}, {self.t1["id"], self.t2["id"]})
         self.assertGreaterEqual(self.fake.list_calls, 1)
+
+    def test_stale_original_holder_cannot_release_takeover_marker(self):
+        # Ownership token pin: if a slow-but-live fallback exceeds the takeover
+        # window, another process may reclaim the stale marker. When the
+        # original finally finishes, it must NOT unlink the replacement
+        # holder's marker, or a third listener can join the still-running
+        # replacement fallback and restart the stampede.
+        claimed, _, original_token = coord_io._claim_fallback_throttle(10.0)
+        self.assertTrue(claimed)
+        self.assertTrue(original_token)
+        ts = time.time() - 30 * 60.0
+        os.utime(self._marker(), (ts, ts))
+        claimed, _, takeover_token = coord_io._claim_fallback_throttle(10.0)
+        self.assertTrue(claimed)
+        self.assertTrue(takeover_token)
+        self.assertNotEqual(original_token, takeover_token)
+
+        coord_io._release_fallback_throttle(original_token)
+
+        self.assertTrue(self._marker().exists(),
+                        "the replacement holder's marker must survive a stale "
+                        "original holder's release")
+        coord_io._release_fallback_throttle(takeover_token)
+        self.assertFalse(self._marker().exists())
 
     # -- contract 3: completion releases --------------------------------------
 
