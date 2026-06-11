@@ -15,6 +15,7 @@ members = [
     "fulcra-media-helpers",
     "fulcra-menubar",
     "fulcra-prefs",
+    "fulcra-vault",
 ]
 
 [[package]]
@@ -524,6 +525,11 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "fulcra-vault"
+version = "0.1.0"
+source = { editable = "packages/fulcra-vault" }
 
 [[package]]
 name = "h11"

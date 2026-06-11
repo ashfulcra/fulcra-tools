@@ -183,7 +183,7 @@ Notes are mutable files; safety is conventions enforced by the CLI:
 write-section <note> --section <slug> --agent <id> (stdin body) |
 append-log <note> --entry <text> --agent <id> | map [--check] |
 backlinks <note> | reindex | doctor | sync [--push-only|--pull-only] |
-install-sync [--interval-min N] | restructure --from-spec <json>`
+install-sync [--interval-min N] | delete <note> | restructure --from-spec <json>`
 
 Conventions carried from fulcra-prefs: dependency-injected `run()` for tests;
 status → stderr, data → stdout; canonical JSON for all derived artifacts;
