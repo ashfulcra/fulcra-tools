@@ -145,24 +145,30 @@ def _list_index_shards(*, backend: Optional[list[str]] = None) -> list[dict[str,
 
 
 def _claim_retention_marker(now: datetime, *,
-                            backend: Optional[list[str]] = None) -> bool:
+                            backend: Optional[list[str]] = None
+                            ) -> tuple[bool, Optional[dict[str, Any]]]:
     """First-host-wins daily throttle for the retention pass — the digest-marker
     pattern (_claim_digest_marker), one rolling file keyed by date-INSIDE-the-JSON.
 
     Read retention/last-run.json: if its date == today (UTC) another host already
-    ran today -> return False (skip). Else write {date, by, at} and re-read; if a
-    different host's stamp won the claim, return False (they run, we skip). Files
+    ran today -> claimed False (skip). Else write {date, by, at} and re-read; if a
+    different host's stamp won the claim, claimed False (they run, we skip). Files
     has no CAS, so two hosts can rarely both see today's marker absent and both
     proceed — ACCEPTED and harmless (mirrors the digest marker): the archive step
     is idempotent + per-task, so a double-run just re-archives already-archived
     ids as no-ops. The marker is a THROTTLE, not a lock. Any error -> skip (never
-    risk an unbounded concurrent pass; next tick/day retries). Never raises."""
+    risk an unbounded concurrent pass; next tick/day retries). Never raises.
+
+    Returns ``(claimed, marker)`` — ``marker`` is the freshest last-run record
+    this claim OBSERVED or WROTE (None when unknown), threaded up through
+    ``_run_retention`` so the health record reuses it instead of re-downloading
+    retention/last-run.json every tick (perf, 2026-06-11 loop-2 pass #6)."""
     try:
         path = remote.retention_marker_path(now)
         today = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
         existing = remote.download_json(path, backend=backend)
         if existing is not None and existing.get("date") == today:
-            return False
+            return False, (existing if isinstance(existing, dict) else None)
         me = identity.resolve_agent()
         marker = {
             "schema": "fulcra.coordination.retention_marker.v1",
@@ -170,7 +176,8 @@ def _claim_retention_marker(now: datetime, *,
             "at": _iso_z(now),
         }
         if not remote.upload_json(marker, path, backend=backend):
-            return False
+            # Our stamp didn't land: the OLD marker (if any) stays the truth.
+            return False, (existing if isinstance(existing, dict) else None)
         # Re-read: if a racing host stamped TODAY's marker instead of ours, yield
         # to them. Only a same-day, different-host stamp counts as losing the race
         # — a re-read still showing an OLDER date just means our write isn't
@@ -178,10 +185,11 @@ def _claim_retention_marker(now: datetime, *,
         confirm = remote.download_json(path, backend=backend)
         if (confirm is not None and confirm.get("date") == today
                 and confirm.get("by") not in (me, None)):
-            return False
-        return True
+            # The racing host's stamp is the freshest last-run truth.
+            return False, (confirm if isinstance(confirm, dict) else None)
+        return True, marker
     except Exception:
-        return False
+        return False, None
 
 
 def _retention_max_per_run() -> int:
@@ -781,7 +789,11 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     Returns {"skipped": True} when throttled/errored, else
     {"archived": N, "deferred": D, "expired_broadcasts": E, "pruned_markers": M,
     "pruned_presence": K, "pruned_health": H, "pruned_continuity": C,
-    "pruned_events": V, "pruned_provenance": P}.
+    "pruned_events": V, "pruned_provenance": P}. Either shape MAY carry
+    "retention_marker" — the freshest retention/last-run.json record the
+    throttle claim observed or wrote — so cmd_reconcile's health record reuses
+    it instead of paying a third download per tick (perf loop-2 #6); absent
+    when the pass never reached the marker (budget gate / claim error).
 
     1. THROTTLE: _claim_retention_marker(now) — first host today wins; others skip.
     2. ARCHIVE up to _retention_max_per_run() archivable tasks (views.
@@ -811,8 +823,19 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     if time.monotonic() >= budget_floor:
         return {"skipped": True}
     try:
-        if not _claim_retention_marker(now, backend=backend):
-            return {"skipped": True}
+        claim = _claim_retention_marker(now, backend=backend)
+        # Tolerate a bare bool: several tests (and any external monkeypatch)
+        # stub _claim_retention_marker with True/False. The threaded marker is
+        # a perf hand-off (saves the health record's re-download — loop-2 #6),
+        # never load-bearing, so an unknown marker just means the caller falls
+        # back to its own read.
+        claimed, marker = (claim if isinstance(claim, tuple)
+                           else (bool(claim), None))
+        if not claimed:
+            out: dict[str, Any] = {"skipped": True}
+            if marker is not None:
+                out["retention_marker"] = marker
+            return out
     except Exception:
         return {"skipped": True}
 
@@ -866,7 +889,10 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
             "pruned_health": pruned_health,
             "pruned_continuity": pruned_continuity,
             "pruned_events": pruned_events,
-            "pruned_provenance": pruned_provenance}
+            "pruned_provenance": pruned_provenance,
+            # The marker this run just stamped — threaded to the health record
+            # so the tick never re-downloads retention/last-run.json (#6).
+            "retention_marker": marker}
 
 
 

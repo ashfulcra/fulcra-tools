@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import time
+import types
+from datetime import datetime, timezone
 from unittest import mock
 
 from fulcra_coord import cli, eventlog, events, io, loop_ops, remote, schema
@@ -386,6 +388,241 @@ def test_reconcile_tick_loads_each_shared_snapshot_once(coord_backend):
             f"loop record {d['id']} downloaded "
             f"{counter.downloads.count(path)}x — must be once per tick")
     assert len(counter.lists_of(remote.directives_prefix())) == 1
+
+
+# ---------------------------------------------------------------------------
+# E5 — role fold: ONE roles/ listing serves registry + every role's leases
+# (2026-06-11 loop-2 mechanical pass, item 1)
+# ---------------------------------------------------------------------------
+
+def _seed_role(backend, name, holders=()):
+    from fulcra_coord import role_ops
+    role = schema.make_role(name, "d")
+    assert role_ops.upsert_role(role, backend=backend) is True
+    for h in holders:
+        assert role_ops.claim_role(name, h, backend=backend) is True
+    return role
+
+
+def _seed_role_bus(backend):
+    """Two roles, three lease shards, one escalation marker — the layout that
+    made list_roles + per-role read_leases pay 1+R listings and R+2L+E
+    downloads per surface render."""
+    _seed_role(backend, "reviewer", ("a:h:r", "b:h:r"))
+    _seed_role(backend, "deployer", ("c:h:r",))
+    remote.upload_json(
+        {"role": "reviewer", "date": "2026-01-01"},
+        remote.role_escalation_marker_path("reviewer", "2026-01-01"),
+        backend=backend)
+
+
+def _assert_one_roles_listing_no_waste(counter):
+    """The shared E5 pin: exactly ONE listing under roles/ (no per-role lease
+    re-list), each registry record + lease shard downloaded exactly once, and
+    the escalation marker never downloaded (path-partitioned away)."""
+    prefix = remote.roles_prefix()
+    assert [p for p in counter.lists if p.startswith(prefix)] == [prefix], (
+        f"roles/ listings: {[p for p in counter.lists if p.startswith(prefix)]}"
+        " — must be exactly one listing of the prefix, no per-role re-lists")
+    expected = sorted([
+        remote.role_record_path("reviewer"),
+        remote.role_record_path("deployer"),
+        remote.role_lease_path("reviewer", "a:h:r"),
+        remote.role_lease_path("reviewer", "b:h:r"),
+        remote.role_lease_path("deployer", "c:h:r"),
+    ])
+    assert sorted(counter.downloads_under(prefix)) == expected, (
+        "downloads under roles/ must be each registry record + lease shard "
+        f"exactly once (no escalation markers): {counter.downloads_under(prefix)}")
+
+
+def test_role_health_check_one_roles_listing_no_waste(coord_backend):
+    """_role_health_check used to pay list_roles (1 list + R+L+E downloads)
+    plus one read_leases per role (R lists + L re-downloads) EVERY reconcile
+    tick. One partitioned listing must serve it all."""
+    _seed_role_bus(coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        out = cli._role_health_check(backend=coord_backend)
+    assert {r["name"] for r in out["roles"]} == {"reviewer", "deployer"}
+    _assert_one_roles_listing_no_waste(counter)
+
+
+def test_cmd_roles_one_roles_listing_no_waste(coord_backend, capsys):
+    _seed_role_bus(coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        rc = cli.cmd_roles(
+            types.SimpleNamespace(roles_action=None, format="json", agent=None),
+            backend=coord_backend)
+    assert rc == 0
+    _assert_one_roles_listing_no_waste(counter)
+
+
+def test_board_roles_section_one_roles_listing_no_waste(coord_backend, capsys):
+    from fulcra_coord import query
+    _seed_role_bus(coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        rc = query.cmd_board(
+            types.SimpleNamespace(agent="me:h:r", format="json"),
+            backend=coord_backend)
+    assert rc == 0
+    _assert_one_roles_listing_no_waste(counter)
+
+
+# ---------------------------------------------------------------------------
+# E6 — notify-inbox: the summaries aggregate is loaded ONCE per listener tick
+# (loop-2 item 2: _load_inbox loaded it, then _notify_new_needs_me re-loaded)
+# ---------------------------------------------------------------------------
+
+def test_notify_inbox_loads_summaries_once(coord_backend):
+    from fulcra_coord import inbox
+    from fulcra_coord.timeutil import now_iso
+    remote.upload_json(
+        {"generated_at": now_iso(), "summaries": []},
+        remote.view_remote_path("summaries"), backend=coord_backend)
+    counter = OpCounter()
+    with mock.patch("fulcra_coord.listener.emit_notification"), \
+         mock.patch("fulcra_coord.listener.emit_message"), \
+         mock.patch("fulcra_coord.selfupdate.maybe_self_update"):
+        with counter.patch():
+            rc = inbox.cmd_notify_inbox(
+                types.SimpleNamespace(agent="agent-a:h:r"),
+                backend=coord_backend)
+    assert rc == 0
+    path = remote.view_remote_path("summaries")
+    assert counter.downloads.count(path) == 1, (
+        f"summaries view downloaded {counter.downloads.count(path)}x per "
+        "notify tick — the needs-me pass must reuse the inbox load")
+
+
+# ---------------------------------------------------------------------------
+# E7 — evidence probe is LIST-ONLY: nonemptiness never downloads shard bodies
+# (loop-2 item 3: evidence_ids_for rode list_json = 1 list + K downloads)
+# ---------------------------------------------------------------------------
+
+def _seed_open_loop_with_evidence(backend, opener="me:h:r"):
+    d = schema.make_directive(
+        directive_type="review", from_agent=opener, audience="rev:h:r",
+        title="review PR 9", workstream="general",
+        kind="review", state="requested", expects_response=True, sla_hours=24)
+    assert remote.upload_json(d, remote.directive_remote_path(d["id"]),
+                              backend=backend)
+    assert loop_ops.append_loop_evidence(
+        d["id"], {"by": "mirror", "note": "PR merged"}, backend=backend) is True
+    return d
+
+
+def test_evidence_probe_lists_without_downloading_shards(coord_backend):
+    """Only listing-NONEMPTINESS is consumed (loops.awaiting_others reads the
+    id set; bodies are read elsewhere via read_loop_evidence), so the probe
+    must cost 1 list + 0 downloads per candidate — not 1 list + K downloads
+    on every board render, digest, and reconcile tick."""
+    d = _seed_open_loop_with_evidence(coord_backend)
+    records = loop_ops.load_loop_records(backend=coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        ids = loop_ops.evidence_ids_for(
+            "me:h:r", records, now=datetime.now(timezone.utc),
+            backend=coord_backend)
+    assert ids == {d["id"]}
+    eprefix = remote.directive_evidence_prefix(d["id"])
+    assert counter.lists_of(eprefix) == [eprefix]
+    assert counter.downloads_under(eprefix) == [], (
+        "evidence shard bodies downloaded for a nonemptiness-only probe")
+
+
+# ---------------------------------------------------------------------------
+# E8 — dual_write folds the responses it already read (no sub-log double-read)
+# (loop-2 item 4: the `if responses:` probe + fold_loop re-read the prefix)
+# ---------------------------------------------------------------------------
+
+def test_dual_write_reads_response_sublog_once(coord_backend):
+    from fulcra_coord import directives
+    t = schema.make_task(title="d", workstream="ws", agent="a",
+                         assignee="peer:h:r")
+    remote.upload_json(t, remote.task_remote_path(t["id"]), backend=coord_backend)
+    d = directives.directive_from_task(t)
+    assert loop_ops.append_loop_response(
+        d["id"], {"by": "peer:h:r", "outcome": {"verdict": "done"}},
+        backend=coord_backend) is True
+    counter = OpCounter()
+    with counter.patch():
+        directives.dual_write(t, command="tell", backend=coord_backend)
+    rprefix = remote.directive_responses_prefix(d["id"])
+    assert counter.lists_of(rprefix) == [rprefix], (
+        f"responses prefix listed {len(counter.lists_of(rprefix))}x per "
+        "dual_write — the fold must reuse the probe's read")
+    assert len(counter.downloads_under(rprefix)) == 1
+    # The fold semantics stay intact: the mirrored snapshot carries closure.
+    stored = remote.download_json(remote.directive_remote_path(d["id"]),
+                                  backend=coord_backend)
+    assert (stored.get("outcome") or {}).get("verdict") == "done"
+
+
+# ---------------------------------------------------------------------------
+# E9 — digest: the summaries aggregate is loaded ONCE per digest
+# (loop-2 item 5: cmd_digest loaded it, then _assess_fleet re-loaded for a count)
+# ---------------------------------------------------------------------------
+
+def test_digest_loads_summaries_once(coord_backend, capsys):
+    from fulcra_coord import digest as digest_mod
+    from fulcra_coord.timeutil import now_iso
+    remote.upload_json(
+        {"generated_at": now_iso(), "summaries": []},
+        remote.view_remote_path("summaries"), backend=coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        rc = digest_mod.cmd_digest(
+            types.SimpleNamespace(window="evening", format="json",
+                                  dry_run=True, human="ash"),
+            backend=coord_backend)
+    assert rc == 0
+    path = remote.view_remote_path("summaries")
+    assert counter.downloads.count(path) == 1, (
+        f"summaries view downloaded {counter.downloads.count(path)}x per "
+        "digest — _assess_fleet must reuse cmd_digest's load")
+
+
+# ---------------------------------------------------------------------------
+# E10 — reconcile: the health record reuses the retention pass's marker read
+# (loop-2 item 6: cli re-downloaded retention/last-run.json the pass just read)
+# ---------------------------------------------------------------------------
+
+def test_reconcile_running_retention_reads_marker_twice_only(coord_backend):
+    """A tick that RUNS retention reads retention/last-run.json exactly twice
+    (the claim's existence read + its post-write race confirm). The health
+    record's retention_last_run must come from the threaded marker — the old
+    third download is the regression this pins out."""
+    counter = OpCounter()
+    with counter.patch():
+        rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+    assert rc == 0
+    path = remote.retention_marker_path(datetime.now(timezone.utc))
+    assert counter.downloads.count(path) == 2, (
+        f"retention marker downloaded {counter.downloads.count(path)}x on a "
+        "running-retention tick — must be claim read + confirm only")
+
+
+def test_reconcile_throttled_retention_reads_marker_once(coord_backend):
+    """The steady state (every tick after today's first): the claim reads the
+    existing today-marker once, yields, and threads it to the health record —
+    ONE download, not two."""
+    from fulcra_coord.timeutil import now_iso
+    now = datetime.now(timezone.utc)
+    remote.upload_json(
+        {"schema": "fulcra.coordination.retention_marker.v1",
+         "date": now.strftime("%Y-%m-%d"), "by": "other:h:r", "at": now_iso()},
+        remote.retention_marker_path(now), backend=coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+    assert rc == 0
+    path = remote.retention_marker_path(now)
+    assert counter.downloads.count(path) == 1, (
+        f"retention marker downloaded {counter.downloads.count(path)}x on a "
+        "throttled tick — the health record must reuse the claim's read")
 
 
 def test_cache_remote_task_weak_only_stat_falls_back_to_download(coord_backend):

@@ -641,27 +641,39 @@ class TestRetentionMarker(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("FULCRA_COORD_REMOTE_ROOT", None)
 
+    # _claim_retention_marker returns (claimed, marker) since the loop-2 perf
+    # pass (#6): the marker rides up to the health record so the tick never
+    # re-downloads retention/last-run.json.
+
     def test_absent_marker_is_claimed(self):
         with patch("fulcra_coord.cli.remote.download_json", return_value=None), \
              patch("fulcra_coord.cli.remote.upload_json", return_value=True):
-            self.assertTrue(cli._claim_retention_marker(self.now, backend=["false"]))
+            claimed, marker = cli._claim_retention_marker(self.now, backend=["false"])
+        self.assertTrue(claimed)
+        self.assertEqual(marker["date"], "2026-06-05")  # our own fresh stamp
 
     def test_today_marker_blocks_second_host(self):
         today = {"date": "2026-06-05", "by": "other-host"}
         with patch("fulcra_coord.cli.remote.download_json", return_value=today), \
              patch("fulcra_coord.cli.remote.upload_json") as up:
-            self.assertFalse(cli._claim_retention_marker(self.now, backend=["false"]))
+            claimed, marker = cli._claim_retention_marker(self.now, backend=["false"])
+        self.assertFalse(claimed)
+        self.assertEqual(marker, today)  # the observed marker is threaded up
         up.assert_not_called()
 
     def test_yesterday_marker_allows_new_claim(self):
         yest = {"date": "2026-06-04", "by": "x"}
         with patch("fulcra_coord.cli.remote.download_json", return_value=yest), \
              patch("fulcra_coord.cli.remote.upload_json", return_value=True):
-            self.assertTrue(cli._claim_retention_marker(self.now, backend=["false"]))
+            claimed, marker = cli._claim_retention_marker(self.now, backend=["false"])
+        self.assertTrue(claimed)
+        self.assertEqual(marker["date"], "2026-06-05")
 
     def test_claim_error_skips(self):
         with patch("fulcra_coord.cli.remote.download_json", side_effect=RuntimeError):
-            self.assertFalse(cli._claim_retention_marker(self.now, backend=["false"]))
+            claimed, marker = cli._claim_retention_marker(self.now, backend=["false"])
+        self.assertFalse(claimed)
+        self.assertIsNone(marker)
 
 
 class TestRunRetention(_FakeBus):
