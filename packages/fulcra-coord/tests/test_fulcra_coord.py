@@ -1031,6 +1031,43 @@ class TestTryMerge(unittest.TestCase):
         self.assertIn("kind:ops", result["tags"])
         self.assertIn("kind:review", result["tags"])
 
+    def test_merge_preserves_standard_kind_when_marker_kind_sorts_first(self):
+        """2026-06-11 bug hunt C7: with tags [kind:idea, kind:ops] the repair
+        extracted 'idea' (sorts first, NOT in VALID_KINDS) as the primary kind,
+        and kind:ops — a standard tag, so excluded from the extras carry — was
+        silently dropped from the merged task. Both must survive."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["tags"] = sorted(set(local_v["tags"] + ["kind:idea"]))
+        # Force local to be the newer side so the merge base carries BOTH kind
+        # tags (the hunt's repro shape: merged["tags"] = [kind:idea, kind:ops]).
+        local_v["updated_at"] = "2030-01-01T00:00:00.000000Z"
+
+        result = _try_merge(local_v, remote_v)
+
+        self.assertIsNotNone(result)
+        self.assertIn("kind:ops", result["tags"])
+        self.assertIn("kind:idea", result["tags"])
+
+    def test_merge_preserves_both_standard_kinds(self):
+        """2026-06-11 bug hunt C7 (companion): TWO standard kinds on a task —
+        the non-primary one is a standard tag (excluded from extras) and used
+        to vanish on merge. Mirrors apply_transition's _secondary_kinds carry."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["tags"] = sorted(set(local_v["tags"] + ["kind:feature"]))
+        local_v["updated_at"] = "2030-01-01T00:00:00.000000Z"
+
+        result = _try_merge(local_v, remote_v)
+
+        self.assertIsNotNone(result)
+        self.assertIn("kind:ops", result["tags"])
+        self.assertIn("kind:feature", result["tags"])
+
     def test_merge_when_only_remote_changed_status(self):
         """Regression: no ConflictError when only REMOTE changed status.
 
