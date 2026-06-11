@@ -212,6 +212,79 @@ def _load_own_presence(
     return remote.download_json(remote.presence_remote_path(slug), backend=backend)
 
 
+def _read_own_capabilities(
+    me: str, backend: Optional[list[str]] = None) -> list[str]:
+    """This agent's currently declared capabilities, best-effort ([] on any
+    read failure). The shared read half of the C4/C5 merge-safe capability
+    RMW — connect and the add/remove helpers below all start from here so
+    "what do I already declare" has exactly one definition."""
+    try:
+        rec = _load_own_presence(me, backend=backend) or {}
+        return [c for c in (rec.get("capabilities") or []) if c]
+    except Exception:
+        return []
+
+
+def _rewrite_own_capabilities(
+    me: str, capabilities: list[str],
+    backend: Optional[list[str]] = None) -> bool:
+    """Rewrite this agent's presence record with new capabilities, preserving
+    workstreams/summary/session (the cmd_workstream preserve pattern). The
+    write half shared by add_capabilities/remove_capability."""
+    try:
+        current = _load_own_presence(me, backend=backend) or {}
+        record = schema.make_presence(
+            me,
+            workstreams=list(current.get("workstreams") or []),
+            summary=current.get("summary", "") or "",
+            session=current.get("session"),
+            capabilities=capabilities,
+        )
+        return _write_presence(record, backend=backend)
+    except Exception:
+        return False
+
+
+def add_capabilities(
+    me: str, roles: list[str], backend: Optional[list[str]] = None) -> bool:
+    """UNION ``roles`` into this agent's presence capabilities (merge-safe RMW).
+
+    2026-06-11 bug hunt C5 (with C4): ``roles claim`` wrote only the lease
+    shard while @role inbox delivery reads only presence capabilities
+    (inbox._my_roles) — split brain: the board said HELD, the directives
+    never arrived. The claim surface calls this so the two truths converge;
+    a no-op when every role is already declared (skips the write). Built on
+    the C4 merge discipline, so it can never wipe sibling declarations."""
+    try:
+        wanted = {r for r in (roles or []) if r}
+        if not wanted:
+            return True
+        existing = set(_read_own_capabilities(me, backend=backend))
+        if wanted <= existing:
+            return True   # already declared — no write needed
+        return _rewrite_own_capabilities(
+            me, sorted(existing | wanted), backend=backend)
+    except Exception:
+        return False
+
+
+def remove_capability(
+    me: str, role: str, backend: Optional[list[str]] = None) -> bool:
+    """Remove ONE role from this agent's presence capabilities (the release
+    half of C5). Deliberately simple: a release drops the capability even if
+    other machinery might still reference it — the operator released the
+    role, so @role delivery to this agent must stop. Siblings survive (RMW
+    union discipline, never a wholesale rebuild from flags)."""
+    try:
+        existing = _read_own_capabilities(me, backend=backend)
+        if role not in existing:
+            return True   # nothing to remove
+        return _rewrite_own_capabilities(
+            me, sorted(c for c in existing if c != role), backend=backend)
+    except Exception:
+        return False
+
+
 def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     """Record this agent's presence on connect (workstream-on-connect).
 
@@ -258,12 +331,9 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     if getattr(args, "clear_roles", False):
         roles = sorted(set(roles))   # explicit drop of prior declarations
     else:
-        try:
-            prior = (_load_own_presence(me, backend=backend) or {}).get(
-                "capabilities") or []
-        except Exception:
-            prior = []
-        roles = sorted({c for c in prior if c} | set(roles))
+        # Shared read half with the C5 add/remove capability helpers below.
+        roles = sorted(set(_read_own_capabilities(me, backend=backend))
+                       | set(roles))
 
     # VERSION SELF-INCORPORATION (operator directive 2026-06-10: "i'm not
     # going to go around and wake the entire fleet for each incremental

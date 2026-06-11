@@ -389,6 +389,58 @@ def test_cmd_roles_claim_and_release(coord_backend):
             os.environ["FULCRA_COORD_AGENT"] = prev
 
 
+def test_cmd_roles_claim_merges_role_into_presence_capabilities(coord_backend):
+    # 2026-06-11 bug hunt C5 (P2, entangled with C4): `roles claim` wrote ONLY
+    # the lease shard, while @role inbox delivery reads ONLY presence
+    # capabilities (inbox._my_roles) — split brain: the board said HELD but
+    # directives @that-role never reached the holder. A claim must also merge
+    # the role into the claimer's presence capabilities (merge-safe RMW, the
+    # C4 helper), and a release must remove it.
+    from fulcra_coord import cli, inbox
+    cli.cmd_roles(_roles_args("set", "reviewer", description="d"),
+                  backend=coord_backend)
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        assert cli.cmd_roles(_roles_args("claim", "reviewer"),
+                             backend=coord_backend) == 0
+        # Board (lease) and inbox (capabilities) AGREE the role is held:
+        leases = role_ops.read_leases("reviewer", backend=coord_backend)
+        assert [l["agent"] for l in leases] == ["me:h:r"]
+        assert "reviewer" in inbox._my_roles("me:h:r", backend=coord_backend)
+
+        assert cli.cmd_roles(_roles_args("release", "reviewer"),
+                             backend=coord_backend) == 0
+        assert role_ops.read_leases("reviewer", backend=coord_backend) == []
+        assert "reviewer" not in inbox._my_roles("me:h:r",
+                                                 backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+def test_cmd_roles_claim_capability_merge_preserves_other_roles(coord_backend):
+    # The capability merge must be the C4 RMW union — claiming a second role
+    # (or releasing one) never wipes the others.
+    from fulcra_coord import cli, inbox
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        cli.cmd_roles(_roles_args("claim", "alpha"), backend=coord_backend)
+        cli.cmd_roles(_roles_args("claim", "beta"), backend=coord_backend)
+        assert inbox._my_roles("me:h:r", backend=coord_backend) == {
+            "alpha", "beta"}
+        cli.cmd_roles(_roles_args("release", "alpha"), backend=coord_backend)
+        assert inbox._my_roles("me:h:r", backend=coord_backend) == {"beta"}
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
 def test_cmd_roles_json_list_includes_status(coord_backend, capsys):
     import json as _json
     from fulcra_coord import cli

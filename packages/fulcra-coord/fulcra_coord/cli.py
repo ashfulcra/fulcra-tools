@@ -70,6 +70,10 @@ from .presence import (
     _upsert_presence_aggregate, _write_presence, _load_own_presence, cmd_connect,
     _split_workstreams, cmd_workstream, cmd_presence, _reconcile_presence,
     _load_presence_agents,
+    # C5: the merge-safe capability RMW pair `roles claim`/`release` use to
+    # keep @role delivery (capabilities) in step with the lease layer.
+    add_capabilities as _presence_add_capabilities,
+    remove_capability as _presence_remove_capability,
 )
 # Read-only situational-awareness commands extracted from this file. Re-exported so
 # the command dispatch (entry.py) and the test imports of these commands keep
@@ -1091,6 +1095,19 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
             if not _role_ops.claim_role(name, me, backend=backend):
                 _err(f"roles claim: lease write failed for '{name}'")
                 return 1
+            # 2026-06-11 bug hunt C5: the lease alone is HALF the truth —
+            # @role inbox delivery reads presence capabilities
+            # (inbox._my_roles), so a claim that only wrote the lease left
+            # the board saying HELD while directives @<role> never arrived.
+            # Merge the role into the claimer's capabilities via the C4
+            # merge-safe helper. This lives HERE (not in role_ops.claim_role)
+            # because role_ops must never import presence — the layering pin
+            # in tests/test_roles.py; connect's lease path syncs capabilities
+            # already by construction (it writes the presence record).
+            if not _presence_add_capabilities(me, [name], backend=backend):
+                _warn(f"roles claim: lease landed but the presence capability "
+                      f"merge failed — @{name} directives may not deliver "
+                      "until the next connect")
             # Post-claim contested check, through the guarded roster (the
             # claim itself stays presence-blind by layering — see role_ops).
             try:
@@ -1123,6 +1140,13 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
         if not _role_ops.release_role(name, me, backend=backend):
             _err(f"roles release: no lease of yours to release on '{name}'")
             return 1
+        # C5 counterpart: stop @role delivery too (capabilities are the
+        # delivery truth). Kept deliberately simple — release always removes
+        # the capability; siblings survive (merge-safe RMW, never a rebuild).
+        if not _presence_remove_capability(me, name, backend=backend):
+            _warn(f"roles release: lease removed but the presence capability "
+                  f"removal failed — @{name} directives may keep delivering "
+                  "until the next release/connect --clear-roles")
         _info(f"Released role '{name}' for {me}")
         return 0
 
