@@ -167,6 +167,85 @@ def test_replay_still_uploads_when_remote_is_absent(coord_backend):
 
 
 # ---------------------------------------------------------------------------
+# 2026-06-11 wave (live find): the body-repair loop was not deadline-gated
+# BETWEEN items. With #167's transient retry (≤61s/op worst case) a 42-item
+# repair list ran 40+ minutes, overlapping the next cron tick's reconcile.
+# The loop must check the same budget floor _run_retention uses between items:
+# stop early, count + ops-log the deferred remainder, KEEP their markers so
+# the next tick (fresh budget) drains them.
+# ---------------------------------------------------------------------------
+
+def _seed_n_repairs(n: int) -> list[str]:
+    """Seed `n` cached tasks each carrying a failed-write repair marker."""
+    ids = []
+    cache.ensure_dirs()
+    for i in range(n):
+        t = schema.make_task(title=f"repair item {i}", workstream="general",
+                             agent="hostA:h:r", summary=f"body {i}")
+        cache.write_cached_task(t)
+        cache.write_op_marker(f"slow{i:02d}", {
+            "op_id": f"slow{i:02d}",
+            "command": "update",
+            "task_id": t["id"],
+            "status": "failed",
+            "needs_reconcile": True,
+            "started_at": "2026-01-01T00:00:00Z",
+        })
+        ids.append(t["id"])
+    return ids
+
+
+def test_repair_loop_stops_at_budget_floor_and_defers(coord_backend, monkeypatch):
+    from fulcra_coord.cli import cmd_reconcile
+    ids = _seed_n_repairs(3)
+    task_paths = {remote.task_remote_path(tid) for tid in ids}
+
+    # Script each repair SLOW: the repair loop's pre-merge body download sleeps
+    # long enough that item 1 alone crosses the budget floor. timeout=8s with
+    # the 5s headroom leaves a 3s repair budget; a 3.5s first download means
+    # item 1 starts inside budget and items 2..3 must be DEFERRED. The sleep
+    # fires only on the FIRST download of each path so the post-repair phases
+    # (_load_all_tasks re-reading the landed body) stay fast and the tick can
+    # finish green — the deferral, not a timeout, is what's under test.
+    monkeypatch.setenv("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", "8")
+    real_download = remote.download_json
+    seen_paths: set[str] = set()
+
+    def slow_first_download(path, *args, **kwargs):
+        if path in task_paths and path not in seen_paths:
+            seen_paths.add(path)
+            import time as _t
+            _t.sleep(3.5)
+        return real_download(path, *args, **kwargs)
+
+    with mock.patch("fulcra_coord.remote.download_json",
+                    side_effect=slow_first_download):
+        import time as _t
+        t0 = _t.monotonic()
+        rc = cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+        elapsed = _t.monotonic() - t0
+
+    # An un-gated loop runs all three slow repairs back to back (>=10.5s of
+    # downloads alone); the gated loop defers after the first and the whole
+    # tick stays inside the budget.
+    assert elapsed < 9.0, f"repair loop ignored the deadline (ran {elapsed:.1f}s)"
+    assert rc == 0, "a deferred repair is debt for the NEXT tick, not a failed tick"
+    # Exactly one body was repaired onto the bus; the other two were deferred.
+    landed = [tid for tid in ids
+              if remote.download_json(remote.task_remote_path(tid),
+                                      backend=coord_backend) is not None]
+    assert len(landed) == 1, f"expected 1 repaired body, got {landed}"
+    # Deferred items KEEP their markers (they must drain next tick); the
+    # repaired item's marker is cleared by the normal success path.
+    remaining = {m["op_id"] for m in cache.list_op_markers()}
+    assert len(remaining & {"slow00", "slow01", "slow02"}) == 2, remaining
+    # ... and the deferral is ops-logged so the operator can see the debt.
+    entries = cache.read_ops_log()
+    assert any(e.get("status") == "task_body_repair_deferred"
+               for e in entries), entries
+
+
+# ---------------------------------------------------------------------------
 # 2026-06-11 bug hunt S7: per-view upload budget. Each view upload in the
 # reconcile pool used to receive the WHOLE remaining reconcile deadline as
 # its subprocess timeout — one wedged backend call could then consume the
