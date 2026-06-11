@@ -284,7 +284,18 @@ def cmd_respond(args: Any, backend: Optional[list[str]] = None) -> int:
         return 1
     # Best-effort snapshot refresh — the shard above is already the truth.
     try:
-        folded = fold_loop(record, backend=backend)
+        # 2026-06-11 bug hunt C6: fold onto a FRESH download, never the body
+        # read at command start. That early copy can be arbitrarily stale by
+        # the time the shard append lands; folding the sub-log onto it and
+        # re-uploading silently REVERTED any concurrent snapshot write (an
+        # ack, a summary edit) that arrived mid-command. Re-downloading just
+        # before the refresh means the only thing this write changes is the
+        # fold result; a failed re-download falls back to the original body
+        # (no worse than the pre-fix behavior, and still best-effort).
+        fresh = remote.download_json(remote.directive_remote_path(loop_id),
+                                     backend=backend)
+        base = fresh if isinstance(fresh, dict) else record
+        folded = fold_loop(base, backend=backend)
         remote.upload_json(folded, remote.directive_remote_path(loop_id),
                            backend=backend)
     except Exception:
