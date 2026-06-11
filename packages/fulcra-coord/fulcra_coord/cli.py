@@ -66,6 +66,11 @@ from .presence import (
     _upsert_presence_aggregate, _write_presence, cmd_connect,
     cmd_workstream, cmd_presence, _reconcile_presence,
     _load_presence_agents,
+    # F5: the "presence could not be read AT ALL this tick" sentinel —
+    # _reconcile_presence returns it when the per-agent read came back partial
+    # AND the previous aggregate is unreadable; reconcile's liveness-sensitive
+    # sub-passes must then take no action (see cmd_reconcile).
+    PRESENCE_READ_ERROR as _PRESENCE_READ_ERROR,
     # C5: the merge-safe capability RMW pair `roles claim`/`release` use to
     # keep @role delivery (capabilities) in step with the lease layer.
     add_capabilities as _presence_add_capabilities,
@@ -1201,35 +1206,58 @@ def _role_health_check(
     ``presence_agents`` (E4 snapshot sharing): cmd_reconcile passes the roster
     it just REBUILT from those same durable per-agent records — fresher than
     any aggregate, so the guard's purpose is preserved without a re-load; None
-    (direct callers) keeps the guarded self-load.
+    (direct callers) keeps the guarded self-load; the
+    ``presence.PRESENCE_READ_ERROR`` sentinel means NO trustworthy roster of
+    any age exists this tick (F5) — every role's vacancy judgment is then
+    UNKNOWN, because lease freshness IS presence freshness.
+
+    UNKNOWN, not vacant (2026-06-11 read-error audit, F4/F5): a lease sub-log
+    that could not be read (role_ops.READ_ERROR), or an unknowable roster,
+    used to fold as VACANT-since-created_at — instantly past any SLA, so one
+    transport blip put a false "Role VACANT past SLA" P1 directive on the
+    maintainer's plate (durable: a human has to read and dismiss it). Those
+    roles now report ``unknown`` and the escalation is SKIPPED with a logged
+    reason; the SLA clock only ever runs on a CONFIRMED-empty lease read.
 
     The fold itself is the pure ``roles.role_status`` with the SAME liveness
     thresholds routing uses (stale_hours + wall-clock grace), injected by
     parameter — one definition of "fresh" across the whole tool. Returned
     shape: ``{roles: [{name, policy, holders, vacant, vacant_since,
-    contested, escalation_due}], vacant, contested, escalated}``."""
+    contested, escalation_due, unknown}], vacant, contested, escalated,
+    unknown}``."""
     registry = _role_ops.list_roles(backend=backend)
     if not registry:
-        return {"roles": [], "vacant": 0, "contested": 0, "escalated": 0}
+        return {"roles": [], "vacant": 0, "contested": 0, "escalated": 0,
+                "unknown": 0}
     now = datetime.now(timezone.utc)
-    if presence_agents is None:
-        presence_agents = _load_presence_agents(backend=backend)
-    presence_by_agent = {
-        a.get("agent"): a
-        for a in presence_agents
-        if isinstance(a, dict) and a.get("agent")
-    }
+    presence_unknown = presence_agents is _PRESENCE_READ_ERROR
+    if presence_unknown:
+        presence_by_agent = None   # role_status's explicit unknown input
+    else:
+        if presence_agents is None:
+            presence_agents = _load_presence_agents(backend=backend)
+        presence_by_agent = {
+            a.get("agent"): a
+            for a in presence_agents
+            if isinstance(a, dict) and a.get("agent")
+        }
     stale_hours = views._stale_hours()
     grace = views._presence_grace_seconds()
     out: list[dict] = []
-    vacant = contested = escalated = 0
+    vacant = contested = escalated = unknown = 0
     for role in registry:
         name = role.get("name") or ""
         leases = _role_ops.read_leases(name, backend=backend)
+        if leases is _role_ops.READ_ERROR:
+            leases = None   # translate the sentinel for the pure fold
         status = _roles.role_status(role, leases, presence_by_agent, now,
                                     stale_hours=stale_hours,
                                     grace_seconds=grace)
         due = _roles.vacancy_escalation_due(role, status, now)
+        if status.get("unknown"):
+            unknown += 1
+            _warn(f"  role '{name}': lease/presence state could not be read — "
+                  "vacancy judgment (and any SLA escalation) skipped this tick")
         if status["vacant"]:
             vacant += 1
         if status["contested"]:
@@ -1245,9 +1273,10 @@ def _role_health_check(
             "vacant_since": status["vacant_since"],
             "contested": status["contested"],
             "escalation_due": due,
+            "unknown": status.get("unknown", False),
         })
     return {"roles": out, "vacant": vacant, "contested": contested,
-            "escalated": escalated}
+            "escalated": escalated, "unknown": unknown}
 
 
 def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
@@ -1342,8 +1371,11 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
                 role = _role_ops.read_role(name, backend=backend)
                 if not isinstance(role, dict):  # absent or READ_ERROR (C1)
                     role = {}
+                leases = _role_ops.read_leases(name, backend=backend)
+                if leases is _role_ops.READ_ERROR:
+                    leases = None   # F4: unknown — fold reports no contest
                 status = _roles.role_status(
-                    role, _role_ops.read_leases(name, backend=backend),
+                    role, leases,
                     {a.get("agent"): a
                      for a in _load_presence_agents(backend=backend)
                      if isinstance(a, dict) and a.get("agent")},
@@ -1391,8 +1423,13 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
     merged: list[dict] = []
     for role in registry:
         name = role.get("name") or ""
+        leases = _role_ops.read_leases(name, backend=backend)
+        if leases is _role_ops.READ_ERROR:
+            # F4: an unreadable lease sub-log must render as UNKNOWN below,
+            # never as VACANT (the false-vacancy class this audit closed).
+            leases = None
         status = _roles.role_status(
-            role, _role_ops.read_leases(name, backend=backend),
+            role, leases,
             presence_by_agent, now, stale_hours=stale_hours,
             grace_seconds=grace)
         row = dict(role)
@@ -1414,7 +1451,10 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
     print("  Fulcra Coordination — Roles")
     print(f"{'='*60}")
     for r in merged:
-        if r["contested"]:
+        if r.get("unknown"):
+            # F4: say what we know (nothing) rather than guessing a vacancy.
+            state = "leases UNREADABLE — held/vacant unknown this read"
+        elif r["contested"]:
             holders = ", ".join(h["agent"] for h in r["holders"])
             state = f"CONTESTED — exclusive, fresh leases: {holders}"
         elif r["vacant"]:
@@ -1741,6 +1781,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # isinstance guard also protects against a patched/failed rebuild handing
     # back a non-dict.
     presence_view = _reconcile_presence(backend=backend)
+    # F5 boundary case: the rebuild read PARTIALLY failed AND the previous
+    # aggregate is unreadable — presence is unknowable this tick (the sentinel,
+    # distinct from None = "nothing to rebuild, sub-passes may self-load").
+    presence_unknown = presence_view is _PRESENCE_READ_ERROR
     if not isinstance(presence_view, dict):
         presence_view = None
     presence_agents = (
@@ -1755,11 +1799,25 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # reviews whose assignee fell below liveness floor, escalates on cap/miss,
     # freezes accepted-then-stalled ones. Whichever machine reconciles first
     # wins; others converge via the stale-observation re-read inside the sweep.
-    try:
-        _sweep_review_routes(all_tasks, backend=backend, now=now,
-                             deadline=deadline, presence=presence_agents)
-    except Exception:
-        pass
+    #
+    # F5: when presence is UNKNOWN this tick the sweep is skipped outright —
+    # every verdict it can reach (reroute away from a "below-floor" assignee,
+    # escalate "no reviewer live" to the human) is a durable wrong decision
+    # when the assignee merely failed to READ. We lived this: a live
+    # reviewer's record 504'd and the operator got "no reviewer live"
+    # escalations while the reviewer was up. Letting the sweep self-load
+    # would re-read through the same failing transport, so skip is the only
+    # honest option; deferred directives drain on the next clean tick.
+    if presence_unknown:
+        _warn("  ⚠ presence unreadable this tick (partial per-agent read, no "
+              "usable aggregate) — review-route sweep skipped (no rerouting "
+              "on an unknowable roster)")
+    else:
+        try:
+            _sweep_review_routes(all_tasks, backend=backend, now=now,
+                                 deadline=deadline, presence=presence_agents)
+        except Exception:
+            pass
 
     # Retention pass (best-effort, throttled to ~once/day, bounded + time-budgeted
     # against THIS reconcile's deadline so it never double-counts the 90s ceiling).
@@ -1901,8 +1959,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # loop-health pass above: the result, present or absent, NEVER
         # changes reconcile's exit code, and the error is surfaced, not eaten.
         try:
+            # F5: an unknowable roster (sentinel) makes every role's vacancy
+            # judgment unknown inside the check — reported, never escalated.
             record["role_health"] = _role_health_check(
-                backend=backend, presence_agents=presence_agents)
+                backend=backend,
+                presence_agents=(_PRESENCE_READ_ERROR if presence_unknown
+                                 else presence_agents))
         except Exception as _rhe:
             try:
                 _warn(f"  Role-health check skipped (error): {_rhe}")

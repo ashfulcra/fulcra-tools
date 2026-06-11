@@ -221,6 +221,11 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
             for role in registry:
                 name = role.get("name") or ""
                 leases = _role_ops.read_leases(name, backend=backend)
+                if leases is _role_ops.READ_ERROR:
+                    # F4 (2026-06-11 read-error audit): an unreadable lease
+                    # sub-log folds as UNKNOWN, never VACANT — the board must
+                    # not show a held role as unstaffed on a transport blip.
+                    leases = None
                 status = _roles.role_status(role, leases, presence_by_agent,
                                             now, stale_hours=stale_hours,
                                             grace_seconds=grace)
@@ -233,6 +238,7 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
                     "contested": status["contested"],
                     "escalation_due": _roles.vacancy_escalation_due(
                         role, status, now),
+                    "unknown": status.get("unknown", False),
                 })
     except Exception:
         roles_section = []
@@ -291,7 +297,11 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
         # double-held).
         print("\n  Roles")
         for r in roles_section:
-            if r["contested"]:
+            if r.get("unknown"):
+                # F4: an unreadable lease sub-log is reported as exactly that —
+                # rendering it VACANT (or HELD-by-nobody) would be a guess.
+                line = "leases UNREADABLE — held/vacant unknown this read"
+            elif r["contested"]:
                 holders = ", ".join(h["agent"] for h in r["holders"])
                 line = f"CONTESTED — exclusive, fresh leases: {holders}"
             elif r["vacant"]:

@@ -46,7 +46,10 @@ def _my_roles(me: str, backend: Optional[list[str]] = None) -> set[str]:
         rec = presence._load_own_presence(me, backend=backend)
     except Exception:
         return set()
-    if not rec:
+    # F8: the loader now returns PRESENCE_READ_ERROR (truthy, not a dict) for
+    # a failed read; the isinstance guard keeps this surface on its documented
+    # fail-safe — a blind read surfaces no role directives, never a crash.
+    if not isinstance(rec, dict):
         return set()
     return {c for c in (rec.get("capabilities") or []) if c}
 
