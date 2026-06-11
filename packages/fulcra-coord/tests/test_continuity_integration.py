@@ -312,13 +312,42 @@ class TestRoleCheckpoint:
                       "sla_hours", "maintainer", "created_at"):
             assert after[field] == before[field], field
 
-    def test_checkpoint_unregistered_role_self_registers(self, coord_backend):
+    def test_checkpoint_unregistered_role_skips_write(self, coord_backend,
+                                                      capsys):
+        # 2026-06-11 bug hunt C1 (P0): this test previously PINNED the buggy
+        # self-registration (checkpoint on an unregistered role upserting a
+        # minimal make_role(name, "")). Because read_role could not tell
+        # confirmed-absent from a transient transport failure, park (which
+        # runs set_role_checkpoint_ref on EVERY session exit) clobbered rich
+        # operator-written role definitions on one flaky read. The fix:
+        # set_role_checkpoint_ref NEVER self-registers — absence or read
+        # error both skip the write with a warn. Register via `roles set`
+        # (or a claim, which self-registers only on CONFIRMED absence) first.
         from fulcra_coord import role_ops
         args = _ns(role="fresh-role", ref="opaque-chk-ref-2", format="table")
         rc = cli.cmd_checkpoint(args, backend=coord_backend)
-        assert rc == 0
-        rec = role_ops.read_role("fresh-role", backend=coord_backend)
-        assert rec["checkpoint_ref"] == "opaque-chk-ref-2"
+        assert rc == 1
+        assert role_ops.read_role("fresh-role", backend=coord_backend) is None
+        err = capsys.readouterr().err
+        assert "fresh-role" in err
+
+    def test_checkpoint_ref_transient_read_failure_leaves_registry_untouched(
+            self, coord_backend):
+        # 2026-06-11 bug hunt C1 (P0): park runs set_role_checkpoint_ref on
+        # every session exit; ONE flaky registry read used to destroy the
+        # operator's role definition (minimal self-registration over the rich
+        # record). On a read error the checkpoint write must be SKIPPED.
+        from fulcra_coord import continuity_ops, role_ops
+        before = self._seed_role(coord_backend)
+        with patch("fulcra_coord.remote.download_json", return_value=None):
+            ok = continuity_ops.set_role_checkpoint_ref(
+                "arc-maintainer", "new-ref", backend=coord_backend)
+        assert ok is False
+        after = role_ops.read_role("arc-maintainer", backend=coord_backend)
+        for field in ("description", "standing_instructions", "policy",
+                      "sla_hours", "maintainer", "created_at"):
+            assert after[field] == before[field], field
+        assert after.get("checkpoint_ref") is None  # untouched, not "new-ref"
 
     def test_checkpoint_without_ref_shows_current(self, coord_backend, capsys):
         self._seed_role(coord_backend)
@@ -460,6 +489,12 @@ class TestParkIsBestEffort:
             self, coord_backend, capsys):
         from fulcra_coord import role_ops
         agent, role = self._hold_role(coord_backend)
+        # 2026-06-11 bug hunt C1: park no longer self-registers absent roles
+        # (set_role_checkpoint_ref skips the write on absence/read-error), so
+        # the registry record must exist — as it does in production, where the
+        # connect-time claim self-registers on CONFIRMED absence.
+        assert role_ops.upsert_role(schema.make_role(role, "keeps Arc healthy"),
+                                    backend=coord_backend)
         checkpoint = {
             "schema_version": "fulcra.continuity.checkpoint.v1",
             "checkpoint_id": "CHK-park-1",

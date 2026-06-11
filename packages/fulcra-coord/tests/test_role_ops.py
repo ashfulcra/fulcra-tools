@@ -113,6 +113,51 @@ def test_claim_self_registers_an_unregistered_role(coord_backend):
     assert [l["agent"] for l in leases] == ["a:h:r"]
 
 
+def test_read_role_distinguishes_transient_error_from_absent(coord_backend):
+    # 2026-06-11 bug hunt C1: read_role used to collapse BOTH confirmed-absent
+    # and transport failure into None, so a flaky download made a registered
+    # role look unregistered — and the claim/checkpoint call sites then
+    # clobbered the operator's rich record with a minimal self-registration.
+    role_ops.upsert_role(schema.make_role("reviewer", "d"),
+                         backend=coord_backend)
+    # Confirmed absent (download AND stat agree the record isn't there) -> None.
+    assert role_ops.read_role("ghost", backend=coord_backend) is None
+    # Transient download failure with the record demonstrably present (the
+    # stat probe still sees it) -> the READ_ERROR sentinel, never None.
+    with mock.patch("fulcra_coord.remote.download_json", return_value=None):
+        assert role_ops.read_role(
+            "reviewer", backend=coord_backend) is role_ops.READ_ERROR
+    # A raising transport reads as error too (fail-safe: never "absent").
+    with mock.patch("fulcra_coord.remote.download_json",
+                    side_effect=RuntimeError("bus down")):
+        assert role_ops.read_role(
+            "reviewer", backend=coord_backend) is role_ops.READ_ERROR
+
+
+def test_claim_on_transient_read_failure_leaves_registry_untouched(coord_backend):
+    # 2026-06-11 bug hunt C1 (P0): a rich operator-written registry record +
+    # ONE flaky read on claim used to be wholesale-replaced by a minimal
+    # make_role(name, "") self-registration. The claim must still land (the
+    # lease shard is per-agent and clobber-free) but the registry must be
+    # left strictly alone.
+    rich = schema.make_role("reviewer", "reviews artifacts",
+                            standing_instructions="run the runbook",
+                            policy="exclusive", sla_hours=24,
+                            maintainer="ops:h:r")
+    assert role_ops.upsert_role(rich, backend=coord_backend) is True
+    with mock.patch("fulcra_coord.remote.download_json", return_value=None):
+        assert role_ops.claim_role("reviewer", "a:h:r",
+                                   backend=coord_backend) is True
+    got = role_ops.read_role("reviewer", backend=coord_backend)
+    assert got["standing_instructions"] == "run the runbook"
+    assert got["policy"] == "exclusive"
+    assert got["sla_hours"] == 24
+    assert got["maintainer"] == "ops:h:r"
+    # ...and the lease itself still landed.
+    leases = role_ops.read_leases("reviewer", backend=coord_backend)
+    assert [l["agent"] for l in leases] == ["a:h:r"]
+
+
 def test_release_removes_own_lease_only(coord_backend):
     role_ops.upsert_role(schema.make_role("reviewer", "d"),
                          backend=coord_backend)
