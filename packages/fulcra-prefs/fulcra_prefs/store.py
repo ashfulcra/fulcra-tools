@@ -29,7 +29,7 @@ from __future__ import annotations
 import io
 import json
 from concurrent.futures import ThreadPoolExecutor
-from .schema import (Signal, canonical_json, temp_signal_id,
+from .schema import (Signal, canonical_json, parse_record, temp_signal_id,
                      CAPTURE_SOURCE_PREFIX, ANNOTATION_SOURCE_PREFIX)
 
 
@@ -145,3 +145,40 @@ class FulcraStore:
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         record = build_record(sig, data_type)
         self._api.fulcra_api("/ingest/v1/record", data=record, method="POST")
+
+    def read_signal_records(self, definition_id: str | None,
+                            start_time=None, end_time=None) -> list[Signal]:
+        """Authoritative signal read via get-records, so captures from ANY
+        platform are visible to compile — including shell-less tier-2 agents
+        that only POST to /ingest and never write a cache shard. Records are
+        matched to our definition by the annotation-linkage source.
+
+        Resilient by design: a transport error returns [] so compile can still
+        proceed from the shard cache (never worse than the cache-only path this
+        augments). Records that don't parse as our signals are skipped, not
+        fatal. The payload field is read defensively (`data` then `note`):
+        the live get-records shape for ingested DataRecordV1 records is pinned
+        by the live-smoke round-trip, not assumed here.
+        """
+        if not definition_id:
+            return []
+        linkage = f"{ANNOTATION_SOURCE_PREFIX}{definition_id}"
+        try:
+            records = self._api.moment_annotations(start_time, end_time)
+        except (OSError, ConnectionError, TimeoutError):
+            return []
+        out: list[Signal] = []
+        for rec in (records or []):
+            sources = rec.get("sources") or []
+            if linkage not in sources:
+                continue
+            payload = rec.get("data")
+            if payload is None:
+                payload = rec.get("note")
+            env = {"id": rec.get("id"), "recorded_at": rec.get("recorded_at"),
+                   "sources": sources, "data": payload}
+            try:
+                out.append(parse_record(env))
+            except (KeyError, ValueError, TypeError):
+                continue   # not one of our signals / unexpected shape
+        return out

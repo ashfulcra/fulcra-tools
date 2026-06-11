@@ -60,4 +60,6 @@ Retry once on failure, then tell the user the capture didn't stick.
 ## 4. What you cannot do at this tier
 
 Compile and solve run only where code runs (CLI-capable agents or cron).
-Your captures appear in compiled docs after the next compile elsewhere.
+Your single ingest POST is enough: compile reads signals straight from
+get-records, so a capture you make here shows up in everyone's compiled docs
+after the next compile elsewhere — you do NOT need to write any cache file.

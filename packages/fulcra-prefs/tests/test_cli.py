@@ -70,6 +70,39 @@ def test_get_platform_falls_back_to_global_when_no_overlay(env, capsys):
         "get --platform with no overlay should fall back to global prefs"
 
 
+def test_compile_sees_ingest_only_signal_without_a_shard(env, capsys):
+    """Feature 1 — tier-2 capture visibility. A signal that was INGESTED but has
+    NO cache shard (exactly what a shell-less tier-2 agent produces: one POST to
+    /ingest, no file write) must still reach compile via the get-records read
+    path. Pre-fix, compile read only shards, so tier-2 captures were invisible."""
+    call, fake_api, store = env
+    from fulcra_prefs.schema import Signal, temp_signal_id
+    obs = "2026-06-10T11:00:00+00:00"
+    key = "comms.tone.concise"
+    sig = Signal(id=temp_signal_id(key, obs, "chatgpt"), kind="preference",
+                 key=key, scope="global", value={"preferred": True}, strength=0.9,
+                 confidence=1.0, half_life_days=90.0, observed_at=obs,
+                 platform="chatgpt", agent=None, session=None, supersedes=None)
+    store.ingest_signal(sig, data_type="MomentAnnotation/def-123")  # tier-2: ingest only
+    assert call("compile") == 0
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert key in out["keys"], "ingest-only (tier-2) signal must be visible to compile"
+
+
+def test_compile_degrades_to_shards_when_record_read_fails(env, capsys):
+    """If the get-records read is unreachable, compile must still proceed from
+    the shard cache (never worse than the cache-only path it replaced)."""
+    call, fake_api, store = env
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")   # writes a shard
+    fake_api.fail_read = True                                 # get-records down
+    assert call("compile") == 0
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"]
+
+
 def test_inject_prints_block_or_nothing(env, capsys):
     call, *_ = env
     assert call("inject", "--platform", "claude-code") == 0

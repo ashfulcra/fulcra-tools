@@ -36,7 +36,7 @@ from .compileprefs import compile_signals
 from .consent import disclosure_signal, filter_for_audience
 from .inject import render_block
 from .outbox import Outbox
-from .schema import Signal, canonical_json, parse_record
+from .schema import Signal, canonical_json, parse_record, TEMP_ID_PREFIX
 from .solver import solve
 from .store import (FulcraStore, build_record, COMPILED_PATH, CONSENT_PATH,
                     META_PATH, SIGNALS_CACHE_PREFIX, platform_path)
@@ -55,8 +55,28 @@ def _require_meta(store: FulcraStore) -> dict | None:
     return meta
 
 
-def _load_cached_signals(store: FulcraStore) -> list[Signal]:
-    return [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
+def _dedup_key(sig: Signal) -> str:
+    # One capture has two representations: the authoritative get-records record
+    # (id = Fulcra record id) and its write-through cache shard (id = temp id).
+    # Both carry the temp id in sources, so key on that temp id to collapse them;
+    # fall back to the signal id when there's no temp id (e.g. a synthetic shard).
+    for s in sig.source_ids:
+        if s.startswith(TEMP_ID_PREFIX):
+            return s
+    return sig.id or ""
+
+
+def _load_cached_signals(store: FulcraStore, meta: dict | None = None) -> list[Signal]:
+    """Union of the authoritative record read (visible to ALL platforms, incl.
+    tier-2) and the local shard cache (covers offline-captured-not-yet-ingested
+    and ingest->read indexing lag), deduped by capture identity. Records are
+    listed first so they win the dedup over their shard twin."""
+    records = store.read_signal_records(meta.get("definition_id")) if meta else []
+    shards = [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
+    by_id: dict[str, Signal] = {}
+    for sig in (*records, *shards):
+        by_id.setdefault(_dedup_key(sig), sig)
+    return list(by_id.values())
 
 
 def _append_signal_cache(store: FulcraStore, sig: Signal) -> None:
@@ -134,7 +154,7 @@ def cmd_compile(args, api, outbox_dir, now) -> int:
     if not meta:
         return 2
     Outbox(outbox_dir).flush(store)
-    docs = compile_signals(_load_cached_signals(store), now)
+    docs = compile_signals(_load_cached_signals(store, meta), now)
     store.write_json(COMPILED_PATH, docs["global"])
     for p, doc in docs["platforms"].items():
         store.write_json(platform_path(p), doc)

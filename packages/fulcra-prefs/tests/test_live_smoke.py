@@ -74,3 +74,20 @@ def test_live_capture_signal_no_exception(live_store):
     )
     # Must not raise — this is the end-to-end ingest path.
     live_store.ingest_signal(sig, data_type=meta["data_type"])
+
+
+def test_live_ingested_signal_is_readable_via_get_records(live_store):
+    """Pins the real get-records shape Feature 1 depends on: a signal ingested
+    to our definition must come back through read_signal_records and parse. If
+    this fails, the payload field assumption (data/note) in
+    store.read_signal_records is wrong for the live API — fix it there, not by
+    loosening the test. Tier-2 capture visibility rides on this round-trip."""
+    meta = live_store.read_json("prefs/meta.json")
+    if meta is None:
+        pytest.skip("not onboarded on this account — run `fulcra-prefs onboard` first")
+    sigs = live_store.read_signal_records(meta["definition_id"])
+    # The smoke signal ingested above (or any prior real capture) should appear.
+    assert any(s.key.startswith("fulcra-prefs.smoke.") or s.kind == "preference"
+               for s in sigs), (
+        "read_signal_records returned nothing parseable for our definition — "
+        "check the get-records payload field mapping in store.read_signal_records")
