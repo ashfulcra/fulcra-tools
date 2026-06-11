@@ -56,7 +56,7 @@ from .retention import (
 # keep resolving. io.py depends only on lower layers and never imports cli,
 # so there is no import cycle.
 from .io import (
-    _load_all_tasks, _load_task_summaries,
+    _confirmed_absent, _load_all_tasks, _load_task_summaries,
     _load_summaries_for_rebuild, _load_task, _updated_at_key,
 )
 # Presence subsystem extracted from this file. Re-exported under the historical
@@ -1668,6 +1668,50 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 remote_exists = True
                 probe_failed = True
             if remote_exists:
+                # TOMBSTONE (2026-06-11, the forever-blocked-markers bug): the
+                # platform DELETE is a SOFT delete, so for a task that was
+                # deliberately deleted (archived/pruned/moved) stat keeps
+                # reporting the version history while downloads 404 — the old
+                # guard read that as "exists but unreadable" and this marker
+                # re-failed every pass, forever. _confirmed_absent now
+                # recognizes the signature (stat visible + download fails
+                # not-found-class + bus reachable => confirmed absent).
+                #
+                # RESURRECTION HAZARD (the F7-adjacent class) — why a
+                # confirmed tombstone must NOT fall through to the
+                # upload-cached-body branch below: a tombstoned path means
+                # someone deliberately deleted this task. Re-uploading the
+                # cached body would resurrect it. So consult the archive
+                # cold-index instead: ARCHIVED => the marker is simply
+                # obsolete (the truth lives in the archive — the very move
+                # that tombstoned the hot path); NOT archived => operator
+                # intent is ambiguous (manual prune? out-of-band cleanup?),
+                # and between silently resurrecting a deleted task and
+                # clearing a marker whose body remains recoverable (platform
+                # version history via `fulcra file restore`, plus the ops-log
+                # trail here), clearing is the safe side. Either way the
+                # local cached copy is evicted, same rationale as
+                # _archive_task: the cache-seeded loader would otherwise
+                # rebuild the dead id straight back into the views.
+                if not probe_failed and _confirmed_absent(task_path,
+                                                          backend=backend):
+                    try:
+                        shard = _read_index_shard(tid, backend=backend)
+                    except Exception:
+                        shard = None
+                    reason = ("tombstone: archived, marker cleared" if shard
+                              else "tombstone: not in archive, marker cleared "
+                                   "without re-upload")
+                    _info(f"  Task {tid}: remote is a soft-delete tombstone — "
+                          f"{reason} (cached body NOT re-uploaded; see "
+                          "archive/restore).")
+                    ops_log.log_op("reconcile", tid,
+                                   status="task_body_repair_tombstone",
+                                   detail=reason)
+                    cache.delete_cached_task(tid)
+                    # Not a failure: fall through to the end-of-tick marker
+                    # sweep, which clears this op's marker with the repaired ones.
+                    continue
                 # A failed/unreadable download is not proof of absence. Blind
                 # replay is safe only when the remote body is confirmed absent;
                 # otherwise this reintroduces the stale-body clobber C2 fixed.

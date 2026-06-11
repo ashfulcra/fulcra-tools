@@ -12,6 +12,57 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Tombstone-aware absence: soft-deleted remote files are now confirmably absent
+
+Live find (2026-06-11, the ~12 forever-blocked repair markers): the Fulcra
+Files platform DELETE is a SOFT delete — a deleted file keeps version history
+that `fulcra file stat` still reports, while `download` fails
+deterministically with a not-found-class error. Every absence check built on
+"stat is None ⇒ maybe absent" (`io._confirmed_absent`, the repair loop's C2
+guard) therefore read a tombstoned path — exactly what the archive move and
+every retention prune produce — as "exists but unreadable": absence was never
+confirmable, and repairs/writes against tombstoned paths re-failed every
+pass, forever. Three-part fix:
+
+- **`_parse_stat` honesty (store).** It returned a truthy `{"raw": text}`
+  fallback for ANY non-empty stdout, so message-shaped output (a
+  "not found"-style line with rc 0, a bare JSON scalar) read as "the file
+  exists". Output carrying none of the expected stat fields (`_STAT_FIELDS`:
+  the strong identity keys, weak indicators, and path echoes that
+  `stat_changed` and the parser actually use) now parses to None. No caller
+  consumed the raw-only fallback (the only `"raw"` consumer is
+  `stat_changed`'s last-resort comparison, reachable only via the removed
+  fallback itself).
+- **Tombstone signature in `io._confirmed_absent`.** A visible stat now costs
+  one fresh download probe: readable ⇒ present; failing with a POSITIVE
+  not-found-class error (the new `store._is_not_found_failure` — deliberately
+  narrower than "non-transient", so silent/unknown failures stay fail-safe)
+  while the bus probes reachable ⇒ tombstone, absence CONFIRMED; transient or
+  unknown failure ⇒ unconfirmable, exactly as before. `download` gained the
+  `last_download_error` observable (the exact counterpart of
+  `last_upload_error`, same documented semantics) so the absence layer can
+  read the failure class. This also unblocks the retention orphan-shard GC,
+  which requires positive absence of the (soft-deleted) hot task file.
+- **Repair loop: tombstone ⇒ resolve the marker, never resurrect.** A
+  tombstoned task path means someone deliberately deleted the task, so the
+  repair must NOT re-upload the cached body (resurrection-by-repair — the
+  F7-adjacent hazard class). Instead it consults the archive cold-index:
+  archived ⇒ the marker is obsolete (the truth lives in the archive; reason
+  `tombstone: archived, marker cleared`); not archived ⇒ operator intent is
+  ambiguous, and clearing with a pointed ops-log trail (reason `tombstone:
+  not in archive, marker cleared without re-upload`; the body remains
+  recoverable via the platform's version history / `fulcra file restore`)
+  beats silently resurrecting a deleted task. Both paths evict the local
+  cached copy (same rationale as `_archive_task`: the cache-seeded loader
+  would rebuild the dead id into the views) and log a distinct
+  `task_body_repair_tombstone` ops-log entry per task. Transiently-unreadable
+  live bodies keep the existing marker-kept/backoff behavior.
+
+The test fake (`fake_fulcra_backend.py`) now models the soft delete via a
+`<path>.tombstone` sibling (stat answers with prior-version metadata,
+download 404s, list hides it); its default `delete` stays a hard unlink so
+every pre-tombstone pin keeps its semantics.
+
 ### Reconcile: repair-queue starvation fix — failing markers rotate out of the head
 
 Live find (2026-06-11, post-recovery): the task-body-repair loop in

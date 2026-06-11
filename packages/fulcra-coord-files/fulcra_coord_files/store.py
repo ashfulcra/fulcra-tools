@@ -201,6 +201,40 @@ def _is_transient_failure(stderr: str) -> bool:
     return bool(_TRANSIENT_STDERR_RE.search(stderr or ""))
 
 
+# What counts as a POSITIVE not-found-class failure — the download half of the
+# TOMBSTONE signature (2026-06-11). The platform DELETE is a SOFT delete (see
+# ``delete`` below): ``stat`` on a deleted file still answers with its version
+# history, while ``download`` fails deterministically with one of these
+# shapes. The absence layer (``fulcra_coord.io._confirmed_absent``) may treat
+# "stat visible + download not-found + bus reachable" as CONFIRMED absence —
+# but only on a positive match here. Deliberately NOT "anything non-transient":
+# confirming absence unlocks destructive decisions (clearing repair markers,
+# pruning orphaned shards, skipping merge checks), so an UNKNOWN failure
+# (empty stderr, bare exit code, usage error) must stay "unconfirmable", the
+# same fail-safe direction every absence check in this codebase leans.
+_NOT_FOUND_STDERR_RE = re.compile(
+    r"HTTP Error 404"
+    r"|Not Found"
+    r"|No such file"
+    r"|does not exist"
+    r"|\bdeleted\b",
+    re.IGNORECASE,
+)
+
+
+def _is_not_found_failure(stderr: Optional[str]) -> bool:
+    """True only for a POSITIVE not-found-class failure (the tombstone's
+    download signature). Transient weather is never not-found — a stderr that
+    somehow matches both (e.g. a proxy page quoting several statuses) is
+    classified transient, because mis-reading weather as absence is the
+    destructive direction."""
+    if not stderr:
+        return False
+    if _is_transient_failure(stderr):
+        return False
+    return bool(_NOT_FOUND_STDERR_RE.search(stderr))
+
+
 def _transient_retries() -> int:
     """Extra attempts after the first (total attempts = 1 + this). Default 1:
     one retry absorbs an isolated 504; more just stalls deadline'd callers."""
@@ -292,6 +326,21 @@ def stat(remote_path: str, *, backend: Optional[list[str]] = None) -> Optional[d
     return _parse_stat(result.stdout)
 
 
+# Best-effort failure observable for DOWNLOADS — the exact counterpart of
+# ``last_upload_error`` below, with the same documented semantics: the stderr
+# tail (last 200 chars) of the most recent FAILED download (or the exception's
+# repr / a bare exit code when stderr was silent), never cleared on success,
+# last failing writer wins under concurrency — a diagnostic hint, not per-call
+# truth. Added 2026-06-11 for the tombstone signature: the absence layer
+# (``fulcra_coord.io._confirmed_absent``) reads it immediately after its own
+# failed download probe to distinguish a soft-deleted file's deterministic
+# not-found from transient transport weather. Same shape-not-signature
+# rationale as the upload observable: ``download`` returns a bare
+# Optional[str] to dozens of callers, and the transport must stay free of any
+# import back into fulcra_coord.
+last_download_error: Optional[str] = None
+
+
 def download(
     remote_path: str,
     *,
@@ -301,14 +350,27 @@ def download(
     """Download remote_path and return contents as string, or None on failure.
 
     Transient transport failures retry within the caller's ``timeout`` budget
-    (see ``_run_with_transient_retry``)."""
+    (see ``_run_with_transient_retry``). On failure, records a short reason in
+    the module-level ``last_download_error`` observable (see its comment
+    above) before returning None."""
+    global last_download_error
     cmd = (backend or _backend_cmd()) + ["download", remote_path, "-"]
-    result, _exc = _run_with_transient_retry(
+    result, exc = _run_with_transient_retry(
         cmd, default_timeout=_read_timeout(), budget=timeout
     )
-    if result is None or result.returncode != 0:
-        return None
-    return result.stdout
+    if result is not None and result.returncode == 0:
+        return result.stdout
+    if exc is not None:
+        last_download_error = f"{type(exc).__name__}: {exc}"[-200:]
+    elif result is not None:
+        # Keep the TAIL: the actionable message (HTTP status, not-found) sits
+        # at the end of a possibly-long trace. A silent-stderr failure still
+        # records the exit code so the observable never reads stale.
+        err_tail = (result.stderr or "").strip()[-200:]
+        last_download_error = err_tail or f"exit {result.returncode}"
+    else:  # pragma: no cover - budget gone before the first attempt ran
+        last_download_error = "download budget exhausted before first attempt"
+    return None
 
 
 def download_json(
@@ -568,17 +630,50 @@ def list_json(
 # Stat parsing
 # ---------------------------------------------------------------------------
 
+# The fields that make output STAT-SHAPED. Union of everything the parser
+# below extracts on purpose and everything any consumer reads off a stat dict:
+# ``stat_changed``'s strong identity keys (version_id / version / etag) and
+# weak indicators (size / uploaded_at / updated_at / date_uploaded /
+# previous_versions), plus the path echoes (the fake backend's JSON ``path``,
+# the live text header's ``path_display``). Output carrying NONE of these is
+# not a stat — see ``_parse_stat``.
+_STAT_FIELDS = frozenset({
+    "version_id", "version", "etag",
+    "size", "uploaded_at", "updated_at", "date_uploaded", "previous_versions",
+    "path", "path_display",
+})
+
+
 def _parse_stat(text: str) -> Optional[dict[str, Any]]:
-    """Parse fulcra file stat output into a dict."""
+    """Parse fulcra file stat output into a dict, or None for NON-stat output.
+
+    HONESTY CONTRACT (2026-06-11 tombstone fix): every existence gate in
+    fulcra-coord reads ``stat(...) is not None`` as "the file exists", so any
+    non-None return here is a positive existence claim. The old parser
+    returned a truthy ``{"raw": text}`` fallback for ANY non-empty stdout —
+    a "not found"-style message printed with rc 0, a usage hint, a bare JSON
+    scalar all read as "exists". Now output that carries none of the expected
+    stat fields (``_STAT_FIELDS``) returns None. No caller consumed the
+    raw-only fallback: the only "raw" consumer is ``stat_changed``'s
+    last-resort comparison, which is reachable only when BOTH sides are
+    raw-only dicts — i.e. only via the fallback being removed (the ``raw``
+    key is still present alongside real fields for that comparison's benefit
+    on partially-parsed output)."""
     text = text.strip()
     if not text:
         return None
 
-    # Try JSON first
+    # Try JSON first. Only a dict can be a stat record — and only one carrying
+    # at least one expected field (a bare scalar / list / message-object is
+    # backend noise, not an existence proof).
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
-        pass
+        parsed = None
+    if parsed is not None:
+        if isinstance(parsed, dict) and any(k in _STAT_FIELDS for k in parsed):
+            return parsed
+        return None
 
     # Parse human-readable text output
     data: dict[str, Any] = {"raw": text}
@@ -606,7 +701,9 @@ def _parse_stat(text: str) -> Optional[dict[str, Any]]:
                     data["previous_versions"] = norm_val
             else:
                 data[norm_key] = norm_val
-    return data if len(data) > 1 else {"raw": text}
+    if any(k in _STAT_FIELDS for k in data):
+        return data
+    return None
 
 
 # ---------------------------------------------------------------------------
