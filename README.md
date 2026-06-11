@@ -14,30 +14,11 @@ lives under [`packages/`](packages) (Python and TypeScript both appear here),
 and each package keeps its own README, build, and tests. This file is the
 front door; the package READMEs carry the detail.
 
+## NOTE - Using Coord, Continuity and Prefs effectively turns any agent (including 
+CLaude Code and Codex) into a looping multithreaded agent with persistent memory a
+cross sessions, much like Openclaw or Hermes Agent. 
+
 ## The packages
-
-**Fulcra Collect** — a local daemon that imports your personal-data streams
-into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md))
-hosts every importer plugin, runs them on schedule in worker subprocesses,
-stores secrets in the OS keychain, and serves the onboarding wizard +
-dashboard at `127.0.0.1:9292`
-([`packages/web-ui`](packages/web-ui/README.md)).
-[`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar
-companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the
-shared API client + ingest pipeline every importer builds against; and
-[`packages/dayone`](packages/dayone/README.md),
-[`packages/csv-importer`](packages/csv-importer/README.md), and
-[`packages/media-helpers`](packages/media-helpers/README.md) are data-source
-importers (Day One journals, arbitrary CSVs, and watched/listened/read history
-from ~13 services). Project overview: [`docs/collect.md`](docs/collect.md).
-
-**Fulcra Attention** ([`packages/attention`](packages/attention/README.md)) —
-a Chrome (MV3) extension that captures what you read while browsing —
-foreground-tab attention, with title and time-on-page — and posts it directly
-to the Fulcra API after a browser sign-in. No daemon involved: the Python half
-of the package is just the Collect pointer plugin that tells you to install
-the extension. Three privacy tiers (param-strip, categorize, ignore) are
-built in.
 
 **Fulcra Coord** ([`packages/fulcra-coord`](packages/fulcra-coord/README.md))
 — the shared agent-coordination layer. Independent agents (Claude Code, Codex,
@@ -68,6 +49,29 @@ consent-gated export where every disclosure is logged (the Privacy Ledger).
 Ships an agent skill ([`skill/SKILL.md`](packages/fulcra-prefs/skill/SKILL.md))
 with raw-HTTP recipes for shell-less agents, and a session hook that boots
 Claude Code with your preferences loaded.
+
+**Fulcra Collect** — a local daemon that imports your personal-data streams
+into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md))
+hosts every importer plugin, runs them on schedule in worker subprocesses,
+stores secrets in the OS keychain, and serves the onboarding wizard +
+dashboard at `127.0.0.1:9292`
+([`packages/web-ui`](packages/web-ui/README.md)).
+[`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar
+companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the
+shared API client + ingest pipeline every importer builds against; and
+[`packages/dayone`](packages/dayone/README.md),
+[`packages/csv-importer`](packages/csv-importer/README.md), and
+[`packages/media-helpers`](packages/media-helpers/README.md) are data-source
+importers (Day One journals, arbitrary CSVs, and watched/listened/read history
+from ~13 services). Project overview: [`docs/collect.md`](docs/collect.md).
+
+**Fulcra Attention** ([`packages/attention`](packages/attention/README.md)) —
+a Chrome (MV3) extension that captures what you read while browsing —
+foreground-tab attention, with title and time-on-page — and posts it directly
+to the Fulcra API after a browser sign-in. No daemon involved: the Python half
+of the package is just the Collect pointer plugin that tells you to install
+the extension. Three privacy tiers (param-strip, categorize, ignore) are
+built in.
 
 ## Getting started
 
