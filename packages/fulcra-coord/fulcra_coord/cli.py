@@ -532,7 +532,13 @@ def _reconcile_rebuild_source_preserving_acks(
     prior_acks: dict[str, set[str]] = {}
     try:
         if summaries_view is _UNSET:
-            source = _load_task_summaries(backend=backend)
+            # BYPASS the fallback stampede breaker: this helper is the
+            # reconcile path, whose job is exactly to repair the views — it
+            # must never be locked out because listener ticks hold the
+            # per-host fallback claim (the 2026-06-11 self-sustaining
+            # stampede; see io._load_task_summaries).
+            source = _load_task_summaries(backend=backend,
+                                          bypass_fallback_throttle=True)
         else:
             source = (summaries_view or {}).get("summaries") or []
         for summary in source:

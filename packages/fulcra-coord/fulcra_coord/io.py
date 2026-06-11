@@ -18,10 +18,15 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import json
+import os
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import cache, log as ops_log, read_source, remote, schema, views
+from . import cache, env_float, log as ops_log, read_source, remote, schema, views
+from .timeutil import now_iso as _now_iso
 # Direct store-module import for the transport's failure observables and
 # stderr classifiers (``last_download_error`` must be read as a LIVE module
 # attribute — ``remote``'s re-exports would not track the store mutating it;
@@ -371,7 +376,126 @@ def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]
     return _LoadedTasks(task_map.values())
 
 
-def _load_task_summaries(backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
+#: Default age (minutes) past which a held fallback-throttle marker is STALE
+#: and may be taken over — the crash-recovery bound, sized to comfortably
+#: cover one full direct-listing fallback (listing + ~450 body fetches).
+FALLBACK_WINDOW_MINUTES_DEFAULT = 10.0
+
+
+def _fallback_window_minutes() -> float:
+    """The stampede-breaker takeover window. ``<= 0`` disables the throttle
+    entirely (operator escape hatch, mirroring FULCRA_COORD_VIEW_STALE_MIN=0)."""
+    return env_float("FULCRA_COORD_FALLBACK_WINDOW_MINUTES",
+                     FALLBACK_WINDOW_MINUTES_DEFAULT)
+
+
+def _claim_fallback_throttle(
+    window_min: float,
+) -> tuple[bool, Optional[float], Optional[str]]:
+    """Try to claim the per-host direct-listing-fallback slot.
+
+    Returns ``(claimed, holder_age_minutes, token)``: ``(True, None, token)``
+    when this process now holds the marker and may run the full fallback;
+    ``(False, age, None)`` when another process on this host is already
+    mid-fallback (the caller must serve its stale cache instead of joining the
+    stampede).
+
+    THE STAMPEDE THIS BREAKS (live, 2026-06-11): with the bus views
+    stale/broken, EVERY listener tick on this host (the operator's Mac runs
+    8 listeners, each with notify-inbox ticks) entered the fallback
+    simultaneously — one listing + ~450 per-task fetches EACH. The host
+    saturated the API gateway with its own concurrent subprocesses (observed
+    15-18 concurrent fulcra-api calls around the clock; one notify-inbox tick
+    running 40+ minutes), every call queued and timed out, the views could
+    never repair, and the loop sustained itself indefinitely. The operator
+    misdiagnosed it as a backend 504 outage — TWICE. One claim per host at a
+    time means one repair-shaped fallback runs while everyone else degrades
+    gracefully to their stale cache.
+
+    MECHANICS — the wake.py pidfile idiom (O_CREAT|O_EXCL as the inter-process
+    mutex, stale-by-mtime takeover): exactly one racer wins the atomic create;
+    a holder older than ``window_min`` is presumed CRASHED mid-fallback (the
+    completion path below always releases) and its marker is unlinked +
+    re-claimed — the loser of THAT re-create race skips too. The marker body
+    ({"at", "holder"}) is diagnostics only; freshness is the mtime, robust to
+    garbage content.
+
+    FAIL OPEN: if the local marker store itself is unusable (unwritable cache
+    dir), grant the claim — the pre-breaker fallback behavior is strictly
+    safer than permanently serving stale data because a LOCAL disk problem
+    disabled the repair path."""
+    path = cache.fallback_throttle_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return True, None, None  # marker store unusable — fail open
+    # Two passes: the first may discover a stale holder and unlink it; the
+    # second re-attempts the O_EXCL create. A FRESH holder on either pass
+    # means throttled.
+    for _ in range(2):
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age_min = (time.time() - path.stat().st_mtime) / 60.0
+            except OSError:
+                continue  # vanished between create and stat — retry the claim
+            if age_min < window_min:
+                return False, age_min, None  # live holder — do not join the stampede
+            # Stale takeover: the holder crashed mid-fallback (completion
+            # always releases). Unlink and let the next pass's O_EXCL decide
+            # the race — same reclaim discipline as wake.py's pidfile.
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        except OSError:
+            return True, None, None  # marker store unusable — fail open
+        token = f"{os.getpid()}-{uuid.uuid4().hex}"
+        try:
+            os.write(fd, json.dumps(
+                {"at": _now_iso(), "holder": os.getpid(),
+                 "token": token}).encode())
+        finally:
+            os.close(fd)
+        return True, None, token
+    # Both passes lost the create race (a concurrent taker-over won): treat as
+    # held-by-them; age unknown.
+    return False, None, None
+
+
+def _release_fallback_throttle(token: Optional[str]) -> None:
+    """Release the fallback claim. Called on fallback COMPLETION — success or
+    failure alike: the window only guards CONCURRENCY (one fallback at a time
+    per host), never rate across time; a failed fallback must free the slot so
+    the next tick can retry immediately instead of waiting out a stale
+    takeover. Best-effort and idempotent.
+
+    The ownership token is load-bearing: a slow-but-live fallback can exceed
+    the takeover window, at which point another process may unlink/reclaim the
+    stale marker. The original finisher must not blindly unlink that newer
+    holder's marker, or the host can stampede again while the replacement
+    fallback is still running."""
+    if token is None:
+        return
+    path = cache.fallback_throttle_path()
+    try:
+        body = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if body.get("token") != token:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _load_task_summaries(
+    backend: Optional[list[str]] = None, *,
+    bypass_fallback_throttle: bool = False,
+) -> list[dict[str, Any]]:
     """Load the compact task-summary list WITHOUT fetching task bodies.
 
     The performance fast-path for reads (status/agents/needs-me/resume/search/
@@ -398,16 +522,50 @@ def _load_task_summaries(backend: Optional[list[str]] = None) -> list[dict[str, 
     fetches via the pool) but CORRECT, and the warn makes the degradation
     visible. A view with NO ``generated_at`` is a pre-stamp bus → trusted as
     before (back-compat); if the direct listing itself fails, the stale view is
-    still better than nothing → use it with a louder warn (degraded, not blind)."""
+    still better than nothing → use it with a louder warn (degraded, not blind).
+
+    STAMPEDE BREAKER (2026-06-11 self-sustaining stampede): the fallback above
+    is repair-shaped (one listing + ~450 body fetches at current bus size) and
+    this loader runs in EVERY listener tick — so when the views break, every
+    listener on a host (the operator's Mac runs 8) fell back at once, the host
+    saturated the gateway with its own concurrent calls, the views could never
+    repair, and the loop sustained itself indefinitely; the operator misread it
+    as a backend 504 outage twice. The fallback is now gated on a per-host
+    claim (``_claim_fallback_throttle``): one caller per host runs the full
+    fallback at a time; everyone else gets the STALE view back with a warn —
+    clearly the lesser evil vs joining the stampede. ``bypass_fallback_throttle``
+    is for the RECONCILE path only: reconcile's job is exactly to repair the
+    views, so it must never be locked out by listener fallbacks (it neither
+    claims nor releases the listeners' marker)."""
     summaries_view = remote.download_json(
         remote.view_remote_path("summaries"), backend=backend)
     if summaries_view and summaries_view.get("summaries") is not None:
         stale_min = views.view_staleness_minutes(summaries_view)
         if stale_min is None:
             return summaries_view["summaries"]
+        window_min = _fallback_window_minutes()
+        holding_token: Optional[str] = None
+        if not bypass_fallback_throttle and window_min > 0:
+            claimed, holder_age, token = _claim_fallback_throttle(window_min)
+            if not claimed:
+                age_txt = (f"{holder_age:.1f}m ago"
+                           if holder_age is not None else "age unknown")
+                _warn(f"summaries view is {int(stale_min)}m stale but the "
+                      "direct-listing fallback is rate-limited — another "
+                      f"process on this host claimed it ({age_txt}); "
+                      "using the stale view (results may be incomplete)")
+                return summaries_view["summaries"]
+            holding_token = token
         _warn(f"summaries view is {int(stale_min)}m stale — "
               "reading task bodies directly")
-        direct = _load_all_tasks_by_listing(backend=backend)
+        try:
+            direct = _load_all_tasks_by_listing(backend=backend)
+        finally:
+            # Completion releases — success OR failure. The marker guards
+            # concurrency only; a failed fallback must free the slot for the
+            # next tick rather than wedge the host until stale takeover.
+            if holding_token is not None:
+                _release_fallback_throttle(holding_token)
         if direct:
             return [schema.task_summary(t) for t in direct]
         _warn(f"summaries view is {int(stale_min)}m stale AND the direct task "

@@ -12,6 +12,40 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Fallback stampede breaker: one direct-listing fallback per host at a time
+
+Live find (2026-06-11, the self-sustaining stampede): when the bus views go
+stale/broken, `_load_task_summaries`' stale-view guard sends every reader to
+the direct-listing fallback — one `tasks/` listing plus ~450 per-task
+stat/body fetches at current bus size. That loader runs in EVERY listener
+tick, and the operator's Mac runs eight listeners: every tick of every
+listener fell back simultaneously, the host saturated the API gateway with
+its own concurrent subprocesses (observed 15-18 concurrent `fulcra-api`
+calls around the clock; a single notify-inbox tick running 40+ minutes), all
+calls queued and timed out at the gateway, the views could never repair, and
+the stampede sustained itself indefinitely. The operator misread the result
+as a backend 504 outage — twice.
+
+Fix — a per-host throttle on the fallback (`io._claim_fallback_throttle`):
+
+- **One claim per host at a time.** Before entering the fallback, a caller
+  must claim a LOCAL marker (`<cache>/roots/<slug>/fallback-throttle.json` —
+  the XDG cache is per-host/per-OS-user, so all of a host's listeners share
+  it; scoped per remote root so one bus's throttle never gates another).
+  The claim reuses wake.py's pidfile idiom: `O_CREAT|O_EXCL` as the
+  inter-process mutex, stale-by-mtime takeover for crashed holders.
+- **Throttled callers serve the stale view** (with a warn naming the rate
+  limit and the holder's age) and make ZERO listing/body calls — clearly the
+  lesser evil vs joining the stampede; the one running fallback repairs the
+  cache for everyone.
+- **Completion releases — success or failure.** The window
+  (`FULCRA_COORD_FALLBACK_WINDOW_MINUTES`, default 10; `<= 0` disables) only
+  guards concurrency, never rate across time; takeover handles crashes.
+- **The reconcile path bypasses the throttle**
+  (`bypass_fallback_throttle=True` from
+  `_reconcile_rebuild_source_preserving_acks`): reconcile's job is exactly
+  to repair the views, so it must never be locked out by listener fallbacks.
+
 ### Archive gates: a tombstoned cold copy no longer counts as "already archived" (the F7-undoing hazard)
 
 Found during the tombstone-absence work — the same stat-dishonesty class,
