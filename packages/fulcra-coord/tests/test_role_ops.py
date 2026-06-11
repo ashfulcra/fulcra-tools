@@ -113,6 +113,51 @@ def test_claim_self_registers_an_unregistered_role(coord_backend):
     assert [l["agent"] for l in leases] == ["a:h:r"]
 
 
+def test_read_role_distinguishes_transient_error_from_absent(coord_backend):
+    # 2026-06-11 bug hunt C1: read_role used to collapse BOTH confirmed-absent
+    # and transport failure into None, so a flaky download made a registered
+    # role look unregistered — and the claim/checkpoint call sites then
+    # clobbered the operator's rich record with a minimal self-registration.
+    role_ops.upsert_role(schema.make_role("reviewer", "d"),
+                         backend=coord_backend)
+    # Confirmed absent (download AND stat agree the record isn't there) -> None.
+    assert role_ops.read_role("ghost", backend=coord_backend) is None
+    # Transient download failure with the record demonstrably present (the
+    # stat probe still sees it) -> the READ_ERROR sentinel, never None.
+    with mock.patch("fulcra_coord.remote.download_json", return_value=None):
+        assert role_ops.read_role(
+            "reviewer", backend=coord_backend) is role_ops.READ_ERROR
+    # A raising transport reads as error too (fail-safe: never "absent").
+    with mock.patch("fulcra_coord.remote.download_json",
+                    side_effect=RuntimeError("bus down")):
+        assert role_ops.read_role(
+            "reviewer", backend=coord_backend) is role_ops.READ_ERROR
+
+
+def test_claim_on_transient_read_failure_leaves_registry_untouched(coord_backend):
+    # 2026-06-11 bug hunt C1 (P0): a rich operator-written registry record +
+    # ONE flaky read on claim used to be wholesale-replaced by a minimal
+    # make_role(name, "") self-registration. The claim must still land (the
+    # lease shard is per-agent and clobber-free) but the registry must be
+    # left strictly alone.
+    rich = schema.make_role("reviewer", "reviews artifacts",
+                            standing_instructions="run the runbook",
+                            policy="exclusive", sla_hours=24,
+                            maintainer="ops:h:r")
+    assert role_ops.upsert_role(rich, backend=coord_backend) is True
+    with mock.patch("fulcra_coord.remote.download_json", return_value=None):
+        assert role_ops.claim_role("reviewer", "a:h:r",
+                                   backend=coord_backend) is True
+    got = role_ops.read_role("reviewer", backend=coord_backend)
+    assert got["standing_instructions"] == "run the runbook"
+    assert got["policy"] == "exclusive"
+    assert got["sla_hours"] == 24
+    assert got["maintainer"] == "ops:h:r"
+    # ...and the lease itself still landed.
+    leases = role_ops.read_leases("reviewer", backend=coord_backend)
+    assert [l["agent"] for l in leases] == ["a:h:r"]
+
+
 def test_release_removes_own_lease_only(coord_backend):
     role_ops.upsert_role(schema.make_role("reviewer", "d"),
                          backend=coord_backend)
@@ -204,6 +249,65 @@ def test_connect_lease_claim_failure_never_fails_the_session_boot(coord_backend)
 
 
 # ---------------------------------------------------------------------------
+# connect capability merge (2026-06-11 bug hunt C4 — RMW-class instance #5)
+# ---------------------------------------------------------------------------
+
+
+def _connect(coord_backend, **over):
+    from fulcra_coord import presence
+    base = dict(agent="a:h:r", workstream=None, summary="",
+                role=None, can_review=False, format="table")
+    base.update(over)
+    args = SimpleNamespace(**base)
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "a:h:r"
+    try:
+        assert presence.cmd_connect(args, backend=coord_backend) == 0
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+def _capabilities(coord_backend):
+    rec = remote.download_json(
+        remote.presence_remote_path("a-h-r"), backend=coord_backend)
+    return (rec or {}).get("capabilities")
+
+
+def test_bare_connect_preserves_declared_capabilities(coord_backend):
+    # 2026-06-11 bug hunt C4 (P1): the shipped SessionStart hook runs a BARE
+    # `connect`. It used to rebuild the presence record with capabilities=[],
+    # silently wiping the roles a prior `connect --role X` declared — which
+    # also broke @role inbox delivery (inbox._my_roles reads capabilities).
+    _connect(coord_backend, role=["reviewer"])
+    assert _capabilities(coord_backend) == ["reviewer"]
+    _connect(coord_backend)                       # the SessionStart hook shape
+    assert _capabilities(coord_backend) == ["reviewer"]
+
+
+def test_connect_with_new_role_unions_capabilities(coord_backend):
+    _connect(coord_backend, role=["x"])
+    _connect(coord_backend, role=["y"])
+    assert _capabilities(coord_backend) == ["x", "y"]
+
+
+def test_connect_clear_roles_drops_capabilities(coord_backend):
+    _connect(coord_backend, role=["x"])
+    _connect(coord_backend, clear_roles=True)
+    assert _capabilities(coord_backend) == []
+
+
+def test_connect_clear_roles_flag_is_wired(coord_backend):
+    from fulcra_coord import entry
+    args = entry.build_parser().parse_args(["connect", "--clear-roles"])
+    assert args.clear_roles is True
+    args = entry.build_parser().parse_args(["connect"])
+    assert args.clear_roles is False
+
+
+# ---------------------------------------------------------------------------
 # CLI: `fulcra-coord roles` (list/set/claim/release)
 # ---------------------------------------------------------------------------
 
@@ -278,6 +382,58 @@ def test_cmd_roles_claim_and_release(coord_backend):
                            backend=coord_backend)
         assert rc == 0
         assert role_ops.read_leases("reviewer", backend=coord_backend) == []
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+def test_cmd_roles_claim_merges_role_into_presence_capabilities(coord_backend):
+    # 2026-06-11 bug hunt C5 (P2, entangled with C4): `roles claim` wrote ONLY
+    # the lease shard, while @role inbox delivery reads ONLY presence
+    # capabilities (inbox._my_roles) — split brain: the board said HELD but
+    # directives @that-role never reached the holder. A claim must also merge
+    # the role into the claimer's presence capabilities (merge-safe RMW, the
+    # C4 helper), and a release must remove it.
+    from fulcra_coord import cli, inbox
+    cli.cmd_roles(_roles_args("set", "reviewer", description="d"),
+                  backend=coord_backend)
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        assert cli.cmd_roles(_roles_args("claim", "reviewer"),
+                             backend=coord_backend) == 0
+        # Board (lease) and inbox (capabilities) AGREE the role is held:
+        leases = role_ops.read_leases("reviewer", backend=coord_backend)
+        assert [l["agent"] for l in leases] == ["me:h:r"]
+        assert "reviewer" in inbox._my_roles("me:h:r", backend=coord_backend)
+
+        assert cli.cmd_roles(_roles_args("release", "reviewer"),
+                             backend=coord_backend) == 0
+        assert role_ops.read_leases("reviewer", backend=coord_backend) == []
+        assert "reviewer" not in inbox._my_roles("me:h:r",
+                                                 backend=coord_backend)
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+def test_cmd_roles_claim_capability_merge_preserves_other_roles(coord_backend):
+    # The capability merge must be the C4 RMW union — claiming a second role
+    # (or releasing one) never wipes the others.
+    from fulcra_coord import cli, inbox
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
+    try:
+        cli.cmd_roles(_roles_args("claim", "alpha"), backend=coord_backend)
+        cli.cmd_roles(_roles_args("claim", "beta"), backend=coord_backend)
+        assert inbox._my_roles("me:h:r", backend=coord_backend) == {
+            "alpha", "beta"}
+        cli.cmd_roles(_roles_args("release", "alpha"), backend=coord_backend)
+        assert inbox._my_roles("me:h:r", backend=coord_backend) == {"beta"}
     finally:
         if prev is None:
             os.environ.pop("FULCRA_COORD_AGENT", None)

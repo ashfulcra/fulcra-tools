@@ -12049,6 +12049,28 @@ def test_role_vacancy_past_sla_escalates_to_maintainer(coord_backend):
     assert "stale-role" in escalations[0].get("title", "")
 
 
+def test_role_vacancy_escalation_reaches_the_maintainers_inbox(coord_backend):
+    """2026-06-11 bug hunt C3 (P1): the escalation used to upload ONLY a
+    first-class directives/<id>.json record — but nothing delivery-side reads
+    that prefix for correctness yet (the inbox, the listener, SessionStart all
+    fold over the legacy TASK set). The maintainer was never actually told;
+    the vacancy alert was write-only. The fix routes the escalation through
+    the legacy task path like every other directive creator (a proposed task
+    assigned to the maintainer via the write pipeline) WITH the standard
+    Phase-3b dual-write mirror — so it lands where the maintainer looks."""
+    from fulcra_coord import cli, inbox
+    _seed_role(coord_backend, "stale-role", sla_hours=24,
+               maintainer="ops:h:r")
+    _seed_lease(coord_backend, "stale-role", "dead:h:r", hours_old=30)
+
+    report = cli._role_health_check(backend=coord_backend)
+    assert report["escalated"] == 1
+
+    items = inbox._load_inbox("ops:h:r", backend=coord_backend)
+    assert any("stale-role" in (i.get("title") or "") for i in items), (
+        f"escalation never reached the maintainer's inbox; inbox={items}")
+
+
 def test_role_vacancy_within_sla_does_not_escalate(coord_backend):
     from fulcra_coord import cli, loop_ops
     _seed_role(coord_backend, "fresh-vacancy", sla_hours=24,

@@ -59,18 +59,28 @@ def set_role_checkpoint_ref(
 
     Read-modify-write of the operator's registry record is safe here because
     we mutate ONLY checkpoint_ref (+ updated_at) on the freshly-read record —
-    the `roles set` _pick/preserve contract, applied to one field. An absent
-    registry record self-registers minimally (the claim_role posture: park /
-    checkpoint must work on buses whose operator never wrote a registry).
+    the `roles set` _pick/preserve contract, applied to one field.
+
+    NEVER self-registers (2026-06-11 bug hunt C1, P0): this rides the park
+    hook on EVERY session exit, so when the registry read fails — or the
+    record is genuinely absent — the only safe move is to SKIP the write with
+    a warn. The old self-registration meant one flaky read at session exit
+    wholesale-replaced the operator's rich role definition with a minimal
+    make_role(name, ""). A role reaches park registered anyway: the
+    connect-time claim self-registers on CONFIRMED absence.
     Best-effort bool, never raises — this rides the park hook."""
     try:
         if not name or not str(name).strip() or not ref:
             return False
         rec = _role_ops.read_role(name, backend=backend)
-        if rec is None:
-            _warn(f"checkpoint: role '{name}' is not registered — "
-                  "self-registering a minimal record")
-            rec = schema.make_role(str(name).strip(), "")
+        if not isinstance(rec, dict):
+            # None (confirmed absent) or READ_ERROR (transport failure):
+            # either way there is no trustworthy record to preserve fields
+            # from, so writing would clobber — skip.
+            _warn(f"checkpoint: role '{name}' registry record is absent or "
+                  "unreadable — skipping the checkpoint_ref write (register "
+                  "the role via `roles set` / a claim first)")
+            return False
         rec["checkpoint_ref"] = str(ref)
         rec["updated_at"] = datetime.now(timezone.utc).isoformat(
             timespec="microseconds").replace("+00:00", "Z")
@@ -109,7 +119,9 @@ def print_role_resume(
     resume behaviour cannot diverge between them."""
     try:
         role = _role_ops.read_role(name, backend=backend)
-        if not role:
+        # READ_ERROR (truthy sentinel, 2026-06-11 bug hunt C1) and None both
+        # mean "nothing to render" on this read-only path.
+        if not isinstance(role, dict):
             return
         for line in role_resume_lines(role, backend=backend):
             _info(f"  {line}")
@@ -146,6 +158,12 @@ def cmd_checkpoint(args: Any, backend: Optional[list[str]] = None) -> int:
         return 0
 
     role = _role_ops.read_role(name, backend=backend)
+    if role is _role_ops.READ_ERROR:
+        # 2026-06-11 bug hunt C1: a failed read is not absence — report it as
+        # such so the operator re-runs instead of concluding the role is gone.
+        _err(f"checkpoint: role '{name}' registry record could not be read — "
+             "re-run (transient bus failure).")
+        return 1
     if role is None:
         _err(f"checkpoint: role '{name}' is not registered.")
         return 1

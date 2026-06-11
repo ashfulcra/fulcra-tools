@@ -212,6 +212,79 @@ def _load_own_presence(
     return remote.download_json(remote.presence_remote_path(slug), backend=backend)
 
 
+def _read_own_capabilities(
+    me: str, backend: Optional[list[str]] = None) -> list[str]:
+    """This agent's currently declared capabilities, best-effort ([] on any
+    read failure). The shared read half of the C4/C5 merge-safe capability
+    RMW — connect and the add/remove helpers below all start from here so
+    "what do I already declare" has exactly one definition."""
+    try:
+        rec = _load_own_presence(me, backend=backend) or {}
+        return [c for c in (rec.get("capabilities") or []) if c]
+    except Exception:
+        return []
+
+
+def _rewrite_own_capabilities(
+    me: str, capabilities: list[str],
+    backend: Optional[list[str]] = None) -> bool:
+    """Rewrite this agent's presence record with new capabilities, preserving
+    workstreams/summary/session (the cmd_workstream preserve pattern). The
+    write half shared by add_capabilities/remove_capability."""
+    try:
+        current = _load_own_presence(me, backend=backend) or {}
+        record = schema.make_presence(
+            me,
+            workstreams=list(current.get("workstreams") or []),
+            summary=current.get("summary", "") or "",
+            session=current.get("session"),
+            capabilities=capabilities,
+        )
+        return _write_presence(record, backend=backend)
+    except Exception:
+        return False
+
+
+def add_capabilities(
+    me: str, roles: list[str], backend: Optional[list[str]] = None) -> bool:
+    """UNION ``roles`` into this agent's presence capabilities (merge-safe RMW).
+
+    2026-06-11 bug hunt C5 (with C4): ``roles claim`` wrote only the lease
+    shard while @role inbox delivery reads only presence capabilities
+    (inbox._my_roles) — split brain: the board said HELD, the directives
+    never arrived. The claim surface calls this so the two truths converge;
+    a no-op when every role is already declared (skips the write). Built on
+    the C4 merge discipline, so it can never wipe sibling declarations."""
+    try:
+        wanted = {r for r in (roles or []) if r}
+        if not wanted:
+            return True
+        existing = set(_read_own_capabilities(me, backend=backend))
+        if wanted <= existing:
+            return True   # already declared — no write needed
+        return _rewrite_own_capabilities(
+            me, sorted(existing | wanted), backend=backend)
+    except Exception:
+        return False
+
+
+def remove_capability(
+    me: str, role: str, backend: Optional[list[str]] = None) -> bool:
+    """Remove ONE role from this agent's presence capabilities (the release
+    half of C5). Deliberately simple: a release drops the capability even if
+    other machinery might still reference it — the operator released the
+    role, so @role delivery to this agent must stop. Siblings survive (RMW
+    union discipline, never a wholesale rebuild from flags)."""
+    try:
+        existing = _read_own_capabilities(me, backend=backend)
+        if role not in existing:
+            return True   # nothing to remove
+        return _rewrite_own_capabilities(
+            me, sorted(c for c in existing if c != role), backend=backend)
+    except Exception:
+        return False
+
+
 def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     """Record this agent's presence on connect (workstream-on-connect).
 
@@ -243,18 +316,32 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     if getattr(args, "can_review", False):
         roles.append("review")
 
-    # VERSION SELF-INCORPORATION (operator directive 2026-06-10: "i'm not
-    # going to go around and wake the entire fleet for each incremental
-    # upgrade"): check the bus version pointer and update BEFORE the presence
-    # write, so the roster reflects post-update staleness. UNthrottled here —
-    # a fresh session must never boot stale because a tick checked recently.
-    # If an update ran it takes effect next invocation (no re-exec); if this
-    # host is behind and COULDN'T update, the stale marker renders as a
-    # '(vX behind canonical Y)' summary suffix — staleness stays VISIBLE on
-    # the roster (the spec's degrade-gracefully rail). Doubly guarded: the
-    # callee never raises, and this block must never fail a session boot.
+    # RMW-class instance #5 (2026-06-11 bug hunt C4, P1): make_presence below
+    # rebuilds the WHOLE record, so a bare `connect` — exactly what the
+    # shipped SessionStart hook runs — used to stamp capabilities=[] over
+    # whatever a previous `connect --role X` declared. That silently dropped
+    # the agent from reviewer routing AND from @role inbox delivery
+    # (inbox._my_roles reads these capabilities). Read-modify-write instead:
+    # UNION the flags with the existing record's capabilities; dropping a
+    # declaration is now an EXPLICIT act (--clear-roles), never a side effect
+    # of reconnecting. Best-effort read: if the own-presence read fails the
+    # union degrades to just the flags — the same exposure every presence
+    # write already has when the bus is down (and a lost union heals on the
+    # next flagged connect).
+    if getattr(args, "clear_roles", False):
+        roles = sorted(set(roles))   # explicit drop of prior declarations
+    else:
+        # Shared read half with the C5 add/remove capability helpers below.
+        roles = sorted(set(_read_own_capabilities(me, backend=backend))
+                       | set(roles))
+
+    # Staleness suffix from the PERSISTED marker (2026-06-11 bug hunt S2):
+    # read BEFORE the presence write so a host already known-behind renders
+    # '(vX behind canonical Y)' on the roster THIS connect. A marker written
+    # by this connect's own update attempt (below, AFTER the presence write)
+    # rides the FOLLOWING connect/heartbeat — the marker file persists state
+    # across invocations precisely so the suffix never needs to block boot.
     try:
-        _selfupdate.maybe_self_update(backend=backend)
         stale = _selfupdate.stale_summary_suffix()
         if stale:
             summary = f"{summary} {stale}".strip()
@@ -285,6 +372,25 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
             _continuity_ops.print_role_resume(role_name, backend=backend)
         except Exception:
             pass
+
+    # VERSION SELF-INCORPORATION (operator directive 2026-06-10: "i'm not
+    # going to go around and wake the entire fleet for each incremental
+    # upgrade"): check the bus version pointer and update if behind.
+    # UNthrottled on the manifest CHECK — a fresh session must never boot
+    # stale because a tick checked recently (attempts toward a canonical a
+    # recent try failed to reach ARE throttled — selfupdate S1 (c)). Runs
+    # AFTER the presence write (2026-06-11 bug hunt S2): the update step can
+    # legitimately take minutes (git pull + a cold uv build, bounded 300s),
+    # and running it first left the booting session INVISIBLE on the roster
+    # for that whole window. Presence is the boot-critical write; any stale
+    # marker this attempt leaves surfaces as the summary suffix on the NEXT
+    # connect/heartbeat (read above). If an update ran it takes effect next
+    # invocation (no re-exec). Doubly guarded: the callee never raises, and
+    # this block must never fail a session boot.
+    try:
+        _selfupdate.maybe_self_update(backend=backend)
+    except Exception:
+        pass
 
     # Self-healing listener re-arm (spec 2026-06-09): connect runs on every
     # session start, so this is the idempotent "heal a dead listener" hook.
