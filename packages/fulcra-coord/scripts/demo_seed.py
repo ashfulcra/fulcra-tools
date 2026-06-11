@@ -67,6 +67,10 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fulcra_coord import remote, schema, views
+# The view-name -> remote-path mapping lives in the package's write pipeline;
+# import it rather than keeping a drift-prone copy here. writepipe never
+# imports cli, so this pulls in no command-surface machinery.
+from fulcra_coord.writepipe import _view_name_to_remote
 
 
 # ---------------------------------------------------------------------------
@@ -273,17 +277,6 @@ def build_scenario_tasks(now: datetime) -> list[dict[str, Any]]:
 # Upload / reset
 # ---------------------------------------------------------------------------
 
-def _view_name_to_remote(name: str) -> str:
-    """Map a build_all_views key to its remote path (mirrors cli._view_name_to_remote)."""
-    if name == "index":
-        return remote.view_remote_path("index")
-    if name.startswith("workstreams/"):
-        return remote.workstream_remote_path(name[len("workstreams/"):])
-    if name.startswith("agents/"):
-        return remote.agent_remote_path(name[len("agents/"):])
-    return remote.view_remote_path(name)
-
-
 def upload_tasks_and_views(
     tasks: list[dict[str, Any]],
     *,
@@ -316,13 +309,14 @@ def upload_tasks_and_views(
 def reset_demo(backend: Optional[list[str]] = None) -> None:
     """Best-effort delete of prior demo task files.
 
-    We do not rely on a remote ``delete`` subcommand (the package's remote layer
-    doesn't wrap one). Reset is achieved by overwriting all known task ids and
-    every view in the subsequent seed — the deterministic-id design makes that a
-    true reset for the demo's own files. This function additionally blanks any
-    demo task whose id is known, so a status filter on the root won't surface a
-    stale prior body if the new seed has fewer tasks (it never does, but this
-    keeps the contract honest).
+    The remote layer does wrap ``delete`` nowadays (``remote.delete``), but the
+    demo deliberately does not use it: reset is achieved by overwriting all
+    known task ids and every view in the subsequent seed — the deterministic-id
+    design makes that a true reset for the demo's own files, with no risk of a
+    failed delete leaving the root half-cleared mid-demo. This function
+    additionally blanks any demo task whose id is known, so a status filter on
+    the root won't surface a stale prior body if the new seed has fewer tasks
+    (it never does, but this keeps the contract honest).
 
     NOTE: this only touches the demo's own deterministic ids + views; it never
     deletes unrelated files under the root.

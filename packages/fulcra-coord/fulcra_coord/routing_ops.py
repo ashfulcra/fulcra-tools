@@ -362,15 +362,6 @@ def _resolve_review_request(artifact: str, *, backend=None) -> Optional[dict[str
     return None
 
 
-def _resolve_review_author(artifact: str, *, backend=None) -> Optional[str]:
-    """Find the AUTHOR who requested review of this artifact, or None."""
-    request = _resolve_review_request(artifact, backend=backend)
-    if not request:
-        return None
-    author = request.get("owner_agent")
-    return author if author else None
-
-
 def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     """Land a reviewer's verdict as a BUS directive to the artifact's author.
 

@@ -68,35 +68,6 @@ STORE = FakeStore()
 # Minimal agent runtime that routes backend calls to the fake store
 # ---------------------------------------------------------------------------
 
-def make_fake_backend_fn(store: FakeStore):
-    """Return a function that patches remote I/O to use the fake store."""
-    import fulcra_coord.remote as _remote
-
-    original_upload = _remote.upload
-    original_download = _remote.download
-    original_stat = _remote.stat
-    original_list = _remote.list_files
-
-    class patch:
-        @staticmethod
-        def upload(content: str, path: str, *, backend=None, timeout=None) -> bool:
-            return store.upload(content, path)
-
-        @staticmethod
-        def download(path: str, *, backend=None, timeout=None) -> str | None:
-            return store.download(path)
-
-        @staticmethod
-        def stat(path: str, *, backend=None) -> dict | None:
-            return store.stat(path)
-
-        @staticmethod
-        def list_files(prefix: str, *, backend=None, timeout=None) -> list[str]:
-            return store.list(prefix)
-
-    return patch, original_upload, original_download, original_stat, original_list
-
-
 def apply_patch(store: FakeStore):
     import fulcra_coord.remote as _remote
     _remote.upload = lambda content, path, **kw: store.upload(content, path)

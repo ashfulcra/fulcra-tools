@@ -41,9 +41,12 @@ All remote I/O goes through subprocesses. Tests inject a fake backend via the
 
 Timeout env vars:
   FULCRA_COORD_TIMEOUT_SECONDS           — read ops (default: 30)
-  FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS — reconcile (default: 90)
   FULCRA_COORD_TRANSIENT_RETRIES         — extra attempts after a transient
                                            transport failure (default: 1)
+
+(The reconcile deadline — FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS — is a
+coordination-layer budget read in ``fulcra_coord.cli``, not a per-call
+transport timeout; the store has no reconcile-specific knob.)
 """
 
 from __future__ import annotations
@@ -70,8 +73,8 @@ def _env_int(name: str, default: int) -> int:
     reason the callers below use this instead of a bare ``int()``.
 
     NOTE: the original ``fulcra_coord.env_int`` took a third ``override`` arg; it
-    was intentionally dropped here because the transport's only callers
-    (``_read_timeout`` / ``_reconcile_timeout``) never used it. Do not assume
+    was intentionally dropped here because the transport's callers
+    (``_read_timeout`` / ``_transient_retries``) never used it. Do not assume
     signature parity with ``fulcra_coord.env_int`` — re-add the param if a future
     caller needs it.
     """
@@ -148,10 +151,6 @@ def _write_timeout() -> int:
     # directives), producing "silent write loss" symptoms with a healthy
     # backend. 60s clears observed worst-case with margin.
     return max(60, _read_timeout())
-
-
-def _reconcile_timeout() -> int:
-    return _env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
 
 
 # ---------------------------------------------------------------------------
