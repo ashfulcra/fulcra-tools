@@ -439,5 +439,3 @@ def _parse_logged_at(value: Any) -> Optional["datetime"]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
-
-
