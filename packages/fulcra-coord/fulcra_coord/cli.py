@@ -7,6 +7,7 @@ override for testing without live Fulcra access.
 from __future__ import annotations
 
 import concurrent.futures
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -34,7 +35,7 @@ from .continuity_ops import cmd_checkpoint, cmd_park  # noqa: F401
 # (fulcra_coord.cli._info / ._err / ...) keep resolving unchanged — output.py /
 # timeutil.py do not import cli, so there is no import cycle.
 from .output import err as _err, warn as _warn, info as _info, print_json as _print_json
-from .timeutil import iso_z as _iso_z
+from .timeutil import iso_z as _iso_z, now_iso as _now_iso
 from .textfmt import age_str as _age_str
 # Retention / archival subsystem extracted from this file. Re-exported under the
 # historical underscore-prefixed names so every remaining caller here
@@ -570,6 +571,55 @@ _PARITY_DEADLINE_HEADROOM_SECONDS = 5.0
 #: and overlapped the next cron tick. The loop checks the budget floor between
 #: items and DEFERS the remainder (markers kept) to the next tick.
 _REPAIR_DEADLINE_HEADROOM_SECONDS = 5.0
+
+#: Cap (minutes) on the per-marker repair-failure backoff window
+#: (2026-06-11 live find, repair-queue starvation). A marker whose repair
+#: FAILED is stamped with ``repair_attempts``/``repair_last_attempt_at`` and
+#: sits out min(2**attempts, this cap) minutes before being re-attempted.
+#: WHY: ~12 deterministically-failing markers sat at the HEAD of the
+#: list_op_markers() glob order, each re-failure burning 30-60s of remote ops
+#: (download + stat probe + upload, with transient retries) — so every pass,
+#: even a 900s one, spent its whole budget re-failing the same head and
+#: deferred the ~60 healthy markers behind it. The queue could never drain
+#: past the failing head. The cap keeps even a permanently-broken marker
+#: retried about once per ~32 min (roughly alternate reconcile ticks), bounded
+#: debt instead of a starved queue. Module constant so tests can patch it
+#: (0 disables the window entirely).
+_REPAIR_BACKOFF_CAP_MINUTES = 32.0
+
+
+def _repair_backoff_minutes(attempts: Any) -> float:
+    """Backoff window (minutes) earned by ``attempts`` failed repair tries.
+
+    min(2**attempts, cap): exponential so a one-off transient costs ~2 min of
+    extra latency while a chronic failure converges to the cap. Garbage /
+    missing counts coerce to 0 — no window — failing toward retrying."""
+    try:
+        a = int(attempts)
+    except (TypeError, ValueError):
+        a = 0
+    if a <= 0:
+        return 0.0
+    # min(a, 16) guards 2** against an absurd stored count before the cap.
+    return min(float(2 ** min(a, 16)), _REPAIR_BACKOFF_CAP_MINUTES)
+
+
+def _repair_in_backoff(marker: dict[str, Any], now: datetime) -> bool:
+    """True when this op marker's last FAILED repair attempt is recent enough
+    that the marker is still inside its backoff window (skip it this pass).
+
+    Parse-don't-compare: the stamp goes through views._parse_dt, never a
+    lexical comparison; an unparseable/missing stamp returns False — i.e. the
+    marker is treated as never-attempted and retried NOW. Failing toward a
+    retry is the safe direction: the worst case is one wasted re-probe,
+    whereas failing toward skip could silently shelve a repairable debt."""
+    window_minutes = _repair_backoff_minutes(marker.get("repair_attempts"))
+    if window_minutes <= 0:
+        return False
+    last = views._parse_dt(marker.get("repair_last_attempt_at") or "")
+    if last is None:
+        return False
+    return (now - last) < timedelta(minutes=window_minutes)
 
 
 def _parity_sample_size() -> int:
@@ -1530,7 +1580,58 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # failure — it must not trip the body_repair_failures early-return.
     repair_budget_floor = deadline - _REPAIR_DEADLINE_HEADROOM_SECONDS
     repair_deferred_ops: set[str] = set()
+
+    # 2026-06-11 live find (repair-queue starvation): list_op_markers() glob
+    # order put a dozen deterministically-failing markers at the HEAD of this
+    # loop, and each re-failure cost 30-60s of remote ops — every pass burned
+    # its whole budget re-failing the same head and the healthy majority
+    # behind it never got a turn. Two defenses, both keyed off the failure
+    # stamps _note_repair_failure writes onto the marker:
+    #   * ORDERING — never-attempted markers run FIRST (first claim on
+    #     budget); previously-failed-but-eligible ones run after, on whatever
+    #     budget is left.
+    #   * BACKOFF — a marker still inside its min(2**attempts, cap)-minute
+    #     window since its last failure is SKIPPED outright this pass (its
+    #     marker is KEPT — skip is debt, not success). Without the skip, a
+    #     pass with spare budget would still re-burn 30-60s per chronic
+    #     failure every ~20-minute tick, forever.
+    repair_now = datetime.now(timezone.utc)
+    repair_backoff_ops: set[str] = set()
+    fresh_repairs: list[dict] = []
+    retry_repairs: list[dict] = []
     for m in needs_repair:
+        if _repair_in_backoff(m, repair_now):
+            repair_backoff_ops.add(m.get("op_id"))
+        elif m.get("repair_attempts"):
+            retry_repairs.append(m)
+        else:
+            fresh_repairs.append(m)
+    if repair_backoff_ops:
+        _info(f"  {len(repair_backoff_ops)} repair marker(s) in failure "
+              "backoff — skipped this pass (retried after their window).")
+
+    body_repair_reasons: dict[str, str] = {}
+
+    def _note_repair_failure(marker: dict, task_id: str, reason: str) -> None:
+        """Record one failed repair: the per-task reason (ops-log diagnosis,
+        truncated — reasons are for operators, not payloads) plus the attempt
+        stamps the next pass's ordering/backoff partition reads. The marker
+        update is best-effort: a failed stamp write only costs the backoff,
+        never the failure accounting."""
+        body_repair_failures.append(task_id)
+        body_repair_reasons[task_id] = reason[:120]
+        try:
+            attempts = int(marker.get("repair_attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        marker["repair_attempts"] = attempts + 1
+        marker["repair_last_attempt_at"] = _now_iso()
+        try:
+            cache.write_op_marker(marker["op_id"], marker)
+        except Exception:
+            pass
+
+    for m in fresh_repairs + retry_repairs:
         if m.get("status") not in ("failed", "unverified"):
             continue
         tid = m.get("task_id")
@@ -1543,7 +1644,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             continue
         cached_task = cache.read_cached_task(tid)
         if not cached_task:
-            body_repair_failures.append(tid)
+            _note_repair_failure(m, tid, "no cached body to replay")
             continue
         task_path = remote.task_remote_path(tid)
         # 2026-06-11 bug hunt C2 (P1): the replay used to upload the cached
@@ -1560,17 +1661,24 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         except Exception:
             current_remote = None
         if not current_remote:
+            probe_failed = False
             try:
                 remote_exists = remote.stat(task_path, backend=backend) is not None
             except Exception:
                 remote_exists = True
+                probe_failed = True
             if remote_exists:
                 # A failed/unreadable download is not proof of absence. Blind
                 # replay is safe only when the remote body is confirmed absent;
                 # otherwise this reintroduces the stale-body clobber C2 fixed.
                 _warn(f"  Task {tid}: remote body exists but could not be "
                       "downloaded for merge — keeping the repair marker.")
-                body_repair_failures.append(tid)
+                _note_repair_failure(
+                    m, tid,
+                    "absence unconfirmable (stat probe failed)"
+                    if probe_failed else
+                    "remote stat exists but fresh download unreadable "
+                    "(cannot merge, cannot confirm absence)")
                 continue
         if current_remote:
             merged = _try_merge(cached_task, current_remote)
@@ -1596,14 +1704,25 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Task {tid}: cached replay conflicts with a changed "
                       "remote body and cannot merge safely — keeping the "
                       "repair marker for manual resolution.")
-                body_repair_failures.append(tid)
+                _note_repair_failure(
+                    m, tid, "unsafe merge: cached and remote bodies diverged, "
+                    "cached side newer (manual resolution)")
                 continue
+        upload_err: Optional[str] = None
         try:
             ok = remote.upload_json(body_to_upload, task_path, backend=backend)
-        except Exception:
+        except Exception as ue:
             ok = False
+            upload_err = f"{type(ue).__name__}: {ue}"
         if not ok:
-            body_repair_failures.append(tid)
+            if upload_err is None:
+                # Transport-level reason: the store's stderr-tail observable
+                # (best-effort — under concurrency it may carry a sibling's
+                # failure, still the right throttle/HTTP hint).
+                upload_err = getattr(_files_store, "last_upload_error", None)
+            tail = (upload_err or "").strip()[-80:]
+            _note_repair_failure(
+                m, tid, f"upload failed: {tail}" if tail else "upload failed")
             continue
         cache.write_cached_task(body_to_upload)
         try:
@@ -1624,14 +1743,19 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         )
 
     if body_repair_failures:
-        _warn(
-            "  Task body repair failures: "
-            f"{sorted(set(body_repair_failures))}"
-        )
+        failed_ids = sorted(set(body_repair_failures))
+        _warn(f"  Task body repair failures: {failed_ids}")
+        # Surface the first few WHYs inline: an operator tailing the log must
+        # see the reason, not just the id (the 2026-06-11 diagnosis had to
+        # guess from an id-only aggregate).
+        for _ftid in failed_ids[:3]:
+            _warn(f"    {_ftid}: {body_repair_reasons.get(_ftid, 'unknown')}")
         ops_log.log_op(
             "reconcile",
             status="task_body_repair_failed",
-            detail=f"failed task body repairs: {sorted(set(body_repair_failures))}",
+            detail=(f"failed task body repairs: {failed_ids}; reasons: "
+                    + json.dumps({t: body_repair_reasons.get(t, "unknown")
+                                  for t in failed_ids}, sort_keys=True)),
         )
         # Do NOT clear op markers. These are authoritative-body repair debts, not
         # mere view debts, so rebuilding views from cache would only make a
@@ -2112,8 +2236,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     for m in needs_repair:
         # A deadline-DEFERRED repair was never attempted — its marker is the
         # only record of the debt, so clearing it here would silently drop the
-        # pending body write. Keep it for the next tick's fresh budget.
+        # pending body write. Same for a backoff-SKIPPED one: it was parked,
+        # not repaired, and clearing it would silently forgive the debt. Keep
+        # both for a later tick's budget / window expiry.
         if m.get("op_id") in repair_deferred_ops:
+            continue
+        if m.get("op_id") in repair_backoff_ops:
             continue
         cache.clear_op_marker(m["op_id"])
 
