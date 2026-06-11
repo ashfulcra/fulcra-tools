@@ -170,10 +170,10 @@ def _is_snapshot_payload(payload: dict[str, Any]) -> bool:
     """Return True if *payload* is a full-task snapshot, False if it is a legacy delta.
 
     A full-task snapshot carries the task schema marker (``"schema"`` key) AND
-    the task id (``"id"`` key).  Phase-1 delta payloads carry neither — they are
-    just a subset of changed fields (title, status, current_summary, etc.).  This
-    discriminator is clean: none of the Phase-1 delta keys overlap with ``schema``
-    or ``id``, so there are no false positives.
+    the task id (``"id"`` key).  Legacy delta payloads (older CLIs) carry neither
+    — they are just a subset of changed fields (title, status, current_summary,
+    etc.).  This discriminator is clean: none of the delta keys overlap with
+    ``schema`` or ``id``, so there are no false positives.
 
     The distinction drives ``fold_task``'s merge strategy:
     * snapshot → ``state = dict(payload)`` (replace wholesale; latest snapshot wins)
@@ -229,16 +229,17 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
        duplicates are silently skipped.  A falsy ``idempotency_key`` (``None``
        or ``""``) means "no dedup key — always apply this event."
 
-    3. **Snapshot vs. delta merge strategy** — Phase 2a introduced full-task
-       snapshot payloads (distinguishable via :func:`_is_snapshot_payload`).
-       The merge strategy depends on the payload type:
+    3. **Snapshot vs. delta merge strategy** — the write path emits full-task
+       snapshot payloads (distinguishable via :func:`_is_snapshot_payload`);
+       older CLIs emitted field-subset deltas. The merge strategy depends on
+       the payload type:
 
        * **Snapshot** (``payload.get("schema")`` and ``payload.get("id")`` are
          both truthy) → ``state = dict(payload)`` — the snapshot *replaces* the
          accumulated state wholesale.  The latest snapshot in sort order wins,
          and any fields present in earlier events but absent from the latest
          snapshot are dropped (they are stale).
-       * **Delta** (Phase-1 legacy — payload carries only a field subset) →
+       * **Delta** (older-CLI legacy — payload carries only a field subset) →
          shallow last-write-wins field merge into the accumulated state, exactly
          as before.  This preserves full backward-compat with events already on
          the live bus.
@@ -305,7 +306,7 @@ def fold_task(evs: list[dict[str, Any]]) -> dict[str, Any]:
             # any fields from earlier events are stale and should be dropped.
             state = dict(payload)
         else:
-            # Legacy Phase-1 delta: shallow last-write-wins merge.  Terminal
+            # Legacy older-CLI delta: shallow last-write-wins merge.  Terminal
             # stickiness is emergent — a later delta without a ``status`` key
             # simply does not overwrite an existing terminal status.
             for k, v in payload.items():
@@ -329,12 +330,13 @@ def fold_is_complete(state: dict[str, Any]) -> bool:
     result has the full schema, whether the latest event was that snapshot or a
     later delta that merged a few fields on top of it.  It is NOT "the latest
     event was a snapshot": a delta arriving after a snapshot still leaves a
-    complete fold.  Phase 2b uses this to decide whether to trust the fold
-    result or fall back to the mutable task file for a task whose events are
-    delta-only (not yet snapshotted by the dual-write path).
+    complete fold.  The events read path (``FULCRA_COORD_READ_SOURCE=events``)
+    uses this to decide whether to trust the fold result or fall back to the
+    mutable task file for a task whose events are delta-only (never snapshotted
+    by the dual-write path).
 
     Returns False for:
-    * delta-only folds (Phase-1 events, no snapshot ever emitted for this task)
+    * delta-only folds (older-CLI events, no snapshot ever emitted for this task)
     * the empty-list sentinel (``{"id": None, "_applied_event_count": 0}``)
     """
     return bool(state.get("schema")) and bool(state.get("id"))

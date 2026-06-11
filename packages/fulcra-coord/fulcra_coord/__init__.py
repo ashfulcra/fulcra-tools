@@ -31,7 +31,7 @@ def task_file_path(task_id: str) -> str:
 def read_source() -> str:
     """Where reads reconstruct a task body from. 'file' (default) = the mutable
     tasks/<id>.json; 'events' = the event fold when complete, else file. Per-host
-    env knob for the Phase-2b cutover; reversible by unsetting it.
+    env knob for the events read cutover; reversible by unsetting it.
 
     Default-off by design: this changes what a READ returns, so an operator must
     explicitly opt in (FULCRA_COORD_READ_SOURCE=events). Any unrecognised value
