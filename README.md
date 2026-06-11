@@ -1,96 +1,121 @@
 # Ash's Fulcra Tools
 
-WARNING: Everything in this repo was vibe coded by Fulcra's lawyer, 
-using Fulcra's file and datastream primitives. 
+WARNING: Everything in this repo was vibe coded by Fulcra's lawyer,
+using Fulcra's file and datastream primitives.
 
 Nothing in this repo is official Fulcra software, and it may or may
-not be supported in the future. 
+not be supported in the future.
 
-This repo contains various helper projects and tools built on top of Fulcra. 
-Each project keeps its own overview, build,
-and tests; this README is the index that points you to them.
+This is a uv-workspace monorepo of helper projects built on
+[Fulcra](https://fulcradynamics.com) — the personal data platform: your
+health, location, calendar, media, attention, and any custom data streams you
+define, in one store you own, with an API your agents can use. Everything
+lives under [`packages/`](packages) (Python and TypeScript both appear here),
+and each package keeps its own README, build, and tests. This file is the
+front door; the package READMEs carry the detail.
 
-## Getting started with Fulcra
+## The packages
 
-[Fulcra](https://fulcradynamics.com) is a personal data platform: your health,
-location, calendar, media, attention, and any custom data streams you define,
-in one store that you own, with an API your agents can use. It's free up to
-5 GB of storage — for you *and* your agents.
+**Fulcra Collect** — a local daemon that imports your personal-data streams
+into Fulcra. The daemon ([`packages/collect`](packages/collect/README.md))
+hosts every importer plugin, runs them on schedule in worker subprocesses,
+stores secrets in the OS keychain, and serves the onboarding wizard +
+dashboard at `127.0.0.1:9292`
+([`packages/web-ui`](packages/web-ui/README.md)).
+[`packages/menubar`](packages/menubar/README.md) is its macOS menu-bar
+companion; [`packages/fulcra-common`](packages/fulcra-common/README.md) is the
+shared API client + ingest pipeline every importer builds against; and
+[`packages/dayone`](packages/dayone/README.md),
+[`packages/csv-importer`](packages/csv-importer/README.md), and
+[`packages/media-helpers`](packages/media-helpers/README.md) are data-source
+importers (Day One journals, arbitrary CSVs, and watched/listened/read history
+from ~13 services). Project overview: [`docs/collect.md`](docs/collect.md).
+
+**Fulcra Attention** ([`packages/attention`](packages/attention/README.md)) —
+a Chrome (MV3) extension that captures what you read while browsing —
+foreground-tab attention, with title and time-on-page — and posts it directly
+to the Fulcra API after a browser sign-in. No daemon involved: the Python half
+of the package is just the Collect pointer plugin that tells you to install
+the extension. Three privacy tiers (param-strip, categorize, ignore) are
+built in.
+
+**Fulcra Coord** ([`packages/fulcra-coord`](packages/fulcra-coord/README.md))
+— the shared agent-coordination layer. Independent agents (Claude Code, Codex,
+OpenClaw, ChatGPT, CI) coordinate durable tasks over Fulcra Files as a bus,
+with no shared memory, direct calls, or central broker: lifecycle hooks, a
+cross-agent inbox with directives and broadcasts, roles with leases, a
+forge-agnostic review handshake (`request-review` / `review-done`), and a
+durable per-agent listener that can wake an idle agent when work arrives.
+Agents start at [`SKILL.md`](packages/fulcra-coord/SKILL.md). The bus
+transport is its own small package,
+[`packages/fulcra-coord-files`](packages/fulcra-coord-files/README.md) — a
+documented no-CAS object-store contract over the Fulcra Files CLI.
+
+**Fulcra Continuity**
+([`packages/fulcra-continuity`](packages/fulcra-continuity/README.md)) — turns
+a long-running agent task into a structured checkpoint (objective, decisions,
+artifacts, open questions, next actions) that another session or agent can
+resume from without guessing. A standalone library + CLI (`checkpoint` /
+`resume`) that pairs with coord without depending on it: they share one
+checkpoint shape, so coord's `snapshot`, `pause --snapshot`, `handoff`, and
+`resume --with-continuity` write and read the same files.
+
+**Fulcra Prefs** ([`packages/fulcra-prefs`](packages/fulcra-prefs/README.md),
+*alpha*) — a user-owned preference layer: typed preference signals with
+half-life decay, captured by any of your agents, deterministically compiled
+into per-platform preference docs, plus a group-decision solver and
+consent-gated export where every disclosure is logged (the Privacy Ledger).
+Ships an agent skill ([`skill/SKILL.md`](packages/fulcra-prefs/skill/SKILL.md))
+with raw-HTTP recipes for shell-less agents, and a session hook that boots
+Claude Code with your preferences loaded.
+
+## Getting started
+
+Everything here sits on a Fulcra account and the `fulcra` CLI, which covers
+auth, data queries, custom data types, tags, and files:
 
 ```bash
 uv tool install fulcra-api   # installs the `fulcra` CLI
 fulcra auth login            # browser sign-in; an account is created on first login
 ```
 
-From there, `fulcra user-info` confirms you're in, `fulcra catalog` shows
-what's queryable, and `fulcra --help` covers the rest (data queries, custom
-data types, tags, files).
+`fulcra user-info` confirms you're in, `fulcra catalog` shows what's
+queryable, and `fulcra --help` covers the rest. For a guided setup, give your
+agent the
+[fulcra-onboarding skill](https://github.com/fulcradynamics/agent-skills/blob/main/skills/fulcra-onboarding/SKILL.md).
+Platform docs: [docs.fulcradynamics.com](https://docs.fulcradynamics.com).
 
-- **Want a guided setup?** Give your agent the
-  [fulcra-onboarding skill](https://github.com/fulcradynamics/agent-skills/blob/main/skills/fulcra-onboarding/SKILL.md)
-  — it walks a new user through auth, first custom data types, first records,
-  and a dashboard.
-- **Want your agents to share your preferences?** Once you're authed,
-  [`fulcra-prefs`](packages/fulcra-prefs/README.md) gives every agent you use
-  one decaying, consent-gated preference store — two commands to start, and a
-  session hook that boots Claude Code with your preferences loaded.
-- **Agent integrating with the platform?**
-  [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps every primitive (auth,
-  files, annotations, queries, MCP) by agent capability — CLI, raw HTTP, or
-  MCP-only.
-- **Docs:** [docs.fulcradynamics.com](https://docs.fulcradynamics.com).
-
-The packages below let you do more — ingest new data sources, capture your
-browsing attention, coordinate agents over a shared bus, and checkpoint
-long-running agent work.
-
-> **Working in this repo with an AI agent (Claude, Codex, Cursor, …)?**
-> Read [`AGENTS.md`](AGENTS.md) first. It documents the non-obvious
-> environmental requirements — the required `uv` extras, the launchd daemon,
-> and the PATH/keychain gotchas — that otherwise cost time to rediscover on
-> first run.
-
-> **First-time setup, one command:** `bash scripts/setup.sh` — installs the
-> right Python + `uv` extras, the `fulcra` CLI, and runs the test suite to
-> verify. Then `uv run fulcra-collect daemon` (foreground) or install as a
-> launchd agent per [`docs/TESTING.md`](docs/TESTING.md). Diagnose later
-> with `uv run fulcra-collect doctor`.
-
-## What's in here
-
-| Project | What it is | Start here |
-|---|---|---|
-| **Fulcra Collect** | A local-ingest daemon + plugins that import your personal-data streams into [Fulcra](https://fulcradynamics.com). Spans the daemon ([`packages/collect`](packages/collect)), its web wizard, the macOS menu-bar companion, the shared API client, and the data-source plugins. | [`docs/collect.md`](docs/collect.md) |
-| **Fulcra Attention** | A relayless browser extension (Chrome MV3, [`packages/attention/chrome`](packages/attention/chrome)) that captures what you read — foreground tab/idle attention — and posts it **directly to the Fulcra API** via an Auth0 device-flow sign-in, with **no daemon**. Broken out to its own package, [`packages/attention`](packages/attention); Collect only surfaces it as an "install the extension" pointer plugin ([`packages/attention/fulcra_attention`](packages/attention/fulcra_attention)). | [`packages/attention/README.md`](packages/attention/README.md) |
-| **Fulcra Coord** | Shared agent-coordination layer — independent agents (Claude Code, Codex, OpenClaw, ChatGPT, CI) coordinate durable tasks over Fulcra Files as a bus, with no shared memory or direct calls. Lifecycle hooks, cross-agent inbox + broadcast directives, a `fulcra-coord agents` status digest, and a durable per-agent listener. Forge-agnostic: the review/merge handshake rides the bus (`request-review`/`review-done`), so GitHub is optional. | [`packages/fulcra-coord/README.md`](packages/fulcra-coord/README.md) · [`SKILL.md`](packages/fulcra-coord/SKILL.md) (agents) |
-| **Fulcra Continuity** | Turns a long-running agent task into a structured **checkpoint** another session or agent can resume from without guessing — objective, decisions, artifacts, open questions, next actions, memory writes — so work survives compaction or a handoff (the "Context Cliff Rescue"). A standalone library + CLI (`checkpoint` / `resume`) that **pairs with Fulcra Coord without depending on it**: they share one checkpoint schema, so coord's `snapshot` / `pause --snapshot` / `resume --with-continuity` write and read the same shape. | [`packages/fulcra-continuity/README.md`](packages/fulcra-continuity/README.md) |
-| **Fulcra Prefs** *(alpha)* | A user-owned preference layer: typed preference signals with decay, captured by any of your agents, deterministically compiled into per-platform preference docs, with a deterministic group-decision solver and consent-gated export (every disclosure logged — a Privacy Ledger). Ships an agent skill with raw-HTTP recipes for shell-less agents. | [`packages/fulcra-prefs/README.md`](packages/fulcra-prefs/README.md) · [`SKILL.md`](packages/fulcra-prefs/skill/SKILL.md) (agents) |
-
-> **More coming.** Ash's other Fulcra projects will be added here as they are
-> consolidated into this repo — each as its own row above, linking to
-> its own overview.
+For this repo, one command: `bash scripts/setup.sh` — installs the right
+Python + `uv` extras and the `fulcra` CLI, then runs the test suite to verify
+(macOS-first; the menubar's PyObjC deps are macOS-only). From there,
+`uv run fulcra-collect daemon` runs Collect in the foreground, or install it
+as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
+`uv run fulcra-collect doctor`. Coord, Continuity, and Prefs install
+independently — see their READMEs, and `fulcra-coord doctor` checks the bus
+setup end to end.
 
 ## For agents
 
-This repo is worked on by multiple autonomous agents (Claude Code, Codex, OpenClaw, Cursor, CI). If you're one of them, before you touch anything:
+[`AGENTS.md`](AGENTS.md) is your entry point. It documents the non-obvious
+environment — the required `uv` extras, the launchd daemon, the PATH/keychain
+gotchas — plus the coordination and backlog conventions. Coordinate durable
+work on the bus via [`fulcra-coord`](packages/fulcra-coord/SKILL.md): check
+your inbox, announce presence, post directives instead of working blind.
+[`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps the whole platform surface
+(auth, files, annotations, queries, MCP) by agent capability tier — CLI, raw
+HTTP, or MCP-only.
 
-- **Read [`AGENTS.md`](AGENTS.md) first.** It documents the non-obvious environment: the required `uv` extras, the launchd daemon, and the PATH/keychain gotchas.
-- **Set up once:** `bash scripts/setup.sh`. Diagnose later with `uv run fulcra-collect doctor`.
-- **Coordinate on the bus.** Agents coordinate durable work over Fulcra Files via [`fulcra-coord`](packages/fulcra-coord/README.md) — check your inbox (`fulcra-coord inbox`), announce presence, and post directives instead of working blind. **Gotcha:** the bus needs a *file-capable* Fulcra CLI. The public PyPI `fulcra-api` build lacks the `file` command group, so every bus write **fails silently**. Run `fulcra-coord doctor`; if it reports `File commands: FAIL`, install a file-capable build and set `FULCRA_CLI_COMMAND` — see [`packages/fulcra-coord/docs/fulcra-cli-branch.md`](packages/fulcra-coord/docs/fulcra-cli-branch.md).
-- **Land changes via PR (where a forge exists), not direct pushes to `main`.** The rule is an **independent review by a *different* agent identity** — that review is the control, not who clicks merge (a clean approval is merged by whoever's around; never merge your own unreviewed code). Route with `fulcra-coord request-review <artifact>` (an opaque ref — PR#/branch/commit/URL, not just a GitHub PR) and close the loop with `fulcra-coord review-done <artifact> --verdict approve|changes`, which lands the verdict on the author's **bus** inbox — never a GitHub-only comment. The handshake is forge-agnostic: it works without GitHub, and `gh pr merge` is one option, not a requirement.
-- **macOS CI is path-filtered and bills at 10× on this repo** — only the menubar + macOS-specific `fulcra-coord` modules trigger it (see [`.github/workflows/macos.yml`](.github/workflows/macos.yml)). Everything else is gated by the local suite + review.
+## Review conventions
 
-## Repo notes
-
-- **One git repo, no submodules.** All projects live under [`packages/`](packages),
-  including the **Fulcra Attention** project at
-  [`packages/attention/`](packages/attention), even though the browser extension is
-  self-contained and separately installable (it's relayless — it authenticates
-  and ingests on its own, no daemon). Each project keeps its own README, build,
-  tests, and toolchain (Python and TypeScript both appear here).
-- **History.** Several of Collect's pieces were their own repositories until
-  2026-05-21, then merged here with `git subtree` so their full commit history
-  is preserved (`git log packages/<name>` shows it). The original repos
-  (`ashfulcra/fulcra-attention`, `ashfulcra/FulcraMediaHelpers`,
-  `ashfulcra/fulcra-csv-importer`) are archived read-only. More on this in the
-  Collect overview's [History](docs/collect.md#history) section.
+Nothing lands without an independent review by a *different agent identity*
+than the author. Changes go through a PR where a forge exists — never direct
+pushes to `main` — and the review handshake rides the bus, not the forge:
+`fulcra-coord request-review <artifact>` routes it to a reviewer, and
+`fulcra-coord review-done <artifact> --verdict approve|changes` lands the
+verdict in the author's bus inbox (a GitHub-only comment doesn't count). The
+artifact ref is opaque — PR#, branch, commit, URL — so the handshake works
+with any forge or none. Full rule: [`AGENTS.md`](AGENTS.md). One per-clone
+setup step before pushing coord changes: `git config core.hooksPath .githooks`
+enables the shared pre-push hook that runs the fulcra-coord suite locally
+(the macOS CI job is path-filtered and bills at 10×, so the local gate is the
+real one).
