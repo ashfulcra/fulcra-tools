@@ -1203,13 +1203,53 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             body_repair_failures.append(tid)
             continue
         task_path = remote.task_remote_path(tid)
+        # 2026-06-11 bug hunt C2 (P1): the replay used to upload the cached
+        # body BLINDLY. An "unverified" marker only means OUR write may not
+        # have landed — it says nothing about what landed SINCE: another
+        # host's newer body was silently reverted by the stale replay. So
+        # look first: if a remote body exists, route through the same
+        # _try_merge the write pipeline uses; the blind upload survives only
+        # for the remote-absent case (the genuine lost-write this repair
+        # exists for).
+        body_to_upload = cached_task
         try:
-            ok = remote.upload_json(cached_task, task_path, backend=backend)
+            current_remote = remote.download_json(task_path, backend=backend)
+        except Exception:
+            current_remote = None
+        if current_remote:
+            merged = _try_merge(cached_task, current_remote)
+            if merged is not None:
+                body_to_upload = merged
+            elif _updated_at_key(current_remote) >= _updated_at_key(cached_task):
+                # Unsafe merge but the bus already carries the as-new-or-newer
+                # body: our cached replay is the stale side — skip the upload
+                # entirely and let the marker resolve as repaired (re-meta the
+                # remote body so the next write's stat check starts clean).
+                try:
+                    post_stat = remote.stat(task_path, backend=backend)
+                    if post_stat:
+                        cache.write_meta(task_path, post_stat)
+                except Exception:
+                    pass
+                cache.write_cached_task(current_remote)
+                continue
+            else:
+                # Unsafe merge and OUR side is newer: neither replaying (would
+                # clobber the remote transition) nor skipping (would silently
+                # drop newer local work) is safe — keep the debt visible.
+                _warn(f"  Task {tid}: cached replay conflicts with a changed "
+                      "remote body and cannot merge safely — keeping the "
+                      "repair marker for manual resolution.")
+                body_repair_failures.append(tid)
+                continue
+        try:
+            ok = remote.upload_json(body_to_upload, task_path, backend=backend)
         except Exception:
             ok = False
         if not ok:
             body_repair_failures.append(tid)
             continue
+        cache.write_cached_task(body_to_upload)
         try:
             post_stat = remote.stat(task_path, backend=backend)
             if post_stat:
