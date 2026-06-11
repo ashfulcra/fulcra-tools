@@ -212,7 +212,7 @@ def _render_digest(digest: dict[str, Any], *, window: str) -> tuple[str, str]:
         sections.append("Stale (no update past threshold) (" + str(len(stale)) + "):")
         sections.extend(_digest_lines(stale, _s))
 
-    # Coordination-loops line (phase 2): one compact line from the pre-computed
+    # Coordination-loops line: one compact line from the pre-computed
     # loop_board counts (cmd_digest does the fold, best-effort — this renderer
     # stays pure). Skipped when the fold failed (key None/absent) AND when
     # every count is zero — a clean bus adds no section, the same
@@ -351,7 +351,7 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     digest = views.build_operator_digest(
         summaries, presence, human=human, now=now, since=since, infra=infra)
 
-    # Coordination-loops counts (phase 2): the same fold the health record
+    # Coordination-loops counts: the same fold the health record
     # uses, over THIS digest's agent identity. FULLY best-effort, mirroring
     # the infra line above — any failure leaves digest["loops"] None and the
     # rendered digest unchanged (a scheduled tick must never crash on an
