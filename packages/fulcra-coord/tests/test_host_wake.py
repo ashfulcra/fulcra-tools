@@ -197,6 +197,33 @@ class TestMaybeWake(_WakeEnvBase):
             self.assertTrue(wake.maybe_wake(self.AGENT, 1))
         popen.assert_called_once()
 
+    def test_spawn_log_never_touches_the_real_logs_dir(self):
+        """HERMETICITY (O7): the spawn path really opens its wake log
+        (``log.open("ab")`` runs even with Popen mocked), so an unredirected
+        scheduler_env.default_logs_dir() made every spawn test above write a
+        ``wake-agent-a-host1-repo.log`` into the operator's REAL
+        ~/Library/Logs/fulcra-coord — a confirmed leak found on a developer
+        machine. The autouse conftest fixture must point default_logs_dir at a
+        per-test temp dir so the log lands (and is asserted) there."""
+        from pathlib import Path
+        from fulcra_coord import scheduler_env
+        logs_dir = scheduler_env.default_logs_dir()
+        real = Path.home() / "Library" / "Logs" / "fulcra-coord"
+        self.assertNotEqual(logs_dir, real,
+                            "default_logs_dir() must be redirected in tests")
+        # The explicit home= override (the installers' test seam) still works.
+        self.assertEqual(scheduler_env.default_logs_dir(home="/tmp/x"),
+                         Path("/tmp/x/Library/Logs/fulcra-coord"))
+        # Drive a real spawn (Popen mocked; the log open is real) and confirm
+        # the log landed in the redirected dir.
+        _write_config({"agent-a:": _entry(["/bin/echo", "hello"])})
+        with patch("fulcra_coord.wake.Popen", self._popen_mock()):
+            self.assertTrue(wake.maybe_wake(self.AGENT, 1))
+        log = wake._wake_log_path(self.AGENT)
+        self.assertTrue(str(log).startswith(str(logs_dir)),
+                        f"wake log {log} escaped the redirected dir {logs_dir}")
+        self.assertTrue(log.exists())
+
     def test_fresh_marker_throttles(self):
         _write_config({"agent-a:": _entry()})
         marker = wake._wake_marker_path(self.AGENT)

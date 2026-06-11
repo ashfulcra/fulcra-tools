@@ -121,9 +121,32 @@ def _hermetic_cache_and_backend():
     prev_retry_sleep = _writepipe._retry_sleep
     _writepipe._retry_sleep = lambda seconds: None
 
+    # Logs-dir isolation (O7): scheduler_env.default_logs_dir() resolves to the
+    # REAL ~/Library/Logs/fulcra-coord, and the XDG redirects above do not cover
+    # it. The wake spawn path opens its log FOR REAL even when Popen is mocked
+    # (``log.open("ab")`` runs before the spawn), so every wake spawn test was
+    # leaking a ``wake-agent-a-host1-repo.log`` into the operator's real Logs
+    # dir — confirmed on a developer machine. Same function-swap pattern as the
+    # _retry_sleep no-op above (this fixture can't use monkeypatch — see the
+    # scope-mechanics NOTE in the module docstring). The ``home=`` parameter is
+    # honoured unchanged so installer tests that probe path NAMING against an
+    # explicit fake home keep their seam; only the implicit real-HOME default is
+    # redirected into the per-test temp tree.
+    from pathlib import Path as _Path
+    from fulcra_coord import scheduler_env as _scheduler_env
+    prev_default_logs_dir = _scheduler_env.default_logs_dir
+
+    def _hermetic_logs_dir(*, home=None):
+        if home is not None:
+            return prev_default_logs_dir(home=home)
+        return _Path(tmp) / "Library" / "Logs" / "fulcra-coord"
+
+    _scheduler_env.default_logs_dir = _hermetic_logs_dir
+
     try:
         yield tmp
     finally:
+        _scheduler_env.default_logs_dir = prev_default_logs_dir
         _writepipe._retry_sleep = prev_retry_sleep
         if prev_xdg is None:
             os.environ.pop("XDG_CACHE_HOME", None)
