@@ -446,6 +446,16 @@ class TestParkIsBestEffort:
         which.assert_not_called()   # roles probed BEFORE the CLI probe
         assert capsys.readouterr().out == ""
 
+    def test_workstream_update_preserves_roles_so_park_still_sees_them(
+            self, coord_backend):
+        from fulcra_coord import continuity_ops
+        agent, role = self._hold_role(coord_backend)
+        args = _ns(agent=agent, ws_action="set", workstreams="coordination",
+                   summary=None, format="table")
+        rc = cli.cmd_workstream(args, backend=coord_backend)
+        assert rc == 0
+        assert continuity_ops._held_roles(agent, backend=coord_backend) == [role]
+
     def test_park_checkpoints_each_held_role_and_updates_its_ref(
             self, coord_backend, capsys):
         from fulcra_coord import role_ops
