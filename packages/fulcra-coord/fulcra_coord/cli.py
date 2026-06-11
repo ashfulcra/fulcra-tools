@@ -7,11 +7,10 @@ override for testing without live Fulcra access.
 from __future__ import annotations
 
 import concurrent.futures
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, log as ops_log, heartbeat, identity
+from . import cache, remote, schema, views, log as ops_log, identity
 from . import env_int
 # Direct store-module import for ONE read-only diagnostic: the transport's
 # ``last_upload_error`` failure observable (see its comment in the store).
@@ -36,7 +35,7 @@ from .continuity_ops import cmd_checkpoint, cmd_park  # noqa: F401
 # timeutil.py do not import cli, so there is no import cycle.
 from .output import err as _err, warn as _warn, info as _info, print_json as _print_json
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
-from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
+from .textfmt import age_str as _age_str, due_str as _due_str
 # Retention / archival subsystem extracted from this file. Re-exported under the
 # historical underscore-prefixed names so every remaining caller here
 # (cmd_reconcile -> _run_retention; cmd_search / cmd_restore -> the cold-index
@@ -44,31 +43,28 @@ from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _d
 # keep resolving. retention.py depends only on lower layers and never imports
 # cli, so there is no import cycle.
 from .retention import (
-    _archive_month, _archive_index_shard, _archive_task, _read_index_shard,
-    _list_index_shards, _retention_max_per_run, _claim_retention_marker,
+    _archive_task, _read_index_shard,
+    _list_index_shards, _claim_retention_marker,
     _prune_markers, _prune_dead_presence, _prune_dead_health, _run_retention,
-    _prune_continuity_checkpoints, _continuity_keep,
-    _expire_stale_broadcasts, _RETENTION_DEADLINE_HEADROOM_SECONDS,
     cmd_search, cmd_restore,
 )
 # Shared remote-task load/cache layer extracted from this file. Re-exported under
 # the historical underscore-prefixed names so every cli-resident caller
-# (cmd_status / cmd_reconcile / cmd_digest / _try_merge / _write_task_and_views /
-# ...) AND the unmigrated test patch targets (fulcra_coord.cli._load_all_tasks /
-# ...) keep resolving. io.py depends only on lower layers and never imports cli,
+# (cmd_reconcile / the parity checks / _reconcile_rebuild_source_preserving_acks)
+# AND the unmigrated test patch targets (fulcra_coord.cli._load_all_tasks / ...)
+# keep resolving. io.py depends only on lower layers and never imports cli,
 # so there is no import cycle.
 from .io import (
-    _cache_remote_task, _load_all_tasks, _load_task_summaries,
+    _load_all_tasks, _load_task_summaries,
     _load_summaries_for_rebuild, _load_task, _updated_at_key,
 )
 # Presence subsystem extracted from this file. Re-exported under the historical
 # names so the command dispatch (cmd_connect/cmd_workstream/cmd_presence),
-# cmd_reconcile's _reconcile_presence call, cmd_start's _maybe_warn_legacy_identity
-# call, and the test patch targets keep resolving. presence.py never imports cli.
+# cmd_reconcile's _reconcile_presence call, and the test patch targets keep
+# resolving. presence.py never imports cli.
 from .presence import (
-    _maybe_warn_legacy_identity, _derive_workstreams_from_open_tasks,
-    _upsert_presence_aggregate, _write_presence, _load_own_presence, cmd_connect,
-    _split_workstreams, cmd_workstream, cmd_presence, _reconcile_presence,
+    _upsert_presence_aggregate, _write_presence, cmd_connect,
+    cmd_workstream, cmd_presence, _reconcile_presence,
     _load_presence_agents,
     # C5: the merge-safe capability RMW pair `roles claim`/`release` use to
     # keep @role delivery (capabilities) in step with the lease layer.
@@ -84,16 +80,15 @@ from .query import cmd_status, cmd_board, cmd_agents, cmd_needs_me, cmd_resume
 # broadcast/assign/inbox/request-review) that calls _write_task_and_views, plus the
 # test patch targets, keep resolving. writepipe.py never imports cli.
 from .writepipe import (
-    _stamp_session_pointer, _write_task_and_views, _emit_lifecycle, _lifecycle_for,
-    _view_name_to_remote, _try_merge, _carry_fields, _union_events_and_acked,
-    _repair_merged_tags,
+    _stamp_session_pointer, _write_task_and_views,
+    _view_name_to_remote, _try_merge,
 )
 # Liveness-aware reviewer routing extracted from this file. Re-exported so
 # cmd_reconcile's _sweep_review_routes call, the request-review dispatch, and the
 # test patch targets keep resolving. routing_ops.py never imports cli.
 from .routing_ops import (
-    _review_pool, _append_route_event_and_assignee,
-    _force_block_for_human, _escalate_review_to_human, cmd_request_review,
+    _review_pool,
+    _escalate_review_to_human, cmd_request_review,
     cmd_review_done, _resolve_review_author,
     _reroute_minutes, _reroute_max, _accepted_stall_hours,
     _review_accepted_by_assignee, _classify_review, _sweep_review_routes,
@@ -152,6 +147,15 @@ from . import annotations as lifecycle_annotations
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+#: Sentinel distinguishing "caller did not supply this tick-scoped snapshot —
+#: load it yourself" from "caller supplied it and it was genuinely absent/None"
+#: (None is meaningful for these views: it is the read-failure / missing shape).
+#: Used by the E4 snapshot-sharing params so cmd_reconcile can load each shared
+#: view ONCE per tick and thread it through every sub-pass, while direct
+#: callers (status, tests) keep the load-it-yourself behaviour.
+_UNSET: Any = object()
+
 
 def _derive_agent() -> str:
     """Resolve the caller's agent id when not given explicitly.
@@ -237,7 +241,9 @@ def _event_dual_write_health() -> dict:
 _UNDELIVERED_LIST_CAP = 50
 
 
-def _live_agent_ids(*, backend: Optional[list[str]] = None) -> Optional[set[str]]:
+def _live_agent_ids(
+    *, backend: Optional[list[str]] = None, agg: Any = _UNSET,
+) -> Optional[set[str]]:
     """The set of agent ids whose presence is LIVE (live or idle), reusing the
     EXISTING liveness rule ``cmd_agents`` applies — no reinvented staleness.
 
@@ -260,8 +266,15 @@ def _live_agent_ids(*, backend: Optional[list[str]] = None) -> Optional[set[str]
         agent" and produced a cry-wolf FLOOD on a single presence blip (the bug
         this sentinel fixes). The caller treats ``None`` as INDETERMINATE — emit a
         single "presence unavailable" signal, never enumerate. The caller also
-        wraps this so a raise can never reach reconcile."""
-    agg = remote.download_json(remote.presence_view_path(), backend=backend)
+        wraps this so a raise can never reach reconcile.
+
+    ``agg`` (E4 snapshot sharing): cmd_reconcile passes the aggregate it just
+    REBUILT from the per-agent records, so the tick never re-downloads a view
+    it produced moments earlier. Default (the ``_UNSET`` sentinel) keeps the
+    download for direct callers; an explicit ``None`` means the caller KNOWS
+    the aggregate is unavailable and gets the INDETERMINATE verdict."""
+    if agg is _UNSET:
+        agg = remote.download_json(remote.presence_view_path(), backend=backend)
     # `agg is None` is the read-failure shape (download_json returns None on any
     # transport failure). A loaded-but-empty dict is a genuine roster, not a
     # failure — so only the None case is INDETERMINATE.
@@ -296,12 +309,19 @@ def _assignee_acked(task: dict[str, Any], assignee: str) -> bool:
     return False
 
 
-def _summary_ack_map(*, backend: Optional[list[str]] = None) -> dict[str, set[str]]:
-    """Load durable summary-only acks, degrading to an empty map on old buses."""
+def _summary_ack_map(
+    *, backend: Optional[list[str]] = None, summaries_view: Any = _UNSET,
+) -> dict[str, set[str]]:
+    """Load durable summary-only acks, degrading to an empty map on old buses.
+
+    ``summaries_view`` (E4 snapshot sharing): cmd_reconcile passes the view it
+    already downloaded this tick (possibly None — absent stays absent for the
+    whole tick); the ``_UNSET`` default keeps the download for direct callers."""
     try:
-        summaries_view = remote.download_json(
-            remote.view_remote_path("summaries"), backend=backend
-        )
+        if summaries_view is _UNSET:
+            summaries_view = remote.download_json(
+                remote.view_remote_path("summaries"), backend=backend
+            )
         acks: dict[str, set[str]] = {}
         for summary in (summaries_view or {}).get("summaries", []):
             if not isinstance(summary, dict):
@@ -319,7 +339,8 @@ def _summary_ack_map(*, backend: Optional[list[str]] = None) -> dict[str, set[st
 
 
 def _undelivered_directive_check(
-    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None
+    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None,
+    presence_view: Any = _UNSET, summaries_view: Any = _UNSET,
 ) -> dict:
     """SAFETY NET (report-only): open directives addressed to an OFFLINE agent.
 
@@ -370,10 +391,14 @@ def _undelivered_directive_check(
     task or view, NEVER reroutes (rerouting to a live role-holder is a separate
     later phase), and the OUTER try/except guarantees a malformed body or a
     presence-load failure can never raise into reconcile or change its exit code.
-    On any internal error it returns a valid empty report."""
+    On any internal error it returns a valid empty report.
+
+    ``presence_view`` / ``summaries_view`` (E4 snapshot sharing): cmd_reconcile
+    threads the snapshots it already holds this tick; the ``_UNSET`` defaults
+    keep the self-loading behaviour for direct callers."""
     try:
         human = identity.resolve_human()
-        live = _live_agent_ids(backend=backend)
+        live = _live_agent_ids(backend=backend, agg=presence_view)
         # INDETERMINATE: a failed presence read (None sentinel) OR an empty live
         # set means we can't confirm any specific assignee is offline. Do NOT
         # enumerate — emit the distinct presence-unavailable signal instead of a
@@ -382,7 +407,8 @@ def _undelivered_directive_check(
         if not live:
             return {"count": 0, "undelivered": [], "presence_unavailable": True}
         now = datetime.now(timezone.utc)
-        summary_acks = _summary_ack_map(backend=backend)
+        summary_acks = _summary_ack_map(backend=backend,
+                                        summaries_view=summaries_view)
         undelivered: list[dict[str, Any]] = []
         count = 0
         for t in all_tasks:
@@ -474,7 +500,8 @@ def _detect_stale_claims(all_tasks: list[dict[str, Any]],
 
 
 def _reconcile_rebuild_source_preserving_acks(
-    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None
+    all_tasks: list[dict[str, Any]], *, backend: Optional[list[str]] = None,
+    summaries_view: Any = _UNSET,
 ) -> list[dict[str, Any]]:
     """Summarize loaded bodies while preserving summary-only inbox acks.
 
@@ -484,10 +511,22 @@ def _reconcile_rebuild_source_preserving_acks(
     If reconcile rebuilt views from raw bodies alone, the ack would disappear and
     the directive would re-notify. Treat the current aggregate's ``acked_by`` as a
     durable prior fact, matching ``_load_summaries_for_rebuild`` on normal writes.
-    """
+
+    ``summaries_view`` (E4 snapshot sharing): cmd_reconcile passes the raw
+    aggregate it downloaded once this tick — the durable home of summary-only
+    acks (an absent/None view degrades to no priors, which loses nothing: the
+    only other ack source is the bodies being summarized right below). The
+    ``_UNSET`` default keeps the staleness-guarded ``_load_task_summaries``
+    load for direct callers."""
     prior_acks: dict[str, set[str]] = {}
     try:
-        for summary in _load_task_summaries(backend=backend):
+        if summaries_view is _UNSET:
+            source = _load_task_summaries(backend=backend)
+        else:
+            source = (summaries_view or {}).get("summaries") or []
+        for summary in source:
+            if not isinstance(summary, dict):
+                continue
             tid = summary.get("id")
             if tid:
                 prior_acks[tid] = set(summary.get("acked_by") or [])
@@ -506,7 +545,62 @@ def _reconcile_rebuild_source_preserving_acks(
     return rebuild_source
 
 
-def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
+#: Wall-clock seconds of headroom the parity pass leaves before reconcile's
+#: deadline — the _RETENTION_DEADLINE_HEADROOM_SECONDS discipline applied to the
+#: parity sub-pass: probing one more task (a listing + K shard downloads) is
+#: never worth blowing the tick's 90s ceiling; deferred tasks drain on the next
+#: tick's rotated window.
+_PARITY_DEADLINE_HEADROOM_SECONDS = 5.0
+
+
+def _parity_sample_size() -> int:
+    """Tasks probed per reconcile tick by the parity pass.
+
+    WHY SAMPLE AT ALL (measured): each probed task costs one event-prefix
+    listing plus one download per shard (~1.3s per subprocess). On the
+    production bus (~440 tasks) probing everything every 20-minute tick was
+    ~1,300+ spawns — the bulk of the measured 3,105-spawn reconcile. Drift is a
+    slow-moving diagnostic (report-only health debt), so a rotating window that
+    covers the full bus every ~ceil(N/sample) ticks (~9 at the default) loses
+    nothing but latency on a signal nobody acts on within an hour anyway.
+    ``FULCRA_COORD_PARITY_SAMPLE`` <= 0 disables sampling (probe everything)."""
+    return env_int("FULCRA_COORD_PARITY_SAMPLE", 50)
+
+
+def _parity_cursor_path():
+    """The rotation cursor's local path — in the cache dir beside the other
+    per-host bookkeeping (notified-state, op markers). Local-only: each host
+    rotates independently; two hosts sampling different windows only *improves*
+    fleet-wide coverage, so the cursor needs no bus coordination."""
+    return cache.cache_root() / "parity-cursor"
+
+
+def _read_parity_cursor() -> int:
+    """Best-effort cursor read; 0 on any miss/corruption (a reset cursor only
+    re-probes tasks sooner, never skips them forever)."""
+    try:
+        return int(_parity_cursor_path().read_text().strip())
+    except Exception:
+        return 0
+
+
+def _write_parity_cursor(value: int) -> None:
+    """Best-effort cursor persist (a bare int — no schema worth versioning) —
+    a failed write must never fail the pass (the next tick just re-probes the
+    same window)."""
+    try:
+        cache.cache_root().mkdir(parents=True, exist_ok=True)
+        _parity_cursor_path().write_text(str(int(value)))
+    except Exception:
+        pass
+
+
+def _event_parity_check(
+    all_tasks: Optional[list[dict[str, Any]]] = None, *,
+    backend: Optional[list[str]] = None,
+    deadline: Optional[float] = None,
+    summaries_view: Any = _UNSET,
+) -> dict:
     """Compare each task snapshot against the fold of its event log.
 
     Phase-1 safety net: surfaces drift as health debt (the mutable file is
@@ -558,16 +652,32 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     events were written before dual-write was introduced and are not drift by
     definition (they haven't been through the dual-write path yet).
 
-    The tasks prefix is ``{remote_root()}/tasks/`` and the events prefix is
-    ``{remote_root()}/events/tasks/`` — completely separate directory trees, so
-    listing the tasks prefix never returns event shards. The ``.json`` filter and
-    ``/events/`` guard are belt-and-suspenders against any future layout change.
+    PERF (2026-06-10 measured pass — this check was the single biggest cost in
+    the 3,105-spawn reconcile tick):
 
-    Cost: O(N) remote I/O — one ``download_json`` per task snapshot plus one
-    ``read_events`` (a ``list_json`` sweep) per task's event prefix. Acceptable
-    for a Phase-2a diagnostic on the current bus scale (reconcile already sweeps
-    all tasks).
+    * ``all_tasks`` — cmd_reconcile passes the bodies it ALREADY loaded, so the
+      check re-downloads nothing (~440 saved downloads/tick). The load fallback
+      (one ``tasks/`` listing + pooled body downloads) remains for direct
+      callers and tests; its tasks prefix is ``{remote_root()}/tasks/`` and the
+      events prefix ``{remote_root()}/events/tasks/`` — separate trees, so the
+      ``.json`` filter and ``/events/`` guard are belt-and-suspenders.
+    * SAMPLING — a rotating window of ``_parity_sample_size()`` tasks per tick
+      (cursor persisted locally), full-bus coverage every ~ceil(N/sample)
+      ticks. ``sampled`` reports the window size; ``tasks_total`` stays the
+      TRUE population so a reader can see the coverage ratio.
+    * DEADLINE — when reconcile passes its deadline, the pass stops probing
+      once the budget (minus headroom) is spent, mirroring ``_run_retention``;
+      unprobed tasks are counted in ``deferred`` and drain on later ticks'
+      rotated windows. ``deadline=None`` keeps the unbounded behaviour for
+      direct callers.
+    * POOLED — per-task probes run on a small thread pool (the
+      ``_load_all_tasks`` shape): each probe is an independent listing + shard
+      downloads with no shared mutable state.
+
+    Remaining cost: O(sample) remote I/O per tick — one event listing plus one
+    download per shard for each sampled task.
     """
+    import time
     # Union set of every task id that drifts for ANY reason (field/status drift
     # OR ack divergence). A task that drifts for multiple reasons is counted
     # ONCE here, so ``drift``/``drift_task_ids`` never double-count.
@@ -597,11 +707,14 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     # is the durable ack set; the fold can lag it (MAX_EVENTS_INLINE truncation, or
     # inbox._ack_summary_only acks that emit NO event shard). A missing / old-bus
     # summaries view degrades to an empty map -> no ack drift flagged, never raises.
+    # E4 snapshot sharing: cmd_reconcile passes the view it already downloaded
+    # this tick; the _UNSET default keeps the download for direct callers.
     summ_acks: dict[str, set[str]] = {}
     try:
-        summaries_view = remote.download_json(
-            remote.view_remote_path("summaries"), backend=backend
-        )
+        if summaries_view is _UNSET:
+            summaries_view = remote.download_json(
+                remote.view_remote_path("summaries"), backend=backend
+            )
         for s in (summaries_view or {}).get("summaries", []):
             if not isinstance(s, dict):
                 continue
@@ -615,31 +728,65 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     except Exception:
         summ_acks = {}
 
-    tasks_prefix = f"{remote.remote_root()}/tasks/"
-    task_paths = remote.list_files(tasks_prefix, backend=backend)
-    for path in task_paths:
-        # Only process actual task JSON files directly under tasks/ — skip
-        # anything that looks like an events shard or a non-JSON file.
-        if not path.endswith(".json"):
-            continue
-        if "/events/" in path:
-            continue
-        # Count every well-formed task file BEFORE the events gate, so
-        # tasks_total reflects the full bus task population (the denominator the
-        # flip gate's coverage check divides tasks_with_events by). A task with no
-        # events still counts toward the total — it just isn't compared.
-        snap = remote.download_json(path, backend=backend)
-        if not snap or "id" not in snap:
-            continue
-        tasks_total += 1
+    # Resolve the task BODIES. cmd_reconcile hands over the set it already
+    # loaded (zero extra I/O); the fallback for direct callers/tests is one
+    # ``tasks/`` listing plus pooled body downloads — same verdicts, just paid
+    # for locally instead of borrowed from the tick.
+    if all_tasks is None:
+        tasks_prefix = f"{remote.remote_root()}/tasks/"
+        try:
+            task_paths = [
+                p for p in remote.list_files(tasks_prefix, backend=backend)
+                # Only actual task JSON files directly under tasks/ — skip
+                # anything that looks like an events shard or a non-JSON file.
+                if p.endswith(".json") and "/events/" not in p
+            ]
+        except Exception:
+            task_paths = []
+        bodies: list[dict[str, Any]] = []
+        if task_paths:
+            workers = min(8, max(2, len(task_paths)))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                for snap in pool.map(
+                        lambda p: remote.download_json(p, backend=backend),
+                        task_paths):
+                    if snap and "id" in snap:
+                        bodies.append(snap)
+    else:
+        bodies = [t for t in all_tasks if isinstance(t, dict) and t.get("id")]
+
+    # tasks_total reflects the full bus task population (the denominator the
+    # flip gate's coverage check divides tasks_with_events by). A task with no
+    # events still counts toward the total — it just isn't compared.
+    tasks_total = len(bodies)
+
+    # SAMPLING: a deterministic rotation over the id-sorted population. The
+    # cursor persists locally so consecutive ticks tile the bus; sorting makes
+    # the window stable against listing order so rotation actually advances.
+    bodies.sort(key=lambda t: t["id"])
+    sample = _parity_sample_size()
+    if sample > 0 and len(bodies) > sample:
+        cursor = _read_parity_cursor() % len(bodies)
+        window = [bodies[(cursor + i) % len(bodies)] for i in range(sample)]
+    else:
+        cursor = None  # sampling inactive — no cursor to advance
+        window = bodies
+
+    budget_floor = (deadline - _PARITY_DEADLINE_HEADROOM_SECONDS
+                    if deadline is not None else None)
+
+    def _probe_one(snap: dict[str, Any]):
+        """One task's parity probe. Returns None when the tick budget is spent
+        (deferred — NOT checked), else (id, has_events, fold_complete,
+        drifted, ack_missing)."""
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            return None
         evs = _eventlog.read_events(snap["id"], backend=backend)
         if not evs:
-            continue  # not yet dual-written (pre-migration task) — not drift
-        checked += 1
+            # not yet dual-written (pre-migration task) — not drift
+            return (snap["id"], False, False, False, False)
         folded = _events.fold_task(evs)
         fold_complete = _events.fold_is_complete(folded)
-        if fold_complete:
-            folds_complete += 1
         if fold_complete:
             # Compare the durable task fields. Exclude bookkeeping the fold adds
             # (_applied_event_count) and fields that legitimately differ between a
@@ -647,8 +794,7 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             # move on every write, and the in-task events[] log grows independently.
             a = {k: v for k, v in folded.items() if k not in ignore}
             b = {k: v for k, v in snap.items() if k not in ignore}
-            if a != b:
-                drift_set.add(snap["id"])
+            drifted = a != b
         else:
             # delta-only: the fold is reconstructed from partial deltas, so only
             # compare fields the fold ACTUALLY carries (skip anything it never saw —
@@ -656,16 +802,44 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             # Reuse the same ignore-set as the full-task branch. status is one of the
             # fold's keys, so the original status-only behaviour is still covered.
             keys = set(folded.keys()) - ignore
-            if any(folded.get(k) != snap.get(k) for k in keys):
-                drift_set.add(snap["id"])
-
+            drifted = any(folded.get(k) != snap.get(k) for k in keys)
         # C1: regardless of fold completeness, the fold must carry every durable
         # ack the summaries authority holds. If it's missing any, a post-flip read
         # would re-notify an already-acked directive — surface it (report-only).
-        missing = summ_acks.get(snap["id"], set()) - set(folded.get("acked_by") or [])
-        if missing:
-            ack_drift_ids_set.add(snap["id"])
-            drift_set.add(snap["id"])
+        ack_missing = bool(
+            summ_acks.get(snap["id"], set()) - set(folded.get("acked_by") or []))
+        return (snap["id"], True, fold_complete, drifted, ack_missing)
+
+    # POOLED probes (the _load_all_tasks pool shape): each probe is one listing
+    # + K shard downloads with no shared mutable state. pool.map preserves
+    # window order, so the deferred count below maps cleanly onto the window.
+    deferred = 0
+    results = []
+    if window:
+        workers = min(8, len(window))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_probe_one, window))
+    for res in results:
+        if res is None:
+            deferred += 1
+            continue
+        tid, has_events, fold_complete, drifted, ack_missing = res
+        if not has_events:
+            continue
+        checked += 1
+        if fold_complete:
+            folds_complete += 1
+        if drifted:
+            drift_set.add(tid)
+        if ack_missing:
+            ack_drift_ids_set.add(tid)
+            drift_set.add(tid)
+
+    # Advance the rotation by what was actually PROBED this tick, so a
+    # deadline-shortened window resumes where it stopped instead of skipping
+    # the deferred tail until the next full revolution.
+    if cursor is not None:
+        _write_parity_cursor((cursor + (len(window) - deferred)) % len(bodies))
 
     drift_task_ids = sorted(drift_set)
     ack_drift_task_ids = sorted(ack_drift_ids_set)
@@ -679,10 +853,19 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
         "tasks_total": tasks_total,
         "tasks_with_events": checked,  # same as checked; named for the flip gate
         "folds_complete": folds_complete,
+        # PERF telemetry: window actually probed this tick + tasks the deadline
+        # gate pushed to a later tick. sampled < tasks_total means the coverage
+        # ratio above is per-revolution, not per-tick.
+        "sampled": len(window),
+        "deferred": deferred,
     }
 
 
-def _directive_parity_check(*, backend: Optional[list[str]] = None) -> dict:
+def _directive_parity_check(
+    *, backend: Optional[list[str]] = None,
+    records: Optional[list[dict[str, Any]]] = None,
+    all_tasks: Optional[list[dict[str, Any]]] = None,
+) -> dict:
     """Compare each first-class directive record against its back-ref task.
 
     Phase 3b Task 4 safety net — the strangler-fig dual-write writes a
@@ -741,9 +924,19 @@ def _directive_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     top-level records that had a comparable back-ref task (shards and orphans are
     excluded). ``orphans`` counts records whose back-ref task is gone.
 
-    Cost: O(D) remote I/O — one ``download_json`` per directive record plus one
-    task load (and a sub-log ``list_json``) per comparable record. Acceptable for
-    a reconcile diagnostic at the current bus scale.
+    E4 snapshot sharing: cmd_reconcile passes ``records`` (the top-level loop
+    records its single ``load_loop_records`` sweep already downloaded — the
+    SAME top-level-only filtered set this check used to re-list and re-download
+    itself) and ``all_tasks`` (the bodies it already holds, replacing one
+    ``_load_task`` per record). Both default to None, which keeps the
+    self-loading behaviour for direct callers; with ``all_tasks`` supplied, a
+    back-ref absent from the tick's working set counts as ``orphan`` — the
+    same verdict the dangling-ref path gives.
+
+    Cost when self-loading: O(D) remote I/O — one ``download_json`` per
+    directive record plus one task load (and a sub-log ``list_json``) per
+    comparable record. With the tick's snapshots threaded in: one ack sub-log
+    listing per comparable record, nothing else.
     """
     drift_set: set[str] = set()
     checked = 0
@@ -755,31 +948,49 @@ def _directive_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     # mapped fields below (directive_type / audience / status / acked_by-as-set).
     # A write timestamp is never in that list, so it can never register as drift.
 
-    prefix = remote.directives_prefix()
-    try:
-        paths = remote.list_files(prefix, backend=backend)
-    except Exception:
-        paths = []
+    if records is None:
+        # Self-loading fallback (direct callers/tests): list the prefix and
+        # download each top-level record.
+        prefix = remote.directives_prefix()
+        try:
+            paths = remote.list_files(prefix, backend=backend)
+        except Exception:
+            paths = []
+        stored_records: list[dict[str, Any]] = []
+        for path in paths:
+            # TOP-LEVEL-ONLY FILTER (load-bearing): strip the prefix and accept
+            # only a direct child ``<id>.json`` — no further '/' (which would
+            # make it a sub-log shard under ``<id>/acks/`` or ``<id>/routing/``).
+            rel = path[len(prefix):] if path.startswith(prefix) else path
+            if "/" in rel:
+                continue  # sub-log shard (acks/ or routing/) — never a record
+            if not rel.endswith(".json"):
+                continue
+            stored = remote.download_json(path, backend=backend)
+            if isinstance(stored, dict):
+                stored_records.append(stored)
+    else:
+        # Tick-shared records: load_loop_records already applied the same
+        # top-level-only filter, so these ARE the top-level directive records.
+        stored_records = [r for r in records if isinstance(r, dict)]
 
-    for path in paths:
-        # TOP-LEVEL-ONLY FILTER (load-bearing): strip the prefix and accept only a
-        # direct child ``<id>.json`` — no further '/' (which would make it a
-        # sub-log shard under ``<id>/acks/`` or ``<id>/routing/``).
-        rel = path[len(prefix):] if path.startswith(prefix) else path
-        if "/" in rel:
-            continue  # sub-log shard (acks/ or routing/) — never a directive record
-        if not rel.endswith(".json"):
-            continue
+    # Tick-shared task bodies: keyed once; None keeps the per-record _load_task.
+    task_map: Optional[dict[str, dict[str, Any]]] = None
+    if all_tasks is not None:
+        task_map = {
+            tid: t for t in all_tasks
+            if isinstance(t, dict) and (tid := t.get("id"))
+        }
 
-        stored = remote.download_json(path, backend=backend)
-        if not isinstance(stored, dict):
-            continue
-
+    for stored in stored_records:
         task_id = stored.get("task_id")
         if not task_id:
             continue  # orphan / directly-authored directive — can't compare (gate)
 
-        task = _load_task(task_id, backend=backend)
+        if task_map is not None:
+            task = task_map.get(task_id)
+        else:
+            task = _load_task(task_id, backend=backend)
         if not task:
             orphans += 1  # back-ref task gone — dangling ref, nothing to compare
             continue
@@ -829,7 +1040,10 @@ def _directive_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     }
 
 
-def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
+def _loop_health_check(
+    *, backend: Optional[list[str]] = None,
+    records: Optional[list[dict[str, Any]]] = None,
+) -> dict:
     """Open/overdue coordination-loop counts for the health record (spec
     2026-06-09 Task 5).
 
@@ -854,11 +1068,16 @@ def _loop_health_check(*, backend: Optional[list[str]] = None) -> dict:
     subset whose EVIDENCE sub-log is nonempty: a forge-mirrored answer exists
     off the bus, so the requester should close the loop explicitly, citing it
     (mirrored evidence never closes anything — fold_loop's invariant).
+
+    ``records`` (E4 snapshot sharing): cmd_reconcile passes the loop records
+    its single per-tick sweep already loaded; None (direct callers, or a tick
+    whose shared sweep failed) keeps the self-loading behaviour.
     """
-    try:
-        records = load_loop_records(backend=backend)
-    except Exception:
-        records = []   # report-only: an unreadable bus reads as "no loops"
+    if records is None:
+        try:
+            records = load_loop_records(backend=backend)
+        except Exception:
+            records = []   # report-only: an unreadable bus reads as "no loops"
     me = identity.resolve_agent(None)
     now = datetime.now(timezone.utc)
     evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
@@ -958,7 +1177,8 @@ def _maybe_escalate_role_vacancy(
 
 
 def _role_health_check(
-    *, backend: Optional[list[str]] = None
+    *, backend: Optional[list[str]] = None,
+    presence_agents: Optional[list[dict[str, Any]]] = None,
 ) -> dict:
     """Role registry status for the health record — vacancy is the new
     dark-agent signal (spec 2026-06-10): not "agent X is dark" but "FUNCTION X
@@ -976,6 +1196,10 @@ def _role_health_check(
     the durable per-agent records when the aggregate lags. Reading the raw
     aggregate here would re-inherit the stale-view blindness: a live holder
     would read dead and the role would falsely escalate as VACANT.
+    ``presence_agents`` (E4 snapshot sharing): cmd_reconcile passes the roster
+    it just REBUILT from those same durable per-agent records — fresher than
+    any aggregate, so the guard's purpose is preserved without a re-load; None
+    (direct callers) keeps the guarded self-load.
 
     The fold itself is the pure ``roles.role_status`` with the SAME liveness
     thresholds routing uses (stale_hours + wall-clock grace), injected by
@@ -986,9 +1210,11 @@ def _role_health_check(
     if not registry:
         return {"roles": [], "vacant": 0, "contested": 0, "escalated": 0}
     now = datetime.now(timezone.utc)
+    if presence_agents is None:
+        presence_agents = _load_presence_agents(backend=backend)
     presence_by_agent = {
         a.get("agent"): a
-        for a in _load_presence_agents(backend=backend)
+        for a in presence_agents
         if isinstance(a, dict) and a.get("agent")
     }
     stale_hours = views._stale_hours()
@@ -1345,8 +1571,24 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         _err("Reconcile timeout exceeded.")
         return 1
 
+    # E4 TICK-SCOPED SNAPSHOT SHARING (measured): one reconcile tick used to
+    # download the summaries view THREE times (rebuild-source acks, parity's
+    # ack authority, the undelivered check's ack map), load presence three
+    # times, and sweep the directives prefix two-three times — each repeat a
+    # fresh ~1.3s subprocess answering a question this tick already answered.
+    # Load each shared snapshot ONCE here and thread it through the sub-passes
+    # (every helper keeps a self-loading fallback for direct callers). An
+    # absent/None snapshot stays absent for the WHOLE tick — one consistent
+    # world-view per tick, not three chances at a different one.
+    try:
+        summaries_view = remote.download_json(
+            remote.view_remote_path("summaries"), backend=backend)
+    except Exception:
+        summaries_view = None
+
     all_views = views.build_all_views(
-        _reconcile_rebuild_source_preserving_acks(all_tasks, backend=backend)
+        _reconcile_rebuild_source_preserving_acks(
+            all_tasks, backend=backend, summaries_view=summaries_view)
     )
     view_items = list(all_views.items())
 
@@ -1469,17 +1711,30 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # Rebuild the presence aggregate from the durable per-agent presence records,
     # mirroring how the task views self-heal here. Best-effort: a presence rebuild
     # failure must not fail a task-view reconcile, so it is reported but does not
-    # count toward `failures`.
-    _reconcile_presence(backend=backend)
+    # count toward `failures`. E4: the REBUILT roster is captured and threaded
+    # through the presence-consuming sub-passes below (reroute sweep, role
+    # health, undelivered check) — it is the freshest presence truth this tick
+    # will see, so re-loading it would only spend spawns to learn less. The
+    # isinstance guard also protects against a patched/failed rebuild handing
+    # back a non-dict.
+    presence_view = _reconcile_presence(backend=backend)
+    if not isinstance(presence_view, dict):
+        presence_view = None
+    presence_agents = (
+        [a for a in presence_view.get("agents", []) if isinstance(a, dict)]
+        if presence_view else None
+    )
 
     # Liveness-aware reroute sweep (best-effort; never fails a reconcile tick).
     # Runs AFTER the presence rebuild so it reads the freshly-reconciled
-    # aggregate. Considers only kind:review directives; reroutes never-acted
+    # roster (threaded in; the sweep self-loads when the rebuild yielded
+    # nothing). Considers only kind:review directives; reroutes never-acted
     # reviews whose assignee fell below liveness floor, escalates on cap/miss,
     # freezes accepted-then-stalled ones. Whichever machine reconciles first
     # wins; others converge via the stale-observation re-read inside the sweep.
     try:
-        _sweep_review_routes(all_tasks, backend=backend, now=now, deadline=deadline)
+        _sweep_review_routes(all_tasks, backend=backend, now=now,
+                             deadline=deadline, presence=presence_agents)
     except Exception:
         pass
 
@@ -1545,9 +1800,13 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # status to the mutable snapshot. Best-effort — any error is swallowed and
         # the result, whether present or absent, NEVER changes the reconcile exit
         # code. Drift is recorded in the health record as health debt only; the
-        # mutable file remains authoritative until Phase 2.
+        # mutable file remains authoritative until Phase 2. PERF: hand over the
+        # bodies this tick already loaded (no re-downloads) and the tick's
+        # deadline (the pass samples + stops on a spent budget — see the check).
         try:
-            parity = _event_parity_check(backend=backend)
+            parity = _event_parity_check(all_tasks, backend=backend,
+                                         deadline=deadline,
+                                         summaries_view=summaries_view)
             record["event_parity"] = parity
         except Exception as _pe:
             # Best-effort, but NOT silent: a checker that eats its own errors
@@ -1570,6 +1829,15 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Dual-write health skipped (error): {_de}")
             except Exception:
                 pass
+        # E4: ONE directives-prefix sweep serves both the directive-parity and
+        # loop-health sub-passes below (each used to pay its own listing +
+        # per-record downloads). None on failure -> both fall back to their
+        # self-loading paths (which will most likely fail the same way and
+        # degrade as before).
+        try:
+            loop_records = load_loop_records(backend=backend)
+        except Exception:
+            loop_records = None
         # Phase 3b Task 4 directive-parity sub-pass: fold each first-class
         # directive record against its back-ref task and surface divergence as
         # health debt. REPORT-ONLY and best-effort — the directive store is not
@@ -1577,7 +1845,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # swallowed and the result, present or absent, NEVER changes reconcile's
         # exit code. Wrapped exactly like the event-parity pass above.
         try:
-            record["directive_parity"] = _directive_parity_check(backend=backend)
+            record["directive_parity"] = _directive_parity_check(
+                backend=backend, records=loop_records, all_tasks=all_tasks)
         except Exception as _dpe:
             # Best-effort but not silent: a checker that ate its own error would
             # report green while broken. Surface it (guarded so the warn can't
@@ -1593,7 +1862,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # passes above: the result, present or absent, NEVER changes
         # reconcile's exit code, and the error is surfaced rather than eaten.
         try:
-            record["loop_health"] = _loop_health_check(backend=backend)
+            record["loop_health"] = _loop_health_check(backend=backend,
+                                                       records=loop_records)
         except Exception as _lhe:
             try:
                 _warn(f"  Loop-health check skipped (error): {_lhe}")
@@ -1607,7 +1877,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # loop-health pass above: the result, present or absent, NEVER
         # changes reconcile's exit code, and the error is surfaced, not eaten.
         try:
-            record["role_health"] = _role_health_check(backend=backend)
+            record["role_health"] = _role_health_check(
+                backend=backend, presence_agents=presence_agents)
         except Exception as _rhe:
             try:
                 _warn(f"  Role-health check skipped (error): {_rhe}")
@@ -1620,7 +1891,15 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # all_tasks is already in hand, so this adds no remote round-trip beyond
         # the single presence-aggregate read inside the check.
         try:
-            ud = _undelivered_directive_check(all_tasks, backend=backend)
+            ud = _undelivered_directive_check(
+                all_tasks, backend=backend,
+                # E4: hand over the freshly-rebuilt presence view when we have
+                # one; otherwise leave the default so the check downloads the
+                # aggregate itself (its None-vs-absent INDETERMINATE semantics
+                # stay intact).
+                presence_view=(presence_view if presence_view is not None
+                               else _UNSET),
+                summaries_view=summaries_view)
             record["undelivered_directives"] = ud
             # Distinct signals — a genuine presence OUTAGE must stay LOUD (never
             # silent) but as "couldn't check," NOT as "N directives rotting." When

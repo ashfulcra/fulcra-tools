@@ -18,7 +18,8 @@ loop_ops, schema, log, output, identity — never cli/views/lifecycle/inbox/
 query/presence/listener. The pin runs in REVERSE too: no core module may
 import this one (tests/test_fulcra_coord.py::TestLoopsLayering::
 test_no_core_module_imports_forge_mirror), so forge polling can never creep
-back into the coordination layer.
+back into the coordination layer. (The bus sweep itself rides
+loop_ops.load_loop_records, so ``remote`` is no longer imported directly.)
 
 Idempotency: every mirrored event carries a DETERMINISTIC ``forge_event_id``
 derived from the forge object (merge/review/comment), used as the evidence
@@ -32,7 +33,7 @@ import re
 import subprocess
 from typing import Any, Optional
 
-from . import loop_ops, loops, remote
+from . import loop_ops, loops
 from . import log as ops_log
 from .output import info as _info, print_json as _print_json
 
@@ -147,25 +148,17 @@ def cmd_forge_mirror(args: Any, backend: Optional[list[str]] = None) -> int:
     daemon here. JSON counters: ``probed`` = loops gh answered for,
     ``mirrored`` = evidence events appended, ``skipped`` = open review loops
     not probed (unusable artifact_ref, --repo filtered) or whose probe failed."""
-    prefix = remote.directives_prefix()
+    # Loop records via the shared loader: loop_ops.load_loop_records owns the
+    # load-bearing top-level-only filter (a shard mistaken for a record would
+    # be probed as a loop) AND filters paths BEFORE downloading, so the sweep
+    # no longer pays a subprocess per sub-log shard. Best-effort at THIS
+    # surface: a broken listing reads as "no loops to probe" — the mirror must
+    # never crash a scheduled tick.
     try:
-        listed = remote.list_json(prefix, backend=backend)
+        records: list[dict[str, Any]] = loop_ops.load_loop_records(
+            backend=backend)
     except Exception:
-        listed = []
-    records: list[dict[str, Any]] = []
-    for path, rec in listed:
-        # TOP-LEVEL-ONLY FILTER (same load-bearing idiom as
-        # cli._loop_health_check): the directives prefix holds sub-log
-        # subtrees (<id>/acks|routing|responses|evidence/) beside the
-        # top-level <id>.json loop records — a shard mistaken for a record
-        # would be probed as a loop.
-        rel = path[len(prefix):] if path.startswith(prefix) else path
-        if "/" in rel:
-            continue  # ack/routing/response/evidence shard — never a loop record
-        if not rel.endswith(".json"):
-            continue
-        if isinstance(rec, dict):
-            records.append(rec)
+        records = []
 
     repo_filter = getattr(args, "repo", None)
     probed = mirrored = skipped = 0

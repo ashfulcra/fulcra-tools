@@ -216,8 +216,7 @@ def _tell_role(from_agent, role_audience, title, *, backend):
 
 
 def _inbox_ids(agent, *, backend):
-    """Run cmd_inbox in json mode and return the directive ids it surfaces."""
-    args = SimpleNamespace(agent=agent, format="json", ack=None, all=False)
+    """Return the directive ids the inbox surfaces for ``agent``."""
     items = inbox._load_inbox(agent, backend=backend)
     return {i["id"] for i in items}
 
@@ -238,7 +237,7 @@ def test_role_directive_in_holder_inbox(coord_backend):
     presence capabilities include coord-maintainer."""
     _connect_with_roles("alice:h:r", {"coord-maintainer"}, backend=coord_backend)
     _tell_role("boss:h:r", "@coord-maintainer", "fix the bus", backend=coord_backend)
-    ids = _inbox_ids("alice:h:r", backend=coord_backend)
+    _inbox_ids("alice:h:r", backend=coord_backend)
     titles = {s["title"] for s in inbox._load_inbox("alice:h:r", backend=coord_backend)}
     assert "fix the bus" in titles
 

@@ -25,20 +25,16 @@ records to the pure ``roles.role_status`` fold with injected thresholds.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from . import remote, schema
 from .output import warn as _warn
-
-
-def _now_z() -> str:
-    """Current UTC instant as an ISO-8601 ``...Z`` stamp (the bus's clock
-    format). Inlined like loop_ops._now_z to keep the low-layer import
-    surface minimal."""
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z")
+# The bus clock format ("UTC, microsecond precision, trailing Z") has ONE home:
+# timeutil — a pure stdlib leaf, so binding it here costs no layering edge (the
+# role_ops import pin forbids only up-layer modules). Bound under the local
+# historical name; this replaced an inlined duplicate of the same function.
+from .timeutil import now_iso as _now_z
 
 
 class _RegistryReadError:

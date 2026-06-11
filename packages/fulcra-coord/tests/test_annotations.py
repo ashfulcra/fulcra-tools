@@ -956,7 +956,6 @@ class TestWriteHttp(unittest.TestCase):
         """A router that resolves every tag to id 'tag-<name>', returns an
         empty (or pre-populated) annotation list, creates the def as 'def-1',
         and accepts the ingest POST."""
-        tag_counter = {"n": 0}
 
         def tag_get(req):
             # Every tag name resolves on GET (200) -> deterministic id.

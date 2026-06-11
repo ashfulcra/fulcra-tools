@@ -336,25 +336,18 @@ def _overdue_loop_suffix(me: str, backend: Optional[list[str]] = None) -> str:
     closure exactly once needs a durable seen-marker (like the blocked-on-you
     seen-set) and is deferred until one exists.
 
-    Cost: one ``list_json`` sweep of the directives prefix per notifying tick
-    (the same sweep reconcile's health check already pays). Lazy imports keep
-    the module load graph flat — this only runs inside a tick."""
+    Cost: one paths-only listing of the directives prefix plus one download
+    per TOP-LEVEL loop record per notifying tick — ``loop_ops.load_loop_records``
+    owns both the load-bearing top-level-only filter and the filter-before-
+    download discipline (this used to be an inline copy that downloaded every
+    sub-log shard too; loop_ops sits BELOW inbox in the layering — it imports
+    only remote/loops/log/output — so sharing the helper costs no inversion).
+    Lazy imports keep the module load graph flat — this only runs inside a
+    tick."""
     try:
         from datetime import datetime, timezone
-        from . import loops
-        prefix = remote.directives_prefix()
-        records: list[dict[str, Any]] = []
-        for path, rec in remote.list_json(prefix, backend=backend):
-            # TOP-LEVEL-ONLY FILTER, duplicated from cli._loop_health_check
-            # (a shared helper would invert the cli -> inbox layering): the
-            # prefix holds ack/routing/response SUB-LOG SHARDS beside the
-            # top-level loop records; only a prefix-relative path with no
-            # inner "/" that ends in .json is a loop record.
-            rel = path[len(prefix):] if path.startswith(prefix) else path
-            if "/" in rel or not rel.endswith(".json"):
-                continue
-            if isinstance(rec, dict):
-                records.append(rec)
+        from . import loop_ops, loops
+        records = loop_ops.load_loop_records(backend=backend)
         overdue = sum(1 for x in loops.awaiting_others(
             me, records, now=datetime.now(timezone.utc)) if x.get("overdue"))
         return f" · {overdue} overdue" if overdue else ""
