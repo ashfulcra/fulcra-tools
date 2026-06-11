@@ -1068,6 +1068,46 @@ class TestTryMerge(unittest.TestCase):
         self.assertIn("kind:ops", result["tags"])
         self.assertIn("kind:feature", result["tags"])
 
+    def test_merge_tolerates_event_missing_at(self):
+        """2026-06-11 bug hunt S8: a malformed bus event with no 'at' key
+        KeyError-ed _try_merge mid-write (event-time set comprehensions and
+        the union's dict-by-at both hard-indexed it). The merge must not
+        raise; the at-less event gets SENTINEL ordering (treated as oldest)
+        and the result is deterministic."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["events"] = list(local_v["events"]) + [
+            {"type": "note", "summary": "no timestamp"}]   # the malformed event
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+
+        result = _try_merge(local_v, remote_v)   # must not raise
+
+        self.assertIsNotNone(result)
+        summaries = [e.get("summary") for e in result["events"]]
+        self.assertIn("local note", summaries)
+        self.assertIn("remote note", summaries)
+        # The at-less event is kept, ordered as OLDEST (the sentinel choice).
+        self.assertEqual(result["events"][0].get("summary"), "no timestamp")
+        # Deterministic: the same inputs always merge to the same result.
+        self.assertEqual(result, _try_merge(local_v, remote_v))
+
+    def test_merge_atless_status_event_is_not_a_new_transition(self):
+        """S8 companion: an at-less STATUS-shaped event cannot be ordered
+        against the other side, so it must read as ancient/shared — never as
+        evidence of a NEW transition that manufactures a spurious conflict."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["events"] = list(local_v["events"]) + [{"type": "active"}]
+        local_v["status"] = "active"
+        remote_v = apply_transition(base, "active", by="agent-b")
+
+        result = _try_merge(local_v, remote_v)   # must not raise, must merge
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "active")
+
     def test_merge_when_only_remote_changed_status(self):
         """Regression: no ConflictError when only REMOTE changed status.
 
