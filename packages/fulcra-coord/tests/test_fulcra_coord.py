@@ -1031,6 +1031,83 @@ class TestTryMerge(unittest.TestCase):
         self.assertIn("kind:ops", result["tags"])
         self.assertIn("kind:review", result["tags"])
 
+    def test_merge_preserves_standard_kind_when_marker_kind_sorts_first(self):
+        """2026-06-11 bug hunt C7: with tags [kind:idea, kind:ops] the repair
+        extracted 'idea' (sorts first, NOT in VALID_KINDS) as the primary kind,
+        and kind:ops — a standard tag, so excluded from the extras carry — was
+        silently dropped from the merged task. Both must survive."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["tags"] = sorted(set(local_v["tags"] + ["kind:idea"]))
+        # Force local to be the newer side so the merge base carries BOTH kind
+        # tags (the hunt's repro shape: merged["tags"] = [kind:idea, kind:ops]).
+        local_v["updated_at"] = "2030-01-01T00:00:00.000000Z"
+
+        result = _try_merge(local_v, remote_v)
+
+        self.assertIsNotNone(result)
+        self.assertIn("kind:ops", result["tags"])
+        self.assertIn("kind:idea", result["tags"])
+
+    def test_merge_preserves_both_standard_kinds(self):
+        """2026-06-11 bug hunt C7 (companion): TWO standard kinds on a task —
+        the non-primary one is a standard tag (excluded from extras) and used
+        to vanish on merge. Mirrors apply_transition's _secondary_kinds carry."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["tags"] = sorted(set(local_v["tags"] + ["kind:feature"]))
+        local_v["updated_at"] = "2030-01-01T00:00:00.000000Z"
+
+        result = _try_merge(local_v, remote_v)
+
+        self.assertIsNotNone(result)
+        self.assertIn("kind:ops", result["tags"])
+        self.assertIn("kind:feature", result["tags"])
+
+    def test_merge_tolerates_event_missing_at(self):
+        """2026-06-11 bug hunt S8: a malformed bus event with no 'at' key
+        KeyError-ed _try_merge mid-write (event-time set comprehensions and
+        the union's dict-by-at both hard-indexed it). The merge must not
+        raise; the at-less event gets SENTINEL ordering (treated as oldest)
+        and the result is deterministic."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["events"] = list(local_v["events"]) + [
+            {"type": "note", "summary": "no timestamp"}]   # the malformed event
+        remote_v = apply_update(base, by="agent-b", summary="remote note")
+
+        result = _try_merge(local_v, remote_v)   # must not raise
+
+        self.assertIsNotNone(result)
+        summaries = [e.get("summary") for e in result["events"]]
+        self.assertIn("local note", summaries)
+        self.assertIn("remote note", summaries)
+        # The at-less event is kept, ordered as OLDEST (the sentinel choice).
+        self.assertEqual(result["events"][0].get("summary"), "no timestamp")
+        # Deterministic: the same inputs always merge to the same result.
+        self.assertEqual(result, _try_merge(local_v, remote_v))
+
+    def test_merge_atless_status_event_is_not_a_new_transition(self):
+        """S8 companion: an at-less STATUS-shaped event cannot be ordered
+        against the other side, so it must read as ancient/shared — never as
+        evidence of a NEW transition that manufactures a spurious conflict."""
+        from fulcra_coord.cli import _try_merge
+        base = _sample_task()
+        local_v = apply_update(base, by="agent-a", summary="local note")
+        local_v["events"] = list(local_v["events"]) + [{"type": "active"}]
+        local_v["status"] = "active"
+        remote_v = apply_transition(base, "active", by="agent-b")
+
+        result = _try_merge(local_v, remote_v)   # must not raise, must merge
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "active")
+
     def test_merge_when_only_remote_changed_status(self):
         """Regression: no ConflictError when only REMOTE changed status.
 
@@ -8762,6 +8839,29 @@ class TestWorkstreamCommand(_PresenceBackendCase):
             agent=me, ws_action="set", workstreams="x", summary="new note",
             format="table"))
         self.assertEqual(self._record(me)["summary"], "new note")
+
+    def test_mutation_strips_baked_stale_version_suffix(self):
+        """2026-06-11 bug hunt S6: connect appends '(vX behind canonical Y)'
+        to the presence summary when the stale marker is set. workstream
+        set/add/clear preserved the WHOLE stored summary, so the baked-in
+        suffix was carried forever — even after the host updated — because
+        only connect re-derives it from the marker. Mutations must strip the
+        trailing suffix from the preserved summary; the rest survives."""
+        from fulcra_coord.cli import cmd_connect, cmd_workstream
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        # Bake the suffixed summary in, exactly as a stale-marked connect does.
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="set", workstreams="x",
+            summary="porting the digest (v0.15.2 behind canonical 0.16.0)",
+            format="table"))
+        # A later mutation that PRESERVES the summary (summary=None)…
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="add", workstreams="y", summary=None,
+            format="table"))
+        # …drops the suffix but keeps the operator's actual text.
+        self.assertEqual(self._record(me)["summary"], "porting the digest")
 
 
 class TestPresenceCommand(_PresenceBackendCase):

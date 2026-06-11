@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -62,6 +63,40 @@ def test_cmd_respond_closes_the_loop(coord_backend):
     assert not loops.is_open_loop(snap)
 
 
+def test_cmd_respond_refresh_preserves_concurrent_snapshot_update(coord_backend):
+    """2026-06-11 bug hunt C6: the snapshot refresh must fold onto a FRESH
+    download, not the body read at command start. A concurrent snapshot write
+    (an ack, a summary edit) landing between respond's initial download and
+    its refresh upload used to be silently reverted by the stale re-upload."""
+    d = _seed_review_loop(coord_backend)
+    path = remote.directive_remote_path(d["id"])
+    real_append = loop_ops.append_loop_response
+
+    def append_then_concurrent_update(*a, **kw):
+        ok = real_append(*a, **kw)
+        # Simulate the interleaving: another host updates the LWW snapshot
+        # AFTER respond downloaded its copy but BEFORE the refresh upload.
+        snap = remote.download_json(path, backend=coord_backend)
+        snap["acked_by"] = ["other:h:r"]
+        snap["current_summary"] = "concurrent update from another host"
+        assert remote.upload_json(snap, path, backend=coord_backend)
+        return ok
+
+    args = SimpleNamespace(loop_id=d["id"], outcome="approve",
+                           evidence="", agent="rev:h:r", format="table")
+    with patch("fulcra_coord.loop_ops.append_loop_response",
+               side_effect=append_then_concurrent_update):
+        assert loop_ops.cmd_respond(args, backend=coord_backend) == 0
+
+    snap = remote.download_json(path, backend=coord_backend)
+    # The refresh still reflects closure (the fold did its job)...
+    assert snap["outcome"]["verdict"] == "approve"
+    assert not loops.is_open_loop(snap)
+    # ...AND the concurrent writer's fields survive — not reverted.
+    assert snap["acked_by"] == ["other:h:r"]
+    assert snap["current_summary"] == "concurrent update from another host"
+
+
 def test_cmd_respond_unknown_loop_is_an_error(coord_backend):
     args = SimpleNamespace(loop_id="DIR-19700101-review-deadbeef",
                            outcome="approve", evidence="", agent="rev:h:r",
@@ -114,6 +149,38 @@ def test_evidence_source_cannot_be_forged(coord_backend):
         backend=coord_backend)
     events = loop_ops.read_loop_evidence(d["id"], backend=coord_backend)
     assert events[0]["source"] == "forge-mirror"
+
+
+def test_fold_keeps_real_verdict_over_trailing_outcomeless_response(coord_backend):
+    """2026-06-11 bug hunt S4: a trailing response WITHOUT an outcome (a
+    malformed/partial shard) used to null the real verdict — fold blindly took
+    responses[-1]. The fold must take the LAST response that actually carries
+    a non-empty outcome; the loop still closes (a real verdict exists)."""
+    d = _seed_review_loop(coord_backend)
+    loop_ops.append_loop_response(
+        d["id"], {"by": "rev:h:r", "outcome": {"verdict": "approve"},
+                  "at": "2026-06-11T00:00:00.000000Z"},
+        backend=coord_backend)
+    loop_ops.append_loop_response(
+        d["id"], {"by": "buggy:h:r",   # no outcome key at all
+                  "at": "2026-06-11T01:00:00.000000Z"},
+        backend=coord_backend)
+    folded = loop_ops.fold_loop(d, backend=coord_backend)
+    assert folded["outcome"] == {"verdict": "approve"}
+    assert not loops.is_open_loop(folded)
+
+
+def test_fold_with_only_outcomeless_responses_keeps_loop_open(coord_backend):
+    """2026-06-11 bug hunt S4 (second half): with NO outcome-carrying response
+    the loop must NOT advance to a terminal state — closure without a verdict
+    is exactly the out-of-band-verdict bug class the loop substrate exists to
+    kill. Outcome stays None and the loop stays open."""
+    d = _seed_review_loop(coord_backend)
+    loop_ops.append_loop_response(
+        d["id"], {"by": "buggy:h:r"}, backend=coord_backend)
+    folded = loop_ops.fold_loop(d, backend=coord_backend)
+    assert folded["outcome"] is None
+    assert loops.is_open_loop(folded)
 
 
 def test_outcome_fold_is_bus_only(coord_backend):
