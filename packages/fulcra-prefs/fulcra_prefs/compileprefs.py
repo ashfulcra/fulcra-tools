@@ -33,7 +33,13 @@ def _reduce(signals: list[Signal], now: datetime) -> dict:
     for key, group in by_key.items():
         # Stable id sort first — conflict resolution must not depend on input order.
         group = sorted(group, key=lambda s: s.id or "")
-        best = max(group, key=lambda s: (abs(effective_weight(s, now)), s.observed_at))
+        # Selection is weighted by confidence so a low-confidence INFERRED signal
+        # (auto-captured) never silently overrides a high-confidence EXPLICIT one
+        # of similar strength. The EMITTED weight stays the raw effective weight;
+        # confidence only influences which signal wins. Deterministic: ties fall
+        # back to observed_at, then the id pre-sort above.
+        best = max(group, key=lambda s: (abs(effective_weight(s, now)) * s.confidence,
+                                         s.observed_at))
         keys[key] = _entry(best, effective_weight(best, now), len(group), now)
     return keys
 

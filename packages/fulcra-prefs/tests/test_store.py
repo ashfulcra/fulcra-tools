@@ -1,5 +1,4 @@
 import json
-import pytest
 from fulcra_prefs.store import FulcraStore, PREFS_ROOT
 from test_schema import make_signal
 
@@ -17,6 +16,34 @@ def test_list_json_reads_folder_children(fake_api):
     store.write_json("prefs/signals-cache/b.json", {"id": "b"})
     store.write_json("prefs/signals-cache/a.json", {"id": "a"})
     assert [rec["id"] for rec in store.list_json("prefs/signals-cache")] == ["a", "b"]
+
+def test_list_json_parallel_path_roundtrips_many_shards(fake_api):
+    """list_json fetches shards concurrently (perf: compile shouldn't scale as
+    N sequential round-trips). Correctness + completeness must be unchanged for
+    many shards regardless of fetch order."""
+    store = FulcraStore(fake_api)
+    for i in range(25):
+        store.write_json(f"prefs/signals-cache/s{i:02d}.json", {"id": f"s{i:02d}"})
+    got = {rec["id"] for rec in store.list_json("prefs/signals-cache")}
+    assert got == {f"s{i:02d}" for i in range(25)}
+
+
+def test_list_json_propagates_download_errors(fake_api):
+    """A failed shard download must still surface (not be silently dropped),
+    matching the old sequential behavior — ex.map re-raises on iteration."""
+    store = FulcraStore(fake_api)
+    for i in range(5):
+        store.write_json(f"prefs/signals-cache/s{i}.json", {"id": i})
+    orig = fake_api.download_file
+    def boom(file_id):
+        if file_id.endswith("s3.json"):
+            raise OSError("simulated download outage")
+        return orig(file_id)
+    fake_api.download_file = boom
+    import pytest
+    with pytest.raises(OSError):
+        store.list_json("prefs/signals-cache")
+
 
 def test_read_missing_returns_none(fake_api):
     assert FulcraStore(fake_api).read_json("prefs/compiled.json") is None

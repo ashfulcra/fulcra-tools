@@ -35,12 +35,18 @@ preference" reference survives the offline gap.
 that reduces all signals to "what's true now":
 
 1. **Decay.** `weight = strength × 2^(−age / half_life)`. A 0.9-strength signal
-   with a 90-day half-life is worth ~0.45 after 90 days. Facts (`half_life: null`)
-   don't decay but are flagged stale after 180 days.
+   with a 90-day half-life is worth ~0.45 after 90 days. A half-life is a
+   positive number of days, or `null` for a durable fact — facts don't decay
+   but are flagged stale after 180 days. (`capture` rejects a zero or negative
+   half-life: a 0 would divide by zero in every later compile.)
 2. **Supersedes.** Corrections drop the replaced signal; chains are followed;
    cycles are silently dropped.
-3. **Conflicts.** Highest absolute decayed weight wins; ties break to the newer
-   signal (then signal id for full determinism).
+3. **Conflicts.** Highest `|decayed weight| × confidence` wins — so a confident
+   explicit preference beats a low-confidence *inferred* (auto-captured) one of
+   similar strength, and a guess never silently overrides something you stated.
+   Ties break to the newer signal (then signal id for full determinism). The
+   emitted weight is still the raw decayed weight; confidence only decides which
+   signal wins.
 4. **Scope overlay.** Platform-scoped signals beat global ones; one compiled doc
    per platform is written alongside the global doc.
 
@@ -94,6 +100,24 @@ pipe `fulcra-prefs get` or `fulcra-prefs inject` without filtering noise.
 
 ---
 
+## Auto-capture (batch)
+
+Agents shouldn't need an explicit "remember this" — they can passively notice
+preferences during a session and record them all at once at the end, with a
+single consented call:
+
+```bash
+fulcra-prefs capture-batch --file candidates.json --platform claude-code
+```
+
+where `candidates.json` is a JSON array of signal specs (`key`, `value`,
+`strength`, and optional `kind`/`scope`/`confidence`/`half_life_days`/
+`supersedes`). Mark inferred-but-unconfirmed signals with a lower `confidence`
+(0.4–0.6): because compile weights conflict resolution by confidence, a guess
+can't override something you explicitly stated — which is what makes passive
+capture safe. The when/what heuristics live in
+[`skill/references/fulcra-prefs-capture.md`](skill/references/fulcra-prefs-capture.md).
+
 ## Claude Code session hook
 
 Add to `~/.claude/settings.json`:
@@ -116,19 +140,31 @@ fail silent, so this hook never breaks a session start.
 Signals are annotation records posted to `/ingest/v1/record` via the Fulcra
 ingest API. Each signal carries a key (dot-namespaced), a typed value, a strength
 in [-1, 1] (negative = aversion), a half-life, and a scope (`global` or
-`platform:<name>`). The `capture` command posts the record and writes a per-signal
-cache shard under `prefs/signals-cache/` in your Fulcra file library — one file
-per signal id, so concurrent captures from different platforms never race on a
-shared file.
+`platform:<name>`). The `capture` command posts the record and also writes a
+per-signal *write-through cache shard* under `prefs/signals-cache/` — one file
+per signal id, so concurrent captures never race on a shared file, and a signal
+captured offline still reaches compile after the next flush.
 
-Compile is a pure function of `(signals, now)`. It folds signals by key using
-half-life decay to compute effective weights, resolves conflicts to the signal
-with the highest absolute effective weight (ties broken by `observed_at`, then
-signal id for full determinism), drops superseded signals including chains and
-cycles, and writes canonical JSON to `prefs/compiled.json` and per-platform
-overlays under `prefs/platforms/`. The output is byte-identical for the same
+Compile reads signals **authoritatively from get-records** (so a capture from
+*any* platform is visible — including shell-less tier-2 agents that only POST to
+ingest and never write a shard), unioned with the local shard cache to cover
+offline-captured-not-yet-ingested signals and ingest→read indexing lag, deduped
+by capture identity. Once a shard's signal is confirmed in get-records the shard
+is pruned, so the cache stays bounded rather than growing forever. Compile itself
+is a pure function of `(signals, now)`: it folds signals by key using half-life
+decay to compute effective weights, resolves conflicts to the signal with the
+highest `|effective weight| × confidence` (so a low-confidence inferred signal
+never overrides a confident explicit one; ties broken by `observed_at`, then
+signal id for full determinism), drops superseded signals including chains and cycles, and
+writes canonical JSON to `prefs/compiled.json` and per-platform overlays under
+`prefs/platforms/`. The output is byte-identical for the same
 inputs regardless of input order — the determinism contract tested in
 `tests/test_determinism.py`. Full design rationale: [`docs/SPEC.md`](docs/SPEC.md).
+
+A platform view is always *global + that platform's overrides*: `get --platform X`
+and `inject --platform X` return the merged platform doc, and when platform `X`
+has no overrides of its own they fall back to the plain global doc (rather than
+nothing) — a platform with no special-casing simply sees your global prefs.
 
 How agents consume the compiled doc: `inject` prints a compact preference block
 at session start (e.g. `- comms.tone.concise: {"preferred": true} [+0.90]`). It
@@ -214,14 +250,23 @@ and cross-platform compile consistency.
 
 ## v1 limitations (honest)
 
-- **Signals cache workaround.** `compile` reads signals from
-  `prefs/signals-cache/` shards instead of calling `get-records` directly.
-  This is because `fulcra-api` has no record-read-by-definition helper wired yet.
-  The replacement (real `get-records` reads scoped to the Preference Signals
-  definition) is tracked on the bus and lands when CLI annotation commands ship.
+- **Read path is get-records + a shard cache.** `compile` reads authoritatively
+  via `get-records` and unions a write-through shard cache (for offline/lag),
+  pruning shards once their records are confirmed. The remaining workaround is
+  the *write* side — signals are posted via `/ingest/v1/record` and there's no
+  record-level delete/replace yet, so corrections are modeled as `supersedes`
+  rather than true deletes. Native revocation lands when CLI annotation
+  (record) commands ship; tracked on the bus.
 - **Single-user.** The solver takes pre-compiled docs as input; there is no
   multi-user sync layer in v1.
 - **No MCP write path.** The Fulcra MCP exposes read operations today; capture
   and compile require a CLI-capable agent. Filed as a platform gap.
 - **Cron documented, not installed.** The recommended cron (`fulcra-prefs compile`
   on a timer) is described in the skill; the installer is out of scope for v1.
+- **A double-ingest corner case.** If a capture's ingest POST *succeeds* but the
+  follow-up cache-shard write fails (rare: network blips between the two calls),
+  the record is spooled and re-POSTed on the next `compile` flush — so the raw
+  Fulcra timeline ends up with two annotation records for that one signal.
+  Compile dedupes by signal id, so compiled output and weights stay correct;
+  only the underlying record stream carries the duplicate. Lands in the
+  record-CRUD cleanup when CLI annotation commands ship.

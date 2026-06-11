@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from fulcra_prefs.cli import run
 from fulcra_prefs.outbox import Outbox
-from fulcra_prefs.store import FulcraStore, META_PATH, COMPILED_PATH, CONSENT_PATH
+from fulcra_prefs.store import FulcraStore, META_PATH, COMPILED_PATH
 from test_schema import make_signal
 
 NOW = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
@@ -52,6 +52,102 @@ def test_get_for_audience_filters_and_logs_disclosure(env, capsys):
     disclosure = json.loads(fake_api.ingested[-1]["data"])
     assert disclosure["kind"] == "consent"
 
+def test_get_platform_falls_back_to_global_when_no_overlay(env, capsys):
+    """BUG A: `get --platform X` for a platform with NO platform-scoped
+    overrides must return the global compiled doc, not an empty doc. Compile
+    only writes platforms/X.json when X has a platform:-scoped signal; for any
+    other platform the view IS global. cmd_inject already falls back to global;
+    cmd_get must match (and it's the consent-gated export path, so silently
+    returning {} is worse than wrong)."""
+    call, fake_api, store = env
+    # A purely GLOBAL preference (no platform overlay anywhere).
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")  # platform = source, scope stays global
+    call("compile")
+    assert call("get", "--platform", "codex") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"], \
+        "get --platform with no overlay should fall back to global prefs"
+
+
+def test_compile_sees_ingest_only_signal_without_a_shard(env, capsys):
+    """Feature 1 — tier-2 capture visibility. A signal that was INGESTED but has
+    NO cache shard (exactly what a shell-less tier-2 agent produces: one POST to
+    /ingest, no file write) must still reach compile via the get-records read
+    path. Pre-fix, compile read only shards, so tier-2 captures were invisible."""
+    call, fake_api, store = env
+    from fulcra_prefs.schema import Signal, temp_signal_id
+    obs = "2026-06-10T11:00:00+00:00"
+    key = "comms.tone.concise"
+    sig = Signal(id=temp_signal_id(key, obs, "chatgpt"), kind="preference",
+                 key=key, scope="global", value={"preferred": True}, strength=0.9,
+                 confidence=1.0, half_life_days=90.0, observed_at=obs,
+                 platform="chatgpt", agent=None, session=None, supersedes=None)
+    store.ingest_signal(sig, data_type="MomentAnnotation/def-123")  # tier-2: ingest only
+    assert call("compile") == 0
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert key in out["keys"], "ingest-only (tier-2) signal must be visible to compile"
+
+
+def test_compile_gcs_confirmed_shards_keeps_unconfirmed(env, capsys):
+    """Feature 2 — cache GC. After compile, a shard whose signal is confirmed in
+    get-records is pruned (the authoritative source has it; the write-through
+    shard is dead weight that would be re-downloaded every compile). A shard
+    NOT yet confirmed (read down / indexing lag) is kept as the safety net."""
+    call, fake_api, store = env
+    # Capture writes a shard AND ingests (so the record is readable = confirmed).
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")
+    shard_paths = [p for p in fake_api.files if "signals-cache" in p]
+    assert len(shard_paths) == 1                      # shard present pre-compile
+    assert call("compile") == 0
+    assert [p for p in fake_api.files if "signals-cache" in p] == [], \
+        "confirmed shard should be GC'd after compile"
+    # get still works — compile read the record authoritatively
+    assert call("get") == 0
+    assert "dining.cuisine.thai" in json.loads(capsys.readouterr().out)["keys"]
+
+
+def test_compile_does_not_fail_when_cache_gc_delete_fails(env, capsys):
+    call, fake_api, _store = env
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")
+
+    def fail_delete(file_id):
+        raise Exception("simulated delete outage")
+
+    fake_api.delete_file = fail_delete
+    assert call("compile") == 0
+    assert [p for p in fake_api.files if "signals-cache" in p] != [], \
+        "failed GC delete should leave shard for a later retry"
+
+
+def test_compile_keeps_shard_when_record_unconfirmed(env, capsys):
+    """A shard whose record isn't visible in get-records (read outage / lag)
+    must be KEPT — pruning it would lose the only copy of that signal."""
+    call, fake_api, store = env
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")
+    fake_api.fail_read = True                          # record read unavailable
+    assert call("compile") == 0
+    assert [p for p in fake_api.files if "signals-cache" in p] != [], \
+        "unconfirmed shard must be kept as the safety net"
+
+
+def test_compile_degrades_to_shards_when_record_read_fails(env, capsys):
+    """If the get-records read is unreachable, compile must still proceed from
+    the shard cache (never worse than the cache-only path it replaced)."""
+    call, fake_api, store = env
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")   # writes a shard
+    fake_api.fail_read = True                                 # get-records down
+    assert call("compile") == 0
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"]
+
+
 def test_inject_prints_block_or_nothing(env, capsys):
     call, *_ = env
     assert call("inject", "--platform", "claude-code") == 0
@@ -92,6 +188,58 @@ def test_solve_from_files(env, tmp_path, capsys):
     assert out["ranked"][0]["id"] == "thai"
     assert out["trace"]
 
+def test_capture_batch_ingests_all_items(env, tmp_path, capsys):
+    """Feature 3 — auto-capture mechanism. An agent that noticed several
+    preferences in a session records them in ONE consented call. Per-item
+    confidence is honored (inferred items can be marked lower-confidence)."""
+    call, fake_api, store = env
+    batch = [
+        {"key": "dining.cuisine.thai", "value": True, "strength": 0.9, "confidence": 1.0},
+        {"key": "comms.tone.concise", "value": True, "strength": 0.7, "confidence": 0.5,
+         "kind": "preference"},
+    ]
+    f = tmp_path / "batch.json"
+    f.write_text(json.dumps(batch))
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 0
+    assert len(fake_api.ingested) == 2
+    assert call("compile") == 0
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"]
+    assert "comms.tone.concise" in out["keys"]
+
+
+def test_capture_batch_rejects_non_array(env, tmp_path, capsys):
+    call, fake_api, store = env
+    f = tmp_path / "bad.json"
+    f.write_text(json.dumps({"key": "x"}))      # object, not array
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 2
+    assert "array" in capsys.readouterr().err
+
+
+def test_capture_batch_rejects_non_object_item_without_ingest(env, tmp_path, capsys):
+    call, fake_api, _store = env
+    f = tmp_path / "bad.json"
+    f.write_text(json.dumps([1]))
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 2
+    assert len(fake_api.ingested) == 0
+    assert "item 1" in capsys.readouterr().err
+
+
+def test_capture_batch_rejects_bad_item_before_any_ingest(env, tmp_path, capsys):
+    call, fake_api, _store = env
+    f = tmp_path / "bad.json"
+    f.write_text(json.dumps([
+        {"key": "dining.cuisine.thai", "value": True, "strength": 0.9},
+        {"key": "comms.tone.concise", "value": True},
+    ]))
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 2
+    assert len(fake_api.ingested) == 0
+    err = capsys.readouterr().err
+    assert "item 2" in err
+    assert "strength" in err
+
+
 def test_missing_meta_gives_actionable_error(fake_api, tmp_path, capsys):
     rc = run(["capture", "--key", "k", "--value", "1", "--strength", "0.5",
               "--platform", "x"], api=fake_api, outbox_dir=tmp_path, now=NOW)
@@ -99,13 +247,14 @@ def test_missing_meta_gives_actionable_error(fake_api, tmp_path, capsys):
     assert "onboard" in capsys.readouterr().err
 
 def test_signal_cache_shards_do_not_clobber_each_other(env):
-    from fulcra_prefs.cli import _append_signal_cache, _load_cached_signals
+    from fulcra_prefs.cli import _append_signal_cache, _gather_signals
     call, fake_api, store = env
     _append_signal_cache(store, make_signal(id="sig-a", key="k.a"))
     _append_signal_cache(store, make_signal(id="sig-b", key="k.b"))
     assert "/prefs/signals-cache/sig-a.json" in fake_api.files
     assert "/prefs/signals-cache/sig-b.json" in fake_api.files
-    assert {s.id for s in _load_cached_signals(store)} == {"sig-a", "sig-b"}
+    signals, _confirmed = _gather_signals(store)   # no meta -> shards only
+    assert {s.id for s in signals} == {"sig-a", "sig-b"}
 
 def test_get_for_audience_spools_disclosure_when_ingest_down(env, tmp_path, capsys):
     call, fake_api, store = env

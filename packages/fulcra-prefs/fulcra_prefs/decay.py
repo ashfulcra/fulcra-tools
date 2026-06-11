@@ -1,7 +1,7 @@
 """Half-life decay. Pure functions of (signal, now); `now` is always explicit
 so compile output is reproducible (the determinism contract in SPEC.md)."""
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from .schema import Signal
 
 STALE_FACT_DAYS = 180  # undecaying facts older than this get flagged, not dropped
@@ -9,6 +9,14 @@ STALE_FACT_DAYS = 180  # undecaying facts older than this get flagged, not dropp
 
 def _age_days(observed_at: str, now: datetime) -> float:
     observed = datetime.fromisoformat(observed_at)
+    # observed_at may arrive tz-naive (real get-records timestamps, a hand-written
+    # cache shard) while `now` is tz-aware. Coerce to a common basis as UTC rather
+    # than raising TypeError on the subtraction — mirrors consent._active.
+    if (observed.tzinfo is None) != (now.tzinfo is None):
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        else:
+            now = now.replace(tzinfo=timezone.utc)
     return (now - observed).total_seconds() / 86400.0
 
 
