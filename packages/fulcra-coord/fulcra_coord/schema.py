@@ -452,6 +452,23 @@ _LOOP_KEYS = {"kind", "state", "outcome", "expects_response", "sla_hours"}
 # at validation. `tell` is the legacy/FYI kind old records map onto.
 _LOOP_KINDS = {"tell", "review", "dispatch", "idea", "question", "signoff"}
 
+# Continuity payload fields (spec 2026-06-10-continuity-integration-design.md)
+# — ADDITIVE and OPTIONAL, exactly like _LOOP_KEYS. A `handoff` dispatch loop
+# carries the producing session's continuity checkpoint as a payload REF:
+#   checkpoint_ref    — an OPAQUE string (a remote `continuity/...` bus path in
+#                       the normal case). Coord never parses structure out of
+#                       it — the checkpoint schema is owned by the standalone
+#                       fulcra-continuity package, and refs-not-bodies is the
+#                       decoupling the spec demands.
+#   checkpoint_inline — FALLBACK ONLY: the checkpoint JSON carried inline when
+#                       publishing a local checkpoint file to the remote tree
+#                       failed (small docs are fine inline; without this a
+#                       transport blip would strand the handoff ref on a path
+#                       the recipient host can't read).
+# Optional so records written by pre-continuity hosts stay valid forever — the
+# same mixed-fleet floor as the loop fields.
+_CONTINUITY_KEYS = {"checkpoint_ref", "checkpoint_inline"}
+
 
 def make_directive_id(directive_type: str, dt: Optional[datetime] = None) -> str:
     """Generate a collision-resistant, day-sortable directive ID.
@@ -606,7 +623,7 @@ def validate_directive(d: dict) -> list[str]:
     errors: list[str] = []
 
     missing = sorted(_DIRECTIVE_KEYS - set(d.keys()))
-    extra = sorted(set(d.keys()) - _DIRECTIVE_KEYS - _LOOP_KEYS)
+    extra = sorted(set(d.keys()) - _DIRECTIVE_KEYS - _LOOP_KEYS - _CONTINUITY_KEYS)
     for field in missing:
         errors.append(f"Missing required field: {field!r}")
     for field in extra:
@@ -1204,6 +1221,14 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "not_before": task.get("not_before"),
         "due": task.get("due"),
         "tags": task.get("tags", []),
+        # Continuity handoff ref (spec 2026-06-10): the inbox/claim surfaces
+        # read summaries, never full bodies, so the OPAQUE ref must ride the
+        # summary or the recipient would have to fetch the body just to learn
+        # a resume point exists. Plain .get carry-through keeps task_summary
+        # idempotent and pre-continuity records summarize to None. The INLINE
+        # fallback body deliberately does NOT ride summaries (size; the claim
+        # path loads the full body anyway).
+        "checkpoint_ref": task.get("checkpoint_ref"),
         "updated_at": task.get("updated_at", ""),
         # Flattened done timestamp (see docstring): the single key every
         # done/abandoned-gating view builder reads off a summary.

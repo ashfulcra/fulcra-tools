@@ -98,6 +98,9 @@ fulcra-coord done TASK-... \
 | `block` | Mark as blocked. `--blocked-on "<reason>"` for an agent/external blocker; **`--on-user "<ask>"`** to block on the human — assigns the task to the resolved human handle, tags `needs:human`, and lands it on `needs-me` + the human's next SessionStart. Optional scheduling on an `--on-user` ask: **`--not-before <when>`** gates when it surfaces as DUE-NOW (it stays under `needs-me`'s Upcoming until then), and **`--due <when>`** is the informational deadline (drives upcoming ordering/urgency, does not gate). `<when>` is an ISO date/datetime (`2026-06-08`, `2026-06-08T18:00:00Z`) or a relative offset (`5d`, `36h`, `10m`) |
 | `pause` | Set to waiting with a next_action. Add `--snapshot` to write a Fulcra Continuity-compatible checkpoint at the durable pause point without writing snapshots on every task update |
 | `snapshot` | Write a Fulcra Continuity-compatible checkpoint without changing task state (`--reason`, `--transcript-path`, optional `--next`). Used by compaction/idle hooks to capture resume state at session boundaries (bounded by `FULCRA_COORD_CONTINUITY_KEEP` retention, not by suppression) |
+| `handoff` | Hand work to another agent or `@role` **with its resume state**: opens a `kind=dispatch` loop whose payload carries a continuity `checkpoint_ref` (`handoff --to <agent\|@role> --title "..." [--checkpoint <ref\|file>]`). A local checkpoint JSON file is published to the bus's `continuity/` tree first (the remote path becomes the ref); an opaque ref is forwarded verbatim. The recipient's claim prints the ref + rendered resume brief. See [Continuity](#continuity) |
+| `checkpoint` | Read or update a **role's** durable resume point: `checkpoint --role X --ref <ref>` points the role registry's `checkpoint_ref` at a continuity checkpoint (preserving every other field); without `--ref` it shows the current ref + best-effort resume brief. Claiming the role (`roles claim` / `connect --role`) prints the same resume. See [Continuity](#continuity) |
+| `park` | Best-effort session-exit checkpoint of every role this session holds: writes a continuity checkpoint per held role via the optional `fulcra-continuity` CLI, publishes it to the bus, and updates each role's `checkpoint_ref`. Silent no-op without the CLI or held roles; **never exits nonzero** — safe for PreCompact/SessionEnd hooks (which call it, backgrounded) |
 | `done` | Mark done (requires evidence) |
 | `abandon` | Mark abandoned |
 | `reconcile` | Repair views and resolve pending markers |
@@ -177,9 +180,12 @@ data) is the thing that persists. Register one with
   on an exclusive role render **CONTESTED** (visible, never silently
   double-held); a stale lease is simply claimable. The default `shared` policy
   fans out to every fresh holder.
-- **`checkpoint_ref` is reserved** for the continuity phase: a session
-  claiming a role will pull the role's latest checkpoint and resume its work.
-  Nothing reads it yet; the field exists so that lands additively.
+- **`checkpoint_ref` is the role's resume point.** A session claiming a role
+  (`roles claim` / `connect --role`) prints the role's checkpoint ref and —
+  when the optional `fulcra-continuity` CLI is installed — the rendered
+  resume brief. Set it with `checkpoint --role X --ref <ref>`, or let the
+  session-exit `park` hook maintain it automatically. See
+  [Continuity](#continuity).
 
 `fulcra-coord roles` is also the **discovery** surface: senders list the
 registry to learn what roles exist instead of guessing session ids, and
@@ -342,6 +348,67 @@ That single discipline is what makes cross-agent coordination visible,
 auditable, and loss-proof: the requester consumes the bus, never polls the
 platform, and the overdue detector catches any loop where the discipline
 slipped.
+
+## Continuity
+
+**A checkpoint is only useful if it travels with the work.** Fulcra Continuity
+(the standalone `fulcra-continuity` package) does the hard part — structured
+checkpoints (objective, decisions, artifacts, open questions, next actions)
+plus resume-brief rendering. What coord adds is **bus visibility and
+delivery**: a checkpoint becomes a payload *ref* on the coordination
+primitives you already use, instead of a side-tree only retention knows
+about. Coord stores **refs, never bodies** — the checkpoint schema stays
+owned by `fulcra-continuity` (coord never imports it; when installed, its CLI
+is invoked as a subprocess to render briefs), and refs are opaque strings
+coord forwards verbatim.
+
+**Handoff — a dispatch loop carrying a resume point.** When one session hands
+work to another agent (or a `@role`), send the state along:
+
+```bash
+fulcra-continuity checkpoint --task-id TASK-123 --title "..." --objective "..." \
+  --next "Audit parser inputs" --out /tmp/handoff.json
+fulcra-coord handoff --to @arc-maintainer --title "Continue the parser audit" \
+  --checkpoint /tmp/handoff.json
+```
+
+`handoff` opens an ordinary `kind=dispatch` loop (SLA-tracked, closed only by
+`respond`) whose payload carries `checkpoint_ref`. A **local checkpoint file
+is published to the bus first** — the `fulcra-continuity` CLI writes local
+paths, which are useless on another host, so coord uploads the JSON to its
+`continuity/` tree and carries the immutable remote archive path as the ref
+(if that publish fails, the checkpoint rides inline in the payload as a
+fallback). Already-remote/opaque refs pass through untouched. The recipient
+sees `checkpoint:` on the directive in `inbox`, and **claiming the task**
+(`update <id> --status active`) prints the ref plus — when `fulcra-continuity`
+is installed — the rendered resume brief. Closing the loop = the work
+continued.
+
+**Role checkpoints — where the role left off, surviving session death.** The
+role registry's `checkpoint_ref` is the role's durable resume point:
+
+```bash
+fulcra-coord checkpoint --role arc-maintainer --ref <ref>   # set
+fulcra-coord checkpoint --role arc-maintainer               # show ref + brief
+```
+
+Any session that later claims the role — `roles claim arc-maintainer` or
+`connect --role arc-maintainer` — gets the ref + best-effort resume brief
+printed at claim time. This is the respawn backbone: spawn session → claim
+role → resume brief → work → checkpoint on park.
+
+**Park — checkpoint on the way out.** `fulcra-coord park` checkpoints every
+role the session holds (via the optional `fulcra-continuity` CLI), publishes
+each checkpoint to the bus, and points the role's `checkpoint_ref` at it. The
+Claude Code PreCompact/SessionEnd hooks call it backgrounded, so the
+"session died mid-work" gap closes without ever blocking a session exit:
+missing CLI, no held roles, or any bus failure are silent no-ops and `park`
+never exits nonzero. Checkpoint archives are GC-bounded by the existing
+`FULCRA_COORD_CONTINUITY_KEEP` retention.
+
+Everything here degrades gracefully: without `fulcra-continuity` installed
+you still get refs stored, forwarded, and printed — only the rendered brief
+requires the CLI. Nothing in core hard-depends on the continuity package.
 
 ## Remote layout
 
