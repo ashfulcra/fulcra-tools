@@ -1239,7 +1239,11 @@ def _role_health_check(
     shape: ``{roles: [{name, policy, holders, vacant, vacant_since,
     contested, escalation_due, unknown}], vacant, contested, escalated,
     unknown}``."""
-    registry = _role_ops.list_roles(backend=backend)
+    # ONE partitioned roles/ listing serves the registry AND every role's
+    # lease sub-log (perf loop-2 #1: list_roles + per-role read_leases used to
+    # re-list and re-download the same shards every tick). READ_ERROR per role
+    # is preserved by the fold — translated below exactly as before.
+    registry = _role_ops.load_roles_with_leases(backend=backend)
     if not registry:
         return {"roles": [], "vacant": 0, "contested": 0, "escalated": 0,
                 "unknown": 0}
@@ -1259,9 +1263,8 @@ def _role_health_check(
     grace = views._presence_grace_seconds()
     out: list[dict] = []
     vacant = contested = escalated = unknown = 0
-    for role in registry:
+    for role, leases in registry:
         name = role.get("name") or ""
-        leases = _role_ops.read_leases(name, backend=backend)
         if leases is _role_ops.READ_ERROR:
             leases = None   # translate the sentinel for the pure fold
         status = _roles.role_status(role, leases, presence_by_agent, now,
@@ -1424,8 +1427,10 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
         _info(f"Released role '{name}' for {me}")
         return 0
 
-    # Default: list the registry with live status folded in.
-    registry = _role_ops.list_roles(backend=backend)
+    # Default: list the registry with live status folded in. One partitioned
+    # roles/ listing carries the lease sub-logs too (perf loop-2 #1 — no
+    # per-role re-list/re-download).
+    registry = _role_ops.load_roles_with_leases(backend=backend)
     now = datetime.now(timezone.utc)
     presence_by_agent = {
         a.get("agent"): a
@@ -1435,9 +1440,8 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
     stale_hours = views._stale_hours()
     grace = views._presence_grace_seconds()
     merged: list[dict] = []
-    for role in registry:
+    for role, leases in registry:
         name = role.get("name") or ""
-        leases = _role_ops.read_leases(name, backend=backend)
         if leases is _role_ops.READ_ERROR:
             # F4: an unreadable lease sub-log must render as UNKNOWN below,
             # never as VACANT (the false-vacancy class this audit closed).
@@ -1885,8 +1889,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # Retention pass (best-effort, throttled to ~once/day, bounded + time-budgeted
     # against THIS reconcile's deadline so it never double-counts the 90s ceiling).
     # Never raises into the tick; logs its tally.
+    retention_marker = None   # threaded to the health record (perf loop-2 #6):
+    # the pass's throttle claim just read (or wrote) retention/last-run.json,
+    # so the health write below must not pay a third download for it.
     try:
         ret = _run_retention(all_tasks, now=now, deadline=deadline, backend=backend)
+        retention_marker = ret.get("retention_marker")
         if not ret.get("skipped"):
             _info(f"  Retention: archived {ret['archived']} task(s) "
                   f"(deferred {ret['deferred']}), expired {ret.get('expired_broadcasts', 0)} "
@@ -1917,7 +1925,14 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     try:
         retention_last_run = None
         try:
-            rmark = remote.download_json(remote.retention_marker_path(now), backend=backend)
+            # Reuse the marker the retention pass already read/wrote this tick
+            # (loop-2 #6); the download remains ONLY as the fallback for ticks
+            # where the pass never reached the marker (budget-gated skip,
+            # claim error, or the pass itself raising).
+            rmark = retention_marker
+            if rmark is None:
+                rmark = remote.download_json(
+                    remote.retention_marker_path(now), backend=backend)
             if isinstance(rmark, dict):
                 retention_last_run = rmark.get("at") or rmark.get("date")
         except Exception:

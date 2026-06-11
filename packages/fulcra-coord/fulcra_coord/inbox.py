@@ -230,7 +230,9 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 def _load_inbox(me: str, backend: Optional[list[str]] = None,
-                include_aged: bool = False) -> list[dict[str, Any]]:
+                include_aged: bool = False,
+                summaries: Optional[list[dict[str, Any]]] = None
+                ) -> list[dict[str, Any]]:
     """Open directives for `me`, recomputed authoritatively from the full task set.
 
     Mirrors cmd_agents: inbox_for over the live tasks is the single source of
@@ -253,8 +255,12 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None,
     """
     # Summaries fast-path: inbox_for reads assignee/status/owner_agent and the
     # ack set, which the summary now carries (acked_by) — no event log / body
-    # fetch needed. Falls back to a full load on an older bus.
-    all_tasks = _load_task_summaries(backend=backend)
+    # fetch needed. Falls back to a full load on an older bus. ``summaries``
+    # threads an already-loaded set through (perf loop-2 #2: the listener tick
+    # loads once and shares it with the needs-me pass — one spawn saved per
+    # tick, and in stale-guard mode one full direct-listing fallback re-run).
+    all_tasks = (summaries if summaries is not None
+                 else _load_task_summaries(backend=backend))
     # Role resolution: load `me`'s declared roles so a directive addressed to a
     # role this agent HOLDS (@<role>) is delivered here, not lost. Empty set for
     # an agent with no roles / old presence record — backward-compatible.
@@ -289,7 +295,9 @@ def _inbox_notified_seen_path(agent: str):
     payload, not just ids)."""
     return cache.cache_root() / f"inbox-notified-{listener.agent_slug(agent)}.json"
 
-def _notify_new_needs_me(backend: Optional[list[str]] = None) -> None:
+def _notify_new_needs_me(backend: Optional[list[str]] = None,
+                         summaries: Optional[list[dict[str, Any]]] = None
+                         ) -> None:
     """Fire a desktop notification for each NEW item blocked on the human.
 
     Polled alongside the inbox by the listener (Part 5). Resolves the human via
@@ -301,7 +309,11 @@ def _notify_new_needs_me(backend: Optional[list[str]] = None) -> None:
     so it can never crash a polling tick. No-op when nothing is blocked."""
     human = identity.resolve_human()
     # needs_human reads status/assignee/tags — all on a summary; no body fetch.
-    items = views.needs_human(_load_task_summaries(backend=backend), human)
+    # ``summaries`` threads the tick's already-loaded set through (perf loop-2
+    # #2); None (direct callers) keeps the self-load.
+    items = views.needs_human(
+        summaries if summaries is not None
+        else _load_task_summaries(backend=backend), human)
     seen_path = _needs_me_seen_path(human)
     seen: set[str] = set()
     if seen_path.exists():
@@ -370,7 +382,12 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """
     me = getattr(args, "agent", None) or _derive_agent()
     try:
-        items = _load_inbox(me, backend=backend)
+        # ONE summaries load per tick, shared by the inbox fold AND the
+        # needs-me pass below (perf loop-2 #2 — each used to pay its own
+        # download; under the stale-view guard each re-ran the whole
+        # direct-listing fallback, ~one spawn per task on the bus).
+        summaries = _load_task_summaries(backend=backend)
+        items = _load_inbox(me, backend=backend, summaries=summaries)
         surface = _inbox_surface_path(me)
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         payload = {"agent": me, "count": len(items), "inbox": items}
@@ -411,7 +428,7 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # ALSO notice anything newly blocked on the human (Part 5). Independent
         # of the agent's own inbox: a tick with an empty inbox can still alert on
         # a new blocked-on-you item. Best-effort within the same fail-safe guard.
-        _notify_new_needs_me(backend=backend)
+        _notify_new_needs_me(backend=backend, summaries=summaries)
         # VERSION SELF-INCORPORATION (operator directive 2026-06-10): the
         # durable listener is the call site that keeps an OPERATOR-ABSENT host
         # current — exactly the host that would otherwise freeze on an old
