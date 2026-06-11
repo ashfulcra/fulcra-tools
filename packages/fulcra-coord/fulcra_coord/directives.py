@@ -592,9 +592,23 @@ def dual_write(
                         directive["acked_by"] = sorted(
                             set(directive.get("acked_by") or [])
                             | set(prev.get("acked_by") or []))
-                    if not routes_ok and not directive.get("routing") \
-                            and prev.get("routing"):
-                        directive["routing"] = prev["routing"]
+                    if not routes_ok and prev.get("routing"):
+                        # A partial routing read is still unsafe to trust as a
+                        # replacement: one shard may read while another listed
+                        # shard fails. Merge-preserve the previous snapshot's
+                        # route history so the upload cannot shrink routing.
+                        routes: dict[tuple[str, str], dict[str, Any]] = {}
+                        for rec in list(prev.get("routing") or []) \
+                                + list(directive.get("routing") or []):
+                            if not isinstance(rec, dict):
+                                continue
+                            rid = (rec.get("event_id") or rec.get("route_id")
+                                   or f"{rec.get('kind','')}|{rec.get('to','')}|"
+                                      f"{rec.get('by','')}|{rec.get('attempt','')}")
+                            routes[(rec.get("at", "") or "", str(rid))] = rec
+                        directive["routing"] = [
+                            routes[k] for k in sorted(routes)
+                        ]
                     if not responses_ok:
                         # A closed loop must NOT re-open because its responses
                         # could not be listed: keep the previous snapshot's
