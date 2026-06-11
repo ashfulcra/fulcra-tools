@@ -25,6 +25,65 @@ from . import cache, log as ops_log, read_source, remote, schema, views
 from .output import warn as _warn
 
 
+class _SummariesReadError:
+    """Sentinel type for :data:`SUMMARIES_READ_ERROR` — see
+    ``_load_summaries_for_rebuild``."""
+
+    def __repr__(self) -> str:  # diagnosable in test failures / debug prints
+        return "<summaries rebuild-source READ_ERROR>"
+
+
+#: 2026-06-11 write-path read-error audit (F2): the "the view-rebuild source
+#: could not be READ" sentinel, distinct from a (possibly empty) summary list.
+#: The same absence-vs-failure discipline as role_ops.READ_ERROR (bug hunt C1):
+#: an unreadable summaries aggregate used to be conflated with "older bus
+#: without the aggregate", fall back to _load_all_tasks — which itself degrades
+#: to LOCAL CACHE ONLY when the index read fails — and the write path then
+#: uploaded ALL views rebuilt from one cold host's partial cache with a fresh
+#: generated_at, silently blanking the bus's read surface (the stale-view guard
+#: cannot catch fresh-but-truncated). Callers must treat this sentinel as "do
+#: not rebuild/upload views from what you have" — upload the task body only and
+#: leave the views to reconcile.
+SUMMARIES_READ_ERROR = _SummariesReadError()
+
+
+class _LoadedTasks(list):
+    """``_load_all_tasks``' return type: a plain list of task bodies PLUS the
+    ``load_degraded`` provenance flag.
+
+    WHY a list subclass and not a tuple/flag return: ``_load_all_tasks`` is
+    re-exported through cli and patched by name in many tests (and called from
+    routing_ops / the io fallbacks), all of which treat the result as a bare
+    list. A subclass keeps every caller and patch target byte-compatible while
+    letting the one caller that must not act on a partial set (cmd_reconcile's
+    view rebuild, F3) ask ``getattr(result, "load_degraded", False)`` — a
+    patched fake returning a plain list simply reads as not-degraded, which
+    preserves every existing test's scripted world."""
+
+    #: True when the remote index could not be READ (as opposed to being
+    #: confirmed absent) and the result is therefore LOCAL CACHE ONLY — a
+    #: partial view of the bus that must never be uploaded as if complete.
+    load_degraded = False
+
+
+def _confirmed_absent(path: str, *, backend: Optional[list[str]] = None) -> bool:
+    """A download of ``path`` returned None — was that ABSENCE or a failed read?
+
+    True only when a stat probe ALSO misses AND the bus probes reachable: the
+    role_ops C1 idiom applied to the write path. A visible stat means the file
+    exists but could not be read (error, never absence); an unreachable bus
+    means nothing can be confirmed at all. The probe_reachable spawn is spent
+    ONLY on this failure path — failure is rare, and one extra spawn to avoid a
+    destructive blind rebuild is the right trade. A raising probe reads as
+    error too (fail-safe: a writer acting on "absent" must never be guessing)."""
+    try:
+        if remote.stat(path, backend=backend) is not None:
+            return False  # the file demonstrably exists — the read failed
+        return remote.probe_reachable(backend)
+    except Exception:
+        return False
+
+
 def _stat_strong_match(before: dict[str, Any], after: dict[str, Any]) -> bool:
     """True ONLY when a STRONG identity key proves the file unchanged.
 
@@ -194,11 +253,27 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
 
 
 def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
-    """Load tasks from cache, refreshing remote-indexed tasks when available."""
+    """Load tasks from cache, refreshing remote-indexed tasks when available.
+
+    Returns a :class:`_LoadedTasks` (a list) whose ``load_degraded`` flag is
+    True when the remote index could not be READ — meaning the result is the
+    LOCAL CACHE ONLY and must not be treated as the bus's full task set."""
     cached = cache.list_cached_tasks()
     idx = remote.download_json(remote.view_remote_path("index"), backend=backend)
     if idx is None:
-        return cached
+        # 2026-06-11 write-path read-error audit (F2/F3): an unreadable index
+        # is NOT the same as a fresh/legacy bus that has no index yet. The old
+        # bare `return cached` collapsed both into a silent cache-only result,
+        # which downstream rebuilders (reconcile's view phase, the summaries
+        # fallback) then uploaded as if it were the whole bus — a thin-cache
+        # host's heartbeat tick could truncate the global views. Flag the
+        # degrade so those callers can refuse; a CONFIRMED-absent index
+        # (stat misses too AND the bus probes reachable) keeps the cached set
+        # as the legitimate best truth.
+        result = _LoadedTasks(cached)
+        result.load_degraded = not _confirmed_absent(
+            remote.view_remote_path("index"), backend=backend)
+        return result
 
     remote_ids = {s["id"] for s in idx.get("active", []) + idx.get("recent_done", [])}
     search_idx = remote.download_json(remote.view_remote_path("search-index"), backend=backend)
@@ -259,7 +334,7 @@ def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]
                     if rid:
                         task_map[rid] = t
 
-    return list(task_map.values())
+    return _LoadedTasks(task_map.values())
 
 
 def _load_task_summaries(backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
@@ -373,9 +448,11 @@ def _load_all_tasks_by_listing(
 
 def _load_summaries_for_rebuild(
     task: dict[str, Any], *, backend: Optional[list[str]] = None
-) -> list[dict[str, Any]]:
+) -> Any:
     """The write-path view-rebuild source: the summaries aggregate with the
-    just-written task's summary upserted in.
+    just-written task's summary upserted in — or :data:`SUMMARIES_READ_ERROR`
+    when no trustworthy rebuild source could be READ (F2; the caller must then
+    skip the view rebuild rather than upload views built from a partial set).
 
     Downloads the authoritative ``views/summaries.json`` (NOT the local cache —
     another agent may have written since we loaded), replaces the entry for this
@@ -408,10 +485,30 @@ def _load_summaries_for_rebuild(
     summaries_view = remote.download_json(
         remote.view_remote_path("summaries"), backend=backend)
     if not (summaries_view and summaries_view.get("summaries") is not None):
-        # Older bus: no aggregate. Rebuild from the authoritative full task set so
-        # a fresh machine doesn't truncate views; the just-written task is already
-        # cached and thus present in _load_all_tasks' result.
-        return [schema.task_summary(t) for t in _load_all_tasks(backend=backend)]
+        # 2026-06-11 write-path read-error audit (F2): a None download is NOT
+        # proof the bus predates the aggregate — it is also what a 504'd /
+        # unreachable read returns. The old unconditional fallback chained two
+        # conflations into a destructive write: summaries unreadable -> "older
+        # bus" -> _load_all_tasks -> index unreadable -> LOCAL CACHE ONLY ->
+        # the caller rebuilt + uploaded ALL views from one cold host's partial
+        # cache with a fresh generated_at, silently blanking the bus's read
+        # surface. Only a CONFIRMED-absent aggregate (stat misses too AND the
+        # bus probes reachable — the role_ops C1 idiom) may take the legacy
+        # fallback; an unreadable one returns the sentinel so the write path
+        # ships the task body only and defers views to reconcile.
+        if summaries_view is None and not _confirmed_absent(
+                remote.view_remote_path("summaries"), backend=backend):
+            return SUMMARIES_READ_ERROR
+        # Older bus (confirmed): no aggregate. Rebuild from the authoritative
+        # full task set so a fresh machine doesn't truncate views; the
+        # just-written task is already cached and thus present in
+        # _load_all_tasks' result. If THAT load itself degraded to cache-only
+        # (index exists but unreadable), the same truncation hazard applies —
+        # sentinel, not a partial rebuild.
+        all_tasks = _load_all_tasks(backend=backend)
+        if getattr(all_tasks, "load_degraded", False):
+            return SUMMARIES_READ_ERROR
+        return [schema.task_summary(t) for t in all_tasks]
 
     # Start from the downloaded aggregate, keyed by id.
     by_id: dict[str, dict[str, Any]] = {
