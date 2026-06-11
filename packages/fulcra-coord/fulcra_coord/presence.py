@@ -243,6 +243,28 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     if getattr(args, "can_review", False):
         roles.append("review")
 
+    # RMW-class instance #5 (2026-06-11 bug hunt C4, P1): make_presence below
+    # rebuilds the WHOLE record, so a bare `connect` — exactly what the
+    # shipped SessionStart hook runs — used to stamp capabilities=[] over
+    # whatever a previous `connect --role X` declared. That silently dropped
+    # the agent from reviewer routing AND from @role inbox delivery
+    # (inbox._my_roles reads these capabilities). Read-modify-write instead:
+    # UNION the flags with the existing record's capabilities; dropping a
+    # declaration is now an EXPLICIT act (--clear-roles), never a side effect
+    # of reconnecting. Best-effort read: if the own-presence read fails the
+    # union degrades to just the flags — the same exposure every presence
+    # write already has when the bus is down (and a lost union heals on the
+    # next flagged connect).
+    if getattr(args, "clear_roles", False):
+        roles = sorted(set(roles))   # explicit drop of prior declarations
+    else:
+        try:
+            prior = (_load_own_presence(me, backend=backend) or {}).get(
+                "capabilities") or []
+        except Exception:
+            prior = []
+        roles = sorted({c for c in prior if c} | set(roles))
+
     # VERSION SELF-INCORPORATION (operator directive 2026-06-10: "i'm not
     # going to go around and wake the entire fleet for each incremental
     # upgrade"): check the bus version pointer and update BEFORE the presence
