@@ -31,11 +31,11 @@ from . import continuity_ops as _continuity_ops
 from .continuity_ops import cmd_checkpoint, cmd_park  # noqa: F401
 # Leaf-utility modules extracted from this file. Re-exported under the historical
 # underscore-prefixed names so every internal call site AND the test patch targets
-# (fulcra_coord.cli._info / ._now_iso / ...) keep resolving unchanged — output.py /
+# (fulcra_coord.cli._info / ._err / ...) keep resolving unchanged — output.py /
 # timeutil.py do not import cli, so there is no import cycle.
 from .output import err as _err, warn as _warn, info as _info, print_json as _print_json
-from .timeutil import iso_z as _iso_z, now_iso as _now_iso
-from .textfmt import age_str as _age_str, due_str as _due_str
+from .timeutil import iso_z as _iso_z
+from .textfmt import age_str as _age_str
 # Retention / archival subsystem extracted from this file. Re-exported under the
 # historical underscore-prefixed names so every remaining caller here
 # (cmd_reconcile -> _run_retention; cmd_search / cmd_restore -> the cold-index
@@ -99,7 +99,7 @@ from .writepipe import (
 from .routing_ops import (
     _review_pool,
     _escalate_review_to_human, cmd_request_review,
-    cmd_review_done, _resolve_review_author,
+    cmd_review_done,
     _reroute_minutes, _reroute_max, _accepted_stall_hours,
     _review_accepted_by_assignee, _classify_review, _sweep_review_routes,
 )

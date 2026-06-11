@@ -105,8 +105,12 @@ def read_loop_evidence(
 ) -> list[dict[str, Any]]:
     """Every evidence shard for a loop, sorted by (at, event id) — the same
     machine-agnostic stable order as read_loop_responses. Best-effort: [].
-    Consumed by DETECTION only (out-of-band flags) — never by the closure
-    fold (see the invariant block on fold_loop)."""
+
+    The public read API for evidence BODIES (production surfaces currently
+    probe only evidence EXISTENCE via ``evidence_ids_for``; the test suite
+    verifies appended evidence through here). NEVER consumed by the closure
+    fold — evidence flags a loop for attention, it cannot close one (see
+    the invariant block on fold_loop)."""
     try:
         records = remote.list_json(remote.directive_evidence_prefix(directive_id),
                                    backend=backend)

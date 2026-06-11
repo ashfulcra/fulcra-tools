@@ -36,9 +36,9 @@ from . import remote_root
 
 # Re-export the full transport surface from the extracted package. ALL moved
 # names are bound here — including the private helpers (``_backend_cmd``,
-# ``cli_base_cmd``, ``_read_timeout``, ``_write_timeout``, ``_reconcile_timeout``,
-# ``_parse_stat``) — because other coord modules reach for them via
-# ``remote.<name>`` (e.g. ``annotations.py`` uses ``remote.cli_base_cmd()`` and
+# ``cli_base_cmd``, ``_read_timeout``, ``_write_timeout``, ``_parse_stat``) —
+# because other coord modules reach for them via ``remote.<name>`` (e.g.
+# ``annotations.py`` uses ``remote.cli_base_cmd()`` and
 # ``remote._write_timeout()``) and tests patch them on this module.
 #
 # NB: ``list_json`` is deliberately NOT re-exported from the store — it is
@@ -47,7 +47,6 @@ from fulcra_coord_files.store import (  # noqa: F401  (re-exported for callers +
     _backend_cmd,
     _parse_stat,
     _read_timeout,
-    _reconcile_timeout,
     _write_timeout,
     check_cli_available,
     check_file_commands,

@@ -705,11 +705,10 @@ def _expire_stale_broadcasts(all_tasks: list[dict[str, Any]], now: datetime, *,
             # The body WAS written (only the view rebuild lagged) — the broadcast
             # is abandoned on the bus, so count it. The next reconcile heals views.
             expired += 1
-        except (schema.TransitionError, schema.SchemaError, schema.ConflictError,
-                Exception):
-            # ConflictError / any other failure => the body did NOT land; skip
-            # without counting and let the next pass retry. One bad task never
-            # aborts the sweep.
+        except Exception:
+            # Any other failure (TransitionError / SchemaError / ConflictError /
+            # transport) => the body did NOT land; skip without counting and let
+            # the next pass retry. One bad task never aborts the sweep.
             continue
     return expired
 
