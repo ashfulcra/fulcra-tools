@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -35,7 +34,6 @@ sys.path.insert(0, str(_FACADE_DIR))
 sys.path.insert(0, str(_REPO_ROOT))
 
 import app as facade_app  # noqa: E402
-from fulcra_coord import remote  # noqa: E402
 
 
 FACADE_TOKEN = "test-token-abc123"

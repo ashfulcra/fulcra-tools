@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from . import continuity, identity, remote, schema, views
+from . import continuity, identity, remote, views
 from . import role_ops as _role_ops
 from .output import err as _err, info as _info, warn as _warn
 

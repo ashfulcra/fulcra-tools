@@ -522,9 +522,9 @@ def _try_merge(
     # is taken from the side that changed it: when only local changed status,
     # local must keep its status even if remote's updated_at is newer.
     if _updated_at_key(remote_task) > _updated_at_key(local):
-        newer, older = remote_task, local
+        newer = remote_task
     else:
-        newer, older = local, remote_task
+        newer = local
 
     merged = copy.deepcopy(newer)
 

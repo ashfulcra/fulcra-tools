@@ -472,7 +472,6 @@ def cmd_install_listener(args: Any, backend: Optional[list[str]] = None) -> int:
 def cmd_install_shim(args: Any, backend: Optional[list[str]] = None) -> int:
     """Install a fulcra-coord shim to PATH (~/.local/bin/fulcra-coord)."""
     import stat as stat_mod
-    from pathlib import Path
 
     # Find the installed entry point for this package
     # Works whether installed as a package or run directly
