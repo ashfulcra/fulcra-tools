@@ -4,8 +4,11 @@ Every command that changes a task (start / update / block / pause / done / aband
 tell / broadcast / assign / inbox-ack / request-review) converges here:
 ``_write_task_and_views`` uploads the task body under optimistic concurrency, merges
 a concurrent peer's write when the pre-stat detects one (``_try_merge`` and its
-field-carry / event-union / tag-repair helpers), rebuilds + uploads all views from
-the summaries aggregate, keeps this session's task pointer in sync
+field-carry / event-union / tag-repair helpers), rebuilds all views from the
+summaries aggregate and uploads the ones whose content actually changed since
+their last confirmed upload (the success-only fingerprint skip — see the
+SKIP-UNCHANGED comment in ``_write_task_and_views``), keeps this session's
+task pointer in sync
 (``_stamp_session_pointer``), and emits the best-effort lifecycle annotation
 (``_emit_lifecycle``).
 
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import hashlib
 import json
 import random
 import uuid
@@ -159,7 +163,7 @@ def _write_task_and_views(
     command: str = "write",
     lifecycle: Optional[str] = None,
 ) -> bool:
-    """Upload task + all views. Returns True on full success.
+    """Upload task + the views whose content changed. Returns True on full success.
 
     ``lifecycle`` lets a caller override the command->lifecycle mapping for the
     best-effort annotation. This matters for ``update``, where the same command
@@ -374,13 +378,45 @@ def _write_task_and_views(
 
     # Upload views CONCURRENTLY (P1): remote.upload_json is thread-safe (each
     # call writes a unique tempfile + runs an independent subprocess; remote.py
-    # holds no shared mutable state), so a small thread pool collapses the ~8-15
+    # holds no shared mutable state), so a small thread pool collapses the
     # sequential view uploads into one round-trip's wall-time. Semantics are
     # preserved exactly: per-view success is collected, any failure lands in
     # view_failures, and the partial-upload handling below is unchanged. Local
     # cache writes happen in the main thread after the futures resolve.
+    #
+    # SKIP-UNCHANGED (2026-06-10/11 incident): build_all_views regenerates the
+    # WHOLE view set — on the live bus ~55 views (per-agent views for 33
+    # identities, inboxes, workstreams, board), a fan-out that scales with
+    # fleet size while a tell/update/done actually changes ~5 of them. Under
+    # backend 504-weather (1-16s per op) those 50 redundant uploads turned
+    # EVERY write into "Task written, views failed: [~50 names]" ->
+    # NeedsReconcile, and reconcile's same-shaped repair burst couldn't drain
+    # (backlog 67->95 in three runs). So: upload ONLY the views whose content
+    # digest differs from the last CONFIRMED upload's fingerprint.
+    #
+    # THE TRAP that makes the fingerprint store necessary: the cached-view
+    # write below runs for EVERY view regardless of upload success (so local
+    # readers see the freshest build) — therefore "content == cached view"
+    # does NOT mean "remote is current"; a previous failed upload poisons that
+    # inference. The fingerprint is written ONLY after a confirmed upload
+    # (never on failure), so a failed view keeps mismatching and is retried on
+    # the next write. FULCRA_COORD_VIEW_SKIP_UNCHANGED=0 restores the old
+    # upload-everything behavior.
     view_items = list(all_views.items())
     view_failures = []
+    skip_unchanged = _view_skip_enabled()
+    view_digests: dict[str, str] = {}
+    to_upload: list[tuple[str, dict[str, Any]]] = []
+    for view_name, view_data in view_items:
+        digest = _view_fingerprint(view_data)
+        view_digests[view_name] = digest
+        if (skip_unchanged
+                and not _view_must_always_upload(view_data)
+                and cache.read_view_fingerprint(view_name) == digest):
+            # Confirmed on the remote and content-identical: skip the upload
+            # (no subprocess). The local cache write below still runs.
+            continue
+        to_upload.append((view_name, view_data))
 
     def _upload_one(item):
         view_name, view_data = item
@@ -397,14 +433,22 @@ def _write_task_and_views(
             ok = False
         return view_name, ok
 
-    max_workers = min(8, len(view_items)) or 1
+    max_workers = min(8, len(to_upload)) or 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for view_name, ok in pool.map(_upload_one, view_items):
-            if not ok:
+        for view_name, ok in pool.map(_upload_one, to_upload):
+            if ok:
+                # SUCCESS-ONLY fingerprint write (main thread): the next write
+                # may skip this view. On failure the stale/absent fingerprint
+                # is deliberately kept so the next write re-attempts even if
+                # the content hasn't changed since (the poisoned-cache case).
+                cache.write_view_fingerprint(view_name, view_digests[view_name])
+            else:
                 view_failures.append(view_name)
 
-    # Cache every view locally regardless of upload outcome (matches prior
-    # behavior: the old loop wrote the cache for every view, success or not).
+    # Cache every view locally regardless of upload outcome — INCLUDING the
+    # skipped ones (matches prior behavior: the old loop wrote the cache for
+    # every view, success or not, so local readers always see the freshest
+    # build). This is exactly why the cache can't drive the skip decision.
     for view_name, view_data in view_items:
         cache.write_cached_view(view_name, view_data)
 
@@ -551,6 +595,49 @@ def _lifecycle_for(command: str, task: dict[str, Any]) -> Optional[str]:
     if command in ("assign", "block", "pause"):
         return "update"
     return None
+
+
+# Top-level per-rebuild stamps the view builders write on EVERY rebuild
+# (views.build_all_views stamps a fresh `now` each call). They change even when
+# the view CONTENT is identical, so the skip-unchanged fingerprint must exclude
+# them — hashing the raw upload bytes would never match across rebuilds and the
+# skip would be a permanent no-op. Top-level keys only: a task's own
+# `updated_at` nested inside a view's summaries is real content and is hashed.
+_VIEW_VOLATILE_STAMP_KEYS = {"updated_at", "generated_at"}
+
+
+def _view_fingerprint(view_data: dict[str, Any]) -> str:
+    """sha256 hexdigest of a view's CONTENT as upload_json would send it.
+
+    Uses remote.serialize_json — the exact serialization upload_json puts on
+    the wire — over the view with only the top-level per-rebuild stamps
+    excluded. Sharing the serializer is load-bearing: if fingerprint and
+    upload serialization drifted (indent/sort_keys), skipping would silently
+    break (uploads forever, or worse, a real change mis-read as unchanged).
+    Guarded byte-for-byte by test_view_skip's drift test."""
+    payload = {k: v for k, v in view_data.items()
+               if k not in _VIEW_VOLATILE_STAMP_KEYS}
+    return hashlib.sha256(
+        remote.serialize_json(payload).encode("utf-8")).hexdigest()
+
+
+def _view_skip_enabled() -> bool:
+    """The one escape hatch: FULCRA_COORD_VIEW_SKIP_UNCHANGED=0 restores the
+    upload-every-view-every-write behavior (default 1 = skip unchanged)."""
+    return env_int("FULCRA_COORD_VIEW_SKIP_UNCHANGED", 1) != 0
+
+
+def _view_must_always_upload(view_data: dict[str, Any]) -> bool:
+    """True for views that must upload even when content is unchanged.
+
+    A view carrying a top-level ``generated_at`` (today: the summaries
+    aggregate) is a FRESHNESS BEACON: the stale-view read guard
+    (views.view_staleness_minutes / FULCRA_COORD_VIEW_STALE_MIN) treats an
+    aging stamp as "this view may be lying" and pushes every reader onto the
+    slow direct-listing fallback. Skipping its upload on a quiet bus would age
+    the stamp with perfectly-current content and trip that guard fleet-wide —
+    so the beacon always re-uploads (1 upload of the ~55, a fine price)."""
+    return "generated_at" in view_data
 
 
 def _view_name_to_remote(name: str) -> str:

@@ -82,6 +82,9 @@ from .query import cmd_status, cmd_board, cmd_agents, cmd_needs_me, cmd_resume
 from .writepipe import (
     _stamp_session_pointer, _write_task_and_views,
     _view_name_to_remote, _try_merge,
+    # Skip-unchanged view-upload helpers, shared so reconcile's repair pass and
+    # the write path can never disagree on what "unchanged" means.
+    _view_fingerprint, _view_must_always_upload, _view_skip_enabled,
 )
 # Liveness-aware reviewer routing extracted from this file. Re-exported so
 # cmd_reconcile's _sweep_review_routes call, the request-review dispatch, and the
@@ -1629,7 +1632,33 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # Semantics are preserved exactly: per-view success is collected, any
     # failure (False OR a raise) lands in `failures`, and the partial-upload
     # handling below is unchanged.
+    #
+    # SKIP-UNCHANGED (2026-06-10/11 incident, same rule as the write path):
+    # the repair pass has the same ~55-upload burst shape that broke the
+    # writes in the first place, which is why the repair backlog GREW (67->95)
+    # instead of draining under 504-weather. Re-upload only the views whose
+    # content digest differs from the last CONFIRMED upload's fingerprint;
+    # record fingerprints on THIS pass's successes so the next write doesn't
+    # pointlessly re-upload what reconcile just repaired. The fingerprint is
+    # success-only (see cache.write_view_fingerprint), so a skip here still
+    # means the view is genuinely on the remote — markers are only cleared
+    # below when every NON-skipped view landed, which preserves the repair
+    # contract: an op resolves only when its views are truly remote. The
+    # ``generated_at``-stamped freshness beacons (summaries) always upload so
+    # the stale-view read guard never trips on a quiet-but-healthy bus.
     failures = []
+    skip_unchanged = _view_skip_enabled()
+    view_digests = {name: _view_fingerprint(data) for name, data in view_items}
+    skipped_unchanged = 0
+    upload_items = []
+    for view_name, view_data in view_items:
+        if (skip_unchanged
+                and not _view_must_always_upload(view_data)
+                and cache.read_view_fingerprint(view_name)
+                == view_digests[view_name]):
+            skipped_unchanged += 1
+            continue
+        upload_items.append((view_name, view_data))
     # Bounded in-tick retry (live 0.15.0 evidence, two hosts): under this very
     # burst a ROTATING subset of views fails each tick — backend throttling /
     # transient 5xx — while single raw uploads succeed in <1s. One jittered
@@ -1713,11 +1742,19 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 pass
         return view_name, ok
 
-    max_workers = min(8, len(view_items)) or 1
+    max_workers = min(8, len(upload_items)) or 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for view_name, ok in pool.map(_upload_one, view_items):
-            if not ok:
+        for view_name, ok in pool.map(_upload_one, upload_items):
+            if ok:
+                # SUCCESS-ONLY fingerprint (main thread, like the write path):
+                # the next write/reconcile may skip this view. Failures keep
+                # their stale/absent fingerprint so they are re-attempted.
+                cache.write_view_fingerprint(view_name, view_digests[view_name])
+            else:
                 failures.append(view_name)
+
+    if skipped_unchanged:
+        _info(f"  View uploads: {skipped_unchanged} unchanged view(s) skipped.")
 
     recovered = retry_stats["recovered"]
     if recovered:
