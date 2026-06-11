@@ -75,7 +75,9 @@ def read_role(name: str, *, backend: Optional[list[str]] = None
             return rec
         if remote.stat(path, backend=backend) is not None:
             return READ_ERROR   # record exists but is unreadable right now
-        return None             # both probes agree: confirmed absent
+        if not remote.probe_reachable(backend):
+            return READ_ERROR   # bus dark: absence is unconfirmable
+        return None             # probes agree and the bus answered: absent
     except Exception:
         return READ_ERROR
 
