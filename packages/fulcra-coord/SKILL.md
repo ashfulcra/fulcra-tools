@@ -25,7 +25,7 @@ description: Use when coordinating durable work across multiple agent sessions o
 ```bash
 fulcra-coord doctor   # verifies CLI, auth, file commands, identity
 ```
-If `File commands: FAIL`, the bus is dead silent: the public PyPI `fulcra-api` lacks the `file` group. Install a file-capable build (see `docs/fulcra-cli-branch.md`). This is the #1 fresh-agent failure.
+If `File commands: FAIL`, the bus is dead silent: the resolved Fulcra CLI isn't exposing the `file` group. The standard `fulcra-api` install ships it — a FAIL usually means a stale install or a mispointed `FULCRA_CLI_COMMAND` (see `docs/fulcra-cli-branch.md`). This is the #1 fresh-agent failure.
 
 ## Quick reference
 

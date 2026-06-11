@@ -91,11 +91,12 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
 
     # File command group probe — the #1 fresh-agent onboarding failure.
     #
-    # The public PyPI `fulcra-api` build lacks the `file` command group that the
-    # entire coordination bus is driven by, so an agent that pip-installs it sees
-    # every bus op fail silently. This probe targets the *resolved real CLI* (not
-    # the injected fake backend, which speaks the `file` subcommand protocol but
-    # has no top-level `file` group), so it answers "does the installed CLI have
+    # The coordination bus is driven by Fulcra Files (`fulcra file ...`). The
+    # standard CLI ships that group today, but a stale install or a mispointed
+    # FULCRA_CLI_COMMAND can still resolve to a binary without it, making bus
+    # ops fail silently. This probe targets the *resolved real CLI* (not the
+    # injected fake backend, which speaks the `file` subcommand protocol but has
+    # no top-level `file` group), so it answers "does the installed CLI have
     # `file`?". Wrapped defensively: a hung or broken probe must degrade to FAIL,
     # never crash doctor.
     try:
@@ -106,11 +107,12 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
     _info(f"  File commands: {file_status}  ({file_msg})")
     if not file_ok:
         ok_all = False
-        _info("  -> The installed Fulcra CLI lacks the `file` command group that "
+        _info("  -> The resolved Fulcra CLI lacks the `file` command group that "
               "fulcra-coord needs to drive the bus.")
-        _info("  -> Install a file-capable build (the `file-management` branch of "
-              "fulcradynamics/fulcra-api-python).")
-        _info("  -> See docs/fulcra-cli-branch.md for the exact install command.")
+        _info("  -> Reinstall the standard CLI (`uv tool install --reinstall "
+              "--force fulcra-api`) or fix a mispointed FULCRA_CLI_COMMAND.")
+        _info("  -> See docs/fulcra-cli-branch.md for verification and "
+              "FULCRA_CLI_COMMAND examples.")
 
     # Remote access
     _info(f"\n[Remote]")
