@@ -82,6 +82,11 @@ from .query import cmd_status, cmd_board, cmd_agents, cmd_needs_me, cmd_resume
 from .writepipe import (
     _stamp_session_pointer, _write_task_and_views,
     _view_name_to_remote, _try_merge,
+    # Shared fingerprint function: reconcile records fingerprints on its
+    # successful uploads (refreshing the write path's skip baseline), so the
+    # two sites can never disagree on what "unchanged" means. Reconcile itself
+    # never skips — see the division-of-labor comment in cmd_reconcile.
+    _view_fingerprint,
 )
 # Liveness-aware reviewer routing extracted from this file. Re-exported so
 # cmd_reconcile's _sweep_review_routes call, the request-review dispatch, and the
@@ -1629,7 +1634,25 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # Semantics are preserved exactly: per-view success is collected, any
     # failure (False OR a raise) lands in `failures`, and the partial-upload
     # handling below is unchanged.
+    #
+    # NO SKIP HERE — division of labor with the write path (2026-06-11 review
+    # finding on the skip-unchanged change): the success-only fingerprint
+    # proves only what THIS HOST last uploaded, never the remote's CURRENT
+    # content — the store has no compare-and-swap and views are shared mutable
+    # paths, so host B can overwrite a view after host A recorded its digest.
+    # If reconcile honored the fingerprint skip, A would rebuild the same
+    # content, match its local fingerprint, skip — and B's clobber would
+    # persist INDEFINITELY, because reconcile is the designated repair path.
+    # So: the WRITE path skips unchanged views (cheap, hot, single-host
+    # correct — see writepipe._write_task_and_views), while reconcile
+    # authoritatively re-asserts EVERY rebuilt view, bounding cross-host view
+    # drift to one reconcile cadence (~20 min) — the pre-skip status quo for
+    # repair. Fingerprints ARE still recorded on this pass's successes: that
+    # refreshes the write path's skip baseline so the next write doesn't
+    # re-upload what reconcile just confirmed.
     failures = []
+    view_digests = {name: _view_fingerprint(data) for name, data in view_items}
+    upload_items = list(view_items)
     # Bounded in-tick retry (live 0.15.0 evidence, two hosts): under this very
     # burst a ROTATING subset of views fails each tick — backend throttling /
     # transient 5xx — while single raw uploads succeed in <1s. One jittered
@@ -1713,10 +1736,16 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 pass
         return view_name, ok
 
-    max_workers = min(8, len(view_items)) or 1
+    max_workers = min(8, len(upload_items)) or 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for view_name, ok in pool.map(_upload_one, view_items):
-            if not ok:
+        for view_name, ok in pool.map(_upload_one, upload_items):
+            if ok:
+                # SUCCESS-ONLY fingerprint (main thread, like the write path):
+                # the next WRITE may skip this view (reconcile itself never
+                # skips — it is the cross-host drift repair). Failures keep
+                # their stale/absent fingerprint so the next write re-attempts.
+                cache.write_view_fingerprint(view_name, view_digests[view_name])
+            else:
                 failures.append(view_name)
 
     recovered = retry_stats["recovered"]

@@ -399,6 +399,20 @@ def upload(
                 pass
 
 
+def serialize_json(data: dict[str, Any]) -> str:
+    """THE one serialization ``upload_json`` puts on the wire.
+
+    Factored out (rather than an inline ``json.dumps``) because fulcra-coord's
+    skip-unchanged view-upload path fingerprints view content by hashing this
+    exact serialization: if the upload's dumps arguments ever changed (indent,
+    sort_keys, separators…) without the fingerprint following, the skip would
+    silently break — every fingerprint mismatches (uploads forever) or, after
+    a partial migration, a real change could be mis-skipped as already-remote.
+    One function, both callers, zero drift (guarded by the byte-for-byte test
+    in fulcra-coord's test_view_skip)."""
+    return json.dumps(data, indent=2)
+
+
 def upload_json(
     data: dict[str, Any],
     remote_path: str,
@@ -406,9 +420,9 @@ def upload_json(
     backend: Optional[list[str]] = None,
     timeout: Optional[int] = None,
 ) -> bool:
-    """Serialize data as JSON and upload to remote_path."""
+    """Serialize data as JSON (via ``serialize_json``) and upload to remote_path."""
     return upload(
-        json.dumps(data, indent=2),
+        serialize_json(data),
         remote_path,
         backend=backend,
         timeout=timeout,

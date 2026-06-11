@@ -53,6 +53,49 @@ path, so the happy path costs no extra spawns.
   genuinely fresh/empty bus (index confirmed absent, bus reachable) is not
   degraded and reconciles as before.
 
+### Write path uploads only the views that actually changed
+
+**Why (2026-06-10 live incident):** `_write_task_and_views` rebuilds ALL views
+and uploaded every one (~55 on the live bus: per-agent views for 33
+identities, inboxes, workstreams, needs-attention, board) through the upload
+pool on EVERY write — a fan-out that scales with fleet size while a
+`tell`/`update`/`done` changes ~5 views. Under backend 504-weather (1–16s per
+op), 50+ uploads per logical write meant every write ended "Task written,
+views failed: [~50 names]" → NeedsReconcile, and reconcile's repair pass (the
+same burst shape) couldn't drain — the repair backlog grew 67→95 across three
+runs.
+
+**What:** each view's content is fingerprinted (sha256 over the exact
+serialization `upload_json` sends — `store.serialize_json`, factored out and
+shared so the two can't drift — with the per-rebuild top-level
+`updated_at`/`generated_at` stamps excluded, since they change on every
+rebuild even when content doesn't) and the **write path's** upload is skipped
+when the digest matches the fingerprint recorded at the last **confirmed**
+upload. Fingerprints are local-only per-host bookkeeping
+(`<cache>/view-fingerprints/`), written **only on upload success** —
+deliberately NOT derived from the local view cache, which is written even for
+failed uploads (so local readers see the freshest build) and therefore cannot
+prove the remote is current. A failed view keeps its stale fingerprint and is
+re-attempted on the next write. The `generated_at`-stamped freshness beacons
+(`views/summaries.json`) always upload so the `FULCRA_COORD_VIEW_STALE_MIN`
+read guard never trips on a quiet-but-healthy bus. Escape hatch:
+`FULCRA_COORD_VIEW_SKIP_UNCHANGED=0` restores upload-everything.
+
+**Division of labor — the write path skips, reconcile never does (2026-06-11
+review finding):** even a success-only fingerprint proves only what *this
+host* last uploaded — never the remote's *current* content, because the store
+has no compare-and-swap and views are shared mutable paths another host can
+overwrite after the digest was recorded. A skip on the repair path would make
+such a cross-host clobber permanent: the clobbered host rebuilds identical
+content, matches its own fingerprint, and skips forever. So the **write path**
+keeps the skip (hot path, single-host correct, the ~10× fan-out cut) and
+accepts *bounded* staleness under cross-host drift, while **reconcile**
+authoritatively re-uploads every rebuilt view — never honoring the skip — so
+any clobbered view is re-asserted within one reconcile cadence (~20 min), the
+pre-change status quo for repair. Reconcile still records fingerprints on its
+successful uploads, refreshing the write path's skip baseline so the next
+write doesn't re-upload what reconcile just confirmed.
+
 ### Transport timeout defaults raised to match real latency
 
 **Why (2026-06-11 root cause):** measured platform latency for fulcra-api calls
