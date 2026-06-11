@@ -276,6 +276,19 @@ def _write_task_and_views(
     }
     cache.write_op_marker(op_id, op_marker)
 
+    # Cache the body BEFORE the upload attempt (2026-06-11 live find, the
+    # 15 unreplayable "no cached body to replay" zombie markers): this write
+    # used to happen only AFTER a successful upload, so the failed-upload
+    # return below left a failed/needs_reconcile marker with NO replay asset —
+    # cmd_reconcile's body-repair pass had nothing to upload and the marker
+    # re-failed every tick. Bit hardest on callers that create the task
+    # straight through this pipeline with no pre-caching of their own
+    # (request-review's escalated-to-human path was the live source). Caching
+    # first makes every marker replayable by construction; on success the
+    # cached copy is byte-identical to what landed (``task`` is final past the
+    # merge above), so the happy path's cache state is unchanged.
+    cache.write_cached_task(task)
+
     # Upload task file — the AUTHORITATIVE write (one jittered retry inside;
     # the view/event/directive side-writes below stay best-effort/unchanged).
     task_ok = _upload_task_body(task, task_path, backend=backend)
@@ -330,8 +343,8 @@ def _write_task_and_views(
         pass
 
     _stamp_session_pointer(task)
-
-    cache.write_cached_task(task)
+    # (The cached-task write moved ABOVE the upload — see the unreplayable-
+    # marker comment there; ``task`` has not changed since, so nothing is lost.)
 
     # Regenerate all views from the compact summaries aggregate, NOT re-fetched
     # task bodies. build_all_views produces identical output from task_summary

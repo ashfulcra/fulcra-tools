@@ -1649,10 +1649,61 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             repair_deferred_ops.add(m.get("op_id"))
             continue
         cached_task = cache.read_cached_task(tid)
-        if not cached_task:
-            _note_repair_failure(m, tid, "no cached body to replay")
-            continue
         task_path = remote.task_remote_path(tid)
+        if not cached_task:
+            # 2026-06-11 live find (15 zombie markers, ops.log "no cached body
+            # to replay"): a marker with no cached body used to FAIL here every
+            # pass — and a failed repair fails the tick, which preserves every
+            # marker — so these survived every reconcile until an operator
+            # deleted them by hand. There is nothing to replay, so the marker's
+            # fate is decided by what the REMOTE says, not by failing blind:
+            #   * remote body READABLE -> the write evidently landed by another
+            #     path (another host's replay, a later successful write of the
+            #     same task) — the marker is obsolete, clear it.
+            #   * remote CONFIRMED absent/tombstoned (the io._confirmed_absent
+            #     idiom from #170/#177) -> nothing can EVER replay this marker:
+            #     pure debt, no asset. Clear it.
+            #   * remote state UNKNOWN (transport failure) -> KEEP the marker —
+            #     fail toward retrying, never toward forgetting a write whose
+            #     fate is unproven (next tick's weather may differ).
+            # (The mint-side fix lives in writepipe: the body is now cached
+            # BEFORE the upload attempt, so new markers are always replayable —
+            # this branch drains the pre-fix zombies and any cache eviction.)
+            try:
+                landed = remote.download_json(task_path, backend=backend)
+            except Exception:
+                landed = None
+            if landed is not None:
+                reason = ("no cached body but remote body readable — write "
+                          "landed by another path; marker cleared")
+                _info(f"  Task {tid}: {reason}")
+                ops_log.log_op("reconcile", tid,
+                               status="task_body_repair_unreplayable",
+                               detail=reason)
+                # Seed the cache from the bus (same idiom as the stale-replay
+                # skip below) so later reads/merges start from remote truth.
+                cache.write_cached_task(landed)
+                try:
+                    landed_stat = remote.stat(task_path, backend=backend)
+                    if landed_stat:
+                        cache.write_meta(task_path, landed_stat)
+                except Exception:
+                    pass
+                # Not a failure: fall through to the end-of-tick marker sweep.
+                continue
+            if _confirmed_absent(task_path, backend=backend):
+                reason = ("no cached body and remote absent — unreplayable "
+                          "marker cleared")
+                _info(f"  Task {tid}: {reason}")
+                ops_log.log_op("reconcile", tid,
+                               status="task_body_repair_unreplayable",
+                               detail=reason)
+                # Not a failure: fall through to the end-of-tick marker sweep.
+                continue
+            _note_repair_failure(
+                m, tid, "no cached body to replay (remote state unknown — "
+                "kept for retry)")
+            continue
         # 2026-06-11 bug hunt C2 (P1): the replay used to upload the cached
         # body BLINDLY. An "unverified" marker only means OUR write may not
         # have landed — it says nothing about what landed SINCE: another

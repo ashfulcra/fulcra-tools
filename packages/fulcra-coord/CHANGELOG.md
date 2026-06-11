@@ -43,6 +43,40 @@ gateway serves under its ~15s limit. Two fixes:
   silently discouraged cleanup. proposed→active/waiting/abandoned unchanged;
   proposed→blocked stays illegal.
 
+### Quick wins from the 2026-06-11 live finds: unreplayable repair markers self-clear (and stop being minted), and `start` refuses task-id-shaped titles
+
+Two operator-reported bugs from the live bus, fixed at both the symptom and
+the source:
+
+- **No-body op markers self-clear.** 15 zombie repair markers (ops.log reason
+  "no cached body to replay") survived every reconcile until manual deletion:
+  a failed/unverified marker whose task has no locally cached body could never
+  be repaired (nothing to replay) and never cleared (each failure fails the
+  tick, which preserves all markers). `cmd_reconcile`'s body-repair loop now
+  resolves these by looking at the remote instead of failing blind: remote
+  body **readable** → the write evidently landed by another path, marker
+  cleared; remote **confirmed absent or tombstoned** (the
+  `io._confirmed_absent` idiom from the tombstone work) → nothing can ever
+  replay it — pure debt, no asset — cleared with ops-log reason "no cached
+  body and remote absent — unreplayable marker cleared"; remote state
+  **unknown** (transport failure) → marker kept, failing toward retry, never
+  toward forgetting an unproven write.
+- **…and stop being minted.** The source was `writepipe._write_task_and_views`
+  caching the task body only *after* a successful upload — a failed upload
+  returned early with a failed/needs_reconcile marker and no cached body.
+  Callers that create their task straight through the pipeline with no
+  pre-caching of their own (request-review's escalated-to-human path was the
+  live source) minted an unreplayable marker on every upload failure. The body
+  is now cached *before* the upload attempt, so every marker is replayable by
+  construction; the reconcile branch above drains the pre-fix zombies.
+- **`start` stops eating task ids.** `start TASK-…` (the operator meant to
+  *claim* an existing task) created junk tasks titled after task ids — 6 found
+  on the live bus. The previous non-blocking "you probably meant to claim"
+  hint demonstrably didn't prevent them, so an id-shaped TITLE
+  (`^TASK-\d{8}-`) is now refused outright: exit 1, nothing created locally or
+  remotely, with a pointer at `fulcra-coord update <id> --status active`.
+  Genuine titles are unaffected.
+
 ---
 
 ## [0.15.4] — 2026-06-11
