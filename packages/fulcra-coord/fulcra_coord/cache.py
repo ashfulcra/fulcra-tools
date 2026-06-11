@@ -17,6 +17,13 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+# The bus timestamp convention lives in ONE place — timeutil (a pure stdlib
+# leaf, so this adds no upward dependency for low-layer cache). Bound under
+# the historical local name: the ops-log writer below and the mixed-precision
+# format pin (test_emitted_timestamps_always_have_six_digit_microseconds)
+# reach it as ``cache._now_iso``.
+from .timeutil import now_iso as _now_iso
+
 
 def cache_root() -> Path:
     xdg = os.environ.get("XDG_CACHE_HOME", "")
@@ -281,16 +288,6 @@ def write_op_marker(op_id: str, data: dict[str, Any]) -> Path:
     return path
 
 
-def read_op_marker(op_id: str) -> Optional[dict[str, Any]]:
-    path = ops_dir() / f"OP-{op_id}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
 def list_op_markers() -> list[dict[str, Any]]:
     d = ops_dir()
     if not d.exists():
@@ -444,6 +441,3 @@ def _parse_logged_at(value: Any) -> Optional["datetime"]:
     return dt
 
 
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")

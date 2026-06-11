@@ -7,11 +7,10 @@ override for testing without live Fulcra access.
 from __future__ import annotations
 
 import concurrent.futures
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, log as ops_log, heartbeat, identity
+from . import cache, remote, schema, views, log as ops_log, identity
 from . import env_int
 # Direct store-module import for ONE read-only diagnostic: the transport's
 # ``last_upload_error`` failure observable (see its comment in the store).
@@ -36,7 +35,7 @@ from .continuity_ops import cmd_checkpoint, cmd_park  # noqa: F401
 # timeutil.py do not import cli, so there is no import cycle.
 from .output import err as _err, warn as _warn, info as _info, print_json as _print_json
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
-from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _due_str
+from .textfmt import age_str as _age_str, due_str as _due_str
 # Retention / archival subsystem extracted from this file. Re-exported under the
 # historical underscore-prefixed names so every remaining caller here
 # (cmd_reconcile -> _run_retention; cmd_search / cmd_restore -> the cold-index
@@ -44,31 +43,28 @@ from .textfmt import age_str as _age_str, until_str as _until_str, due_str as _d
 # keep resolving. retention.py depends only on lower layers and never imports
 # cli, so there is no import cycle.
 from .retention import (
-    _archive_month, _archive_index_shard, _archive_task, _read_index_shard,
-    _list_index_shards, _retention_max_per_run, _claim_retention_marker,
+    _archive_task, _read_index_shard,
+    _list_index_shards, _claim_retention_marker,
     _prune_markers, _prune_dead_presence, _prune_dead_health, _run_retention,
-    _prune_continuity_checkpoints, _continuity_keep,
-    _expire_stale_broadcasts, _RETENTION_DEADLINE_HEADROOM_SECONDS,
     cmd_search, cmd_restore,
 )
 # Shared remote-task load/cache layer extracted from this file. Re-exported under
 # the historical underscore-prefixed names so every cli-resident caller
-# (cmd_status / cmd_reconcile / cmd_digest / _try_merge / _write_task_and_views /
-# ...) AND the unmigrated test patch targets (fulcra_coord.cli._load_all_tasks /
-# ...) keep resolving. io.py depends only on lower layers and never imports cli,
+# (cmd_reconcile / the parity checks / _reconcile_rebuild_source_preserving_acks)
+# AND the unmigrated test patch targets (fulcra_coord.cli._load_all_tasks / ...)
+# keep resolving. io.py depends only on lower layers and never imports cli,
 # so there is no import cycle.
 from .io import (
-    _cache_remote_task, _load_all_tasks, _load_task_summaries,
+    _load_all_tasks, _load_task_summaries,
     _load_summaries_for_rebuild, _load_task, _updated_at_key,
 )
 # Presence subsystem extracted from this file. Re-exported under the historical
 # names so the command dispatch (cmd_connect/cmd_workstream/cmd_presence),
-# cmd_reconcile's _reconcile_presence call, cmd_start's _maybe_warn_legacy_identity
-# call, and the test patch targets keep resolving. presence.py never imports cli.
+# cmd_reconcile's _reconcile_presence call, and the test patch targets keep
+# resolving. presence.py never imports cli.
 from .presence import (
-    _maybe_warn_legacy_identity, _derive_workstreams_from_open_tasks,
-    _upsert_presence_aggregate, _write_presence, _load_own_presence, cmd_connect,
-    _split_workstreams, cmd_workstream, cmd_presence, _reconcile_presence,
+    _upsert_presence_aggregate, _write_presence, cmd_connect,
+    cmd_workstream, cmd_presence, _reconcile_presence,
     _load_presence_agents,
     # C5: the merge-safe capability RMW pair `roles claim`/`release` use to
     # keep @role delivery (capabilities) in step with the lease layer.
@@ -84,16 +80,15 @@ from .query import cmd_status, cmd_board, cmd_agents, cmd_needs_me, cmd_resume
 # broadcast/assign/inbox/request-review) that calls _write_task_and_views, plus the
 # test patch targets, keep resolving. writepipe.py never imports cli.
 from .writepipe import (
-    _stamp_session_pointer, _write_task_and_views, _emit_lifecycle, _lifecycle_for,
-    _view_name_to_remote, _try_merge, _carry_fields, _union_events_and_acked,
-    _repair_merged_tags,
+    _stamp_session_pointer, _write_task_and_views,
+    _view_name_to_remote, _try_merge,
 )
 # Liveness-aware reviewer routing extracted from this file. Re-exported so
 # cmd_reconcile's _sweep_review_routes call, the request-review dispatch, and the
 # test patch targets keep resolving. routing_ops.py never imports cli.
 from .routing_ops import (
-    _review_pool, _append_route_event_and_assignee,
-    _force_block_for_human, _escalate_review_to_human, cmd_request_review,
+    _review_pool,
+    _escalate_review_to_human, cmd_request_review,
     cmd_review_done, _resolve_review_author,
     _reroute_minutes, _reroute_max, _accepted_stall_hours,
     _review_accepted_by_assignee, _classify_review, _sweep_review_routes,

@@ -59,7 +59,6 @@ def cmd_capabilities(args: Any, backend: Optional[list[str]] = None) -> int:
 
 def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
     """Check configuration, CLI availability, and remote access."""
-    import shutil
     from . import __version__, remote_root as get_remote_root
 
     _info(f"\nfulcra-coord doctor — v{__version__}")

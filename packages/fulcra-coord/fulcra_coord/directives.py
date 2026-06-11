@@ -21,7 +21,6 @@ mapping stays a pure function of its input.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,15 +32,13 @@ from . import log as ops_log
 # allows it). Imported for the registry SLA defaults — the dispatch mapping
 # must read loops.KINDS rather than hardcode a copy of the horizon.
 from . import loops
-
-
-def _now_z() -> str:
-    """Current UTC instant as an ISO-8601 ``...Z`` stamp (the bus's clock format).
-
-    Inlined here rather than importing ``timeutil`` so ``directives`` keeps its
-    minimal low-layer import surface (schema / remote / log only)."""
-    return datetime.now(timezone.utc).isoformat(
-        timespec="microseconds").replace("+00:00", "Z")
+# The bus clock format ("UTC, microsecond precision, trailing Z") has ONE home:
+# timeutil — a pure stdlib leaf, so this stays within the minimal low-layer
+# import surface (the directives.py fitness pin forbids only up-layer modules).
+# Bound under the local historical name; this replaced an inlined duplicate —
+# three modules each carrying their own copy of the same six lines is how a
+# clock-format change misses one of them.
+from .timeutil import now_iso as _now_z
 
 # Pure leaf constants, re-declared locally to respect LAYERING. ``views`` is an
 # up-layer module (forbidden by the package fitness test), so we MUST NOT import
