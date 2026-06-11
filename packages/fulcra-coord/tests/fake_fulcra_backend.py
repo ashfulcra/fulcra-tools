@@ -17,6 +17,17 @@ Mirrors the subcommands the package uses:
 State root comes from ``FULCRA_FAKE_ROOT`` (a real local directory). Remote
 paths like ``/coordination-demo/tasks/X.json`` map to files under that root.
 
+TOMBSTONES (the platform's SOFT delete, 2026-06-11): the real Fulcra Files
+DELETE keeps version history, so ``stat`` on a deleted file still answers
+(with the prior version's metadata) while ``download`` fails with a
+not-found-class error. Tests model that by placing a ``<path>.tombstone``
+sibling file (holding the prior version's content) where the live body would
+be: ``stat`` then reports the prior version, ``download`` exits 1 with the
+404-shaped stderr the real CLI emits, and ``list`` never shows the path.
+The default ``delete`` below stays a hard unlink — most tests predate the
+tombstone work and pin behaviors on plain absence; tombstone tests opt in by
+writing the sibling file themselves.
+
 This duplicates ``adapters/chatgpt/facade/tests/fake_fulcra_backend.py`` on
 purpose: the two test suites run from different working directories and must not
 import across the adapter boundary.
@@ -46,6 +57,11 @@ def _local_for(root: Path, remote_path: str) -> Path:
     return root / rel
 
 
+def _tombstone_for(local: Path) -> Path:
+    """The soft-delete marker for ``local`` (see module docstring)."""
+    return Path(str(local) + ".tombstone")
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         return 0
@@ -60,6 +76,15 @@ def main(argv: list[str]) -> int:
     if cmd == "stat":
         local = _local_for(root, argv[1])
         if not local.exists():
+            tomb = _tombstone_for(local)
+            if tomb.exists():
+                # Soft-deleted: the real CLI still reports the version history
+                # of a deleted file — the prior version's metadata, here.
+                data = tomb.read_bytes()
+                version = hashlib.sha1(data).hexdigest()
+                print(json.dumps({"path": argv[1], "size": len(data),
+                                  "version": version, "previous_versions": 1}))
+                return 0
             return 1
         data = local.read_bytes()
         version = hashlib.sha1(data).hexdigest()
@@ -69,6 +94,12 @@ def main(argv: list[str]) -> int:
     if cmd == "download":
         local = _local_for(root, argv[1])
         if not local.exists():
+            if _tombstone_for(local).exists():
+                # Soft-deleted: the current version is a delete marker — the
+                # download fails DETERMINISTICALLY with the not-found-class
+                # stderr the real CLI emits (NOT transient per #167's
+                # classifier; version history remains restorable).
+                sys.stderr.write("Error: HTTP Error 404: Not Found\n")
             return 1
         sys.stdout.write(local.read_text())
         return 0
@@ -87,7 +118,9 @@ def main(argv: list[str]) -> int:
         if not target.exists():
             return 0
         for p in sorted(target.rglob("*")):
-            if p.is_file():
+            # Tombstone markers are emulator state, not listable remote files
+            # (the real CLI does not list deleted paths).
+            if p.is_file() and not p.name.endswith(".tombstone"):
                 print("/" + str(p.relative_to(root)))
         return 0
 
