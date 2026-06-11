@@ -10,6 +10,20 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [Unreleased] — transport timeout defaults raised to match real latency
+
+**Why (2026-06-11 root cause):** measured platform latency for fulcra-api calls
+is 1–16s per operation (idle; worse under host CPU load). The previous defaults
+(read 5s / write 15s) sat BELOW natural latency, so the client killed its own
+calls: truncated listings ("unstable listings"), reads that looked like stale
+views, and writes abandoned after the server had already accepted them
+(observed duplicate directives) — an entire evening misdiagnosed as a backend
+outage. The backend was healthy throughout.
+
+**What:** `FULCRA_COORD_TIMEOUT_SECONDS` default 5 → 30; write timeout
+`max(15, read)` → `max(60, read)`. Per-call slowness is the reconcile
+deadline's job to bound, not the per-op timeout's.
+
 ## [Unreleased] — continuity integration: checkpoint refs ride the loops and roles
 
 **Why:** spec `docs/superpowers/specs/2026-06-10-continuity-integration-design.md`.

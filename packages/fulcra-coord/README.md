@@ -124,7 +124,7 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 |---|---|---|
 | `FULCRA_COORD_REMOTE_ROOT` | `/coordination` | Coordination root in Fulcra Files |
 | `FULCRA_CLI_COMMAND` | `fulcra-api` | CLI command (or `uv tool run fulcra-api`) |
-| `FULCRA_COORD_TIMEOUT_SECONDS` | `5` | Read timeout |
+| `FULCRA_COORD_TIMEOUT_SECONDS` | `30` | Read timeout |
 | `FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS` | `90` | Reconcile timeout |
 | `FULCRA_COORD_UPLOAD_RETRY` | `1` | Reconcile's parallel view-upload pool retries a failed view ONCE after a 0.5–2s jitter sleep — only when there is real deadline headroom (jitter + 1s per-upload floor + 2s slack), so the deadline stays a hard ceiling. Absorbs backend burst throttling / transient 5xx that otherwise fails a rotating subset of views every tick. `0` disables (single attempt, pre-0.15.x behavior); a second failure is final and keeps the unchanged markers-preserved/exit-1 path |
 | `FULCRA_COORD_WRITE_RETRY` | `1` | The **single-write** sibling of the row above: the authoritative task-body upload in every mutating command (`tell` / `later` / `done` / `update` / …) retries ONCE after a 0.5–2s jitter sleep on a failed **or raising** upload — absorbs the backend write-throttling that silently dropped single writes (2026-06-10 evidence: four sender-believed-delivered losses in one evening). `0` disables (single attempt); a second failure keeps the unchanged cached-locally path (warn + local cache + reconcile self-heal) |
