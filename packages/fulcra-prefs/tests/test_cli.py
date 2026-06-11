@@ -109,6 +109,20 @@ def test_compile_gcs_confirmed_shards_keeps_unconfirmed(env, capsys):
     assert "dining.cuisine.thai" in json.loads(capsys.readouterr().out)["keys"]
 
 
+def test_compile_does_not_fail_when_cache_gc_delete_fails(env, capsys):
+    call, fake_api, _store = env
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")
+
+    def fail_delete(file_id):
+        raise Exception("simulated delete outage")
+
+    fake_api.delete_file = fail_delete
+    assert call("compile") == 0
+    assert [p for p in fake_api.files if "signals-cache" in p] != [], \
+        "failed GC delete should leave shard for a later retry"
+
+
 def test_compile_keeps_shard_when_record_unconfirmed(env, capsys):
     """A shard whose record isn't visible in get-records (read outage / lag)
     must be KEPT — pruning it would lose the only copy of that signal."""
@@ -201,6 +215,29 @@ def test_capture_batch_rejects_non_array(env, tmp_path, capsys):
     f.write_text(json.dumps({"key": "x"}))      # object, not array
     assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 2
     assert "array" in capsys.readouterr().err
+
+
+def test_capture_batch_rejects_non_object_item_without_ingest(env, tmp_path, capsys):
+    call, fake_api, _store = env
+    f = tmp_path / "bad.json"
+    f.write_text(json.dumps([1]))
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 2
+    assert len(fake_api.ingested) == 0
+    assert "item 1" in capsys.readouterr().err
+
+
+def test_capture_batch_rejects_bad_item_before_any_ingest(env, tmp_path, capsys):
+    call, fake_api, _store = env
+    f = tmp_path / "bad.json"
+    f.write_text(json.dumps([
+        {"key": "dining.cuisine.thai", "value": True, "strength": 0.9},
+        {"key": "comms.tone.concise", "value": True},
+    ]))
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 2
+    assert len(fake_api.ingested) == 0
+    err = capsys.readouterr().err
+    assert "item 2" in err
+    assert "strength" in err
 
 
 def test_missing_meta_gives_actionable_error(fake_api, tmp_path, capsys):

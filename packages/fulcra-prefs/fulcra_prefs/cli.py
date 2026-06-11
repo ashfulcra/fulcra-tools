@@ -98,7 +98,7 @@ def _gc_confirmed_shards(store: FulcraStore, confirmed: set[str]) -> int:
             try:
                 store.delete_file(fid)
                 pruned += 1
-            except (OSError, ConnectionError, TimeoutError):
+            except Exception:
                 continue
     return pruned
 
@@ -177,6 +177,42 @@ def cmd_capture(args, api, outbox_dir, now) -> int:
     return 0
 
 
+def _normalize_batch_spec(spec: object, index: int, args
+                          ) -> tuple[dict | None, str | None]:
+    if not isinstance(spec, dict):
+        return None, f"--file item {index} must be an object"
+    missing = [k for k in ("key", "value", "strength") if k not in spec]
+    if missing:
+        return None, (f"--file item {index} missing required field(s): "
+                      f"{', '.join(missing)}")
+    try:
+        strength = float(spec["strength"])
+        confidence = float(spec.get("confidence", 1.0))
+        hl = spec.get("half_life_days", 90.0)
+        half_life_days = None if hl is None else float(hl)
+    except (TypeError, ValueError) as e:
+        return None, f"--file item {index} has invalid numeric field: {e}"
+    normalized = {
+        "key": spec["key"],
+        "value": spec["value"],
+        "strength": strength,
+        "kind": spec.get("kind", "preference"),
+        "scope": spec.get("scope", "global"),
+        "confidence": confidence,
+        "half_life_days": half_life_days,
+        "platform": args.platform,
+        "agent": spec.get("agent", args.agent),
+        "session": spec.get("session", args.session),
+        "supersedes": spec.get("supersedes"),
+    }
+    try:
+        Signal(id=None, observed_at="1970-01-01T00:00:00+00:00",
+               source_ids=(), **normalized)
+    except ValueError as e:
+        return None, f"--file item {index} is invalid: {e}"
+    return normalized, None
+
+
 def cmd_capture_batch(args, api, outbox_dir, now) -> int:
     """Auto-capture mechanism: record many signals an agent noticed in one
     consented call. `--file` is a JSON array of specs (key, value, strength, and
@@ -196,19 +232,17 @@ def cmd_capture_batch(args, api, outbox_dir, now) -> int:
         print("fulcra-prefs: --file must contain a JSON array of signal specs",
               file=sys.stderr)
         return 2
+    normalized_specs = []
+    for i, spec in enumerate(specs, start=1):
+        normalized, err = _normalize_batch_spec(spec, i, args)
+        if err:
+            print(f"fulcra-prefs: {err}", file=sys.stderr)
+            return 2
+        normalized_specs.append(normalized)
     outbox = Outbox(outbox_dir)
-    for spec in specs:
-        hl = spec.get("half_life_days", 90.0)
-        _capture_one(
-            store, outbox, meta, now,
-            key=spec["key"], value=spec["value"], strength=float(spec["strength"]),
-            kind=spec.get("kind", "preference"), scope=spec.get("scope", "global"),
-            confidence=float(spec.get("confidence", 1.0)),
-            half_life_days=(None if hl is None else float(hl)),
-            platform=args.platform, agent=spec.get("agent", args.agent),
-            session=spec.get("session", args.session),
-            supersedes=spec.get("supersedes"))
-    print(f"captured {len(specs)} signal(s)", file=sys.stderr)
+    for spec in normalized_specs:
+        _capture_one(store, outbox, meta, now, **spec)
+    print(f"captured {len(normalized_specs)} signal(s)", file=sys.stderr)
     return 0
 
 
