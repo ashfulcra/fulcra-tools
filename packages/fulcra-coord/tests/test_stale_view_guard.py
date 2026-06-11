@@ -292,10 +292,10 @@ class TestPresenceStaleGuard(unittest.TestCase):
 
         def fake_list_json(prefix, *, backend=None, **kw):
             assert prefix == remote.presence_prefix()
-            return [(f"{prefix}rev-h-r.json", fresh_record)]
+            return [(f"{prefix}rev-h-r.json", fresh_record)], True
 
         with mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json",
+             mock.patch("fulcra_coord.remote.list_json_checked",
                         side_effect=fake_list_json), \
              mock.patch("fulcra_coord.presence._warn") as warned:
             agents = _load_presence_agents(backend=["false"])
@@ -316,10 +316,10 @@ class TestPresenceStaleGuard(unittest.TestCase):
 
         def fake_list_json(prefix, *, backend=None, **kw):
             assert prefix == remote.presence_prefix()
-            return [(f"{prefix}rev-h-r.json", fresh_record)]
+            return [(f"{prefix}rev-h-r.json", fresh_record)], True
 
         with mock.patch("fulcra_coord.remote.download_json", return_value=None), \
-             mock.patch("fulcra_coord.remote.list_json",
+             mock.patch("fulcra_coord.remote.list_json_checked",
                         side_effect=fake_list_json), \
              mock.patch("fulcra_coord.presence._warn") as warned:
             agents = _load_presence_agents(backend=["false"])
@@ -332,7 +332,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
         from fulcra_coord.presence import _load_presence_agents
         agg = views.build_presence([schema.make_presence("rev:h:r")])  # fresh
         with mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json") as listed:
+             mock.patch("fulcra_coord.remote.list_json_checked") as listed:
             agents = _load_presence_agents(backend=["false"])
         self.assertEqual([a["agent"] for a in agents], ["rev:h:r"])
         listed.assert_not_called()
@@ -343,7 +343,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
         agg.pop("generated_at", None)
         agg["updated_at"] = _iso(_now() - timedelta(hours=9))
         with mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json") as listed:
+             mock.patch("fulcra_coord.remote.list_json_checked") as listed:
             agents = _load_presence_agents(backend=["false"])
         self.assertEqual([a["agent"] for a in agents], ["rev:h:r"])
         listed.assert_not_called()
@@ -357,7 +357,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
             raise RuntimeError("backend list outage")
 
         with mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json", side_effect=boom), \
+             mock.patch("fulcra_coord.remote.list_json_checked", side_effect=boom), \
              mock.patch("fulcra_coord.presence._warn") as warned:
             agents = _load_presence_agents(backend=["false"])
         self.assertEqual([a["agent"] for a in agents], [reviewer],
@@ -374,7 +374,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
         fresh_record = schema.make_presence(reviewer, capabilities=["review"])
 
         def fake_list_json(prefix, *, backend=None, **kw):
-            return [(f"{prefix}rev-h-r.json", fresh_record)]
+            return [(f"{prefix}rev-h-r.json", fresh_record)], True
 
         import io as _io
         from contextlib import redirect_stdout
@@ -383,7 +383,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
                                      format="json", agent="author:h:r",
                                      candidate_list=None)
         with mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json",
+             mock.patch("fulcra_coord.remote.list_json_checked",
                         side_effect=fake_list_json), \
              mock.patch("fulcra_coord.presence._warn"), \
              redirect_stdout(buf):
@@ -402,7 +402,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
             reviewer, workstreams=["review"], summary="fresh review loop")
 
         def fake_list_json(prefix, *, backend=None, **kw):
-            return [(f"{prefix}rev-h-r.json", fresh_record)]
+            return [(f"{prefix}rev-h-r.json", fresh_record)], True
 
         import io as _io
         from contextlib import redirect_stdout
@@ -410,7 +410,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
         args = types.SimpleNamespace(mine=None, format="json")
         with mock.patch("fulcra_coord.query._load_task_summaries", return_value=[]), \
              mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json",
+             mock.patch("fulcra_coord.remote.list_json_checked",
                         side_effect=fake_list_json), \
              mock.patch("fulcra_coord.presence._warn"), \
              redirect_stdout(buf):
@@ -433,7 +433,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
             reviewer, workstreams=["review"], summary="fresh review loop")
 
         def fake_list_json(prefix, *, backend=None, **kw):
-            return [(f"{prefix}rev-h-r.json", fresh_record)]
+            return [(f"{prefix}rev-h-r.json", fresh_record)], True
 
         import io as _io
         from contextlib import redirect_stdout
@@ -442,7 +442,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
                                      with_continuity=False)
         with mock.patch("fulcra_coord.query._load_task_summaries", return_value=[]), \
              mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json",
+             mock.patch("fulcra_coord.remote.list_json_checked",
                         side_effect=fake_list_json), \
              mock.patch("fulcra_coord.presence._warn"), \
              redirect_stdout(buf):
@@ -464,7 +464,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
             reviewer, workstreams=["review"], summary="fresh review loop")
 
         def fake_list_json(prefix, *, backend=None, **kw):
-            return [(f"{prefix}rev-h-r.json", fresh_record)]
+            return [(f"{prefix}rev-h-r.json", fresh_record)], True
 
         import io as _io
         from contextlib import redirect_stdout
@@ -475,7 +475,7 @@ class TestPresenceStaleGuard(unittest.TestCase):
              mock.patch("fulcra_coord.digest._assess_fleet", return_value=None), \
              mock.patch("fulcra_coord.digest._loop_board_summary", return_value=None), \
              mock.patch("fulcra_coord.remote.download_json", return_value=agg), \
-             mock.patch("fulcra_coord.remote.list_json",
+             mock.patch("fulcra_coord.remote.list_json_checked",
                         side_effect=fake_list_json), \
              mock.patch("fulcra_coord.presence._warn"), \
              redirect_stdout(buf):

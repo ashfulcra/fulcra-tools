@@ -13,7 +13,9 @@ Two write surfaces with different authority:
     (idempotent refresh), two agents never collide, and the holder union =
     list the prefix (the directive ack sub-log pattern; no CAS needed).
 
-Everything here is best-effort never-raise (True/False, record-or-None, []),
+Everything here is best-effort never-raise (True/False, record-or-None, [],
+or the :data:`READ_ERROR` sentinel where a caller must be able to tell a
+failed read apart from confirmed absence — read_role and read_leases),
 because claims ride the ``connect`` session-boot path and reads ride the
 report-only health/board surfaces — none of which may crash on a flaky bus.
 
@@ -73,7 +75,9 @@ def read_role(name: str, *, backend: Optional[list[str]] = None
             return rec
         if remote.stat(path, backend=backend) is not None:
             return READ_ERROR   # record exists but is unreadable right now
-        return None             # both probes agree: confirmed absent
+        if not remote.probe_reachable(backend):
+            return READ_ERROR   # bus dark: absence is unconfirmable
+        return None             # probes agree and the bus answered: absent
     except Exception:
         return READ_ERROR
 
@@ -125,16 +129,32 @@ def upsert_role(record: dict[str, Any], *,
 
 
 def read_leases(name: str, *, backend: Optional[list[str]] = None
-                ) -> list[dict[str, Any]]:
+                ) -> Any:
     """Every lease shard for a role, sorted by (at, path stem) — the same
-    machine-agnostic stable order as read_loop_responses. Best-effort: [].
-    Raw records only: freshness is judged up-layer by roles.role_status
-    against the presence roster (see the module docstring)."""
+    machine-agnostic stable order as read_loop_responses. Returns ``[]`` only
+    for a CONFIRMED-empty sub-log, or the :data:`READ_ERROR` sentinel when
+    the lease state could not be read. Raw records only: freshness is judged
+    up-layer by roles.role_status against the presence roster (see the module
+    docstring).
+
+    2026-06-11 roles/presence read-error audit (F4): this used to return []
+    on ANY failure — and [] folds to VACANT in roles.role_status with
+    ``vacant_since`` = the role's (old) ``created_at``, so ONE failed lease
+    listing pushed a false "Role VACANT past SLA" P1 directive onto the
+    maintainer's plate. Same C1 discipline as read_role: a shard that was
+    LISTED but would not download is an error outright; an EMPTY listing is
+    trusted only after ``probe_reachable`` confirms the bus answered
+    (list_files swallows transport failures into [] — emptiness alone proves
+    nothing). The probe is spent on the empty path only."""
     try:
-        records = remote.list_json(remote.role_leases_prefix(name),
-                                   backend=backend)
+        records, complete = remote.list_json_checked(
+            remote.role_leases_prefix(name), backend=backend)
+        if not complete:
+            return READ_ERROR   # listing failed, or a listed shard wouldn't read
+        if not records and not remote.probe_reachable(backend):
+            return READ_ERROR   # "empty" from an unreachable bus is a guess
     except Exception:
-        return []
+        return READ_ERROR
     events: list[tuple[str, str, dict[str, Any]]] = []
     for path, rec in records:
         if isinstance(rec, dict):
@@ -186,8 +206,17 @@ def claim_role(name: str, agent: str, *,
             role = schema.make_role(str(name).strip(), "")
             upsert_role(role, backend=backend)   # best-effort; claim proceeds
         if role is not None and role.get("policy") == "exclusive":
+            existing_leases = read_leases(name, backend=backend)
+            if existing_leases is READ_ERROR:
+                # F4: the contested check is ADVISORY — an unreadable lease
+                # sub-log must not fail the claim (the per-agent shard below
+                # is clobber-free regardless). Skip the warn; a genuine
+                # double-hold still surfaces at read time via role_status.
+                _warn(f"claim: lease listing for '{name}' could not be read — "
+                      "skipping the exclusive-policy check")
+                existing_leases = []
             others = sorted({
-                lease.get("agent") for lease in read_leases(name, backend=backend)
+                lease.get("agent") for lease in existing_leases
                 if lease.get("agent") and lease.get("agent") != agent
             })
             if others:

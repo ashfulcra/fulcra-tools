@@ -515,7 +515,8 @@ class TestConnectWiring(_CfgEnvBase):
              patch("fulcra_coord.presence._write_presence",
                    side_effect=lambda rec, backend=None: order.append("presence") or True), \
              patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
-                   return_value=[]):
+                   return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True):
             cmd_connect(self._args(), backend=["false"])
         self.assertEqual(order[0], "presence")
         self.assertIn("update", order)
@@ -538,7 +539,8 @@ class TestConnectWiring(_CfgEnvBase):
              patch("fulcra_coord.presence._write_presence",
                    side_effect=lambda rec, backend=None: captured.update(rec=rec) or True), \
              patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
-                   return_value=[]):
+                   return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True):
             cmd_connect(self._args(summary="building things"), backend=["false"])
         self.assertIn("building things", captured["rec"]["summary"])
         self.assertIn(f"(v{__version__} behind canonical 99.0.0)",
@@ -556,7 +558,8 @@ class TestConnectWiring(_CfgEnvBase):
              patch("fulcra_coord.presence._write_presence",
                    side_effect=lambda rec, backend=None: records.append(rec) or True), \
              patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
-                   return_value=[]):
+                   return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True):
             cmd_connect(self._args(summary="on it"), backend=["false"])
             cmd_connect(self._args(summary="on it"), backend=["false"])
         suffix = f"(v{__version__} behind canonical 99.0.0)"
