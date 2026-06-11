@@ -49,7 +49,7 @@ SPEC_HASH="${fp%% *}"; SPEC_SIG="${fp#* }"
 
 CLI_HEAD="$(gh api repos/fulcradynamics/fulcra-api-python/commits/main --jq '.sha[:7]' 2>/dev/null || echo UNKNOWN)"
 # annotation RECORD write/delete commands in CLI = the rewrite trigger
-ANN_CMDS="$(gh api repos/fulcradynamics/fulcra-api-python/contents/fulcra_api/cli/data_types.py --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | grep -coE '@data_type\.command|@records?\.command' || echo 0)"
+ANN_CMDS="$(gh api repos/fulcradynamics/fulcra-api-python/contents/fulcra_api/cli/data_types.py --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | grep -E '@data_type\.command|@records?\.command' | wc -l | tr -d '[:space:]')"
 MCP_SCOPES="$(curl -s --max-time 12 https://mcp.fulcradynamics.com/.well-known/oauth-authorization-server | python3 -c 'import sys,json;print(",".join(json.load(sys.stdin).get("scopes_supported",[])))' 2>/dev/null || echo UNKNOWN)"
 
 CUR="$(python3 -c "import json,sys;print(json.dumps({'spec_hash':sys.argv[1],'cli_head':sys.argv[2],'ann_cmd_count':sys.argv[3],'mcp_scopes':sys.argv[4]},sort_keys=True))" "$SPEC_HASH" "$CLI_HEAD" "$ANN_CMDS" "$MCP_SCOPES")"
