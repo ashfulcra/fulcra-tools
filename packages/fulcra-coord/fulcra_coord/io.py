@@ -25,6 +25,26 @@ from . import cache, log as ops_log, read_source, remote, schema, views
 from .output import warn as _warn
 
 
+def _stat_strong_match(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """True ONLY when a STRONG identity key proves the file unchanged.
+
+    The skip-the-download gate for ``_cache_remote_task``. Deliberately
+    stricter than ``store.stat_changed``: that function answers "did it
+    change?" and treats all-weak-keys-equal as "no" (fine for its
+    optimistic-concurrency callers, where a false "unchanged" only delays a
+    merge check). Here a false "unchanged" would serve a STALE CACHED BODY as
+    the current task, so only the keys ``stat_changed`` itself calls
+    definitive (version_id / version / etag) count — equal weak indicators
+    (size, timestamps) prove nothing (a re-upload can reproduce the same
+    size). No strong key on both sides => no proof => download."""
+    for key in ("version_id", "version", "etag"):
+        bv = before.get(key)
+        av = after.get(key)
+        if bv is not None and av is not None:
+            return bv == av
+    return False
+
+
 def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
     """Reconstruct a remote task body, cache it, and cache the FILE's stat meta.
 
@@ -47,6 +67,22 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
     events-mode skipped the file stat, the next write would lose its baseline.
     Phase-2b changes READS only — the write-path concurrency stat stays
     file-sourced.
+
+    STAT-GATED FETCH (PERF, 2026-06-10 measured pass): the file source used to
+    download the body unconditionally and then stat it — two ~1.3s subprocesses
+    per task per read even when NOTHING changed, which on the production bus
+    (~440 tasks/reconcile tick) is the steady-state case for almost every task.
+    Now the file branch stats FIRST: when the fresh stat's STRONG identity key
+    (version_id / version / etag — the keys ``store.stat_changed`` treats as
+    definitive) matches the cached meta AND a cached body exists, the download
+    is skipped and the cached body served — 1 spawn instead of 2. Weak
+    indicators (size / timestamps) are never trusted as proof of no-change (a
+    re-upload can reproduce the same size), and a missing strong key, missing
+    meta, or missing cached body all fall back to the full download. NB the
+    served cached body may be a LOCAL write whose upload is still pending
+    repair (the op-marker path); the strong-key match proves the REMOTE side
+    is unchanged since the meta was recorded, so preferring the newer local
+    body is at worst the same trade the repair replay itself makes.
     """
     task_path = remote.task_remote_path(task_id)
     task: Optional[dict[str, Any]] = None
@@ -99,15 +135,35 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
 
     # File source (default, OR events-mode fallback when the fold was
     # incomplete/absent/errored). This is the authoritative mutable snapshot.
+    task_stat: Optional[dict[str, Any]] = None
     if task is None:
-        task = remote.download_json(task_path, backend=backend)
-        if not task:
-            return None
+        # STAT GATE (see docstring): only worth probing when we hold BOTH a
+        # prior meta and a cached body — otherwise the stat can't save the
+        # download and would only add a spawn.
+        prior_meta = cache.read_meta(task_path)
+        cached_body = cache.read_cached_task(task_id) if prior_meta else None
+        if prior_meta and cached_body is not None:
+            task_stat = remote.stat(task_path, backend=backend)
+            if task_stat and _stat_strong_match(prior_meta, task_stat):
+                task = cached_body
+        if task is None:
+            task = remote.download_json(task_path, backend=backend)
+            if not task:
+                return None
+            # When the gate ran, task_stat is the PRE-download stat — keep it.
+            # If a writer lands between that stat and this download, the meta
+            # is OLDER than the body, so the next write sees stat_changed and
+            # runs its merge check: a spurious check at worst. (The reverse —
+            # a post-download stat NEWER than the body, which the old
+            # download-then-stat order could record — is the unsafe direction:
+            # it makes a stale body look current.)
 
     cache.write_cached_task(task)
     # Always stat the FILE (not the fold) so the write-path concurrency baseline
-    # stays correct regardless of where the body was sourced from.
-    task_stat = remote.stat(task_path, backend=backend)
+    # stays correct regardless of where the body was sourced from. Skipped only
+    # when the stat gate above already holds THIS read's fresh file stat.
+    if task_stat is None:
+        task_stat = remote.stat(task_path, backend=backend)
     if task_stat:
         cache.write_meta(task_path, task_stat)
 

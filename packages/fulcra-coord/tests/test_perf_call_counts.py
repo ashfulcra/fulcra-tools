@@ -271,3 +271,84 @@ def test_overdue_loop_suffix_downloads_only_top_level_records(coord_backend):
     with counter.patch():
         inbox._overdue_loop_suffix("someone:h:r", backend=coord_backend)
     assert _no_sublog_shards(counter.downloads_under(prefix)), counter.downloads
+
+
+# ---------------------------------------------------------------------------
+# E3 — stat-gated body fetch in io._cache_remote_task
+# ---------------------------------------------------------------------------
+
+def _seed_body(backend, summary="v1") -> dict:
+    t = schema.make_task(title="stat-gate", workstream="ws", agent="a")
+    t["current_summary"] = summary
+    remote.upload_json(t, remote.task_remote_path(t["id"]), backend=backend)
+    return t
+
+
+def test_cache_remote_task_unchanged_body_is_one_stat_zero_downloads(coord_backend):
+    """The steady-state read: the task did not change since the last read, so
+    the strong version key in the fresh stat matches the cached meta and the
+    body download is SKIPPED — 1 stat replaces the old unconditional
+    download+stat pair. On a 440-task bus where a tick touches a handful of
+    tasks, this halves the body-fetch spawn count."""
+    t = _seed_body(coord_backend)
+    path = remote.task_remote_path(t["id"])
+    warm = io._cache_remote_task(t["id"], backend=coord_backend)  # seeds cache+meta
+    counter = OpCounter()
+    with counter.patch():
+        got = io._cache_remote_task(t["id"], backend=coord_backend)
+    assert got == warm
+    assert counter.stats == [path]
+    assert counter.downloads == []
+
+
+def test_cache_remote_task_changed_body_stats_then_downloads(coord_backend):
+    """A changed task (new strong version key) costs exactly stat + download
+    and returns the NEW body — the gate never serves a stale cache."""
+    t = _seed_body(coord_backend, summary="v1")
+    path = remote.task_remote_path(t["id"])
+    io._cache_remote_task(t["id"], backend=coord_backend)  # warm
+    t2 = dict(t)
+    t2["current_summary"] = "v2"
+    remote.upload_json(t2, path, backend=coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        got = io._cache_remote_task(t["id"], backend=coord_backend)
+    assert got["current_summary"] == "v2"
+    assert counter.stats == [path]
+    assert counter.downloads == [path]
+
+
+def test_cache_remote_task_cold_cache_downloads(coord_backend):
+    """No prior meta / no cached body -> the gate cannot prove anything, so the
+    body is downloaded (the pre-fix behaviour, one download + one meta stat)."""
+    t = _seed_body(coord_backend)
+    path = remote.task_remote_path(t["id"])
+    counter = OpCounter()
+    with counter.patch():
+        got = io._cache_remote_task(t["id"], backend=coord_backend)
+    assert got["id"] == t["id"]
+    assert counter.downloads == [path]
+
+
+def test_cache_remote_task_weak_only_stat_falls_back_to_download(coord_backend):
+    """A stat with NO strong identity key (version_id/version/etag) can never
+    prove the body unchanged — equal sizes/timestamps don't (a re-upload can
+    produce the same size), so the gate must fall back to downloading."""
+    t = _seed_body(coord_backend)
+    path = remote.task_remote_path(t["id"])
+    io._cache_remote_task(t["id"], backend=coord_backend)  # warm
+    # Make BOTH sides weak-only: strip strong keys from the cached meta and
+    # serve a weak-only fresh stat.
+    from fulcra_coord import cache
+    meta = cache.read_meta(path)
+    meta.pop("version", None)
+    meta.pop("version_id", None)
+    meta.pop("etag", None)
+    cache.write_meta(path, meta)
+    weak_stat = {"path": path, "size": meta.get("size", 1)}
+    counter = OpCounter()
+    with mock.patch.object(remote, "stat", return_value=weak_stat):
+        with counter.patch():
+            got = io._cache_remote_task(t["id"], backend=coord_backend)
+    assert got["id"] == t["id"]
+    assert counter.downloads == [path]
