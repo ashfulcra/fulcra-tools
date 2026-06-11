@@ -38,7 +38,8 @@ that makes it safe under failure.
 ### Design axioms
 
 1. **Broker-free.** The only required infrastructure is one durable shared store.
-2. **Roles over sessions.** Durable identity is a role; a session is a lease on it.
+2. **Roles over sessions.** Long-lived responsibility is a role; a session is a
+   lease on it.
 3. **Loops, not messages.** Every cross-boundary ask is a typed unit of work with
    a lifecycle and a guaranteed terminal state.
 4. **The bus is the source of truth for coordination state** — never a side
@@ -52,7 +53,7 @@ that makes it safe under failure.
 
 **1.1** A coordination layer MUST require only a **single durable shared store**
 that every participant can read and write. It MUST NOT require a message broker,
-a always-on central service, direct agent-to-agent connectivity, or shared
+an always-on central service, direct agent-to-agent connectivity, or shared
 filesystem/VPN access. *Prevents: excluding the majority of agents, which run in
 sandboxes (cloud, CI, phones) that cannot reach each other.*
 
@@ -78,10 +79,12 @@ declared authoritative at any time, and migrations between them MUST be gated (s
 
 ## 2. Identity, presence, and capability
 
-**2.1 — Roles over sessions.** Durable identity MUST be a **role** (the job:
-`reviewer`, `deployer`, `backlog-groomer`), not a session id. A session **claims a
-lease** on a role. *Prevents: identity drifting every time a session dies and
-respawns, and work routed to a dead session id.*
+**2.1 — Roles over sessions.** Long-lived responsibility SHOULD be modeled as a
+**role** (the job: `reviewer`, `deployer`, `backlog-groomer`) or capability, not
+as a one-off session id. A session **claims a lease** on a role. Stable agent and
+human identities may still exist as participants, but routable functions should
+not depend on a particular ephemeral holder. *Prevents: responsibility drifting
+every time a session dies and respawns, and work routed to a dead session id.*
 
 **2.2 — Leases ride liveness.** A role lease MUST stay valid exactly as long as the
 holder's presence is fresh, and MUST lapse automatically when the holder goes
@@ -185,9 +188,10 @@ a fresh session resumes without guessing. *Prevents: compaction or session death
 destroying in-flight understanding.*
 
 **5.2 — Checkpoints travel with the work and are portable.** A resume point MUST be
-carried as a **ref on the coordination primitive** that hands off the work, and MUST
-be published so it is resolvable on any host — never a bare local path. *Prevents: a
-handoff referencing state the receiver cannot load.*
+carried on the coordination primitive that hands off the work, preferably as a
+published **ref** that is resolvable on any host. If publishing the ref fails, a
+self-contained portable payload MAY ride with the handoff; a bare local path alone
+MUST NOT. *Prevents: a handoff referencing state the receiver cannot load.*
 
 **5.3 — Checkpoint at durable boundaries, not every event.** The operational ledger
 MUST stay cheap and chatty; checkpoints SHOULD be written only at durable pause
@@ -200,10 +204,11 @@ claiming the role MUST surface where it left off, and session-exit SHOULD update
 claim role → resume brief → work → checkpoint on exit.*
 
 **5.5 — Continuity is decoupled.** The checkpoint format MUST be owned by the
-continuity layer, and the coordination layer MUST store **refs, never bodies**, so
-either can evolve independently and the coordination core never hard-depends on the
-continuity implementation. *Prevents: tight coupling that makes either system
-un-evolvable.*
+continuity layer, and the coordination layer SHOULD store opaque refs rather than
+interpreting checkpoint bodies. When a portable inline fallback is needed, the
+coordination layer MUST still treat it as opaque payload, so either layer can evolve
+independently and the coordination core never hard-depends on the continuity
+implementation. *Prevents: tight coupling that makes either system un-evolvable.*
 
 ---
 

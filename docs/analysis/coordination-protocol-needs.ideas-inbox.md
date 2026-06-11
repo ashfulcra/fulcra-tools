@@ -39,9 +39,11 @@ guarantees that make it true.
 
 ## B. Identity, presence & liveness
 
-- **B1 — Durable identity is decoupled from ephemeral sessions.** A *role* (the
-  job) persists; a *session* is a lease on it. *Prevents:* identity drifting every
-  time a session dies/respawns, and routing to a dead session id.
+- **B1 — Long-lived responsibility is decoupled from ephemeral sessions.** A
+  *role* (the job) persists; a *session* is a lease on it. Stable agent and human
+  identities can still exist as participants, but routable functions should not
+  depend on a particular ephemeral holder. *Prevents:* responsibility drifting
+  every time a session dies/respawns, and routing to a dead session id.
 - **B2 — Identity is per-context and clobber-proof.** Two co-located sessions
   sharing a working context must not overwrite each other's identity; an explicit
   per-session override must win. *Prevents:* silent mis-attribution of work
@@ -96,10 +98,11 @@ guarantees that make it true.
   decisions, artifacts, open questions, next actions — enough that the next
   session resumes without guessing. *Prevents:* compaction / session death
   destroying in-flight understanding.
-- **E2 — Checkpoints travel with the work and are portable.** A resume point is a
-  *ref* carried on the coordination primitive, published so it's valid on any
-  host (never a bare local path). *Prevents:* a handoff that references state the
-  receiver can't load.
+- **E2 — Checkpoints travel with the work and are portable.** A resume point is
+  carried on the coordination primitive, preferably as a published *ref* valid on
+  any host; if publishing fails, a self-contained portable payload can ride with
+  the handoff. A bare local path alone is never enough. *Prevents:* a handoff that
+  references state the receiver can't load.
 - **E3 — Checkpoint at durable boundaries, not every event.** Before
   compaction/handoff/idle/exit — keep the operational ledger cheap and chatty.
   *Prevents:* checkpoint spam, and the ledger becoming the snapshot store.
@@ -181,8 +184,8 @@ append-only store**:
 
 1. **Durable, broker-free substrate** (A) — a shared log anyone can reach, correct
    without locks.
-2. **Roles over sessions** (B) — durable identity + liveness + capability, so work
-   routes to a *live capable holder*, never a dead id.
+2. **Roles over sessions** (B) — durable responsibility + liveness + capability,
+   so work routes to a *live capable holder*, never a dead id.
 3. **Loops that always close on the bus** (C) — every cross-boundary ask is typed,
    lifecycle-bounded, and closed only by an on-bus response.
 4. **The human as a first-class, scheduled participant** (D) — addressable,
