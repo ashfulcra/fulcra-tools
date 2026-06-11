@@ -35,8 +35,10 @@ preference" reference survives the offline gap.
 that reduces all signals to "what's true now":
 
 1. **Decay.** `weight = strength × 2^(−age / half_life)`. A 0.9-strength signal
-   with a 90-day half-life is worth ~0.45 after 90 days. Facts (`half_life: null`)
-   don't decay but are flagged stale after 180 days.
+   with a 90-day half-life is worth ~0.45 after 90 days. A half-life is a
+   positive number of days, or `null` for a durable fact — facts don't decay
+   but are flagged stale after 180 days. (`capture` rejects a zero or negative
+   half-life: a 0 would divide by zero in every later compile.)
 2. **Supersedes.** Corrections drop the replaced signal; chains are followed;
    cycles are silently dropped.
 3. **Conflicts.** Highest absolute decayed weight wins; ties break to the newer
@@ -129,6 +131,11 @@ cycles, and writes canonical JSON to `prefs/compiled.json` and per-platform
 overlays under `prefs/platforms/`. The output is byte-identical for the same
 inputs regardless of input order — the determinism contract tested in
 `tests/test_determinism.py`. Full design rationale: [`docs/SPEC.md`](docs/SPEC.md).
+
+A platform view is always *global + that platform's overrides*: `get --platform X`
+and `inject --platform X` return the merged platform doc, and when platform `X`
+has no overrides of its own they fall back to the plain global doc (rather than
+nothing) — a platform with no special-casing simply sees your global prefs.
 
 How agents consume the compiled doc: `inject` prints a compact preference block
 at session start (e.g. `- comms.tone.concise: {"preferred": true} [+0.90]`). It
@@ -225,3 +232,10 @@ and cross-platform compile consistency.
   and compile require a CLI-capable agent. Filed as a platform gap.
 - **Cron documented, not installed.** The recommended cron (`fulcra-prefs compile`
   on a timer) is described in the skill; the installer is out of scope for v1.
+- **A double-ingest corner case.** If a capture's ingest POST *succeeds* but the
+  follow-up cache-shard write fails (rare: network blips between the two calls),
+  the record is spooled and re-POSTed on the next `compile` flush — so the raw
+  Fulcra timeline ends up with two annotation records for that one signal.
+  Compile dedupes by signal id, so compiled output and weights stay correct;
+  only the underlying record stream carries the duplicate. Lands in the
+  record-CRUD cleanup when CLI annotation commands ship.
