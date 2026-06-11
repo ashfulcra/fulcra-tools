@@ -500,9 +500,14 @@ class TestConnectWiring(_CfgEnvBase):
         base.update(kw)
         return types.SimpleNamespace(**base)
 
-    def test_update_attempt_precedes_presence_write(self):
-        """The roster must reflect POST-update staleness, so the check runs
-        BEFORE the presence write — patch both and record call order."""
+    def test_presence_write_precedes_update_check(self):
+        """2026-06-11 bug hunt S2 (P2): this test previously PINNED the buggy
+        order (update BEFORE presence). The update step can legitimately run
+        for minutes (git pull + a cold uv build, bounded at 300s) — during
+        which the booting session was INVISIBLE on the roster. Presence is
+        the boot-critical write; the staleness suffix can ride the next
+        connect/heartbeat off the persisted marker. Pin: the presence upload
+        precedes the manifest read / update attempt."""
         from fulcra_coord.presence import cmd_connect
         order = []
         with patch("fulcra_coord.selfupdate.maybe_self_update",
@@ -512,18 +517,24 @@ class TestConnectWiring(_CfgEnvBase):
              patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
                    return_value=[]):
             cmd_connect(self._args(), backend=["false"])
-        self.assertEqual(order[0], "update")
-        self.assertIn("presence", order)
-        self.assertLess(order.index("update"), order.index("presence"))
+        self.assertEqual(order[0], "presence")
+        self.assertIn("update", order)
+        self.assertLess(order.index("presence"), order.index("update"))
 
     def test_stale_marker_suffixes_connect_summary(self):
-        """Visible degradation: when the host is behind and couldn't update,
-        the presence summary carries '(vX behind canonical Y)' on the roster."""
+        """Visible degradation: when the host is KNOWN behind (the marker a
+        previous attempt persisted), the presence summary carries
+        '(vX behind canonical Y)' on the roster.
+
+        Updated for S2 (2026-06-11 bug hunt): presence now writes BEFORE the
+        update check, so the suffix comes from the marker persisted by the
+        PREVIOUS episode — seeded here directly — and a marker written by
+        THIS connect's update attempt surfaces on the FOLLOWING connect."""
         from fulcra_coord.presence import cmd_connect
+        selfupdate._write_stale_marker(__version__, "99.0.0")
         captured = {}
         with patch("fulcra_coord.selfupdate.maybe_self_update",
-                   side_effect=lambda **kw: selfupdate._write_stale_marker(
-                       __version__, "99.0.0") or "degraded-no-config"), \
+                   return_value="degraded-no-config"), \
              patch("fulcra_coord.presence._write_presence",
                    side_effect=lambda rec, backend=None: captured.update(rec=rec) or True), \
              patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
@@ -532,6 +543,25 @@ class TestConnectWiring(_CfgEnvBase):
         self.assertIn("building things", captured["rec"]["summary"])
         self.assertIn(f"(v{__version__} behind canonical 99.0.0)",
                       captured["rec"]["summary"])
+
+    def test_marker_written_this_connect_suffixes_the_following_connect(self):
+        """The S2 ride-the-next-heartbeat contract end-to-end: connect #1's
+        update attempt writes the marker (AFTER presence uploaded, so #1's
+        record carries no suffix); connect #2 picks it up."""
+        from fulcra_coord.presence import cmd_connect
+        records = []
+        with patch("fulcra_coord.selfupdate.maybe_self_update",
+                   side_effect=lambda **kw: selfupdate._write_stale_marker(
+                       __version__, "99.0.0") or "update-failed"), \
+             patch("fulcra_coord.presence._write_presence",
+                   side_effect=lambda rec, backend=None: records.append(rec) or True), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks",
+                   return_value=[]):
+            cmd_connect(self._args(summary="on it"), backend=["false"])
+            cmd_connect(self._args(summary="on it"), backend=["false"])
+        suffix = f"(v{__version__} behind canonical 99.0.0)"
+        self.assertNotIn(suffix, records[0]["summary"])
+        self.assertIn(suffix, records[1]["summary"])
 
     def test_selfupdate_failure_never_fails_connect(self):
         from fulcra_coord.presence import cmd_connect
