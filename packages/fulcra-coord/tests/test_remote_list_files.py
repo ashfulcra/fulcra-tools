@@ -20,9 +20,14 @@ from fulcra_coord import cli, remote
 
 
 def _completed(stdout: str, returncode: int = 0):
-    """A stand-in subprocess.CompletedProcess carrying canned stdout."""
+    """A stand-in subprocess.CompletedProcess carrying canned stdout.
+
+    ``stderr`` must be a real string, not a Mock attribute: a real
+    CompletedProcess always carries one, and the store's transient-failure
+    classifier regex-matches it on every non-zero exit."""
     cp = mock.Mock()
     cp.stdout = stdout
+    cp.stderr = ""
     cp.returncode = returncode
     return cp
 
