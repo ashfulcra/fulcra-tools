@@ -195,6 +195,73 @@ def list_cached_tasks() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# View upload fingerprints (skip-unchanged view uploads)
+# ---------------------------------------------------------------------------
+#
+# Per view name, the sha256 hexdigest of the view content as LAST CONFIRMED
+# uploaded (writepipe._view_fingerprint defines the exact digest). The write
+# path and reconcile skip a view upload when the freshly-rebuilt content
+# matches this digest — the fix for the all-views fan-out (~55 uploads per
+# logical write on the live bus, growing with fleet size) that turned every
+# write into a NeedsReconcile burst under backend 504-weather (2026-06-10).
+#
+# WHY a separate store, and not "compare against the cached view":
+# write_cached_view is deliberately written for EVERY view regardless of
+# upload success (a failed upload still caches, so local readers see the
+# freshest build). "content == cached view" therefore does NOT imply "remote
+# is current" — a previous failed upload poisons that inference. This store
+# is SUCCESS-ONLY by contract: a fingerprint is written exclusively after a
+# confirmed upload, so a digest match here really does mean the bytes are on
+# the remote (as far as this host ever observed).
+#
+# LOCAL-ONLY per-host bookkeeping, like the meta/ stats and prov sidecars:
+# never uploaded, scoped per remote root (no cross-root bleed), and safe to
+# delete at any time — the only cost of a lost fingerprint is one redundant
+# re-upload.
+
+def view_fingerprints_dir() -> Path:
+    return _root_cache() / "view-fingerprints"
+
+
+def _view_fingerprint_path(view_name: str) -> Path:
+    # View names carry "/" (workstreams/ws, agents/<id>) and agent ids carry
+    # ":" — sanitize for the filesystem, but keep a short hash of the RAW name
+    # so two names that sanitize identically (agents/a:b vs agents/a-b) can
+    # never alias onto one file and cross-poison each other's skip decisions.
+    import hashlib
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "-" for c in view_name)
+    digest = hashlib.sha1(view_name.encode()).hexdigest()[:8]
+    return view_fingerprints_dir() / f"{safe}-{digest}"
+
+
+def read_view_fingerprint(view_name: str) -> Optional[str]:
+    """Digest of `view_name`'s last CONFIRMED upload, or None (never uploaded
+    successfully / unreadable). None always means "upload it" — the safe
+    direction, mirroring read_meta's corrupt-is-absent stance."""
+    path = _view_fingerprint_path(view_name)
+    if not path.exists():
+        return None
+    try:
+        return path.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def write_view_fingerprint(view_name: str, digest: str) -> None:
+    """Record `view_name`'s content digest after a CONFIRMED upload.
+
+    Callers must only invoke this on upload success — writing it on failure
+    would re-create exactly the poisoned-cache trap this store exists to
+    avoid. Best-effort like write_annotation_marker: a failure here just means
+    one redundant re-upload on the next write, never a failed task op."""
+    try:
+        view_fingerprints_dir().mkdir(parents=True, exist_ok=True)
+        _view_fingerprint_path(view_name).write_text(digest)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Remote stat metadata (version tracking for optimistic concurrency)
 # ---------------------------------------------------------------------------
 

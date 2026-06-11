@@ -36,8 +36,11 @@ files.list_json("/coordination/events/tasks/T1/", backend=B)
 ```
 
 Exported: `stat`, `download`, `download_json`, `upload`, `upload_json`,
-`delete`, `list_files`, `list_json`, `stat_changed`, `check_cli_available`,
-`check_file_commands`, `probe_reachable`, `check_remote_access`.
+`serialize_json` (the exact serialization `upload_json` puts on the wire —
+shared with fulcra-coord's skip-unchanged view fingerprints so the digest and
+the upload bytes can never drift), `delete`, `list_files`, `list_json`,
+`stat_changed`, `check_cli_available`, `check_file_commands`,
+`probe_reachable`, `check_remote_access`.
 
 ### Failure observability: `store.last_upload_error`
 
