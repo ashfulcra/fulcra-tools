@@ -151,6 +151,38 @@ def test_evidence_source_cannot_be_forged(coord_backend):
     assert events[0]["source"] == "forge-mirror"
 
 
+def test_fold_keeps_real_verdict_over_trailing_outcomeless_response(coord_backend):
+    """2026-06-11 bug hunt S4: a trailing response WITHOUT an outcome (a
+    malformed/partial shard) used to null the real verdict — fold blindly took
+    responses[-1]. The fold must take the LAST response that actually carries
+    a non-empty outcome; the loop still closes (a real verdict exists)."""
+    d = _seed_review_loop(coord_backend)
+    loop_ops.append_loop_response(
+        d["id"], {"by": "rev:h:r", "outcome": {"verdict": "approve"},
+                  "at": "2026-06-11T00:00:00.000000Z"},
+        backend=coord_backend)
+    loop_ops.append_loop_response(
+        d["id"], {"by": "buggy:h:r",   # no outcome key at all
+                  "at": "2026-06-11T01:00:00.000000Z"},
+        backend=coord_backend)
+    folded = loop_ops.fold_loop(d, backend=coord_backend)
+    assert folded["outcome"] == {"verdict": "approve"}
+    assert not loops.is_open_loop(folded)
+
+
+def test_fold_with_only_outcomeless_responses_keeps_loop_open(coord_backend):
+    """2026-06-11 bug hunt S4 (second half): with NO outcome-carrying response
+    the loop must NOT advance to a terminal state — closure without a verdict
+    is exactly the out-of-band-verdict bug class the loop substrate exists to
+    kill. Outcome stays None and the loop stays open."""
+    d = _seed_review_loop(coord_backend)
+    loop_ops.append_loop_response(
+        d["id"], {"by": "buggy:h:r"}, backend=coord_backend)
+    folded = loop_ops.fold_loop(d, backend=coord_backend)
+    assert folded["outcome"] is None
+    assert loops.is_open_loop(folded)
+
+
 def test_outcome_fold_is_bus_only(coord_backend):
     # The fold derives outcome/closure ONLY from bus response events — there is
     # no other input. A loop with no response events folds to outcome None/open.
