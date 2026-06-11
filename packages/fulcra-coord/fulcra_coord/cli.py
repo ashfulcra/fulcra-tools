@@ -910,27 +910,45 @@ def _maybe_escalate_role_vacancy(
         if not remote.upload_json(marker, marker_path, backend=backend):
             return False   # uncertain claim: skip, never risk a double
         vacant_for = _age_str(status.get("vacant_since") or "")
-        directive = schema.make_directive(
-            directive_type="tell",
-            from_agent=identity.resolve_agent(),
-            audience=maintainer,
+        # 2026-06-11 bug hunt C3 (P1): this used to upload ONLY a first-class
+        # directives/<id>.json record — which NOTHING delivery-side reads for
+        # correctness yet (inbox / listener / SessionStart all fold over the
+        # legacy TASK set), so the maintainer was never actually told. Route
+        # through the legacy task path like every other directive creator
+        # (a proposed task assigned to the maintainer via the write pipeline)
+        # plus the standard Phase-3b dual-write mirror — the exact
+        # writepipe+dual_write combination request-review uses (lifecycle's
+        # cmd_tell can't be reused here without an args shim; the pipeline
+        # call IS its machinery).
+        me = identity.resolve_agent()
+        task = schema.make_task(
             title=f"Role '{name}' VACANT past SLA",
             workstream="coordination",
+            agent=me,
+            owner_agent=me,
+            assignee=maintainer,
+            priority="P1",
             summary=(f"Role '{name}' has been vacant for {vacant_for} "
                      f"(SLA {role.get('sla_hours')}h). "
                      f"{role.get('description') or ''}").strip(),
             next_action=(f"Restaff it: have an agent run "
                          f"`fulcra-coord roles claim {name}` (or connect "
                          f"--role {name}), or adjust the registry record."),
-            priority="P1",
         )
-        ok = bool(remote.upload_json(
-            directive, remote.directive_remote_path(directive["id"]),
-            backend=backend))
+        cache.write_cached_task(task)
+        try:
+            ok = _write_task_and_views(task, backend=backend, command="tell")
+        except (schema.ConflictError, schema.NeedsReconcile):
+            # The task BODY landed (these raise only after the body uploaded)
+            # — the escalation is delivered; views self-heal on reconcile.
+            ok = True
         if ok:
+            # Best-effort mirror into directives/<id>.json (never fails or
+            # alters the authoritative task write — see directives.dual_write).
+            _directives.dual_write(task, command="tell", backend=backend)
             _warn(f"  ⚠ role '{name}' vacant past SLA — escalation directive "
                   f"sent to {maintainer}")
-        return ok
+        return bool(ok)
     except Exception:
         return False   # best-effort: escalation must never break the sweep
 
