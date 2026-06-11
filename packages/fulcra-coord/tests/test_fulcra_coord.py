@@ -8800,6 +8800,29 @@ class TestWorkstreamCommand(_PresenceBackendCase):
             format="table"))
         self.assertEqual(self._record(me)["summary"], "new note")
 
+    def test_mutation_strips_baked_stale_version_suffix(self):
+        """2026-06-11 bug hunt S6: connect appends '(vX behind canonical Y)'
+        to the presence summary when the stale marker is set. workstream
+        set/add/clear preserved the WHOLE stored summary, so the baked-in
+        suffix was carried forever — even after the host updated — because
+        only connect re-derives it from the marker. Mutations must strip the
+        trailing suffix from the preserved summary; the rest survives."""
+        from fulcra_coord.cli import cmd_connect, cmd_workstream
+        me = "claude-code:h:r"
+        self._run(cmd_connect, self._ns(
+            agent=me, workstream="fulcra", summary="", format="table"))
+        # Bake the suffixed summary in, exactly as a stale-marked connect does.
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="set", workstreams="x",
+            summary="porting the digest (v0.15.2 behind canonical 0.16.0)",
+            format="table"))
+        # A later mutation that PRESERVES the summary (summary=None)…
+        self._run(cmd_workstream, self._ns(
+            agent=me, ws_action="add", workstreams="y", summary=None,
+            format="table"))
+        # …drops the suffix but keeps the operator's actual text.
+        self.assertEqual(self._record(me)["summary"], "porting the digest")
+
 
 class TestPresenceCommand(_PresenceBackendCase):
     def test_empty_roster_message(self):
