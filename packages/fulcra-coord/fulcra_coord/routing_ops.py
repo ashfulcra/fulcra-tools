@@ -571,7 +571,8 @@ def _classify_review(task, presence, now):
     return "reroute"
 
 
-def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None):
+def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None,
+                         presence=None):
     """Authoritative reconcile-time reroute sweep. Considers ONLY kind:review
     directives. For each: classify; reroute a never-acted below-floor past-
     threshold review (excluding already-tried agents, minting a new route_id),
@@ -590,20 +591,26 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None):
     deadline). ``deadline`` is reconcile's monotonic deadline; once the budget
     (minus a small headroom for retention) is spent we stop processing further
     directives. Best-effort: deferred directives drain on the next tick.
-    ``deadline=None`` keeps the old unbounded behavior for direct callers/tests."""
+    ``deadline=None`` keeps the old unbounded behavior for direct callers/tests.
+
+    ``presence`` (E4 snapshot sharing): cmd_reconcile passes the roster it just
+    rebuilt from the durable per-agent records — at least as fresh as anything
+    the guarded loader would return; ``None`` keeps the self-load for direct
+    callers."""
     import time
     from . import routing
     if now is None:
         now = datetime.now(timezone.utc)
     budget_floor = (deadline - _SWEEP_DEADLINE_HEADROOM_SECONDS
                     if deadline is not None else None)
-    try:
-        # Staleness-guarded (same rationale as cmd_request_review): the sweep's
-        # reroute/escalate verdicts hinge on last_seen, and a stale aggregate
-        # would escalate reviews a live reviewer should receive.
-        presence = _load_presence_agents(backend=backend)
-    except Exception:
-        presence = []
+    if presence is None:
+        try:
+            # Staleness-guarded (same rationale as cmd_request_review): the
+            # sweep's reroute/escalate verdicts hinge on last_seen, and a stale
+            # aggregate would escalate reviews a live reviewer should receive.
+            presence = _load_presence_agents(backend=backend)
+        except Exception:
+            presence = []
     deferred = 0
     for task in all_tasks:
         try:
