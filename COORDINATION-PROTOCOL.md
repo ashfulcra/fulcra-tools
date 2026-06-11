@@ -1,4 +1,4 @@
-# The Coordination Protocol
+# Agents + Humans - Coordination Protocol
 
 **A generalizable protocol for human–agent and agent–agent coordination.**
 
