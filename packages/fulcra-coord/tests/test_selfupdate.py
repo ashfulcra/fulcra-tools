@@ -233,17 +233,29 @@ class TestMaybeSelfUpdate(_CfgEnvBase):
     def test_behind_with_checkout_config_builds_argv_in_code(self):
         """The built-in default: update.json names the canonical checkout and
         the TWO argvs (git pull --ff-only, uv tool install) are built IN CODE
-        from that path — never from anything the bus said (the pointer rule)."""
+        from that path — never from anything the bus said (the pointer rule).
+
+        Updated for the 2026-06-11 bug hunt S1 branch guard: a rev-parse
+        branch probe now legitimately PRECEDES the pull (and must report the
+        configured branch for the update to proceed), so the spawn sequence
+        is probe -> pull -> install."""
         checkout = self.cfg_tmp  # any existing dir
         self._write_cfg("update.json", {"checkout": checkout})
         calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "rev-parse" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="main\n")
+            return types.SimpleNamespace(returncode=0)
+
         with self._behind(), \
-             patch("fulcra_coord.selfupdate._run_proc",
-                   side_effect=lambda argv, **kw: calls.append(argv) or
-                   types.SimpleNamespace(returncode=0)):
+             patch("fulcra_coord.selfupdate._run_proc", side_effect=run):
             self.assertEqual(selfupdate.maybe_self_update(), "updated")
-        self.assertEqual(calls[0], ["git", "-C", checkout, "pull", "--ff-only"])
-        self.assertEqual(calls[1],
+        self.assertEqual(calls[0], ["git", "-C", checkout, "rev-parse",
+                                    "--abbrev-ref", "HEAD"])
+        self.assertEqual(calls[1], ["git", "-C", checkout, "pull", "--ff-only"])
+        self.assertEqual(calls[2],
                          ["uv", "tool", "install", "--reinstall", "--force",
                           f"{checkout}/packages/fulcra-coord"])
 
@@ -325,6 +337,156 @@ class TestMaybeSelfUpdate(_CfgEnvBase):
             selfupdate.maybe_self_update(throttle=True)
             self.assertEqual(selfupdate.maybe_self_update(), "current")
             self.assertEqual(dl.call_count, 2)
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-11 bug hunt S1: branch guard + update lock + attempt throttle
+# ---------------------------------------------------------------------------
+
+class TestSelfUpdateGuards(_CfgEnvBase):
+    """S1 (P1): the updater used to (a) ff-pull whatever branch the checkout
+    happened to be on, (b) re-run the full git+uv reinstall on EVERY connect
+    while an update kept failing or not taking effect, and (c) let a
+    concurrent connect+tick double-run git/uv with no lock."""
+
+    def _behind(self, version="99.0.0"):
+        return patch("fulcra_coord.selfupdate._download_manifest",
+                     return_value=_manifest(version, "abc"))
+
+    # -- (a) branch guard ----------------------------------------------------
+
+    def test_checkout_on_wrong_branch_refuses_to_pull(self):
+        """A checkout parked on a feature branch must NOT be ff-pulled (that
+        either fails noisily forever or, worse, fast-forwards a feature
+        branch onto origin's state). Refuse: warn + stale marker, no spawn
+        of pull/install."""
+        checkout = self.cfg_tmp
+        self._write_cfg("update.json", {"checkout": checkout})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "rev-parse" in argv:
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="feature/wip\n")
+            return types.SimpleNamespace(returncode=0)
+
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc", side_effect=run):
+            self.assertEqual(selfupdate.maybe_self_update(), "wrong-branch")
+        # ONLY the branch probe ran — never the pull or the reinstall.
+        self.assertTrue(calls, "the branch probe must run")
+        self.assertTrue(all("rev-parse" in argv for argv in calls), calls)
+        # Degraded VISIBLY: the roster suffix shows the host is behind.
+        self.assertIn("behind canonical", selfupdate.stale_summary_suffix())
+
+    def test_checkout_branch_override_in_update_json(self):
+        """update.json may pin a non-main canonical branch; the guard then
+        accepts exactly that branch."""
+        checkout = self.cfg_tmp
+        self._write_cfg("update.json",
+                        {"checkout": checkout, "branch": "release"})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if "rev-parse" in argv:
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="release\n")
+            return types.SimpleNamespace(returncode=0)
+
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc", side_effect=run):
+            self.assertEqual(selfupdate.maybe_self_update(), "updated")
+        self.assertIn(["git", "-C", checkout, "pull", "--ff-only"], calls)
+
+    def test_undeterminable_branch_refuses(self):
+        """No git / not a repo / probe error -> the branch is unknowable, so
+        the pull would be a blind mutation of an unknown working tree.
+        Fail closed (refuse), degrade visibly."""
+        checkout = self.cfg_tmp
+        self._write_cfg("update.json", {"checkout": checkout})
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc",
+                   side_effect=OSError("git missing")):
+            self.assertEqual(selfupdate.maybe_self_update(), "wrong-branch")
+        self.assertIn("behind canonical", selfupdate.stale_summary_suffix())
+
+    # -- (b) the update lock ---------------------------------------------------
+
+    def test_lock_held_skips_concurrent_attempt(self):
+        """A FRESH lock file means another process (connect or tick) is
+        mid-update right now: the second attempt must skip, not double-run
+        git/uv over the same checkout."""
+        self._write_cfg("update-cmd.json", {"cmd": ["/usr/bin/true"]})
+        lock = selfupdate._update_lock_path()
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("12345")
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc") as run:
+            self.assertEqual(selfupdate.maybe_self_update(), "locked")
+        run.assert_not_called()
+        self.assertTrue(lock.exists())   # never steal a live holder's lock
+
+    def test_stale_lock_is_broken_and_update_proceeds(self):
+        """A lock older than UPDATE_TIMEOUT_S can only be a crashed holder
+        (every update step is bounded by that timeout) — break it."""
+        self._write_cfg("update-cmd.json", {"cmd": ["/usr/bin/true"]})
+        lock = selfupdate._update_lock_path()
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("dead")
+        old = time.time() - (selfupdate.UPDATE_TIMEOUT_S * 2 + 60)
+        os.utime(lock, (old, old))
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc",
+                   return_value=types.SimpleNamespace(returncode=0)):
+            self.assertEqual(selfupdate.maybe_self_update(), "updated")
+        self.assertFalse(lock.exists())   # released after the run
+
+    # -- (c) attempt throttle on the connect path ------------------------------
+
+    def test_ineffective_update_attempt_throttles_next_connect(self):
+        """An attempt that doesn't change __version__ (failed install, or a
+        'successful' one that didn't take) must not re-run the whole
+        git+uv pipeline on EVERY subsequent session start — arm the same
+        6h marker the tick uses and skip within it."""
+        self._write_cfg("update-cmd.json", {"cmd": ["/usr/bin/true"]})
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc",
+                   return_value=types.SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(selfupdate.maybe_self_update(), "updated")
+            self.assertEqual(run.call_count, 1)
+            # Next connect: still behind the SAME canonical -> no re-spawn.
+            self.assertEqual(selfupdate.maybe_self_update(),
+                             "attempt-throttled")
+            self.assertEqual(run.call_count, 1)
+        # Still degraded VISIBLY while throttled.
+        self.assertIn("behind canonical", selfupdate.stale_summary_suffix())
+
+    def test_failed_update_attempt_throttles_next_connect(self):
+        self._write_cfg("update-cmd.json", {"cmd": ["/usr/bin/false"]})
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc",
+                   return_value=types.SimpleNamespace(returncode=1)) as run:
+            self.assertEqual(selfupdate.maybe_self_update(), "update-failed")
+            self.assertEqual(selfupdate.maybe_self_update(),
+                             "attempt-throttled")
+            self.assertEqual(run.call_count, 1)
+
+    def test_new_canonical_release_resets_the_attempt_throttle(self):
+        """The throttle is per-canonical-version: a NEW release must get one
+        immediate attempt even inside the window (the operator just shipped
+        a fix — quite possibly for the broken updater)."""
+        self._write_cfg("update-cmd.json", {"cmd": ["/usr/bin/true"]})
+        with self._behind("99.0.0"), \
+             patch("fulcra_coord.selfupdate._run_proc",
+                   return_value=types.SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(selfupdate.maybe_self_update(), "updated")
+        with self._behind("99.1.0"), \
+             patch("fulcra_coord.selfupdate._run_proc",
+                   return_value=types.SimpleNamespace(returncode=0)) as run2:
+            self.assertEqual(selfupdate.maybe_self_update(), "updated")
+            self.assertEqual(run2.call_count, 1)
 
 
 # ---------------------------------------------------------------------------
