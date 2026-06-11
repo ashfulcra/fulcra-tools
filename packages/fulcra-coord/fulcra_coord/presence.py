@@ -361,9 +361,11 @@ def cmd_workstream(args: Any, backend: Optional[list[str]] = None) -> int:
         return 1
 
     new_summary = summary_arg if summary_arg is not None else cur_summary
-    record = schema.make_presence(me, workstreams=new_workstreams,
-                                  summary=new_summary,
-                                  session=(current or {}).get("session"))
+    record = schema.make_presence(
+        me, workstreams=new_workstreams, summary=new_summary,
+        session=(current or {}).get("session"),
+        capabilities=(current or {}).get("capabilities"),
+    )
     _write_presence(record, backend=backend)
 
     if out_format == "json":
