@@ -249,7 +249,7 @@ def awaiting_others(
     symmetric counterpart to the undelivered-directive check (#127): that
     catches sends that never arrived; this catches sends never ANSWERED.
 
-    ``evidence_ids`` (phase 2) is the set of loop ids whose evidence sub-log
+    ``evidence_ids`` is the set of loop ids whose evidence sub-log
     is nonempty — the CALLER does that I/O (this fold stays pure); each
     summary gains ``out_of_band``: True iff this open loop's id is in the set.
     The flag is the REQUESTER's signal ("an answer exists off the bus — close

@@ -1,12 +1,13 @@
-"""Pure task→directive mapping for the Phase 3b strangler-fig dual-write.
+"""Pure task→directive mapping for the directive dual-write.
 
-fulcra-coord historically models a directive ("agent A tells agent B to do X")
-as a LEGACY task-with-assignee: a ``proposed`` task whose ``assignee`` is the
-target agent and whose ``owner_agent`` is the issuer. Phase 3a added a
-first-class ``Directive`` record (``schema.make_directive``); Phase 3b makes the
-directive-creating commands ADDITIVELY mirror each such task into a
-``directives/<id>.json`` record, best-effort, with ZERO behaviour change — the
-legacy task stays authoritative and nothing READS directives for correctness yet.
+fulcra-coord models a directive ("agent A tells agent B to do X") as a task
+with an assignee: a ``proposed`` task whose ``assignee`` is the target agent
+and whose ``owner_agent`` is the issuer. Every directive-creating command
+ADDITIVELY mirrors that task into a first-class ``directives/<id>.json``
+loop record (``schema.make_directive``), best-effort. The TASK record stays
+authoritative for task state; the loop records are what coordination-state
+readers consume — ``board``, the digest, ``review-done``, and the reconcile
+health/parity passes.
 
 This module is the PURE mapping core, deliberately testable from plain task
 dicts with no I/O. LAYERING: it may import only DOWN/peer modules
@@ -44,7 +45,7 @@ from .timeutil import now_iso as _now_z
 # up-layer module (forbidden by the package fitness test), so we MUST NOT import
 # it — even just for ``views.BROADCAST``. ``routing.REVIEW_TAG`` is pure, but
 # ``routing`` imports ``views`` transitively, so we keep the dependency surface
-# minimal and re-declare the three constants here with a sync note. These are
+# minimal and re-declare the constants here with a sync note. These are
 # bare strings, not behaviour; the risk is drift, not coupling, so the keep-in-
 # sync comments below are the contract.
 #
@@ -205,7 +206,7 @@ def stable_directive_id(task_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Append-only SUB-LOG API (Phase 3b Task 2) — ack + routing persistence.
+# Append-only SUB-LOG API — ack + routing persistence.
 #
 # WHY a sub-log and not a field on the single directive record: see the long note
 # on remote.directive_acks_prefix. The bus has no compare-and-swap, so a
@@ -302,7 +303,7 @@ def read_directive_routing(
 def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
     """Build a first-class Directive record mirroring a legacy directive-task.
 
-    ADDITIVE / best-effort: this is the payload the Phase 3b dual-write uploads
+    ADDITIVE / best-effort: this is the payload the dual-write uploads
     alongside the authoritative task. It NEVER mutates ``task``.
 
     Field mapping:
@@ -423,13 +424,13 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
 def dual_write(
     task: dict[str, Any], *, command: str, backend: Optional[list[str]] = None
 ) -> None:
-    """Shared Phase 3b best-effort directive dual-write — the WRITE half.
+    """Shared best-effort directive dual-write — the WRITE half.
 
     ADDITIVELY mirror a directive-creating ``task`` into a first-class
     ``directives/<id>.json`` record. This is the single low-layer implementation
-    of the strangler-fig dual-write so EVERY directive-creating command (tell /
-    broadcast / assign / request-review / review-done) shares one writer rather
-    than each re-implementing the upload + ops-log-on-miss dance.
+    of the dual-write so EVERY directive-creating command (tell / broadcast /
+    assign / request-review / review-done) shares one writer rather than each
+    re-implementing the upload + ops-log-on-miss dance.
 
     WHY this lives in ``directives.py`` (the low layer) and NOT as a helper
     imported from ``lifecycle``: ``lifecycle`` already imports
@@ -499,9 +500,9 @@ def dual_write(
             except Exception:
                 pass
     except Exception as exc:
-        # Best-effort: the legacy task write already succeeded. Record the miss
-        # in the ops log (Phase 3b's job is to validate the dual-write), guarded
-        # so even the logging cannot break the authoritative write.
+        # Best-effort: the authoritative task write already succeeded. Record
+        # the miss in the ops log (the directive-parity pass audits dual-write
+        # misses), guarded so even the logging cannot break that write.
         try:
             ops_log.log_op(command, task.get("id"),
                            status="directive_write_failed", error=str(exc))

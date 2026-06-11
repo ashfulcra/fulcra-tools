@@ -333,9 +333,9 @@ def _write_task_and_views(
 
     _emit_lifecycle(command, task, lifecycle, backend=backend)
 
-    # Strangler-fig dual-write: also append an immutable event mirroring this
+    # Event dual-write: also append an immutable event mirroring this
     # mutation. BEST-EFFORT — never fail the task write on an event-log error
-    # (Phase 1: the mutable file is still authoritative). A later reconcile
+    # (the mutable file stays authoritative). The reconcile
     # parity pass surfaces any event-vs-file drift as health debt.
     #
     # Reaches here ONLY on the fully-clean normal-completion path: the
@@ -347,7 +347,7 @@ def _write_task_and_views(
         ev = _events.make_event(
             family="tasks", task_id=task["id"], kind=command,
             actor=task.get("owner_agent") or task.get("assignee") or "unknown",
-            # Phase 2a: the payload IS the full task snapshot — the entire task
+            # The payload IS the full task snapshot — the entire task
             # dict, not a field subset — so ``fold_task`` can reconstruct a
             # complete, schema-valid task from the latest snapshot (including the
             # nested ``source{}``/``claim{}``/``done{}`` and ``tags[]``). It is
@@ -366,7 +366,7 @@ def _write_task_and_views(
                 pass
     except Exception as exc:
         # Best-effort; the mutable write already succeeded. But DO record the
-        # failure in the ops log — Phase 1's whole job is to validate the
+        # failure in the ops log — the parity pass audits the
         # dual-write, so a silent miss is exactly what we must not have. The
         # logging is itself guarded so even it cannot break the task write.
         try:

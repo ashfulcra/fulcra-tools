@@ -50,7 +50,7 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
 
     The single funnel every task-BODY read passes through (both ``_load_task``
     and the bulk ``_load_all_tasks``). It resolves the body from one of two
-    sources, governed by the per-host ``read_source()`` knob (Phase-2b cutover):
+    sources, governed by the per-host ``read_source()`` knob (the events read cutover):
 
     * ``'file'`` (DEFAULT) — download the mutable ``tasks/<id>.json``. This is
       the pre-cutover behaviour, byte-identical and default-on so an operator
@@ -65,7 +65,7 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
     from the fold. The write path (``writepipe._write_task_and_views``) reads
     ``cache.read_meta`` on ``tasks/<id>.json`` for optimistic-concurrency; if
     events-mode skipped the file stat, the next write would lose its baseline.
-    Phase-2b changes READS only — the write-path concurrency stat stays
+    The cutover changes READS only — the write-path concurrency stat stays
     file-sourced.
 
     STAT-GATED FETCH (PERF, 2026-06-10 measured pass): the file source used to

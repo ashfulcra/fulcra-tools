@@ -57,7 +57,7 @@ def _load_task_from_summary(summary: dict[str, Any], *,
     task_file = summary.get("task_file")
     if not (task_id and task_file):
         return None
-    # Route the body read through the single funnel so it honors the Phase-2b
+    # Route the body read through the single funnel so it honors the per-host
     # read_source() knob (file vs event-fold) like every other read path. The
     # funnel derives the path from task_id itself, but we still require the
     # summary to NAME a durable file (the guard above) — that's what makes this
@@ -158,7 +158,7 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         if not ok:
             _warn(f"Ack cached locally but remote upload failed: {ack_id}.")
             return 1
-        # Phase 3b Task 2: ALSO record a DURABLE, clobber-safe per-agent directive
+        # ALSO record a DURABLE, clobber-safe per-agent directive
         # ack in the append-only sub-log. The task's inline ``inbox_ack`` event is
         # capped (the bounded event log can drop it) and a single-record update
         # would clobber concurrent acks of a broadcast; the per-agent ack file is

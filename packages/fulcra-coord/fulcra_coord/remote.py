@@ -240,7 +240,7 @@ def presence_prefix() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Directive path helpers (Phase 3a — additive, nothing writes here yet)
+# Directive path helpers (the directive dual-write's storage tree)
 # ---------------------------------------------------------------------------
 
 def directives_prefix() -> str:
@@ -261,7 +261,7 @@ def directive_remote_path(directive_id: str) -> str:
 
     Mirrors ``task_remote_path`` / ``presence_remote_path`` in structure:
     one file per record, keyed by id, under the directives prefix. Only the
-    issuing agent writes this file (Phase 3b dual-write), so there is no
+    issuing agent writes this file (the directive dual-write), so there is no
     cross-agent write contention — the same per-entity pattern used for
     presence and agent views.
     """
@@ -269,7 +269,7 @@ def directive_remote_path(directive_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Directive SUB-LOG path helpers (Phase 3b Task 2 — append-only ack + routing)
+# Directive SUB-LOG path helpers (append-only ack + routing)
 # ---------------------------------------------------------------------------
 #
 # THE CONCURRENCY CRUX: the bus is a brokerless object store with NO compare-and-
