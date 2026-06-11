@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import types
+from unittest import mock
 
 from fulcra_coord import cache, remote, schema
 
@@ -115,6 +116,35 @@ def test_replay_unsafe_merge_with_newer_cache_keeps_the_debt(coord_backend):
     assert rc == 1
     on_bus = remote.download_json(path, backend=coord_backend)
     assert on_bus["status"] == "waiting"   # B's body untouched either way
+    remaining = cache.list_op_markers()
+    assert any(m["op_id"] == "replay01" for m in remaining)
+
+
+def test_replay_does_not_blind_upload_when_remote_download_fails(coord_backend):
+    # A failed/unreadable download is NOT remote absence. If stat can still
+    # see the task body, blind replaying the stale cache would clobber the
+    # existing remote write. Keep the repair marker visible instead.
+    from fulcra_coord.cli import cmd_reconcile
+    old, newer = _old_and_newer_bodies()
+    cache.write_cached_task(old)
+    _seed_marker(old["id"])
+    path = remote.task_remote_path(old["id"])
+    assert remote.upload_json(newer, path, backend=coord_backend)
+
+    real_download = remote.download_json
+
+    def flaky_download(remote_path, *args, **kwargs):
+        if remote_path == path:
+            return None
+        return real_download(remote_path, *args, **kwargs)
+
+    with mock.patch("fulcra_coord.remote.download_json",
+                    side_effect=flaky_download):
+        rc = cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+
+    assert rc == 1
+    on_bus = remote.download_json(path, backend=coord_backend)
+    assert on_bus["current_summary"] == "newer summary from B"
     remaining = cache.list_op_markers()
     assert any(m["op_id"] == "replay01" for m in remaining)
 
