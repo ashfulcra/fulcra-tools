@@ -16,6 +16,7 @@ cleanly separated.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from typing import Any, Optional
 
@@ -73,20 +74,28 @@ def read_events(
     A caller that needs the shard paths should use ``remote.list_json`` directly.
 
     Missing prefix (no events written yet) or an unreachable store returns
-    ``[]`` — the best-effort contract inherited from
-    :func:`fulcra_coord.remote.list_json`.
+    ``[]`` — the best-effort contract callers (the parity check's "not yet
+    dual-written" skip, the read cutover's file fallback) rely on.
 
-    Drop detection (observability, non-invasive): ``remote.list_json``
-    *silently* filters out any shard whose JSON fails to parse to a dict. A
-    dropped **snapshot** shard is especially dangerous — the fold would
-    reconstruct STALE state from an older snapshot while ``fold_is_complete``
-    still returned True, a silent correctness hazard with zero signal. So after
-    reading, we cheaply compare the count of ``.json`` paths the store *lists*
-    against the count of records that actually *parsed*; if fewer parsed, we
-    emit a best-effort warning naming the task and the drop count. This NEVER
-    changes the return value (the good records are returned unchanged) and the
-    whole probe is wrapped in try/except so it can never break the read — it is
-    a signal only.
+    ONE LISTING serves both the read and the drop detection (PERF, 2026-06-10
+    measured pass): this used to call ``remote.list_json`` (which lists the
+    prefix internally) and then ``remote.list_files`` AGAIN for drop
+    detection — two list subprocesses (~1.3s each) per task per reconcile
+    tick, ~880 redundant spawns on a 440-task bus. The single ``list_files``
+    below feeds the parallel shard downloads AND the listed-vs-parsed
+    comparison.
+
+    Drop detection (observability, non-invasive): a shard whose JSON fails to
+    parse to a dict is silently dropped from the result. A dropped
+    **snapshot** shard is especially dangerous — the fold would reconstruct
+    STALE state from an older snapshot while ``fold_is_complete`` still
+    returned True, a silent correctness hazard with zero signal. So we compare
+    the count of ``.json`` paths the store *listed* against the count of
+    records that actually *parsed*; if fewer parsed, we emit a best-effort
+    warning naming the task and the drop count. This NEVER changes the return
+    value (the good records are returned unchanged) and the warn itself is
+    guarded so a logging failure can never break the read — it is a signal
+    only.
 
     Args:
         task_id: The task whose event shards to retrieve.
@@ -96,21 +105,46 @@ def read_events(
         List of event dicts, unordered.
     """
     prefix = remote.events_prefix(task_id)
-    records = [record for _path, record in remote.list_json(prefix, backend=backend)]
-
-    # Best-effort: surface silently-dropped shards. Guarded so an extra probe
-    # failure (or any list_files hiccup) can never turn a successful read into
-    # a failure — the records above are already in hand.
     try:
-        listed = sum(1 for p in remote.list_files(prefix, backend=backend) if p.endswith(".json"))
-        dropped = listed - len(records)
-        if dropped > 0:
+        paths = [p for p in remote.list_files(prefix, backend=backend)
+                 if p.endswith(".json")]
+    except Exception:
+        # Unreachable store / broken listing reads as "no events" — the
+        # best-effort contract above (mirrors the old list_json behaviour).
+        return []
+    if not paths:
+        return []
+
+    # Parallel shard downloads (the remote.list_json pool shape): each download
+    # is an independent subprocess writing no shared state, so a small pool
+    # collapses K serial round-trips into one batch's wall-time. Results keep
+    # the listing's path order so the return is deterministic for a given bus.
+    results: dict[str, dict[str, Any]] = {}
+    workers = min(8, max(2, len(paths)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(remote.download_json, p, backend=backend): p
+            for p in paths
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            path = futures[fut]
+            try:
+                rec = fut.result()
+            except Exception:
+                rec = None  # one failed shard must not break the read
+            if isinstance(rec, dict):
+                results[path] = rec
+    records = [results[p] for p in paths if p in results]
+
+    dropped = len(paths) - len(records)
+    if dropped > 0:
+        try:
             log.warning(
                 "read_events(%s): %d of %d event shard(s) failed to parse and "
                 "were dropped — fold may reconstruct stale/incomplete state.",
-                task_id, dropped, listed,
+                task_id, dropped, len(paths),
             )
-    except Exception:  # pragma: no cover — signal only, must not break the read
-        pass
+        except Exception:  # pragma: no cover — signal only, never breaks the read
+            pass
 
     return records
