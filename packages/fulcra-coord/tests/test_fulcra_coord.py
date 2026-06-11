@@ -6111,11 +6111,15 @@ class TestNotifyInbox(unittest.TestCase):
         notification as a " · N overdue" suffix (spec 2026-06-09 Task 7).
         Asserted at the delivered-message level (the suffix is composed in
         cmd_notify_inbox, formatted by listener.emit_notification). A sub-log
-        shard is seeded beside the record to pin the top-level-only filter."""
+        shard is seeded beside the record to pin the top-level-only filter —
+        which, post filter-before-download, must reject the shard by PATH (the
+        shard is never even downloaded)."""
         from fulcra_coord import remote
         from fulcra_coord.cli import cmd_notify_inbox
         cache.write_cached_task(_directive("codex:h:r"))  # makes notify fire
         prefix = remote.directives_prefix()
+        record_path = prefix + "DIR-OVERDUE-1.json"
+        shard_path = prefix + "DIR-OVERDUE-1/acks/codex-h-r.json"
         loop = {
             "id": "DIR-OVERDUE-1", "kind": "review", "state": "requested",
             "from": "codex:h:r", "audience": "other:h:r",
@@ -6123,14 +6127,21 @@ class TestNotifyInbox(unittest.TestCase):
             "created_at": "2026-01-01T00:00:00Z",  # far past the 24h review SLA
         }
 
-        def fake_list_json(p, *, backend=None, **kw):
+        def fake_list_files(p, *, backend=None, **kw):
             if p == prefix:
-                return [(prefix + "DIR-OVERDUE-1.json", loop),
-                        # ack shard: must be filtered out, never folded
-                        (prefix + "DIR-OVERDUE-1/acks/codex-h-r.json", {"agent": "x"})]
+                # ack shard beside the record: must be filtered out by path
+                return [record_path, shard_path]
             return []
 
-        with patch("fulcra_coord.remote.list_json", side_effect=fake_list_json), \
+        downloaded = []
+
+        def fake_download_json(p, *, backend=None, **kw):
+            downloaded.append(p)
+            return loop if p == record_path else None
+
+        with patch("fulcra_coord.remote.list_files", side_effect=fake_list_files), \
+             patch("fulcra_coord.remote.download_json",
+                   side_effect=fake_download_json), \
              patch("fulcra_coord.listener._deliver") as dl:
             rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
                                   backend=self.fake_backend)
@@ -6139,6 +6150,9 @@ class TestNotifyInbox(unittest.TestCase):
                       if "directive(s) waiting" in c[0][0]]
         self.assertEqual(len(inbox_msgs), 1)
         self.assertIn("1 overdue", inbox_msgs[0])
+        # Filter-before-download: the sub-log shard was rejected by PATH and
+        # never cost a download subprocess.
+        self.assertNotIn(shard_path, downloaded)
 
 
 class TestNotifyBlockedOnYou(unittest.TestCase):
