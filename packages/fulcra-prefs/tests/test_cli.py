@@ -174,6 +174,35 @@ def test_solve_from_files(env, tmp_path, capsys):
     assert out["ranked"][0]["id"] == "thai"
     assert out["trace"]
 
+def test_capture_batch_ingests_all_items(env, tmp_path, capsys):
+    """Feature 3 — auto-capture mechanism. An agent that noticed several
+    preferences in a session records them in ONE consented call. Per-item
+    confidence is honored (inferred items can be marked lower-confidence)."""
+    call, fake_api, store = env
+    batch = [
+        {"key": "dining.cuisine.thai", "value": True, "strength": 0.9, "confidence": 1.0},
+        {"key": "comms.tone.concise", "value": True, "strength": 0.7, "confidence": 0.5,
+         "kind": "preference"},
+    ]
+    f = tmp_path / "batch.json"
+    f.write_text(json.dumps(batch))
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 0
+    assert len(fake_api.ingested) == 2
+    assert call("compile") == 0
+    assert call("get") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"]
+    assert "comms.tone.concise" in out["keys"]
+
+
+def test_capture_batch_rejects_non_array(env, tmp_path, capsys):
+    call, fake_api, store = env
+    f = tmp_path / "bad.json"
+    f.write_text(json.dumps({"key": "x"}))      # object, not array
+    assert call("capture-batch", "--file", str(f), "--platform", "chatgpt") == 2
+    assert "array" in capsys.readouterr().err
+
+
 def test_missing_meta_gives_actionable_error(fake_api, tmp_path, capsys):
     rc = run(["capture", "--key", "k", "--value", "1", "--strength", "0.5",
               "--platform", "x"], api=fake_api, outbox_dir=tmp_path, now=NOW)

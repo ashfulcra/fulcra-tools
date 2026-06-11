@@ -41,8 +41,12 @@ that reduces all signals to "what's true now":
    half-life: a 0 would divide by zero in every later compile.)
 2. **Supersedes.** Corrections drop the replaced signal; chains are followed;
    cycles are silently dropped.
-3. **Conflicts.** Highest absolute decayed weight wins; ties break to the newer
-   signal (then signal id for full determinism).
+3. **Conflicts.** Highest `|decayed weight| × confidence` wins — so a confident
+   explicit preference beats a low-confidence *inferred* (auto-captured) one of
+   similar strength, and a guess never silently overrides something you stated.
+   Ties break to the newer signal (then signal id for full determinism). The
+   emitted weight is still the raw decayed weight; confidence only decides which
+   signal wins.
 4. **Scope overlay.** Platform-scoped signals beat global ones; one compiled doc
    per platform is written alongside the global doc.
 
@@ -96,6 +100,24 @@ pipe `fulcra-prefs get` or `fulcra-prefs inject` without filtering noise.
 
 ---
 
+## Auto-capture (batch)
+
+Agents shouldn't need an explicit "remember this" — they can passively notice
+preferences during a session and record them all at once at the end, with a
+single consented call:
+
+```bash
+fulcra-prefs capture-batch --file candidates.json --platform claude-code
+```
+
+where `candidates.json` is a JSON array of signal specs (`key`, `value`,
+`strength`, and optional `kind`/`scope`/`confidence`/`half_life_days`/
+`supersedes`). Mark inferred-but-unconfirmed signals with a lower `confidence`
+(0.4–0.6): because compile weights conflict resolution by confidence, a guess
+can't override something you explicitly stated — which is what makes passive
+capture safe. The when/what heuristics live in
+[`skill/references/fulcra-prefs-capture.md`](skill/references/fulcra-prefs-capture.md).
+
 ## Claude Code session hook
 
 Add to `~/.claude/settings.json`:
@@ -131,8 +153,9 @@ by capture identity. Once a shard's signal is confirmed in get-records the shard
 is pruned, so the cache stays bounded rather than growing forever. Compile itself
 is a pure function of `(signals, now)`: it folds signals by key using half-life
 decay to compute effective weights, resolves conflicts to the signal with the
-highest absolute effective weight (ties broken by `observed_at`, then signal id
-for full determinism), drops superseded signals including chains and cycles, and
+highest `|effective weight| × confidence` (so a low-confidence inferred signal
+never overrides a confident explicit one; ties broken by `observed_at`, then
+signal id for full determinism), drops superseded signals including chains and cycles, and
 writes canonical JSON to `prefs/compiled.json` and per-platform overlays under
 `prefs/platforms/`. The output is byte-identical for the same
 inputs regardless of input order — the determinism contract tested in

@@ -147,28 +147,68 @@ def cmd_onboard(args, api, now) -> int:
     return 0
 
 
+def _capture_one(store, outbox, meta, now, **kw) -> Signal:
+    """Capture a single signal (ingest + write-through shard). Shared by
+    `capture` and `capture-batch`. A cache-shard write failure never aborts a
+    successful capture — the record is spooled for a later flush/back-fill (the
+    signal is already posted or itself spooled by capture_signal)."""
+    sig = capture_signal(store, outbox, data_type=meta["data_type"], now=now, **kw)
+    try:
+        _append_signal_cache(store, sig)
+    except (OSError, ConnectionError, TimeoutError) as e:
+        outbox.spool(build_record(sig, meta["data_type"]))
+        print(f"fulcra-prefs: warning: could not write signal cache shard: {e}",
+              file=sys.stderr)
+    return sig
+
+
 def cmd_capture(args, api, outbox_dir, now) -> int:
     store = _store(api)
     meta = _require_meta(store)
     if not meta:
         return 2
-    outbox = Outbox(outbox_dir)
-    sig = capture_signal(
-        store, outbox, data_type=meta["data_type"], now=now,
+    sig = _capture_one(
+        store, Outbox(outbox_dir), meta, now,
         key=args.key, value=json.loads(args.value), strength=args.strength,
         kind=args.kind, scope=args.scope, confidence=args.confidence,
         half_life_days=args.half_life, platform=args.platform,
         agent=args.agent, session=args.session, supersedes=args.supersedes)
-    try:
-        _append_signal_cache(store, sig)
-    except (OSError, ConnectionError, TimeoutError) as e:
-        # Cache-write failure must never abort a successful capture. The signal
-        # is already posted (or spooled), but v1 compile reads cache shards, so
-        # also spool the record for a later flush/back-fill.
-        outbox.spool(build_record(sig, meta["data_type"]))
-        print(f"fulcra-prefs: warning: could not write signal cache shard: {e}",
-              file=sys.stderr)
     print(f"captured {sig.id}", file=sys.stderr)
+    return 0
+
+
+def cmd_capture_batch(args, api, outbox_dir, now) -> int:
+    """Auto-capture mechanism: record many signals an agent noticed in one
+    consented call. `--file` is a JSON array of specs (key, value, strength, and
+    optional kind/scope/confidence/half_life_days/agent/session/supersedes).
+    Lower-confidence INFERRED signals are safe — compile weights selection by
+    confidence so they won't override explicit ones."""
+    store = _store(api)
+    meta = _require_meta(store)
+    if not meta:
+        return 2
+    try:
+        specs = json.loads(Path(args.file).read_text())
+    except (OSError, ValueError) as e:
+        print(f"fulcra-prefs: could not read --file: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(specs, list):
+        print("fulcra-prefs: --file must contain a JSON array of signal specs",
+              file=sys.stderr)
+        return 2
+    outbox = Outbox(outbox_dir)
+    for spec in specs:
+        hl = spec.get("half_life_days", 90.0)
+        _capture_one(
+            store, outbox, meta, now,
+            key=spec["key"], value=spec["value"], strength=float(spec["strength"]),
+            kind=spec.get("kind", "preference"), scope=spec.get("scope", "global"),
+            confidence=float(spec.get("confidence", 1.0)),
+            half_life_days=(None if hl is None else float(hl)),
+            platform=args.platform, agent=spec.get("agent", args.agent),
+            session=spec.get("session", args.session),
+            supersedes=spec.get("supersedes"))
+    print(f"captured {len(specs)} signal(s)", file=sys.stderr)
     return 0
 
 
@@ -300,6 +340,13 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("--session")
     c.add_argument("--supersedes")
 
+    cb = sub.add_parser("capture-batch",
+                        help="capture many signals from a JSON array file")
+    cb.add_argument("--file", required=True, help="path to a JSON array of signal specs")
+    cb.add_argument("--platform", required=True)
+    cb.add_argument("--agent")
+    cb.add_argument("--session")
+
     sub.add_parser("compile")
 
     g = sub.add_parser("get")
@@ -336,6 +383,7 @@ def run(argv, api, outbox_dir, now) -> int:
     args = _parser().parse_args(argv)
     handlers = {"onboard": lambda: cmd_onboard(args, api, now),
                 "capture": lambda: cmd_capture(args, api, outbox_dir, now),
+                "capture-batch": lambda: cmd_capture_batch(args, api, outbox_dir, now),
                 "compile": lambda: cmd_compile(args, api, outbox_dir, now),
                 "get": lambda: cmd_get(args, api, outbox_dir, now),
                 "consent": lambda: cmd_consent(args, api, outbox_dir, now),

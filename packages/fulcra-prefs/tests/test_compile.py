@@ -58,6 +58,22 @@ def test_supersedes_cycle_drops_all_cycle_members():
     b = make_signal(id="rec-b", value={"gen": 2}, supersedes="rec-a")
     assert compile_signals([a, b], NOW)["global"]["keys"] == {}
 
+def test_confidence_weights_selection_so_inferred_does_not_override_explicit():
+    """Feature 3 — auto-capture safety. confidence was stored but UNUSED in
+    conflict resolution, so a low-confidence INFERRED signal could override a
+    high-confidence EXPLICIT one of similar weight. Selection is now weighted by
+    confidence: |0.6|*1.0 = 0.60 beats |0.8|*0.5 = 0.40 → the explicit pref wins,
+    even though the inferred one has the larger raw strength."""
+    explicit = make_signal(id="rec-explicit", strength=0.6, confidence=1.0,
+                           value={"liked": True}, half_life_days=None,
+                           observed_at="2026-06-09T12:00:00+00:00")
+    inferred = make_signal(id="rec-inferred", strength=0.8, confidence=0.5,
+                           value={"liked": False}, half_life_days=None,
+                           observed_at="2026-06-09T12:00:00+00:00")
+    docs = compile_signals([explicit, inferred], NOW)
+    assert docs["global"]["keys"]["dining.cuisine.thai"]["value"] == {"liked": True}
+
+
 def test_platform_scope_overlays_global():
     g = make_signal(id="rec-g", value={"v": "global"})
     p = make_signal(id="rec-p", scope="platform:claude-code", value={"v": "cc"})
