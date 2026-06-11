@@ -52,6 +52,24 @@ def test_get_for_audience_filters_and_logs_disclosure(env, capsys):
     disclosure = json.loads(fake_api.ingested[-1]["data"])
     assert disclosure["kind"] == "consent"
 
+def test_get_platform_falls_back_to_global_when_no_overlay(env, capsys):
+    """BUG A: `get --platform X` for a platform with NO platform-scoped
+    overrides must return the global compiled doc, not an empty doc. Compile
+    only writes platforms/X.json when X has a platform:-scoped signal; for any
+    other platform the view IS global. cmd_inject already falls back to global;
+    cmd_get must match (and it's the consent-gated export path, so silently
+    returning {} is worse than wrong)."""
+    call, fake_api, store = env
+    # A purely GLOBAL preference (no platform overlay anywhere).
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")  # platform = source, scope stays global
+    call("compile")
+    assert call("get", "--platform", "codex") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "dining.cuisine.thai" in out["keys"], \
+        "get --platform with no overlay should fall back to global prefs"
+
+
 def test_inject_prints_block_or_nothing(env, capsys):
     call, *_ = env
     assert call("inject", "--platform", "claude-code") == 0

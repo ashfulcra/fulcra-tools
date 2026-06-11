@@ -63,6 +63,12 @@ class Signal:
             raise ValueError(f"scope must be 'global' or 'platform:<p>', got {self.scope!r}")
         if not self.key:
             raise ValueError("key is required")
+        if self.half_life_days is not None and self.half_life_days <= 0:
+            # 0 → divide-by-zero in effective_weight; <0 → decay that grows.
+            # Reject at construction so a poisoned signal never reaches the
+            # cache and breaks every later compile. None = no decay (valid).
+            raise ValueError(
+                f"half_life_days must be > 0 or None, got {self.half_life_days!r}")
 
     def to_payload(self) -> dict:
         return {

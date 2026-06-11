@@ -149,9 +149,16 @@ def cmd_compile(args, api, outbox_dir, now) -> int:
 
 def cmd_get(args, api, outbox_dir, now) -> int:
     store = _store(api)
-    path = platform_path(args.platform) if args.platform else COMPILED_PATH
-    doc = store.read_json(path) or {"v": 1, "compiled_at": now.isoformat(),
-                                    "keys": {}}
+    # A platform view is global + overlay. Compile only writes platforms/<p>.json
+    # when <p> has a platform:-scoped signal, so for an override-less platform we
+    # must fall back to the global doc (mirrors cmd_inject) — returning an empty
+    # doc here would silently withhold the user's global prefs on the export path.
+    doc = None
+    if args.platform:
+        doc = store.read_json(platform_path(args.platform))
+    if doc is None:
+        doc = store.read_json(COMPILED_PATH)
+    doc = doc or {"v": 1, "compiled_at": now.isoformat(), "keys": {}}
     if args.audience:
         grants = (store.read_json(CONSENT_PATH) or {"grants": []})["grants"]
         doc = filter_for_audience(doc, grants, args.audience, now)
