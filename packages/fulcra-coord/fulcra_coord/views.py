@@ -6,8 +6,13 @@ Generates materialized JSON views from a list of task dicts:
   - views/next.json          — proposed + waiting (candidates for starting)
   - views/recently-done.json — done/abandoned within retention window
   - views/search-index.json  — tag/title/summary records for search
+  - views/needs-attention.json — active tasks gone stale
+  - views/summaries.json     — the compact read-side aggregate (fast path)
   - workstreams/{ws}.json    — per-workstream active view
-  - agents/{agent}.json      — per-agent active view
+
+(The per-agent ``agents/{agent}.json`` and per-assignee
+``views/inbox/{slug}.json`` views were retired 2026-06-11 — rebuilt and
+uploaded on every write with zero readers; see build_all_views.)
 """
 
 from __future__ import annotations
@@ -876,18 +881,19 @@ def build_needs_attention(tasks: list[dict[str, Any]], updated_at: Optional[str]
 
 
 def agent_slug(agent: str) -> str:
-    """Filesystem-safe slug for an agent id, used as the inbox view basename and
-    the surface-file suffix. Agent ids look like ``claude-code:host:repo`` — the
-    colons are not portable in filenames, so collapse every non-[a-z0-9-_.] run
-    to a single ``-`` (mirrors cache._root_slug's approach). Lowercased so two
-    ids differing only in case can't fork into two views.
+    """Filesystem-safe slug for an agent id, used as the ``index.counts.inbox``
+    key, the presence record basename, and the local surface-file suffix. Agent
+    ids look like ``claude-code:host:repo`` — the colons are not portable in
+    filenames, so collapse every non-[a-z0-9-_.] run to a single ``-`` (mirrors
+    cache._root_slug's approach). Lowercased so two ids differing only in case
+    can't fork into two keys.
 
     The broadcast sentinel ``*`` is special-cased to ``broadcast`` (M3): every
     char of ``*`` is non-portable, so the generic path would strip to empty and
-    fall back to the opaque ``agent``. ``broadcast`` makes the materialized
-    ``views/inbox/broadcast.json`` file and the ``index.counts.inbox`` bucket
-    human-legible. The literal ``*`` never reaches a filesystem path — this slug
-    is the only place a broadcast assignee is turned into a path segment."""
+    fall back to the opaque ``agent``. ``broadcast`` makes the
+    ``index.counts.inbox`` bucket human-legible. The literal ``*`` never
+    reaches a filesystem path — this slug is the only place a broadcast
+    assignee is turned into a path segment."""
     if agent == BROADCAST:
         return "broadcast"
     s = "".join(c if (c.isalnum() or c in "-_.") else "-" for c in agent.lower())
@@ -974,12 +980,12 @@ def is_open_directive(task: dict[str, Any], assignee: str,
     both the status and owner checks.
 
     AGE-OUT: a stale informational broadcast (is_aged_out_broadcast) is treated
-    as no longer open by default, so the materialized inbox view and the
-    index.counts.inbox fold don't keep counting fan-out that the live `inbox`
-    read filter (inbox_for) already hides — the SessionStart banner count and the
-    materialized buckets must agree with the read path. `include_aged=True`
-    keeps the legacy "everything open" semantics. Concrete-assignee directives
-    are never aged out (is_aged_out_broadcast guards on assignee == BROADCAST).
+    as no longer open by default, so the index.counts.inbox fold doesn't keep
+    counting fan-out that the live `inbox` read filter (inbox_for) already
+    hides — the SessionStart banner count and the index buckets must agree with
+    the read path. `include_aged=True` keeps the legacy "everything open"
+    semantics. Concrete-assignee directives are never aged out
+    (is_aged_out_broadcast guards on assignee == BROADCAST).
     """
     if task.get("assignee") != assignee:
         return False
@@ -997,19 +1003,20 @@ def is_open_directive(task: dict[str, Any], assignee: str,
 def build_inbox(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Group open directives by assignee slug -> list of compact summaries.
 
-    The read surface for `fulcra-coord inbox`: one bucket per assignee that has
-    at least one open directive. Assignees with no open directives are omitted
-    (an empty inbox needs no view). Keyed by agent_slug so the per-assignee view
-    files (`views/inbox/<slug>.json`) and the index counts agree on the key.
+    Feeds the ``index.counts.inbox`` fold (build_index): one bucket per
+    assignee that has at least one open directive; assignees with no open
+    directives are omitted. (The per-assignee ``views/inbox/<slug>.json``
+    files this also used to materialize were retired 2026-06-11 — zero
+    readers; the live `inbox` read path recomputes via inbox_for. See
+    build_all_views' RETIRED VIEWS note.)
 
     ROLE audiences (@<role>) are EXCLUDED: they are resolved at delivery time
     against each agent's declared roles (inbox_for + _my_roles), never by a
-    per-slug view file. Materializing one here would create a phantom
-    ``views/inbox/<role-slug>.json`` bucket and an index.counts.inbox entry that
-    no agent ever reads as "their" inbox (no concrete agent's slug equals a role
-    name) — a misleading operator-surface artifact. Skipping them keeps the
-    materialized view tree and counts describing only concrete/broadcast
-    recipients, exactly mirroring what the slug-keyed read path can deliver.
+    per-slug bucket. Counting one here would create an index.counts.inbox
+    entry that no agent ever reads as "their" inbox (no concrete agent's slug
+    equals a role name) — a misleading operator-surface artifact. Skipping
+    them keeps the counts describing only concrete/broadcast recipients,
+    exactly mirroring what the slug-keyed read path can deliver.
     """
     inbox: dict[str, list[dict[str, Any]]] = {}
     for t in tasks:
@@ -1403,41 +1410,9 @@ def build_workstream_view(
     }
 
 
-def build_agent_view(
-    agent: str,
-    tasks: list[dict[str, Any]],
-    updated_at: Optional[str] = None,
-    done_days: int = RECENTLY_DONE_DAYS,
-) -> dict[str, Any]:
-    """Per-agent view: tasks owned or recently touched by agent."""
-    if updated_at is None:
-        updated_at = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
-    cutoff = _now() - timedelta(days=done_days)
-    agent_tasks = [
-        t for t in tasks
-        if t.get("owner_agent") == agent or t.get("last_touched_by") == agent
-    ]
-    active = [
-        task_summary(t) for t in agent_tasks
-        if t.get("status") in ("active", "waiting", "blocked", "proposed")
-    ]
-    recent_done = []
-    for t in agent_tasks:
-        if t.get("status") not in ("done", "abandoned"):
-            continue
-        done_at = _done_at(t)
-        if done_at:
-            dt = _parse_dt(done_at)
-            if dt and dt >= cutoff:
-                recent_done.append(task_summary(t))
-
-    return {
-        "schema": "fulcra.coordination.agent_view.v1",
-        "agent": agent,
-        "updated_at": updated_at,
-        "active": sorted(active, key=lambda x: (x.get("priority", "P9"), x.get("updated_at", ""))),
-        "recent_done": sorted(recent_done, key=lambda x: x.get("updated_at", ""), reverse=True),
-    }
+# (build_agent_view lived here until the 2026-06-11 perf wave: the
+# agents/<id>.json views it fed were uploaded on every write/reconcile and
+# read by nothing — see build_all_views' RETIRED VIEWS note.)
 
 
 # ---------------------------------------------------------------------------
@@ -1652,7 +1627,28 @@ def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     Every builder reads only fields task_summary emits (done_at and last_touched_by
     were added there for exactly this reason), so the write path can rebuild views
     from the summaries aggregate instead of re-fetching task bodies. The
-    equivalence test (TestBuildAllViewsEquivalence) guards this property."""
+    equivalence test (TestBuildAllViewsEquivalence) guards this property.
+
+    RETIRED VIEWS (2026-06-11 perf wave item 3 — zero readers, real upload cost):
+
+      * ``agents/<id>.json`` (build_agent_view) — one file per owner/toucher
+        identity, rebuilt + uploaded on every write/reconcile, downloaded by
+        NOTHING (cmd_agents/resume fold the summaries aggregate client-side;
+        verified by audit + grep before cutting).
+      * ``views/inbox/<slug>.json`` — one file per open-directive assignee,
+        likewise read by nothing: cmd_inbox deliberately recomputes from the
+        task set because this view goes stale once an inbox empties (the C1
+        phantom-directive bug) — it was retained only as a materialized
+        artifact. The ``index.counts.inbox`` fold (build_inbox, below via
+        build_index) is the surviving read surface and is unchanged.
+
+      Together they were ~A agents + I inboxes ≈ 35+ uploads per write/
+      reconcile pass at current fleet size, scaling with fleet growth. The
+      EXISTING remote files are deliberately NOT deleted here: bus-state
+      cleanup is deferred pending a Fulcra service review — they are simply
+      never rewritten again (inert) and age out later. The stale-view guard /
+      summaries freshness beacon are untouched: they key off ``generated_at``,
+      which neither retired view ever carried."""
     now = _now().isoformat(timespec="microseconds").replace("+00:00", "Z")
     result: dict[str, dict[str, Any]] = {
         "index": build_index(tasks, now),
@@ -1669,30 +1665,6 @@ def build_all_views(tasks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     workstreams = sorted(set(t.get("workstream", "") for t in tasks) - {""})
     for ws in workstreams:
         result[f"workstreams/{ws}"] = build_workstream_view(ws, tasks, now)
-
-    agents = sorted({
-        agent
-        for t in tasks
-        for agent in (t.get("owner_agent", ""), t.get("last_touched_by", ""))
-        if agent
-    })
-    for agent in agents:
-        result[f"agents/{agent}"] = build_agent_view(agent, tasks, now)
-
-    # One inbox view per assignee with open directives, keyed by agent_slug.
-    # NOTE: cmd_inbox no longer reads this view — it recomputes from the task set
-    # (see cli._load_inbox), because this view is only emitted for assignees who
-    # *still* have open directives, so it goes stale (never overwritten) once an
-    # inbox empties. The view file is retained as a materialized artifact (index
-    # inbox counts come from build_inbox directly), but is no longer the read path.
-    for slug, items in build_inbox(tasks).items():
-        result[f"inbox/{slug}"] = {
-            "schema": "fulcra.coordination.inbox_view.v1",
-            "view": "inbox",
-            "assignee_slug": slug,
-            "updated_at": now,
-            "inbox": items,
-        }
 
     return result
 

@@ -41,7 +41,6 @@ from fulcra_coord.views import (
     build_recently_done,
     build_search_index,
     build_workstream_view,
-    build_agent_view,
     search_tasks,
     build_all_views,
 )
@@ -456,18 +455,6 @@ class TestBuildWorkstreamView(unittest.TestCase):
         self.assertEqual(view["workstream"], "devops")
 
 
-class TestBuildAgentView(unittest.TestCase):
-    def test_no_error(self):
-        tasks = _make_tasks_set()
-        view = build_agent_view("agent-b", tasks)
-        self.assertIn("active", view)
-
-    def test_schema(self):
-        tasks = _make_tasks_set()
-        view = build_agent_view("claude-code", tasks)
-        self.assertEqual(view["schema"], "fulcra.coordination.agent_view.v1")
-
-
 class TestSearchTasks(unittest.TestCase):
     def test_finds_by_title(self):
         tasks = _make_tasks_set()
@@ -502,39 +489,17 @@ class TestBuildAllViews(unittest.TestCase):
         all_v = build_all_views(tasks)
         self.assertIn("workstreams/devops", all_v)
 
-    def test_agent_views_generated(self):
+    def test_agent_views_not_materialized(self):
+        # 2026-06-11 perf wave item 3: per-agent agents/<id>.json views were
+        # rebuilt + uploaded on every write/reconcile and read by NOTHING (no
+        # surface downloads agent_remote_path — verified by audit + grep).
+        # They are no longer materialized; per-agent reads ride the summaries
+        # aggregate (cmd_agents/resume fold it client-side).
         tasks = _make_tasks_set()
         all_v = build_all_views(tasks)
-        self.assertIn("agents/claude-code", all_v)
-
-    def test_agent_views_generated_for_recent_touchers(self):
-        tasks = _make_tasks_set()
-        handed_off = _with_status(_sample_task(), "done")
-        handed_off["owner_agent"] = "agent-a"
-        handed_off["last_touched_by"] = "agent-b"
-        # RELATIVE to now (not a hardcoded date): build_agent_view's recent_done
-        # uses cutoff = _now() - RECENTLY_DONE_DAYS (7d). A fixed absolute date is a
-        # time-bomb — it silently crossed the window as wall-clock advanced and this
-        # assertion began failing. One day old keeps the task comfortably inside the
-        # window forever, so the test exercises the recent-toucher path, not the calendar.
-        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        handed_off["done"] = {
-            "done_at": recent,
-            "done_by": "agent-b",
-            "evidence": "Smoke test passed",
-            "verification_level": "agent-verified",
-            "confidence": None,
-        }
-        handed_off["updated_at"] = recent
-
-        all_v = build_all_views([*tasks, handed_off])
-
-        self.assertIn("agents/agent-b", all_v)
-        self.assertTrue(
-            any(t["id"] == handed_off["id"] for t in all_v["agents/agent-b"]["recent_done"])
-        )
+        agent_views = [n for n in all_v if n.startswith("agents/")]
+        self.assertEqual(agent_views, [],
+                         f"zero-reader per-agent views re-materialized: {agent_views}")
 
 
 # ---------------------------------------------------------------------------
@@ -5272,10 +5237,17 @@ class TestBuildInbox(unittest.TestCase):
 
 
 class TestBuildAllViewsInbox(unittest.TestCase):
-    def test_inbox_views_emitted_per_assignee(self):
+    def test_inbox_views_not_materialized(self):
+        # 2026-06-11 perf wave item 3: views/inbox/<slug>.json was emitted per
+        # open-directive assignee on every write/reconcile and read by NOTHING
+        # — cmd_inbox recomputes from the task set precisely because this view
+        # goes stale once an inbox empties (the C1 phantom-directive bug). The
+        # index's counts.inbox fold (below) is the surviving read surface.
         d = _directive("codex:h:r")
         views_out = build_all_views([d])
-        self.assertIn("inbox/codex-h-r", views_out)
+        inbox_views = [n for n in views_out if n.startswith("inbox/")]
+        self.assertEqual(inbox_views, [],
+                         f"zero-reader inbox views re-materialized: {inbox_views}")
 
     def test_index_folds_inbox_count(self):
         d = _directive("codex:h:r")
@@ -8229,7 +8201,8 @@ def _make_representative_tasks() -> list[dict]:
     recent_iso = (now - timedelta(days=2)).isoformat().replace("+00:00", "Z")
     old_iso = (now - timedelta(days=40)).isoformat().replace("+00:00", "Z")
 
-    # active, touched by a different agent than the owner (exercises build_agent_view)
+    # active, touched by a different agent than the owner (exercises the
+    # last_touched_by summary field the digest's hand-off grouping reads)
     active = apply_transition(_sample_task(), "active", by="agent-x")
     active["owner_agent"] = "agent-a"
     active["last_touched_by"] = "agent-x"

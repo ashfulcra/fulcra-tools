@@ -26,17 +26,17 @@ Topology used throughout (small + exact, so the pins are exact counts):
   T1: workstream "alpha", agent "agent-a"   (status proposed)
   T2: workstream "beta",  agent "agent-b"   (status proposed)
 
-build_all_views for both tasks yields exactly 11 views:
+build_all_views for both tasks yields exactly 9 views:
   index, active, next, recently-done, search-index, needs-attention,
-  summaries, workstreams/alpha, workstreams/beta, agents/agent-a,
-  agents/agent-b
-(no inbox views: no assignees). With both tasks proposed, ``active``,
-``recently-done``, ``needs-attention`` AND the workstream views are empty of
-summaries (build_workstream_view lists only active/waiting/blocked +
-recent-done) and ``index`` carries only counts — so a T1-only field update
-changes exactly 4 views: next, search-index, summaries, agents/agent-a
-(the agent view does include proposed tasks). The live-incident shape
-(~5 changed of ~55) at test scale: 4 changed of 11.
+  summaries, workstreams/alpha, workstreams/beta
+(the per-agent ``agents/<id>`` and per-assignee ``views/inbox/<slug>`` views
+are no longer materialized — zero readers; see the 2026-06-11 perf wave item 3
+pin below). With both tasks proposed, ``active``, ``recently-done``,
+``needs-attention`` AND the workstream views are empty of summaries
+(build_workstream_view lists only active/waiting/blocked + recent-done) and
+``index`` carries only counts — so a T1-only field update changes exactly 3
+views: next, search-index, summaries. The live-incident shape (~5 changed of
+~55) at test scale: 3 changed of 9.
 """
 
 from __future__ import annotations
@@ -127,13 +127,14 @@ def _touch(task) -> dict:
 
 # The exact view set a single-task change touches in this topology (summaries
 # is also the always-upload freshness beacon, see test below). The workstream
-# views do NOT change: proposed tasks never appear in them.
-T1_CHANGED_VIEWS = {"next", "search-index", "summaries", "agents/agent-a"}
-T2_CHANGED_VIEWS = {"next", "search-index", "summaries", "agents/agent-b"}
+# views do NOT change: proposed tasks never appear in them. (Per-agent views
+# are gone — perf wave item 3 — so T1's and T2's changed sets are now equal;
+# both names are kept for the per-task reading of each pin.)
+T1_CHANGED_VIEWS = {"next", "search-index", "summaries"}
+T2_CHANGED_VIEWS = {"next", "search-index", "summaries"}
 ALL_VIEWS_BOTH_TASKS = {
     "index", "active", "next", "recently-done", "search-index",
     "needs-attention", "summaries", "workstreams/alpha", "workstreams/beta",
-    "agents/agent-a", "agents/agent-b",
 }
 
 
@@ -145,13 +146,14 @@ def test_first_write_uploads_all_views_and_records_fingerprints(coord_backend):
     t1 = _make_t1()
     rec = _write(t1, coord_backend)
     # First write: no fingerprints exist, so every built view uploads.
-    # T1-only topology: the 11-view set minus T2's workstream/agent views.
+    # T1-only topology: the 9-view set minus T2's workstream view (8). Was 9
+    # of 11 before the zero-reader agents/<id> views were retired (item 3).
     expected = {_view_path(n) for n in ALL_VIEWS_BOTH_TASKS
-                - {"workstreams/beta", "agents/agent-b"}}
+                - {"workstreams/beta"}}
     assert set(rec.view_uploads()) == expected
-    assert len(rec.view_uploads()) == 9
+    assert len(rec.view_uploads()) == 8
     # Every successful upload recorded a fingerprint.
-    for name in ALL_VIEWS_BOTH_TASKS - {"workstreams/beta", "agents/agent-b"}:
+    for name in ALL_VIEWS_BOTH_TASKS - {"workstreams/beta"}:
         assert cache.read_view_fingerprint(name), f"no fingerprint for {name}"
 
 
@@ -159,11 +161,13 @@ def test_second_write_uploads_only_changed_views(coord_backend):
     t1, t2 = _make_t1(), _make_t2()
     _write(t1, coord_backend)
     _write(t2, coord_backend)
-    # THE PIN: a T1-only update uploads exactly the 4 views whose content
-    # changed — not the full 11-view fan-out (live bus: ~5 instead of ~55).
+    # THE PIN: a T1-only update uploads exactly the 3 views whose content
+    # changed — not the full 9-view fan-out (live bus: ~4 instead of ~35+).
+    # Was 4 of 11 before item 3 retired the per-agent view (agents/agent-a no
+    # longer exists to change).
     rec = _write(_touch(t1), coord_backend)
     assert set(rec.view_uploads()) == {_view_path(n) for n in T1_CHANGED_VIEWS}
-    assert len(rec.view_uploads()) == 4
+    assert len(rec.view_uploads()) == 3
 
 
 def test_skipped_views_are_still_cached_locally(coord_backend):
@@ -272,10 +276,11 @@ def test_reconcile_always_uploads_all_views(coord_backend):
     assert rc == 0
     task_views = {p for p in rec.view_uploads()
                   if p != remote.presence_view_path()}
-    # T1-only topology: all 9 views upload (the 11-view set minus T2's
-    # workstream/agent views), unchanged or not.
+    # T1-only topology: all 8 views upload (the 9-view set minus T2's
+    # workstream view), unchanged or not. Was 9 of 11 before item 3 retired
+    # the per-agent views.
     assert task_views == {_view_path(n) for n in ALL_VIEWS_BOTH_TASKS
-                          - {"workstreams/beta", "agents/agent-b"}}
+                          - {"workstreams/beta"}}
 
 
 def test_reconcile_repairs_view_clobbered_by_another_host(coord_backend):
@@ -288,18 +293,20 @@ def test_reconcile_repairs_view_clobbered_by_another_host(coord_backend):
     upload despite the matching fingerprint and restore the rebuilt content."""
     t1, t2 = _make_t1(), _make_t2()
     _write(t1, coord_backend)
-    _write(t2, coord_backend)  # all 11 views remote + fingerprinted (host A)
+    _write(t2, coord_backend)  # all 9 views remote + fingerprinted (host A)
 
-    # Host B clobbers agents/agent-b on the shared remote. The fake backend
+    # Host B clobbers workstreams/beta on the shared remote. The fake backend
     # stores uploads as files under FULCRA_FAKE_ROOT, so a direct file write
-    # IS another writer mutating the shared path behind A's back.
-    victim = "agents/agent-b"
+    # IS another writer mutating the shared path behind A's back. (The victim
+    # used to be agents/agent-b; item 3 retired the per-agent views, and the
+    # workstream view exercises the identical skip/repair mechanics.)
+    victim = "workstreams/beta"
     victim_file = (Path(os.environ["FULCRA_FAKE_ROOT"]) /
                    _view_path(victim).lstrip("/"))
     clobber = json.dumps({"clobbered_by": "host-b", "summaries": []})
     victim_file.write_text(clobber)
 
-    # A's next write: a T1-only touch leaves agents/agent-b content-identical
+    # A's next write: a T1-only touch leaves workstreams/beta content-identical
     # to A's fingerprint, so the write path SKIPS it — and the clobber
     # survives. This assertion documents the accepted bounded staleness, not
     # a bug: the write path cannot see remote drift without a per-view stat.
@@ -313,7 +320,7 @@ def test_reconcile_repairs_view_clobbered_by_another_host(coord_backend):
     assert rc == 0
     repaired = json.loads(victim_file.read_text())
     assert "clobbered_by" not in repaired
-    assert repaired.get("agent") == "agent-b"
+    assert repaired.get("workstream") == "beta"
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +333,43 @@ def test_skip_disabled_env_restores_upload_everything(coord_backend):
     _write(t2, coord_backend)
     with mock.patch.dict(os.environ, {"FULCRA_COORD_VIEW_SKIP_UNCHANGED": "0"}):
         rec = _write(_touch(t1), coord_backend)
-    # Today's behavior: every one of the 11 views uploads, changed or not.
+    # Escape-hatch behavior: every one of the 9 views uploads, changed or not.
     assert set(rec.view_uploads()) == {_view_path(n) for n in ALL_VIEWS_BOTH_TASKS}
-    assert len(rec.view_uploads()) == 11
+    assert len(rec.view_uploads()) == 9
+
+
+# ---------------------------------------------------------------------------
+# Zero-reader views are not materialized at all (2026-06-11 perf wave item 3)
+# ---------------------------------------------------------------------------
+
+def test_no_zero_reader_views_built_or_uploaded(coord_backend):
+    """``agents/<id>.json`` and ``views/inbox/<slug>.json`` were rebuilt and
+    uploaded on EVERY write/reconcile (~A agents + I inboxes ≈ 35+ files per
+    pass at current fleet size) and read by NOTHING — cmd_inbox recomputes from
+    the task set (views.py documented the inbox views as "no longer the read
+    path") and no surface ever downloaded a per-agent view. They must no
+    longer appear in build_all_views nor on the wire — even for a task WITH an
+    assignee (the case that used to bucket an inbox view).
+
+    The already-uploaded remote files are deliberately NOT deleted: they are
+    inert and age out later (bus-state cleanup deferred pending a Fulcra
+    service review — see build_all_views)."""
+    t = schema.make_task(title="directive", workstream="alpha",
+                         agent="agent-a", assignee="peer:h:r")
+    built = views.build_all_views([t])
+    assert not [n for n in built if n.startswith("agents/")], (
+        f"per-agent views re-materialized: {sorted(built)}")
+    assert not [n for n in built if n.startswith("inbox/")], (
+        f"per-assignee inbox views re-materialized: {sorted(built)}")
+    # And nothing under those remote prefixes is uploaded on a real write.
+    rec = _write(t, coord_backend)
+    root = remote.remote_root()
+    stray = [p for p in rec.calls
+             if p.startswith(f"{root}/agents/")
+             or p.startswith(f"{root}/views/inbox/")]
+    assert stray == [], f"zero-reader view paths uploaded: {stray}"
+    # The index's per-assignee inbox COUNTS (a different, read surface) stay.
+    assert built["index"]["counts"]["inbox"] == {"peer-h-r": 1}
 
 
 # ---------------------------------------------------------------------------

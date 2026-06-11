@@ -1199,14 +1199,14 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
     summaries aggregate, never re-fetched bodies. Two fields were previously
     omitted and are now included:
 
-      * ``last_touched_by`` — build_agent_view groups by owner_agent OR
-        last_touched_by, so a hand-off agent (touched but doesn't own) would lose
-        its per-agent view if this were dropped.
+      * ``last_touched_by`` — the operator digest's per-agent fold
+        (views.build_operator_digest) groups finished work by owner_agent OR
+        last_touched_by, so a hand-off agent (touched but doesn't own) would
+        lose its done-this-window credit if this were dropped.
       * ``done_at`` — flattened from ``done.done_at`` (which the full body nests).
-        build_search_index / build_recently_done / build_workstream_view /
-        build_agent_view all gate done/abandoned tasks on this timestamp. A
-        summary has no nested ``done`` block, so the flattened key is what those
-        builders read.
+        build_search_index / build_recently_done / build_workstream_view all
+        gate done/abandoned tasks on this timestamp. A summary has no nested
+        ``done`` block, so the flattened key is what those builders read.
 
     IDEMPOTENCE: task_summary(task_summary(t)) == task_summary(t). A summary has
     no nested ``done`` dict but carries the flat ``done_at``, so we resolve it
@@ -1249,9 +1249,10 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         # before this field existed) render None rather than KeyError-crashing
         # the view — symmetric with priority/updated_at above.
         "assignee": task.get("assignee"),
-        # last_touched_by drives build_agent_view's hand-off grouping; default to
-        # owner_agent (the touching agent on a brand-new task) so an old task body
-        # missing the field summarizes sensibly rather than to None.
+        # last_touched_by drives the operator digest's hand-off grouping
+        # (build_operator_digest's per-agent done fold); default to owner_agent
+        # (the touching agent on a brand-new task) so an old task body missing
+        # the field summarizes sensibly rather than to None.
         "last_touched_by": task.get("last_touched_by", task.get("owner_agent")),
         "current_summary": task.get("current_summary", ""),
         "next_action": task.get("next_action", ""),

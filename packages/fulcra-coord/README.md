@@ -438,9 +438,9 @@ requires the CLI. Nothing in core hard-depends on the continuity package.
     recently-done.json      ← last 7 days of done/abandoned
     search-index.json       ← searchable records
     needs-attention.json    ← active tasks gone stale (possibly forgotten)
-    inbox/{agent-slug}.json ← open directives addressed to each assignee
+    summaries.json          ← compact task_summary aggregate — the read-side
+                               fast path every glance command loads
   workstreams/{ws}.json     ← per-workstream active view
-  agents/{agent}.json       ← per-agent active view
   tasks/TASK-*.json         ← individual task files (mutable, authoritative)
   events/
     tasks/{task_id}/{event_id}.json ← immutable, append-only event shards
@@ -458,7 +458,17 @@ requires the CLI. Nothing in core hard-depends on the continuity package.
                                        (first-writer-wins, like digest markers)
 ```
 
-`index.json`'s `counts.inbox` folds a per-assignee directive count so a hook can see "you have N directives" without loading every inbox view.
+`index.json`'s `counts.inbox` folds a per-assignee directive count so a hook
+can see "you have N directives" in one read; the live `inbox` command
+recomputes membership from the summaries.
+
+**Retired (2026-06-11):** the per-agent `agents/{agent}.json` and per-assignee
+`views/inbox/{agent-slug}.json` views are no longer written. They were
+materialized on every write/reconcile (~35+ uploads per pass at fleet size)
+and read by nothing — `agents`/`resume`/`inbox` all fold `views/summaries.json`
+or the task set client-side. Files already on a bus under those prefixes are
+inert leftovers; they are deliberately not deleted (bus-state cleanup is
+deferred pending a Fulcra service review) and simply never refresh again.
 
 ## How it works
 

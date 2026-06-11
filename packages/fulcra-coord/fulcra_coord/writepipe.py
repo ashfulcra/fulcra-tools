@@ -667,14 +667,13 @@ def _view_must_always_upload(view_data: dict[str, Any]) -> bool:
 
 
 def _view_name_to_remote(name: str) -> str:
+    # (The "agents/<id>" branch was removed with the 2026-06-11 retirement of
+    # the per-agent views — build_all_views no longer emits those names.)
     if name == "index":
         return remote.view_remote_path("index")
     if name.startswith("workstreams/"):
         ws = name[len("workstreams/"):]
         return remote.workstream_remote_path(ws)
-    if name.startswith("agents/"):
-        agent = name[len("agents/"):]
-        return remote.agent_remote_path(agent)
     return remote.view_remote_path(name)
 
 
