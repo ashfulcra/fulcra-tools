@@ -22,6 +22,12 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import cache, log as ops_log, read_source, remote, schema, views
+# Direct store-module import for the transport's failure observables and
+# stderr classifiers (``last_download_error`` must be read as a LIVE module
+# attribute — ``remote``'s re-exports would not track the store mutating it;
+# same pattern as cli.py's ``last_upload_error`` read). No new dependency
+# edge: io already reaches the store through ``remote``.
+from fulcra_coord_files import store as _files_store
 from .output import warn as _warn
 
 
@@ -69,16 +75,44 @@ class _LoadedTasks(list):
 def _confirmed_absent(path: str, *, backend: Optional[list[str]] = None) -> bool:
     """A download of ``path`` returned None — was that ABSENCE or a failed read?
 
-    True only when a stat probe ALSO misses AND the bus probes reachable: the
-    role_ops C1 idiom applied to the write path. A visible stat means the file
-    exists but could not be read (error, never absence); an unreachable bus
-    means nothing can be confirmed at all. The probe_reachable spawn is spent
-    ONLY on this failure path — failure is rare, and one extra spawn to avoid a
-    destructive blind rebuild is the right trade. A raising probe reads as
-    error too (fail-safe: a writer acting on "absent" must never be guessing)."""
+    True only when the bus probes reachable AND either (a) a stat probe ALSO
+    misses — the role_ops C1 idiom applied to the write path — or (b) the path
+    is a soft-delete TOMBSTONE: stat still answers but a fresh download fails
+    with a POSITIVE not-found-class error.
+
+    THE TOMBSTONE BRANCH (2026-06-11, the forever-blocked-markers bug): the
+    Fulcra Files platform DELETE is a SOFT delete — a deleted file keeps
+    version history that ``stat`` still reports (see store.delete and
+    retention's soft-delete commentary), so for every archived/pruned task
+    path the old "visible stat => exists, read failed" verdict was wrong
+    FOREVER: absence was never confirmable and repairs/writes against
+    tombstoned paths re-failed deterministically every pass. The signature
+    that distinguishes a tombstone from a genuinely-unreadable live file is
+    the download's failure CLASS: a soft-deleted file fails not-found-style
+    deterministically (#167's classifier already treats 404/Not Found as
+    non-transient), while a live-but-unreadable file fails with transient
+    weather. So a visible stat now costs one fresh download probe: readable
+    => demonstrably present (False); not-found-class failure on a reachable
+    bus => tombstone, absence CONFIRMED (True); transient or UNKNOWN failure
+    (silent stderr, bare exit code) => unconfirmable (False, fail-safe — a
+    writer acting on "absent" must never be guessing).
+
+    The extra download + probe_reachable spawns are spent ONLY on this
+    failure path — failure is rare, and one extra spawn to avoid either a
+    destructive blind rebuild or an eternally-stuck repair is the right
+    trade. A raising probe reads as error too."""
     try:
         if remote.stat(path, backend=backend) is not None:
-            return False  # the file demonstrably exists — the read failed
+            # Fresh probe (not the caller's possibly-stale failure): the
+            # observable below is documented as last-FAILURE-wins, so it is
+            # only trustworthy read immediately after our own attempt.
+            if remote.download(path, backend=backend) is not None:
+                return False  # readable — the file demonstrably exists
+            err = _files_store.last_download_error
+            if _files_store._is_not_found_failure(err):
+                # Tombstone: version history visible, current version deleted.
+                return remote.probe_reachable(backend)
+            return False  # transient/unknown read failure — never absence
         return remote.probe_reachable(backend)
     except Exception:
         return False
