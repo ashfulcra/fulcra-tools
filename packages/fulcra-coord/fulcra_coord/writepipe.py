@@ -29,7 +29,12 @@ from . import cache, remote, schema, views, identity, session_link, env_int
 from . import annotations as lifecycle_annotations
 from . import eventlog, events as _events
 from . import log as ops_log
-from .io import SUMMARIES_READ_ERROR, _load_summaries_for_rebuild, _updated_at_key
+from .io import (
+    SUMMARIES_READ_ERROR,
+    _confirmed_absent,
+    _load_summaries_for_rebuild,
+    _updated_at_key,
+)
 from .output import warn as _warn
 from .timeutil import now_iso as _now_iso
 
@@ -192,7 +197,7 @@ def _write_task_and_views(
                     f"unsafe. Run 'fulcra-coord reconcile' to repair."
                 )
             task = merged
-        elif pre_stat is not None or not remote.probe_reachable(backend):
+        elif pre_stat is not None or not _confirmed_absent(task_path, backend=backend):
             # 2026-06-11 write-path read-error audit (F1, fold branch): a None
             # download used to read as "file gone, nothing to merge against" —
             # but None is ALSO what a failed read returns, and a fold-sourced
@@ -201,9 +206,9 @@ def _write_task_and_views(
             # unreachable bus proves nothing. Either way, uploading the fold
             # body as-is would blind-LWW over whatever we couldn't read.
             return _fail_write_pre_read_error(task, op_id, command)
-        # else: pre_stat missed, the download missed, AND the bus probes
-        # reachable — absence CONFIRMED (the file really is gone). Keep `task`
-        # as-is: nothing to merge against.
+        # else: pre_stat missed, the download missed, AND a follow-up stat
+        # missed while the bus probes reachable — absence CONFIRMED (the file
+        # really is gone). Keep `task` as-is: nothing to merge against.
     else:
         # Pre-read disambiguation (2026-06-11 write-path read-error audit, F1):
         # stat -> None means EITHER "the file does not exist yet" (new task)
@@ -222,7 +227,7 @@ def _write_task_and_views(
             fresh = remote.download_json(task_path, backend=backend)
             if fresh:
                 needs_merge_check = True   # the file exists; stat lied/failed
-            elif remote.probe_reachable(backend):
+            elif _confirmed_absent(task_path, backend=backend):
                 needs_merge_check = False  # absence CONFIRMED: genuinely new
             else:
                 return _fail_write_pre_read_error(task, op_id, command)

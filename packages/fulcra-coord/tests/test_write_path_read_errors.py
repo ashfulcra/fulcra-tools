@@ -159,6 +159,48 @@ def test_f1_unreadable_remote_fails_write_instead_of_blind_overwrite(
     assert cache.read_cached_task(base["id"]) is not None
 
 
+def test_f1_reachable_bus_alone_does_not_confirm_absent_body(
+        coord_backend, monkeypatch, tmp_path):
+    """A reachable bus is not enough to prove a task body is absent when the
+    task-path reads are failing. Re-stat the task path before taking the
+    genuinely-new-task path; otherwise a transient stat/download failure while
+    the bus is reachable still blind-overwrites an existing task."""
+    base = _make_task()
+    done_by_b = schema.apply_transition(
+        base, "done", by="agent-b",
+        evidence="shipped", verification_level="agent-verified")
+    task_path = remote.task_remote_path(base["id"])
+    remote.upload_json(done_by_b, task_path, backend=coord_backend)
+    before = _store_file(tmp_path, task_path).read_text()
+
+    a_local = dict(base)
+    a_local["current_summary"] = "A-progress-note"
+    cache.write_cached_task(a_local)
+
+    real_stat = remote.stat
+    calls = {"task_stat": 0}
+
+    def flaky_initial_stat(path, **kw):
+        if path == task_path:
+            calls["task_stat"] += 1
+            if calls["task_stat"] == 1:
+                return None
+        return real_stat(path, **kw)
+
+    monkeypatch.setattr(remote, "stat", flaky_initial_stat)
+    _patch_download_none_for(monkeypatch, lambda p: p == task_path)
+    monkeypatch.setattr(remote, "probe_reachable", lambda backend=None: True)
+
+    ok = writepipe._write_task_and_views(
+        a_local, backend=coord_backend, command="update")
+    assert ok is False
+    assert calls["task_stat"] >= 2, \
+        "absence must be confirmed by re-statting the task path"
+    assert _store_file(tmp_path, task_path).read_text() == before, \
+        "bus reachability alone was treated as absent and overwrote B's done"
+    assert _failed_marker_for(base["id"])
+
+
 def test_f1_stat_sees_file_but_body_unreadable_fails_write(coord_backend,
                                                            monkeypatch,
                                                            tmp_path):
