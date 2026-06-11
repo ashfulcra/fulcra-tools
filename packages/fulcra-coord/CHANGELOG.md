@@ -12,6 +12,37 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Reconcile: repair-queue starvation fix — failing markers rotate out of the head
+
+Live find (2026-06-11, post-recovery): the task-body-repair loop in
+`cmd_reconcile` iterated op markers in `cache.list_op_markers()` glob order.
+~12 markers failed deterministically every pass, each re-failure costing
+30–60s of remote ops (download + stat probe + upload, with transient
+retries) — and they sorted at the HEAD of the order, so every pass (even a
+900s one) burned its whole budget re-failing the same head and deferred the
+~60 healthy markers behind it at the budget floor. A 900s pass repaired ~1 of
+72; the queue could never drain past the failing head. Two-part fix:
+
+- **Per-marker attempt bookkeeping + backoff.** A FAILED repair attempt now
+  stamps the marker (`repair_attempts`, `repair_last_attempt_at` — house ISO
+  via `timeutil.now_iso`). At loop start markers are partitioned:
+  never-attempted ones run FIRST (first claim on budget), previously-failed
+  ones whose backoff expired run after on leftover budget, and markers still
+  inside their `min(2**attempts, 32)`-minute window (`
+  _REPAIR_BACKOFF_CAP_MINUTES`, patchable) are SKIPPED for the pass — marker
+  KEPT (skip is debt, not success) and retried after the window. Stamps are
+  parsed (`views._parse_dt`), never compared lexically; an unparseable stamp
+  fails toward retrying. The #172 budget-floor deferral semantics are
+  unchanged.
+- **Per-task failure reasons.** The aggregate `task_body_repair_failed`
+  ops-log entry listed only ids — tonight's diagnosis had to guess. Each
+  failure site now records a short reason (`upload failed: <stderr tail>`,
+  `remote stat exists but fresh download unreadable`, `absence unconfirmable
+  (stat probe failed)`, `unsafe merge: … cached side newer`, `no cached body
+  to replay`), the ops-log detail carries a `{task_id: reason}` mapping
+  (reasons truncated ~120 chars), and the first 3 reasons are warned inline
+  so an operator tail shows WHY.
+
 ### Perf, loop 2: six mechanical double-read/over-download eliminations
 
 Every remote op is one `fulcra file` subprocess (~1.3s median against a
