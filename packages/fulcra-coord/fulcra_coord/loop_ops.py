@@ -227,17 +227,28 @@ def fold_loop(
     record: dict[str, Any], *, backend: Optional[list[str]] = None
 ) -> dict[str, Any]:
     """The loop with its response sub-log folded in — outcome + closure derived
-    ONLY from bus response events (the guarantee's read side). Latest response
-    wins for `outcome`; any response moves an expecting loop to its terminal
-    closure by replaying legal hops (preferring the kind's response hop —
-    responded/delivered/answered — then walking the machine to the nearest
-    terminal, so the snapshot never teleports through an illegal edge). Pure
-    given its inputs; the only I/O is the sub-log read."""
+    ONLY from bus response events (the guarantee's read side). The latest
+    OUTCOME-CARRYING response wins for `outcome` (S4: outcome-less shards are
+    inert — they neither null a verdict nor close anything); such a response
+    moves an expecting loop to its terminal closure by replaying legal hops
+    (preferring the kind's response hop — responded/delivered/answered — then
+    walking the machine to the nearest terminal, so the snapshot never
+    teleports through an illegal edge). Pure given its inputs; the only I/O is
+    the sub-log read."""
     folded = dict(record)
     responses = read_loop_responses(record.get("id") or "", backend=backend)
-    if not responses:
+    # 2026-06-11 bug hunt S4: take the LAST response that actually CARRIES a
+    # non-empty outcome — not blindly responses[-1]. A trailing outcome-less
+    # shard (a malformed/partial responder) used to null a real verdict AND
+    # still close the loop: a terminal state with outcome=None is closure
+    # without a verdict, the exact out-of-band-verdict bug class this
+    # substrate exists to kill. The deliberate choice: an outcome-less
+    # response NEVER advances state to terminal (the loop stays visibly open
+    # until a real verdict lands), because a stuck-open loop is recoverable
+    # while a silently-verdict-less closed one is not.
+    last = next((r for r in reversed(responses) if r.get("outcome")), None)
+    if last is None:
         return folded
-    last = responses[-1]
     folded["outcome"] = last.get("outcome")
     kind = loops.loop_kind_of(folded)
     state = loops.loop_state_of(folded)
