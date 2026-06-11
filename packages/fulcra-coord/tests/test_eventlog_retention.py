@@ -89,17 +89,24 @@ class _EventTree(unittest.TestCase):
             return True
         return _delete
 
-    def _stat_factory(self, present_paths):
-        """stat -> truthy for paths in present_paths, else None."""
+    def _stat_factory(self, present_paths, stat_raises=False):
+        """stat -> truthy for paths in present_paths, else None (or raises)."""
         def _stat(path, *, backend=None):
+            if stat_raises:
+                raise RuntimeError("transient stat failure (504)")
             return {"size": 1} if path in present_paths else None
         return _stat
 
     def _run(self, *, files_tree, json_tree, all_tasks, present_paths=(),
-             raise_on=(), deadline=None, max_per_run=None):
+             raise_on=(), deadline=None, max_per_run=None,
+             stat_raises=False, bus_reachable=True):
         cm = patch("fulcra_coord.retention._retention_max_per_run",
                    return_value=max_per_run) if max_per_run is not None \
             else _NullCM()
+        # F6 (2026-06-11 wave): the orphan branch now requires POSITIVE absence
+        # via io._confirmed_absent — stat-miss alone is not proof, the bus must
+        # also probe reachable. Default the probe to True so the legitimate
+        # orphan-GC tests model a healthy bus; the F6 failure-path tests flip it.
         with patch("fulcra_coord.retention.remote.list_files",
                    side_effect=self._list_files_factory(files_tree)), \
              patch("fulcra_coord.retention.remote.list_json",
@@ -107,7 +114,10 @@ class _EventTree(unittest.TestCase):
              patch("fulcra_coord.retention.remote.delete",
                    side_effect=self._delete_factory(raise_on)), \
              patch("fulcra_coord.retention.remote.stat",
-                   side_effect=self._stat_factory(set(present_paths))), \
+                   side_effect=self._stat_factory(set(present_paths),
+                                                  stat_raises=stat_raises)), \
+             patch("fulcra_coord.remote.probe_reachable",
+                   return_value=bus_reachable), \
              cm:
             return retention._prune_event_log(
                 all_tasks, self.now, backend=["false"], deadline=deadline)
@@ -359,6 +369,48 @@ class TestPruneEventLogOrphans(_EventTree):
                       all_tasks=[], present_paths=())
         self.assertEqual(n, 1)
         self.assertEqual(self.deleted, [good_path])
+
+    def test_orphan_stat_failure_does_not_delete(self):
+        # F6 (2026-06-11 wave): the old guard was `if stat(...) is not None:
+        # continue` — a stat that FAILED (transport error/504 after retry, which
+        # the transport collapses into the same None as genuine absence, or an
+        # outright raise) read as "hot file confirmed gone" and the whole shard
+        # tree was deleted. Compound with a partial all_tasks load and a LIVE
+        # task's fold source is destroyed. A raising stat must defer: zero
+        # deletions this pass; the orphan drains on a later, healthy pass.
+        tid = "task-maybe-archived"
+        recs = [
+            _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
+                payload=_delta_payload(x=1)),
+        ]
+        shards = [_shard_path(tid, r) for r in recs]
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): shards},
+                      json_tree={},
+                      all_tasks=[],          # not in the (possibly partial) live set
+                      present_paths=(),
+                      stat_raises=True)      # the stat probe is FAILING, not missing
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
+
+    def test_orphan_unreachable_bus_does_not_delete(self):
+        # F6: a stat-miss while the bus probes UNREACHABLE is a transport
+        # failure wearing absence's clothes — _confirmed_absent must read it as
+        # "unknowable", so the orphan branch skips this task this pass.
+        tid = "task-unreachable"
+        recs = [
+            _ev(tid, at="2026-01-01T00:00:00Z", suffix="01",
+                payload=_delta_payload(x=1)),
+        ]
+        shards = [_shard_path(tid, r) for r in recs]
+        n = self._run(files_tree={_EVENTS_ROOT: [_events_prefix(tid)],
+                                  _events_prefix(tid): shards},
+                      json_tree={},
+                      all_tasks=[],
+                      present_paths=(),       # stat -> None ...
+                      bus_reachable=False)    # ... but nothing is reachable
+        self.assertEqual(n, 0)
+        self.assertEqual(self.deleted, [])
 
     def test_orphan_failsafe_hot_file_present_skips(self):
         # B2 fail-safe: not in all_tasks BUT hot file stat -> present => possibly

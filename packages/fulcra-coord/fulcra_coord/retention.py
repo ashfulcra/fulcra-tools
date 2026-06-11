@@ -22,7 +22,7 @@ from typing import Any, Optional
 from . import cache, remote, views, identity, schema
 from . import env_int, remote_root
 from .events import _is_snapshot_payload
-from .io import _load_task_summaries
+from .io import _confirmed_absent, _load_task_summaries
 from .writepipe import _write_task_and_views
 from .output import info as _info, print_json as _print_json, err as _err
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
@@ -200,20 +200,39 @@ _RETENTION_DEADLINE_HEADROOM_SECONDS = 5.0
 
 
 def _prune_markers(now: datetime, *, backend: Optional[list[str]] = None) -> int:
-    """Delete spent digest dedup markers older than the marker-retention window.
+    """Delete spent daily dedup markers older than the marker-retention window:
+    digest markers (digest/markers/) AND role vacancy-escalation markers
+    (roles/<name>/escalations/<YYYY-MM-DD>.json — 2026-06-11 wave: minted daily
+    per vacant role by _maybe_escalate_role_vacancy and previously never swept,
+    so they accumulated forever and every roles listing paid for the pile).
 
-    Lists digest/markers/, deletes each path views.is_prunable_marker flags.
     Markers are regenerable guards with NO history value, so they are deleted
-    (platform soft-delete keeps them restorable), not archived. is_prunable_marker
-    FAILS SAFE: a path it can't date (no embedded YYYY-MM-DD) is KEPT, never
-    pruned. Best-effort: a failed listing prunes nothing; one failed delete is
-    skipped, not fatal. Returns the count deleted."""
+    (platform soft-delete keeps them restorable), not archived. Both predicates
+    (views.is_prunable_marker / views.is_prunable_escalation_marker) FAIL SAFE:
+    a path they can't date is KEPT, never pruned — and the escalation predicate
+    additionally matches ONLY the .../escalations/<date>.json shape, so role
+    records and lease files sharing the roles/ prefix can never enter the
+    delete set. Best-effort and INDEPENDENT per family: each listing failure
+    prunes nothing from ITS family without aborting the other; one failed
+    delete is skipped, not fatal. Returns the total count deleted."""
     n = 0
     try:
         for path in remote.list_files(remote.digest_markers_prefix(), backend=backend):
             if not path.endswith(".json"):
                 continue
             if views.is_prunable_marker(path, now):
+                try:
+                    if remote.delete(path, backend=backend):
+                        n += 1
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    try:
+        # One recursive listing of roles/ (the live list contract): the
+        # escalation predicate's strict path-shape match does the filtering.
+        for path in remote.list_files(remote.roles_prefix(), backend=backend):
+            if views.is_prunable_escalation_marker(path, now):
                 try:
                     if remote.delete(path, backend=backend):
                         n += 1
@@ -269,14 +288,6 @@ def _prune_dead_health(now: datetime, *, backend: Optional[list[str]] = None) ->
     return n
 
 
-# Max directory depth the continuity walk will descend before giving up on a
-# subtree. The real tree is exactly 4 levels under continuity/
-# (ws / agent / task / checkpoints), so 6 leaves slack for a future nesting
-# tweak while still hard-bounding a malformed / self-referential tree so the
-# recursive walk can never infinite-loop or blow the Python recursion limit.
-_CONTINUITY_WALK_MAX_DEPTH = 6
-
-
 def _continuity_keep() -> int:
     """How many of the NEWEST checkpoints to keep per task: env
     FULCRA_COORD_CONTINUITY_KEEP (default 10), floored at 1.
@@ -289,54 +300,64 @@ def _continuity_keep() -> int:
 
 
 def _walk_continuity_checkpoint_dirs(backend: Optional[list[str]], *,
-                                     deadline: Optional[float] = None) -> list[str]:
-    """Enumerate every ``.../checkpoints/`` directory under the continuity tree.
+                                     deadline: Optional[float] = None
+                                     ) -> dict[str, list[str]]:
+    """Partition ONE recursive listing of the continuity tree into
+    ``{checkpoints-dir: [file paths under it]}``.
 
-    remote.list_files is NON-RECURSIVE: it returns only the IMMEDIATE children of
-    a prefix, with subdirectories suffixed by a trailing slash and files without
-    one. So the 4-level continuity tree (continuity/{ws}/{agent}/{task}/
-    checkpoints/) MUST be walked by descending into each trailing-slash child.
+    THE CONTRACT (2026-06-11 wave, from the 2026-06-10 measured pass — the same
+    listing contract load_loop_records' top-level path filter is built on, and
+    the shape the fake test backend's rglob reproduces): the live ``fulcra file
+    list`` returns a RECURSIVE listing of FILES under the prefix, with NO
+    directory entries. The previous walker descended trailing-slash directory
+    entries level by level — a contract the live backend does not implement —
+    so in PRODUCTION it found zero children and ``_prune_continuity_checkpoints``
+    never deleted anything: the unbounded checkpoints/ growth the GC exists to
+    bound was silently un-GC'd. Partitioning one listing by path segments fixes
+    that AND costs one list call instead of O(directories).
 
-    Iterative DFS (explicit stack, not recursion) bounded by
-    _CONTINUITY_WALK_MAX_DEPTH so a malformed / self-referential listing can't
-    infinite-loop. Best-effort: a list_files failure for any subtree is swallowed
-    — that subtree contributes nothing rather than aborting the whole walk. The
-    caller is wrapped too, so nothing here escapes into reconcile.
+    TOLERANT of a backend that DOES emit directory entries (trailing slash):
+    a dir entry whose last segment is ``checkpoints`` registers the dir (with
+    no children of its own — a dir entry is never a delete candidate); its
+    files arrive as separate file entries. Both contracts therefore produce
+    the same partition.
 
-    When reconcile supplies a deadline, the walk checks the same budget floor
-    before each remote listing. This is load-bearing: a huge malformed
-    continuity tree must not spend the whole reconcile budget before the prune
-    loop gets its first chance to stop."""
+    Best-effort: a failed listing yields an empty partition rather than
+    raising (the caller is wrapped too, so nothing escapes into reconcile).
+    When reconcile supplies a deadline, the same budget floor as the prune
+    loop gates the single listing — a spent budget must not buy a large
+    listing it can't act on."""
     import time
     budget_floor = (deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
                     if deadline is not None else None)
+    found: dict[str, list[str]] = {}
+    if budget_floor is not None and time.monotonic() >= budget_floor:
+        return found
     root = f"{remote_root()}/continuity"
-    found: list[str] = []
-    # Stack of (dir_path_without_trailing_slash, depth).
-    stack: list[tuple[str, int]] = [(root, 0)]
-    while stack:
-        if budget_floor is not None and time.monotonic() >= budget_floor:
-            break
-        current, depth = stack.pop()
-        if depth > _CONTINUITY_WALK_MAX_DEPTH:
+    try:
+        entries = remote.list_files(root, backend=backend)
+    except Exception:
+        return found
+    prefix = root if root.endswith("/") else root + "/"
+    for entry in entries:
+        is_dir = entry.endswith("/")
+        path = entry.rstrip("/")
+        if not path.startswith(prefix):
+            continue  # defensive: never partition a path outside the tree
+        segments = path[len(prefix):].split("/")
+        if is_dir:
+            if segments and segments[-1] == "checkpoints":
+                found.setdefault(path, [])
             continue
-        try:
-            children = remote.list_files(current, backend=backend)
-        except Exception:
-            continue
-        for child in children:
-            if not child.endswith("/"):
-                continue  # a file at this level; not a directory to descend
-            sub = child.rstrip("/")
-            # A self-referential listing (dir lists itself) would otherwise loop
-            # forever; the depth bound below terminates it, but skipping the exact
-            # self-pointer also avoids wasted round-trips.
-            if sub == current:
-                continue
-            if sub.rsplit("/", 1)[-1] == "checkpoints":
-                found.append(sub)
-            else:
-                stack.append((sub, depth + 1))
+        # A file: find the checkpoints dir it sits under. The LAST `checkpoints`
+        # ancestor wins — the file's immediate prunable directory — so a
+        # pathological task literally named "checkpoints" still partitions to
+        # the dir its archives actually live in.
+        for i in range(len(segments) - 2, -1, -1):
+            if segments[i] == "checkpoints":
+                chk_dir = prefix + "/".join(segments[: i + 1])
+                found.setdefault(chk_dir, []).append(path)
+                break
     return found
 
 
@@ -353,14 +374,15 @@ def _prune_continuity_checkpoints(now: datetime, *,
     The other pruners never touch continuity/**, so this is the GC that bounds it.
 
     HOW:
-      * RECURSIVE WALK (_walk_continuity_checkpoint_dirs) finds every
-        ``checkpoints/`` dir — remote.list_files is non-recursive, so the 4-level
-        tree must be descended explicitly. Depth-bounded so a malformed tree can't
-        loop.
-      * Per dir, list its ``CHK-*.json`` files and sort by filename DESCENDING.
-        The <stamp> is a zero-padded lexically-sortable timestamp, so filename
-        sort == chronological sort: index 0 is NEWEST. Keep the first `keep`,
-        delete the rest (oldest-first).
+      * ONE RECURSIVE LISTING (_walk_continuity_checkpoint_dirs) partitioned by
+        path segments yields every ``checkpoints/`` dir WITH its files — the
+        live listing contract is recursive files-only (see the walker's
+        docstring; the old per-directory descent matched no real backend and
+        this GC silently never ran in production).
+      * Per dir, filter to its ``CHK-*.json`` files and sort by filename
+        DESCENDING. The <stamp> is a zero-padded lexically-sortable timestamp,
+        so filename sort == chronological sort: index 0 is NEWEST. Keep the
+        first `keep`, delete the rest (oldest-first).
       * NEVER deletes ``latest.json`` (or anything not matching ``CHK-``) — only
         immutable checkpoint archives are prunable; latest.json is the live
         pointer a resuming agent reads.
@@ -384,15 +406,15 @@ def _prune_continuity_checkpoints(now: datetime, *,
             return 0
         if budget_floor is not None and time.monotonic() >= budget_floor:
             return 0
-        for chk_dir in _walk_continuity_checkpoint_dirs(backend, deadline=deadline):
+        partition = _walk_continuity_checkpoint_dirs(backend, deadline=deadline)
+        # Sorted iteration: a capped/deadline-shortened pass deletes a
+        # deterministic subset across machines, not a dict-order lottery.
+        for chk_dir in sorted(partition):
             if deleted >= cap:
                 break
             if budget_floor is not None and time.monotonic() >= budget_floor:
                 break
-            try:
-                entries = remote.list_files(chk_dir, backend=backend)
-            except Exception:
-                continue
+            entries = partition[chk_dir]
             # Only immutable checkpoint archives are prunable. A bare ``latest.json``
             # (or any non-CHK file) is excluded HERE so it can never enter the
             # delete set — the load-bearing safety property.
@@ -453,11 +475,14 @@ def _prune_event_log(all_tasks: list[dict[str, Any]], now: datetime, *,
     HOW (two branches per task dir under events/tasks/):
 
       * ORPHAN (B2): a task dir whose id is NOT in the live set AND whose hot
-        file (tasks/<id>.json) is CONFIRMED absent (stat -> None) belongs to an
-        archived/deleted task — delete ALL its shards. The stat is a positive
-        confirmation guarding against a PARTIAL all_tasks: if the hot file still
-        exists (task merely missing from this caller's list), SKIP — never prune
-        a possibly-live task's tree.
+        file (tasks/<id>.json) is CONFIRMED absent — via io._confirmed_absent
+        (stat miss + bus probes reachable), NOT a bare stat-None, which the
+        transport also returns on a failed read (F6) — belongs to an
+        archived/deleted task: delete ALL its shards. The positive confirmation
+        guards both a PARTIAL all_tasks (hot file still exists -> task merely
+        missing from this caller's list) and a transport blip (absence
+        unknowable): in either case SKIP — never prune a possibly-live task's
+        tree; an unconfirmable orphan simply defers to the next healthy pass.
 
       * LIVE (B1): for a task still in the live set, keep the LATEST snapshot
         event + the most recent _eventlog_keep() events; delete only shards
@@ -541,11 +566,23 @@ def _prune_event_log(all_tasks: list[dict[str, Any]], now: datetime, *,
                 break
             try:
                 if task_id not in live_ids:
-                    # B2 ORPHAN branch — but ONLY if the hot file is CONFIRMED
-                    # gone. A still-present hot file means the task may be live
-                    # and merely missing from a partial all_tasks: SKIP it.
-                    if remote.stat(remote.task_remote_path(task_id),
-                                   backend=backend) is not None:
+                    # B2 ORPHAN branch — but ONLY on POSITIVE absence. F6
+                    # (2026-06-11 wave): the old gate was `stat is not None ->
+                    # skip`, but the transport collapses "read FAILED" into the
+                    # same None as "confirmed gone" — so one transient 504
+                    # (after retry) read as proof of absence, and compounded
+                    # with a partial all_tasks load this branch DELETED a live
+                    # task's entire fold source. _confirmed_absent (the
+                    # role_ops C1 / write-path idiom) requires the stat miss
+                    # AND a reachable bus before anything destructive may act
+                    # on "absent"; the probe spawn is spent only on the
+                    # stat-miss path. Unconfirmable -> SKIP this task this
+                    # pass (defer); a genuinely archived tree drains on the
+                    # next healthy pass. A still-present hot file likewise
+                    # means the task may be live and merely missing from a
+                    # partial all_tasks: SKIP it.
+                    if not _confirmed_absent(remote.task_remote_path(task_id),
+                                             backend=backend):
                         continue
                     # Enumerate via list_files, NOT list_json: the orphan branch
                     # deletes the WHOLE tree and never inspects a payload, while
@@ -909,18 +946,42 @@ def cmd_search(args: Any, backend: Optional[list[str]] = None) -> int:
 
 
 def cmd_restore(args: Any, backend: Optional[list[str]] = None) -> int:
-    """Restore a cold-archived task back into the hot path.
+    """Restore a cold-archived task back into the hot path — and make it STICK.
 
     Reverses _archive_task: reads the task's archive/index/<id>.json shard for
-    its archive_path, downloads the archived body, uploads it back to
-    tasks/<id>.json, then deletes the index shard. The NEXT reconcile re-includes
-    it in views (the body is back in the tasks/ listing the self-heal enumerates).
-    Nothing is one-way. NOTE this is a bus-level MOVE, independent of the platform
-    'fulcra file restore' (which restores a deleted file's prior VERSION by UUID);
-    archived tasks were moved, not deleted, so we move them back ourselves.
+    its archive_path, downloads the archived body, stamps ``restored_at``,
+    uploads it back to tasks/<id>.json, VERIFIES the hot copy landed, then
+    deletes the ARCHIVE BODY and finally the index shard. The NEXT reconcile
+    re-includes it in views (the body is back in the tasks/ listing the
+    self-heal enumerates). Nothing is one-way. NOTE this is a bus-level MOVE,
+    independent of the platform 'fulcra file restore' (which restores a deleted
+    file's prior VERSION by UUID); archived tasks were moved, not deleted, so
+    we move them back ourselves.
 
-    Order mirrors the archive's no-loss ordering: write the hot copy and VERIFY it
-    landed before deleting the shard, so a crash leaves a recoverable state."""
+    F7 (2026-06-11 wave) — two holes made restore SILENTLY UNDO ITSELF within
+    ~24h unless the operator also transitioned the task:
+
+      * The ARCHIVE BODY was left in place, so the next daily retention pass
+        saw archive_exists=True on the still-terminal task, skipped the upload,
+        and DELETED the hot copy again — re-archiving the restore. The cold
+        copy is now deleted (after the hot verify — _archive_task's no-loss
+        ordering, mirrored in reverse: the irreversible delete runs strictly
+        after a positive read-back of the destination).
+      * The task remained terminal+AGED (it ages from done_at), so even with
+        the body deleted it re-qualified instantly. ``restored_at`` is stamped
+        on the hot body and ``views.is_archivable_task`` ages from
+        max(done_at, restored_at) — the operator gets a FULL fresh retention
+        window before the task can cold-store again.
+
+    ORDERING / FAILURE DISCIPLINE: hot upload -> verify -> delete archive body
+    -> delete index shard. A failed/uncertain archive-body delete ERRORS OUT
+    with the shard KEPT: deleting the shard while a stale cold copy lingers
+    would let a later idempotent _archive_task resurrect the STALE body over
+    post-restore edits (archive_exists skips the fresh upload). With the shard
+    kept, the operator simply re-runs restore — the hot copy is already in
+    place, so the retry only finishes the cold-side cleanup. A crash between
+    the two deletes leaves shard-without-body, which a retry reports loudly
+    (body missing) while the restored hot copy keeps working."""
     tid = args.task_id
     shard = _read_index_shard(tid, backend=backend)
     if not shard:
@@ -931,12 +992,27 @@ def cmd_restore(args: Any, backend: Optional[list[str]] = None) -> int:
     if not body:
         _err(f"Archived body for {tid!r} not found at {archive_path}.")
         return 1
+    # Stamp the restore moment BEFORE the upload so the hot body carries it
+    # atomically — a crash right after the upload still leaves a body that
+    # ages from the restore, never one the next pass re-archives instantly.
+    body["restored_at"] = _now_iso()
     task_path = remote.task_remote_path(tid)
     if not remote.upload_json(body, task_path, backend=backend):
         _err(f"Failed to restore body for {tid!r}.")
         return 1
     if remote.stat(task_path, backend=backend) is None:
         _err(f"Restore of {tid!r} did not verify; left archive shard intact.")
+        return 1
+    # Hot copy verifiably landed — only now is the cold-side delete safe.
+    try:
+        body_deleted = remote.delete(archive_path, backend=backend)
+    except Exception:
+        body_deleted = False
+    if not body_deleted:
+        _err(f"Restored {tid} to {task_path}, but the archive body at "
+             f"{archive_path} could not be deleted — index shard kept; re-run "
+             "restore to finish the move (otherwise the next retention pass "
+             "would re-archive the stale cold copy).")
         return 1
     remote.delete(remote.archive_index_path(tid), backend=backend)
     _info(f"Restored {tid} to {task_path}. Run reconcile to re-incorporate into views.")
