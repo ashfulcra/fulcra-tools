@@ -53,6 +53,37 @@ path, so the happy path costs no extra spawns.
   genuinely fresh/empty bus (index confirmed absent, bus reachable) is not
   degraded and reconciles as before.
 
+### Write path uploads only the views that actually changed
+
+**Why (2026-06-10 live incident):** `_write_task_and_views` rebuilds ALL views
+and uploaded every one (~55 on the live bus: per-agent views for 33
+identities, inboxes, workstreams, needs-attention, board) through the upload
+pool on EVERY write — a fan-out that scales with fleet size while a
+`tell`/`update`/`done` changes ~5 views. Under backend 504-weather (1–16s per
+op), 50+ uploads per logical write meant every write ended "Task written,
+views failed: [~50 names]" → NeedsReconcile, and reconcile's repair pass (the
+same burst shape) couldn't drain — the repair backlog grew 67→95 across three
+runs.
+
+**What:** each view's content is fingerprinted (sha256 over the exact
+serialization `upload_json` sends — `store.serialize_json`, factored out and
+shared so the two can't drift — with the per-rebuild top-level
+`updated_at`/`generated_at` stamps excluded, since they change on every
+rebuild even when content doesn't) and the upload is skipped when the digest
+matches the fingerprint recorded at the last **confirmed** upload.
+Fingerprints are local-only per-host bookkeeping
+(`<cache>/view-fingerprints/`), written **only on upload success** —
+deliberately NOT derived from the local view cache, which is written even for
+failed uploads (so local readers see the freshest build) and therefore cannot
+prove the remote is current. A failed view keeps its stale fingerprint and is
+re-attempted on the next write; reconcile's repair pass uses the same skip and
+records fingerprints on its own successful uploads, so a repaired view isn't
+pointlessly re-uploaded by the next write. The `generated_at`-stamped
+freshness beacons (`views/summaries.json`) always upload so the
+`FULCRA_COORD_VIEW_STALE_MIN` read guard never trips on a quiet-but-healthy
+bus. Escape hatch: `FULCRA_COORD_VIEW_SKIP_UNCHANGED=0` restores
+upload-everything.
+
 ### Transport timeout defaults raised to match real latency
 
 **Why (2026-06-11 root cause):** measured platform latency for fulcra-api calls

@@ -56,6 +56,10 @@ from fulcra_coord_files.store import (  # noqa: F401  (re-exported for callers +
     download,
     download_json,
     list_files,
+    # serialize_json is the wire serialization upload_json sends; the
+    # writepipe/reconcile skip-unchanged view fingerprint MUST hash this exact
+    # serialization (see store.serialize_json for the drift rationale).
+    serialize_json,
     stat,
     stat_changed,
     upload,
