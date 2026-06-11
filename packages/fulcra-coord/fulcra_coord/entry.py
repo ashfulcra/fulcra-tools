@@ -489,6 +489,14 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="VERSION",
                     help="Optional compatibility floor: the oldest version "
                          "still expected to read the bus correctly")
+    # 2026-06-11 bug hunt C8 (a): announcing a dev/prerelease build silently
+    # froze fleet self-update (hosts can't compare non-X.Y.Z versions), so
+    # announce-version now refuses them unless this explicit override is set.
+    sp.add_argument("--allow-prerelease", dest="allow_prerelease",
+                    action="store_true", default=False,
+                    help="Announce a non-X.Y.Z (dev/prerelease) version "
+                         "anyway — hosts will NOT update toward it; they "
+                         "mark themselves stale instead. Loudly warned.")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- health ----
