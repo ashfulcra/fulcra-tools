@@ -59,7 +59,7 @@ green — don't hand it back to the author and wait (that round-trip stalls
 cross-agent reviews); if the **reviewer pushed fixes**, the author (or a second
 reviewer) signs off on those before merge. **Hard floor: never merge your own
 unreviewed code** (Codex → a Claude reviews its work). Routing: non-Arc Claude →
-`codex:Mac.localdomain:main`; Arc → `claude-code:ArcBot:Arc-Code-Review`; Codex's
+`Ashs-MBP-Work:Codex-Review-Workbook`; Arc → `claude-code:ArcBot:Arc-Code-Review`; Codex's
 own → a live Claude. No reviewer live → ping the operator (`fulcra-coord block
 --on-user`); never merge unreviewed. (Co-located agents + Codex often share one
 GitHub account, so GitHub "Approve" can no-op — that's why the handshake lives on
