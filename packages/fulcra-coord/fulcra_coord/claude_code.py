@@ -367,8 +367,11 @@ def install_claude_code(*, scope: str = "global", uninstall: bool = False,
         # into the materialized scripts, so the hooks work under uv-tool /
         # source installs where a bare `fulcra-coord` is not on PATH. The
         # committed template + parity copies keep the literal placeholder.
+        # PLACEHOLDER_ARGV is deliberately NOT re-imported here — the
+        # module-level import (re-exported for adapter/test use) already
+        # binds it; a local import would just shadow that name.
         from .cli_invocation import (
-            resolve_cli_argv, resolve_cli_command, materialize_argv, PLACEHOLDER_ARGV,
+            resolve_cli_argv, resolve_cli_command, materialize_argv,
         )
         argv = resolve_cli_argv()
         # Display string for the plan (shell-quoted); the scripts get the array.
