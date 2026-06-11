@@ -402,6 +402,19 @@ def _write_task_and_views(
     # (never on failure), so a failed view keeps mismatching and is retried on
     # the next write. FULCRA_COORD_VIEW_SKIP_UNCHANGED=0 restores the old
     # upload-everything behavior.
+    #
+    # DIVISION OF LABOR with reconcile (2026-06-11 review finding): even a
+    # success-only fingerprint proves only what THIS HOST last uploaded — it
+    # can never prove the remote's CURRENT content, because the store has no
+    # compare-and-swap and views are shared mutable paths another host can
+    # overwrite after our digest was recorded. The write path accepts that
+    # bounded staleness: it is the hot path, it skips unchanged views (the
+    # ~10x fan-out cut), and it is fully correct in the single-host case.
+    # Reconcile (cmd_reconcile's view pool) is the cross-host drift REPAIR: it
+    # always re-uploads every rebuilt view, never honoring the skip, so a view
+    # clobbered by another host is re-asserted within one reconcile cadence
+    # (~20 min). Do not "optimize" reconcile back onto this skip — that would
+    # make cross-host clobbers permanent (the repair path would skip too).
     view_items = list(all_views.items())
     view_failures = []
     skip_unchanged = _view_skip_enabled()

@@ -69,20 +69,32 @@ runs.
 serialization `upload_json` sends — `store.serialize_json`, factored out and
 shared so the two can't drift — with the per-rebuild top-level
 `updated_at`/`generated_at` stamps excluded, since they change on every
-rebuild even when content doesn't) and the upload is skipped when the digest
-matches the fingerprint recorded at the last **confirmed** upload.
-Fingerprints are local-only per-host bookkeeping
+rebuild even when content doesn't) and the **write path's** upload is skipped
+when the digest matches the fingerprint recorded at the last **confirmed**
+upload. Fingerprints are local-only per-host bookkeeping
 (`<cache>/view-fingerprints/`), written **only on upload success** —
 deliberately NOT derived from the local view cache, which is written even for
 failed uploads (so local readers see the freshest build) and therefore cannot
 prove the remote is current. A failed view keeps its stale fingerprint and is
-re-attempted on the next write; reconcile's repair pass uses the same skip and
-records fingerprints on its own successful uploads, so a repaired view isn't
-pointlessly re-uploaded by the next write. The `generated_at`-stamped
-freshness beacons (`views/summaries.json`) always upload so the
-`FULCRA_COORD_VIEW_STALE_MIN` read guard never trips on a quiet-but-healthy
-bus. Escape hatch: `FULCRA_COORD_VIEW_SKIP_UNCHANGED=0` restores
-upload-everything.
+re-attempted on the next write. The `generated_at`-stamped freshness beacons
+(`views/summaries.json`) always upload so the `FULCRA_COORD_VIEW_STALE_MIN`
+read guard never trips on a quiet-but-healthy bus. Escape hatch:
+`FULCRA_COORD_VIEW_SKIP_UNCHANGED=0` restores upload-everything.
+
+**Division of labor — the write path skips, reconcile never does (2026-06-11
+review finding):** even a success-only fingerprint proves only what *this
+host* last uploaded — never the remote's *current* content, because the store
+has no compare-and-swap and views are shared mutable paths another host can
+overwrite after the digest was recorded. A skip on the repair path would make
+such a cross-host clobber permanent: the clobbered host rebuilds identical
+content, matches its own fingerprint, and skips forever. So the **write path**
+keeps the skip (hot path, single-host correct, the ~10× fan-out cut) and
+accepts *bounded* staleness under cross-host drift, while **reconcile**
+authoritatively re-uploads every rebuilt view — never honoring the skip — so
+any clobbered view is re-asserted within one reconcile cadence (~20 min), the
+pre-change status quo for repair. Reconcile still records fingerprints on its
+successful uploads, refreshing the write path's skip baseline so the next
+write doesn't re-upload what reconcile just confirmed.
 
 ### Transport timeout defaults raised to match real latency
 

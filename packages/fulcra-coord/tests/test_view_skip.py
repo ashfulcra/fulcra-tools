@@ -210,8 +210,18 @@ def test_failed_view_is_reattempted_even_when_content_unchanged(coord_backend):
 
 
 # ---------------------------------------------------------------------------
-# Reconcile repair: writes fingerprints on its successful uploads
+# Reconcile repair: ALWAYS uploads every view, records fingerprints on success
 # ---------------------------------------------------------------------------
+#
+# DIVISION OF LABOR (2026-06-11 review finding): the success-only fingerprint
+# proves only what THIS HOST last uploaded — never the remote's CURRENT
+# content (no compare-and-swap in the store; views are shared mutable paths
+# another host can clobber after our digest was recorded). So the WRITE path
+# skips unchanged views (hot path, single-host correct), while RECONCILE never
+# skips: it authoritatively re-asserts every rebuilt view, bounding cross-host
+# view drift to one reconcile cadence. If reconcile honored the skip too, a
+# cross-host clobber would persist indefinitely — the repair path would skip
+# right alongside the write path. These tests pin both halves.
 
 def test_reconcile_repair_updates_fingerprints_then_write_skips(coord_backend):
     t1, t2 = _make_t1(), _make_t2()
@@ -224,7 +234,8 @@ def test_reconcile_repair_updates_fingerprints_then_write_skips(coord_backend):
     assert markers, "partial write must leave a needs_reconcile marker"
 
     # Reconcile (no failures now) must re-upload the failed view and record
-    # its fingerprint; views already confirmed on the remote are skipped.
+    # its fingerprint. As the cross-host repair path it uploads EVERY view —
+    # never trusting a local fingerprint to vouch for remote state.
     rec = UploadRecorder()
     with mock.patch.object(remote, "upload_json", rec):
         rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
@@ -236,18 +247,21 @@ def test_reconcile_repair_updates_fingerprints_then_write_skips(coord_backend):
     assert [m for m in cache.list_op_markers() if m.get("needs_reconcile")] == []
 
     # A subsequent write that does not change the index skips it — the
-    # reconcile-written fingerprint counts as a confirmed upload.
+    # reconcile-written fingerprint counts as a confirmed upload. This is the
+    # reconcile -> write fingerprint HANDOFF: reconcile's successes refresh
+    # the write path's skip baseline.
     rec2 = _write(_touch(t2), coord_backend)
     assert index_path not in rec2.view_uploads()
     assert set(rec2.view_uploads()) == {_view_path(n) for n in T2_CHANGED_VIEWS}
 
 
-def test_reconcile_skips_unchanged_views_but_keeps_summaries_beacon(coord_backend):
-    """Back-to-back reconciles with nothing changed: the second tick skips the
-    content-identical views BUT must still upload the summaries aggregate —
-    its ``generated_at`` is the freshness beacon the stale-view read guard
-    (FULCRA_COORD_VIEW_STALE_MIN) checks; skipping it would age the stamp and
-    push every reader onto the slow direct-listing fallback on a quiet bus."""
+def test_reconcile_always_uploads_all_views(coord_backend):
+    """Back-to-back reconciles with nothing changed: the second tick STILL
+    uploads every view. Reconcile is the authoritative re-assert of the bus's
+    read surface — its job is repairing remote drift this host cannot observe
+    (the fingerprint store has no way to know another host clobbered a view),
+    so it must not skip even content-identical rebuilds. The hot-path upload
+    cut lives entirely on the write side."""
     _write(_make_t1(), coord_backend)
     rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
     assert rc == 0
@@ -256,9 +270,50 @@ def test_reconcile_skips_unchanged_views_but_keeps_summaries_beacon(coord_backen
     with mock.patch.object(remote, "upload_json", rec):
         rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
     assert rc == 0
-    task_views = [p for p in rec.view_uploads()
-                  if p != remote.presence_view_path()]
-    assert task_views == [_view_path("summaries")]
+    task_views = {p for p in rec.view_uploads()
+                  if p != remote.presence_view_path()}
+    # T1-only topology: all 9 views upload (the 11-view set minus T2's
+    # workstream/agent views), unchanged or not.
+    assert task_views == {_view_path(n) for n in ALL_VIEWS_BOTH_TASKS
+                          - {"workstreams/beta", "agents/agent-b"}}
+
+
+def test_reconcile_repairs_view_clobbered_by_another_host(coord_backend):
+    """THE DRIFT-REPAIR PIN (the 2026-06-11 review scenario, end to end):
+
+    host A records fingerprints at upload time; host B then overwrites a
+    shared view path; A's fingerprint still matches A's local rebuild, so
+    A's WRITE path skips — the stale remote view survives the write (that is
+    the accepted, bounded staleness). A's next RECONCILE must repair it:
+    upload despite the matching fingerprint and restore the rebuilt content."""
+    t1, t2 = _make_t1(), _make_t2()
+    _write(t1, coord_backend)
+    _write(t2, coord_backend)  # all 11 views remote + fingerprinted (host A)
+
+    # Host B clobbers agents/agent-b on the shared remote. The fake backend
+    # stores uploads as files under FULCRA_FAKE_ROOT, so a direct file write
+    # IS another writer mutating the shared path behind A's back.
+    victim = "agents/agent-b"
+    victim_file = (Path(os.environ["FULCRA_FAKE_ROOT"]) /
+                   _view_path(victim).lstrip("/"))
+    clobber = json.dumps({"clobbered_by": "host-b", "summaries": []})
+    victim_file.write_text(clobber)
+
+    # A's next write: a T1-only touch leaves agents/agent-b content-identical
+    # to A's fingerprint, so the write path SKIPS it — and the clobber
+    # survives. This assertion documents the accepted bounded staleness, not
+    # a bug: the write path cannot see remote drift without a per-view stat.
+    rec = _write(_touch(t1), coord_backend)
+    assert _view_path(victim) not in rec.view_uploads()
+    assert victim_file.read_text() == clobber
+
+    # A's next reconcile: no skip on the repair path — the clobbered view is
+    # re-uploaded and the remote again carries A's rebuilt content.
+    rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+    assert rc == 0
+    repaired = json.loads(victim_file.read_text())
+    assert "clobbered_by" not in repaired
+    assert repaired.get("agent") == "agent-b"
 
 
 # ---------------------------------------------------------------------------
