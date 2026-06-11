@@ -335,18 +335,13 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
         roles = sorted(set(_read_own_capabilities(me, backend=backend))
                        | set(roles))
 
-    # VERSION SELF-INCORPORATION (operator directive 2026-06-10: "i'm not
-    # going to go around and wake the entire fleet for each incremental
-    # upgrade"): check the bus version pointer and update BEFORE the presence
-    # write, so the roster reflects post-update staleness. UNthrottled here —
-    # a fresh session must never boot stale because a tick checked recently.
-    # If an update ran it takes effect next invocation (no re-exec); if this
-    # host is behind and COULDN'T update, the stale marker renders as a
-    # '(vX behind canonical Y)' summary suffix — staleness stays VISIBLE on
-    # the roster (the spec's degrade-gracefully rail). Doubly guarded: the
-    # callee never raises, and this block must never fail a session boot.
+    # Staleness suffix from the PERSISTED marker (2026-06-11 bug hunt S2):
+    # read BEFORE the presence write so a host already known-behind renders
+    # '(vX behind canonical Y)' on the roster THIS connect. A marker written
+    # by this connect's own update attempt (below, AFTER the presence write)
+    # rides the FOLLOWING connect/heartbeat — the marker file persists state
+    # across invocations precisely so the suffix never needs to block boot.
     try:
-        _selfupdate.maybe_self_update(backend=backend)
         stale = _selfupdate.stale_summary_suffix()
         if stale:
             summary = f"{summary} {stale}".strip()
@@ -377,6 +372,25 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
             _continuity_ops.print_role_resume(role_name, backend=backend)
         except Exception:
             pass
+
+    # VERSION SELF-INCORPORATION (operator directive 2026-06-10: "i'm not
+    # going to go around and wake the entire fleet for each incremental
+    # upgrade"): check the bus version pointer and update if behind.
+    # UNthrottled on the manifest CHECK — a fresh session must never boot
+    # stale because a tick checked recently (attempts toward a canonical a
+    # recent try failed to reach ARE throttled — selfupdate S1 (c)). Runs
+    # AFTER the presence write (2026-06-11 bug hunt S2): the update step can
+    # legitimately take minutes (git pull + a cold uv build, bounded 300s),
+    # and running it first left the booting session INVISIBLE on the roster
+    # for that whole window. Presence is the boot-critical write; any stale
+    # marker this attempt leaves surfaces as the summary suffix on the NEXT
+    # connect/heartbeat (read above). If an update ran it takes effect next
+    # invocation (no re-exec). Doubly guarded: the callee never raises, and
+    # this block must never fail a session boot.
+    try:
+        _selfupdate.maybe_self_update(backend=backend)
+    except Exception:
+        pass
 
     # Self-healing listener re-arm (spec 2026-06-09): connect runs on every
     # session start, so this is the idempotent "heal a dead listener" hook.
