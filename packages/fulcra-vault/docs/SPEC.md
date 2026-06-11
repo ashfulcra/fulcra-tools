@@ -1,9 +1,10 @@
 # fulcra-vault — validated design spec (2026-06-11)
 
-Status: design locked with Ash in-session 2026-06-11 (write model: owned
-sections + LWW; retrieval: map-note + link-following; human surface: real
-Obsidian via local mirror; structure: interview-driven, fully generic).
-Pre-implementation review artifact for Ashs-MBP-Work:Codex-Review-Workbook.
+Status: design locked with Ash in-session 2026-06-11, then amended after a
+deep-research pass over field practice (OpenClaw memory-wiki, claude-obsidian
+~6.5k stars, obsidian-claude-code-mcp, mcpvault; 10 adversarially-verified
+findings — see Research notes at bottom). Pre-implementation review artifact
+for Ashs-MBP-Work:Codex-Review-Workbook.
 
 ## What this is
 
@@ -25,6 +26,14 @@ vaults shaped like their answers.
 Companion to `fulcra-prefs` (same store patterns, same tier model, same
 onboarding family: fulcra-onboarding → fulcra-prefs → fulcra-vault).
 
+**Structural decision (made explicit after research):** the vault IS the
+durable store — there is no live memory engine behind it compiling a
+projection (OpenClaw's memory-wiki layers a compiled vault over a separate
+recall/promotion engine; we deliberately don't). Fulcra's typed engines
+(prefs signals, annotations) own their domains; the vault owns prose truth
+directly. If a recall/ranking engine ever emerges, it layers OVER the vault,
+not under it.
+
 ## Architecture
 
 ### Storage: plain markdown in the file library
@@ -39,6 +48,14 @@ onboarding family: fulcra-onboarding → fulcra-prefs → fulcra-vault).
   version, the structure spec from the interview, created/updated stamps.
 - History/undo = the file library's native versioning. No separate index
   files as source of truth; the link index is derived, never authoritative.
+- **Obsidian-grade conventions** (per OpenClaw's published obsidian-mode
+  rules): stable filenames; frontmatter kept Dataview-queryable (flat
+  scalar/list keys, ISO dates); **no rename without link repair** — v1 ships
+  `rename <note> <new>` that rewrites all referring wikilinks in one
+  operation, and `doctor` flags manual renames via dangling links.
+- **Vault-level operations log**: `vault/LOG.md`, append-only, one line per
+  CLI mutation (who/what/when) — the audit trail the per-note logs can't
+  give (field precedent: claude-obsidian's wiki/log.md).
 
 ### Write model: owned sections + last-writer-wins
 
@@ -52,16 +69,33 @@ Notes are mutable files; safety is conventions enforced by the CLI:
   - **shared log** — every note ends with `## Log`, append-only; any agent
     appends one-line dated entries via `append-log`. Appends never rewrite
     existing content.
-- Whole-file writes are last-writer-wins; the losing version survives in
-  file history. Frontmatter `updated-by` + `updated-at` make races visible.
+- **Per-note advisory locks for agent writes** (research finding: the only
+  mechanical concurrency answer deployed in the field — claude-obsidian v1.7's
+  per-file locks with stale reaping; nobody ships merge semantics).
+  `write-section`/`append-log` acquire `vault/.locks/<note>.lock` (holder id +
+  timestamp), self-reap stale locks after 120 s, fail fast with a retry hint
+  if held. Locks are advisory — the mirror and humans ignore them.
+- Whole-file LWW remains only at the **human-mirror sync boundary**; the
+  losing version survives in file history. NOTE: LWW-with-dual-preservation
+  at this boundary is novel relative to field practice (the field locks or
+  serializes) — the conflict tests in Testing are therefore load-bearing.
+- **Frontmatter is validated before every write** (field headline risk is
+  frontmatter corruption): the CLI parses YAML, applies changes to parsed
+  structure, re-serializes only changed keys, and refuses writes that would
+  emit invalid YAML. Section edits are targeted mutations (unique-match
+  replace within the owned region), never whole-file rewrites.
 - Human edits via the mirror are exempt from ownership rules (the user owns
   everything); the sync layer stamps them `updated-by: human`.
 
 ### Retrieval: map note + link-following
 
-- `vault/MAP.md` is the single injected entry point — the user's taxonomy
-  rendered as curated wikilink lists ("hot" items first), small enough to
-  inject whole (target < 2 KB; `doctor` warns beyond it).
+- Injection is **token-cost tiered** (field-validated: claude-obsidian's
+  hot→index→sub-index→pages hierarchy): `vault/HOT.md` — a ~500-word
+  auto-curated hot cache (active items, standing corrections, recent
+  decisions) — is injected at every session start; `vault/MAP.md` — the full
+  taxonomy as curated wikilink lists — is the second tier, injected when
+  small enough (target < 2 KB) or fetched on demand. `doctor` warns when
+  either exceeds budget.
 - Session start (hook or skill step): inject MAP.md. Working on something
   mapped? `fulcra-vault read <note> [--with-backlinks]` pulls the note and,
   optionally, one hop of backlinks (titles + first lines, not full bodies).
@@ -92,10 +126,14 @@ Notes are mutable files; safety is conventions enforced by the CLI:
 
 ### First-run interview → structure spec (the generalization mechanism)
 
-- The **skill** opens with an interview (agent-led, conversational, in the
-  fulcra-onboarding voice): what do you do; which assistants/agents do you
-  use and for what; what knowledge should outlive a session; what's
-  off-limits or restricted; what belongs at the top of your map.
+- The **skill** opens with a deliberately SHORT interview (field precedent:
+  claude-obsidian's one-question scaffold + methodology modes beats long
+  questionnaires): one anchor question ("what should this vault remember for
+  you?"), one structure pass where the agent proposes a taxonomy adapted
+  from the archetype references and the user edits it, and one exclusions
+  question (what's off-limits — our consent differentiator, not present in
+  any field precedent). Everything else is inferred and adjustable later via
+  `restructure`.
 - The interview produces a **structure spec** (JSON): ordered sections, each
   `{slug, title, description, seed_notes[]}`, plus `exclusions[]` (paths/
   topics agents must not write) and `map_highlights[]`.
@@ -147,8 +185,10 @@ spooling where applicable (sync retries, never crashes the daemon).
 - Sync conflict: LWW + dual preservation (above). Sync crash mid-run: state
   file written atomically last; next run reconverges from hashes.
 - Broken wikilinks: `doctor` reports; never auto-deleted.
-- Map > size budget: `doctor` warns; injection truncates at section
-  boundaries with a "(map truncated — run fulcra-vault map)" marker.
+- HOT/MAP > size budget: `doctor` warns; injection truncates at section
+  boundaries with a loud "(truncated — run fulcra-vault map)" marker. Never
+  truncate silently — the field's documented bug (openclaw#71782, MEMORY.md
+  bootstrap truncation) is silent drops that users discover weeks later.
 - A note matching an exclusion: `write-section`/`append-log` refuse with an
   actionable error.
 - Missing vault (not onboarded): every read command exits 0 with empty
@@ -176,3 +216,18 @@ plugin (the mirror makes it unnecessary for v1).
 
 Isolation: `packages/fulcra-vault/**` on branch `claude-code/fulcra-vault`,
 worktree `fulcra-tools-vault`, PR + adversarial review per the global rule.
+
+## Research notes (2026-06-11 deep-research pass, 10 verified findings)
+
+Field practice validates: vault-as-agent-surface (4 independent integration
+styles incl. OpenClaw's first-party memory-wiki with `renderMode: obsidian`),
+owned-sections (OpenClaw `preserveHumanBlocks`), map-note + link-following
+retrieval over RAG-first (claude-obsidian's tiered hot→index→pages; BM25 only
+as supplement), local-mirror-to-real-Obsidian, and (thinly, one precedent)
+interview-driven scaffolding. Field contradicts: nobody ships LWW merge
+semantics — concurrency is handled by per-file advisory locks w/ stale
+reaping or whole-pipeline serialization; our LWW-at-the-mirror-boundary is
+novel and tested accordingly. Stolen outright: hot-cache injection tier,
+AST-validated frontmatter writes, targeted section mutation, non-silent
+truncation budgets, vault-level append-only ops log, Dataview-compatible
+frontmatter, rename-with-link-repair, per-note advisory locks.
