@@ -388,8 +388,8 @@ def _undelivered_directive_check(
 
     REPORT-ONLY and best-effort, mirroring ``_event_parity_check`` /
     ``_event_dual_write_health`` / ``_directive_parity_check``: it NEVER mutates a
-    task or view, NEVER reroutes (rerouting to a live role-holder is a separate
-    later phase), and the OUTER try/except guarantees a malformed body or a
+    task or view, NEVER reroutes (rerouting to a live role-holder is
+    deliberately out of scope here), and the OUTER try/except guarantees a malformed body or a
     presence-load failure can never raise into reconcile or change its exit code.
     On any internal error it returns a valid empty report.
 
@@ -603,10 +603,10 @@ def _event_parity_check(
 ) -> dict:
     """Compare each task snapshot against the fold of its event log.
 
-    Phase-1 safety net: surfaces drift as health debt (the mutable file is
-    still authoritative, so drift is REPORTED, never acted on).
+    Safety net for the event dual-write: surfaces drift as health debt (the
+    mutable file stays authoritative, so drift is REPORTED, never acted on).
 
-    Phase-2a broadening: when ``events.fold_is_complete(folded)`` is True
+    When ``events.fold_is_complete(folded)`` is True
     (at least one full-task snapshot event has been applied), the check
     compares ALL durable task fields — not just status — giving a precise
     whole-task parity signal.
@@ -615,7 +615,7 @@ def _event_parity_check(
     complete, the check no longer compares status alone.  It compares every field
     the fold ACTUALLY carries (``set(folded.keys()) - ignore``) against the file,
     but ONLY those fields — a field the fold never saw is skipped, so genuinely
-    partial pre-migration payloads can't false-positive.  status is one of the
+    partial older-CLI delta payloads can't false-positive.  status is one of the
     fold's keys, so the original status drift is still caught.
 
     Root cause C1 — ack divergence (report-only).  The AUTHORITATIVE ack set for a
@@ -630,7 +630,8 @@ def _event_parity_check(
     ``ack_drift_task_ids`` AND folded into ``drift_task_ids`` so the flip-readiness
     gate (drift>0) trips.  A missing / old-bus summaries view degrades to no
     ack-drift, never raises.  This is report-only; the durable write-path fix that
-    makes the fold carry every ack is deferred to a later phase.
+    makes the fold carry every ack is deliberately deferred (the ack sub-log
+    union into summaries covers the read side meanwhile).
 
     Fields excluded from the full-task comparison (the ignore-set):
 
@@ -868,16 +869,17 @@ def _directive_parity_check(
 ) -> dict:
     """Compare each first-class directive record against its back-ref task.
 
-    Phase 3b Task 4 safety net — the strangler-fig dual-write writes a
-    ``directives/<id>.json`` LWW snapshot mirroring each directive-creating task
-    (id ``DIR-T-<task_id>``), but NOTHING reads the directive store for
-    correctness yet (the legacy task-with-assignee stays authoritative). This
+    Safety net for the directive dual-write — every directive-creating command
+    writes a ``directives/<id>.json`` LWW snapshot mirroring its task (id
+    ``DIR-T-<task_id>``). The TASK record stays authoritative for task state,
+    but the mirrored loop records carry coordination state (board / digest /
+    review-done / health read them), so silent divergence matters. This
     sub-pass folds the STORED directive record against the EXPECTED mirror of its
     current back-ref task and surfaces divergence as health debt — REPORT-ONLY,
     exactly like ``_event_parity_check``: drift is recorded, never acted on, and
     a failure here can never change reconcile's exit code or mutate anything.
 
-    THE TOP-LEVEL-ONLY FILTER (load-bearing). ``remote.directives_prefix()`` now
+    THE TOP-LEVEL-ONLY FILTER (load-bearing). ``remote.directives_prefix()``
     contains SUB-LOG SUBTREES as well as top-level records:
 
       * top-level record : ``directives/<id>.json``
@@ -1064,7 +1066,7 @@ def _loop_health_check(
     ``open_loops`` is |awaiting_me| + |awaiting_others| and ``overdue`` counts
     the overdue subset of ``awaiting_others`` — the loops-never-ANSWERED
     counterpart to the undelivered (never-ARRIVED) check beside it in the
-    health record. ``out_of_band`` (phase 2) counts the awaiting_others
+    health record. ``out_of_band`` counts the awaiting_others
     subset whose EVIDENCE sub-log is nonempty: a forge-mirrored answer exists
     off the bus, so the requester should close the loop explicitly, citing it
     (mirrored evidence never closes anything — fold_loop's invariant).
@@ -1134,12 +1136,12 @@ def _maybe_escalate_role_vacancy(
             return False   # uncertain claim: skip, never risk a double
         vacant_for = _age_str(status.get("vacant_since") or "")
         # 2026-06-11 bug hunt C3 (P1): this used to upload ONLY a first-class
-        # directives/<id>.json record — which NOTHING delivery-side reads for
-        # correctness yet (inbox / listener / SessionStart all fold over the
-        # legacy TASK set), so the maintainer was never actually told. Route
-        # through the legacy task path like every other directive creator
+        # directives/<id>.json record — which NOTHING delivery-side reads
+        # (inbox / listener / SessionStart all fold over the authoritative
+        # TASK set), so the maintainer was never actually told. Route
+        # through the task path like every other directive creator
         # (a proposed task assigned to the maintainer via the write pipeline)
-        # plus the standard Phase-3b dual-write mirror — the exact
+        # plus the standard directive dual-write mirror — the exact
         # writepipe+dual_write combination request-review uses (lifecycle's
         # cmd_tell can't be reused here without an args shim; the pipeline
         # call IS its machinery).
@@ -1796,11 +1798,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             listener_last_fire=listener_last_fire,
             bus_task_count=len(all_tasks),
         )
-        # Phase-1 event-parity sub-pass: fold each task's event log and compare
+        # Event-parity sub-pass: fold each task's event log and compare
         # status to the mutable snapshot. Best-effort — any error is swallowed and
         # the result, whether present or absent, NEVER changes the reconcile exit
         # code. Drift is recorded in the health record as health debt only; the
-        # mutable file remains authoritative until Phase 2. PERF: hand over the
+        # mutable file remains authoritative (the events read cutover is gated
+        # on sustained parity). PERF: hand over the
         # bodies this tick already loaded (no re-downloads) and the tick's
         # deadline (the pass samples + stops on a spent budget — see the check).
         try:
@@ -1838,12 +1841,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             loop_records = load_loop_records(backend=backend)
         except Exception:
             loop_records = None
-        # Phase 3b Task 4 directive-parity sub-pass: fold each first-class
-        # directive record against its back-ref task and surface divergence as
-        # health debt. REPORT-ONLY and best-effort — the directive store is not
-        # authoritative (nothing reads it for correctness), so any error is
-        # swallowed and the result, present or absent, NEVER changes reconcile's
-        # exit code. Wrapped exactly like the event-parity pass above.
+        # Directive-parity sub-pass: fold each first-class directive record
+        # against its back-ref task and surface divergence as health debt.
+        # REPORT-ONLY and best-effort — the task record stays authoritative for
+        # task state (the loop records carry coordination state), so any error
+        # is swallowed and the result, present or absent, NEVER changes
+        # reconcile's exit code. Wrapped exactly like the event-parity pass above.
         try:
             record["directive_parity"] = _directive_parity_check(
                 backend=backend, records=loop_records, all_tasks=all_tasks)

@@ -10,7 +10,9 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
-## [Unreleased] — transport timeout defaults raised to match real latency
+## [Unreleased]
+
+### Transport timeout defaults raised to match real latency
 
 **Why (2026-06-11 root cause):** measured platform latency for fulcra-api calls
 is 1–16s per operation (idle; worse under host CPU load). The previous defaults
@@ -24,7 +26,7 @@ outage. The backend was healthy throughout.
 `max(15, read)` → `max(60, read)`. Per-call slowness is the reconcile
 deadline's job to bound, not the per-op timeout's.
 
-## [Unreleased] — continuity integration: checkpoint refs ride the loops and roles
+### Continuity integration: checkpoint refs ride the loops and roles
 
 **Why:** spec `docs/superpowers/specs/2026-06-10-continuity-integration-design.md`.
 Two things changed: (1) the plan to move most sessions to the always-on
@@ -74,7 +76,7 @@ inline-payload fallback when the publish fails.
   records grow OPTIONAL additive `checkpoint_ref`/`checkpoint_inline` keys
   (the `_LOOP_KEYS` mixed-fleet floor: pre-continuity records stay valid).
 
-## [0.15.3 / Unreleased] — version self-incorporation: the fleet stays current from a bus pointer
+### Version self-incorporation: the fleet stays current from a bus pointer (version-stamped 0.15.3)
 
 **Why:** operator directive (2026-06-10): "i'm not going to go around and
 wake the entire fleet for each incremental upgrade." Every release needed a
@@ -116,7 +118,7 @@ gated/opt-in note), env opt-out `FULCRA_COORD_SELF_UPDATE=0`.
   is on 0.15.3+ (one last manual update) it incorporates every later
   release automatically.
 
-## [Unreleased] — host wake-exec: the listener can wake an agent runtime, not just notify
+### Host wake-exec: the listener can wake an agent runtime, not just notify
 
 **Why:** operator directive (2026-06-10): "that needs to be part of the
 product. this can't die if i do other stuff for a bit. the whole point was to
@@ -156,7 +158,7 @@ arms a listener rather than starting a runtime.
   a test driving a notify-inbox tick on an operator machine could read the
   REAL wake.json and spawn a REAL agent runtime mid-suite.
 
-## [Unreleased] — single task writes retry once and verify delivery (silent single-write loss)
+### Single task writes retry once and verify delivery (silent single-write loss)
 
 **Why:** Live evidence (2026-06-10, four occurrences in one evening): under
 backend write-throttling, single task/directive writes (`tell` / `later` /
@@ -194,7 +196,8 @@ attempt.
   backend fails every first upload, which would otherwise add ~70s of pure
   sleep to the suite); jitter-asserting tests patch `writepipe._retry_sleep`
   themselves.
-## [Unreleased] — roles as durable identity: registry, leases, vacancy escalation
+
+### Roles as durable identity: registry, leases, vacancy escalation
 
 **Why:** Sessions are ephemeral (Claude Code / Codex sessions die, sleep, get
 respawned) and identity drifts with them — directives addressed to dead
@@ -231,7 +234,8 @@ ephemeral lease on it.**
   + `role_ops.py` (best-effort I/O: claim/release/read + registry CRUD with
   verify-after-write), following the loops.py/loop_ops.py split and
   fitness-pinned the same way.
-## [Unreleased] — staleness-guarded reads: stale views fall back to direct listings
+
+### Staleness-guarded reads: stale views fall back to direct listings
 
 **Why:** Live 2026-06-10 evidence (the highest-severity find of that night's
 systematic debugging): every read surface (`inbox`, `presence`/liveness,
@@ -263,7 +267,8 @@ durable Tier-0 layer worked; the read path lied.
 - Degraded-not-blind floor: if the direct listing ALSO fails (or returns
   empty — indistinguishable from a backend without a working `list`), the
   stale view is still used, with a louder warn. Stale data beats no data.
-## [Unreleased] — reconcile view uploads retry once with jitter under burst throttling
+
+### Reconcile view uploads retry once with jitter under burst throttling
 
 **Why:** Live 0.15.0 evidence (two hosts): every `reconcile` tick was failing a
 ROTATING subset of view uploads under its parallel upload burst (run 1: 13
@@ -290,7 +295,7 @@ reconcile sat pinned at its ~90s deadline ceiling.
   (`status=view_upload_failed`) on each final view-upload failure, so a
   rotating-failure tick leaves a diagnosable trace, not just view names.
 
-## [Unreleased] — `resume` flags PRs you opened but never routed for review
+### `resume` flags PRs you opened but never routed for review
 
 **Why:** A reviewer can only act on a review that was *routed* — `request-review`
 creates a `kind:review` directive assigned to a live reviewer, which then shows
@@ -311,7 +316,7 @@ plate.
 - Rule (docs): opening a PR means running `request-review` — never leave a PR
   review as a free-text next_action, or it reaches no reviewer.
 
-## [Unreleased] — `install-openclaw` can bundle the durable bus-pickup path
+### `install-openclaw` can bundle the durable bus-pickup path
 
 **Why:** `install-openclaw` installed OpenClaw's lifecycle hooks, but a fresh
 OpenClaw agent still didn't *hear the bus* unless an operator separately ran
@@ -331,7 +336,7 @@ blocks run in all three modes (install, dry-run, uninstall) — previously the
 early `return 0` on dry-run/uninstall made even the existing `--with-plugin`
 block unreachable in those modes; that is now fixed too.
 
-## [Unreleased] — `ensure-codex-watch`: Codex coordination self-heals on every app start
+### `ensure-codex-watch`: Codex coordination self-heals on every app start
 
 **Why:** Codex's durable per-agent inbox listener was only ever installed if an
 operator manually ran `install-listener`. On a fresh Codex machine that never
@@ -617,6 +622,7 @@ timeline twice daily and on demand.
 All digest paths are best-effort: a failed read/marker/emit never raises into a
 scheduled tick. Datetime comparisons (the `since` window + due ranking) parse
 timestamps (consistent with the 0.5.x mixed-precision fix), never lexical compare.
+
 ## [0.5.6] — Debug sweep, rounds 2-3
 
 **Why:** a second adversarial pass focused on timestamp precision, malformed task
