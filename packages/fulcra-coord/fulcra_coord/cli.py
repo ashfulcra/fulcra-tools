@@ -506,7 +506,61 @@ def _reconcile_rebuild_source_preserving_acks(
     return rebuild_source
 
 
-def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
+#: Wall-clock seconds of headroom the parity pass leaves before reconcile's
+#: deadline — the _RETENTION_DEADLINE_HEADROOM_SECONDS discipline applied to the
+#: parity sub-pass: probing one more task (a listing + K shard downloads) is
+#: never worth blowing the tick's 90s ceiling; deferred tasks drain on the next
+#: tick's rotated window.
+_PARITY_DEADLINE_HEADROOM_SECONDS = 5.0
+
+
+def _parity_sample_size() -> int:
+    """Tasks probed per reconcile tick by the parity pass.
+
+    WHY SAMPLE AT ALL (measured): each probed task costs one event-prefix
+    listing plus one download per shard (~1.3s per subprocess). On the
+    production bus (~440 tasks) probing everything every 20-minute tick was
+    ~1,300+ spawns — the bulk of the measured 3,105-spawn reconcile. Drift is a
+    slow-moving diagnostic (report-only health debt), so a rotating window that
+    covers the full bus every ~ceil(N/sample) ticks (~9 at the default) loses
+    nothing but latency on a signal nobody acts on within an hour anyway.
+    ``FULCRA_COORD_PARITY_SAMPLE`` <= 0 disables sampling (probe everything)."""
+    return env_int("FULCRA_COORD_PARITY_SAMPLE", 50)
+
+
+def _parity_cursor_path():
+    """The rotation cursor's local path — in the cache dir beside the other
+    per-host bookkeeping (notified-state, op markers). Local-only: each host
+    rotates independently; two hosts sampling different windows only *improves*
+    fleet-wide coverage, so the cursor needs no bus coordination."""
+    return cache.cache_root() / "parity-cursor"
+
+
+def _read_parity_cursor() -> int:
+    """Best-effort cursor read; 0 on any miss/corruption (a reset cursor only
+    re-probes tasks sooner, never skips them forever)."""
+    try:
+        return int(_parity_cursor_path().read_text().strip())
+    except Exception:
+        return 0
+
+
+def _write_parity_cursor(value: int) -> None:
+    """Best-effort cursor persist (a bare int — no schema worth versioning) —
+    a failed write must never fail the pass (the next tick just re-probes the
+    same window)."""
+    try:
+        cache.cache_root().mkdir(parents=True, exist_ok=True)
+        _parity_cursor_path().write_text(str(int(value)))
+    except Exception:
+        pass
+
+
+def _event_parity_check(
+    all_tasks: Optional[list[dict[str, Any]]] = None, *,
+    backend: Optional[list[str]] = None,
+    deadline: Optional[float] = None,
+) -> dict:
     """Compare each task snapshot against the fold of its event log.
 
     Phase-1 safety net: surfaces drift as health debt (the mutable file is
@@ -558,16 +612,32 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     events were written before dual-write was introduced and are not drift by
     definition (they haven't been through the dual-write path yet).
 
-    The tasks prefix is ``{remote_root()}/tasks/`` and the events prefix is
-    ``{remote_root()}/events/tasks/`` — completely separate directory trees, so
-    listing the tasks prefix never returns event shards. The ``.json`` filter and
-    ``/events/`` guard are belt-and-suspenders against any future layout change.
+    PERF (2026-06-10 measured pass — this check was the single biggest cost in
+    the 3,105-spawn reconcile tick):
 
-    Cost: O(N) remote I/O — one ``download_json`` per task snapshot plus one
-    ``read_events`` (a ``list_json`` sweep) per task's event prefix. Acceptable
-    for a Phase-2a diagnostic on the current bus scale (reconcile already sweeps
-    all tasks).
+    * ``all_tasks`` — cmd_reconcile passes the bodies it ALREADY loaded, so the
+      check re-downloads nothing (~440 saved downloads/tick). The load fallback
+      (one ``tasks/`` listing + pooled body downloads) remains for direct
+      callers and tests; its tasks prefix is ``{remote_root()}/tasks/`` and the
+      events prefix ``{remote_root()}/events/tasks/`` — separate trees, so the
+      ``.json`` filter and ``/events/`` guard are belt-and-suspenders.
+    * SAMPLING — a rotating window of ``_parity_sample_size()`` tasks per tick
+      (cursor persisted locally), full-bus coverage every ~ceil(N/sample)
+      ticks. ``sampled`` reports the window size; ``tasks_total`` stays the
+      TRUE population so a reader can see the coverage ratio.
+    * DEADLINE — when reconcile passes its deadline, the pass stops probing
+      once the budget (minus headroom) is spent, mirroring ``_run_retention``;
+      unprobed tasks are counted in ``deferred`` and drain on later ticks'
+      rotated windows. ``deadline=None`` keeps the unbounded behaviour for
+      direct callers.
+    * POOLED — per-task probes run on a small thread pool (the
+      ``_load_all_tasks`` shape): each probe is an independent listing + shard
+      downloads with no shared mutable state.
+
+    Remaining cost: O(sample) remote I/O per tick — one event listing plus one
+    download per shard for each sampled task.
     """
+    import time
     # Union set of every task id that drifts for ANY reason (field/status drift
     # OR ack divergence). A task that drifts for multiple reasons is counted
     # ONCE here, so ``drift``/``drift_task_ids`` never double-count.
@@ -615,31 +685,65 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
     except Exception:
         summ_acks = {}
 
-    tasks_prefix = f"{remote.remote_root()}/tasks/"
-    task_paths = remote.list_files(tasks_prefix, backend=backend)
-    for path in task_paths:
-        # Only process actual task JSON files directly under tasks/ — skip
-        # anything that looks like an events shard or a non-JSON file.
-        if not path.endswith(".json"):
-            continue
-        if "/events/" in path:
-            continue
-        # Count every well-formed task file BEFORE the events gate, so
-        # tasks_total reflects the full bus task population (the denominator the
-        # flip gate's coverage check divides tasks_with_events by). A task with no
-        # events still counts toward the total — it just isn't compared.
-        snap = remote.download_json(path, backend=backend)
-        if not snap or "id" not in snap:
-            continue
-        tasks_total += 1
+    # Resolve the task BODIES. cmd_reconcile hands over the set it already
+    # loaded (zero extra I/O); the fallback for direct callers/tests is one
+    # ``tasks/`` listing plus pooled body downloads — same verdicts, just paid
+    # for locally instead of borrowed from the tick.
+    if all_tasks is None:
+        tasks_prefix = f"{remote.remote_root()}/tasks/"
+        try:
+            task_paths = [
+                p for p in remote.list_files(tasks_prefix, backend=backend)
+                # Only actual task JSON files directly under tasks/ — skip
+                # anything that looks like an events shard or a non-JSON file.
+                if p.endswith(".json") and "/events/" not in p
+            ]
+        except Exception:
+            task_paths = []
+        bodies: list[dict[str, Any]] = []
+        if task_paths:
+            workers = min(8, max(2, len(task_paths)))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                for snap in pool.map(
+                        lambda p: remote.download_json(p, backend=backend),
+                        task_paths):
+                    if snap and "id" in snap:
+                        bodies.append(snap)
+    else:
+        bodies = [t for t in all_tasks if isinstance(t, dict) and t.get("id")]
+
+    # tasks_total reflects the full bus task population (the denominator the
+    # flip gate's coverage check divides tasks_with_events by). A task with no
+    # events still counts toward the total — it just isn't compared.
+    tasks_total = len(bodies)
+
+    # SAMPLING: a deterministic rotation over the id-sorted population. The
+    # cursor persists locally so consecutive ticks tile the bus; sorting makes
+    # the window stable against listing order so rotation actually advances.
+    bodies.sort(key=lambda t: t["id"])
+    sample = _parity_sample_size()
+    if sample > 0 and len(bodies) > sample:
+        cursor = _read_parity_cursor() % len(bodies)
+        window = [bodies[(cursor + i) % len(bodies)] for i in range(sample)]
+    else:
+        cursor = None  # sampling inactive — no cursor to advance
+        window = bodies
+
+    budget_floor = (deadline - _PARITY_DEADLINE_HEADROOM_SECONDS
+                    if deadline is not None else None)
+
+    def _probe_one(snap: dict[str, Any]):
+        """One task's parity probe. Returns None when the tick budget is spent
+        (deferred — NOT checked), else (id, has_events, fold_complete,
+        drifted, ack_missing)."""
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            return None
         evs = _eventlog.read_events(snap["id"], backend=backend)
         if not evs:
-            continue  # not yet dual-written (pre-migration task) — not drift
-        checked += 1
+            # not yet dual-written (pre-migration task) — not drift
+            return (snap["id"], False, False, False, False)
         folded = _events.fold_task(evs)
         fold_complete = _events.fold_is_complete(folded)
-        if fold_complete:
-            folds_complete += 1
         if fold_complete:
             # Compare the durable task fields. Exclude bookkeeping the fold adds
             # (_applied_event_count) and fields that legitimately differ between a
@@ -647,8 +751,7 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             # move on every write, and the in-task events[] log grows independently.
             a = {k: v for k, v in folded.items() if k not in ignore}
             b = {k: v for k, v in snap.items() if k not in ignore}
-            if a != b:
-                drift_set.add(snap["id"])
+            drifted = a != b
         else:
             # delta-only: the fold is reconstructed from partial deltas, so only
             # compare fields the fold ACTUALLY carries (skip anything it never saw —
@@ -656,16 +759,44 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
             # Reuse the same ignore-set as the full-task branch. status is one of the
             # fold's keys, so the original status-only behaviour is still covered.
             keys = set(folded.keys()) - ignore
-            if any(folded.get(k) != snap.get(k) for k in keys):
-                drift_set.add(snap["id"])
-
+            drifted = any(folded.get(k) != snap.get(k) for k in keys)
         # C1: regardless of fold completeness, the fold must carry every durable
         # ack the summaries authority holds. If it's missing any, a post-flip read
         # would re-notify an already-acked directive — surface it (report-only).
-        missing = summ_acks.get(snap["id"], set()) - set(folded.get("acked_by") or [])
-        if missing:
-            ack_drift_ids_set.add(snap["id"])
-            drift_set.add(snap["id"])
+        ack_missing = bool(
+            summ_acks.get(snap["id"], set()) - set(folded.get("acked_by") or []))
+        return (snap["id"], True, fold_complete, drifted, ack_missing)
+
+    # POOLED probes (the _load_all_tasks pool shape): each probe is one listing
+    # + K shard downloads with no shared mutable state. pool.map preserves
+    # window order, so the deferred count below maps cleanly onto the window.
+    deferred = 0
+    results = []
+    if window:
+        workers = min(8, len(window))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_probe_one, window))
+    for res in results:
+        if res is None:
+            deferred += 1
+            continue
+        tid, has_events, fold_complete, drifted, ack_missing = res
+        if not has_events:
+            continue
+        checked += 1
+        if fold_complete:
+            folds_complete += 1
+        if drifted:
+            drift_set.add(tid)
+        if ack_missing:
+            ack_drift_ids_set.add(tid)
+            drift_set.add(tid)
+
+    # Advance the rotation by what was actually PROBED this tick, so a
+    # deadline-shortened window resumes where it stopped instead of skipping
+    # the deferred tail until the next full revolution.
+    if cursor is not None:
+        _write_parity_cursor((cursor + (len(window) - deferred)) % len(bodies))
 
     drift_task_ids = sorted(drift_set)
     ack_drift_task_ids = sorted(ack_drift_ids_set)
@@ -679,6 +810,11 @@ def _event_parity_check(*, backend: Optional[list[str]] = None) -> dict:
         "tasks_total": tasks_total,
         "tasks_with_events": checked,  # same as checked; named for the flip gate
         "folds_complete": folds_complete,
+        # PERF telemetry: window actually probed this tick + tasks the deadline
+        # gate pushed to a later tick. sampled < tasks_total means the coverage
+        # ratio above is per-revolution, not per-tick.
+        "sampled": len(window),
+        "deferred": deferred,
     }
 
 
@@ -1545,9 +1681,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # status to the mutable snapshot. Best-effort — any error is swallowed and
         # the result, whether present or absent, NEVER changes the reconcile exit
         # code. Drift is recorded in the health record as health debt only; the
-        # mutable file remains authoritative until Phase 2.
+        # mutable file remains authoritative until Phase 2. PERF: hand over the
+        # bodies this tick already loaded (no re-downloads) and the tick's
+        # deadline (the pass samples + stops on a spent budget — see the check).
         try:
-            parity = _event_parity_check(backend=backend)
+            parity = _event_parity_check(all_tasks, backend=backend,
+                                         deadline=deadline)
             record["event_parity"] = parity
         except Exception as _pe:
             # Best-effort, but NOT silent: a checker that eats its own errors

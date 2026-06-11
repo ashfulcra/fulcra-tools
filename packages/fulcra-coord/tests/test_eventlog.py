@@ -90,23 +90,25 @@ def _shard(task_id, eid):
 
 
 def test_read_events_warns_when_a_shard_fails_to_parse():
-    """D3: a shard that fails to parse to a dict is silently dropped by
-    list_json. A dropped *snapshot* shard could make the fold reconstruct
-    STALE state while fold_is_complete still returns True — a silent
-    correctness hazard. read_events must emit a best-effort warning naming the
-    task and the drop count when fewer shards parse than the store lists, while
+    """D3: a shard that fails to parse to a dict is silently dropped. A dropped
+    *snapshot* shard could make the fold reconstruct STALE state while
+    fold_is_complete still returns True — a silent correctness hazard.
+    read_events must emit a best-effort warning naming the task and the drop
+    count when fewer shards parse than the (single) listing returned, while
     STILL returning the good records unchanged."""
     listed = [
         "events/tasks/TASK-D3/aaa.json",
         "events/tasks/TASK-D3/bbb.json",
         "events/tasks/TASK-D3/ccc.json",  # this one fails to parse -> dropped
     ]
-    parsed = [
-        ("events/tasks/TASK-D3/aaa.json", _shard("TASK-D3", "aaa")),
-        ("events/tasks/TASK-D3/bbb.json", _shard("TASK-D3", "bbb")),
-    ]
+    parsed = {
+        "events/tasks/TASK-D3/aaa.json": _shard("TASK-D3", "aaa"),
+        "events/tasks/TASK-D3/bbb.json": _shard("TASK-D3", "bbb"),
+        "events/tasks/TASK-D3/ccc.json": None,  # unparseable JSON -> None
+    }
     with mock.patch.object(remote, "list_files", return_value=listed), \
-         mock.patch.object(remote, "list_json", return_value=parsed), \
+         mock.patch.object(remote, "download_json",
+                           side_effect=lambda p, **kw: parsed.get(p)), \
          mock.patch.object(eventlog.log, "warning") as warn:
         got = eventlog.read_events("TASK-D3")
 
@@ -124,12 +126,13 @@ def test_read_events_no_warning_when_all_shards_parse():
         "events/tasks/TASK-OK/aaa.json",
         "events/tasks/TASK-OK/bbb.json",
     ]
-    parsed = [
-        ("events/tasks/TASK-OK/aaa.json", _shard("TASK-OK", "aaa")),
-        ("events/tasks/TASK-OK/bbb.json", _shard("TASK-OK", "bbb")),
-    ]
+    parsed = {
+        "events/tasks/TASK-OK/aaa.json": _shard("TASK-OK", "aaa"),
+        "events/tasks/TASK-OK/bbb.json": _shard("TASK-OK", "bbb"),
+    }
     with mock.patch.object(remote, "list_files", return_value=listed), \
-         mock.patch.object(remote, "list_json", return_value=parsed), \
+         mock.patch.object(remote, "download_json",
+                           side_effect=lambda p, **kw: parsed.get(p)), \
          mock.patch.object(eventlog.log, "warning") as warn:
         got = eventlog.read_events("TASK-OK")
 
@@ -137,12 +140,30 @@ def test_read_events_no_warning_when_all_shards_parse():
     assert not warn.called, "no shard was dropped; warning must not fire"
 
 
-def test_read_events_warning_failure_never_breaks_the_read():
-    """The drop-detection is best-effort: if the extra list_files probe raises,
-    read_events must still return the parsed records (signal is never load-
-    bearing)."""
-    parsed = [("events/tasks/TASK-B/aaa.json", _shard("TASK-B", "aaa"))]
-    with mock.patch.object(remote, "list_files", side_effect=RuntimeError("boom")), \
-         mock.patch.object(remote, "list_json", return_value=parsed):
+def test_read_events_listing_failure_reads_as_no_events():
+    """A raising listing degrades to [] — the best-effort contract callers
+    (parity's "not yet dual-written" skip, the read cutover's file fallback)
+    rely on. read_events must never raise out of a broken store."""
+    with mock.patch.object(remote, "list_files", side_effect=RuntimeError("boom")):
+        assert eventlog.read_events("TASK-B") == []
+
+
+def test_read_events_one_failed_shard_download_never_breaks_the_read():
+    """A single raising shard download is dropped (and warned about) while the
+    healthy shards are still returned — per-shard isolation, never load-bearing."""
+    listed = [
+        "events/tasks/TASK-B/aaa.json",
+        "events/tasks/TASK-B/bbb.json",
+    ]
+
+    def flaky(path, **kw):
+        if path.endswith("bbb.json"):
+            raise RuntimeError("boom")
+        return _shard("TASK-B", "aaa")
+
+    with mock.patch.object(remote, "list_files", return_value=listed), \
+         mock.patch.object(remote, "download_json", side_effect=flaky), \
+         mock.patch.object(eventlog.log, "warning") as warn:
         got = eventlog.read_events("TASK-B")
     assert [r["event_id"] for r in got] == ["aaa"]
+    assert warn.called, "a dropped (raising) shard must still be surfaced"
