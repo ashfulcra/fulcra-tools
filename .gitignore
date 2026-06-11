@@ -26,3 +26,4 @@ packages/*/docs/superpowers/
 packages/menubar/build/
 packages/menubar/dist/
 packages/menubar/logs/
+.primitives-state/
