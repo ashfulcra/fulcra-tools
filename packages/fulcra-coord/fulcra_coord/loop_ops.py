@@ -198,15 +198,21 @@ def evidence_ids_for(
     get the candidate ids (my own open asks — a small set), then each
     candidate's evidence prefix is listed. Never one list per directive on
     the bus. Each probe is individually best-effort (a failed list reads as
-    "no evidence", never an error)."""
+    "no evidence", never an error).
+
+    LIST-ONLY (perf, 2026-06-11 loop-2 pass): only listing-nonemptiness is
+    consumed here, so the probe uses ``list_files`` — ``list_json`` would
+    also download every shard body (1 + K spawns per flagged loop, per
+    board/digest/tick render) just to discard them. Bodies are read
+    elsewhere via ``read_loop_evidence``."""
     evidence_ids: set[str] = set()
     for s in loops.awaiting_others(me, records, now=now):
         lid = s.get("id")
         if not lid:
             continue
         try:
-            if remote.list_json(remote.directive_evidence_prefix(lid),
-                                backend=backend):
+            if remote.list_files(remote.directive_evidence_prefix(lid),
+                                 backend=backend):
                 evidence_ids.add(lid)
         except Exception:
             continue   # best-effort: an unreadable prefix is "no evidence"

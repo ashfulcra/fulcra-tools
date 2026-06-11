@@ -63,6 +63,75 @@ def test_list_roles_ignores_lease_shards(coord_backend):
 
 
 # ---------------------------------------------------------------------------
+# load_roles_with_leases — the one-listing fold the read surfaces ride
+# (perf loop-2 #1; call counts pinned in test_perf_call_counts.py — these
+# pin its SEMANTICS, especially the F4 READ_ERROR discipline)
+# ---------------------------------------------------------------------------
+
+
+def test_load_roles_with_leases_pairs_each_role_with_its_sublog(coord_backend):
+    role_ops.upsert_role(schema.make_role("reviewer", "d"),
+                         backend=coord_backend)
+    role_ops.upsert_role(schema.make_role("deployer", "d"),
+                         backend=coord_backend)
+    role_ops.claim_role("reviewer", "a:h:r", backend=coord_backend)
+    role_ops.claim_role("reviewer", "b:h:r", backend=coord_backend)
+    out = role_ops.load_roles_with_leases(backend=coord_backend)
+    assert [(rec["name"], sorted(l["agent"] for l in leases))
+            for rec, leases in out] == [
+        ("deployer", []),          # confirmed-empty sub-log stays []
+        ("reviewer", ["a:h:r", "b:h:r"]),
+    ]
+
+
+def test_load_roles_with_leases_unreadable_shard_is_read_error(coord_backend,
+                                                               monkeypatch):
+    """F4 carried into the combined fold: a lease shard that was LISTED but
+    would not download makes THAT role's leases the READ_ERROR sentinel —
+    never [] (which folds to VACANT downstream). Sibling roles keep their
+    confirmed reads."""
+    role_ops.upsert_role(schema.make_role("reviewer", "d"),
+                         backend=coord_backend)
+    role_ops.upsert_role(schema.make_role("deployer", "d"),
+                         backend=coord_backend)
+    role_ops.claim_role("reviewer", "a:h:r", backend=coord_backend)
+    role_ops.claim_role("deployer", "c:h:r", backend=coord_backend)
+    real_dl = remote.download_json
+
+    def flaky(path, **kw):
+        if "/reviewer/leases/" in path:
+            return None   # listed shard, failed body read
+        return real_dl(path, **kw)
+
+    monkeypatch.setattr(remote, "download_json", flaky)
+    out = {rec["name"]: leases
+           for rec, leases in role_ops.load_roles_with_leases(
+               backend=coord_backend)}
+    assert out["reviewer"] is role_ops.READ_ERROR
+    assert [l["agent"] for l in out["deployer"]] == ["c:h:r"]
+
+
+def test_load_roles_with_leases_failed_listing_enumerates_nothing(
+        coord_backend, monkeypatch):
+    role_ops.upsert_role(schema.make_role("reviewer", "d"),
+                         backend=coord_backend)
+    monkeypatch.setattr(remote, "list_files",
+                        mock.Mock(side_effect=RuntimeError("bus down")))
+    assert role_ops.load_roles_with_leases(backend=coord_backend) == []
+
+
+def test_load_roles_with_leases_skips_escalation_markers(coord_backend):
+    role_ops.upsert_role(schema.make_role("reviewer", "d"),
+                         backend=coord_backend)
+    remote.upload_json(
+        {"role": "reviewer", "date": "2026-01-01"},
+        remote.role_escalation_marker_path("reviewer", "2026-01-01"),
+        backend=coord_backend)
+    out = role_ops.load_roles_with_leases(backend=coord_backend)
+    assert [(rec["name"], leases) for rec, leases in out] == [("reviewer", [])]
+
+
+# ---------------------------------------------------------------------------
 # Leases: per-agent shard, no clobber, self-registration
 # ---------------------------------------------------------------------------
 

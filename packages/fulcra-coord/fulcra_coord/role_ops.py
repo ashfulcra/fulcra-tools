@@ -82,6 +82,109 @@ def read_role(name: str, *, backend: Optional[list[str]] = None
         return READ_ERROR
 
 
+def load_roles_with_leases(
+    *, backend: Optional[list[str]] = None, include_leases: bool = True,
+) -> list[tuple[dict[str, Any], Any]]:
+    """Every TOP-LEVEL role registry record WITH its lease sub-log, from ONE
+    listing of the roles/ prefix: ``[(registry_record, leases), ...]`` sorted
+    by role name, where ``leases`` is the sorted shard list, ``[]`` for a
+    confirmed-empty sub-log, or :data:`READ_ERROR`.
+
+    FILTER BEFORE DOWNLOAD (perf, 2026-06-11 loop-2 pass): the read surfaces
+    (role health on every reconcile tick, the board's Roles section, ``roles``)
+    used to pay ``list_roles`` — ``remote.list_json`` over the whole prefix,
+    downloading every lease shard and escalation marker only to discard them —
+    PLUS one ``read_leases`` per role (a re-list and a re-download of the very
+    shards just thrown away). With R roles, L lease shards and E escalation
+    markers that was 1+R listings and R+2L+E downloads per render; this fold
+    is 1 listing and R+L downloads. The listing is partitioned by PATH first
+    (the load_loop_records rule): top-level ``<slug>.json`` = registry record,
+    ``<slug>/leases/*.json`` = lease shard, anything else (escalation markers,
+    future sub-logs) is never downloaded.
+
+    READ_ERROR DISCIPLINE PRESERVED (#171/F4 — load-bearing): a lease shard
+    that was LISTED but would not download (or parsed to a non-dict) makes
+    that role's ``leases`` the :data:`READ_ERROR` sentinel, never ``[]`` —
+    one transport blip must not fold a HELD role to VACANT. Unlike
+    ``read_leases``, an EMPTY lease set here needs no ``probe_reachable``
+    spend: the role's registry record came back from the SAME successful
+    listing, so the bus demonstrably answered and the emptiness is confirmed
+    by construction.
+
+    Best-effort at the edges exactly like ``list_roles``: a failed LISTING
+    enumerates nothing (``[]``), and a registry record whose own download
+    fails is dropped — along with its leases — from this glance (per-item
+    isolation; the role re-appears next read). ``include_leases=False`` skips
+    every shard download (``leases`` is None) — the ``list_roles`` fast path.
+    """
+    import concurrent.futures
+    prefix = remote.roles_prefix()
+    try:
+        listed = remote.list_files(prefix, backend=backend)
+    except Exception:
+        return []
+    registry_paths: list[str] = []
+    lease_paths: dict[str, list[str]] = {}
+    for path in listed:
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        if not rel.endswith(".json"):
+            continue
+        if "/" not in rel:
+            registry_paths.append(path)
+            continue
+        slug, _, sub = rel.partition("/")
+        sub_dir, _, leaf = sub.partition("/")
+        if sub_dir == "leases" and leaf and "/" not in leaf:
+            lease_paths.setdefault(slug, []).append(path)
+        # escalations/ markers (and any future per-role subtree) are pruned
+        # HERE, by path — no read surface folds them, so they cost nothing.
+    if not registry_paths:
+        return []
+    wanted = list(registry_paths)
+    if include_leases:
+        # Only shards under a LISTED registry record are fetched: an orphan
+        # lease subtree (registry record deleted) has no role to fold into.
+        registry_slugs = {Path(p).stem for p in registry_paths}
+        for slug in sorted(registry_slugs):
+            wanted.extend(lease_paths.get(slug, []))
+    # Pooled download of exactly the surviving paths (the list_json pool
+    # shape): independent subprocesses, no shared state. Callees resolve via
+    # the remote module so test patches on remote.download_json still apply.
+    results: dict[str, Any] = {}
+    workers = min(8, max(2, len(wanted)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(remote.download_json, p, backend=backend): p
+            for p in wanted
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            path = futures[fut]
+            try:
+                results[path] = fut.result()
+            except Exception:
+                results[path] = None   # reads as a failed download below
+    out: list[tuple[dict[str, Any], Any]] = []
+    for rpath in registry_paths:
+        rec = results.get(rpath)
+        if not isinstance(rec, dict):
+            continue  # per-item isolation: an unreadable record is dropped
+        if not include_leases:
+            out.append((rec, None))
+            continue
+        shards = lease_paths.get(Path(rpath).stem, [])
+        if any(not isinstance(results.get(sp), dict) for sp in shards):
+            # F4: a listed-but-unreadable shard is a read ERROR for the whole
+            # role — partial lease truth must never masquerade as the union.
+            out.append((rec, READ_ERROR))
+            continue
+        events = [(results[sp].get("at", "") or "", Path(sp).stem, results[sp])
+                  for sp in shards]
+        events.sort(key=lambda t: (t[0], t[1]))
+        out.append((rec, [shard for _at, _stem, shard in events]))
+    out.sort(key=lambda pair: pair[0].get("name") or "")
+    return out
+
+
 def list_roles(*, backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
     """Every TOP-LEVEL role registry record, sorted by name. Best-effort: [].
 
@@ -89,22 +192,12 @@ def list_roles(*, backend: Optional[list[str]] = None) -> list[dict[str, Any]]:
     prefix holds per-role SUBTREES (``<name>/leases/``, ``<name>/escalations/``)
     beside the registry records; only a path that, after stripping the prefix,
     has no further ``/`` and ends in ``.json`` is a registry record — a lease
-    shard counted as a role would inflate the registry."""
-    prefix = remote.roles_prefix()
-    try:
-        listed = remote.list_json(prefix, backend=backend)
-    except Exception:
-        return []
-    records: list[dict[str, Any]] = []
-    for path, rec in listed:
-        rel = path[len(prefix):] if path.startswith(prefix) else path
-        if "/" in rel:
-            continue  # lease/escalation shard — never a registry record
-        if not rel.endswith(".json"):
-            continue
-        if isinstance(rec, dict):
-            records.append(rec)
-    return sorted(records, key=lambda r: r.get("name") or "")
+    shard counted as a role would inflate the registry. Rides the partitioned
+    ``load_roles_with_leases`` fold with the shard downloads SKIPPED, so a
+    registry glance costs 1 listing + R downloads (it used to download every
+    lease shard and escalation marker too, only to throw them away)."""
+    return [rec for rec, _leases in
+            load_roles_with_leases(backend=backend, include_leases=False)]
 
 
 def upsert_role(record: dict[str, Any], *,

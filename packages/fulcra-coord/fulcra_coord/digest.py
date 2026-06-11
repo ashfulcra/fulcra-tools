@@ -58,11 +58,16 @@ def _freshest_digest_emit(*, backend: Optional[list[str]] = None):
     return best
 
 
-def _assess_fleet(*, now: datetime, backend: Optional[list[str]] = None) -> dict:
+def _assess_fleet(*, now: datetime, backend: Optional[list[str]] = None,
+                  summaries: Optional[list[dict]] = None) -> dict:
     """Load all health inputs (records + bus markers) and run the pure judgment.
     Shared by cmd_health, the doctor fold, and the digest (which passes the result
     into the pure builder). Best-effort reads — a missing marker leaves its field
-    None, never an exception into the caller."""
+    None, never an exception into the caller. ``summaries`` threads an
+    already-loaded summary set through for the task count (perf loop-2 #5:
+    cmd_digest loads the aggregate anyway — re-downloading it here just to
+    ``len()`` it cost one spawn per digest); None (cmd_health, the doctor)
+    keeps the self-load."""
     recs = _load_health_records(backend=backend)
     digest_emit = _freshest_digest_emit(backend=backend)
     retention_last_run = None
@@ -74,7 +79,8 @@ def _assess_fleet(*, now: datetime, backend: Optional[list[str]] = None) -> dict
         retention_last_run = None
     task_count = None
     try:
-        task_count = len(_load_task_summaries(backend=backend))
+        task_count = len(summaries if summaries is not None
+                         else _load_task_summaries(backend=backend))
     except Exception:
         task_count = None
     return views.assess_infra_health(
@@ -342,9 +348,10 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
 
     # v1 push surface: compute the fleet assessment once (best-effort; a read
     # failure leaves infra=None and the digest renders without the line) and pass
-    # it into the pure builder so the builder stays I/O-free.
+    # it into the pure builder so the builder stays I/O-free. The summaries
+    # loaded above ride along for the task count (perf loop-2 #5 — no re-load).
     try:
-        infra = _assess_fleet(now=now, backend=backend)
+        infra = _assess_fleet(now=now, backend=backend, summaries=summaries)
     except Exception:
         infra = None
 
