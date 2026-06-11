@@ -28,6 +28,7 @@ file-commands branch):
 from __future__ import annotations
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
 from .schema import (Signal, canonical_json, temp_signal_id,
                      CAPTURE_SOURCE_PREFIX, ANNOTATION_SOURCE_PREFIX)
 
@@ -124,11 +125,22 @@ class FulcraStore:
         result = self._api.list_files(_abs(folder_path))
         # Real library wraps results: {"files": [...], ...}
         file_records = result["files"] if isinstance(result, dict) else result
-        out = []
-        for rec in file_records:
+        if not file_records:
+            return []
+
+        def _fetch(rec):
             resp = self._api.download_file(rec["id"])
-            out.append(json.loads(resp.read().decode()))
-        return out
+            return json.loads(resp.read().decode())
+
+        # Shard downloads are independent GETs and compile sorts by signal id,
+        # so result order is irrelevant — fetch concurrently to keep compile
+        # from scaling as N sequential round-trips. Bounded pool to avoid
+        # hammering the API. ex.map preserves order and re-raises the first
+        # download error, matching the previous sequential semantics.
+        if len(file_records) == 1:
+            return [_fetch(file_records[0])]
+        with ThreadPoolExecutor(max_workers=min(8, len(file_records))) as ex:
+            return list(ex.map(_fetch, file_records))
 
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         record = build_record(sig, data_type)

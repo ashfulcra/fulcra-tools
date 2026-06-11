@@ -108,13 +108,13 @@ def cmd_capture(args, api, outbox_dir, now) -> int:
     meta = _require_meta(store)
     if not meta:
         return 2
+    outbox = Outbox(outbox_dir)
     sig = capture_signal(
-        store, Outbox(outbox_dir), data_type=meta["data_type"], now=now,
+        store, outbox, data_type=meta["data_type"], now=now,
         key=args.key, value=json.loads(args.value), strength=args.strength,
         kind=args.kind, scope=args.scope, confidence=args.confidence,
         half_life_days=args.half_life, platform=args.platform,
         agent=args.agent, session=args.session, supersedes=args.supersedes)
-    outbox = Outbox(outbox_dir)
     try:
         _append_signal_cache(store, sig)
     except (OSError, ConnectionError, TimeoutError) as e:
