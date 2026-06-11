@@ -12,6 +12,41 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Archive gates: a tombstoned cold copy no longer counts as "already archived" (the F7-undoing hazard)
+
+Found during the tombstone-absence work — the same stat-dishonesty class,
+opposite direction. The platform delete is SOFT, so after `restore` deletes
+the archive copy, `stat` on the archive path still answers from version
+history. `retention._archive_task`'s gates read that stat as "cold copy
+present": the next retention pass on a re-aged restored task (reachable since
+the restore-sticks fix ages from `restored_at`) skipped the fresh archive
+upload, its stat-based post-upload verify passed vacuously, and it deleted
+the hot copy — the task body GONE from the hot path with only a tombstone in
+the archive, silently undoing the operator's restore. Fix (the no-loss
+ordering upload → verify → delete-hot is unchanged; only the gates got
+honest):
+
+- **`_cold_copy_state`** — tombstone-aware presence probe for archive-side
+  paths, the `io._confirmed_absent` signature applied to the presence
+  question: readable JSON body ⇒ present; not-found-class download failure on
+  a reachable bus ⇒ tombstone ⇒ ABSENT (do the fresh upload); transient or
+  unknown failure ⇒ UNKNOWN ⇒ the task is deferred this pass, hot copy kept
+  (fail toward keeping the hot copy, never toward deleting it).
+- **Post-upload verify is now a readable-body check** (`download_json`, never
+  a bare stat): a lying/failed upload over a tombstone can no longer
+  stat-verify and unlock the hot delete. One extra download per archive move
+  — archival is a daily background pass.
+- **Index-shard gate same fix**: `restore` soft-deletes the shard too, so the
+  old stat gate skipped rewriting it on re-archive, leaving the task
+  invisible to `search --archived` and unrestorable. A readable shard is now
+  required; rewriting over a transient read failure is harmless (same id,
+  same path, fresh `archived_at`).
+- **`cmd_restore`'s mirror verify**: the hot path is tombstoned from the
+  original archive move, so its stat-based post-upload verify was vacuous —
+  an upload that claimed success without landing would have passed verify and
+  the archive-body delete right after would have destroyed the ONLY readable
+  copy. The hot copy must now download readable before any cold-side delete.
+
 ### Tombstone-aware absence: soft-deleted remote files are now confirmably absent
 
 Live find (2026-06-11, the ~12 forever-blocked repair markers): the Fulcra
