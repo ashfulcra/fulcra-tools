@@ -654,6 +654,101 @@ class TestAnnounceVersion(_CfgEnvBase):
         self.assertIn("announce-version", COMMAND_MAP)
         args = build_parser().parse_args(["announce-version"])
         self.assertEqual(args.command, "announce-version")
+        self.assertFalse(args.allow_prerelease)
+        args = build_parser().parse_args(["announce-version",
+                                          "--allow-prerelease"])
+        self.assertTrue(args.allow_prerelease)
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-11 bug hunt C8: dev/prerelease versions silently FROZE the fleet.
+# is_behind("0.15.3", "0.16.0.dev0") -> False (fail-closed on the unparseable
+# segment), so announcing a dev build stopped every host's self-update with no
+# error anywhere. Three guards: (a) announce-version refuses non-plain
+# versions (--allow-prerelease overrides, loudly); (b) the manifest's
+# release_commit comes from the CONFIGURED checkout, not whatever cwd the
+# maintainer happened to announce from; (c) an unparseable manifest version
+# still never triggers an update but now degrades VISIBLY (stale marker +
+# 'unparseable-manifest' status) instead of reading as silently 'current'.
+# ---------------------------------------------------------------------------
+
+class TestPrereleaseFreezeGuards(_CfgEnvBase):
+    def _args(self, **kw):
+        base = dict(min_supported=None, format="table")
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    # -- (a) announce refuses non-plain versions ------------------------------
+    def test_announce_refuses_dev_version(self):
+        import io, contextlib
+        stderr = io.StringIO()
+        with patch("fulcra_coord.selfupdate.__version__", "0.16.0.dev0"), \
+             patch("fulcra_coord.selfupdate.remote") as rmock, \
+             contextlib.redirect_stderr(stderr):
+            rc = selfupdate.cmd_announce_version(self._args(), backend=None)
+        self.assertEqual(rc, 1)
+        rmock.upload_json.assert_not_called()   # nothing reached the bus
+        self.assertIn("--allow-prerelease", stderr.getvalue())
+
+    def test_announce_allow_prerelease_overrides_with_loud_warn(self):
+        import io, contextlib
+        stderr = io.StringIO()
+        with patch("fulcra_coord.selfupdate.__version__", "0.16.0.dev0"), \
+             patch("fulcra_coord.selfupdate.remote") as rmock, \
+             patch("fulcra_coord.selfupdate._local_release_commit",
+                   return_value="abc1234"), \
+             contextlib.redirect_stderr(stderr):
+            rmock.version_manifest_path.return_value = "/x/runtime/version.json"
+            rmock.upload_json.return_value = True
+            rmock.stat.return_value = {"size": 1}
+            rc = selfupdate.cmd_announce_version(
+                self._args(allow_prerelease=True), backend=None)
+        self.assertEqual(rc, 0)
+        rmock.upload_json.assert_called_once()
+        self.assertIn("WARNING", stderr.getvalue())
+
+    # -- (b) release-commit provenance ----------------------------------------
+    def test_release_commit_resolved_from_configured_checkout(self):
+        checkout = self.cfg_tmp  # any existing dir
+        self._write_cfg("update.json", {"checkout": checkout})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="cafe123\n")
+
+        with patch("fulcra_coord.selfupdate._run_proc", side_effect=run):
+            self.assertEqual(selfupdate._local_release_commit(), "cafe123")
+        self.assertEqual(calls[0],
+                         ["git", "-C", checkout, "rev-parse", "HEAD"])
+
+    def test_release_commit_falls_back_to_cwd_with_warn(self):
+        import io, contextlib
+        stderr = io.StringIO()
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="cafe123\n")
+
+        with patch("fulcra_coord.selfupdate._run_proc", side_effect=run), \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(selfupdate._local_release_commit(), "cafe123")
+        self.assertEqual(calls[0], ["git", "rev-parse", "HEAD"])
+        self.assertIn("current directory", stderr.getvalue())
+
+    # -- (c) unparseable manifest degrades visibly, never updates --------------
+    def test_unparseable_manifest_sets_marker_and_skips_update(self):
+        self._write_cfg("update-cmd.json", {"cmd": ["/usr/bin/true"]})
+        with patch("fulcra_coord.selfupdate._download_manifest",
+                   return_value=_manifest("0.16.0.dev0")), \
+             patch("fulcra_coord.selfupdate._run_proc") as run:
+            self.assertEqual(selfupdate.maybe_self_update(),
+                             "unparseable-manifest")
+        run.assert_not_called()   # no update attempt off a version we can't compare
+        suffix = selfupdate.stale_summary_suffix()
+        self.assertIn("0.16.0.dev0", suffix)
+        self.assertIn("behind canonical", suffix)
 
 
 if __name__ == "__main__":
