@@ -1382,9 +1382,16 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # unguarded pool.map would re-raise out of cmd_reconcile, bypassing the
         # failures -> "preserve markers, return 1" path and crashing the
         # heartbeat. Catching keeps the contract: any failure is a failed view.
+        # 2026-06-11 bug hunt S7: the per-view budget is min(remaining
+        # deadline, transport write timeout) — NOT the whole remaining
+        # deadline. Handing one upload the full deadline let a single wedged
+        # backend call eat the entire tick's budget (and its retry eat it
+        # again), starving every other view behind it in the pool. Resolved
+        # via remote._write_timeout() (env-tunable), never a constant.
         try:
-            ok = remote.upload_json(view_data, vpath, backend=backend,
-                                    timeout=int(remaining))
+            ok = remote.upload_json(
+                view_data, vpath, backend=backend,
+                timeout=min(int(remaining), remote._write_timeout()))
         except Exception:
             ok = False
         if not ok and retry_enabled:
@@ -1402,8 +1409,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 remaining = deadline - time.monotonic()
                 if remaining >= 1:
                     try:
-                        ok = remote.upload_json(view_data, vpath, backend=backend,
-                                                timeout=int(remaining))
+                        # Same S7 cap as the first attempt: a retry must
+                        # never inherit the whole remaining deadline either.
+                        ok = remote.upload_json(
+                            view_data, vpath, backend=backend,
+                            timeout=min(int(remaining),
+                                        remote._write_timeout()))
                     except Exception:
                         ok = False
                     if ok:
