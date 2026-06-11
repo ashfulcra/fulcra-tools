@@ -142,6 +142,17 @@ class FulcraStore:
         with ThreadPoolExecutor(max_workers=min(8, len(file_records))) as ex:
             return list(ex.map(_fetch, file_records))
 
+    def list_file_ids(self, folder_path: str) -> list[tuple[str, str]]:
+        """(name, file_id) for direct children of a folder, WITHOUT downloading
+        contents — used by cache GC, which prunes shards by filename (the temp
+        id) so it never needs to read them."""
+        result = self._api.list_files(_abs(folder_path))
+        recs = result["files"] if isinstance(result, dict) else result
+        return [(r.get("name", ""), r["id"]) for r in (recs or [])]
+
+    def delete_file(self, file_id: str) -> None:
+        self._api.delete_file(file_id)
+
     def ingest_signal(self, sig: Signal, data_type: str) -> None:
         record = build_record(sig, data_type)
         self._api.fulcra_api("/ingest/v1/record", data=record, method="POST")

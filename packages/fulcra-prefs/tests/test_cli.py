@@ -90,6 +90,37 @@ def test_compile_sees_ingest_only_signal_without_a_shard(env, capsys):
     assert key in out["keys"], "ingest-only (tier-2) signal must be visible to compile"
 
 
+def test_compile_gcs_confirmed_shards_keeps_unconfirmed(env, capsys):
+    """Feature 2 — cache GC. After compile, a shard whose signal is confirmed in
+    get-records is pruned (the authoritative source has it; the write-through
+    shard is dead weight that would be re-downloaded every compile). A shard
+    NOT yet confirmed (read down / indexing lag) is kept as the safety net."""
+    call, fake_api, store = env
+    # Capture writes a shard AND ingests (so the record is readable = confirmed).
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")
+    shard_paths = [p for p in fake_api.files if "signals-cache" in p]
+    assert len(shard_paths) == 1                      # shard present pre-compile
+    assert call("compile") == 0
+    assert [p for p in fake_api.files if "signals-cache" in p] == [], \
+        "confirmed shard should be GC'd after compile"
+    # get still works — compile read the record authoritatively
+    assert call("get") == 0
+    assert "dining.cuisine.thai" in json.loads(capsys.readouterr().out)["keys"]
+
+
+def test_compile_keeps_shard_when_record_unconfirmed(env, capsys):
+    """A shard whose record isn't visible in get-records (read outage / lag)
+    must be KEPT — pruning it would lose the only copy of that signal."""
+    call, fake_api, store = env
+    call("capture", "--key", "dining.cuisine.thai", "--value", "true",
+         "--strength", "0.8", "--platform", "claude-code")
+    fake_api.fail_read = True                          # record read unavailable
+    assert call("compile") == 0
+    assert [p for p in fake_api.files if "signals-cache" in p] != [], \
+        "unconfirmed shard must be kept as the safety net"
+
+
 def test_compile_degrades_to_shards_when_record_read_fails(env, capsys):
     """If the get-records read is unreachable, compile must still proceed from
     the shard cache (never worse than the cache-only path it replaced)."""
@@ -150,13 +181,14 @@ def test_missing_meta_gives_actionable_error(fake_api, tmp_path, capsys):
     assert "onboard" in capsys.readouterr().err
 
 def test_signal_cache_shards_do_not_clobber_each_other(env):
-    from fulcra_prefs.cli import _append_signal_cache, _load_cached_signals
+    from fulcra_prefs.cli import _append_signal_cache, _gather_signals
     call, fake_api, store = env
     _append_signal_cache(store, make_signal(id="sig-a", key="k.a"))
     _append_signal_cache(store, make_signal(id="sig-b", key="k.b"))
     assert "/prefs/signals-cache/sig-a.json" in fake_api.files
     assert "/prefs/signals-cache/sig-b.json" in fake_api.files
-    assert {s.id for s in _load_cached_signals(store)} == {"sig-a", "sig-b"}
+    signals, _confirmed = _gather_signals(store)   # no meta -> shards only
+    assert {s.id for s in signals} == {"sig-a", "sig-b"}
 
 def test_get_for_audience_spools_disclosure_when_ingest_down(env, tmp_path, capsys):
     call, fake_api, store = env

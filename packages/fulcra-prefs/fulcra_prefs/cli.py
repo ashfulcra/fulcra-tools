@@ -2,15 +2,16 @@
 for tests; main() binds the real FulcraAPI (reusing the user's `fulcra auth
 login` credentials), the real outbox dir, and the real clock.
 
-Signal reads in v1 go through a compile cache in the file library: capture
-posts the canonical signal to Fulcra and writes one independent cache shard per
-signal id under `prefs/signals-cache/`. Because the fulcra-api library has no
-record-read-by-definition helper for arbitrary windows wired here yet, compile
-lists those cache shards. Do NOT use one shared `signals-cache.json` file:
-that would be a remote read-modify-write race across concurrently-capturing
-platforms and would violate SPEC.md's atomic-capture rationale. The shard cache
-is an implementation detail replaced by real get-records reads when CLI
-annotation commands land (tracked on the bus).
+Signal reads: compile reads authoritatively via get-records
+(store.read_signal_records) so captures from any platform are visible, UNIONed
+with a write-through per-signal shard cache under `prefs/signals-cache/` (one
+file per signal id — never a shared `signals-cache.json`, which would be a
+remote read-modify-write race across concurrently-capturing platforms, against
+SPEC.md's atomic-capture rationale). The shard cache covers offline-captured-
+not-yet-ingested signals and ingest->read indexing lag; compile GCs a shard once
+its record is confirmed in get-records, keeping the cache bounded. The remaining
+workaround is the write side (no record delete/replace yet — corrections are
+`supersedes`); native revocation lands when CLI annotation record commands do.
 
 INTEGRATION DEVIATIONS from plan sketch (verified against fulcra-api 0.1.33):
   1. Credential wiring: FulcraAPI takes credentials= and refresh_callback= at
@@ -66,17 +67,40 @@ def _dedup_key(sig: Signal) -> str:
     return sig.id or ""
 
 
-def _load_cached_signals(store: FulcraStore, meta: dict | None = None) -> list[Signal]:
-    """Union of the authoritative record read (visible to ALL platforms, incl.
-    tier-2) and the local shard cache (covers offline-captured-not-yet-ingested
-    and ingest->read indexing lag), deduped by capture identity. Records are
-    listed first so they win the dedup over their shard twin."""
+def _gather_signals(store: FulcraStore, meta: dict | None = None
+                    ) -> tuple[list[Signal], set[str]]:
+    """Return (merged signals, confirmed capture-keys).
+
+    Merged = union of the authoritative record read (visible to ALL platforms,
+    incl. tier-2) and the local shard cache (covers offline-captured-not-yet-
+    ingested and ingest->read indexing lag), deduped by capture identity;
+    records are listed first so they win the dedup over their shard twin.
+    Confirmed = the dedup keys that came from get-records — i.e. captures the
+    authoritative source has, whose write-through shards are now safe to GC."""
     records = store.read_signal_records(meta.get("definition_id")) if meta else []
     shards = [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
     by_id: dict[str, Signal] = {}
     for sig in (*records, *shards):
         by_id.setdefault(_dedup_key(sig), sig)
-    return list(by_id.values())
+    return list(by_id.values()), {_dedup_key(s) for s in records}
+
+
+def _gc_confirmed_shards(store: FulcraStore, confirmed: set[str]) -> int:
+    """Delete cache shards whose capture is confirmed in get-records. Shard
+    filenames are the temp id (== the records' dedup key), so we prune by name
+    without downloading. Unconfirmed shards (read outage / indexing lag) are
+    kept — they may be the only copy of a signal. Best-effort: a failed delete
+    is retried on the next compile, never fatal."""
+    pruned = 0
+    for name, fid in store.list_file_ids(SIGNALS_CACHE_PREFIX):
+        stem = name[:-5] if name.endswith(".json") else name
+        if stem in confirmed:
+            try:
+                store.delete_file(fid)
+                pruned += 1
+            except (OSError, ConnectionError, TimeoutError):
+                continue
+    return pruned
 
 
 def _append_signal_cache(store: FulcraStore, sig: Signal) -> None:
@@ -154,7 +178,8 @@ def cmd_compile(args, api, outbox_dir, now) -> int:
     if not meta:
         return 2
     Outbox(outbox_dir).flush(store)
-    docs = compile_signals(_load_cached_signals(store, meta), now)
+    signals, confirmed = _gather_signals(store, meta)
+    docs = compile_signals(signals, now)
     store.write_json(COMPILED_PATH, docs["global"])
     for p, doc in docs["platforms"].items():
         store.write_json(platform_path(p), doc)
@@ -162,8 +187,13 @@ def cmd_compile(args, api, outbox_dir, now) -> int:
     # without reading the full compiled doc.
     meta["last_compile"] = now.isoformat()
     store.write_json(META_PATH, meta)
+    # GC: prune write-through shards now confirmed in the authoritative read,
+    # bounding the cache and keeping compile from re-downloading dead shards.
+    pruned = _gc_confirmed_shards(store, confirmed)
     print(f"compiled {len(docs['global']['keys'])} keys, "
-          f"{len(docs['platforms'])} platform views", file=sys.stderr)
+          f"{len(docs['platforms'])} platform views"
+          + (f", pruned {pruned} cached shard(s)" if pruned else ""),
+          file=sys.stderr)
     return 0
 
 

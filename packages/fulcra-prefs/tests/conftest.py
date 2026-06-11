@@ -77,6 +77,11 @@ class FakeFulcraAPI:
         self.files[filepath] = data.read()
         return {"url": "fake://uploaded", "id": f"v-{filepath}"}
 
+    def delete_file(self, file_id):
+        # file_id is "v-<abspath>" (see resolve_filepath / upload_file).
+        path = file_id[2:]
+        self.files.pop(path, None)
+
     def list_files(self, path="/"):
         """Returns {"files": [...]} dict mirroring the real library's shape.
         The real list_files wraps results in a top-level dict; callers must

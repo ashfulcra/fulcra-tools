@@ -118,17 +118,23 @@ fail silent, so this hook never breaks a session start.
 Signals are annotation records posted to `/ingest/v1/record` via the Fulcra
 ingest API. Each signal carries a key (dot-namespaced), a typed value, a strength
 in [-1, 1] (negative = aversion), a half-life, and a scope (`global` or
-`platform:<name>`). The `capture` command posts the record and writes a per-signal
-cache shard under `prefs/signals-cache/` in your Fulcra file library — one file
-per signal id, so concurrent captures from different platforms never race on a
-shared file.
+`platform:<name>`). The `capture` command posts the record and also writes a
+per-signal *write-through cache shard* under `prefs/signals-cache/` — one file
+per signal id, so concurrent captures never race on a shared file, and a signal
+captured offline still reaches compile after the next flush.
 
-Compile is a pure function of `(signals, now)`. It folds signals by key using
-half-life decay to compute effective weights, resolves conflicts to the signal
-with the highest absolute effective weight (ties broken by `observed_at`, then
-signal id for full determinism), drops superseded signals including chains and
-cycles, and writes canonical JSON to `prefs/compiled.json` and per-platform
-overlays under `prefs/platforms/`. The output is byte-identical for the same
+Compile reads signals **authoritatively from get-records** (so a capture from
+*any* platform is visible — including shell-less tier-2 agents that only POST to
+ingest and never write a shard), unioned with the local shard cache to cover
+offline-captured-not-yet-ingested signals and ingest→read indexing lag, deduped
+by capture identity. Once a shard's signal is confirmed in get-records the shard
+is pruned, so the cache stays bounded rather than growing forever. Compile itself
+is a pure function of `(signals, now)`: it folds signals by key using half-life
+decay to compute effective weights, resolves conflicts to the signal with the
+highest absolute effective weight (ties broken by `observed_at`, then signal id
+for full determinism), drops superseded signals including chains and cycles, and
+writes canonical JSON to `prefs/compiled.json` and per-platform overlays under
+`prefs/platforms/`. The output is byte-identical for the same
 inputs regardless of input order — the determinism contract tested in
 `tests/test_determinism.py`. Full design rationale: [`docs/SPEC.md`](docs/SPEC.md).
 
@@ -221,11 +227,13 @@ and cross-platform compile consistency.
 
 ## v1 limitations (honest)
 
-- **Signals cache workaround.** `compile` reads signals from
-  `prefs/signals-cache/` shards instead of calling `get-records` directly.
-  This is because `fulcra-api` has no record-read-by-definition helper wired yet.
-  The replacement (real `get-records` reads scoped to the Preference Signals
-  definition) is tracked on the bus and lands when CLI annotation commands ship.
+- **Read path is get-records + a shard cache.** `compile` reads authoritatively
+  via `get-records` and unions a write-through shard cache (for offline/lag),
+  pruning shards once their records are confirmed. The remaining workaround is
+  the *write* side — signals are posted via `/ingest/v1/record` and there's no
+  record-level delete/replace yet, so corrections are modeled as `supersedes`
+  rather than true deletes. Native revocation lands when CLI annotation
+  (record) commands ship; tracked on the bus.
 - **Single-user.** The solver takes pre-compiled docs as input; there is no
   multi-user sync layer in v1.
 - **No MCP write path.** The Fulcra MCP exposes read operations today; capture
