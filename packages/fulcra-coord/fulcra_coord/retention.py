@@ -16,6 +16,7 @@ import cycle.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -26,6 +27,12 @@ from .io import _confirmed_absent, _load_task_summaries
 from .writepipe import _write_task_and_views
 from .output import info as _info, print_json as _print_json, err as _err
 from .timeutil import iso_z as _iso_z, now_iso as _now_iso
+# Direct store-module import for the transport's failure observable and the
+# not-found classifier — same pattern (and rationale) as io.py:
+# ``last_download_error`` must be read as a LIVE module attribute, and
+# ``remote``'s re-exports would not track the store mutating it. No new
+# dependency edge: retention already reaches the store through ``remote``.
+from fulcra_coord_files import store as _files_store
 
 
 # ---------------------------------------------------------------------------
@@ -58,17 +65,80 @@ def _archive_index_shard(task: dict[str, Any], archive_path: str) -> dict[str, A
     }
 
 
+def _cold_copy_state(path: str, *, backend: Optional[list[str]] = None) -> str:
+    """Tombstone-aware presence verdict for a COLD (archive-side) path:
+    ``"present"`` / ``"absent"`` / ``"unknown"``.
+
+    WHY a bare stat cannot answer this (the F7-UNDOING hazard, 2026-06-11 —
+    the same stat-dishonesty class as the tombstone-absence fix, opposite
+    direction): the platform delete is SOFT, so after ``cmd_restore`` deletes
+    the archive copy, stat on the archive path STILL answers from version
+    history. A gate reading stat-non-None as "cold copy present" sees that
+    tombstone as an already-archived body — so the next retention pass on a
+    re-aged restored task (reachable since #172 ages from ``restored_at``)
+    skipped the fresh upload, its stat-based verify passed vacuously, and it
+    deleted the hot copy: body GONE from the hot path with only a tombstone
+    in the archive, silently undoing the restore.
+
+    The verdicts (io._confirmed_absent's tombstone signature applied to the
+    presence question — note the OPPOSITE fail-safe direction: absence checks
+    fail toward "unconfirmable, do nothing destructive"; this presence check
+    fails toward "unknown, KEEP the hot copy"):
+
+    * stat misses ⇒ ``absent``. Same verdict the old gate gave; a fresh
+      upload is the safe direction even if the miss was transport weather —
+      it just rewrites the current body.
+    * stat answers and the download reads a JSON dict ⇒ ``present``. A cold
+      copy only counts when it could actually serve a future restore, so a
+      readable-but-corrupt body reads as ``absent`` (overwrite-with-fresh —
+      a successful read is never a tombstone, so overwriting is safe).
+    * stat answers, the download fails with a POSITIVE not-found-class error
+      and the bus probes reachable ⇒ ``absent``: the tombstone signature.
+      The "cold copy" is a soft-delete marker, not an archived body.
+    * any other failure (transient weather, silent/unknown stderr,
+      unreachable bus, raising probe) ⇒ ``unknown``: unconfirmable. The
+      caller must DEFER the task this pass — fail toward keeping the hot
+      copy, never toward deleting it.
+
+    COST: the download probe is spent only when stat answers (the
+    already-archived / tombstoned minority), one read per candidate on a
+    daily background pass — the right trade for a no-loss gate."""
+    try:
+        if remote.stat(path, backend=backend) is None:
+            return "absent"
+        raw = remote.download(path, backend=backend)
+        if raw is not None:
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                return "absent"  # readable-but-corrupt: overwrite with fresh
+            return "present" if isinstance(body, dict) else "absent"
+        err = _files_store.last_download_error
+        if _files_store._is_not_found_failure(err):
+            # Tombstone-shaped — but only a reachable bus makes it a verdict.
+            return "absent" if remote.probe_reachable(backend) else "unknown"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
 def _archive_task(task: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
     """Crash-safely MOVE a terminal+aged task out of the hot path into the cold
     archive. Returns True on a completed (or already-complete) move, False if the
     move could not be safely completed (caller logs + retries next pass).
 
     ORDER (no-loss by construction): upload archive body -> VERIFY it landed
-    (stat) -> only THEN delete tasks/<id>.json -> write the per-id index shard.
-    A crash anywhere leaves the body in BOTH places (a recoverable duplicate),
-    never lost. IDEMPOTENT: if the archive body already exists we skip the
-    upload, still ensure the original is deleted and the shard exists, so
-    archiving an already-archived id (or finishing a crashed move) is a no-op.
+    READABLE (download — never a bare stat, which a tombstone answers; see
+    _cold_copy_state) -> only THEN delete tasks/<id>.json -> write the per-id
+    index shard. A crash anywhere leaves the body in BOTH places (a
+    recoverable duplicate), never lost. IDEMPOTENT: if a READABLE archive body
+    already exists we skip the upload, still ensure the original is deleted
+    and the shard exists, so archiving an already-archived id (or finishing a
+    crashed move) is a no-op. A TOMBSTONED archive path (cmd_restore's
+    soft-deleted cold copy — the F7-undoing hazard) counts as ABSENT, so a
+    re-aged restored task gets a FRESH upload instead of losing its hot copy
+    behind a stat that answered from version history; an UNCONFIRMABLE cold
+    state (transient probe failure) defers the task this pass, hot copy kept.
 
     PHANTOM GUARD (B2): require the HOT remote copy (tasks/<id>.json) to exist
     before starting a move — UNLESS the archive body already exists (the
@@ -87,10 +157,18 @@ def _archive_task(task: dict[str, Any], *, backend: Optional[list[str]] = None) 
     try:
         archive_path = remote.archive_task_path(tid, _archive_month(task))
         task_path = remote.task_remote_path(tid)
-        # (0) PHANTOM GUARD: only proceed if the hot copy exists OR the move is
+        # (0) COLD-COPY PROBE (tombstone discipline — see _cold_copy_state):
+        # "present" means a READABLE archived body, never a bare stat answer.
+        # An unconfirmable verdict defers the whole task this pass: every
+        # branch below is gated on this answer, and guessing it is exactly
+        # how the stat gate deleted hot copies behind tombstones.
+        cold_state = _cold_copy_state(archive_path, backend=backend)
+        if cold_state == "unknown":
+            return False  # defer; fail toward keeping the hot copy
+        archive_exists = cold_state == "present"
+        # (0b) PHANTOM GUARD: only proceed if the hot copy exists OR the move is
         # already (partly) done (archive body present). Neither => stale-cache
         # phantom: evict the local copy and skip — never write a phantom archive.
-        archive_exists = remote.stat(archive_path, backend=backend) is not None
         if not archive_exists and remote.stat(task_path, backend=backend) is None:
             cache.delete_cached_task(tid)
             return False
@@ -98,14 +176,25 @@ def _archive_task(task: dict[str, Any], *, backend: Optional[list[str]] = None) 
         if not archive_exists:
             if not remote.upload_json(task, archive_path, backend=backend):
                 return False
-        # (2) VERIFY it landed before any delete — the no-loss gate.
-        if remote.stat(archive_path, backend=backend) is None:
-            return False
+            # (2) VERIFY the body just uploaded is READABLE before any delete —
+            # the no-loss gate. A stat is NOT enough: a tombstoned archive path
+            # answers stat from version history, so a lying/failed upload over
+            # a tombstone would stat-verify vacuously and step (3) would
+            # destroy the only readable copy. (On the archive_exists branch the
+            # probe above already proved readability — no second download.)
+            if remote.download_json(archive_path, backend=backend) is None:
+                return False
         # (3) only now remove the hot copy (idempotent: a missing original is fine).
         if remote.stat(task_path, backend=backend) is not None:
             remote.delete(task_path, backend=backend)
-        # (4) write the append-only index shard if absent (idempotent).
-        if remote.stat(remote.archive_index_path(tid), backend=backend) is None:
+        # (4) write the append-only index shard if absent-or-unreadable
+        # (idempotent). Same tombstone hole as the body gate: cmd_restore
+        # soft-deletes the shard, so a stat gate would read the tombstone as
+        # "shard exists" and skip the rewrite — leaving the re-archived task
+        # invisible to `search --archived` and unrestorable. Require a READABLE
+        # shard; rewriting over a transient read failure is harmless (same id,
+        # same path, fresh archived_at).
+        if remote.download_json(remote.archive_index_path(tid), backend=backend) is None:
             remote.upload_json(_archive_index_shard(task, archive_path),
                                remote.archive_index_path(tid), backend=backend)
         # (5) Evict the local cache copy. The body has left the remote tasks/
@@ -975,8 +1064,11 @@ def cmd_restore(args: Any, backend: Optional[list[str]] = None) -> int:
 
     Reverses _archive_task: reads the task's archive/index/<id>.json shard for
     its archive_path, downloads the archived body, stamps ``restored_at``,
-    uploads it back to tasks/<id>.json, VERIFIES the hot copy landed, then
-    deletes the ARCHIVE BODY and finally the index shard. The NEXT reconcile
+    uploads it back to tasks/<id>.json, VERIFIES the hot copy landed READABLE
+    (a download, never a bare stat — the hot path is tombstoned from the
+    original archive move, so a stat answers from version history even when
+    the upload never landed), then deletes the ARCHIVE BODY and finally the
+    index shard. The NEXT reconcile
     re-includes it in views (the body is back in the tasks/ listing the
     self-heal enumerates). Nothing is one-way. NOTE this is a bus-level MOVE,
     independent of the platform 'fulcra file restore' (which restores a deleted
@@ -1025,8 +1117,15 @@ def cmd_restore(args: Any, backend: Optional[list[str]] = None) -> int:
     if not remote.upload_json(body, task_path, backend=backend):
         _err(f"Failed to restore body for {tid!r}.")
         return 1
-    if remote.stat(task_path, backend=backend) is None:
-        _err(f"Restore of {tid!r} did not verify; left archive shard intact.")
+    # VERIFY the hot body is READABLE — never a bare stat. The hot path was
+    # soft-deleted by the original archive move, so its tombstone answers stat
+    # from version history regardless of whether the upload above landed; a
+    # stat-based verify is vacuous there, and the archive-body delete below
+    # would then destroy the ONLY readable copy (the mirror of _archive_task's
+    # readable-body verify; one extra download per restore is nothing).
+    if remote.download_json(task_path, backend=backend) is None:
+        _err(f"Restore of {tid!r} did not verify (hot body unreadable); "
+             "archive body and index shard left intact.")
         return 1
     # Hot copy verifiably landed — only now is the cold-side delete safe.
     try:

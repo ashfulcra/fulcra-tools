@@ -407,6 +407,257 @@ class TestArchiveTask(_FakeBus):
         self.assertTrue(cli._archive_task(t, backend=self.backend))
 
 
+class TestArchiveTombstoneVerify(_FakeBus):
+    """_archive_task must require a READABLE cold body, never a bare stat.
+
+    THE BUG (the F7-UNDOING hazard, 2026-06-11 — same stat-dishonesty class as
+    #177, opposite direction): the platform delete is SOFT, so after
+    cmd_restore deletes the archive copy, stat on the archive path STILL
+    answers (version history). The old stat-based gates therefore read the
+    tombstoned cold copy as "already archived": the next retention pass on a
+    re-aged restored task (reachable since #172 ages from restored_at) skipped
+    the fresh upload, its stat-based verify passed, and it DELETED the hot
+    copy — body GONE from the hot path with only a tombstone in the archive,
+    silently undoing #172's restore-sticks fix.
+
+    Discipline pinned here (the #177 tombstone signature applied to the
+    presence question): readable download ⇒ present; not-found-class download
+    failure on a reachable bus ⇒ tombstone ⇒ NOT present (fresh upload);
+    transient/unknown failure ⇒ unconfirmable ⇒ DEFER, hot copy kept."""
+
+    def _task(self, tid="t-1"):
+        return {"id": tid, "title": "old work", "status": "done",
+                "workstream": "ws", "owner_agent": "claude-code:h:r",
+                "done_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"}
+
+    def _tombstone(self, remote_path, prior_content="{}"):
+        """Model the platform's SOFT delete at ``remote_path``: no live body,
+        but a ``.tombstone`` sibling the fake backend answers stat from while
+        download fails with the not-found-class stderr."""
+        local = Path(self.tmp) / remote_path.lstrip("/")
+        local.parent.mkdir(parents=True, exist_ok=True)
+        if local.exists():
+            local.unlink()
+        Path(str(local) + ".tombstone").write_text(prior_content)
+
+    def _restore_args(self, tid):
+        ns = type("A", (), {})()
+        ns.task_id, ns.format = tid, "table"
+        return ns
+
+    def test_re_aged_restore_uploads_fresh_body_over_tombstone(self):
+        # (a) restore -> soft-deleted cold copy -> re-age -> retention pass:
+        # the tombstoned cold copy must read as NOT present, so a FRESH upload
+        # lands and is READABLE before the hot copy may go. Before the fix the
+        # tombstone stat read as "already archived": no upload, hot deleted,
+        # body lost.
+        t = self._task()
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._put(ap, t)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        self.assertEqual(cli.cmd_restore(self._restore_args("t-1"),
+                                         backend=self.backend), 0)
+        # The fake's delete is a hard unlink; production's is SOFT. Recreate
+        # what production leaves behind: tombstones (prior versions) where
+        # restore deleted the archive body AND the index shard.
+        self._tombstone(ap, json.dumps(t))
+        self._tombstone("/coordination/archive/index/t-1.json",
+                        json.dumps({"id": "t-1", "archive_path": ap}))
+        # Re-age: the restored task drifts past the retention window again.
+        hot = self._read("/coordination/tasks/t-1.json")
+        hot["restored_at"] = "2026-02-01T00:00:00Z"
+        self._put("/coordination/tasks/t-1.json", hot)
+        self.assertTrue(views.is_archivable_task(
+            hot, datetime.now(timezone.utc)))  # the scenario is reachable
+
+        ok = cli._archive_task(hot, backend=self.backend)
+
+        self.assertTrue(ok, "a legitimate re-archive must complete")
+        archived = remote.download_json(ap, backend=self.backend)
+        self.assertIsNotNone(
+            archived,
+            "the FRESH body must be READABLE in the archive — a tombstone "
+            "stat must never count as 'already archived' (no-loss)")
+        self.assertEqual(archived.get("restored_at"), "2026-02-01T00:00:00Z",
+                         "the archived body must be the fresh hot body, not "
+                         "the stale pre-restore version")
+        # The shard gate has the same hole: restore tombstoned the shard, and
+        # a stat-gate would skip the rewrite, leaving the re-archived task
+        # invisible to `search --archived` and unrestorable.
+        shard = remote.download_json("/coordination/archive/index/t-1.json",
+                                     backend=self.backend)
+        self.assertIsNotNone(shard, "a READABLE index shard must be rewritten "
+                                    "over the tombstoned one")
+        self.assertEqual(shard.get("id"), "t-1")
+        # No loss: the hot copy may only be gone because the readable fresh
+        # cold copy above exists.
+        self.assertFalse(self._exists("/coordination/tasks/t-1.json"))
+
+    def test_tombstoned_archive_transient_probe_failure_defers(self):
+        # (b) tombstoned cold copy + TRANSIENT download failure: the presence
+        # verdict is unconfirmable — the task must be DEFERRED this pass and
+        # the hot copy kept. Before the fix the tombstone stat read as
+        # present and the hot copy was deleted on a guess.
+        from fulcra_coord_files import store
+        t = self._task()
+        self._put("/coordination/tasks/t-1.json", t)
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._tombstone(ap, json.dumps(t))
+
+        wrapper = Path(self.tmp) / "transient_download_backend.py"
+        wrapper.write_text(
+            f"""
+import os, sys
+if sys.argv[1:2] == ["download"]:
+    sys.stderr.write("Error: HTTP Error 504: Gateway Timeout\\n")
+    sys.exit(1)
+os.execv({sys.executable!r}, [{sys.executable!r}, {_FAKE!r}] + sys.argv[1:])
+"""
+        )
+        backend = [sys.executable, str(wrapper)]
+        with patch.object(store, "_RETRY_BACKOFF_SECONDS", 0.0):
+            ok = cli._archive_task(t, backend=backend)
+        self.assertFalse(ok, "an unconfirmable cold-copy state must defer")
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"),
+                        "the hot copy must be kept on an unconfirmable pass")
+        self.assertFalse(self._exists(ap),
+                         "no upload may land on an unconfirmable pass")
+
+    def test_tombstoned_archive_unreachable_bus_defers(self):
+        # (b') tombstone-shaped failure but the bus probe fails: nothing is
+        # confirmable on an unreachable bus — defer, keep the hot copy.
+        t = self._task()
+        self._put("/coordination/tasks/t-1.json", t)
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._tombstone(ap, json.dumps(t))
+
+        wrapper = Path(self.tmp) / "unreachable_backend.py"
+        wrapper.write_text(
+            f"""
+import os, sys
+if sys.argv[1:2] == ["list"]:
+    sys.stderr.write("Connection refused\\n")
+    sys.exit(1)
+os.execv({sys.executable!r}, [{sys.executable!r}, {_FAKE!r}] + sys.argv[1:])
+"""
+        )
+        backend = [sys.executable, str(wrapper)]
+        ok = cli._archive_task(t, backend=backend)
+        self.assertFalse(ok, "tombstone on an unreachable bus is unconfirmable")
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"),
+                        "the hot copy must be kept on an unconfirmable pass")
+
+    def test_post_upload_verify_rejects_tombstone_stat_only_state(self):
+        # (c) the no-loss gate itself: an upload that CLAIMS success while the
+        # archive path stays tombstone-only (stat answers, body unreadable)
+        # must NOT verify — the hot delete below it would destroy the only
+        # readable copy. Stat passed vacuously before the fix.
+        t = self._task()
+        self._put("/coordination/tasks/t-1.json", t)
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._tombstone(ap, json.dumps(t))
+
+        with patch("fulcra_coord.retention.remote.upload_json",
+                   return_value=True):  # lies: writes nothing
+            ok = cli._archive_task(t, backend=self.backend)
+        self.assertFalse(ok, "a tombstone-stat-only archive state must not "
+                             "pass the post-upload verify")
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"),
+                        "the hot copy survives an unverifiable upload")
+
+    def test_restore_then_immediate_pass_still_sticks(self):
+        # The #172 pin, replayed against PRODUCTION's soft delete: a fresh
+        # restore (not yet re-aged) whose archive body/shard deletes left
+        # tombstones must STILL survive the very next retention pass.
+        t = self._task()
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._put(ap, t)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        self.assertEqual(cli.cmd_restore(self._restore_args("t-1"),
+                                         backend=self.backend), 0)
+        self._tombstone(ap, json.dumps(t))
+        self._tombstone("/coordination/archive/index/t-1.json",
+                        json.dumps({"id": "t-1", "archive_path": ap}))
+        restored = self._read("/coordination/tasks/t-1.json")
+        with patch("fulcra_coord.retention._claim_retention_marker",
+                   return_value=True):
+            res = cli._run_retention([restored], now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() + 60,
+                                     backend=self.backend)
+        self.assertEqual(res.get("archived", 0), 0)
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"),
+                        "restore must stick even with tombstoned cold paths")
+
+
+class TestRestoreTombstoneVerify(_FakeBus):
+    """cmd_restore's mirror case: its post-upload verify of the HOT copy must
+    require a READABLE body. The hot path tasks/<id>.json is tombstoned in
+    production (the original archive move soft-deleted it), so a stat-based
+    verify passes vacuously even when the upload never landed — and the
+    archive-body delete right after it would destroy the ONLY readable copy."""
+
+    def _task(self):
+        return {"id": "t-1", "title": "old", "status": "done",
+                "workstream": "ws", "owner_agent": "a",
+                "done_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"}
+
+    def _tombstone(self, remote_path, prior_content="{}"):
+        local = Path(self.tmp) / remote_path.lstrip("/")
+        local.parent.mkdir(parents=True, exist_ok=True)
+        if local.exists():
+            local.unlink()
+        Path(str(local) + ".tombstone").write_text(prior_content)
+
+    def _args(self, tid):
+        ns = type("A", (), {})()
+        ns.task_id, ns.format = tid, "table"
+        return ns
+
+    def test_restore_verify_rejects_tombstoned_hot_path(self):
+        # (d) lying upload over a tombstoned hot path: the verify must FAIL
+        # and the archive body + shard must be KEPT. Before the fix the
+        # tombstone's stat verified the restore, the archive body was deleted,
+        # and the task body was gone from BOTH sides.
+        t = self._task()
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._put(ap, t)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        self._tombstone("/coordination/tasks/t-1.json", json.dumps(t))
+
+        with patch("fulcra_coord.retention.remote.upload_json",
+                   return_value=True):  # lies: writes nothing
+            rc = cli.cmd_restore(self._args("t-1"), backend=self.backend)
+        self.assertEqual(rc, 1, "an unreadable hot body must not verify")
+        self.assertTrue(self._exists(ap),
+                        "the archive body — the only readable copy — is kept")
+        self.assertTrue(self._exists("/coordination/archive/index/t-1.json"),
+                        "the index shard is kept for the retry")
+
+    def test_restore_succeeds_over_tombstoned_hot_path(self):
+        # Positive control: a REAL upload over the tombstoned hot path (the
+        # production-normal restore) verifies readable and completes — the
+        # strengthened verify must not spuriously fail on the tombstone
+        # sibling left by the original archive move.
+        t = self._task()
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._put(ap, t)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        self._tombstone("/coordination/tasks/t-1.json", json.dumps(t))
+
+        rc = cli.cmd_restore(self._args("t-1"), backend=self.backend)
+        self.assertEqual(rc, 0)
+        hot = remote.download_json("/coordination/tasks/t-1.json",
+                                   backend=self.backend)
+        self.assertIsNotNone(hot, "the restored hot body must be readable")
+        self.assertTrue(hot.get("restored_at"))
+
+
 class TestIndexShards(_FakeBus):
     def _shard(self, tid):
         return {"schema": "fulcra.coordination.archive_index.v1", "id": tid,
