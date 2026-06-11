@@ -41,21 +41,26 @@ host's default permissions), so it is hedged on every side:
     degrades to exactly the pre-feature notify-only behavior.
   * **Throttle**: a per-agent mtime marker in the local cache dir (the same
     pattern as the notified-state files) allows at most one spawn per
-    ``min_interval_min``. The marker is written only AFTER a successful spawn,
-    so a failed spawn does not arm the throttle and the next tick retries.
+    ``min_interval_min``. The marker is armed BEFORE the spawn (2026-06-11
+    bug hunt S3): a marker-write failure after a successful spawn would allow
+    immediate respawns (a spawn storm); the inverse — marker armed but spawn
+    failed — only delays the retry by one interval, the safer side to fail on.
   * **Single-flight**: a per-agent pidfile records the last spawned pid; if
-    that process is still alive, the tick skips (one wake at a time). A stale
-    pidfile (dead pid / garbage) is ignored.
+    that process is still alive AND the pidfile is younger than
+    ``max_runtime_s``, the tick skips (one wake at a time). An older pidfile
+    is stale even with a live-probing pid — pids recycle (S3). The pidfile is
+    created O_CREAT|O_EXCL before the spawn, doubling as the inter-tick mutex
+    so two racing ticks can never both spawn (S3 TOCTOU).
   * **Detached**: ``start_new_session=True`` — the wake outlives the listener
     tick and can never block it. stdout/stderr append to
     ``<logs-dir>/wake-<agent-slug>.log`` (the listener's logs dir convention)
     so a misbehaving wake leaves a breadcrumb.
   * **Runaway protection is the SPAWNED side's job**: ``max_runtime_s`` is
-    carried in the config as documented operator intent, but this module
-    deliberately does NOT babysit the child (no process manager, no watchdog —
-    that's a whole new failure surface). Cap runtime with the spawned
-    command's own timeout flags; the single-flight pidfile prevents pile-up
-    meanwhile.
+    documented operator intent that the spawned command should enforce on
+    itself; this module deliberately does NOT babysit the child (no process
+    manager, no watchdog — that's a whole new failure surface). Here it is
+    read only as the pidfile staleness bound above; cap actual runtime with
+    the spawned command's own timeout flags.
 
 The spawned command receives context via env (kept deliberately simple):
 ``FULCRA_COORD_AGENT`` (whose inbox fired) and ``FULCRA_COORD_WAKE_PENDING``
@@ -82,6 +87,13 @@ from .views import agent_slug  # one source of truth for the agent->slug mapping
 # Default throttle when an entry omits min_interval_min: at most one wake per
 # 15 minutes. Conservative on purpose — a wake spawns a whole agent runtime.
 MIN_INTERVAL_MIN_DEFAULT = 15
+
+# Default runtime ceiling when an entry omits max_runtime_s (matches the
+# shipped wake.example.json). 2026-06-11 bug hunt S3: this is the pidfile
+# STALENESS bound — a pidfile older than this cannot belong to a live wake
+# (the spawned side is expected to cap itself at max_runtime_s), so a "live"
+# pid behind it is presumed RECYCLED and the wake slot is reclaimed.
+MAX_RUNTIME_S_DEFAULT = 900
 
 
 def _wake_config_path() -> Path:
@@ -169,6 +181,17 @@ def _min_interval_min(entry: dict) -> float:
     return val if val >= 0 else float(MIN_INTERVAL_MIN_DEFAULT)
 
 
+def _max_runtime_s(entry: dict) -> float:
+    """The entry's runtime ceiling, defaulting (and falling back on garbage)
+    to MAX_RUNTIME_S_DEFAULT — same defensive shape as _min_interval_min."""
+    raw = entry.get("max_runtime_s", MAX_RUNTIME_S_DEFAULT)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return float(MAX_RUNTIME_S_DEFAULT)
+    return val if val > 0 else float(MAX_RUNTIME_S_DEFAULT)
+
+
 def _valid_cmd(entry: dict) -> Optional[list[str]]:
     """The entry's argv iff well-formed (non-empty list of non-empty strings);
     None otherwise. Validated up front so a malformed cmd reads as "not
@@ -234,15 +257,58 @@ def maybe_wake(agent: str, pending: int) -> bool:
         except OSError:
             pass  # no marker yet -> first wake, proceed
 
-        # Single-flight: skip while the previous wake is still running. A
-        # stale pidfile (dead pid, garbage content) is ignored, never fatal.
+        # Single-flight: skip while the previous wake is still running.
+        # 2026-06-11 bug hunt S3 (PID recycling): a pidfile OLDER than the
+        # entry's max_runtime_s is stale even when its pid probes alive — the
+        # spawned side is expected to cap itself at max_runtime_s, so past
+        # that age a "live" pid is far more likely a RECYCLED pid belonging
+        # to an unrelated process. Without the age bound, one recycled pid
+        # blocked an agent's wakes indefinitely. A dead/garbage pidfile is
+        # stale as before. Stale pidfiles are unlinked so the O_EXCL mutex
+        # below can re-take the slot.
         pidfile = _wake_pidfile_path(agent)
         if pidfile.exists():
+            fresh = False
             try:
-                if _pid_alive(int(pidfile.read_text().strip())):
-                    return False
-            except (ValueError, OSError):
-                pass  # garbage/unreadable pidfile = stale -> proceed
+                fresh = (time.time() - pidfile.stat().st_mtime
+                         ) <= _max_runtime_s(entry)
+            except OSError:
+                pass  # vanished/unstatable -> treat as stale
+            if fresh:
+                try:
+                    if _pid_alive(int(pidfile.read_text().strip())):
+                        return False
+                except (ValueError, OSError):
+                    pass  # garbage/unreadable pidfile = stale -> reclaim
+            try:
+                pidfile.unlink()
+            except OSError:
+                pass  # already gone (another tick reclaimed it first)
+
+        # 2026-06-11 bug hunt S3 (TOCTOU): the exists()/alive() check above is
+        # racy — two ticks could both see a free slot and both spawn. The
+        # pidfile itself, created O_CREAT|O_EXCL, is the inter-tick mutex:
+        # exactly one tick wins the create; the loser skips this interval.
+        # Seeded with OUR pid (not the child's, which doesn't exist yet) so a
+        # concurrent tick inside the spawn window sees a live holder; the
+        # child's pid replaces it right after a successful spawn.
+        cache.cache_root().mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(str(pidfile), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False  # a concurrent tick won the slot — one wake at a time
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
+
+        # 2026-06-11 bug hunt S3 (marker-failure spawn leak): arm the throttle
+        # BEFORE spawning. If the marker were written after the spawn and that
+        # write failed, every tick would respawn a full agent runtime
+        # immediately — a spawn storm. The inverse failure mode (marker armed
+        # but the spawn below fails) merely delays the retry by one interval,
+        # which is the right side to fail on.
+        marker.write_text("")
 
         # Spawn DETACHED so the wake outlives (and can never block) the tick.
         # Output appends to the wake log so a misbehaving command is debuggable.
@@ -251,14 +317,21 @@ def maybe_wake(agent: str, pending: int) -> bool:
         env = dict(os.environ)
         env["FULCRA_COORD_AGENT"] = agent
         env["FULCRA_COORD_WAKE_PENDING"] = str(pending)
-        with log.open("ab") as fh:
-            proc = Popen(cmd, stdin=DEVNULL, stdout=fh, stderr=fh,
-                         start_new_session=True, env=env, cwd=cwd)
+        try:
+            with log.open("ab") as fh:
+                proc = Popen(cmd, stdin=DEVNULL, stdout=fh, stderr=fh,
+                             start_new_session=True, env=env, cwd=cwd)
+        except Exception:
+            # Release the mutex so the post-throttle retry isn't also blocked
+            # for max_runtime_s; the armed marker above still spaces retries.
+            try:
+                pidfile.unlink()
+            except OSError:
+                pass
+            return False
 
-        # Record state only AFTER a successful spawn: a failed Popen leaves the
-        # throttle unarmed so the next tick retries.
-        cache.cache_root().mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(proc.pid))
+        # Record the child's pid (replacing the mutex seed). The fresh mtime
+        # doubles as the spawn timestamp the staleness bound above reads.
         pidfile.write_text(str(proc.pid))
         print(f"[fulcra-coord] wake: spawned {cmd[0]} (pid {proc.pid}) for "
               f"{agent} — {pending} pending; log: {log}", file=sys.stderr)
