@@ -42,6 +42,8 @@ All remote I/O goes through subprocesses. Tests inject a fake backend via the
 Timeout env vars:
   FULCRA_COORD_TIMEOUT_SECONDS           — read ops (default: 30)
   FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS — reconcile (default: 90)
+  FULCRA_COORD_TRANSIENT_RETRIES         — extra attempts after a transient
+                                           transport failure (default: 1)
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -152,24 +155,142 @@ def _reconcile_timeout() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Transient-failure retry
+# ---------------------------------------------------------------------------
+
+# Fixed backoff between retry attempts. A constant, not an env knob: the only
+# job of the pause is to let a momentarily-overloaded gateway breathe before
+# the second attempt — tuning it buys nothing, and tests patch it to 0.
+_RETRY_BACKOFF_SECONDS = 1.0
+
+# Minimum remaining per-call budget (seconds) required to attempt a retry.
+# Below this there is no realistic chance the retry completes in time, so we
+# fail within budget instead of blowing through the caller's deadline.
+_MIN_RETRY_HEADROOM_SECONDS = 2.0
+
+# What counts as a TRANSIENT transport failure in the CLI's stderr.
+#
+# WHY (2026-06-10 night incident): the backend's natural per-op latency is
+# 1-16s and its gateway times out at ~15s, so intermittent `HTTP Error 504:
+# Gateway Timeout` responses are permanent weather, not outages. Single-attempt
+# primitives turned each one into a false "missing/empty": a landed upload
+# logged "DELIVERY NOT CONFIRMED" because its post-write verify listing 504'd,
+# searches reported "No tasks found" for files that exist, presence flapped.
+# One bounded retry absorbs the weather.
+#
+# Deliberately NARROW: anything not matched — notably `HTTP Error 404` /
+# `Not Found` and usage errors — is NOT transient. Existence probes against
+# missing files are extremely common in this codebase (stat-gates, presence
+# checks, archive-move idempotence) and must stay single-attempt fast; retrying
+# a genuine not-found would double the latency of every probe for zero benefit.
+_TRANSIENT_STDERR_RE = re.compile(
+    r"HTTP Error 5\d\d"
+    r"|Gateway Time-?out"
+    r"|timed out"
+    r"|timeout"
+    r"|Connection reset"
+    r"|Connection refused"
+    r"|Temporary failure"
+    r"|Service Unavailable",
+    re.IGNORECASE,
+)
+
+
+def _is_transient_failure(stderr: str) -> bool:
+    """Classify a failed attempt's stderr: True only for transport weather
+    (5xx / gateway timeout / connection trouble) worth one more attempt."""
+    return bool(_TRANSIENT_STDERR_RE.search(stderr or ""))
+
+
+def _transient_retries() -> int:
+    """Extra attempts after the first (total attempts = 1 + this). Default 1:
+    one retry absorbs an isolated 504; more just stalls deadline'd callers."""
+    return max(0, _env_int("FULCRA_COORD_TRANSIENT_RETRIES", 1))
+
+
+def _run_with_transient_retry(
+    cmd: list[str],
+    *,
+    default_timeout: int,
+    budget: Optional[int] = None,
+) -> tuple[Optional[subprocess.CompletedProcess], Optional[Exception]]:
+    """Run ``cmd``, retrying transient failures within the caller's budget.
+
+    Returns ``(result, exc)``: ``result`` is the final ``CompletedProcess``
+    (rc==0 on success; callers map a non-zero final rc to their failure value),
+    or ``None`` with ``exc`` set when the final attempt raised
+    (TimeoutExpired / missing CLI / OS error). Never raises.
+
+    BUDGET DISCIPLINE — the load-bearing rule: when the caller passed an
+    explicit per-call ``timeout`` (``budget``), the retry loop must never make
+    the call cost more than that. Deadline-budgeted callers (reconcile view
+    repair uses ``timeout=min(remaining, ...)``) size their budgets assuming a
+    call costs <= timeout; a retry that doubles the wall cost would blow the
+    composed deadline. So each attempt's subprocess timeout is the REMAINING
+    budget, and we only retry while at least ``_MIN_RETRY_HEADROOM_SECONDS``
+    remains. A client-side ``TimeoutExpired`` counts as transient, but with an
+    explicit budget it has by definition consumed it — so it never retries
+    there; with the default timeout it may retry once. When no explicit timeout
+    was passed, each attempt gets the full ``default_timeout`` and retry is
+    always allowed.
+
+    ``FileNotFoundError`` / ``OSError`` (CLI missing, exec failure) are NOT
+    transient — a missing binary will not appear 1s later — and fail fast.
+    """
+    attempts = 1 + _transient_retries()
+    start = time.monotonic()
+    last_result: Optional[subprocess.CompletedProcess] = None
+    last_exc: Optional[Exception] = None
+    for attempt in range(attempts):
+        if budget is not None:
+            remaining = budget - (time.monotonic() - start)
+            if remaining <= 0:
+                break  # budget already gone — report the last failure as-is
+            attempt_timeout: float = remaining
+        else:
+            attempt_timeout = default_timeout
+        try:
+            last_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=attempt_timeout,
+            )
+            last_exc = None
+            if last_result.returncode == 0:
+                return last_result, None
+            transient = _is_transient_failure(last_result.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            # Client-side kill: transient by classification (the op may well
+            # have been about to complete), but still budget-gated below.
+            last_result, last_exc = None, e
+            transient = True
+        except (FileNotFoundError, OSError) as e:
+            return None, e
+        if not transient or attempt + 1 >= attempts:
+            break
+        if budget is not None:
+            remaining = budget - (time.monotonic() - start)
+            if remaining < _MIN_RETRY_HEADROOM_SECONDS:
+                break  # not enough budget left for a retry to plausibly land
+        time.sleep(_RETRY_BACKOFF_SECONDS)
+    return last_result, last_exc
+
+
+# ---------------------------------------------------------------------------
 # Low-level wrappers
 # ---------------------------------------------------------------------------
 
 def stat(remote_path: str, *, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
-    """Return parsed stat output for remote_path, or None on failure."""
+    """Return parsed stat output for remote_path, or None on failure.
+
+    Transient transport failures get one bounded retry (see
+    ``_run_with_transient_retry``); a genuine not-found stays single-attempt."""
     cmd = (backend or _backend_cmd()) + ["stat", remote_path]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_read_timeout(),
-        )
-        if result.returncode != 0:
-            return None
-        return _parse_stat(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    result, _exc = _run_with_transient_retry(cmd, default_timeout=_read_timeout())
+    if result is None or result.returncode != 0:
         return None
+    return _parse_stat(result.stdout)
 
 
 def download(
@@ -178,20 +299,17 @@ def download(
     backend: Optional[list[str]] = None,
     timeout: Optional[int] = None,
 ) -> Optional[str]:
-    """Download remote_path and return contents as string, or None on failure."""
+    """Download remote_path and return contents as string, or None on failure.
+
+    Transient transport failures retry within the caller's ``timeout`` budget
+    (see ``_run_with_transient_retry``)."""
     cmd = (backend or _backend_cmd()) + ["download", remote_path, "-"]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout or _read_timeout(),
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    result, _exc = _run_with_transient_retry(
+        cmd, default_timeout=_read_timeout(), budget=timeout
+    )
+    if result is None or result.returncode != 0:
         return None
+    return result.stdout
 
 
 def download_json(
@@ -248,22 +366,29 @@ def upload(
             tmp_path = tmp.name
 
         upload_cmd = cmd + ["upload", tmp_path, remote_path]
-        result = subprocess.run(
-            upload_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout or _write_timeout(),
+        # Transient transport failures retry within the caller's ``timeout``
+        # budget (see _run_with_transient_retry). On final failure the recorded
+        # reason is the LAST attempt's stderr — that is the freshest signal.
+        result, exc = _run_with_transient_retry(
+            upload_cmd, default_timeout=_write_timeout(), budget=timeout
         )
-        if result.returncode != 0:
+        if result is not None and result.returncode == 0:
+            return True
+        if exc is not None:
+            # Timeouts are a primary failure mode under backend burst
+            # throttling — record them too so the observable never reads
+            # stale on a fresh failure.
+            last_upload_error = f"{type(exc).__name__}: {exc}"[-200:]
+        elif result is not None:
             # Keep the TAIL: CLI/backend errors put the actionable message
             # (HTTP status, throttle hint) at the end of a possibly-long trace.
             err_tail = (result.stderr or "").strip()[-200:]
             last_upload_error = err_tail or f"exit {result.returncode}"
-            return False
-        return True
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        # Timeouts are a primary failure mode under backend burst throttling —
-        # record them too so the observable never reads stale on a fresh failure.
+        else:  # pragma: no cover - budget gone before the first attempt ran
+            last_upload_error = "upload budget exhausted before first attempt"
+        return False
+    except (FileNotFoundError, OSError) as e:
+        # Tempfile creation failure — the retry helper never raises.
         last_upload_error = f"{type(e).__name__}: {e}"[-200:]
         return False
     finally:
@@ -342,33 +467,31 @@ def list_files(
     or already begins with the prefix, pass it through unchanged; otherwise it's
     a bare filename from the real CLI, so join it onto the prefix.
 
-    Best-effort: returns [] on any error (non-zero exit, timeout, missing CLI)."""
+    Best-effort: returns [] on any error (non-zero exit, timeout, missing CLI).
+    Transient transport failures retry within the caller's ``timeout`` budget
+    (see ``_run_with_transient_retry``) — a single 504 on a listing used to
+    read as "no files", which upstream turned into "No tasks found" for tasks
+    that exist and false "DELIVERY NOT CONFIRMED" on landed writes."""
     cmd = (backend or _backend_cmd()) + ["list", prefix]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout or _read_timeout(),
-        )
-        if result.returncode != 0:
-            return []
-        normalized: list[str] = []
-        for raw in result.stdout.splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            # Filenames are slug/id-based with no spaces, so the trailing
-            # whitespace-delimited token is the filename (real CLI) or the
-            # whole clean path (fake / already-normalized).
-            name = line.split()[-1]
-            if name.startswith("/") or name.startswith(prefix):
-                normalized.append(name)
-            else:
-                normalized.append(prefix.rstrip("/") + "/" + name)
-        return normalized
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    result, _exc = _run_with_transient_retry(
+        cmd, default_timeout=_read_timeout(), budget=timeout
+    )
+    if result is None or result.returncode != 0:
         return []
+    normalized: list[str] = []
+    for raw in result.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Filenames are slug/id-based with no spaces, so the trailing
+        # whitespace-delimited token is the filename (real CLI) or the
+        # whole clean path (fake / already-normalized).
+        name = line.split()[-1]
+        if name.startswith("/") or name.startswith(prefix):
+            normalized.append(name)
+        else:
+            normalized.append(prefix.rstrip("/") + "/" + name)
+    return normalized
 
 
 def list_json(
