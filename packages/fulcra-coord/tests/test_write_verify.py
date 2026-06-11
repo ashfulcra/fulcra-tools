@@ -27,9 +27,10 @@ best-effort view/event/directive side-writes are untouched):
    returns True (the self-heal contract stands: cached locally, repaired at the
    next reconcile; the sender's exit code must not flip).
 
-The fast path (success + verified) must cost exactly what it did before the
-fix: one body upload and one post-upload stat — verification reuses the
-version-tracking stat, it does not add a round-trip.
+The successful upload path still verifies with one post-upload stat —
+verification reuses the version-tracking stat, it does not add another
+round-trip after the upload. Confirmed-new writes may spend an extra pre-upload
+stat to disambiguate absence from a read failure.
 """
 
 import io as _io
@@ -120,7 +121,7 @@ def test_body_upload_fail_once_recovers_on_retry(coord_backend, monkeypatch):
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
         upload_results=[False, True],          # transient throttle, then lands
-        stat_results=[None, _OK_STAT],         # pre-stat (new file), then verified
+        stat_results=[None, None, _OK_STAT],   # pre-stat, confirm absent, verify
     )
     ok, err = _write(t, coord_backend)
     assert ok is True
@@ -138,7 +139,7 @@ def test_body_upload_raise_once_recovers_on_retry(coord_backend, monkeypatch):
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
         upload_results=[RuntimeError("transport blew up"), True],
-        stat_results=[None, _OK_STAT],
+        stat_results=[None, None, _OK_STAT],
     )
     ok, err = _write(t, coord_backend)
     assert ok is True
@@ -250,9 +251,9 @@ def test_verify_recovers_on_reupload_no_warn(coord_backend, monkeypatch):
     t = _make_task()
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
-        # pre-stat None, post-stat None (unverified), re-stat OK
+        # pre-stat None, confirm absent, post-stat None (unverified), re-stat OK
         upload_results=[True],
-        stat_results=[None, None, _OK_STAT],
+        stat_results=[None, None, None, _OK_STAT],
     )
     ok, err = _write(t, coord_backend)
     assert ok is True
@@ -293,7 +294,7 @@ def test_write_verify_knob_zero_disables_verification(coord_backend, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# 5. fast path: success + verified costs exactly 1 upload + 1 post-upload stat
+# 5. upload fast path: success + verified costs exactly 1 post-upload stat
 # ---------------------------------------------------------------------------
 
 def test_fast_path_costs_one_upload_one_verify_stat(coord_backend, monkeypatch):
@@ -301,7 +302,7 @@ def test_fast_path_costs_one_upload_one_verify_stat(coord_backend, monkeypatch):
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
         upload_results=[True],
-        stat_results=[None, _OK_STAT],         # pre-stat (new file), verified post-stat
+        stat_results=[None, None, _OK_STAT],   # pre-stat, confirm absent, verify
     )
     ok, err = _write(t, coord_backend)
     assert ok is True

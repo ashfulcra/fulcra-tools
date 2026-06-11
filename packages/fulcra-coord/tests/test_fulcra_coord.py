@@ -1792,9 +1792,14 @@ class TestReconcilePreservesMarkersOnFailure(unittest.TestCase):
             "started_at": "2026-01-01T00:00:00Z",
         })
 
-        # Patch remote.upload_json to always succeed so reconcile completes cleanly
+        # Patch remote.upload_json to always succeed so reconcile completes
+        # cleanly. probe_reachable=True declares the mocked world a REACHABLE
+        # bus whose index is confirmed absent (F3): without it, all-None reads
+        # now correctly read as "can't see the bus" and the tick refuses to
+        # rebuild views (degraded skip) instead of completing.
         with patch("fulcra_coord.cli.remote.upload_json", return_value=True), \
-             patch("fulcra_coord.cli.remote.download_json", return_value=None):
+             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True):
             args = types.SimpleNamespace()
             rc = cmd_reconcile(args, backend=["false"])
 
@@ -2011,30 +2016,72 @@ class TestConflictDetectionWithNoCachedMeta(unittest.TestCase):
                                    msg="ConflictError must raise on conflicting status changes even with no cached meta"):
                 _write_task_and_views(local_done, backend=["false"])
 
-    def test_no_merge_when_remote_file_absent(self):
-        """No merge check when pre_stat is None (new task — file not yet on remote)."""
+    def test_confirmed_absent_new_task_skips_merge_and_writes(self):
+        """CONFIRMED absence (stat None + download None + bus reachable) is the
+        genuinely-new-task case: no merge check, the write proceeds unmodified.
+
+        2026-06-11 write-path read-error audit (F1): this test used to pin the
+        OPPOSITE — "no merge check when pre_stat is None" — which conflated a
+        504'd stat with absence and let a stale agent blind-overwrite a peer's
+        landed transition. Absence now requires a failed download AND a
+        positive reachability probe, never a bare stat miss."""
         from fulcra_coord.cli import _write_task_and_views
 
         base = make_task(title="Brand new task", workstream="devops", agent="agent-a")
         cache.write_cached_task(base)
 
-        download_called = []
+        uploaded = {}
 
         def _fake_upload(data, path, *, backend=None, timeout=None):
+            if "/tasks/" in path and "/events/" not in path:
+                uploaded["task"] = data
             return True
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
-             patch("fulcra_coord.cli.remote.download_json",
-                   side_effect=lambda *a, **kw: download_called.append(a) or None), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=_fake_upload):
-            _write_task_and_views(base, backend=["false"])
+            ok = _write_task_and_views(base, backend=["false"])
 
-        # download_json may be called for view building (index etc.) but NOT for conflict check
-        # The task-path download for conflict detection must not occur when pre_stat is None
-        task_path = __import__("fulcra_coord.remote", fromlist=["task_remote_path"]).task_remote_path(base["id"])
-        task_downloads = [a for a in download_called if a and task_path in str(a)]
-        self.assertEqual(len(task_downloads), 0,
-                         "No merge-check download should happen when remote file does not exist (pre_stat is None)")
+        self.assertTrue(ok, "confirmed-absent new task must write cleanly")
+        self.assertEqual(uploaded.get("task", {}).get("id"), base["id"])
+        self.assertEqual(uploaded["task"].get("status"), base.get("status"),
+                         "no merge may rewrite a confirmed-new task's body")
+
+    def test_read_failure_is_not_absence_and_never_blind_overwrites(self):
+        """READ FAILURE (stat None + download None + bus NOT reachable) must
+        fail the write — cached locally + needs_reconcile marker — instead of
+        being mistaken for a new task and uploaded blind (the F1 failure
+        sequence: A's pre-stat 504s while B's `done` sits on the bus; A's
+        'new task' upload reverts B's transition)."""
+        from fulcra_coord.cli import _write_task_and_views
+
+        base = make_task(title="Maybe not new", workstream="devops", agent="agent-a")
+        cache.write_cached_task(base)
+
+        task_body_uploads = []
+
+        def _fake_upload(data, path, *, backend=None, timeout=None):
+            if "/tasks/" in path and "/events/" not in path:
+                task_body_uploads.append(path)
+            return True
+
+        with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=False), \
+             patch("fulcra_coord.cli.remote.upload_json", side_effect=_fake_upload):
+            ok = _write_task_and_views(base, backend=["false"])
+
+        self.assertFalse(ok, "unconfirmable absence must fail the write")
+        self.assertEqual(task_body_uploads, [],
+                         "no task body may be uploaded while reads are failing "
+                         "(blind overwrite of a possibly-newer remote body)")
+        markers = [m for m in cache.list_op_markers()
+                   if m.get("task_id") == base["id"]]
+        self.assertTrue(
+            any(m.get("needs_reconcile") and m.get("status") == "failed"
+                for m in markers),
+            f"expected a failed/needs_reconcile marker for self-heal, got {markers}")
 
 
 class TestVerificationLevelHelpText(unittest.TestCase):
@@ -2505,8 +2552,12 @@ class TestViewFanOutTaskSetFreshness(unittest.TestCase):
             uploaded_views[path] = data
             return True
 
+        # probe_reachable=True: this world's bus is plainly reachable (the
+        # index downloads fine); the F1/F2 read-error guards must read the
+        # missing summaries aggregate as confirmed-absent, not as an outage.
         with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download), \
              patch("fulcra_coord.cli.remote.stat", side_effect=fake_stat), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=fake_upload):
             _write_task_and_views(task_a, backend=["false"])
 
@@ -2568,8 +2619,11 @@ class TestViewFanOutTaskSetFreshness(unittest.TestCase):
             uploaded_views[path] = data
             return True
 
+        # probe_reachable=True (F1/F2 guards): reachable bus, the new task and
+        # the summaries aggregate are CONFIRMED absent rather than unreadable.
         with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download), \
              patch("fulcra_coord.cli.remote.stat", side_effect=fake_stat), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=fake_upload):
             _write_task_and_views(task_new, backend=["false"])
 
@@ -3960,8 +4014,13 @@ class TestReconcileStaleness(unittest.TestCase):
     def test_reconcile_writes_needs_attention_view(self):
         from fulcra_coord import cli as climod, cache
         cache.write_cached_task(_stale_task(9))
-        rc = climod.cmd_reconcile(types.SimpleNamespace(),
-                                  backend=self.fake_backend)
+        # probe_reachable=True: model a REACHABLE bus with no index yet, so the
+        # F3 degraded-load guard doesn't (correctly) skip the view-build phase
+        # this test exists to exercise. Uploads still fail (the `false`
+        # backend), which is the partial-failure outcome under test.
+        with patch("fulcra_coord.cli.remote.probe_reachable", return_value=True):
+            rc = climod.cmd_reconcile(types.SimpleNamespace(),
+                                      backend=self.fake_backend)
         self.assertEqual(rc, 1)  # fake backend upload fails, but views build
         na = cache.read_cached_view("needs-attention")
         self.assertIsNotNone(na)
@@ -3972,7 +4031,10 @@ class TestReconcileStaleness(unittest.TestCase):
         from fulcra_coord import cli as climod, cache
         os.environ["FULCRA_COORD_STALE_HOURS"] = "24"
         cache.write_cached_task(_stale_task(9))  # 9h < 24h -> not stale
-        climod.cmd_reconcile(types.SimpleNamespace(), backend=self.fake_backend)
+        # probe_reachable=True: same F3 note as above — reachable, index absent.
+        with patch("fulcra_coord.cli.remote.probe_reachable", return_value=True):
+            climod.cmd_reconcile(types.SimpleNamespace(),
+                                 backend=self.fake_backend)
         na = cache.read_cached_view("needs-attention")
         self.assertEqual(na["tasks"], [])
 
@@ -8328,7 +8390,11 @@ class TestParallelViewUpload(unittest.TestCase):
                 return False
             return True
 
+        # probe_reachable=True (F1 guard): stat None + download None on a
+        # REACHABLE bus is a confirmed-new task; without the probe this world
+        # would now (correctly) refuse to write at all.
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
              patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]):
@@ -8350,6 +8416,7 @@ class TestParallelViewUpload(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
              patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]), \
@@ -8369,6 +8436,7 @@ class TestParallelViewUpload(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
              patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]):
@@ -8614,7 +8682,9 @@ class TestParallelUploadExceptionSafety(unittest.TestCase):
                 raise RuntimeError("simulated network blowup")
             return True
 
+        # probe_reachable=True (F1 guard): see TestParallelViewUpload.
         with patch("fulcra_coord.cli.remote.stat", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
              patch("fulcra_coord.writepipe._load_summaries_for_rebuild",
                    return_value=[schema.task_summary(task)]):
@@ -11411,8 +11481,12 @@ class TestReconcileHealthWrite(unittest.TestCase):
             uploaded.append(path)
             return upload_side_effect(data, path, **kw)
 
+        # probe_reachable=True (F3 guard): a reachable bus with no index yet —
+        # all-None reads on an UNREACHABLE bus now correctly skip the view
+        # phase (degraded) and would never reach the health write under test.
         with patch("fulcra_coord.cli.remote.upload_json", side_effect=_capture), \
              patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
         return rc, uploaded
@@ -11443,6 +11517,7 @@ class TestReconcileHealthWrite(unittest.TestCase):
 
         with patch("fulcra_coord.cli.remote.upload_json", side_effect=_side), \
              patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
         self.assertEqual(rc, 0, "a health-write failure must never fail the tick")

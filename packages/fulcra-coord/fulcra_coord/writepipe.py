@@ -29,7 +29,12 @@ from . import cache, remote, schema, views, identity, session_link, env_int
 from . import annotations as lifecycle_annotations
 from . import eventlog, events as _events
 from . import log as ops_log
-from .io import _load_summaries_for_rebuild, _updated_at_key
+from .io import (
+    SUMMARIES_READ_ERROR,
+    _confirmed_absent,
+    _load_summaries_for_rebuild,
+    _updated_at_key,
+)
 from .output import warn as _warn
 from .timeutil import now_iso as _now_iso
 
@@ -79,6 +84,49 @@ def _upload_task_body(
         except Exception:
             ok = False
     return ok
+
+
+def _fail_write_pre_read_error(
+    task: dict[str, Any], op_id: str, command: str
+) -> bool:
+    """The pre-write read FAILED and absence could not be confirmed: refuse to
+    write. Returns False (the caller's existing cached-locally contract).
+
+    WHY (2026-06-11 write-path read-error audit, F1): writing anyway is the
+    blind-LWW disaster — agent A holds a stale body, agent B's ``done`` is on
+    the bus, A's pre-read 504s, and A's upload reverts B's transition with no
+    signal anywhere. Failing the write is strictly safer: the body is cached
+    locally and the failed/needs_reconcile marker hands it to cmd_reconcile's
+    body-repair pass, which replays it MERGE-AWARE (the C2 fix: download the
+    current remote, _try_merge, never clobber a newer transition). So the edit
+    is deferred-and-merged instead of delivered-by-clobbering.
+
+    Deliberately ``return False`` and NOT ``raise NeedsReconcile``: every
+    NeedsReconcile handler in lifecycle.py treats the exception as "the TASK
+    BODY landed, only views need repair" (some return success and fire the
+    directive dual-write on it). Raising it BEFORE any upload would make a
+    failed write report as delivered — the exact lie this fix exists to stop.
+    """
+    cache.write_cached_task(task)  # the self-heal source for the marker replay
+    op_marker = {
+        "op_id": op_id,
+        "command": command,
+        "task_id": task["id"],
+        "status": "failed",
+        "needs_reconcile": True,
+        "started_at": _now_iso(),
+    }
+    cache.write_op_marker(op_id, op_marker)
+    ops_log.log_op(command, task["id"], status="error",
+                   error="Pre-write read failed and absence is unconfirmed — "
+                         "refusing to write blind; cached for reconcile")
+    _warn(
+        f"WRITE DEFERRED: {task['id']} — the remote body could not be read and "
+        f"the bus could not confirm it is absent. Writing blind could revert a "
+        f"concurrent agent's transition, so the body is cached locally; run "
+        f"'fulcra-coord reconcile' to merge-and-deliver it."
+    )
+    return False
 
 
 def _stamp_session_pointer(task: dict[str, Any]) -> None:
@@ -149,30 +197,69 @@ def _write_task_and_views(
                     f"unsafe. Run 'fulcra-coord reconcile' to repair."
                 )
             task = merged
-        # If the file is gone (None), keep `task` as-is — nothing to merge against.
+        elif pre_stat is not None or not _confirmed_absent(task_path, backend=backend):
+            # 2026-06-11 write-path read-error audit (F1, fold branch): a None
+            # download used to read as "file gone, nothing to merge against" —
+            # but None is ALSO what a failed read returns, and a fold-sourced
+            # body is exactly the kind that may LAG the file. A visible
+            # pre-stat proves the file EXISTS (the read failed); an
+            # unreachable bus proves nothing. Either way, uploading the fold
+            # body as-is would blind-LWW over whatever we couldn't read.
+            return _fail_write_pre_read_error(task, op_id, command)
+        # else: pre_stat missed, the download missed, AND a follow-up stat
+        # missed while the bus probes reachable — absence CONFIRMED (the file
+        # really is gone). Keep `task` as-is: nothing to merge against.
     else:
-        # Trigger merge/conflict check when:
-        # - we have a cached baseline and it differs from the current remote (normal case), OR
-        # - we have NO cached baseline but the file already exists remotely (fresh machine
-        #   that loaded the task via _load_task or _load_all_tasks but never previously wrote
-        #   it — unknown whether another agent updated it since we loaded it).
-        # Skipping this check when cached_meta is None would silently overwrite concurrent
-        # remote changes from other agents on cross-machine sessions.
-        needs_merge_check = pre_stat is not None and (
-            cached_meta is None or remote.stat_changed(cached_meta, pre_stat)
-        )
-        if needs_merge_check:
+        # Pre-read disambiguation (2026-06-11 write-path read-error audit, F1):
+        # stat -> None means EITHER "the file does not exist yet" (new task)
+        # OR "the stat failed after retry" (504 weather) — and the no-CAS
+        # transport cannot tell us which. The old code assumed the former and
+        # skipped the merge check, producing this failure sequence: agent A
+        # holds a stale task; agent B lands `done`; A runs `update`; A's
+        # pre-stat 504s -> merge check skipped -> A's upload silently reverts
+        # B's transition (blind LWW). So a None stat now costs one body
+        # download: a readable body forces the merge check; a missing body is
+        # trusted as ABSENT only when probe_reachable() confirms the bus is
+        # answering (the role_ops C1 idiom — the probe spawn is spent only on
+        # this rare path, never on the happy path).
+        fresh: Optional[dict[str, Any]] = None
+        if pre_stat is None:
             fresh = remote.download_json(task_path, backend=backend)
             if fresh:
-                merged = _try_merge(task, fresh)
-                if merged is None:
-                    ops_log.log_op(command, task_id, status="conflict",
-                                   error="Unsafe merge — remote version changed")
-                    raise schema.ConflictError(
-                        f"Remote task {task_id} changed and merge is unsafe. "
-                        f"Run 'fulcra-coord reconcile' to repair."
-                    )
-                task = merged
+                needs_merge_check = True   # the file exists; stat lied/failed
+            elif _confirmed_absent(task_path, backend=backend):
+                needs_merge_check = False  # absence CONFIRMED: genuinely new
+            else:
+                return _fail_write_pre_read_error(task, op_id, command)
+        else:
+            # Trigger merge/conflict check when:
+            # - we have a cached baseline and it differs from the current remote (normal case), OR
+            # - we have NO cached baseline but the file already exists remotely (fresh machine
+            #   that loaded the task via _load_task or _load_all_tasks but never previously wrote
+            #   it — unknown whether another agent updated it since we loaded it).
+            # Skipping this check when cached_meta is None would silently overwrite concurrent
+            # remote changes from other agents on cross-machine sessions.
+            needs_merge_check = (
+                cached_meta is None or remote.stat_changed(cached_meta, pre_stat)
+            )
+        if needs_merge_check:
+            if fresh is None:
+                fresh = remote.download_json(task_path, backend=backend)
+            if not fresh:
+                # The pre-stat SAW the file (this branch is unreachable for the
+                # stat-None path, which always carries a body here) but its
+                # body could not be read: READ_ERROR, never "nothing to merge
+                # against" — proceeding would be the same blind overwrite (F1).
+                return _fail_write_pre_read_error(task, op_id, command)
+            merged = _try_merge(task, fresh)
+            if merged is None:
+                ops_log.log_op(command, task_id, status="conflict",
+                               error="Unsafe merge — remote version changed")
+                raise schema.ConflictError(
+                    f"Remote task {task_id} changed and merge is unsafe. "
+                    f"Run 'fulcra-coord reconcile' to repair."
+                )
+            task = merged
 
     # Write operation marker before fan-out
     op_marker = {
@@ -250,13 +337,39 @@ def _write_task_and_views(
     # the write-path half of the perf refactor: it removes the per-task body
     # fetch loop (~N round-trips) that _load_all_tasks performed on every write.
     #
-    # BACKWARD COMPAT: a bus that predates the aggregate has no summaries.json. In
-    # that case _load_summaries_for_rebuild returns None and we fall back to the
-    # old _load_all_tasks path (correctness over speed) — a fresh machine that ran
-    # only _load_task() still pulls every remote task before building views, so no
-    # task is silently dropped. The current task is already cached (line above),
-    # so it is always part of the rebuilt set either way.
+    # BACKWARD COMPAT: a bus that predates the aggregate has no summaries.json.
+    # When that ABSENCE is confirmed, _load_summaries_for_rebuild falls back to
+    # the old _load_all_tasks path (correctness over speed) — a fresh machine
+    # that ran only _load_task() still pulls every remote task before building
+    # views, so no task is silently dropped. The current task is already cached
+    # (line above), so it is always part of the rebuilt set either way.
     rebuild_source = _load_summaries_for_rebuild(task, backend=backend)
+    if rebuild_source is SUMMARIES_READ_ERROR:
+        # 2026-06-11 write-path read-error audit (F2): NO trustworthy rebuild
+        # source could be read (the aggregate exists but is unreadable, or the
+        # fallback full load degraded to local cache because the index is
+        # unreadable). Rebuilding views from whatever this host happens to have
+        # cached and uploading them with a fresh generated_at would silently
+        # BLANK the bus's read surface — the stale-view guard cannot catch
+        # fresh-but-truncated. The task BODY already landed above (the
+        # transition is real), so this is exactly a partial write: keep the
+        # needs_reconcile marker, emit the lifecycle moment (BUG 10 contract),
+        # and raise NeedsReconcile so reconcile — which refuses the same
+        # degraded source (F3) — repairs the views once it can see the bus.
+        op_marker["status"] = "partial"
+        op_marker["needs_reconcile"] = True
+        op_marker["views_skipped"] = "rebuild_source_read_error"
+        cache.write_op_marker(op_id, op_marker)
+        ops_log.log_op(command, task_id, status="partial",
+                       detail="Task written; view rebuild skipped — the "
+                              "summaries/index rebuild source could not be "
+                              "read (would truncate views)")
+        _emit_lifecycle(command, task, lifecycle, backend=backend)
+        raise schema.NeedsReconcile(
+            f"Task {task_id} written, but the view-rebuild source could not "
+            f"be read — views were left untouched instead of being rebuilt "
+            f"from a partial set. Run 'fulcra-coord reconcile' to repair."
+        )
     all_views = views.build_all_views(rebuild_source)
 
     # Upload views CONCURRENTLY (P1): remote.upload_json is thread-safe (each
