@@ -125,13 +125,26 @@ def _backend_cmd() -> list[str]:
 
 
 def _read_timeout() -> int:
-    # _env_int (not a bare int()): a non-numeric override falls back to 5 instead
-    # of raising and crashing every read op on a typo'd value.
-    return _env_int("FULCRA_COORD_TIMEOUT_SECONDS", 5)
+    # _env_int (not a bare int()): a non-numeric override falls back to the
+    # default instead of raising and crashing every read op on a typo'd value.
+    #
+    # DEFAULT 30 (was 5) — 2026-06-11 root cause: real platform latency for
+    # this CLI is 1-16s per operation (measured idle; worse under host CPU
+    # load). A 5s read timeout silently TRUNCATED long listings and killed
+    # slow reads, which masqueraded as a backend outage for an entire evening
+    # ("unstable listings", "stale views", "write-dead windows" — all the
+    # client executing its own calls). Timeouts must sit well above natural
+    # latency; slowness is surfaced by the reconcile deadline, not per-call.
+    return _env_int("FULCRA_COORD_TIMEOUT_SECONDS", 30)
 
 
 def _write_timeout() -> int:
-    return max(15, _read_timeout())
+    # max(60, read) (was max(15, read)) — same root cause as _read_timeout:
+    # uploads measured at 1-16s idle routinely crossed 15s under load; the
+    # client gave up on writes the server then completed (observed duplicate
+    # directives), producing "silent write loss" symptoms with a healthy
+    # backend. 60s clears observed worst-case with margin.
+    return max(60, _read_timeout())
 
 
 def _reconcile_timeout() -> int:
