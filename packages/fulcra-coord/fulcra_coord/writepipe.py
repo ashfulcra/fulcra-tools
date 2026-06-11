@@ -720,11 +720,25 @@ def _repair_merged_tags(
         for tag in (task.get("tags") or [])
         if not is_standard_tag(tag)
     ]
+    primary_kind = schema._extract_kind_from_tags(merged.get("tags") or [])
+    # 2026-06-11 bug hunt C7 (mirrors apply_transition's _secondary_kinds
+    # carry): every non-primary kind: tag from either side must survive the
+    # rebuild. Multi-kind membership is routing-load-bearing, and a SECOND
+    # standard kind (kind:feature beside kind:ops) is excluded from `extra`
+    # above precisely because it IS a standard tag — without this explicit
+    # carry it vanished from the merged task. build_tags dedups via
+    # sorted(set(...)), so overlap with `extra` is harmless.
+    secondary_kinds = [
+        tag
+        for task in (local, remote_task, merged)
+        for tag in (task.get("tags") or [])
+        if tag.startswith("kind:") and tag != f"kind:{primary_kind}"
+    ]
     merged["tags"] = schema.build_tags(
         status=merged.get("status", ""),
         workstream=merged.get("workstream", ""),
         agent=merged.get("owner_agent", ""),
-        kind=schema._extract_kind_from_tags(merged.get("tags") or []),
+        kind=primary_kind,
         priority=merged.get("priority", ""),
-        extra=extra or None,
+        extra=(extra + secondary_kinds) or None,
     )
