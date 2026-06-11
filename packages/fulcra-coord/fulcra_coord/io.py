@@ -21,6 +21,7 @@ import copy
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -388,13 +389,16 @@ def _fallback_window_minutes() -> float:
                      FALLBACK_WINDOW_MINUTES_DEFAULT)
 
 
-def _claim_fallback_throttle(window_min: float) -> tuple[bool, Optional[float]]:
+def _claim_fallback_throttle(
+    window_min: float,
+) -> tuple[bool, Optional[float], Optional[str]]:
     """Try to claim the per-host direct-listing-fallback slot.
 
-    Returns ``(claimed, holder_age_minutes)``: ``(True, None)`` when this
-    process now holds the marker and may run the full fallback; ``(False,
-    age)`` when another process on this host is already mid-fallback (the
-    caller must serve its stale cache instead of joining the stampede).
+    Returns ``(claimed, holder_age_minutes, token)``: ``(True, None, token)``
+    when this process now holds the marker and may run the full fallback;
+    ``(False, age, None)`` when another process on this host is already
+    mid-fallback (the caller must serve its stale cache instead of joining the
+    stampede).
 
     THE STAMPEDE THIS BREAKS (live, 2026-06-11): with the bus views
     stale/broken, EVERY listener tick on this host (the operator's Mac runs
@@ -424,7 +428,7 @@ def _claim_fallback_throttle(window_min: float) -> tuple[bool, Optional[float]]:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
-        return True, None  # marker store unusable — fail open (see docstring)
+        return True, None, None  # marker store unusable — fail open
     # Two passes: the first may discover a stale holder and unlink it; the
     # second re-attempts the O_EXCL create. A FRESH holder on either pass
     # means throttled.
@@ -437,7 +441,7 @@ def _claim_fallback_throttle(window_min: float) -> tuple[bool, Optional[float]]:
             except OSError:
                 continue  # vanished between create and stat — retry the claim
             if age_min < window_min:
-                return False, age_min  # live holder — do not join the stampede
+                return False, age_min, None  # live holder — do not join the stampede
             # Stale takeover: the holder crashed mid-fallback (completion
             # always releases). Unlink and let the next pass's O_EXCL decide
             # the race — same reclaim discipline as wake.py's pidfile.
@@ -447,26 +451,43 @@ def _claim_fallback_throttle(window_min: float) -> tuple[bool, Optional[float]]:
                 pass
             continue
         except OSError:
-            return True, None  # marker store unusable — fail open
+            return True, None, None  # marker store unusable — fail open
+        token = f"{os.getpid()}-{uuid.uuid4().hex}"
         try:
             os.write(fd, json.dumps(
-                {"at": _now_iso(), "holder": os.getpid()}).encode())
+                {"at": _now_iso(), "holder": os.getpid(),
+                 "token": token}).encode())
         finally:
             os.close(fd)
-        return True, None
+        return True, None, token
     # Both passes lost the create race (a concurrent taker-over won): treat as
     # held-by-them; age unknown.
-    return False, None
+    return False, None, None
 
 
-def _release_fallback_throttle() -> None:
+def _release_fallback_throttle(token: Optional[str]) -> None:
     """Release the fallback claim. Called on fallback COMPLETION — success or
     failure alike: the window only guards CONCURRENCY (one fallback at a time
     per host), never rate across time; a failed fallback must free the slot so
     the next tick can retry immediately instead of waiting out a stale
-    takeover. Best-effort and idempotent."""
+    takeover. Best-effort and idempotent.
+
+    The ownership token is load-bearing: a slow-but-live fallback can exceed
+    the takeover window, at which point another process may unlink/reclaim the
+    stale marker. The original finisher must not blindly unlink that newer
+    holder's marker, or the host can stampede again while the replacement
+    fallback is still running."""
+    if token is None:
+        return
+    path = cache.fallback_throttle_path()
     try:
-        cache.fallback_throttle_path().unlink(missing_ok=True)
+        body = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if body.get("token") != token:
+        return
+    try:
+        path.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -523,9 +544,9 @@ def _load_task_summaries(
         if stale_min is None:
             return summaries_view["summaries"]
         window_min = _fallback_window_minutes()
-        holding = False
+        holding_token: Optional[str] = None
         if not bypass_fallback_throttle and window_min > 0:
-            claimed, holder_age = _claim_fallback_throttle(window_min)
+            claimed, holder_age, token = _claim_fallback_throttle(window_min)
             if not claimed:
                 age_txt = (f"{holder_age:.1f}m ago"
                            if holder_age is not None else "age unknown")
@@ -534,7 +555,7 @@ def _load_task_summaries(
                       f"process on this host claimed it ({age_txt}); "
                       "using the stale view (results may be incomplete)")
                 return summaries_view["summaries"]
-            holding = True
+            holding_token = token
         _warn(f"summaries view is {int(stale_min)}m stale — "
               "reading task bodies directly")
         try:
@@ -543,8 +564,8 @@ def _load_task_summaries(
             # Completion releases — success OR failure. The marker guards
             # concurrency only; a failed fallback must free the slot for the
             # next tick rather than wedge the host until stale takeover.
-            if holding:
-                _release_fallback_throttle()
+            if holding_token is not None:
+                _release_fallback_throttle(holding_token)
         if direct:
             return [schema.task_summary(t) for t in direct]
         _warn(f"summaries view is {int(stale_min)}m stale AND the direct task "
