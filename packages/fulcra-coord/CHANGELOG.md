@@ -12,6 +12,65 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Retention/directives wave: destructive paths stop trusting failed reads; the GC that never ran now runs
+
+Seven fixes from the 2026-06-10/11 blind audit + live operation, sharing two
+themes: (a) the READ_ERROR/`_confirmed_absent` discipline extended to the
+remaining destructive call sites — absence needs POSITIVE evidence before
+anything is deleted or overwritten; (b) long loops compose with reconcile's
+deadline instead of overrunning it.
+
+- **Event-log orphan GC requires confirmed absence (F6):** the orphan branch
+  of `retention._prune_event_log` treated a stat-`None` — which the transport
+  also returns on a FAILED read — as "hot file confirmed gone" and deleted the
+  task's whole event-shard tree; compound with a partial task load and a LIVE
+  task's fold source was destroyed. The branch now requires
+  `io._confirmed_absent` (stat miss + reachable bus); unconfirmable absence
+  defers the task to the next pass.
+- **`restore` now sticks (F7):** `cmd_restore` left the archive body in place
+  and the task terminal+aged, so the next daily retention pass re-archived it
+  within ~24h — silently undoing the operator's restore. Restore now deletes
+  the cold copy after verifying the hot body landed (the `_archive_task`
+  no-loss ordering, reversed; a failed cold delete keeps the index shard and
+  errors so a retry finishes the move instead of letting a stale archive body
+  resurrect later), stamps `restored_at` on the hot body, and
+  `views.is_archivable_task` ages from max(done_at, restored_at) — a restore
+  opens a full fresh retention window.
+- **Directive snapshot refresh can no longer regress (F9):** `dual_write`
+  rebuilt the LWW snapshot from three best-effort sub-log reads that returned
+  `[]` on failure, so a re-mirror during a listing blip shrank `acked_by`
+  below the durable union and re-opened closed loops on every board/digest
+  until the next good fold. The reads now report failure distinctly
+  (`directives._read_sublog_shards`); on any failure the refresh
+  merge-preserves the previous snapshot's acks/terminal state (the upload can
+  only ADD), and skips entirely (ops-logged `directive_snapshot_skipped`)
+  when there is nothing safe to merge from.
+- **`review-done` failure path could never be audited (NameError):**
+  `routing_ops` called `ops_log.log_op` without importing `ops_log`; the
+  NameError was swallowed by the guarding try/except, so the
+  `response_write_failed` entry was never written. Import added (the
+  writepipe style) and the entry pinned by test.
+- **Continuity-checkpoint GC never ran in production (listing contract):**
+  `_walk_continuity_checkpoint_dirs` descended trailing-slash directory
+  entries, but the live `fulcra file list` returns RECURSIVE file listings
+  with no directory entries — the walker found zero children and the
+  unbounded `checkpoints/` growth was never pruned. Rewritten to partition
+  ONE recursive listing by path segments (one list call instead of
+  O(directories); tolerant of backends that do emit dir entries), with the
+  mock tests re-encoded to the live contract and a fake-backend-shaped pin.
+- **Role escalation markers are now pruned:** `roles/<name>/escalations/
+  <YYYY-MM-DD>.json` (minted daily per vacant role) accumulated forever and
+  every roles listing paid for the pile. The marker-prune pass now sweeps
+  them on the existing marker-retention window with the same
+  parse-don't-compare + fail-toward-keeping discipline (role records and
+  leases can never match the prune shape).
+- **Reconcile's body-repair loop is deadline-gated (live find):** the loop
+  ran every queued repair regardless of budget — with the #167 transient
+  retry (≤61s/op worst case) a 42-item backlog ran 40+ minutes and overlapped
+  the next cron tick. It now checks the same budget floor `_run_retention`
+  uses between items, defers the remainder (markers kept, ops-logged
+  `task_body_repair_deferred`), and the remainder drains next tick.
+
 ### Roles and presence: read failures no longer read as vacancy or absence
 
 **The same class, second wave (2026-06-11 adversarial audit, F4/F5/F8):** the

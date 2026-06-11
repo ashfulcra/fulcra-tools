@@ -369,7 +369,18 @@ def is_archivable_task(task, now=None, retention_days=None):
     fails toward SURFACING a clockless task), archiving is a destructive MOVE, so
     a clockless terminal task is NOT archived — we never move what we can't date.
     Boundary: age >= retention_days qualifies (a task done exactly N days ago is
-    archivable), matching the recently-done cutoff's >= semantics."""
+    archivable), matching the recently-done cutoff's >= semantics.
+
+    RESTORED TASKS (F7, 2026-06-11 wave): ``cmd_restore`` stamps ``restored_at``
+    on the hot body it re-uploads. A restored task is still terminal and still
+    aged from its original done stamp, so aging from done_at alone re-archived
+    it on the very next daily pass — silently undoing the operator's restore.
+    Eligibility therefore ages from max(done_at, restored_at): a restore opens
+    a FULL fresh retention window. A restored_at that is PRESENT but
+    unparseable fails toward KEEPING (a restore demonstrably happened, at an
+    unknown time — never move what we can't date), exactly like the done
+    stamp; a restored_at older than the done stamp is inert under max() (a
+    restore can never make a task MORE archivable)."""
     if task.get("status") not in ("done", "abandoned"):
         return False
     if now is None:
@@ -377,6 +388,12 @@ def is_archivable_task(task, now=None, retention_days=None):
     dt = _parse_dt(_done_at(task))
     if dt is None:
         return False
+    if task.get("restored_at") is not None:
+        rdt = _parse_dt(task.get("restored_at"))
+        if rdt is None:
+            return False  # undatable restore: fail toward keeping
+        if rdt > dt:
+            dt = rdt
     return (now - dt).total_seconds() / 86400.0 >= _retention_days(retention_days)
 
 
@@ -395,6 +412,39 @@ def is_prunable_marker(path, now=None, marker_days=None):
     if now is None:
         now = _now()
     m = _MARKER_DATE_RE.search(path)
+    if not m:
+        return False
+    dt = _parse_dt(m.group(1) + "T00:00:00Z")
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _marker_retention_days(marker_days)
+
+
+_ESCALATION_MARKER_DATE_RE = _re.compile(r"/escalations/(\d{4}-\d{2}-\d{2})\.json$")
+
+
+def is_prunable_escalation_marker(path, now=None, marker_days=None):
+    """True when a role vacancy-escalation daily marker is older than the
+    MARKER retention window and should be pruned (deleted).
+
+    WHY (2026-06-11 wave): ``remote.role_escalation_marker_path`` mints
+    ``roles/<name>/escalations/<YYYY-MM-DD>.json`` once per vacant role per
+    day (the first-writer-wins dedup guard behind "escalate a vacancy once a
+    day, not once a tick"), but nothing ever pruned them — the digest-marker
+    sweep covers only digest/markers/. They accumulated forever AND every
+    roles listing paid to enumerate/download the growing pile. Same nature as
+    digest markers (regenerable guard, zero history value), so the SAME
+    retention window (_marker_retention_days) applies.
+
+    SAFETY: the path must match ``.../escalations/<date>.json`` EXACTLY — the
+    role record (roles/<name>.json) and lease files (.../leases/<agent>.json)
+    share the roles/ prefix and must never look prunable however date-like
+    their names are. Date parsed via _parse_dt, never compared lexically; an
+    undatable path is KEPT (never delete what we can't date). Boundary:
+    age >= marker_days prunes — matching is_prunable_marker."""
+    if now is None:
+        now = _now()
+    m = _ESCALATION_MARKER_DATE_RE.search(path)
     if not m:
         return False
     dt = _parse_dt(m.group(1) + "T00:00:00Z")

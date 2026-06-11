@@ -63,6 +63,37 @@ class TestIsArchivableTask(unittest.TestCase):
         finally:
             del os.environ["FULCRA_COORD_RETENTION_DAYS"]
 
+    # --- restored_at (F7, 2026-06-11 wave): a restore stamps restored_at and
+    # --- archive eligibility ages from max(done_at, restored_at), so a restored
+    # --- task gets a FRESH retention window instead of an instant re-archive.
+
+    def test_fresh_restore_is_not_archivable(self):
+        # done 40d ago (aged) but restored 1d ago: the restore opens a fresh
+        # window — NOT archivable, else the next daily pass silently undoes it.
+        t = {"status": "done", "done_at": _dt(40, self.now),
+             "updated_at": _dt(40, self.now), "restored_at": _dt(1, self.now)}
+        self.assertFalse(views.is_archivable_task(t, self.now, 30))
+
+    def test_aged_restore_is_archivable_again(self):
+        # restored 31d ago: the fresh window has itself expired — archivable.
+        t = {"status": "done", "done_at": _dt(90, self.now),
+             "updated_at": _dt(90, self.now), "restored_at": _dt(31, self.now)}
+        self.assertTrue(views.is_archivable_task(t, self.now, 30))
+
+    def test_unparseable_restored_at_is_kept(self):
+        # A restore demonstrably happened but can't be dated: fail toward
+        # KEEPING (archiving is a destructive move — never move what we can't date).
+        t = {"status": "done", "done_at": _dt(40, self.now),
+             "updated_at": _dt(40, self.now), "restored_at": "garbage"}
+        self.assertFalse(views.is_archivable_task(t, self.now, 30))
+
+    def test_older_restored_at_does_not_shrink_done_age(self):
+        # restored BEFORE the done stamp (weird but possible after manual edits):
+        # max() keeps aging from done_at — restore never makes a task MORE archivable.
+        t = {"status": "done", "done_at": _dt(10, self.now),
+             "updated_at": _dt(10, self.now), "restored_at": _dt(50, self.now)}
+        self.assertFalse(views.is_archivable_task(t, self.now, 30))
+
 
 class TestIsPrunableMarker(unittest.TestCase):
     def setUp(self):
@@ -84,6 +115,44 @@ class TestIsPrunableMarker(unittest.TestCase):
         # never delete something we can't date — safe direction for a destructive op.
         self.assertFalse(views.is_prunable_marker("/x/digest/markers/garbage.json", self.now, 7))
         self.assertFalse(views.is_prunable_marker("/x/digest/markers/.json", self.now, 7))
+
+
+class TestIsPrunableEscalationMarker(unittest.TestCase):
+    """Role vacancy-escalation daily markers (roles/<name>/escalations/<DAY>.json)
+    are minted per vacant role per day and were never pruned — they accumulated
+    forever AND every roles listing paid to download them (2026-06-11 wave).
+    Same parse-don't-compare + fail-toward-keeping discipline as the digest
+    markers, on the same MARKER retention window."""
+
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_old_escalation_marker_prunable(self):
+        path = "/coordination/roles/triage-lead/escalations/2026-05-20.json"  # 16d
+        self.assertTrue(views.is_prunable_escalation_marker(path, self.now, 7))
+
+    def test_recent_escalation_marker_kept(self):
+        path = "/coordination/roles/triage-lead/escalations/2026-06-03.json"  # 2d
+        self.assertFalse(views.is_prunable_escalation_marker(path, self.now, 7))
+
+    def test_exactly_at_cutoff_prunable(self):
+        path = "/coordination/roles/triage-lead/escalations/2026-05-29.json"  # 7d
+        self.assertTrue(views.is_prunable_escalation_marker(path, self.now, 7))
+
+    def test_undatable_kept(self):
+        # Never delete what we can't date — destructive-op safe direction.
+        for path in ("/coordination/roles/r/escalations/garbage.json",
+                     "/coordination/roles/r/escalations/.json",
+                     "/coordination/roles/r/escalations/2026-13-99-extra.json"):
+            self.assertFalse(views.is_prunable_escalation_marker(path, self.now, 7), path)
+
+    def test_non_escalation_paths_never_match(self):
+        # The role record and lease files share the roles/ prefix but are NOT
+        # markers — they must never be prunable, however old their names look.
+        self.assertFalse(views.is_prunable_escalation_marker(
+            "/coordination/roles/2026-05-01.json", self.now, 7))
+        self.assertFalse(views.is_prunable_escalation_marker(
+            "/coordination/roles/r/leases/2026-05-01.json", self.now, 7))
 
 
 class TestIsPrunablePresence(unittest.TestCase):
@@ -179,6 +248,68 @@ class TestRemoteDelete(_FakeBus):
     def test_delete_missing_file_is_false(self):
         ok = remote.delete("/coordination/tasks/nope.json", backend=self.backend)
         self.assertFalse(ok)
+
+
+class TestPruneMarkersSweepsEscalations(_FakeBus):
+    """retention._prune_markers must also sweep aged role vacancy-escalation
+    markers (2026-06-11 wave): they are daily first-writer-wins dedup guards
+    exactly like the digest markers — regenerable, no history value — but lived
+    outside the digest/markers/ prefix and so leaked forever."""
+
+    def _seed(self):
+        # An aged digest marker (the pre-existing sweep), plus the new family:
+        self._put("/coordination/digest/markers/2026-05-01-morning.json", {"x": 1})
+        # aged escalation marker (35d before `now` below) -> pruned
+        self._put("/coordination/roles/triage-lead/escalations/2026-05-01.json",
+                  {"role": "triage-lead", "date": "2026-05-01"})
+        # fresh escalation marker (same day) -> kept
+        self._put("/coordination/roles/triage-lead/escalations/2026-06-05.json",
+                  {"role": "triage-lead", "date": "2026-06-05"})
+        # undatable file in the escalations dir -> kept (never delete undatable)
+        self._put("/coordination/roles/triage-lead/escalations/notes.json",
+                  {"free": "form"})
+        # role record + lease share the roles/ prefix -> never touched
+        self._put("/coordination/roles/triage-lead.json",
+                  {"name": "triage-lead", "maintainer": "ash"})
+        self._put("/coordination/roles/triage-lead/leases/agent-a.json",
+                  {"agent": "agent-a"})
+
+    def test_aged_escalation_pruned_fresh_and_undatable_kept(self):
+        self._seed()
+        now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        n = retention._prune_markers(now, backend=self.backend)
+        # both aged markers (digest + escalation) deleted
+        self.assertEqual(n, 2)
+        self.assertFalse(self._exists(
+            "/coordination/roles/triage-lead/escalations/2026-05-01.json"))
+        self.assertFalse(self._exists(
+            "/coordination/digest/markers/2026-05-01-morning.json"))
+        # fresh + undatable + non-marker files survive
+        self.assertTrue(self._exists(
+            "/coordination/roles/triage-lead/escalations/2026-06-05.json"))
+        self.assertTrue(self._exists(
+            "/coordination/roles/triage-lead/escalations/notes.json"))
+        self.assertTrue(self._exists("/coordination/roles/triage-lead.json"))
+        self.assertTrue(self._exists(
+            "/coordination/roles/triage-lead/leases/agent-a.json"))
+
+    def test_roles_listing_failure_still_prunes_digest_markers(self):
+        # The two sweeps are independently best-effort: a roles-prefix listing
+        # failure must not abort the digest-marker sweep (and vice versa).
+        self._seed()
+        now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        real_list = remote.list_files
+
+        def _flaky(prefix, *a, **k):
+            if prefix.startswith("/coordination/roles"):
+                raise RuntimeError("roles listing 504")
+            return real_list(prefix, *a, **k)
+
+        with patch("fulcra_coord.retention.remote.list_files", side_effect=_flaky):
+            n = retention._prune_markers(now, backend=self.backend)
+        self.assertEqual(n, 1)  # the digest marker still pruned
+        self.assertTrue(self._exists(
+            "/coordination/roles/triage-lead/escalations/2026-05-01.json"))
 
 
 class TestArchiveTask(_FakeBus):
@@ -378,6 +509,89 @@ class TestRestore(_FakeBus):
         self.assertEqual(rc, 0)
         self.assertTrue(self._exists("/coordination/tasks/t-1.json"))
         self.assertFalse(self._exists("/coordination/archive/index/t-1.json"))
+
+    def test_restore_deletes_archive_body(self):
+        # F7 (2026-06-11 wave): restore used to leave the ARCHIVE BODY in
+        # place — the next daily retention pass then saw archive_exists=True,
+        # skipped the upload, and deleted the hot copy again: a restore not
+        # followed by a status transition within ~24h was silently undone.
+        # The cold copy must be deleted once the hot body verifiably landed.
+        body = {"id": "t-1", "title": "old", "status": "done",
+                "done_at": "2026-05-01T00:00:00Z", "updated_at": "2026-05-01T00:00:00Z"}
+        ap = "/coordination/archive/tasks/2026-05/t-1.json"
+        self._put(ap, body)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        rc = cli.cmd_restore(self._args("t-1"), backend=self.backend)
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"))
+        self.assertFalse(self._exists(ap),
+                         "the archive body must be deleted or the next retention "
+                         "pass re-archives via the idempotent archive_exists branch")
+        self.assertFalse(self._exists("/coordination/archive/index/t-1.json"))
+
+    def test_restore_stamps_restored_at(self):
+        # The restored hot body must carry restored_at so is_archivable_task
+        # ages from the restore, not the original done stamp.
+        body = {"id": "t-1", "title": "old", "status": "done",
+                "done_at": "2026-05-01T00:00:00Z", "updated_at": "2026-05-01T00:00:00Z"}
+        ap = "/coordination/archive/tasks/2026-05/t-1.json"
+        self._put(ap, body)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        self.assertEqual(cli.cmd_restore(self._args("t-1"), backend=self.backend), 0)
+        hot = self._read("/coordination/tasks/t-1.json")
+        self.assertTrue(hot.get("restored_at"),
+                        "restore must stamp restored_at on the hot body")
+        self.assertIsNotNone(views._parse_dt(hot["restored_at"]))
+
+    def test_restore_archive_delete_failure_keeps_shard_and_errors(self):
+        # If the cold-copy delete fails the restore must KEEP the index shard
+        # and return non-zero so the operator retries — deleting the shard while
+        # the stale archive body lingers would let a later idempotent archive
+        # pass resurrect the stale body over post-restore edits.
+        body = {"id": "t-1", "title": "old", "status": "done",
+                "done_at": "2026-05-01T00:00:00Z", "updated_at": "2026-05-01T00:00:00Z"}
+        ap = "/coordination/archive/tasks/2026-05/t-1.json"
+        self._put(ap, body)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        real_delete = remote.delete
+
+        def _flaky_delete(path, *, backend=None):
+            if path == ap:
+                return False  # the cold-copy delete transiently fails
+            return real_delete(path, backend=backend)
+
+        with patch("fulcra_coord.retention.remote.delete", side_effect=_flaky_delete):
+            rc = cli.cmd_restore(self._args("t-1"), backend=self.backend)
+        self.assertEqual(rc, 1)
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"))  # hot landed
+        self.assertTrue(self._exists("/coordination/archive/index/t-1.json"),
+                        "shard kept so a retry can finish the move")
+
+    def test_restore_sticks_across_next_retention_pass(self):
+        # END-TO-END F7 pin: restore an aged terminal task, then run the very
+        # next retention pass — the task must REMAIN hot. Before the fix the
+        # pass re-archived it instantly (still terminal + aged from done_at,
+        # archive body still present), silently undoing the operator's restore.
+        body = {"id": "t-1", "title": "old", "status": "done",
+                "workstream": "ws", "owner_agent": "a",
+                "done_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"}
+        ap = "/coordination/archive/tasks/2026-01/t-1.json"
+        self._put(ap, body)
+        self._put("/coordination/archive/index/t-1.json",
+                  {"id": "t-1", "archive_path": ap})
+        self.assertEqual(cli.cmd_restore(self._args("t-1"), backend=self.backend), 0)
+        restored = self._read("/coordination/tasks/t-1.json")
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=True):
+            res = cli._run_retention([restored], now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() + 60,
+                                     backend=self.backend)
+        self.assertEqual(res.get("archived", 0), 0,
+                         "a just-restored task must not be re-archived next pass")
+        self.assertTrue(self._exists("/coordination/tasks/t-1.json"),
+                        "restore must stick: the hot body survives the next retention pass")
 
     def test_restore_unknown_id_is_error(self):
         rc = cli.cmd_restore(self._args("nope"), backend=self.backend)
@@ -800,16 +1014,21 @@ def _chk(stamp, *, task="task-1", hex_="abcdef0123"):
 
 
 class _ContTree(unittest.TestCase):
-    """Base for the continuity pruner tests. Models the NON-RECURSIVE
-    remote.list_files as a {prefix: [immediate children]} map: subdirs come back
-    with a trailing slash, files do not — exactly the live contract. Patches
-    remote.list_files + remote.delete on the retention module."""
+    """Base for the continuity pruner tests. Models the LIVE ``fulcra file
+    list`` contract (the 2026-06-10 measured pass, the same contract
+    load_loop_records' top-level path filter is built on, and the shape
+    tests/fake_fulcra_backend.py's rglob produces): ONE listing of a prefix
+    returns the RECURSIVE set of FILE paths under it, with NO directory
+    entries. Tests hand `_run` a flat file list; the pruner must partition it
+    by path segments — never descend per-directory (the old walker did, found
+    zero children in production, and the checkpoints/ GC silently never ran)."""
 
     def setUp(self):
         os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination"
         self._prev_keep = os.environ.pop("FULCRA_COORD_CONTINUITY_KEEP", None)
         self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
         self.deleted: list[str] = []
+        self.list_calls: list[str] = []
 
     def tearDown(self):
         os.environ.pop("FULCRA_COORD_REMOTE_ROOT", None)
@@ -818,11 +1037,14 @@ class _ContTree(unittest.TestCase):
         else:
             os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = self._prev_keep
 
-    def _list_factory(self, tree):
-        """Return a side_effect for list_files that reads `tree` (a
-        {prefix: [children]} dict). Unknown prefixes -> [] (best-effort)."""
+    def _list_factory(self, entries):
+        """side_effect for list_files: every entry under the asked prefix, the
+        recursive live contract. Entries may include trailing-slash dir entries
+        for the tolerance tests; real backends return files only."""
         def _list(prefix, *, backend=None, timeout=None):
-            return list(tree.get(prefix, []))
+            self.list_calls.append(prefix)
+            norm = prefix if prefix.endswith("/") else prefix + "/"
+            return [e for e in entries if e.startswith(norm)]
         return _list
 
     def _delete_factory(self, raise_on=()):
@@ -833,8 +1055,8 @@ class _ContTree(unittest.TestCase):
             return True
         return _delete
 
-    def _run(self, tree, *, raise_on=(), list_side_effect=None, deadline=None):
-        list_se = list_side_effect or self._list_factory(tree)
+    def _run(self, entries, *, raise_on=(), list_side_effect=None, deadline=None):
+        list_se = list_side_effect or self._list_factory(entries)
         with patch("fulcra_coord.retention.remote.list_files", side_effect=list_se), \
              patch("fulcra_coord.retention.remote.delete",
                    side_effect=self._delete_factory(raise_on)):
@@ -843,42 +1065,29 @@ class _ContTree(unittest.TestCase):
 
 
 class TestPruneContinuityCheckpoints(_ContTree):
-    def test_recursive_walk_descends_to_checkpoints(self):
-        # ws/ -> agent/ -> task/ -> checkpoints/ : 4 levels of trailing-slash dirs,
-        # each only an IMMEDIATE child of the level above. The pruner must descend.
-        ws = f"{_CONT_ROOT}/ws-hash"
-        agent = f"{ws}/agent-a"
-        task = f"{agent}/task-1"
-        chk = f"{task}/checkpoints"
+    def test_partitions_one_recursive_listing(self):
+        # ws -> agent -> task -> checkpoints, 4 path levels deep — but the
+        # listing is ONE flat recursive file set (no dir entries anywhere).
+        # The pruner must find the checkpoints dir purely by path segments.
+        chk = f"{_CONT_ROOT}/ws-hash/agent-a/task-1/checkpoints"
         files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 5)]  # 4 files
-        tree = {
-            _CONT_ROOT: [f"{ws}/"],
-            ws: [f"{agent}/"],
-            agent: [f"{task}/"],
-            task: [f"{chk}/", f"{task}/latest.json"],
-            chk: files,
-        }
-        # keep=2 -> the 2 oldest of the 4 are deleted.
+        entries = files + [f"{_CONT_ROOT}/ws-hash/agent-a/task-1/latest.json"]
         os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "2"
-        n = self._run(tree)
+        n = self._run(entries)
         self.assertEqual(n, 2)
         # The two OLDEST (lexically smallest) are deleted.
         self.assertEqual(sorted(self.deleted), sorted(files[:2]))
+        # PERF half of the fix: exactly ONE listing — no per-directory walk.
+        self.assertEqual(self.list_calls, [f"{_CONT_ROOT}"])
 
     def test_keep_newest_n_deletes_oldest(self):
         chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
         # 15 files, stamps chosen so lexical sort == chronological order.
         stamps = [f"20260101T{h:02d}0000z" for h in range(15)]
         files = [f"{chk}/{_chk(s)}" for s in stamps]
-        tree = {
-            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
-            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
-            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
-            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/", f"{_CONT_ROOT}/ws/a/t/latest.json"],
-            chk: files,
-        }
+        entries = files + [f"{_CONT_ROOT}/ws/a/t/latest.json"]
         os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "10"
-        n = self._run(tree)
+        n = self._run(entries)
         self.assertEqual(n, 5)
         oldest_5 = files[:5]   # smallest stamps
         newest_10 = files[5:]
@@ -888,35 +1097,35 @@ class TestPruneContinuityCheckpoints(_ContTree):
         # latest.json is never in the delete set.
         self.assertNotIn(f"{_CONT_ROOT}/ws/a/t/latest.json", self.deleted)
 
+    def test_per_task_dirs_pruned_independently(self):
+        # Two tasks' checkpoints dirs in ONE listing: the keep window applies
+        # PER DIR, not across the union (else a chatty task would evict a quiet
+        # task's history).
+        chk_a = f"{_CONT_ROOT}/ws/a/t1/checkpoints"
+        chk_b = f"{_CONT_ROOT}/ws/a/t2/checkpoints"
+        files_a = [f"{chk_a}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 5)]  # 4
+        files_b = [f"{chk_b}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 3)]  # 2
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "2"
+        n = self._run(files_a + files_b)
+        self.assertEqual(n, 2)   # only t1 has more than `keep`
+        self.assertEqual(sorted(self.deleted), sorted(files_a[:2]))
+
     def test_latest_json_never_deleted(self):
         chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
         files = [f"{chk}/{_chk(f'202601{d:02d}T000000z')}" for d in range(1, 13)]
         # A latest.json INSIDE the checkpoints dir as well — must survive.
         latest_in_chk = f"{chk}/latest.json"
-        tree = {
-            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
-            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
-            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
-            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/", f"{_CONT_ROOT}/ws/a/t/latest.json"],
-            chk: files + [latest_in_chk],
-        }
+        entries = files + [latest_in_chk, f"{_CONT_ROOT}/ws/a/t/latest.json"]
         os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "10"
-        self._run(tree)
+        self._run(entries)
         self.assertNotIn(latest_in_chk, self.deleted)
         self.assertNotIn(f"{_CONT_ROOT}/ws/a/t/latest.json", self.deleted)
 
     def test_keep_ge_count_no_deletions(self):
         chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
         files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 4)]  # 3
-        tree = {
-            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
-            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
-            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
-            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
-            chk: files,
-        }
         os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "10"
-        n = self._run(tree)
+        n = self._run(files)
         self.assertEqual(n, 0)
         self.assertEqual(self.deleted, [])
 
@@ -927,14 +1136,7 @@ class TestPruneContinuityCheckpoints(_ContTree):
         chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
         older = f"{chk}/{_chk('20260101T000000z')}"
         newer = f"{chk}/{_chk('20260102T000000z')}"
-        tree = {
-            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
-            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
-            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
-            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
-            chk: [older, newer],
-        }
-        n = self._run(tree)
+        n = self._run([older, newer])
         self.assertEqual(n, 1)
         self.assertEqual(self.deleted, [older])  # oldest deleted, newest kept
 
@@ -944,39 +1146,25 @@ class TestPruneContinuityCheckpoints(_ContTree):
     def test_per_run_cap_limits_deletions(self):
         chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
         files = [f"{chk}/{_chk(f'202601{d:02d}T000000z')}" for d in range(1, 12)]  # 11
-        tree = {
-            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
-            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
-            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
-            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
-            chk: files,
-        }
         os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "1"  # 10 deletable
         with patch("fulcra_coord.retention._retention_max_per_run", return_value=2):
-            n = self._run(tree)
+            n = self._run(files)
         self.assertEqual(n, 2)
         self.assertEqual(len(self.deleted), 2)
 
     def test_list_files_raises_returns_zero(self):
         def _boom(prefix, *, backend=None, timeout=None):
             raise RuntimeError("list blew up")
-        n = self._run({}, list_side_effect=_boom)
+        n = self._run([], list_side_effect=_boom)
         self.assertEqual(n, 0)
         self.assertEqual(self.deleted, [])
 
     def test_one_delete_raises_others_still_deleted(self):
         chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
         files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 6)]  # 5
-        tree = {
-            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
-            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
-            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
-            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
-            chk: files,
-        }
         os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "1"  # 4 deletable (files[:4])
         # Make the SECOND-oldest deletion raise; the others must still proceed.
-        n = self._run(tree, raise_on=(files[1],))
+        n = self._run(files, raise_on=(files[1],))
         # 4 deletable, one raised -> 3 counted, no exception escapes.
         self.assertEqual(n, 3)
         self.assertNotIn(files[1], self.deleted)
@@ -985,7 +1173,7 @@ class TestPruneContinuityCheckpoints(_ContTree):
         self.assertIn(files[3], self.deleted)
 
     def test_empty_tree_zero_deletions(self):
-        n = self._run({_CONT_ROOT: []})
+        n = self._run([])
         self.assertEqual(n, 0)
         self.assertEqual(self.deleted, [])
 
@@ -993,15 +1181,8 @@ class TestPruneContinuityCheckpoints(_ContTree):
         # A deadline already past -> the budget gate stops before any delete.
         chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
         files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 6)]
-        tree = {
-            _CONT_ROOT: [f"{_CONT_ROOT}/ws/"],
-            f"{_CONT_ROOT}/ws": [f"{_CONT_ROOT}/ws/a/"],
-            f"{_CONT_ROOT}/ws/a": [f"{_CONT_ROOT}/ws/a/t/"],
-            f"{_CONT_ROOT}/ws/a/t": [f"{chk}/"],
-            chk: files,
-        }
         os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "1"
-        n = self._run(tree, deadline=time.monotonic() - 1)
+        n = self._run(files, deadline=time.monotonic() - 1)
         self.assertEqual(n, 0)
         self.assertEqual(self.deleted, [])
 
@@ -1017,17 +1198,44 @@ class TestPruneContinuityCheckpoints(_ContTree):
         lf.assert_not_called()
         delete.assert_not_called()
 
-    def test_malformed_deep_tree_is_depth_bounded(self):
-        # A pathological self-referential tree (a dir that lists itself as a child)
-        # must NOT infinite-loop: the depth bound terminates the walk. We assert the
-        # call returns (no hang / no RecursionError) and prunes nothing.
-        loop = f"{_CONT_ROOT}/loop"
-        tree = {
-            _CONT_ROOT: [f"{loop}/"],
-            loop: [f"{loop}/"],  # points back at itself forever
-        }
-        n = self._run(tree)
-        self.assertEqual(n, 0)
+    def test_dir_entries_tolerated_same_result(self):
+        # TOLERANCE pin: a backend that emits trailing-slash DIRECTORY entries
+        # alongside the recursive file paths must partition to the SAME result
+        # as a files-only listing — dir entries register the checkpoints dir but
+        # are never themselves delete candidates.
+        chk = f"{_CONT_ROOT}/ws/a/t/checkpoints"
+        files = [f"{chk}/{_chk(f'2026010{i}T000000z')}" for i in range(1, 5)]  # 4
+        entries = [f"{_CONT_ROOT}/ws/",
+                   f"{_CONT_ROOT}/ws/a/",
+                   f"{_CONT_ROOT}/ws/a/t/",
+                   f"{chk}/"] + files
+        os.environ["FULCRA_COORD_CONTINUITY_KEEP"] = "2"
+        n = self._run(entries)
+        self.assertEqual(n, 2)
+        self.assertEqual(sorted(self.deleted), sorted(files[:2]))
+
+
+class TestPruneContinuityLiveListingShape(_FakeBus):
+    def test_fake_backend_recursive_listing_is_pruned(self):
+        # THE F-finding pin (2026-06-11 wave): against the REAL fake backend —
+        # whose `list` is recursive files-only (rglob), the measured live
+        # contract — the pruner must actually find and bound checkpoints/.
+        # The old trailing-slash walker found zero children here and the GC
+        # silently never deleted anything.
+        chk = "/coordination/continuity/ws/agent/task/checkpoints"
+        for i in range(1, 13):   # 12 archives; default keep=10 -> 2 deletable
+            self._put(f"{chk}/CHK-202601{i:02d}T000000z-task-abcdef.json", {"i": i})
+        self._put("/coordination/continuity/ws/agent/task/latest.json", {"latest": True})
+        n = retention._prune_continuity_checkpoints(
+            datetime.now(timezone.utc), backend=self.backend)
+        self.assertEqual(n, 2)
+        self.assertFalse(self._exists(f"{chk}/CHK-20260101T000000z-task-abcdef.json"))
+        self.assertFalse(self._exists(f"{chk}/CHK-20260102T000000z-task-abcdef.json"))
+        for i in range(3, 13):
+            self.assertTrue(self._exists(
+                f"{chk}/CHK-202601{i:02d}T000000z-task-abcdef.json"))
+        self.assertTrue(self._exists(
+            "/coordination/continuity/ws/agent/task/latest.json"))
 
 
 class TestRunRetentionContinuityWiring(_FakeBus):

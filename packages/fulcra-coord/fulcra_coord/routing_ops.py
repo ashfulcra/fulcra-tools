@@ -22,6 +22,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, routing, env_float
+# Ops-log writer, bound under the package-wide conventional name (the writepipe
+# import style). 2026-06-11 wave: cmd_review_done's response-write failure path
+# called ``ops_log.log_op`` WITHOUT this import — the NameError was swallowed by
+# the guarding try/except, so the ``response_write_failed`` entry could never be
+# written and a failed review-loop closure left no audit trail.
+from . import log as ops_log
 # Staleness-guarded roster read: under backend write-throttling the presence
 # AGGREGATE lags the durable per-agent records by hours, so routing against it
 # reported "no reviewer live" while the reviewer was live (2026-06-10). The

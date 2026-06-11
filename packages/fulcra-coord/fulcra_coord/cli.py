@@ -562,6 +562,15 @@ def _reconcile_rebuild_source_preserving_acks(
 #: tick's rotated window.
 _PARITY_DEADLINE_HEADROOM_SECONDS = 5.0
 
+#: Headroom for cmd_reconcile's task-body-repair loop (2026-06-11 wave): the
+#: _RETENTION_DEADLINE_HEADROOM_SECONDS discipline applied to the repair pass.
+#: Each repair item is several remote round-trips (download + stat + upload +
+#: re-stat) and, under the #167 transient retry, can legally take ~61s on the
+#: default-timeout path — un-gated, a long backlog ran reconcile 40+ minutes
+#: and overlapped the next cron tick. The loop checks the budget floor between
+#: items and DEFERS the remainder (markers kept) to the next tick.
+_REPAIR_DEADLINE_HEADROOM_SECONDS = 5.0
+
 
 def _parity_sample_size() -> int:
     """Tasks probed per reconcile tick by the parity pass.
@@ -1507,11 +1516,26 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         _info(f"  {len(needs_repair)} operation(s) need view repair.")
 
     body_repair_failures = []
+    # 2026-06-11 wave (live find): this loop was NOT deadline-gated between
+    # items. Each repair is several remote round-trips, and with the #167
+    # transient retry a single op can legally take ~61s on the default-timeout
+    # path — a 42-item backlog ran 40+ minutes and overlapped the NEXT cron
+    # tick's reconcile. Gate on the same budget floor _run_retention uses:
+    # stop + defer the remainder (markers KEPT, so the next tick's fresh
+    # budget drains them), log the deferred count. Deferral is debt, not
+    # failure — it must not trip the body_repair_failures early-return.
+    repair_budget_floor = deadline - _REPAIR_DEADLINE_HEADROOM_SECONDS
+    repair_deferred_ops: set[str] = set()
     for m in needs_repair:
         if m.get("status") not in ("failed", "unverified"):
             continue
         tid = m.get("task_id")
         if not tid:
+            continue
+        if time.monotonic() >= repair_budget_floor:
+            # Budget nearly spent: defer this and every remaining repair to
+            # the next tick rather than overrun reconcile's ceiling.
+            repair_deferred_ops.add(m.get("op_id"))
             continue
         cached_task = cache.read_cached_task(tid)
         if not cached_task:
@@ -1584,6 +1608,16 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 cache.write_meta(task_path, post_stat)
         except Exception:
             pass
+
+    if repair_deferred_ops:
+        _warn(f"  Task body repair: deferred {len(repair_deferred_ops)} "
+              "marker(s) at the reconcile budget floor — they drain next tick.")
+        ops_log.log_op(
+            "reconcile",
+            status="task_body_repair_deferred",
+            detail=(f"deferred {len(repair_deferred_ops)} body repair(s) at "
+                    "the deadline budget floor; markers kept for next tick"),
+        )
 
     if body_repair_failures:
         _warn(
@@ -2061,6 +2095,11 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # ------------------------------------------------------------------------
 
     for m in needs_repair:
+        # A deadline-DEFERRED repair was never attempted — its marker is the
+        # only record of the debt, so clearing it here would silently drop the
+        # pending body write. Keep it for the next tick's fresh budget.
+        if m.get("op_id") in repair_deferred_ops:
+            continue
         cache.clear_op_marker(m["op_id"])
 
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
