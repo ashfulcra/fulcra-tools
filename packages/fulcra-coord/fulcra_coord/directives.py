@@ -235,6 +235,60 @@ def write_directive_ack(
         return False
 
 
+def _read_sublog_shards(
+    prefix: str, *, backend: Optional[list[str]] = None
+) -> tuple[list[tuple[str, dict[str, Any]]], bool]:
+    """Read every ``.json`` shard under a sub-log prefix, DISTINGUISHING read
+    failure from emptiness: returns ``(pairs, complete)``.
+
+    WHY (F9, 2026-06-11 wave): ``remote.list_json`` — which all three public
+    sub-log readers ride — collapses a RAISING listing into ``[]`` and silently
+    drops any shard whose download fails, exactly like it drops a corrupt
+    shard. For the LWW snapshot refresh in ``dual_write`` that collapse is the
+    bug: a re-mirror during a listing blip rebuilt the snapshot from "three
+    empty sub-logs", shrinking ``acked_by`` below the durable union and
+    re-opening closed loops on every board/digest until the next good fold.
+    The role_ops READ_ERROR discipline applied here: a failed read must be
+    VISIBLE so the caller can refuse to act on it as if it were truth.
+
+    ``complete`` is False when the listing raised OR any listed shard failed
+    to download/parse to a dict — either way the union derived from ``pairs``
+    may be smaller than the durable truth and must not overwrite a snapshot
+    that knows better. Per-shard failures still contribute the shards that DID
+    read (the union can then only be merged UP, never trusted alone). Never
+    raises."""
+    try:
+        paths = [p for p in remote.list_files(prefix, backend=backend)
+                 if p.endswith(".json")]
+    except Exception:
+        return [], False
+    if not paths:
+        return [], True
+    import concurrent.futures
+    complete = True
+    results: dict[str, dict[str, Any]] = {}
+    workers = min(8, max(2, len(paths)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(remote.download_json, p, backend=backend): p
+                   for p in paths}
+        for fut in concurrent.futures.as_completed(futures):
+            path = futures[fut]
+            try:
+                rec = fut.result()
+            except Exception:
+                rec = None
+            if isinstance(rec, dict):
+                results[path] = rec
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    for path in paths:
+        rec = results.get(path)
+        if rec is None:
+            complete = False  # listed but unreadable: the union may be short
+            continue
+        pairs.append((path, rec))
+    return pairs, complete
+
+
 def read_directive_acks(
     directive_id: str, *, backend: Optional[list[str]] = None
 ) -> list[str]:
@@ -449,6 +503,14 @@ def dual_write(
     False-returning upload, a mapping error) is swallowed and recorded in the ops
     log as ``directive_write_failed`` so migration parity can be audited — exactly
     mirroring the event-append best-effort posture in writepipe.
+
+    NON-REGRESSION (F9, 2026-06-11): the snapshot refresh distinguishes a
+    FAILED sub-log read from an empty one. On a read failure it merge-preserves
+    the previous snapshot's acks/terminal state (the upload may only ADD), and
+    when there is nothing safe to merge from it SKIPS the refresh entirely
+    (ops-logged as ``directive_snapshot_skipped``) — the append-only shards
+    remain the durable truth either way. See the inline comments at the read
+    sites for the full rationale.
     """
     try:
         directive = directive_from_task(task)
@@ -458,37 +520,119 @@ def dual_write(
         # reflects every durable ack — even ones the task's capped inline event log
         # has since dropped. The snapshot's acked_by therefore NEVER shrinks below
         # the sub-log union, and routing reflects every persisted route shard.
-        # Best-effort per side: a sub-log read failure leaves the task-derived
-        # acked_by / empty routing as-is (never worse than today).
+        #
+        # F9 (2026-06-11 wave): the three sub-log reads used to be best-effort-
+        # to-[] — so a re-mirror during a LISTING blip rebuilt the snapshot from
+        # "empty" sub-logs and uploaded it: acked_by SHRANK below the durable
+        # union and a closed loop's state REGRESSED to open, flapping every
+        # board/digest until the next good fold. The reads now report failure
+        # distinctly (_read_sublog_shards), and on ANY sub-log read failure the
+        # refresh is MERGE-PRESERVING: the previous snapshot's acks are
+        # unioned in and its terminal state/outcome kept, so the upload can
+        # only ever add. Merge-preserving (rather than skipping the refresh
+        # outright) is the better fit for this writer: dual_write also carries
+        # the AUTHORITATIVE task-side edits (title/status/summary of the
+        # mirror), which must still land even when one sub-log listing blips —
+        # only when there is NOTHING safe to merge from (previous snapshot
+        # unreadable AND absence unconfirmable) does it skip, because then any
+        # upload would be a blind guess; the shards remain the truth and the
+        # skip is ops-logged for the parity audit.
         directive_id = directive.get("id")
         if directive_id:
-            try:
-                sublog_acks = read_directive_acks(directive_id, backend=backend)
-                if sublog_acks:
-                    union = set(directive.get("acked_by") or []) | set(sublog_acks)
-                    directive["acked_by"] = sorted(union)
-            except Exception:
-                pass  # leave task-derived acked_by untouched
-            try:
-                routes = read_directive_routing(directive_id, backend=backend)
-                if routes:
-                    directive["routing"] = routes
-            except Exception:
-                pass  # leave routing as make_directive's empty default
+            ack_pairs, acks_ok = _read_sublog_shards(
+                remote.directive_acks_prefix(directive_id), backend=backend)
+            sublog_acks = sorted({rec["agent"] for _p, rec in ack_pairs
+                                  if rec.get("agent")})
+            if sublog_acks:
+                union = set(directive.get("acked_by") or []) | set(sublog_acks)
+                directive["acked_by"] = sorted(union)
+
+            route_pairs, routes_ok = _read_sublog_shards(
+                remote.directive_routing_prefix(directive_id), backend=backend)
+            if route_pairs:
+                # Same machine-agnostic (at, shard-stem) order as
+                # read_directive_routing.
+                route_pairs.sort(key=lambda pr: (pr[1].get("at", "") or "",
+                                                 Path(pr[0]).stem))
+                directive["routing"] = [rec for _p, rec in route_pairs]
+
             # Loop return leg (spec 2026-06-09): fold the RESPONSE sub-log into
             # the snapshot too, so a re-mirror of an already-answered loop
             # reflects its closure (outcome + terminal state) instead of
             # reopening it. Lazy import — loop_ops imports directives, so a
             # module-level back-import here would cycle (and trip the layering
-            # fitness pin). Best-effort like the folds above.
-            try:
-                from . import loop_ops
-                responses = loop_ops.read_loop_responses(directive_id,
-                                                         backend=backend)
-                if responses:
-                    directive = loop_ops.fold_loop(directive, backend=backend)
-            except Exception:
-                pass  # snapshot stays pre-fold; shards remain the truth
+            # fitness pin). The shards read ONCE here are handed to fold_loop
+            # so the fold can't re-read them best-effort and silently
+            # re-introduce the failure-reads-as-empty collapse.
+            resp_pairs, responses_ok = _read_sublog_shards(
+                remote.directive_responses_prefix(directive_id), backend=backend)
+            if resp_pairs:
+                resp_pairs.sort(key=lambda pr: (pr[1].get("at", "") or "",
+                                                Path(pr[0]).stem))
+                try:
+                    from . import loop_ops
+                    directive = loop_ops.fold_loop(
+                        directive, backend=backend,
+                        responses=[rec for _p, rec in resp_pairs])
+                except Exception:
+                    pass  # snapshot stays pre-fold; shards remain the truth
+
+            if not (acks_ok and routes_ok and responses_ok):
+                # At least one sub-log read FAILED (vs. read empty): the fields
+                # derived above may be short of the durable truth. Merge-
+                # preserve from the previous snapshot so this upload can only
+                # ever ADD relative to what readers already see.
+                try:
+                    prev = remote.download_json(
+                        remote.directive_remote_path(directive_id), backend=backend)
+                except Exception:
+                    prev = None
+                if isinstance(prev, dict):
+                    if not acks_ok:
+                        directive["acked_by"] = sorted(
+                            set(directive.get("acked_by") or [])
+                            | set(prev.get("acked_by") or []))
+                    if not routes_ok and not directive.get("routing") \
+                            and prev.get("routing"):
+                        directive["routing"] = prev["routing"]
+                    if not responses_ok:
+                        # A closed loop must NOT re-open because its responses
+                        # could not be listed: keep the previous snapshot's
+                        # terminal state + outcome. A non-terminal previous
+                        # state carries no closure to preserve — the
+                        # task-derived state stands.
+                        prev_kind = loops.loop_kind_of(prev)
+                        prev_state = loops.loop_state_of(prev)
+                        if prev_state in loops.terminal_states(prev_kind):
+                            directive["state"] = prev_state
+                            if prev.get("outcome") is not None:
+                                directive["outcome"] = prev["outcome"]
+                else:
+                    # No previous snapshot READ — but None is absence only with
+                    # POSITIVE evidence (the role_ops READ_ERROR discipline: a
+                    # stat-visible file, or an unreachable bus, means the
+                    # snapshot may exist and an upload would blindly regress
+                    # it). The probe spawn is spent only on this rare failure
+                    # path. Confirmed-absent => first-ever mirror: nothing to
+                    # regress, the task-derived snapshot lands (a tell must not
+                    # be invisible to the board because one listing blipped).
+                    snap_path = remote.directive_remote_path(directive_id)
+                    try:
+                        absent = (remote.stat(snap_path, backend=backend) is None
+                                  and remote.probe_reachable(backend))
+                    except Exception:
+                        absent = False
+                    if not absent:
+                        try:
+                            ops_log.log_op(
+                                command, task.get("id"),
+                                status="directive_snapshot_skipped",
+                                error=("sub-log read failed and previous "
+                                       "snapshot unreadable — refresh skipped "
+                                       "(shards remain the truth)"))
+                        except Exception:
+                            pass
+                        return
         ok = remote.upload_json(
             directive, remote.directive_remote_path(directive["id"]), backend=backend
         )

@@ -254,7 +254,8 @@ def _walk_to_terminal(kind: str, state: str) -> str:
 # citing the evidence. Pinned by
 # tests/test_loop_conformance.py::test_mirrored_evidence_never_closes_a_loop.
 def fold_loop(
-    record: dict[str, Any], *, backend: Optional[list[str]] = None
+    record: dict[str, Any], *, backend: Optional[list[str]] = None,
+    responses: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """The loop with its response sub-log folded in — outcome + closure derived
     ONLY from bus response events (the guarantee's read side). The latest
@@ -264,9 +265,18 @@ def fold_loop(
     (preferring the kind's response hop — responded/delivered/answered — then
     walking the machine to the nearest terminal, so the snapshot never
     teleports through an illegal edge). Pure given its inputs; the only I/O is
-    the sub-log read."""
+    the sub-log read.
+
+    ``responses`` (F9, 2026-06-11 wave): a caller that ALREADY read the
+    response sub-log — and, crucially, already distinguished a read FAILURE
+    from a genuinely empty log, which this function's best-effort self-read
+    cannot — passes the (at, event_id)-sorted records here so the fold never
+    re-reads (and never silently re-introduces the failure-reads-as-empty
+    collapse). None keeps the self-loading behaviour for every existing
+    caller."""
     folded = dict(record)
-    responses = read_loop_responses(record.get("id") or "", backend=backend)
+    if responses is None:
+        responses = read_loop_responses(record.get("id") or "", backend=backend)
     # 2026-06-11 bug hunt S4: take the LAST response that actually CARRIES a
     # non-empty outcome — not blindly responses[-1]. A trailing outcome-less
     # shard (a malformed/partial responder) used to null a real verdict AND

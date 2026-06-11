@@ -531,6 +531,35 @@ def test_review_done_closes_original_review_loop(coord_backend, monkeypatch):
     assert not loops.is_open_loop(folded)
 
 
+def test_review_done_response_write_failure_is_ops_logged(coord_backend, monkeypatch):
+    """NAMEERROR pin (2026-06-11 wave): routing_ops.cmd_review_done's
+    response-write failure path calls ``ops_log.log_op(...)`` — but routing_ops
+    never imported ``ops_log``, so the call NameError'd inside its guarding
+    try/except and the ``response_write_failed`` entry could NEVER be written.
+    Assert via the REAL ops log content that the entry now lands (which also
+    proves no NameError fired — a NameError would have been swallowed and left
+    the log empty, exactly the regression)."""
+    from fulcra_coord import routing_ops, cache
+    _patch_presence(monkeypatch, routing_ops)
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "claude-code:author:r")
+    assert routing_ops.cmd_request_review(_rr_args(), backend=coord_backend) == 0
+
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "codex:rev:main")
+    # Script the response-shard write failing (transport said no). routing_ops
+    # imports loop_ops lazily inside the command, so patch the module itself.
+    monkeypatch.setattr(loop_ops, "append_loop_response", lambda *a, **k: False)
+    rc = routing_ops.cmd_review_done(
+        _rd_args(artifact="42", verdict="approve", repo="fulcra-tools"),
+        backend=coord_backend)
+    assert rc == 1, "a failed response write must surface as a non-zero exit"
+    entries = cache.read_ops_log()
+    assert any(e.get("status") == "response_write_failed"
+               and e.get("command") == "review-done" for e in entries), (
+        f"response_write_failed must be ops-logged (NameError regression): {entries}")
+
+
 def test_directive_write_failure_does_not_fail_request_review(coord_backend, monkeypatch):
     from fulcra_coord import routing_ops
     _patch_presence(monkeypatch, routing_ops)
