@@ -330,6 +330,64 @@ def test_cache_remote_task_cold_cache_downloads(coord_backend):
     assert counter.downloads == [path]
 
 
+# ---------------------------------------------------------------------------
+# E4 — tick-scoped snapshot sharing in cmd_reconcile
+# ---------------------------------------------------------------------------
+
+def test_reconcile_tick_loads_each_shared_snapshot_once(coord_backend):
+    """One reconcile tick used to download the summaries view 3x (rebuild-source
+    acks, event-parity ack authority, undelivered-check ack map), load presence
+    3x (reroute sweep, role health, undelivered live-set), and sweep the
+    directives prefix 2x (directive parity, loop health). Each snapshot is now
+    loaded ONCE at the top of the relevant section and threaded through."""
+    import types
+    from fulcra_coord import views
+    from fulcra_coord.timeutil import now_iso
+
+    tasks = [_seed_task_with_events(coord_backend, i) for i in range(2)]
+    loops_seeded = [_seed_loop_with_sublogs(coord_backend, i) for i in range(2)]
+    # Presence: per-agent records (what _reconcile_presence rebuilds from).
+    for agent in ("a", "peer:h:r"):
+        remote.upload_json(
+            {"agent": agent, "last_seen": now_iso(), "workstreams": ["ws"]},
+            remote.presence_remote_path(views.agent_slug(agent)),
+            backend=coord_backend)
+    # Summaries view with an ack worth preserving.
+    remote.upload_json(
+        {"generated_at": now_iso(),
+         "summaries": [{"id": tasks[0]["id"], "acked_by": ["peer:h:r"]}]},
+        remote.view_remote_path("summaries"), backend=coord_backend)
+    # Index view so _load_all_tasks actually loads the seeded tasks.
+    remote.upload_json(
+        {"active": [{"id": t["id"]} for t in tasks], "recent_done": []},
+        remote.view_remote_path("index"), backend=coord_backend)
+
+    counter = OpCounter()
+    with counter.patch():
+        rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+    assert rc == 0
+
+    # Summaries view: exactly ONE download per tick (was 3).
+    summaries_path = remote.view_remote_path("summaries")
+    assert counter.downloads.count(summaries_path) == 1, (
+        f"summaries view downloaded "
+        f"{counter.downloads.count(summaries_path)}x — must be once per tick")
+
+    # Presence aggregate view: ZERO downloads — the tick rebuilds it from the
+    # per-agent records and shares the rebuilt roster with every sub-pass.
+    assert counter.downloads.count(remote.presence_view_path()) == 0, (
+        "presence view re-downloaded — the tick already holds the rebuilt one")
+
+    # Directives: each top-level loop record downloaded exactly ONCE (was 2-3x
+    # across loop-health + directive-parity), prefix listed exactly once.
+    for d in loops_seeded:
+        path = remote.directive_remote_path(d["id"])
+        assert counter.downloads.count(path) == 1, (
+            f"loop record {d['id']} downloaded "
+            f"{counter.downloads.count(path)}x — must be once per tick")
+    assert len(counter.lists_of(remote.directives_prefix())) == 1
+
+
 def test_cache_remote_task_weak_only_stat_falls_back_to_download(coord_backend):
     """A stat with NO strong identity key (version_id/version/etag) can never
     prove the body unchanged — equal sizes/timestamps don't (a re-upload can

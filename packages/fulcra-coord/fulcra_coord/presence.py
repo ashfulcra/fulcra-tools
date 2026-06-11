@@ -543,7 +543,9 @@ def cmd_presence(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
-def _reconcile_presence(backend: Optional[list[str]] = None) -> None:
+def _reconcile_presence(
+    backend: Optional[list[str]] = None,
+) -> Optional[dict[str, Any]]:
     """Rebuild ``views/presence.json`` from the durable ``presence/*.json`` files.
 
     Lists ``<root>/presence/`` and downloads each per-agent record in parallel
@@ -552,6 +554,13 @@ def _reconcile_presence(backend: Optional[list[str]] = None) -> None:
     aggregate merge eventually-consistent: even if a connect's best-effort upsert
     was lost, reconcile reconstructs the roster from the authoritative per-agent
     records.
+
+    Returns the REBUILT aggregate view on success, else None (E4 snapshot
+    sharing): the rebuilt roster is the freshest presence truth this tick will
+    see, so cmd_reconcile threads it through the reroute sweep / role health /
+    undelivered checks instead of each one re-loading presence. Returned even
+    when the aggregate UPLOAD failed — the view was still built from the
+    authoritative per-agent records, so in-tick consumers can trust it.
 
     LISTING REQUIREMENT: relies on remote.list_json being able to enumerate the
     presence dir. If listing returns nothing (empty dir, or a backend without a
@@ -563,9 +572,11 @@ def _reconcile_presence(backend: Optional[list[str]] = None) -> None:
             if rec.get("agent")
         ]
         if not records:
-            return
+            return None
         view = views.build_presence(records)
         remote.upload_json(view, remote.presence_view_path(), backend=backend)
         cache.write_cached_view("presence", view)
+        return view
     except Exception:
-        pass  # presence rebuild is best-effort; task-view reconcile is the contract
+        # presence rebuild is best-effort; task-view reconcile is the contract
+        return None
