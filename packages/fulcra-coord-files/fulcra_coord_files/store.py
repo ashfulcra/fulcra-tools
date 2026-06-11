@@ -40,7 +40,7 @@ All remote I/O goes through subprocesses. Tests inject a fake backend via the
 ``backend=`` parameter or the ``FULCRA_COORD_BACKEND`` env var.
 
 Timeout env vars:
-  FULCRA_COORD_TIMEOUT_SECONDS           — read ops (default: 5)
+  FULCRA_COORD_TIMEOUT_SECONDS           — read ops (default: 30)
   FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS — reconcile (default: 90)
 """
 

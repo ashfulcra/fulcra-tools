@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import fulcra_coord_files as files
+from fulcra_coord_files import store
 
 # The fake backend lives in the sibling fulcra-coord package's tests dir. We
 # resolve it relative to THIS file (…/fulcra-coord-files/tests/) so the path is
@@ -34,6 +35,25 @@ def _backend(tmp_path: Path) -> list[str]:
     """
     os.environ["FULCRA_FAKE_ROOT"] = str(tmp_path)
     return [sys.executable, str(FAKE)]
+
+
+def test_timeout_defaults_match_real_platform_latency(monkeypatch):
+    """Default read/write timeouts must stay above measured platform latency."""
+    monkeypatch.delenv("FULCRA_COORD_TIMEOUT_SECONDS", raising=False)
+    assert store._read_timeout() == 30
+    assert store._write_timeout() == 60
+
+
+def test_timeout_override_extends_write_floor(monkeypatch):
+    monkeypatch.setenv("FULCRA_COORD_TIMEOUT_SECONDS", "75")
+    assert store._read_timeout() == 75
+    assert store._write_timeout() == 75
+
+
+def test_invalid_timeout_override_falls_back_to_new_defaults(monkeypatch):
+    monkeypatch.setenv("FULCRA_COORD_TIMEOUT_SECONDS", "not-an-int")
+    assert store._read_timeout() == 30
+    assert store._write_timeout() == 60
 
 
 def test_upload_download_json_roundtrips(tmp_path):

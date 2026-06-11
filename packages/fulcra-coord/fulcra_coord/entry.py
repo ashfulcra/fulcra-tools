@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  FULCRA_CLI_COMMAND              Fulcra CLI invocation (default: fulcra-api)\n"
             "  FULCRA_COORD_REMOTE_ROOT        Remote root path (default: /coordination)\n"
             "  FULCRA_COORD_BACKEND            Override backend for testing\n"
-            "  FULCRA_COORD_TIMEOUT_SECONDS    Read timeout in seconds (default: 5)\n"
+            "  FULCRA_COORD_TIMEOUT_SECONDS    Read timeout in seconds (default: 30)\n"
             "  XDG_CACHE_HOME                  Cache base dir (default: ~/.cache)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
