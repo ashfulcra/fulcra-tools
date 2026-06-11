@@ -12,6 +12,44 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Perf, loop 2: six mechanical double-read/over-download eliminations
+
+Every remote op is one `fulcra file` subprocess (~1.3s median against a
+backend with 1–16s natural latency); this pass removes spawns that paid for
+the same bytes twice or downloaded bodies nobody read. No behavior changes —
+only fewer remote ops, each pinned by a counting-fake test in
+`tests/test_perf_call_counts.py` (E5–E10):
+
+- **Role fold (health tick / board / `roles`):** `list_roles` downloaded
+  EVERY `.json` under `roles/` (lease shards + escalation markers included)
+  then discarded the non-top-level ones, and `read_leases` re-listed and
+  re-downloaded each role's shards. One partitioned listing
+  (`role_ops.load_roles_with_leases`) now serves registry + leases: with R
+  roles, L lease shards, E escalation markers, each render drops from 1+R
+  listings and R+2L+E downloads to 1 listing and R+L downloads (pinned: 3→1
+  listings, 9→5 downloads on the 2-role/3-lease/1-marker fixture). The #171
+  F4 discipline is preserved — a listed-but-unreadable lease shard still
+  surfaces as `READ_ERROR`, never as the `[]` that folds to VACANT.
+- **Listener tick (`notify-inbox`):** the inbox fold and the needs-me pass
+  each loaded `views/summaries.json`; the tick now loads once and threads it
+  through (2→1 downloads per tick per agent — and in stale-guard mode the
+  saved load was a full ~one-spawn-per-task direct-listing fallback re-run).
+- **Evidence probe (`evidence_ids_for`, on board/digest/reconcile):** only
+  listing-NONEMPTINESS is consumed, so the probe is now a paths-only
+  `list_files` instead of `list_json` — 1 list + 0 downloads per candidate
+  (was 1 list + one download per shard).
+- **Directive dual-write:** the `if responses:` probe and `fold_loop` each
+  swept the responses sub-log; the probe's read is now threaded into the fold
+  (`fold_loop(responses=...)`) — 2→1 lists (+K shard downloads saved) per
+  directive-creating write.
+- **Digest:** `cmd_digest` and `_assess_fleet` each loaded the summaries
+  aggregate (the latter only for `len()`); threaded through — 2→1 downloads
+  per digest.
+- **Reconcile health record:** re-downloaded `retention/last-run.json` although
+  the retention pass's throttle claim had just read (or written) it; the claim
+  now returns the observed marker and the tick reuses it — 3→2 downloads on a
+  running-retention tick, 2→1 on the throttled steady state (~every tick).
+
 ### Retention/directives wave: destructive paths stop trusting failed reads; the GC that never ran now runs
 
 Seven fixes from the 2026-06-10/11 blind audit + live operation, sharing two

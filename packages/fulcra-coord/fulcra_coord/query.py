@@ -209,7 +209,9 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
     # unreadable registry renders no Roles section, never a stack trace.
     roles_section: list[dict[str, Any]] = []
     try:
-        registry = _role_ops.list_roles(backend=backend)
+        # ONE partitioned roles/ listing carries the lease sub-logs too (perf
+        # loop-2 #1 — no per-role re-list/re-download on a glance surface).
+        registry = _role_ops.load_roles_with_leases(backend=backend)
         if registry:
             presence_by_agent = {
                 a.get("agent"): a
@@ -218,9 +220,8 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
             }
             stale_hours = views._stale_hours()
             grace = views._presence_grace_seconds()
-            for role in registry:
+            for role, leases in registry:
                 name = role.get("name") or ""
-                leases = _role_ops.read_leases(name, backend=backend)
                 if leases is _role_ops.READ_ERROR:
                     # F4 (2026-06-11 read-error audit): an unreadable lease
                     # sub-log folds as UNKNOWN, never VACANT — the board must
