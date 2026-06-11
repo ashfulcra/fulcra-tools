@@ -68,8 +68,8 @@ def lease_fresh(
 
 def role_status(
     role: dict[str, Any],
-    leases: list[dict[str, Any]],
-    presence_by_agent: dict[str, dict[str, Any]],
+    leases: Optional[list[dict[str, Any]]],
+    presence_by_agent: Optional[dict[str, dict[str, Any]]],
     now: datetime,
     *,
     stale_hours: float,
@@ -77,7 +77,19 @@ def role_status(
 ) -> dict[str, Any]:
     """Fold one role's lease sub-log + the presence roster into its status.
 
-    Returns ``{holders, vacant, vacant_since, contested}``:
+    Returns ``{holders, vacant, vacant_since, contested, unknown}``:
+
+      * ``unknown`` — an input was UNKNOWABLE: ``leases is None`` (the caller
+        got role_ops.READ_ERROR — the lease sub-log could not be read) or
+        ``presence_by_agent is None`` (the roster this tick is untrustworthy,
+        the F5 partial-read case). 2026-06-11 read-error audit (F4): the fold
+        used to receive [] for a FAILED listing and judge the role VACANT
+        with ``vacant_since`` = the role's old ``created_at`` — instantly
+        past any SLA, a false P1 escalation onto a human's plate. Unknowable
+        inputs now yield the explicit no-judgment outcome: not vacant, not
+        contested, no holders, no SLA clock. Callers stay layering-clean by
+        translating their sentinel to None (this module imports nothing
+        first-party, so it cannot see role_ops.READ_ERROR itself).
 
       * ``holders`` — ``[{agent, since}, ...]`` for every FRESH lease, sorted
         by agent for deterministic rendering. Duplicate shards for one agent
@@ -91,6 +103,14 @@ def role_status(
       * ``contested`` — exclusive policy + more than one fresh lease: visible,
         never silently double-held. A shared role is never contested, and a
         stale lease never contests (it is simply claimable)."""
+    if leases is None or presence_by_agent is None:
+        return {
+            "holders": [],
+            "vacant": False,        # explicitly NOT a vacancy verdict
+            "vacant_since": None,   # no SLA clock may start on a blind read
+            "contested": False,
+            "unknown": True,
+        }
     by_agent: dict[str, dict[str, Any]] = {}
     newest_at = ""
     for lease in leases:
@@ -120,6 +140,7 @@ def role_status(
         "vacant": vacant,
         "vacant_since": vacant_since,
         "contested": (role.get("policy") == "exclusive" and len(holders) > 1),
+        "unknown": False,
     }
 
 
@@ -132,7 +153,12 @@ def vacancy_escalation_due(
     Mirrors loops._is_overdue's failure discipline: a role with no SLA is
     never due, and garbage off the bus (unparseable ``vacant_since``, a
     non-numeric SLA) fails toward NOT due — an escalation writes a directive,
-    and noise must never spam the maintainer's inbox."""
+    and noise must never spam the maintainer's inbox. An UNKNOWN status (F4:
+    lease/presence state unreadable this tick) is never due either — the
+    explicit guard, even though unknown also implies vacant=False, so a
+    future change to the unknown shape cannot quietly re-arm the SLA clock."""
+    if status.get("unknown"):
+        return False
     if not status.get("vacant"):
         return False
     sla = role.get("sla_hours")

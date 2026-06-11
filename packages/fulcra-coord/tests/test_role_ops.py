@@ -132,6 +132,15 @@ def test_read_role_distinguishes_transient_error_from_absent(coord_backend):
                     side_effect=RuntimeError("bus down")):
         assert role_ops.read_role(
             "reviewer", backend=coord_backend) is role_ops.READ_ERROR
+    # Download miss + stat miss is still not confirmed absence when the bus
+    # itself cannot answer. This is the PR #170/F4 discipline: a dark bus can
+    # prove nothing, and self-registering on this shape would still overwrite a
+    # rich role record once writes recover.
+    with mock.patch("fulcra_coord.remote.download_json", return_value=None), \
+         mock.patch("fulcra_coord.remote.stat", return_value=None), \
+         mock.patch("fulcra_coord.remote.probe_reachable", return_value=False):
+        assert role_ops.read_role(
+            "reviewer", backend=coord_backend) is role_ops.READ_ERROR
 
 
 def test_claim_on_transient_read_failure_leaves_registry_untouched(coord_backend):

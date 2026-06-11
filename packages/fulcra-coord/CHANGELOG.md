@@ -12,6 +12,60 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Roles and presence: read failures no longer read as vacancy or absence
+
+**The same class, second wave (2026-06-11 adversarial audit, F4/F5/F8):** the
+write-path fix below closed the absence-vs-read-failure conflation for task
+writes; the roles and presence layers had three more instances of it, each
+ending in a durable wrong outcome — a false P1 on a human's plate, a live
+reviewer rerouted away from, an agent's declared record wiped. Same C1
+discipline throughout: a failed read is disambiguated (stat probe +
+`probe_reachable`, spent only on failure paths) and surfaced as a sentinel;
+nothing escalates, reroutes, or rewrites on a guess.
+
+- **`role_ops.read_leases` (F4):** returned `[]` on ANY failure, and `[]`
+  folds to VACANT in `roles.role_status` with `vacant_since` = the role's
+  (old) `created_at` — instantly past any SLA, so ONE failed lease listing
+  pushed a false "Role VACANT past SLA" P1 directive onto the maintainer's
+  plate (the daily marker capped it at one/day, but each is a durable false
+  alarm a human has to read and dismiss). `read_leases` now returns the
+  `READ_ERROR` sentinel (the `read_role` idiom) when the listing failed, a
+  listed shard wouldn't download, or an empty listing can't be confirmed
+  against a reachable bus; `role_status` grew an explicit `unknown` outcome
+  (never vacant, no SLA clock) for unknowable inputs; the vacancy escalation
+  is SKIPPED with a logged reason; and every read surface (`roles`, the
+  board's Roles section, role health) renders "leases UNREADABLE" instead of
+  VACANT. The exclusive-policy check inside `claim_role` treats an unreadable
+  sub-log as advisory-skip — the claim itself still lands (per-agent shards
+  are clobber-free).
+- **`presence._reconcile_presence` / `_upsert_presence_aggregate` (F5):**
+  `remote.list_json`'s per-item isolation silently DROPS a record whose
+  individual download fails, and both rebuilds uploaded the SURVIVORS as the
+  authoritative aggregate — a live reviewer whose one record 504'd vanished
+  from the roster, and the truncated roster threaded into the review-route
+  sweep and role health that same tick ("no reviewer live" escalated to the
+  human while the reviewer was up — lived incident). The new opt-in
+  `remote.list_json_checked` variant exposes completeness (existing
+  `list_json` callers keep their contract untouched); a PARTIAL rebuild now
+  never uploads — the previous full aggregate stays, is handed to the tick's
+  consumers (stale-but-full beats fresh-but-truncated), and the boundary case
+  (per-agent read partial AND the previous aggregate unreadable) fails toward
+  NO-ACTION: the review sweep is skipped outright and role health reports
+  every role unknown. The staleness-guarded roster loader likewise no longer
+  swaps a full stale aggregate for a partial per-agent listing.
+- **`presence.cmd_connect` / `cmd_workstream` / the capability RMW (F8):** a
+  failed read of the agent's OWN presence record was treated as "never
+  connected", and the subsequent whole-record write wiped
+  capabilities/workstreams/summary/session (the C4 comment admitted the bare-
+  connect exposure; `workstream add` could wipe everything). `_load_own_presence`
+  now disambiguates per the C1+probe idiom; on a failed read, connect SKIPS
+  the presence write with a loud warning (a missed heartbeat heals on the
+  next connect; a wiped record needs an operator), `workstream set/add/clear`
+  aborts with a clear error, and `add_capabilities`/`remove_capability`
+  refuse the rewrite. A genuinely-first connect (probe-confirmed absent on a
+  reachable bus) still writes the full fresh record, and an explicit
+  `--clear-roles` still rebuilds — the operator sanctioned it.
+
 ### Write path: transport read failures are no longer treated as absence
 
 **The class (2026-06-11 adversarial audit):** the transport primitives

@@ -99,12 +99,43 @@ def list_json(
     module's globals (``list_files(...)`` / ``download_json(...)``) preserves that
     patch surface exactly. See the store version for the full contract docstring.
     """
+    return list_json_checked(prefix, backend=backend, suffix=suffix,
+                             max_workers=max_workers)[0]
+
+
+def list_json_checked(
+    prefix: str,
+    *,
+    backend: Optional[list[str]] = None,
+    suffix: str = ".json",
+    max_workers: int = 8,
+) -> tuple[list[tuple[str, dict[str, Any]]], bool]:
+    """``list_json`` plus a COMPLETENESS verdict: ``(items, complete)``.
+
+    2026-06-11 roles/presence read-error audit (F4/F5): ``list_json``'s
+    per-item isolation is deliberately silent — a record whose individual
+    download 504s is simply DROPPED. That is the right contract for prunes and
+    glance surfaces, but it is how a live reviewer's one failed presence read
+    became "absent from the roster" (a reconcile then uploaded the survivors
+    as the authoritative aggregate) and how one failed lease listing folded a
+    HELD role to VACANT. Consumers whose result feeds a DECISION need to know
+    the enumeration was partial; this opt-in variant carries that verdict so
+    the many existing ``list_json`` callers keep their contract untouched.
+
+    ``complete`` is False when the listing itself raised OR when any listed
+    path's download failed/parsed to a non-dict (a corrupt record is a read
+    problem too — fail toward "don't trust this enumeration"). CAVEAT a
+    decision-making caller must handle: ``list_files`` swallows transport
+    failures into ``[]``, so an EMPTY-and-"complete" result is only
+    trustworthy after ``probe_reachable`` confirms the bus answered — the
+    probe is the caller's to spend, on the empty path only (read_leases is
+    the reference caller)."""
     try:
         paths = [p for p in list_files(prefix, backend=backend) if p.endswith(suffix)]
     except Exception:
-        return []
+        return [], False
     if not paths:
-        return []
+        return [], True
     results: dict[str, dict[str, Any]] = {}
     workers = min(max_workers, max(2, len(paths)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -119,7 +150,8 @@ def list_json(
                 rec = None
             if isinstance(rec, dict):
                 results[path] = rec
-    return [(path, results[path]) for path in paths if path in results]
+    items = [(path, results[path]) for path in paths if path in results]
+    return items, len(items) == len(paths)
 
 
 # ---------------------------------------------------------------------------
