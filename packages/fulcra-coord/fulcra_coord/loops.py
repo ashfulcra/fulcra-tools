@@ -94,6 +94,8 @@ KINDS: dict[str, dict[str, Any]] = {
 
 
 def states_of(kind: str) -> set[str]:
+    """All states of a kind's machine. No production caller — exists for the
+    conformance suite, which sweeps every state of every kind."""
     return set(KINDS[kind]["transitions"].keys())
 
 
@@ -116,7 +118,9 @@ def can_transition(kind: str, from_state: str, to_state: str) -> bool:
 
 def closure_reachable(kind: str, state: str) -> bool:
     """Spec invariant: from EVERY state some terminal is reachable — a
-    lifecycle must never strand a loop. (BFS over the transition graph.)"""
+    lifecycle must never strand a loop. (BFS over the transition graph.)
+    No production caller — exists for the conformance suite, which asserts
+    the invariant over every (kind, state) pair."""
     terminals = terminal_states(kind)
     seen, frontier = {state}, [state]
     while frontier:

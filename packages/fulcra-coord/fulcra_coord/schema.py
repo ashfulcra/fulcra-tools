@@ -629,6 +629,11 @@ def validate_directive(d: dict) -> list[str]:
     WHY pure (no raises): validators that raise stop at the first problem.
     A list-returning validator lets the CLI / inbox renderer show everything
     wrong with an inbound directive in one pass, which matters for triage.
+
+    NOT on the write path today: production validation happens make_*-side
+    (``make_directive`` constructs only valid shapes); this is the invariant
+    check the test suite runs against emitted records. Wiring it into the
+    write path would be a behavior change — don't do it casually.
     """
     errors: list[str] = []
 
@@ -821,7 +826,12 @@ def validate_role(r: dict) -> list[str]:
 
     ``description``/``standing_instructions`` may legitimately be EMPTY
     strings (a claim on an unregistered role self-registers a minimal record);
-    only their TYPE is checked."""
+    only their TYPE is checked.
+
+    NOT on the write path today: production validation happens make_*-side
+    (``make_role`` constructs only valid shapes); this is the invariant check
+    the test suite runs against emitted records. Wiring it into the write
+    path would be a behavior change — don't do it casually."""
     errors: list[str] = []
 
     missing = sorted(_ROLE_KEYS - set(r.keys()))

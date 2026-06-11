@@ -9471,8 +9471,8 @@ class TestNeedsMeDateFormatting(unittest.TestCase):
     """Small CLI display helpers should stay portable across Python platforms."""
 
     def test_due_str_uses_unpadded_day_without_platform_specific_strftime(self):
-        from fulcra_coord.cli import _due_str
-        self.assertEqual(_due_str("2026-06-08T18:00:00Z"), "Jun 8")
+        from fulcra_coord.textfmt import due_str
+        self.assertEqual(due_str("2026-06-08T18:00:00Z"), "Jun 8")
 
 
 class TestEquivalenceWithScheduleFields(unittest.TestCase):
@@ -10084,7 +10084,7 @@ class TestTimestampPrecision(unittest.TestCase):
     def test_emitted_timestamps_always_have_six_digit_microseconds(self):
         import re
         from datetime import datetime, timezone
-        from fulcra_coord import cli as cli_mod
+        from fulcra_coord import timeutil as timeutil_mod
         from fulcra_coord import cache as cache_mod
         from fulcra_coord import annotations as ann_mod
         pat = re.compile(r"\.\d{6}Z$")
@@ -10094,9 +10094,10 @@ class TestTimestampPrecision(unittest.TestCase):
         self.assertRegex(schema.parse_when("0d", now=zero_us), pat)
         t = make_task(title="x", workstream="ws", agent="a", dt=zero_us)
         self.assertRegex(t["updated_at"], pat)
-        # The per-file _now_iso helpers (cache / cli / annotations) — exercised
-        # at runtime when µs happens to be 0, so assert the shape directly.
-        for helper in (cli_mod._now_iso, cache_mod._now_iso, ann_mod._recorded_at):
+        # The per-file now-string helpers (timeutil — the cli write paths ride
+        # it — plus cache / annotations) — exercised at runtime when µs happens
+        # to be 0, so assert the shape directly.
+        for helper in (timeutil_mod.now_iso, cache_mod._now_iso, ann_mod._recorded_at):
             val = helper({}) if helper is ann_mod._recorded_at else helper()
             self.assertRegex(val, pat, f"{helper.__module__}.{helper.__name__}")
 
