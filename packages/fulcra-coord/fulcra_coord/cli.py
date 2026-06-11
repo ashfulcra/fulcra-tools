@@ -1258,6 +1258,19 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             current_remote = remote.download_json(task_path, backend=backend)
         except Exception:
             current_remote = None
+        if not current_remote:
+            try:
+                remote_exists = remote.stat(task_path, backend=backend) is not None
+            except Exception:
+                remote_exists = True
+            if remote_exists:
+                # A failed/unreadable download is not proof of absence. Blind
+                # replay is safe only when the remote body is confirmed absent;
+                # otherwise this reintroduces the stale-body clobber C2 fixed.
+                _warn(f"  Task {tid}: remote body exists but could not be "
+                      "downloaded for merge — keeping the repair marker.")
+                body_repair_failures.append(tid)
+                continue
         if current_remote:
             merged = _try_merge(cached_task, current_remote)
             if merged is not None:
