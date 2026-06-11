@@ -175,27 +175,30 @@ def cmd_tell(args: Any, backend: Optional[list[str]] = None,
 def _dual_write_directive(
     task: dict[str, Any], *, command: str, backend: Optional[list[str]] = None
 ) -> None:
-    """Phase 3b strangler-fig dual-write: ADDITIVELY mirror a directive-creating
-    task into a first-class ``directives/<id>.json`` record.
+    """Directive dual-write: ADDITIVELY mirror a directive-creating task into
+    a first-class ``directives/<id>.json`` loop record.
 
-    BEST-EFFORT — this NEVER fails or alters the authoritative legacy task write.
-    It is called only AFTER the task body has already landed, so the legacy write
+    BEST-EFFORT — this NEVER fails or alters the authoritative task write.
+    It is called only AFTER the task body has already landed, so that write
     is committed regardless of what happens here. Any failure (a raising or
     False-returning upload, a mapping error) is swallowed and recorded in the
-    ops log as ``directive_write_failed`` so the migration parity can be audited
+    ops log as ``directive_write_failed`` so the parity pass can audit misses
     — exactly mirroring the event-append best-effort posture in writepipe.
+
+    The TASK record stays authoritative for task state; the mirrored loop
+    records carry coordination state (board / digest / review-done / the
+    reconcile health and parity passes read them).
 
     ``directives`` is lazy-imported inside the function to avoid paying its
     import cost on every lifecycle import and to keep the module-load graph flat
-    (no eager cycle risk during package init). Nothing READS directives for
-    correctness yet — this is purely the write half of the migration.
+    (no eager cycle risk during package init).
 
-    Task 3: the upload + ops-log-on-miss logic now lives in the low-layer
+    The upload + ops-log-on-miss logic lives in the low-layer
     ``directives.dual_write`` so tell/broadcast (here) and the routing_ops
     commands (assign/request-review/review-done) share ONE writer. This function
-    is kept as the thin lifecycle-facing entry point cmd_tell/cmd_broadcast
-    already call; it delegates so there is a single best-effort implementation to
-    audit, not two divergent copies.
+    is the thin lifecycle-facing entry point cmd_tell/cmd_broadcast call; it
+    delegates so there is a single best-effort implementation to audit, not two
+    divergent copies.
     """
     from . import directives  # lazy import: avoid import cost / cycle at module load
     directives.dual_write(task, command=command, backend=backend)
@@ -361,7 +364,7 @@ def cmd_assign(args: Any, backend: Optional[list[str]] = None) -> int:
     if not ok:
         _warn(f"Task cached locally but remote upload failed: {task_id}.")
         return 1
-    # Phase 3b dual-write: assignment sets/redirects the directive audience. This
+    # Directive dual-write: assignment sets/redirects the directive audience. This
     # is an LWW-snapshot OVERWRITE of directives/<id>.json (storage model A): a
     # re-assign re-writes the same record with the new audience, so the directive
     # always reflects the latest assignee. Best-effort — never fails the task write.

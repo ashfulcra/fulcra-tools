@@ -412,7 +412,10 @@ def validate_version_manifest(m: Any) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# First-class Directive record (Phase 3a — additive, nothing reads/writes yet)
+# First-class Directive record — the coordination LOOP record. Dual-written
+# by every directive-creating command (directives.dual_write); read for
+# coordination state by board / digest / review-done / the reconcile health
+# and parity passes. The TASK record stays authoritative for task state.
 # ---------------------------------------------------------------------------
 
 DIRECTIVE_SCHEMA = "fulcra.coordination.directive.v1"
@@ -516,19 +519,23 @@ def make_directive(
     sla_hours: Optional[int] = None,
     dt: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """Build a first-class directive record. ADDITIVE — nothing consumes it yet.
+    """Build a first-class directive record — the coordination loop record.
+
+    Every directive-creating command dual-writes one of these alongside its
+    authoritative task (``directives.dual_write``); board, digest, review-done
+    and the reconcile health/parity passes read them for coordination state.
+    The task record stays authoritative for task state.
 
     ``from_agent`` is who issues the directive (the instructing owner);
     ``audience`` is the recipient agent id or ``'*'`` (broadcast wildcard, matching
-    ``views.BROADCAST``). ``task_id`` is a back-reference to the legacy
-    task-with-assignee during the dual-write transition (Phase 3b); it is ``None``
-    for directives created directly after the migration cutover.
+    ``views.BROADCAST``). ``task_id`` is the back-reference to the task this
+    record mirrors; it is ``None`` for a directive that mirrors no task.
 
     WHY a separate record type rather than a task with assignee: tasks model
     WORK (with lifecycle, evidence, checklists, done/blocked semantics). Directives
     model COMMUNICATION (who told whom what). Conflating them forces the inbox,
     ack, expiry, and routing semantics to leak into the task lifecycle state
-    machine — which is exactly the coupling Phase 3 removes.
+    machine — which is exactly the coupling this record type avoids.
     """
     # --- Validate required string fields first (before the more expensive path) ---
     if directive_type not in _DIRECTIVE_TYPES:
@@ -582,19 +589,22 @@ def make_directive(
         "priority": priority,
         "workstream": workstream,
         "status": status,
-        # acked_by: agents (or humans) who have acknowledged receipt. Initially
-        # empty; the Phase 3b listener appends entries as acks arrive.
+        # acked_by: agents (or humans) who have acknowledged receipt. Starts
+        # empty; the dual-write folds the per-agent ack sub-log union in on
+        # each re-mirror (directives.dual_write), so it never shrinks below
+        # the durable sub-log truth.
         "acked_by": [],
         "artifact_ref": artifact_ref,
         "not_before": not_before,
         "due": due,
-        # routing: reserved for Phase 3b fan-out metadata (e.g. re-broadcast
-        # hops, delivery receipts). Empty list is the safe default.
+        # routing: the route-event history. Starts empty; the dual-write folds
+        # the append-only routing sub-log shards in on each re-mirror, so a
+        # re-routed review carries its full route trail.
         "routing": [],
         "created_at": now_iso,
         "updated_at": now_iso,
-        # Back-reference to the legacy task-with-assignee during Phase 3b
-        # dual-write. None once migration is complete and directives are primary.
+        # Back-reference to the task this record mirrors (the dual-write sets
+        # it). None for a directive that mirrors no task.
         "task_id": task_id,
         # --- Loop fields (additive; see _LOOP_KEYS note) ---
         "kind": kind,
@@ -766,8 +776,10 @@ def make_role(
     description — runbooks, conventions, where the role's state lives — so ANY
     fresh session that claims the role knows what to do. ``maintainer`` is the
     escalation edge: who gets the directive when the role sits vacant past
-    ``sla_hours``. ``checkpoint_ref`` is RESERVED for continuity phase 2
-    (claim → resume) so that phase lands additively; nothing reads it yet.
+    ``sla_hours``. ``checkpoint_ref`` is the role's durable resume point:
+    set by ``checkpoint --role`` and the session-exit ``park``, read by
+    ``continuity_ops``, and printed (ref + resume brief) when a session
+    claims the role.
 
     GENERALIZATION RULE (non-negotiable): core ships the MECHANISM only —
     role names are adopter data written through this constructor at runtime,
