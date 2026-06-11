@@ -150,9 +150,10 @@ task):
    directive to a live/idle reviewer, self-healing if nobody's up; the reviewer
    hunts for bugs adversarially, doesn't rubber-stamp.
    - **Reviewer routing:** non-Arc Claude Code agents → the **Codex reviewer**
-     (currently `codex:Mac.localdomain:main`). Arc sessions (`claude-code:ArcBot:*`)
-     → the **Arc code-review** session (`claude-code:ArcBot:Arc-Code-Review`). The
-     Codex reviewer's own work → a live **Claude** agent.
+     (currently `Ashs-MBP-Work:Codex-Review-Workbook`). Arc sessions
+     (`claude-code:ArcBot:*`) → the **Arc code-review** session
+     (`claude-code:ArcBot:Arc-Code-Review`). The Codex reviewer's own work → a
+     live **Claude** agent.
 3. The reviewer posts the outcome with
    **`review-done <artifact> --verdict approve|changes [--note "…"] [--to <author>]`**.
    This lands the verdict as a bus directive (tagged `kind:review-verdict`) in the
