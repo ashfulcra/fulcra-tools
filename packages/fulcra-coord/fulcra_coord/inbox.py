@@ -111,10 +111,11 @@ def _ack_summary_only(task_id: str, me: str, *,
 def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """List (or ack) open directives addressed to the calling agent.
 
-    Read path recomputes authoritatively from the full task set (see
-    _load_inbox) — mirroring cmd_agents — rather than trusting a materialized
-    inbox view, which can go stale once an inbox empties. `--ack <id>` records an
-    inbox_ack event so the listener stops re-notifying, without claiming the task.
+    Read path recomputes authoritatively from the task summaries (see
+    _load_inbox) — mirroring cmd_agents. (The per-assignee inbox view files
+    this once avoided trusting were retired entirely in the 2026-06-11 perf
+    wave; the recompute IS the read path.) `--ack <id>` records an inbox_ack
+    event so the listener stops re-notifying, without claiming the task.
     """
     me = getattr(args, "agent", None) or _derive_agent()
     out_format = getattr(args, "format", "table")
@@ -236,7 +237,7 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None,
     """Open directives for `me`, recomputed authoritatively from the full task set.
 
     Mirrors cmd_agents: inbox_for over the live tasks is the single source of
-    truth. We deliberately do NOT prefer a materialized inbox/<slug> view here.
+    truth.
 
     Membership uses prefix-aware matching (views.inbox_for / agent_matches): a
     directive addressed to a short id like `claude-code` reaches the full-id
@@ -244,14 +245,16 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None,
     for the original bug — strict slug equality silently dropped short-id
     directives.
 
-    Why recompute (not read a materialized view): build_all_views only emits an
-    inbox/<slug> view for assignees who still have at least one open directive.
-    When an inbox empties — the last directive is acked or claimed — the stale
-    inbox/<slug>.json (local cache AND remote) is never overwritten, so preferring
-    it returned a phantom directive forever (`inbox` re-listed handled work, the
-    listener re-notified, SessionStart re-injected). Recomputing from the task set
-    always reflects the current truth, at the cost of one task-set load — the same
-    cost cmd_agents pays.
+    Why recompute (history): the materialized inbox/<slug> views were only
+    emitted for assignees who still had at least one open directive, so when an
+    inbox emptied the stale file was never overwritten and preferring it
+    returned a phantom directive forever (`inbox` re-listed handled work, the
+    listener re-notified, SessionStart re-injected). The recompute became the
+    read path, which left those view files write-only — and as of the
+    2026-06-11 perf wave they are no longer materialized at all (see
+    views.build_all_views' RETIRED VIEWS note). Recomputing from the task set
+    always reflects the current truth, at the cost of one task-set load — the
+    same cost cmd_agents pays.
     """
     # Summaries fast-path: inbox_for reads assignee/status/owner_agent and the
     # ack set, which the summary now carries (acked_by) — no event log / body
