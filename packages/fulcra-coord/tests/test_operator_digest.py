@@ -386,7 +386,7 @@ class TestInstallDigest(unittest.TestCase):
 
     def test_cron_has_two_managed_lines(self):
         cron = self.tmp / "cron.txt"
-        plan = digest_schedule.install_digest(crontab_path=cron, force_cron=True)
+        digest_schedule.install_digest(crontab_path=cron, force_cron=True)
         text = cron.read_text()
         self.assertIn("0 8 * * *", text)
         self.assertIn("0 18 * * *", text)

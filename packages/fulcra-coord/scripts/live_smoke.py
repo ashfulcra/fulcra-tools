@@ -28,7 +28,7 @@ if not os.environ.get("FULCRA_COORD_LIVE_SMOKE"):
 # Add package root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fulcra_coord import remote, cache, schema, views
+from fulcra_coord import remote, schema, views
 from fulcra_coord import remote_root
 
 
@@ -66,7 +66,6 @@ def main() -> None:
 
     # 4. Download and verify
     print("\n[4] Download")
-    import json
     downloaded = remote.download_json(test_path)
     check("Download succeeded", downloaded is not None)
     check("Downloaded content matches", downloaded == payload if downloaded else False)

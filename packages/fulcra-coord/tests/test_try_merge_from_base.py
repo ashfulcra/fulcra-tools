@@ -9,7 +9,6 @@ recovered, not clobbered. These tests pin every per-field rule branch on small
 pure dicts, before the function is wired into the write path.
 """
 
-import pytest
 
 from fulcra_coord import writepipe
 

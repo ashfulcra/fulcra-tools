@@ -276,8 +276,8 @@ def test_fold_does_not_remint_event_id(coord_backend, monkeypatch):
     _seed_snapshot(t, backend=coord_backend)
     evs = eventlog.read_events(t["id"], backend=coord_backend)
     calls["n"] = 0                 # reset after the append minted its id
-    folded = events.fold_task(evs)
-    folded2 = events.fold_task(evs)
+    events.fold_task(evs)
+    events.fold_task(evs)
     assert calls["n"] == 0, "fold_task must not mint event_id"
     # And the stored event_id is stable across reads.
     assert evs[0]["event_id"] == eventlog.read_events(t["id"], backend=coord_backend)[0]["event_id"]

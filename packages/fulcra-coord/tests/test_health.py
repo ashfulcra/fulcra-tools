@@ -282,7 +282,6 @@ class TestHealthWiring(unittest.TestCase):
 
 class TestDoctorHealthFold(unittest.TestCase):
     def test_doctor_includes_fleet_health(self):
-        now = datetime.now(timezone.utc)
         buf = io.StringIO()
         with mock.patch("fulcra_coord.cli.remote.list_files", return_value=[]), \
              mock.patch("fulcra_coord.cli.remote.download_json", return_value=None), \

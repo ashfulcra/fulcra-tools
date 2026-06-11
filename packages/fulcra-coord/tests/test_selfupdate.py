@@ -480,7 +480,7 @@ class TestSelfUpdateGuards(_CfgEnvBase):
         self._write_cfg("update-cmd.json", {"cmd": ["/usr/bin/true"]})
         with self._behind("99.0.0"), \
              patch("fulcra_coord.selfupdate._run_proc",
-                   return_value=types.SimpleNamespace(returncode=0)) as run:
+                   return_value=types.SimpleNamespace(returncode=0)):
             self.assertEqual(selfupdate.maybe_self_update(), "updated")
         with self._behind("99.1.0"), \
              patch("fulcra_coord.selfupdate._run_proc",

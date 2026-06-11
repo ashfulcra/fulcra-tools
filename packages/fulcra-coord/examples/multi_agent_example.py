@@ -20,12 +20,11 @@ import json
 import os
 import sys
 import tempfile
-import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fulcra_coord import schema, cache, views
+from fulcra_coord import views
 from fulcra_coord.schema import (
     make_task, apply_transition, apply_update, validate_task
 )
@@ -72,7 +71,6 @@ STORE = FakeStore()
 def make_fake_backend_fn(store: FakeStore):
     """Return a function that patches remote I/O to use the fake store."""
     import fulcra_coord.remote as _remote
-    import json as _json
 
     original_upload = _remote.upload
     original_download = _remote.download

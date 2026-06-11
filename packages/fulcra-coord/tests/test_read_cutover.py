@@ -20,7 +20,6 @@ default-off (zero behaviour change unless an operator sets
    the body comes from the fold the file stat must be cached.
 """
 
-import os
 
 from fulcra_coord import cache, eventlog, events, io, remote, schema
 from fulcra_coord import log as ops_log
