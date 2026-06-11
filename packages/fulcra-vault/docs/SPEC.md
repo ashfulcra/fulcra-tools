@@ -123,6 +123,16 @@ Notes are mutable files; safety is conventions enforced by the CLI:
   (default 5 min) with debounce; `sync --watch` documented for foreground.
 - Obsidian-specific artifacts (`.obsidian/`, plugins, workspace state) are
   mirror-local and never uploaded (sync ignore list).
+- **Deletions never propagate automatically** (adapted from fulcra-coord's
+  2026-06 reliability wave: transport read failures must never be read as
+  absence on destructive paths — coord PRs #170/#171 fixed exactly this
+  class). Sync propagates creations and modifications only. A transport
+  failure on either side skips that path for the run — no destructive
+  conclusion is ever drawn from a failed read, and absence is only believed
+  after a confirming re-stat. A note genuinely deleted on one side is
+  reported by `doctor` as a side-orphan; intentional deletion is the explicit
+  `fulcra-vault delete <note>` command, which removes both sides (remote copy
+  survives in file-library history) and logs to LOG.md.
 
 ### First-run interview → structure spec (the generalization mechanism)
 
