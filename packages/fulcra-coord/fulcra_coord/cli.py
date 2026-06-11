@@ -1023,7 +1023,15 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
 
     if action == "set":
         name = (getattr(args, "name", "") or "").strip()
-        existing = _role_ops.read_role(name, backend=backend) or {}
+        existing = _role_ops.read_role(name, backend=backend)
+        if existing is _role_ops.READ_ERROR:
+            # 2026-06-11 bug hunt C1: a failed registry read must not be
+            # treated as "new role" — the _pick/preserve update below would
+            # rebuild from defaults and wipe every field not passed this run.
+            _err(f"roles set: registry record for '{name}' could not be read "
+                 "— re-run (updating blind would wipe unspecified fields)")
+            return 1
+        existing = existing or {}
 
         def _pick(arg_name: str, field: str, default):
             val = getattr(args, arg_name, None)
@@ -1068,7 +1076,9 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
             # Post-claim contested check, through the guarded roster (the
             # claim itself stays presence-blind by layering — see role_ops).
             try:
-                role = _role_ops.read_role(name, backend=backend) or {}
+                role = _role_ops.read_role(name, backend=backend)
+                if not isinstance(role, dict):  # absent or READ_ERROR (C1)
+                    role = {}
                 status = _roles.role_status(
                     role, _role_ops.read_leases(name, backend=backend),
                     {a.get("agent"): a
