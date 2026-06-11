@@ -70,6 +70,10 @@ from .presence import (
     _upsert_presence_aggregate, _write_presence, _load_own_presence, cmd_connect,
     _split_workstreams, cmd_workstream, cmd_presence, _reconcile_presence,
     _load_presence_agents,
+    # C5: the merge-safe capability RMW pair `roles claim`/`release` use to
+    # keep @role delivery (capabilities) in step with the lease layer.
+    add_capabilities as _presence_add_capabilities,
+    remove_capability as _presence_remove_capability,
 )
 # Read-only situational-awareness commands extracted from this file. Re-exported so
 # the command dispatch (entry.py) and the test imports of these commands keep
@@ -910,27 +914,45 @@ def _maybe_escalate_role_vacancy(
         if not remote.upload_json(marker, marker_path, backend=backend):
             return False   # uncertain claim: skip, never risk a double
         vacant_for = _age_str(status.get("vacant_since") or "")
-        directive = schema.make_directive(
-            directive_type="tell",
-            from_agent=identity.resolve_agent(),
-            audience=maintainer,
+        # 2026-06-11 bug hunt C3 (P1): this used to upload ONLY a first-class
+        # directives/<id>.json record — which NOTHING delivery-side reads for
+        # correctness yet (inbox / listener / SessionStart all fold over the
+        # legacy TASK set), so the maintainer was never actually told. Route
+        # through the legacy task path like every other directive creator
+        # (a proposed task assigned to the maintainer via the write pipeline)
+        # plus the standard Phase-3b dual-write mirror — the exact
+        # writepipe+dual_write combination request-review uses (lifecycle's
+        # cmd_tell can't be reused here without an args shim; the pipeline
+        # call IS its machinery).
+        me = identity.resolve_agent()
+        task = schema.make_task(
             title=f"Role '{name}' VACANT past SLA",
             workstream="coordination",
+            agent=me,
+            owner_agent=me,
+            assignee=maintainer,
+            priority="P1",
             summary=(f"Role '{name}' has been vacant for {vacant_for} "
                      f"(SLA {role.get('sla_hours')}h). "
                      f"{role.get('description') or ''}").strip(),
             next_action=(f"Restaff it: have an agent run "
                          f"`fulcra-coord roles claim {name}` (or connect "
                          f"--role {name}), or adjust the registry record."),
-            priority="P1",
         )
-        ok = bool(remote.upload_json(
-            directive, remote.directive_remote_path(directive["id"]),
-            backend=backend))
+        cache.write_cached_task(task)
+        try:
+            ok = _write_task_and_views(task, backend=backend, command="tell")
+        except (schema.ConflictError, schema.NeedsReconcile):
+            # The task BODY landed (these raise only after the body uploaded)
+            # — the escalation is delivered; views self-heal on reconcile.
+            ok = True
         if ok:
+            # Best-effort mirror into directives/<id>.json (never fails or
+            # alters the authoritative task write — see directives.dual_write).
+            _directives.dual_write(task, command="tell", backend=backend)
             _warn(f"  ⚠ role '{name}' vacant past SLA — escalation directive "
                   f"sent to {maintainer}")
-        return ok
+        return bool(ok)
     except Exception:
         return False   # best-effort: escalation must never break the sweep
 
@@ -1023,7 +1045,15 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
 
     if action == "set":
         name = (getattr(args, "name", "") or "").strip()
-        existing = _role_ops.read_role(name, backend=backend) or {}
+        existing = _role_ops.read_role(name, backend=backend)
+        if existing is _role_ops.READ_ERROR:
+            # 2026-06-11 bug hunt C1: a failed registry read must not be
+            # treated as "new role" — the _pick/preserve update below would
+            # rebuild from defaults and wipe every field not passed this run.
+            _err(f"roles set: registry record for '{name}' could not be read "
+                 "— re-run (updating blind would wipe unspecified fields)")
+            return 1
+        existing = existing or {}
 
         def _pick(arg_name: str, field: str, default):
             val = getattr(args, arg_name, None)
@@ -1065,10 +1095,25 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
             if not _role_ops.claim_role(name, me, backend=backend):
                 _err(f"roles claim: lease write failed for '{name}'")
                 return 1
+            # 2026-06-11 bug hunt C5: the lease alone is HALF the truth —
+            # @role inbox delivery reads presence capabilities
+            # (inbox._my_roles), so a claim that only wrote the lease left
+            # the board saying HELD while directives @<role> never arrived.
+            # Merge the role into the claimer's capabilities via the C4
+            # merge-safe helper. This lives HERE (not in role_ops.claim_role)
+            # because role_ops must never import presence — the layering pin
+            # in tests/test_roles.py; connect's lease path syncs capabilities
+            # already by construction (it writes the presence record).
+            if not _presence_add_capabilities(me, [name], backend=backend):
+                _warn(f"roles claim: lease landed but the presence capability "
+                      f"merge failed — @{name} directives may not deliver "
+                      "until the next connect")
             # Post-claim contested check, through the guarded roster (the
             # claim itself stays presence-blind by layering — see role_ops).
             try:
-                role = _role_ops.read_role(name, backend=backend) or {}
+                role = _role_ops.read_role(name, backend=backend)
+                if not isinstance(role, dict):  # absent or READ_ERROR (C1)
+                    role = {}
                 status = _roles.role_status(
                     role, _role_ops.read_leases(name, backend=backend),
                     {a.get("agent"): a
@@ -1095,6 +1140,13 @@ def cmd_roles(args: Any, backend: Optional[list[str]] = None) -> int:
         if not _role_ops.release_role(name, me, backend=backend):
             _err(f"roles release: no lease of yours to release on '{name}'")
             return 1
+        # C5 counterpart: stop @role delivery too (capabilities are the
+        # delivery truth). Kept deliberately simple — release always removes
+        # the capability; siblings survive (merge-safe RMW, never a rebuild).
+        if not _presence_remove_capability(me, name, backend=backend):
+            _warn(f"roles release: lease removed but the presence capability "
+                  f"removal failed — @{name} directives may keep delivering "
+                  "until the next release/connect --clear-roles")
         _info(f"Released role '{name}' for {me}")
         return 0
 
@@ -1193,13 +1245,66 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             body_repair_failures.append(tid)
             continue
         task_path = remote.task_remote_path(tid)
+        # 2026-06-11 bug hunt C2 (P1): the replay used to upload the cached
+        # body BLINDLY. An "unverified" marker only means OUR write may not
+        # have landed — it says nothing about what landed SINCE: another
+        # host's newer body was silently reverted by the stale replay. So
+        # look first: if a remote body exists, route through the same
+        # _try_merge the write pipeline uses; the blind upload survives only
+        # for the remote-absent case (the genuine lost-write this repair
+        # exists for).
+        body_to_upload = cached_task
         try:
-            ok = remote.upload_json(cached_task, task_path, backend=backend)
+            current_remote = remote.download_json(task_path, backend=backend)
+        except Exception:
+            current_remote = None
+        if not current_remote:
+            try:
+                remote_exists = remote.stat(task_path, backend=backend) is not None
+            except Exception:
+                remote_exists = True
+            if remote_exists:
+                # A failed/unreadable download is not proof of absence. Blind
+                # replay is safe only when the remote body is confirmed absent;
+                # otherwise this reintroduces the stale-body clobber C2 fixed.
+                _warn(f"  Task {tid}: remote body exists but could not be "
+                      "downloaded for merge — keeping the repair marker.")
+                body_repair_failures.append(tid)
+                continue
+        if current_remote:
+            merged = _try_merge(cached_task, current_remote)
+            if merged is not None:
+                body_to_upload = merged
+            elif _updated_at_key(current_remote) >= _updated_at_key(cached_task):
+                # Unsafe merge but the bus already carries the as-new-or-newer
+                # body: our cached replay is the stale side — skip the upload
+                # entirely and let the marker resolve as repaired (re-meta the
+                # remote body so the next write's stat check starts clean).
+                try:
+                    post_stat = remote.stat(task_path, backend=backend)
+                    if post_stat:
+                        cache.write_meta(task_path, post_stat)
+                except Exception:
+                    pass
+                cache.write_cached_task(current_remote)
+                continue
+            else:
+                # Unsafe merge and OUR side is newer: neither replaying (would
+                # clobber the remote transition) nor skipping (would silently
+                # drop newer local work) is safe — keep the debt visible.
+                _warn(f"  Task {tid}: cached replay conflicts with a changed "
+                      "remote body and cannot merge safely — keeping the "
+                      "repair marker for manual resolution.")
+                body_repair_failures.append(tid)
+                continue
+        try:
+            ok = remote.upload_json(body_to_upload, task_path, backend=backend)
         except Exception:
             ok = False
         if not ok:
             body_repair_failures.append(tid)
             continue
+        cache.write_cached_task(body_to_upload)
         try:
             post_stat = remote.stat(task_path, backend=backend)
             if post_stat:
