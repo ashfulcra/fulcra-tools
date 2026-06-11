@@ -1856,12 +1856,12 @@ class TestDoctorRemoteAccessExitCode(unittest.TestCase):
 class TestDoctorFileCapabilityCheck(unittest.TestCase):
     """Doctor must explicitly probe the `file` command group.
 
-    The #1 fresh-agent onboarding failure: the public PyPI `fulcra-api` build
-    lacks the `file` command group that drives the coordination bus. Without a
-    dedicated probe, the agent installs fulcra-api, runs fulcra-coord, and every
-    bus op fails silently with no clear signal why. Doctor surfaces this with a
-    FAIL + the fix (install the file-capable build per docs/fulcra-cli-branch.md)
-    and marks the overall result not-ok.
+    The #1 fresh-agent onboarding failure: the resolved Fulcra CLI lacks the
+    `file` command group that drives the coordination bus. Without a dedicated
+    probe, the agent runs fulcra-coord and every bus op fails silently with no
+    clear signal why. Doctor surfaces this with a FAIL + the fix (reinstall the
+    standard CLI or fix FULCRA_CLI_COMMAND per docs/fulcra-cli-branch.md) and
+    marks the overall result not-ok.
     """
 
     def setUp(self):
@@ -1891,11 +1891,12 @@ class TestDoctorFileCapabilityCheck(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_doctor_reports_file_commands_fail_with_fix(self):
-        """Probe fails → FAIL line + fix hint pointing at the file-capable build,
-        and the overall doctor result is not-ok (exit 1)."""
+        """Probe fails → FAIL line + current fix hint, and the overall doctor
+        result is not-ok (exit 1)."""
         rc, out = self._run_doctor(False, "No such command 'file'.")
         self.assertIn("File commands: FAIL", out)
-        self.assertIn("file-management", out)
+        self.assertIn("uv tool install --reinstall --force fulcra-api", out)
+        self.assertIn("FULCRA_CLI_COMMAND", out)
         self.assertIn("docs/fulcra-cli-branch.md", out)
         self.assertEqual(rc, 1, "missing file command group must mark doctor not-ok")
 

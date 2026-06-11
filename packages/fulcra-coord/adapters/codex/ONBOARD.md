@@ -20,10 +20,11 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    checkout path, see README "Self-update"). This manual step is only needed
    to cross onto 0.15.3, or with FULCRA_COORD_SELF_UPDATE=0.
 2. Verify + auth:  `fulcra-coord doctor`   (if unauthed: `fulcra-api auth login`).
-   If `doctor` reports `File commands: FAIL`, your Fulcra CLI lacks the `file`
-   command group the bus runs on — install the file-capable build per
-   `docs/fulcra-cli-branch.md` (the `file-management` branch of
-   `fulcradynamics/fulcra-api-python`).
+   If `doctor` reports `File commands: FAIL`, the resolved Fulcra CLI isn't
+   exposing the `file` command group the bus runs on. The standard
+   `fulcra-api` install ships it — reinstall (`uv tool install --reinstall
+   --force fulcra-api`) or fix a mispointed `FULCRA_CLI_COMMAND`; see
+   `docs/fulcra-cli-branch.md`.
    Confirm your build is current: `fulcra-coord --version` and
    `fulcra-coord capabilities` (lists supported commands — if a command this
    doc mentions is missing, your install is stale; reinstall per step 1).
@@ -46,7 +47,7 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
 7. (Optional) Agent-Tasks Fulcra timeline annotations:
    `export FULCRA_COORD_ANNOTATIONS=cli` and point
    `FULCRA_COORD_ANNOTATION_CLI` at a create-annotations-commands fulcra build
-   (keep FULCRA_CLI_COMMAND on your Files build — they're decoupled on purpose).
+   (keep FULCRA_CLI_COMMAND on the standard CLI — they're decoupled on purpose).
 
 Acknowledge on the bus when you're in.
 ```

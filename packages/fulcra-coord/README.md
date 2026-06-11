@@ -23,15 +23,16 @@ pip install fulcra-coord
 uv add fulcra-coord
 ```
 
-Requires: Python 3.10+, and a **file-capable** Fulcra CLI (`fulcra-api`).
+Requires: Python 3.10+, and the Fulcra CLI (`uv tool install fulcra-api`). The
+standard build ships the `file` command group the bus runs on
+(`fulcra file list|stat|download|upload|delete`) — no special branch or build
+needed.
 
-> **Important:** the public PyPI `fulcra-api` build does **not** ship the `file`
-> command group that the coordination bus depends on. If `fulcra-coord doctor`
-> reports `File commands: FAIL`, install a file-capable build (the
-> `file-management` branch of `fulcradynamics/fulcra-api-python`). See
-> [`docs/fulcra-cli-branch.md`](docs/fulcra-cli-branch.md) for the exact command.
-> This is the most common fresh-agent setup failure — without it, every bus op
-> fails silently.
+> If `fulcra-coord doctor` reports `File commands: FAIL`, the *resolved* CLI is
+> not exposing `file` — usually a stale install (`uv tool install --reinstall
+> fulcra-api`) or a `FULCRA_CLI_COMMAND` pointing at a binary without it. See
+> [`docs/fulcra-cli-branch.md`](docs/fulcra-cli-branch.md) to verify and
+> repoint. Without `file`, every bus op fails silently.
 
 ## Quick start
 
@@ -816,7 +817,7 @@ session boot or a polling tick. Update output is appended to
 - `docs/protocol.md` — when and how to use coordination
 - `docs/auth.md` — auth in local and remote/headless environments
 - `docs/continuity-handoff.md` — how `fulcra-coord` and Fulcra Continuity work together for cross-agent, non-GitHub handoff
-- `docs/fulcra-cli-branch.md` — Fulcra CLI Files support requirement
+- `docs/fulcra-cli-branch.md` — Fulcra CLI `file` support: verify + `FULCRA_CLI_COMMAND` repointing (the old special-branch workaround is obsolete)
 - `docs/schema.md` — full task and view schema reference
 - `docs/annotations.md` — Agent Tasks lifecycle annotation track (enable flag, tags, deferred-write caveat)
 - `docs/other-side-claude-code-test-plan.md` — cross-environment Claude Code verification plan
