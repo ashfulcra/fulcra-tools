@@ -7,7 +7,7 @@ uv-workspace monorepo, macOS-first. Packages under `packages/`:
 
 ## Setup & tests
 - Full install: **`uv sync --all-packages --all-extras`**. Bare `uv sync` is NOT enough — pytest lives in each package's `dev` extra and PyObjC/rumps in the `macos` extra, so a bare sync fails tests with `Failed to spawn: pytest` and the menu-bar can't import.
-- Run tests: `uv run pytest packages/ -q` (~1500 tests, ~20s, and must NOT hit the network — a network-bound run is the bug, not slowness).
+- Run tests: `uv run pytest packages/ -q` (~3200 tests, a couple of minutes, and must NOT hit the network — a network-bound run is the bug, not slowness).
 - Editable install: the `.venv` imports the live workspace source, so a code change is picked up by **restarting the daemon**, not re-syncing.
 - Pull latest into a checkout with `bash scripts/update.sh` (git pull + `uv sync --all-packages --all-extras` + restart daemon/menubar). Any sync must keep `--all-extras` or it prunes pytest + PyObjC back out.
 - PyObjC-free logic is split into its own modules so tests run on Linux CI; macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC imports lazy (inside functions), never at module import time.
@@ -99,7 +99,7 @@ its time comes, route it with the ordinary `assign TASK-ID <agent>`. (Subagent
 work, by contrast, stays OFF the bus.)
 
 ## Repo homes
-This monorepo (Fulcra-internal for now) is **only for things that make Fulcra
+This monorepo is **only for things that make Fulcra
 useful for other people**. Fulcra-related infra that isn't useful-to-others
 enough → its own `ashfulcra/<repo>`; personal/unrelated projects → their own
 `reversity/<repo>`. Ask the operator when unsure.

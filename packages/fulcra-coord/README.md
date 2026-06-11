@@ -86,7 +86,7 @@ fulcra-coord done TASK-... \
 | `broadcast` | Direct work at **every** agent: create a `proposed` directive with the wildcard assignee `*` (`broadcast "<title>" [--from <me>] [--next] [--workstream] [--priority]`). It lands in every agent's inbox and is acknowledged **per-agent** — one agent's `inbox --ack` clears it for that agent only, so no agent loses or duplicates the directive. Use `tell` for one agent, `broadcast` for all (e.g. "update fulcra-coord when main changes") |
 | `assign` | Set or redirect the `assignee` on an existing task (`assign <task-id> <assignee>`) |
 | `inbox` | List open directives addressed to you (`--agent`, `--format json`); `--ack <task-id>` marks one seen without claiming it. Stale informational broadcasts (older than `FULCRA_COORD_INBOX_AGE_DAYS`, default 3) are hidden by default and noted as a count; `--all` shows them too. Matching is prefix-aware: a directive addressed to a short id (`claude-code`) reaches the full-id agent (`claude-code:<host>:<repo>`) it prefixes |
-| `identity` | Show, set, clear, or migrate this host's declared agent id — the identity handshake reused by every bus op. `identity` shows the resolved id + its source (and hints if a stale legacy global exists); `identity set <agent-id>` persists it; `identity clear` removes it; `identity migrate` copies a legacy global identity into the current repo's entry (`--format json`). **Scoped per working directory** so sibling sessions in different repos no longer clobber each other's identity |
+| `identity` | Show, set, clear, or migrate this host's declared agent id — the identity handshake reused by every bus op. `identity` shows the resolved id + its source (and hints if a stale legacy global exists); `identity set <agent-id>` persists it; `identity clear` removes it; `identity migrate` copies a legacy global identity into the current repo's entry (`--format json`). **Scoped per working directory** so sibling sessions in different repos don't clobber each other's identity |
 | `human` | Show, set, or clear the human operator's handle — the addressable identity tasks are "blocked on ME" against. Defaults to the neutral `human`; personalize with `human set <name>` (e.g. `human set ash`). `human clear` reverts (`--format json`). Global per machine |
 | `annotations` | Enable/disable/inspect the **Agent Tasks** timeline annotations writer. `annotations on` persists `http` to `<XDG_CONFIG_HOME>/fulcra-coord/annotations` so **every agent on the machine emits** without a per-shell `FULCRA_COORD_ANNOTATIONS` export; `annotations off` removes it; bare `annotations`/`annotations status` reports the resolved mode + its source (env/config/default) and whether a token resolves — the token value is never printed (`--format json`). `FULCRA_COORD_ANNOTATIONS` still overrides per shell. Per-event notes now carry work substance — `[<workstream>/<kind>] <title> — <summary> · next: <action>` — so a single moment conveys what the task is and what's next |
 | `needs-me` | **What's blocked on YOU** (the human): every open task assigned to / blocked on you across all agents, showing who's waiting, the ask, and how long it's been (`--human <handle>`, `--format json`). The "what's on my plate from my agents" glance. Asks with a future `not_before` (see `block`) are split off into a compact **Upcoming (next 7d)** section instead of the DUE-NOW plate, so a task you can't act on yet doesn't clutter it; `--all` lists each upcoming item inline. JSON returns `{human, count, items, upcoming}` — `count` reflects DUE-NOW only |
@@ -114,8 +114,8 @@ fulcra-coord done TASK-... \
 | `install-heartbeat` | Install a scheduled `reconcile` heartbeat (launchd on macOS, crontab elsewhere) — the safety net that sweeps stale tasks for crashed / end-hook-less agents (`--interval-min N`) |
 | `install-listener` | Install a scheduled `notify-inbox` listener (launchd on macOS, crontab elsewhere) — the durable, per-agent way to notice directed work while idle (`--agent`, `--interval-min N`, default 10). See `adapters/claude-code/LISTENER.md` |
 | `notify-inbox` | Poll the inbox for an agent; if directives exist, write a surface file the next SessionStart injects and emit a best-effort notification (the call the listener runs each tick). With a per-adopter `wake.json` entry it can also **wake** the agent — spawn a configured command, throttled + single-flighted (see "Host wake") |
-
 | `announce-version` | **Maintainer, at each release:** publish this build's version as the canonical manifest (`runtime/version.json`) with verify-after-write. The manifest is a version *pointer* (version + commit + optional `--min-supported`), never code or commands — see [Self-update](#self-update) |
+
 All hook installers resolve a concretely-callable `fulcra-coord` invocation at install time and bake it into the materialized scripts (absolute on-PATH path, else `<python> -m fulcra_coord`), so hooks work under `uv tool` / source installs, not just `pip`-on-PATH. The committed adapter copies keep a literal placeholder.
 
 ## Configuration
@@ -126,7 +126,7 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_CLI_COMMAND` | `fulcra-api` | CLI command (or `uv tool run fulcra-api`) |
 | `FULCRA_COORD_TIMEOUT_SECONDS` | `30` | Read timeout |
 | `FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS` | `90` | Reconcile timeout |
-| `FULCRA_COORD_UPLOAD_RETRY` | `1` | Reconcile's parallel view-upload pool retries a failed view ONCE after a 0.5–2s jitter sleep — only when there is real deadline headroom (jitter + 1s per-upload floor + 2s slack), so the deadline stays a hard ceiling. Absorbs backend burst throttling / transient 5xx that otherwise fails a rotating subset of views every tick. `0` disables (single attempt, pre-0.15.x behavior); a second failure is final and keeps the unchanged markers-preserved/exit-1 path |
+| `FULCRA_COORD_UPLOAD_RETRY` | `1` | Reconcile's parallel view-upload pool retries a failed view ONCE after a 0.5–2s jitter sleep — only when there is real deadline headroom (jitter + 1s per-upload floor + 2s slack), so the deadline stays a hard ceiling. Absorbs backend burst throttling / transient 5xx that otherwise fails a rotating subset of views every tick. `0` disables (single attempt); a second failure is final and keeps the unchanged markers-preserved/exit-1 path |
 | `FULCRA_COORD_WRITE_RETRY` | `1` | The **single-write** sibling of the row above: the authoritative task-body upload in every mutating command (`tell` / `later` / `done` / `update` / …) retries ONCE after a 0.5–2s jitter sleep on a failed **or raising** upload — absorbs the backend write-throttling that silently dropped single writes (2026-06-10 evidence: four sender-believed-delivered losses in one evening). `0` disables (single attempt); a second failure keeps the unchanged cached-locally path (warn + local cache + reconcile self-heal) |
 | `FULCRA_COORD_WRITE_VERIFY` | `1` | Verify-after-write for the same task-body upload: the post-write version-tracking `stat` doubles as delivery confirmation (no extra round-trip on the fast path). When the just-uploaded body is NOT visible on the bus despite a success-shaped upload, the write is re-tried once more (jittered) and, if still unverifiable, an unmissable `DELIVERY NOT CONFIRMED: <task-id>` warning is printed and the op marker is kept `needs_reconcile` for the standard reconcile self-heal — the exit code never flips (the body is cached locally). `0` disables verification (for backends with unreliable `stat`) without losing the upload retry |
 | `XDG_CACHE_HOME` | `~/.cache` | Local cache base |
@@ -141,12 +141,26 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_COORD_CONTINUITY_KEEP` | `10` | How many of the newest **continuity checkpoint** archives to keep per task. `continuity/<ws>/<agent>/<task>/checkpoints/CHK-*.json` is written immutably on every snapshot (SessionEnd / PreCompact / compaction) and would otherwise grow without bound; the reconcile retention pass keeps the newest N per task and deletes the rest (`latest.json` is never touched — it's the live pointer a resuming agent reads). Floored at `1` so the latest checkpoint is never deleted. Reconcile reports `N continuity` in its Retention line |
 | `FULCRA_COORD_READ_SOURCE` | `file` | Where task **bodies** are reconstructed from (per host, reversible). `file` (default) reads the mutable `tasks/<id>.json`, byte-identical to pre-substrate behaviour. `events` folds the task's immutable event log and uses the fold **only** when it's a complete snapshot, falling back to the file on a delta-only / empty / errored fold. Opting a single host into `events` is the validation step for the read cutover; flipping the fleet default is a deliberate operator decision gated on parity (see [Event-sourcing substrate](#event-sourcing-substrate-the-durable-event-log)). Any unrecognised value degrades to `file`, so a typo can never silently flip the read path |
 | `FULCRA_COORD_EVENTLOG_KEEP` | `20` | How many of the newest **event-log shards** to keep per LIVE task. Every task mutation appends `events/tasks/<id>/<event_id>.json` forever, so the reconcile retention pass window-prunes each live task below its latest snapshot — keeping that snapshot plus the most recent N events — and GCs the whole shard tree of archived/deleted tasks. A delta-only task (no snapshot ever emitted) is **never** pruned (fail-safe: a delta may carry a unique field never re-set). Floored at `1`. Reconcile reports `N events` in its Retention line |
+| `FULCRA_COORD_PARITY_SAMPLE` | `50` | Tasks the reconcile event-parity pass probes per tick (a rotating window with a persisted cursor, so the full bus is covered every ~⌈N/sample⌉ ticks). Probing everything every tick was the bulk of a measured 3,105-subprocess reconcile; drift is a slow-moving report-only signal, so sampling loses nothing but latency. `<= 0` disables sampling (probe everything) |
+| `FULCRA_COORD_RETENTION_DAYS` | `30` | Age past which a terminal (done/abandoned) task leaves the hot path for the cold archive. A month of finished work stays instantly visible in `recently-done`/`search` before it cold-stores |
+| `FULCRA_COORD_RETENTION_MAX_PER_RUN` | `200` | Per-tick archive cap: a huge first backlog drains over several passes instead of blowing reconcile's deadline |
+| `FULCRA_COORD_MARKER_RETENTION_DAYS` | `7` | How long spent digest dedup markers linger before the retention pass deletes them — regenerable guards with no history value |
+| `FULCRA_COORD_PRESENCE_RETENTION_DAYS` | `30` | How long a dead presence record lingers before the retention pass takes it. Presence is a live snapshot, not history; a record untouched this long is a long-departed agent |
+| `FULCRA_COORD_PRESENCE_GRACE_SECONDS` | `1200` | Wall-clock grace (seconds) past the idle→stale cutoff before review routing treats an agent as below the liveness floor. One missed heartbeat or a laptop sleep/wake must not drop a reviewer; an absolute duration (not a tick count) so it evaluates identically on every machine |
+| `FULCRA_COORD_REVIEW_REROUTE_MINUTES_P1` | `15` | How long a never-acted P1 review may sit on a reviewer that has since gone below the liveness floor before the reconcile sweep reroutes it to a live candidate |
+| `FULCRA_COORD_REVIEW_REROUTE_MINUTES_P2` | `30` | The same reroute gate for P2/P3 reviews — less urgent, longer leash |
+| `FULCRA_COORD_REVIEW_REROUTE_MAX` | `2` | Total route attempts (the initial route + reroutes) before the sweep stops cycling reviewers and escalates the review to the human |
+| `FULCRA_COORD_ACCEPTED_STALL_HOURS` | `2` | Hours an accepted-then-silent review may stall before the sweep escalates it to the human. An accepted review is never rerouted — work isn't yanked out from under a reviewer mid-flight; the human gets nudged instead |
+| `FULCRA_COORD_HEALTH_DEGRADED_SECONDS` | heartbeat interval ×3 (`3600`) | Age of a host's newest reconcile past which the fleet-health dashboard marks it `degraded`. The default ties to the heartbeat interval rather than bare wall-clock so one slow or skipped tick can't flap a host |
+| `FULCRA_COORD_HEALTH_OUTAGE_SECONDS` | `10800` | Age (~3h) past which a silent host reads `outage` on the fleet-health dashboard |
+| `FULCRA_COORD_OPSLOG_MAX_BYTES` | `1000000` | Size ceiling for the local ops-log segment before it rotates to `.1`. Floored at 4096 so a tiny override can't rotate on every append; `<= 0` disables rotation entirely (unbounded, opt-in) |
 | `FULCRA_COORD_AGENT` | — | Session-scoped override for your agent id. Identity resolution order is: explicit `--agent` > `FULCRA_COORD_AGENT` > per-cwd persisted identity (`fulcra-coord identity set`) > derived `claude-code:<host>:<repo>` (matching the SessionStart hook) |
 | `FULCRA_COORD_HUMAN` | `human` | The human operator's handle — who tasks are "blocked on ME" against (`needs-me`, `block --on-user`). Resolution order: `FULCRA_COORD_HUMAN` > persisted handle (`fulcra-coord human set`) > default `human`. Personalize with `fulcra-coord human set <name>` |
 | `FULCRA_COORD_BACKEND` | — | Override backend (testing only) |
 | `FULCRA_COORD_ANNOTATIONS` | `off` | Emit lifecycle annotations to the Fulcra **Agent Tasks** timeline track: `off` (default, inert), `http` (alias `api`, **recommended** — writes directly over the Fulcra HTTP API via stdlib `urllib`, needs only a Fulcra token), or `cli` (legacy CLI shell-out). Resolution order: this env var (when set) > the persisted config (`fulcra-coord annotations on`, at `<XDG_CONFIG_HOME>/fulcra-coord/annotations`) > `off`. **Persist it once with `fulcra-coord annotations on`** so every agent emits without exporting this in each shell; set the env var to override a single session. See [docs/annotations.md](docs/annotations.md). |
 | `FULCRA_API_BASE` | `https://api.fulcradynamics.com` | Fulcra HTTP API base for the `http` annotation transport. |
 | `FULCRA_ACCESS_TOKEN` | _(unset)_ | Bearer token for the `http` annotation transport; when unset the writer falls back to `fulcra auth print-access-token`. |
+| `FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS` | `86400` | TTL on the locally cached annotation definition/tag ids. A fresh entry is a zero-HTTP hit; an expired one re-resolves (and re-stamps), so any drift heals within a day instead of being trusted forever |
 | `FULCRA_COORD_SELF_UPDATE` | `1` (on) | **Version self-incorporation** — default ON. Every `connect` (session start) and every throttled `notify-inbox` tick compares the installed version against the canonical manifest at `runtime/version.json` and, when behind, runs the locally configured update (see [Self-update](#self-update)). Set `0` to opt this host out |
 | `FULCRA_COORD_SELF_UPDATE_INTERVAL_H` | `6` | Listener-tick throttle: at most one self-update check per this many hours (mtime marker in the cache dir). `connect` is never throttled — a fresh session always checks |
 | `FULCRA_COORD_SESSION_KEY` | — | Generic session pointer key for non-Claude-Code agents (OpenClaw passes its `sessionKey` here); `CLAUDE_CODE_SESSION_ID` takes precedence |
@@ -457,10 +471,11 @@ Read commands use local cache when fresh. Full remote sync happens on `status` a
 
 ## Event-sourcing substrate (the durable event log)
 
-Alongside the mutable `tasks/<id>.json` files, the bus now keeps an immutable,
-append-only **event log**. This is a strangler-fig migration: the event log is
-written today, validated in parallel, and only takes over reads once parity
-proves it's safe. The mutable file stays authoritative until that flip.
+Alongside the mutable `tasks/<id>.json` files, the bus keeps an immutable,
+append-only **event log**. The cutover is deliberately incremental: the event
+log is written on every mutation, validated in parallel, and only takes over
+reads once parity proves it's safe. The mutable file stays authoritative until
+that flip.
 
 **The model.** Every task mutation (`_write_task_and_views`) does two things:
 upload the task file as before, *and* — best-effort, default-ON — append one
@@ -470,7 +485,7 @@ the event plus a random suffix), so every append lands on a *distinct* path —
 two concurrent writers for the same task in the same microsecond never collide,
 which is what lets a no-CAS, no-lock store stay correct. The dual-write is
 best-effort by design: an event-append failure is logged but **never** fails the
-task write (Phase 1's job is to validate the dual-write, not to depend on it).
+task write (the mutable file is authoritative; the parity pass audits misses).
 
 **The fold.** `events.fold_task` is a pure reducer that reduces a task's events
 back to a snapshot. It (1) sorts by `(canonical-microsecond-instant, event_id)`
@@ -480,8 +495,8 @@ precision; (2) dedups retries by the compound `(actor, idempotency_key)` pair,
 first-in-sort-order wins; and (3) merges by payload type. A **snapshot** payload
 (a full task, carrying both `schema` and `id`) *replaces* the accumulated state
 wholesale — the latest snapshot wins and stale fields drop. A legacy **delta**
-payload (a field subset, Phase-1 events) field-merges last-write-wins. The two
-compose in any order. `fold_is_complete` is true once at least one full snapshot
+payload (a field subset, written by older CLIs) field-merges last-write-wins.
+The two compose in any order. `fold_is_complete` is true once at least one full snapshot
 has been applied — that's the signal the fold reconstructed a trustworthy,
 schema-complete task rather than a partial delta-only stream.
 
@@ -536,14 +551,16 @@ soundness (a fleet where some hosts read from `events` and others from `file`) i
 in-flight. The flip is gated on sustained zero drift and is fully reversible per
 host. Until then the mutable file is the source of truth and `events` is opt-in.
 
-A first-class **Directive** record (Phase 3a, schema
-`fulcra.coordination.directive.v1`, built/validated by `schema.make_directive` /
-`validate_directive` against `DIRECTIVE_SCHEMA`) also lands as an *additive*
-schema. It models *communication* (who told whom what) as its own record type
-rather than a task-with-assignee. It is **not yet wired into the lifecycle** —
-nothing produces or consumes it on the bus today; its dual-write arrives in a
-later phase. It's documented here so its presence in the code isn't mistaken for
-an active path.
+A first-class **Directive** record (schema `fulcra.coordination.directive.v1`,
+built/validated by `schema.make_directive` / `validate_directive`) rides the
+same dual-write pattern: every directive-creating command (`tell` / `broadcast`
+/ `assign` / `request-review` / `review-done`) additively mirrors its task into
+a `directives/<id>.json` loop record, best-effort. It models *communication*
+(who told whom what) as its own record type rather than a task-with-assignee.
+The task record stays authoritative for task state; the loop records are what
+the coordination-state readers consume — `board`, the digest, `review-done`,
+and reconcile's health and directive-parity passes (see [Coordination
+loops](#coordination-loops)).
 
 ## Module architecture
 
@@ -562,7 +579,7 @@ there are no import cycles.
 | | `remote.py` | Fulcra Files I/O (upload/download/list/`list_json`/stat/delete) |
 | | `events.py` | pure event envelope (`make_event`/`event_id`) + the `fold_task` reducer / `fold_is_complete` (no I/O) |
 | | `eventlog.py` | append-only event-shard I/O (`append_event`/`read_events`) over the immutable `events/tasks/<id>/<event_id>.json` paths |
-| | `schema.py` | task schema + state transitions; the additive Phase-3a `make_directive`/`validate_directive` record (not yet wired in) |
+| | `schema.py` | task schema + state transitions; the directive/loop record (`make_directive`/`validate_directive`) every directive-creating command dual-writes |
 | | `views.py` | materialized-view generation + pure judgments |
 | | `io.py` | task load/cache layer (parallel fetch, summaries fast-path, self-heal) |
 | | `writepipe.py` | the single write path: optimistic-concurrency upload + merge + view fan-out |
@@ -622,8 +639,8 @@ extraction is behavior-preserving end to end.
   fallback, and OpenClaw folds `notify-inbox` into its heartbeat. The listener is
   **per-agent**, not per-machine: its launchd label / plist / cron marker are
   derived from the agent's slug, so co-located agents on one machine each get
-  their own coexisting job and none clobbers another. (A legacy pre-0.5.3
-  machine-global job is migrated to a per-agent job on the next install.)
+  their own coexisting job and none clobbers another. (A legacy machine-global
+  job from an older install is migrated to a per-agent job on the next install.)
   Notification delivery is layered and best-effort: **Tier 0** is the SessionStart
   inbox-surface file (guaranteed, zero-config, no network — directed work always
   reaches the operator on the next session start, every OS); **Tier 1** is opt-in
