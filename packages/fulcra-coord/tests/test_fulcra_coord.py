@@ -31,8 +31,6 @@ from fulcra_coord.schema import (
     apply_transition,
     apply_update,
     validate_task,
-    build_tags,
-    CoordError,
     TransitionError,
     SchemaError,
 )
@@ -1143,7 +1141,6 @@ class TestTryMerge(unittest.TestCase):
     def test_merge_only_remote_status_applies_newer_local_fields(self):
         """When local fields are newer than remote's status-change, they should be applied."""
         from fulcra_coord.cli import _try_merge
-        import copy
         from datetime import datetime, timezone, timedelta
         base = _sample_task()
         # Remote changes status at T_remote
@@ -1952,7 +1949,6 @@ class TestConflictDetectionWithNoCachedMeta(unittest.TestCase):
         update too. With no cached meta, the merge check must fire and incorporate
         the remote's extra event rather than silently overwriting it.
         """
-        import copy
         from fulcra_coord.cli import _write_task_and_views
 
         base = make_task(title="Fresh machine merge test", workstream="devops", agent="agent-a")
@@ -1989,7 +1985,6 @@ class TestConflictDetectionWithNoCachedMeta(unittest.TestCase):
 
     def test_conflict_raised_when_both_sides_changed_status_no_meta(self):
         """ConflictError must fire for conflicting status changes even with no cached meta."""
-        import copy
         from fulcra_coord.cli import _write_task_and_views
 
         base = make_task(title="Conflict no-meta test", workstream="devops", agent="agent-a")
@@ -2017,7 +2012,6 @@ class TestConflictDetectionWithNoCachedMeta(unittest.TestCase):
 
     def test_no_merge_when_remote_file_absent(self):
         """No merge check when pre_stat is None (new task — file not yet on remote)."""
-        import copy
         from fulcra_coord.cli import _write_task_and_views
 
         base = make_task(title="Brand new task", workstream="devops", agent="agent-a")
@@ -2212,7 +2206,6 @@ class TestLoadAllTasksCachesRemoteSearchIndex(unittest.TestCase):
     def test_load_all_tasks_writes_remote_search_index_to_local_cache(self):
         """After _load_all_tasks, the local search-index cache must reflect remote content."""
         from fulcra_coord.cli import _load_all_tasks
-        from fulcra_coord import remote as _remote
 
         # No local cache initially
         self.assertIsNone(cache.read_cached_view("search-index"))
@@ -3216,7 +3209,7 @@ class TestSessionStartAgentResolution(unittest.TestCase):
              "updated_at": "2026-06-01T00:00:00Z", "next_action": "do Y"}]})
         r = self._run(sj)
         self.assertEqual(r.returncode, 0)
-        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
         # Title (first active task owned by AGENT) must be empty -> no sessionTitle
         # since the derived-owned task is not owned by the declared AGENT.
         self.assertNotIn("sessionTitle", r.stdout)
@@ -3648,7 +3641,7 @@ class TestInstallOpenClawBundleCmd(unittest.TestCase):
         the MagicMocks for heartbeat / listener so tests can assert on them.
         openclaw.install_openclaw returns a minimal plan dict with the keys the
         command's summary printing reads."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         hb = patch("fulcra_coord.installers.heartbeat.install_heartbeat",
                    return_value={"mechanism": "launchd", "writes": ["/tmp/hb.plist"],
                                  "removes": ["/tmp/hb.plist"], "interval_min": 20,
@@ -4047,8 +4040,8 @@ class TestInstallHeartbeat(unittest.TestCase):
         with patch("fulcra_coord.cli_invocation.resolve_cli_argv",
                    return_value=["/opt/bin/fulcra-coord"]), \
              patch("sys.platform", "darwin"):
-            plan = heartbeat.install_heartbeat(target_dir=self.target,
-                                               interval_min=20)
+            heartbeat.install_heartbeat(target_dir=self.target,
+                                        interval_min=20)
         plist = os.path.join(self.target, "com.fulcra.coord.heartbeat.plist")
         self.assertTrue(os.path.exists(plist))
         body = open(plist).read()
@@ -4086,7 +4079,7 @@ class TestInstallHeartbeat(unittest.TestCase):
         with patch("sys.platform", "linux"), \
              patch("fulcra_coord.cli_invocation.resolve_cli_argv",
                    return_value=["/opt/bin/fulcra-coord"]):
-            plan = heartbeat.install_heartbeat(
+            heartbeat.install_heartbeat(
                 target_dir=self.tmp, interval_min=15,
                 crontab_path=crontab)
         body = open(crontab).read()
@@ -5427,9 +5420,9 @@ class TestInstallListener(unittest.TestCase):
         with patch("fulcra_coord.cli_invocation.resolve_cli_argv",
                    return_value=["/opt/bin/fulcra-coord"]), \
              patch("sys.platform", "darwin"):
-            plan = listener.install_listener(agent="codex:h:r",
-                                             target_dir=self.target,
-                                             interval_min=10)
+            listener.install_listener(agent="codex:h:r",
+                                      target_dir=self.target,
+                                      interval_min=10)
         plist = os.path.join(self.target,
                              "com.fulcra.coord.listener.codex-h-r.plist")
         self.assertTrue(os.path.exists(plist))
@@ -8186,7 +8179,6 @@ class TestBuildAllViewsEquivalence(unittest.TestCase):
         summaries = [schema.task_summary(t) for t in tasks]
         # Freeze "now" inside build_all_views so the updated_at stamps match
         # across the two calls (they would otherwise differ by microseconds).
-        fixed = "2026-06-03T00:00:00Z"
         with patch("fulcra_coord.views._now") as mock_now:
             from datetime import datetime, timezone
             mock_now.return_value = datetime(2026, 6, 3, tzinfo=timezone.utc)
@@ -8321,7 +8313,6 @@ class TestParallelViewUpload(unittest.TestCase):
     def _setup_remote(self):
         """Make the optimistic-concurrency pre-stat see no remote file (fresh
         write) and the task upload succeed, so we isolate the view fan-out."""
-        from fulcra_coord import remote
         task = apply_transition(_sample_task(), "active", by="claude-code")
         cache.write_cached_task(task)
         return task
@@ -8329,7 +8320,6 @@ class TestParallelViewUpload(unittest.TestCase):
     def test_raises_needs_reconcile_when_one_view_fails(self):
         from fulcra_coord.cli import _write_task_and_views
         task = self._setup_remote()
-        index_path = "/".join([__import__("fulcra_coord").remote.view_remote_path("index")])
 
         def upload_json(data, path, *, backend=None, timeout=None):
             # Fail exactly one view upload (index); task + every other view ok.
@@ -9015,7 +9005,6 @@ class TestPresenceUpsertSelfHeal(_PresenceBackendCase):
 class TestStartAgentOptional(_PresenceBackendCase):
     def test_start_without_agent_resolves_via_resolve_agent(self):
         from fulcra_coord.cli import cmd_start
-        from fulcra_coord import remote
         os.environ["FULCRA_COORD_AGENT"] = "env-agent:h:r"
         # No --agent attribute set on the namespace at all (omitted).
         rc, out = self._run(cmd_start, self._ns(
@@ -10164,7 +10153,6 @@ class TestUploadOneSubSecondDeadline(unittest.TestCase):
         del os.environ["XDG_CACHE_HOME"]
 
     def test_no_upload_starts_with_sub_second_budget(self):
-        import time as _time
         from fulcra_coord.cli import cmd_reconcile
         task = apply_transition(_sample_task(), "active", by="claude-code")
         called = {"n": 0}
@@ -11005,7 +10993,7 @@ class TestTellRouteCapability(unittest.TestCase):
             args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
                 priority="P2", summary="", route_capability="review", floor="idle")
             setattr(args, "from", None)
-            rc = cmd_tell(args, backend=["false"])
+            cmd_tell(args, backend=["false"])
         self.assertEqual(captured["task"]["assignee"], "rev:h:r")
 
     def test_tell_route_capability_miss_escalates(self):
@@ -11020,7 +11008,7 @@ class TestTellRouteCapability(unittest.TestCase):
             args = types.SimpleNamespace(assignee=None, title="Do X", next="", workstream="general",
                 priority="P2", summary="", route_capability="review", floor="idle")
             setattr(args, "from", None)
-            rc = cmd_tell(args, backend=["false"])
+            cmd_tell(args, backend=["false"])
         self.assertTrue(escalated)
 
 
@@ -11199,7 +11187,6 @@ class TestReviewSweep(unittest.TestCase):
 
     def test_sweep_reroutes_and_writes_rerouted_event(self):
         from fulcra_coord.cli import _sweep_review_routes
-        from fulcra_coord import remote
         t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
         agg = {"agents": self._presence("dead:h:r", 300) + [{"agent": "alive:h:r",
                "last_seen": self.NOW.isoformat(timespec="microseconds").replace("+00:00", "Z"),
@@ -11223,7 +11210,6 @@ class TestReviewSweep(unittest.TestCase):
 
     def test_sweep_stale_observation_aborts_when_task_moved(self):
         from fulcra_coord.cli import _sweep_review_routes
-        from fulcra_coord import remote
         # The re-read task's latest route event differs from the snapshot the
         # decision was computed from -> abort (no competing reroute).
         t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
@@ -11242,7 +11228,6 @@ class TestReviewSweep(unittest.TestCase):
 
     def test_sweep_ignores_non_review_tasks(self):
         from fulcra_coord.cli import _sweep_review_routes
-        from fulcra_coord import remote
         t = self._routed_review("dead:h:r", routed_minutes_ago=20, priority="P1")
         t["tags"] = ["kind:ops"]
         agg = {"agents": self._presence("dead:h:r", 300)}
@@ -11682,7 +11667,7 @@ def test_loop_health_check_ignores_sublog_shards(coord_backend):
     prev = os.environ.get("FULCRA_COORD_AGENT")
     os.environ["FULCRA_COORD_AGENT"] = "me:h:r"
     try:
-        d = _seed_open_review_loop(coord_backend, opener="me:h:r")
+        _seed_open_review_loop(coord_backend, opener="me:h:r")
         # A response shard from someone ELSE's loop bookkeeping lands under the
         # same prefix; it must not inflate (or close) anything by mere presence.
         assert loop_ops.append_loop_response(
@@ -12032,7 +12017,7 @@ def test_board_is_wired_into_map():
 
 def _seed_role(backend, name, *, policy="shared", sla_hours=None,
                maintainer=None, created_hours_ago=100.0):
-    from fulcra_coord import remote, role_ops
+    from fulcra_coord import role_ops
     r = schema.make_role(name, f"the {name} role", policy=policy,
                          sla_hours=sla_hours, maintainer=maintainer)
     r["created_at"] = (
