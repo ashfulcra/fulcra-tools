@@ -3054,13 +3054,20 @@ class TestHookScriptsE2E(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
         self.calls = os.path.join(self.tmp, "calls.log")
-        # fake fulcra-coord: status returns canned JSON; other subcommands log args
+        # fake fulcra-coord: briefing wraps the canned status JSON into the
+        # combined one-process payload session-start now consumes; status stays
+        # canned for session-end.sh; other subcommands log args.
+        status_json = os.path.join(self.tmp, "status.json")
         fake = os.path.join(self.bin, "fulcra-coord")
         with open(fake, "w") as f:
             f.write("#!/usr/bin/env bash\n"
+                    'if [ "$1" = "briefing" ]; then STATUS="%s" python3 -c \''
+                    'import json,os;print(json.dumps({"agent":"",'
+                    '"status":json.load(open(os.environ["STATUS"])),'
+                    '"inbox":{"inbox":[]},"needs_me":{"items":[]}}))\'; exit 0; fi\n'
                     'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
                     'if [ "$1" = "__session-task" ]; then echo "TASK-live"; exit 0; fi\n'
-                    'echo "$@" >> "%s"\n' % (os.path.join(self.tmp, "status.json"), self.calls))
+                    'echo "$@" >> "%s"\n' % (status_json, status_json, self.calls))
         os.chmod(fake, 0o755)
         # Materialize the committed templates into a temp dir with the Gap-1
         # argv placeholder substituted by the fake CLI's absolute path (as a bash
@@ -3179,13 +3186,18 @@ class TestSessionStartBlockedOnYouBanner(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
-        # Fake CLI: status -> canned; needs-me -> canned; inbox -> empty; others log.
+        # Fake CLI: briefing -> canned status + needs-me sections combined into
+        # the one-process payload session-start now consumes (inbox empty).
         fake = os.path.join(self.bin, "fulcra-coord")
         with open(fake, "w") as f:
             f.write("#!/usr/bin/env bash\n"
-                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "needs-me" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'if [ "$1" = "briefing" ]; then STATUS="%s" NEEDSME="%s" '
+                    "python3 -c '"
+                    'import json,os;print(json.dumps({"agent":"",'
+                    '"status":json.load(open(os.environ["STATUS"])),'
+                    '"inbox":{"inbox":[]},'
+                    '"needs_me":json.load(open(os.environ["NEEDSME"]))}))'
+                    "'; exit 0; fi\n"
                     'exit 0\n'
                     % (os.path.join(self.tmp, "status.json"),
                        os.path.join(self.tmp, "needsme.json")))
@@ -3278,15 +3290,18 @@ class TestSessionStartAgentResolution(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
-        # Fake CLI: identity -> a DECLARED id different from the derived shape;
-        # status -> canned; needs-me/inbox -> empty.
+        # Fake CLI: briefing carries a DECLARED agent id (what
+        # identity.resolve_agent resolved inside the one-process command),
+        # different from the derived shape; status canned; inbox/needs-me empty.
         fake = os.path.join(self.bin, "fulcra-coord")
         with open(fake, "w") as f:
             f.write("#!/usr/bin/env bash\n"
-                    'if [ "$1" = "identity" ]; then echo "{\\"agent\\": \\"declared:custom:id\\"}"; exit 0; fi\n'
-                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "needs-me" ]; then echo "{\\"items\\": []}"; exit 0; fi\n'
-                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'if [ "$1" = "briefing" ]; then STATUS="%s" '
+                    "python3 -c '"
+                    'import json,os;print(json.dumps({"agent":"declared:custom:id",'
+                    '"status":json.load(open(os.environ["STATUS"])),'
+                    '"inbox":{"inbox":[]},"needs_me":{"items":[]}}))'
+                    "'; exit 0; fi\n"
                     'exit 0\n' % (os.path.join(self.tmp, "status.json"),))
         os.chmod(fake, 0o755)
         from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
@@ -3352,13 +3367,16 @@ class TestSessionStartSelfBlockedDedup(unittest.TestCase):
         self.agent = "claude-code:%s:%s" % (self.host, self.repo)
         fake = os.path.join(self.bin, "fulcra-coord")
         with open(fake, "w") as f:
-            # identity -> empty (exercise the derived fallback so AGENT == the
-            # owner_agent of the self-filed task below).
+            # briefing carries an EMPTY agent id (exercise the derived fallback
+            # so AGENT == the owner_agent of the self-filed task below).
             f.write("#!/usr/bin/env bash\n"
-                    'if [ "$1" = "identity" ]; then exit 0; fi\n'
-                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "needs-me" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'if [ "$1" = "briefing" ]; then STATUS="%s" NEEDSME="%s" '
+                    "python3 -c '"
+                    'import json,os;print(json.dumps({"agent":"",'
+                    '"status":json.load(open(os.environ["STATUS"])),'
+                    '"inbox":{"inbox":[]},'
+                    '"needs_me":json.load(open(os.environ["NEEDSME"]))}))'
+                    "'; exit 0; fi\n"
                     'exit 0\n'
                     % (os.path.join(self.tmp, "status.json"),
                        os.path.join(self.tmp, "needsme.json")))
@@ -4923,12 +4941,17 @@ class TestClaudeHookSpacedArgvE2E(unittest.TestCase):
         os.makedirs(self.bindir)
         self.calls = os.path.join(self.tmp, "calls.log")
         self.fake = os.path.join(self.bindir, "fulcra-coord")
+        status_json = os.path.join(self.tmp, "status.json")
         with open(self.fake, "w") as f:
             f.write("#!/usr/bin/env bash\n"
+                    'if [ "$1" = "briefing" ]; then STATUS="%s" python3 -c \''
+                    'import json,os;print(json.dumps({"agent":"",'
+                    '"status":json.load(open(os.environ["STATUS"])),'
+                    '"inbox":{"inbox":[]},"needs_me":{"items":[]}}))\'; exit 0; fi\n'
                     'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
                     'if [ "$1" = "__session-task" ]; then echo "TASK-live"; exit 0; fi\n'
                     'echo "$@" >> "%s"\n'
-                    % (os.path.join(self.tmp, "status.json"), self.calls))
+                    % (status_json, status_json, self.calls))
         os.chmod(self.fake, 0o755)
         # Resolved argv with a spaced argv[0] — the fake CLI's real path.
         self.argv = [self.fake]
@@ -5478,11 +5501,17 @@ class TestSessionStartInbox(unittest.TestCase):
         self.inbox_args = os.path.join(self.tmp, "inbox_args.log")
         fake = os.path.join(self.bin, "fulcra-coord")
         with open(fake, "w") as f:
+            # briefing combines the canned status + inbox sections; its argv is
+            # logged so the no-pinned---agent contract (I1) stays assertable.
             f.write("#!/usr/bin/env bash\n"
-                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "inbox" ]; then echo "$@" > "%s"; cat "%s" 2>/dev/null; exit 0; fi\n'
+                    'if [ "$1" = "briefing" ]; then echo "$@" > "%s"; '
+                    'STATUS="%s" INBOX="%s" python3 -c \''
+                    'import json,os;print(json.dumps({"agent":"",'
+                    '"status":json.load(open(os.environ["STATUS"])),'
+                    '"inbox":json.load(open(os.environ["INBOX"])),'
+                    '"needs_me":{"items":[]}}))\'; exit 0; fi\n'
                     'if [ "$1" = "__session-task" ]; then echo "TASK-live"; exit 0; fi\n'
-                    'exit 0\n' % (self.status_json, self.inbox_args, self.inbox_json))
+                    'exit 0\n' % (self.inbox_args, self.status_json, self.inbox_json))
         os.chmod(fake, 0o755)
         from fulcra_coord.cli_invocation import PLACEHOLDER_ARGV, materialize_argv
         from fulcra_coord import claude_code as cc
@@ -5520,19 +5549,18 @@ class TestSessionStartInbox(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")
 
-    def test_inbox_call_does_not_pin_agent(self):
-        # I1: the hook must NOT pass --agent to the inbox call. Passing it is
-        # highest-precedence in resolve_agent and would override a persisted
-        # (`identity set`) or $FULCRA_COORD_AGENT identity, so directives
-        # addressed to a declared id would be missed. The inbox command must
-        # resolve its own identity. (The status call may still derive/filter on
-        # the auto id — only the inbox call is asserted here.)
+    def test_briefing_call_does_not_pin_agent(self):
+        # I1: the hook must NOT pass --agent to the briefing call (which now
+        # carries the inbox section). Passing it is highest-precedence in
+        # resolve_agent and would override a persisted (`identity set`) or
+        # $FULCRA_COORD_AGENT identity, so directives addressed to a declared
+        # id would be missed. The briefing command must resolve its own identity.
         self._run(status=json.dumps({"active": []}),
                   inbox=json.dumps({"inbox": []}))
         with open(self.inbox_args) as f:
             recorded = f.read()
         self.assertNotIn("--agent", recorded,
-                         "SessionStart inbox call must not pin --agent (I1)")
+                         "SessionStart briefing call must not pin --agent (I1)")
 
 
 # ---------------------------------------------------------------------------
@@ -9701,10 +9729,16 @@ class TestSessionStartUpcomingBanner(unittest.TestCase):
         self.bin = os.path.join(self.tmp, "bin"); os.makedirs(self.bin)
         fake = os.path.join(self.bin, "fulcra-coord")
         with open(fake, "w") as f:
+            # briefing combines the canned status + needs-me sections (the
+            # one-process payload session-start now consumes; inbox empty).
             f.write("#!/usr/bin/env bash\n"
-                    'if [ "$1" = "status" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "needs-me" ]; then cat "%s"; exit 0; fi\n'
-                    'if [ "$1" = "inbox" ]; then echo "{\\"inbox\\": []}"; exit 0; fi\n'
+                    'if [ "$1" = "briefing" ]; then STATUS="%s" NEEDSME="%s" '
+                    "python3 -c '"
+                    'import json,os;print(json.dumps({"agent":"",'
+                    '"status":json.load(open(os.environ["STATUS"])),'
+                    '"inbox":{"inbox":[]},'
+                    '"needs_me":json.load(open(os.environ["NEEDSME"]))}))'
+                    "'; exit 0; fi\n"
                     'exit 0\n'
                     % (os.path.join(self.tmp, "status.json"),
                        os.path.join(self.tmp, "needsme.json")))

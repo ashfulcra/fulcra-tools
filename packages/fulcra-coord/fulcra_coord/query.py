@@ -530,6 +530,97 @@ def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
     return 0
 
 
+def cmd_briefing(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Session-start consolidation: identity + status + inbox + needs-me in ONE
+    process over ONE summaries load (perf wave item 2). Read-only.
+
+    WHY: the SessionStart hooks (Claude Code + the Codex twin) ran those four
+    surfaces as four separate CLI processes, each re-downloading
+    ``views/summaries.json`` (4 spawns + 4 view reads per session start) — and
+    under the stale-view guard each process could independently re-run the
+    whole direct-listing fallback, multiplying a repair-shaped burst by four.
+    One process + one load means the degraded path also runs AT MOST ONCE.
+
+    The sections are the SAME folds the individual commands run (the #173
+    summaries-threading idiom — share the loaded set, never re-load):
+
+      * ``status``   — views.build_index over the summaries (cmd_status JSON).
+      * ``inbox``    — views.inbox_for + aged_out_inbox_count with the caller's
+                       held roles (cmd_inbox's read path, shape included).
+      * ``needs_me`` — views.needs_human + upcoming_for_human (cmd_needs_me).
+
+    Identity/human resolve exactly like the commands they replace
+    (resolve_agent / resolve_human), so a persisted ``identity set`` id or
+    $FULCRA_COORD_HUMAN drives every section consistently (the I-2 contract the
+    hook previously stitched together by hand). ``--format json`` is the hook
+    contract; the table form is a compact human glance.
+    """
+    me = identity.resolve_agent(getattr(args, "agent", None))
+    human = identity.resolve_human()
+    out_format = getattr(args, "format", "json")
+
+    # THE one summaries load — every section below folds over this list.
+    all_tasks = _load_task_summaries(backend=backend)
+    # One pinned `now` for the whole briefing (the cmd_inbox BUG 14 discipline):
+    # an id at the age-out boundary is either shown or counted hidden, never both.
+    now = views._now()
+
+    # Lazy import: inbox.py sits beside query in the layering (neither imports
+    # the other at module level today); _my_roles is its one-presence-read role
+    # resolution and pulling it lazily keeps query's import graph flat.
+    from .inbox import _my_roles
+    roles = _my_roles(me, backend=backend)
+    items = views.inbox_for(me, all_tasks, now=now, roles=roles)
+    hidden = views.aged_out_inbox_count(me, all_tasks, now=now)
+
+    needs = views.needs_human(all_tasks, human)
+    upcoming = views.upcoming_for_human(all_tasks, human)
+
+    payload = {
+        "agent": me,
+        "human": human,
+        # Shape-compatible with the commands each section replaces, so a hook
+        # (or any tooling) can consume a section exactly as it consumed the
+        # standalone command's JSON.
+        "status": views.build_index(all_tasks),
+        "inbox": {"agent": me, "count": len(items), "hidden_aged": hidden,
+                  "inbox": items},
+        "needs_me": {"human": human, "count": len(needs), "items": needs,
+                     "upcoming": upcoming},
+    }
+
+    if out_format == "json":
+        _print_json(payload)
+        return 0
+
+    print(f"\n{'='*60}")
+    print(f"  Session briefing — {me}")
+    print(f"{'='*60}")
+    if needs:
+        print(f"\n  ⛔ Blocked on {human} ({len(needs)})")
+        for s in needs:
+            ask = (s.get("blocked_on") or s.get("next_action") or "").strip()
+            print(f"    {s.get('id','')}  {s.get('title','')[:50]}"
+                  + (f" — needs: {ask[:60]}" if ask else ""))
+    if upcoming:
+        print(f"  … (+{len(upcoming)} upcoming)")
+    mine = [t for t in payload["status"]["active"]
+            if t.get("owner_agent") == me]
+    print(f"\n  Your open work ({len(mine)})")
+    for t in mine:
+        print(f"    [{t.get('status','?').upper()}] {t.get('id','')}  "
+              f"{t.get('title','')[:50]}")
+    print(f"\n  Inbox ({len(items)})")
+    for s in items:
+        print(f"    {s.get('id','')}  {s.get('title','')[:50]} "
+              f"(from {s.get('owner_agent','?')})")
+    if hidden:
+        print(f"    ({hidden} older broadcast{'s' if hidden != 1 else ''} "
+              f"hidden — `inbox --all` to show)")
+    print()
+    return 0
+
+
 def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     """Pick-up-where-you-left-off briefing for an agent (situational awareness
     piece 7). Read-only.
