@@ -79,6 +79,27 @@ def annotations_dir() -> Path:
     return _root_cache() / "annotations"
 
 
+def fallback_throttle_path() -> Path:
+    """The per-host direct-listing-fallback throttle marker (the 2026-06-11
+    stampede breaker — see ``io._load_task_summaries``).
+
+    PLACEMENT — per HOST, per remote ROOT, deliberately:
+
+    * Per host: the XDG cache root is keyed by OS user + machine, never by
+      agent identity (nothing under ``cache_root()`` is identity-scoped), so
+      every listener/process this user runs on this host — the operator's Mac
+      runs EIGHT — shares ONE marker. That is the whole point: the stampede
+      is a per-host phenomenon (one host saturating the gateway with its own
+      concurrent fallbacks), so the claim must be host-wide. Caveat: listeners
+      running as DIFFERENT OS users (or with divergent ``XDG_CACHE_HOME``)
+      would each get their own marker — acceptable; the fleet here runs one
+      user per host.
+    * Per remote root (under ``roots/<slug>``): throttling one bus's fallback
+      must never gate a different bus on the same machine — the staleness
+      being repaired is per-bus state."""
+    return _root_cache() / "fallback-throttle.json"
+
+
 def sessions_dir() -> Path:
     # Intentionally GLOBAL (not per-root): session pointers are keyed by the
     # globally-unique CLAUDE_CODE_SESSION_ID / FULCRA_COORD_SESSION_KEY and
