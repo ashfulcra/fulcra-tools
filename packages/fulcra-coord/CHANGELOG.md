@@ -12,6 +12,29 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+---
+
+## [0.15.4] — 2026-06-11
+
+**Reliability release.** The through-line: the transport stops lying to the
+code above it. Read failures no longer read as absence anywhere they could
+destroy or skip work (write path, roles/presence, retention, directives), and
+the platform's soft-delete tombstones are now recognized for what they are —
+deliberate deletions — by the repair loop, the archive gates, and restore.
+On top of that honesty layer: writes upload only the views that actually
+changed (~10x cut in per-write bus fan-out, with reconcile keeping its role
+as the drift repair), transient transport failures retry instead of failing
+the operation, the repair queue rotates failing markers out of the head so
+one poison marker can't starve the rest, and a per-host breaker stops the
+direct-listing fallback stampede that could saturate a host's API gateway
+indefinitely. The loop-2 perf wave (six mechanical double-read/over-download
+eliminations) and the orphan cleanup ride along.
+
+**Upgrade note — hosts on ≤0.15.3 should move promptly:** older versions
+re-upload every view on every write, generating heavy bus write amplification
+that this release eliminates. With self-update (0.15.3+) the fleet picks this
+up from the announced manifest; opted-out hosts need the manual pull.
+
 ### Fallback stampede breaker: one direct-listing fallback per host at a time
 
 Live find (2026-06-11, the self-sustaining stampede): when the bus views go
