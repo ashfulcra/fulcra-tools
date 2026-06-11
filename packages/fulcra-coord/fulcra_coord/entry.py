@@ -79,6 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Declare this agent can review PRs (sugar for --role review)")
     sp.add_argument("--role", action="append", default=None, metavar="ROLE",
                     help="Declare a capability/role (repeatable), e.g. --role review")
+    sp.add_argument("--clear-roles", dest="clear_roles", action="store_true",
+                    help="EXPLICITLY drop previously declared roles (a bare "
+                         "connect preserves them; 2026-06-11 bug hunt C4)")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- workstream ----

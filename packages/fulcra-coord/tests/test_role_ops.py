@@ -249,6 +249,65 @@ def test_connect_lease_claim_failure_never_fails_the_session_boot(coord_backend)
 
 
 # ---------------------------------------------------------------------------
+# connect capability merge (2026-06-11 bug hunt C4 — RMW-class instance #5)
+# ---------------------------------------------------------------------------
+
+
+def _connect(coord_backend, **over):
+    from fulcra_coord import presence
+    base = dict(agent="a:h:r", workstream=None, summary="",
+                role=None, can_review=False, format="table")
+    base.update(over)
+    args = SimpleNamespace(**base)
+    prev = os.environ.get("FULCRA_COORD_AGENT")
+    os.environ["FULCRA_COORD_AGENT"] = "a:h:r"
+    try:
+        assert presence.cmd_connect(args, backend=coord_backend) == 0
+    finally:
+        if prev is None:
+            os.environ.pop("FULCRA_COORD_AGENT", None)
+        else:
+            os.environ["FULCRA_COORD_AGENT"] = prev
+
+
+def _capabilities(coord_backend):
+    rec = remote.download_json(
+        remote.presence_remote_path("a-h-r"), backend=coord_backend)
+    return (rec or {}).get("capabilities")
+
+
+def test_bare_connect_preserves_declared_capabilities(coord_backend):
+    # 2026-06-11 bug hunt C4 (P1): the shipped SessionStart hook runs a BARE
+    # `connect`. It used to rebuild the presence record with capabilities=[],
+    # silently wiping the roles a prior `connect --role X` declared — which
+    # also broke @role inbox delivery (inbox._my_roles reads capabilities).
+    _connect(coord_backend, role=["reviewer"])
+    assert _capabilities(coord_backend) == ["reviewer"]
+    _connect(coord_backend)                       # the SessionStart hook shape
+    assert _capabilities(coord_backend) == ["reviewer"]
+
+
+def test_connect_with_new_role_unions_capabilities(coord_backend):
+    _connect(coord_backend, role=["x"])
+    _connect(coord_backend, role=["y"])
+    assert _capabilities(coord_backend) == ["x", "y"]
+
+
+def test_connect_clear_roles_drops_capabilities(coord_backend):
+    _connect(coord_backend, role=["x"])
+    _connect(coord_backend, clear_roles=True)
+    assert _capabilities(coord_backend) == []
+
+
+def test_connect_clear_roles_flag_is_wired(coord_backend):
+    from fulcra_coord import entry
+    args = entry.build_parser().parse_args(["connect", "--clear-roles"])
+    assert args.clear_roles is True
+    args = entry.build_parser().parse_args(["connect"])
+    assert args.clear_roles is False
+
+
+# ---------------------------------------------------------------------------
 # CLI: `fulcra-coord roles` (list/set/claim/release)
 # ---------------------------------------------------------------------------
 
