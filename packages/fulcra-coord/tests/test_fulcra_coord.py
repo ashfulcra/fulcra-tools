@@ -772,7 +772,8 @@ class TestCLIWithFakeBackend(unittest.TestCase):
             return True
 
         with patch("fulcra_coord.presence._write_presence", side_effect=fake_write), \
-             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]):
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True):
             args = self._args(agent="claude-code:h:r", workstream=None, summary="",
                               format="json", can_review=True, role=None)
             cmd_connect(args, backend=["false"])
@@ -783,7 +784,8 @@ class TestCLIWithFakeBackend(unittest.TestCase):
         captured = {}
         with patch("fulcra_coord.presence._write_presence",
                    side_effect=lambda record, backend=None: captured.update(rec=record) or True), \
-             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]):
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True):
             args = self._args(agent="a", workstream=None, summary="", format="json",
                               can_review=False, role=["review", "deploy"])
             cmd_connect(args, backend=["false"])
@@ -12156,7 +12158,8 @@ def test_role_health_check_reports_held_vacant_contested(coord_backend):
 def test_role_health_check_empty_registry_is_quiet(coord_backend):
     from fulcra_coord import cli
     report = cli._role_health_check(backend=coord_backend)
-    assert report == {"roles": [], "vacant": 0, "contested": 0, "escalated": 0}
+    assert report == {"roles": [], "vacant": 0, "contested": 0, "escalated": 0,
+                      "unknown": 0}
 
 
 def test_role_health_uses_the_staleness_guarded_presence_read(coord_backend):

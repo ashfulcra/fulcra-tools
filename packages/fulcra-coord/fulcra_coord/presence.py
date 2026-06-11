@@ -31,6 +31,28 @@ from .output import info as _info, print_json as _print_json, warn as _warn, err
 from .textfmt import age_str as _age_str
 
 
+class _PresenceReadError:
+    """Sentinel type for :data:`PRESENCE_READ_ERROR` — see _load_own_presence
+    and _reconcile_presence."""
+
+    def __repr__(self) -> str:  # diagnosable in test failures / debug prints
+        return "<presence READ_ERROR>"
+
+
+#: 2026-06-11 roles/presence read-error audit (F5/F8): the "this presence read
+#: FAILED" sentinel, distinct from None ("confirmed absent / nothing usable").
+#: The role_ops.READ_ERROR idiom (bug hunt C1) applied to the presence layer:
+#: _load_own_presence used to collapse a failed read of the agent's OWN record
+#: into None ("never connected"), and the whole-record rewrites downstream
+#: (connect, workstream set/add, the capability RMW) then wiped
+#: capabilities/workstreams/summary/session off the bus. _reconcile_presence
+#: returns it when NEITHER the per-agent enumeration NOR the previous
+#: aggregate could be read — the tick's consumers must treat presence as
+#: unknown and take no routing action. Callers must treat it as "do not write
+#: / do not decide", never as absence.
+PRESENCE_READ_ERROR = _PresenceReadError()
+
+
 def _maybe_warn_legacy_identity(explicit: Optional[str]) -> None:
     """Print a one-line migration hint (to STDERR) iff the resolved identity is
     purely DERIVED (nothing explicit/env/per-cwd) AND a legacy global
@@ -89,9 +111,14 @@ def _upsert_presence_aggregate(
     aggregate — on the very next connect, instead of leaving it invisible until a
     90s reconcile (the task views already self-heal this way).
 
-    FALLBACK: if the listing fails or is empty (a backend without a working
-    ``list``), fall back to the old download-aggregate + upsert-self path so we
-    never regress below the prior single-file behaviour. Whole thing is
+    FALLBACK LADDER (tightened by the 2026-06-11 read-error audit, F5): an
+    enumeration that fails, is empty (a backend without a working ``list``),
+    or is PARTIAL — the checked listing exposes per-record drops, and
+    survivors of a partial read must never be uploaded as the roster, that is
+    how a live peer vanished from presence — falls back to the previous
+    aggregate's peers (stale-but-full). When THAT is also unreadable (or the
+    bus unreachable), the upsert is skipped entirely: fail toward no-action.
+    Only a probe-confirmed-fresh bus proceeds self-only. Whole thing is
     BEST-EFFORT: the durable per-agent record is already written and reconcile is
     the eventual-consistency backstop, so a transient aggregate write must never
     surface as an error to connect."""
@@ -102,22 +129,55 @@ def _upsert_presence_aggregate(
 
     try:
         records: list[dict[str, Any]] = []
+        complete = False
         try:
-            for _, rec in remote.list_json(remote.presence_prefix(), backend=backend):
+            listed, complete = remote.list_json_checked(
+                remote.presence_prefix(), backend=backend)
+            for _, rec in listed:
                 if rec.get("agent") and rec.get("agent") != record["agent"]:
                     records.append(_without_liveness(rec))
         except Exception:
-            records = []  # listing best-effort; fall through to the download path
+            records, complete = [], False  # fall through to the download path
+
+        if not complete:
+            # 2026-06-11 read-error audit (F5): the enumeration was PARTIAL or
+            # failed — a peer whose one record 504'd is missing from
+            # ``records``, and uploading the survivors as the aggregate is
+            # exactly how a LIVE reviewer vanished from the roster (and the
+            # review sweep then escalated "no reviewer live" to the human
+            # while the reviewer was up). Survivors of a partial read are
+            # never the roster: discard them and recover peers from the
+            # previous aggregate instead (stale-but-FULL beats fresh-but-
+            # truncated; the durable per-agent records stay authoritative and
+            # reconcile heals the view once reads recover).
+            records = []
 
         if not records:
-            # Fallback: no usable listing → recover peers from the current
-            # aggregate instead, so behaviour never regresses below pre-BUG-4.
+            # No usable listing (failed/partial — or genuinely no peers, in
+            # which case the aggregate path is a harmless no-op source) →
+            # recover peers from the current aggregate, so behaviour never
+            # regresses below pre-BUG-4.
             agg = remote.download_json(remote.presence_view_path(), backend=backend)
-            existing = (agg or {}).get("agents", []) if agg else []
-            records = [
-                _without_liveness(a)
-                for a in existing if a.get("agent") != record["agent"]
-            ]
+            if isinstance(agg, dict):
+                records = [
+                    _without_liveness(a)
+                    for a in agg.get("agents", []) or []
+                    if a.get("agent") != record["agent"]
+                ]
+            elif not complete:
+                # Boundary case (F5, documented policy: fail toward NO-ACTION):
+                # the enumeration is untrustworthy AND the previous aggregate
+                # would not read. Writing now could only shrink the roster to
+                # self. Disambiguate absence per the C1 idiom: if the aggregate
+                # demonstrably EXISTS (stat sees it) or the bus is unreachable,
+                # skip the upsert entirely — the durable per-agent record above
+                # already landed, so nothing is lost but an opportunistic
+                # refresh. Only a probe-confirmed-absent aggregate on a
+                # reachable bus (a genuinely fresh bus) may proceed self-only.
+                if (remote.stat(remote.presence_view_path(),
+                                backend=backend) is not None
+                        or not remote.probe_reachable(backend)):
+                    return
 
         records.append(record)
         view = views.build_presence(records)
@@ -154,14 +214,19 @@ def _load_presence_agents(backend: Optional[list[str]] = None) -> list[dict[str,
         _warn("presence aggregate is missing — reading per-agent presence "
               "records directly")
         try:
-            records = [
-                rec for _, rec in remote.list_json(
-                    remote.presence_prefix(), backend=backend)
-                if rec.get("agent")
-            ]
+            listed, complete = remote.list_json_checked(
+                remote.presence_prefix(), backend=backend)
+            records = [rec for _, rec in listed if rec.get("agent")]
         except Exception:
-            records = []
+            records, complete = [], False
         if records:
+            if not complete:
+                # F5-adjacent: with no aggregate to fall back to, a partial
+                # listing is still the best roster available — but the reader
+                # must know it may UNDER-report (a live agent whose one record
+                # failed to read is missing). Loud, never blind.
+                _warn("per-agent presence listing was PARTIAL (some records "
+                      "failed to read) — the roster may be missing live agents")
             return records
         _warn("presence aggregate is missing AND the per-agent listing failed "
               "or was empty — treating presence as unavailable")
@@ -173,17 +238,21 @@ def _load_presence_agents(backend: Optional[list[str]] = None) -> list[dict[str,
     _warn(f"presence aggregate is {int(stale_min)}m stale — "
           "reading per-agent presence records directly")
     try:
-        records = [
-            rec for _, rec in remote.list_json(
-                remote.presence_prefix(), backend=backend)
-            if rec.get("agent")
-        ]
+        listed, complete = remote.list_json_checked(
+            remote.presence_prefix(), backend=backend)
+        records = [rec for _, rec in listed if rec.get("agent")]
     except Exception:
-        records = []
-    if records:
+        records, complete = [], False
+    # 2026-06-11 read-error audit (F5): only a COMPLETE per-agent read may
+    # replace the aggregate. A partial listing here used to hand liveness-
+    # sensitive consumers (review routing) a roster silently missing the very
+    # agent whose record failed to read; stale-but-FULL beats fresh-but-
+    # truncated, so an incomplete read degrades to the stale aggregate below.
+    if records and complete:
         return records
     _warn(f"presence aggregate is {int(stale_min)}m stale AND the per-agent "
-          "listing failed — using the stale roster (liveness may under-report)")
+          "listing failed or was partial — using the stale roster (liveness "
+          "may under-report)")
     return agents
 
 
@@ -205,25 +274,52 @@ def _write_presence(
 
 
 def _load_own_presence(
-    me: str, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
-    """Download this agent's own presence record (``presence/<slug>.json``), or
-    None if it has never connected. Used by `workstream` to mutate the existing
-    record rather than clobber declared streams/summary."""
+    me: str, backend: Optional[list[str]] = None) -> Any:
+    """This agent's own presence record (``presence/<slug>.json``): the dict,
+    None on CONFIRMED absence (genuinely never connected), or the
+    :data:`PRESENCE_READ_ERROR` sentinel when the read failed. Used by
+    `workstream`/`connect`/the capability RMW to mutate the existing record
+    rather than clobber declared streams/summary.
+
+    2026-06-11 read-error audit (F8): this used to return the transport's raw
+    None for BOTH "no record" and "read failed", and every caller rebuilds the
+    WHOLE record from that base — so one 504 on the agent's own read meant the
+    next write wiped its capabilities/workstreams/summary/session off the bus.
+    Same C1 discipline as role_ops.read_role, with the PR-#170 probe on top: a
+    failed download is absence only when the stat probe ALSO misses AND
+    ``probe_reachable`` confirms the bus was answering — an unreachable bus
+    can confirm nothing. The probes are spent on the failure path only."""
     slug = views.agent_slug(me)
-    return remote.download_json(remote.presence_remote_path(slug), backend=backend)
+    path = remote.presence_remote_path(slug)
+    try:
+        rec = remote.download_json(path, backend=backend)
+        if isinstance(rec, dict):
+            return rec
+        if remote.stat(path, backend=backend) is not None:
+            return PRESENCE_READ_ERROR  # record exists but is unreadable now
+        if not remote.probe_reachable(backend):
+            return PRESENCE_READ_ERROR  # bus dark: absence is unconfirmable
+        return None                     # confirmed absent: first connect
+    except Exception:
+        return PRESENCE_READ_ERROR
 
 
 def _read_own_capabilities(
-    me: str, backend: Optional[list[str]] = None) -> list[str]:
-    """This agent's currently declared capabilities, best-effort ([] on any
-    read failure). The shared read half of the C4/C5 merge-safe capability
-    RMW — connect and the add/remove helpers below all start from here so
-    "what do I already declare" has exactly one definition."""
+    me: str, backend: Optional[list[str]] = None) -> Any:
+    """This agent's currently declared capabilities: a list, or
+    :data:`PRESENCE_READ_ERROR` when the own-record read failed (F8 — the
+    callers are all about to REWRITE the record, and a failed read collapsed
+    to [] here is precisely the wiped-capabilities bug). Confirmed absence is
+    simply []. The shared read half of the C4/C5 merge-safe capability RMW —
+    connect and the add/remove helpers below all start from here so "what do
+    I already declare" has exactly one definition."""
     try:
-        rec = _load_own_presence(me, backend=backend) or {}
-        return [c for c in (rec.get("capabilities") or []) if c]
+        rec = _load_own_presence(me, backend=backend)
+        if rec is PRESENCE_READ_ERROR:
+            return PRESENCE_READ_ERROR
+        return [c for c in ((rec or {}).get("capabilities") or []) if c]
     except Exception:
-        return []
+        return PRESENCE_READ_ERROR
 
 
 def _rewrite_own_capabilities(
@@ -231,9 +327,19 @@ def _rewrite_own_capabilities(
     backend: Optional[list[str]] = None) -> bool:
     """Rewrite this agent's presence record with new capabilities, preserving
     workstreams/summary/session (the cmd_workstream preserve pattern). The
-    write half shared by add_capabilities/remove_capability."""
+    write half shared by add_capabilities/remove_capability.
+
+    F8: "preserving" requires a READABLE base — when the own-record read
+    fails, rebuilding from an empty dict would wipe every preserved field, so
+    the rewrite refuses (False) and the caller's RMW aborts visibly."""
     try:
-        current = _load_own_presence(me, backend=backend) or {}
+        current = _load_own_presence(me, backend=backend)
+        if current is PRESENCE_READ_ERROR:
+            _warn(f"presence: {me}'s own record could not be read — refusing "
+                  "the capability rewrite (a blind rebuild would wipe "
+                  "workstreams/summary/session)")
+            return False
+        current = current or {}
         record = schema.make_presence(
             me,
             workstreams=list(current.get("workstreams") or []),
@@ -260,7 +366,14 @@ def add_capabilities(
         wanted = {r for r in (roles or []) if r}
         if not wanted:
             return True
-        existing = set(_read_own_capabilities(me, backend=backend))
+        current = _read_own_capabilities(me, backend=backend)
+        if current is PRESENCE_READ_ERROR:
+            # F8: the union base is unknowable — merging onto [] would write a
+            # record that DROPS every undeclared-this-call capability (and the
+            # rewrite would wipe workstreams/summary too). Abort; the caller
+            # (`roles claim`) already warns-and-continues on False.
+            return False
+        existing = set(current)
         if wanted <= existing:
             return True   # already declared — no write needed
         return _rewrite_own_capabilities(
@@ -278,6 +391,10 @@ def remove_capability(
     union discipline, never a wholesale rebuild from flags)."""
     try:
         existing = _read_own_capabilities(me, backend=backend)
+        if existing is PRESENCE_READ_ERROR:
+            # F8: same refusal as add_capabilities — "remove one" cannot be
+            # computed from an unreadable base without wiping the siblings.
+            return False
         if role not in existing:
             return True   # nothing to remove
         return _rewrite_own_capabilities(
@@ -325,16 +442,29 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     # (inbox._my_roles reads these capabilities). Read-modify-write instead:
     # UNION the flags with the existing record's capabilities; dropping a
     # declaration is now an EXPLICIT act (--clear-roles), never a side effect
-    # of reconnecting. Best-effort read: if the own-presence read fails the
-    # union degrades to just the flags — the same exposure every presence
-    # write already has when the bus is down (and a lost union heals on the
-    # next flagged connect).
+    # of reconnecting.
+    #
+    # 2026-06-11 read-error audit (F8): C4's comment admitted the residual
+    # exposure — "if the own-presence read fails the union degrades to just
+    # the flags", i.e. one 504 on the agent's own read still wiped its
+    # declarations on the very next bare connect. The read now distinguishes
+    # READ_ERROR from confirmed absence (the C1 probe idiom in
+    # _load_own_presence); on READ_ERROR the presence WRITE below is skipped
+    # entirely — connect cannot merge-preserve fields it cannot see, and a
+    # missed heartbeat (healed by the next connect/tick) is strictly cheaper
+    # than a wiped record (only healed by an operator noticing). An explicit
+    # --clear-roles still writes: the operator sanctioned the rebuild.
+    own_read_failed = False
     if getattr(args, "clear_roles", False):
         roles = sorted(set(roles))   # explicit drop of prior declarations
     else:
         # Shared read half with the C5 add/remove capability helpers below.
-        roles = sorted(set(_read_own_capabilities(me, backend=backend))
-                       | set(roles))
+        existing = _read_own_capabilities(me, backend=backend)
+        if existing is PRESENCE_READ_ERROR:
+            own_read_failed = True
+            roles = sorted(set(roles))   # flags only — used for lease claims
+        else:
+            roles = sorted(set(existing) | set(roles))
 
     # Staleness suffix from the PERSISTED marker (2026-06-11 bug hunt S2):
     # read BEFORE the presence write so a host already known-behind renders
@@ -352,7 +482,17 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     record = schema.make_presence(me, workstreams=workstreams, summary=summary,
                                   capabilities=roles or None,
                                   session=os.environ.get("FULCRA_COORD_SESSION") or None)
-    _write_presence(record, backend=backend)
+    if own_read_failed:
+        # F8: the record demonstrably exists (or the bus is dark) but could not
+        # be read — uploading the rebuilt record above would shrink it to what
+        # THIS invocation happens to know. Skip the write, say so, and carry on
+        # with the rest of boot (lease claims for the explicit --role flags are
+        # clobber-free per-agent shards, so they still land below).
+        _warn(f"connect: {me}'s presence record could not be read — presence "
+              "write SKIPPED this boot (a blind rebuild would wipe declared "
+              "capabilities/workstreams; heartbeat resumes next connect)")
+    else:
+        _write_presence(record, backend=backend)
 
     # Roles-as-durable-identity (spec 2026-06-10): each declared role is ALSO
     # a lease CLAIM on that role — additive on top of the capabilities field
@@ -448,6 +588,18 @@ def cmd_workstream(args: Any, backend: Optional[list[str]] = None) -> int:
     summary_arg = getattr(args, "summary", None)
 
     current = _load_own_presence(me, backend=backend)
+    if current is PRESENCE_READ_ERROR:
+        # F8: every mutating action below REBUILDS the whole record from this
+        # read ("preserve" = copy from `current`), so acting on a failed read
+        # used to write a record with empty workstreams/summary/capabilities —
+        # `workstream add` could wipe everything. Nothing here is boot-critical
+        # (unlike connect's heartbeat), so the honest move is to abort loudly;
+        # the bare show degrades the same way rather than rendering a record we
+        # know exists but cannot see.
+        _err(f"workstream: {me}'s presence record could not be read — "
+             "aborting (mutating it blind would wipe the existing "
+             "workstreams/summary/capabilities); re-run when the bus answers")
+        return 1
     cur_workstreams = list((current or {}).get("workstreams", []))
     # 2026-06-11 bug hunt S6: strip the trailing stale-version suffix from the
     # PRESERVED summary. Connect bakes '(vX behind canonical Y)' into the
@@ -562,15 +714,44 @@ def _reconcile_presence(
     when the aggregate UPLOAD failed — the view was still built from the
     authoritative per-agent records, so in-tick consumers can trust it.
 
-    LISTING REQUIREMENT: relies on remote.list_json being able to enumerate the
-    presence dir. If listing returns nothing (empty dir, or a backend without a
-    working list), no aggregate is written — the existing one is left intact
-    rather than clobbered to empty. Best-effort: never raises into reconcile."""
+    PARTIAL-READ POLICY (2026-06-11 read-error audit, F5): remote.list_json's
+    per-item isolation silently DROPS a record whose individual download
+    fails — and this function used to upload the SURVIVORS as the
+    authoritative aggregate. One 504 on a live reviewer's record erased it
+    from presence, and the truncated roster threaded into the review sweep +
+    role health that same tick ("no reviewer live" escalated to the human
+    while the reviewer was up — lived incident). The checked listing now
+    exposes the drop, and a partial rebuild:
+
+      * NEVER uploads (the previous aggregate, however stale, stays — full
+        beats truncated; the per-agent records remain authoritative and the
+        next clean tick heals the view);
+      * hands the tick the PREVIOUS aggregate when it is readable (consumers
+        decide on a full roster);
+      * returns :data:`PRESENCE_READ_ERROR` when the previous aggregate is
+        ALSO unreadable/absent — the boundary case. Policy: fail toward
+        NO-ACTION; cmd_reconcile skips the route sweep and role-health
+        vacancy judgment outright, because no trustworthy roster of any age
+        exists this tick.
+
+    LISTING REQUIREMENT: relies on the remote listing being able to enumerate
+    the presence dir. If listing returns nothing (empty dir, or a backend
+    without a working list), no aggregate is written — the existing one is
+    left intact rather than clobbered to empty. Best-effort: never raises
+    into reconcile."""
     try:
-        records = [
-            rec for _, rec in remote.list_json(remote.presence_prefix(), backend=backend)
-            if rec.get("agent")
-        ]
+        listed, complete = remote.list_json_checked(
+            remote.presence_prefix(), backend=backend)
+        records = [rec for _, rec in listed if rec.get("agent")]
+        if not complete:
+            _warn("  presence rebuild: per-agent listing was PARTIAL — "
+                  "aggregate upload skipped (uploading survivors would erase "
+                  "live agents from the roster)")
+            prev = remote.download_json(remote.presence_view_path(),
+                                        backend=backend)
+            if isinstance(prev, dict):
+                return prev   # previous FULL aggregate: usable, just older
+            return PRESENCE_READ_ERROR
         if not records:
             return None
         view = views.build_presence(records)
