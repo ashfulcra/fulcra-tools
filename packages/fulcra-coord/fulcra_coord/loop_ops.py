@@ -126,33 +126,66 @@ def read_loop_evidence(
 def load_loop_records(
     *, backend: Optional[list[str]] = None
 ) -> list[dict[str, Any]]:
-    """Every TOP-LEVEL loop record on the bus — one ``list_json`` sweep of the
-    directives prefix with the top-level-only filter applied.
+    """Every TOP-LEVEL loop record on the bus — one paths-only listing of the
+    directives prefix, the top-level-only filter applied to the PATHS, then a
+    pooled download of ONLY the surviving records.
+
+    FILTER BEFORE DOWNLOAD (PERF, 2026-06-10 measured pass): this used to ride
+    ``remote.list_json``, which downloads EVERY ``.json`` under the prefix —
+    ack/routing/response/evidence shards included — and only then threw the
+    shards away. Each shard download is one ~1.3s subprocess, and this sweep
+    runs on every listener notify tick, every board render, every digest, and
+    every reconcile health fold, so the bus paid for its whole sub-log volume
+    over and over. Filtering the paths first (the ``_directive_parity_check``
+    idiom) makes the cost O(top-level records), not O(all shards).
 
     THE TOP-LEVEL-ONLY FILTER (load-bearing — the single home for this rule,
-    consumed by the loop health check, the board, and the digest section):
+    consumed by the loop health check, the board, the digest section, the
+    forge-mirror sweep, and the inbox overdue suffix):
     ``remote.directives_prefix()`` holds SUB-LOG SUBTREES (``<id>/acks/``,
     ``<id>/routing/``, ``<id>/responses/``, ``<id>/evidence/``) beside the
     top-level ``directives/<id>.json`` loop records. Only a path that, after
     stripping the prefix, has NO further ``/`` and ends in ``.json`` is a loop
     record — a shard counted as a record would inflate every count.
 
-    Deliberately NOT best-effort: a broken prefix read RAISES so each surface
-    keeps its own error discipline (health/board swallow to ``[]`` at the call
-    site; the digest lets its caller omit the whole section)."""
+    Deliberately NOT best-effort: a broken prefix LISTING raises so each
+    surface keeps its own error discipline (health/board swallow to ``[]`` at
+    the call site; the digest lets its caller omit the whole section). A
+    single failed record download, by contrast, is skipped — one unreadable
+    record must not blank every board."""
+    import concurrent.futures
     prefix = remote.directives_prefix()
-    listed = remote.list_json(prefix, backend=backend)
-    records: list[dict[str, Any]] = []
-    for path, rec in listed:
-        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards.
+    paths: list[str] = []
+    for path in remote.list_files(prefix, backend=backend):
+        # TOP-LEVEL-ONLY FILTER (see docstring): reject sub-log shards by PATH,
+        # before any download is paid for.
         rel = path[len(prefix):] if path.startswith(prefix) else path
         if "/" in rel:
             continue  # ack/routing/response/evidence shard — never a loop record
         if not rel.endswith(".json"):
             continue
-        if isinstance(rec, dict):
-            records.append(rec)
-    return records
+        paths.append(path)
+    if not paths:
+        return []
+    # Pooled download of the surviving top-level records (the remote.list_json
+    # pool shape): independent subprocesses, no shared state. Results keep the
+    # listing's path order so callers see a stable order for a given bus.
+    results: dict[str, dict[str, Any]] = {}
+    workers = min(8, max(2, len(paths)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(remote.download_json, p, backend=backend): p
+            for p in paths
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            path = futures[fut]
+            try:
+                rec = fut.result()
+            except Exception:
+                rec = None  # per-record isolation: skip, never blank the sweep
+            if isinstance(rec, dict):
+                results[path] = rec
+    return [results[p] for p in paths if p in results]
 
 
 def evidence_ids_for(

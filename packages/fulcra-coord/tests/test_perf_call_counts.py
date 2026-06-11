@@ -198,3 +198,76 @@ def test_parity_no_deadline_keeps_unbounded_behavior(coord_backend):
     report = cli._event_parity_check(tasks, backend=coord_backend)
     assert report["checked"] == 2
     assert report["deferred"] == 0
+
+
+# ---------------------------------------------------------------------------
+# E2 — loop-record sweeps: filter paths BEFORE downloading
+# ---------------------------------------------------------------------------
+
+def _seed_loop_with_sublogs(backend, i: int) -> dict:
+    """One top-level loop record plus ack + routing + response sub-log shards
+    under the same prefix — the layout that made download-then-filter pay a
+    subprocess for every shard on every listener tick and board render."""
+    from fulcra_coord import directives
+    t = schema.make_task(title=f"d{i}", workstream="ws", agent="a",
+                         assignee="peer:h:r")
+    remote.upload_json(t, remote.task_remote_path(t["id"]), backend=backend)
+    d = directives.directive_from_task(t)
+    remote.upload_json(d, remote.directive_remote_path(d["id"]), backend=backend)
+    directives.write_directive_ack(d["id"], "peer:h:r", backend=backend)
+    directives.append_directive_route(
+        d["id"], {"event_id": f"e{i}", "at": "2026-01-01T00:00:00Z"},
+        backend=backend)
+    loop_ops.append_loop_response(
+        d["id"], {"by": "peer:h:r", "outcome": {"verdict": "done"}},
+        backend=backend)
+    return d
+
+
+def _no_sublog_shards(paths: list[str]) -> bool:
+    return all("/acks/" not in p and "/routing/" not in p
+               and "/responses/" not in p and "/evidence/" not in p
+               for p in paths)
+
+
+def test_load_loop_records_downloads_only_top_level_records(coord_backend):
+    """The directives prefix holds 3 sub-log shards per loop beside each
+    top-level record; load_loop_records used to download ALL of them (via
+    list_json) and throw the shards away. The paths must be filtered BEFORE
+    downloading: downloads under the prefix == top-level record count."""
+    seeded = [_seed_loop_with_sublogs(coord_backend, i) for i in range(2)]
+    prefix = remote.directives_prefix()
+    # Sanity: the prefix really holds one record + 3 shards per loop.
+    assert len(remote.list_files(prefix, backend=coord_backend)) == 8
+    counter = OpCounter()
+    with counter.patch():
+        records = loop_ops.load_loop_records(backend=coord_backend)
+    assert {r["id"] for r in records} == {d["id"] for d in seeded}
+    assert sorted(counter.downloads_under(prefix)) == sorted(
+        remote.directive_remote_path(d["id"]) for d in seeded)
+
+
+def test_forge_mirror_sweep_downloads_only_top_level_records(coord_backend):
+    """forge_mirror's sweep now rides load_loop_records — same pin."""
+    import types
+    from fulcra_coord import forge_mirror
+    _seed_loop_with_sublogs(coord_backend, 0)
+    prefix = remote.directives_prefix()
+    counter = OpCounter()
+    with counter.patch():
+        forge_mirror.cmd_forge_mirror(
+            types.SimpleNamespace(format="json", repo=None),
+            backend=coord_backend)
+    assert _no_sublog_shards(counter.downloads_under(prefix)), counter.downloads
+
+
+def test_overdue_loop_suffix_downloads_only_top_level_records(coord_backend):
+    """inbox's overdue-loop suffix (paid on every notifying listener tick) now
+    rides load_loop_records — same pin."""
+    from fulcra_coord import inbox
+    _seed_loop_with_sublogs(coord_backend, 0)
+    prefix = remote.directives_prefix()
+    counter = OpCounter()
+    with counter.patch():
+        inbox._overdue_loop_suffix("someone:h:r", backend=coord_backend)
+    assert _no_sublog_shards(counter.downloads_under(prefix)), counter.downloads
