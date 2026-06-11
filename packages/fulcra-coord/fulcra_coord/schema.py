@@ -1128,10 +1128,24 @@ def validate_task(task: dict[str, Any]) -> list[str]:
 
 
 def _extract_kind_from_tags(tags: list[str]) -> str:
+    """The task's PRIMARY kind from its tags.
+
+    2026-06-11 bug hunt C7: prefer a VALID_KINDS member. Membership markers
+    (kind:idea, kind:review-verdict, …) can sort AHEAD of the real schema kind
+    in the sorted tag list; blindly returning the first ``kind:`` suffix made
+    downstream tag rebuilds (writepipe._repair_merged_tags, apply_transition)
+    treat the marker as primary — and the actual standard kind tag, being
+    "standard" and non-primary, was then dropped from the rebuilt tag set.
+    Falls back to the first kind tag (no valid member present), then "ops"."""
+    first = ""
     for tag in tags:
         if tag.startswith("kind:"):
-            return tag[5:]
-    return "ops"
+            suffix = tag[5:]
+            if suffix in VALID_KINDS:
+                return suffix
+            if not first:
+                first = suffix
+    return first or "ops"
 
 
 # ---------------------------------------------------------------------------
