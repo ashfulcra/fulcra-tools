@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from fulcra_prefs.cli import run
 from fulcra_prefs.outbox import Outbox
-from fulcra_prefs.store import FulcraStore, META_PATH, COMPILED_PATH, CONSENT_PATH
+from fulcra_prefs.store import FulcraStore, META_PATH, COMPILED_PATH
 from test_schema import make_signal
 
 NOW = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)

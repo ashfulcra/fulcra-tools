@@ -1,5 +1,4 @@
 import json
-import pytest
 from fulcra_prefs.store import FulcraStore, PREFS_ROOT
 from test_schema import make_signal
 

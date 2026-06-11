@@ -26,7 +26,6 @@ VERIFIED against fulcra_api/core.py (v0.1.30, file-commands branch):
   accuracy.
 """
 import io
-import json
 import sys
 from pathlib import Path
 import pytest

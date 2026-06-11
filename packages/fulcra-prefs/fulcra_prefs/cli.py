@@ -39,7 +39,7 @@ from .outbox import Outbox
 from .schema import Signal, canonical_json, parse_record
 from .solver import solve
 from .store import (FulcraStore, build_record, COMPILED_PATH, CONSENT_PATH,
-                    META_PATH, PREFS_ROOT, SIGNALS_CACHE_PREFIX, platform_path)
+                    META_PATH, SIGNALS_CACHE_PREFIX, platform_path)
 
 
 def _store(api) -> FulcraStore:
