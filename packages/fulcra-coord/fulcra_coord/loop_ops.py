@@ -6,7 +6,7 @@ per response (append-only, concurrent responders never clobber; same pattern
 as directives.append_directive_route). The LWW snapshot's `outcome`/`state` is
 a best-effort CACHE of the sub-log fold, never the truth.
 
-Phase 2 adds the EVIDENCE sub-log (``directives/<id>/evidence/``): forge-
+The EVIDENCE sub-log (``directives/<id>/evidence/``) sits beside it: forge-
 mirrored signals, force-stamped ``source=forge-mirror``, consumed only by
 detection (out-of-band flags) — never by ``fold_loop`` (see the invariant
 block there): mirrored evidence can never close a loop.
@@ -244,7 +244,7 @@ def _walk_to_terminal(kind: str, state: str) -> str:
     return state
 
 
-# CRITICAL INVARIANT (phase 2): fold_loop reads ONLY the responses sub-log,
+# CRITICAL INVARIANT: fold_loop reads ONLY the responses sub-log,
 # NEVER the evidence sub-log. Mirrored evidence (source=forge-mirror, written
 # by append_loop_evidence) is detection input — it flags a loop out-of-band on
 # the board, and NOTHING more. If this fold ever consumed the evidence prefix,

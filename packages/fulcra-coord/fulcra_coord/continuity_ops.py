@@ -3,8 +3,8 @@
 Spec 2026-06-10-continuity-integration-design.md, items 2 (role claim →
 resume) and 3 (park hooks). The ROLE is the durable identity (roles spec);
 this module gives it a durable "where I left off": the registry record's
-``checkpoint_ref`` — RESERVED by the roles spec for exactly this phase —
-points at a continuity checkpoint that survives every session death. The
+``checkpoint_ref`` points at a continuity checkpoint that survives every
+session death. The
 ArcBot remote-control backbone is: spawn session → claim role → resume brief
 → work → checkpoint on park.
 

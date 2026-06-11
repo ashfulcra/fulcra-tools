@@ -8,7 +8,7 @@ import sys
 
 from . import __version__
 from . import cli as _cli
-# The one sanctioned forge poller (phase 2) dispatches DIRECTLY from here, not
+# The one sanctioned forge poller dispatches DIRECTLY from here, not
 # via a cli re-export like every other command: cli.py is a core module, and
 # the reverse fitness pin (test_no_core_module_imports_forge_mirror) forbids
 # core from importing the mirror — entry.py sits above core, so this is the

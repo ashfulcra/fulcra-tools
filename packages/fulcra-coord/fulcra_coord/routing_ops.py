@@ -314,7 +314,7 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
         ok = True
     if ok:
         _mirror_route_to_directive_sublog(task, backend=backend)
-        # Phase 3b dual-write: mirror the routed review into a `review` directive
+        # Directive dual-write: mirror the routed review into a `review` directive
         # (type detected by the kind:review tag; artifact_ref from pr/repo). Uses
         # the shared low-layer writer in directives — see the WHY note there for
         # the lifecycle↔routing_ops import-cycle reason it lives there, not here.
@@ -446,7 +446,7 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
         _warn(f"review-done directive failed (non-fatal): {e}")
         return 1
     if ok:
-        # Phase 3b dual-write: mirror the verdict into a `verdict` directive
+        # Directive dual-write: mirror the verdict into a `verdict` directive
         # addressed to the author (type detected by the kind:review-verdict tag).
         # Shared low-layer writer; never fails the authoritative task write.
         from . import directives
