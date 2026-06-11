@@ -351,6 +351,37 @@ class TestSnapshotRefreshNeverRegressesOnReadFailure:
             f"a responses-listing blip re-opened a closed loop: {d2.get('state')}")
         assert (d2.get("outcome") or {}).get("verdict") == "approve"
 
+    def test_partial_routing_read_does_not_shrink_snapshot(self, coord_backend, monkeypatch):
+        from fulcra_coord import directives
+        t = _task()
+        did = directives._stable_directive_id(t["id"])
+        e1 = routing.make_route_event(
+            kind="routed", to="agent-b", by="agent-a", attempt=1, reason="r",
+            candidate_snapshot=[], observed_updated_at="", at="2026-06-09T00:00:00Z",
+            route_id="route-a")
+        e2 = routing.make_route_event(
+            kind="rerouted", to="agent-c", by="agent-a", attempt=2, reason="r",
+            candidate_snapshot=[], observed_updated_at="", at="2026-06-09T00:01:00Z",
+            route_id="route-b")
+        directives.append_directive_route(did, e1, backend=coord_backend)
+        directives.append_directive_route(did, e2, backend=coord_backend)
+        directives.dual_write(t, command="tell", backend=coord_backend)
+        before = _read_directive(coord_backend, did)
+        assert [r["to"] for r in before["routing"]] == ["agent-b", "agent-c"]
+
+        real_dl = remote.download_json
+        missing = remote.directive_route_path(did, "route-b")
+
+        def _partial_dl(path, *a, **k):
+            if path == missing:
+                return None
+            return real_dl(path, *a, **k)
+
+        monkeypatch.setattr(directives.remote, "download_json", _partial_dl)
+        directives.dual_write(t, command="tell", backend=coord_backend)
+        after = real_dl(remote.directive_remote_path(did), backend=coord_backend)
+        assert [r["to"] for r in after["routing"]] == ["agent-b", "agent-c"]
+
     def test_blip_with_unreadable_prev_snapshot_skips_refresh(self, coord_backend, monkeypatch):
         """When the sub-logs are unreadable AND the previous snapshot can't be
         read either (so there is nothing to merge-preserve from and absence is
