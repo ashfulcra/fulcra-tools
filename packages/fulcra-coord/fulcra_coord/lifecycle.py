@@ -388,14 +388,25 @@ def cmd_start(args: Any, backend: Optional[list[str]] = None) -> int:
     next_action = getattr(args, "next", "") or ""
     surface = getattr(args, "surface", None)
 
-    # Non-blocking onboarding nudges (Task C). A title shaped like a task id is a
-    # near-certain "I meant to claim an existing task" — warn but PROCEED (start
-    # always creates a NEW task, by design). And if this session is running on a
-    # derived identity while a legacy global identity.json lingers, point the
-    # operator at migration. Both go to STDERR, one line each.
+    # REFUSE an id-shaped title outright (2026-06-11 live find: 6 junk tasks
+    # on the bus, each TITLED after an existing task id). The previous
+    # warn-but-PROCEED nudge (Task C) demonstrably did not stop the mistake —
+    # agents typed `start TASK-...` meaning to CLAIM, the warning scrolled
+    # past, and a duplicate task named after an id landed on the bus every
+    # time. The operator filed it as option (a): an id-shaped title is
+    # near-certainly a mis-aimed claim, so refuse BEFORE anything is created
+    # or uploaded (exit 1, no cache write, zero remote calls) and point at the
+    # right command. Only the dated TASK-<8 digits>- prefix matches, so a
+    # genuine title that merely mentions a date can't trip it (see
+    # _TASK_ID_TITLE_RE).
     if title and _TASK_ID_TITLE_RE.match(title):
-        _warn("'start' always creates a NEW task. To claim/activate an existing "
-              "one: fulcra-coord update <id> --status active")
+        _err(f"'{title}' looks like a task id — 'start' creates a NEW task "
+             "from a title. To claim/activate an existing task: "
+             "fulcra-coord update <id> --status active")
+        return 1
+    # Non-blocking onboarding nudge (Task C): if this session is running on a
+    # derived identity while a legacy global identity.json lingers, point the
+    # operator at migration. STDERR, one line.
     _maybe_warn_legacy_identity(explicit_agent)
 
     if workstream not in schema.SUGGESTED_WORKSTREAMS:
