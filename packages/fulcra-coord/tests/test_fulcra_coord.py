@@ -8064,15 +8064,16 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_3(self):
-        # 0.15.3: version self-incorporation (operator directive 2026-06-10:
-        # "i'm not going to go around and wake the entire fleet for each
-        # incremental upgrade"). announce-version publishes the canonical
-        # manifest; connect + the listener tick self-update from it, default
-        # ON. The FIRST self-propagating release: hosts need one last manual
-        # update onto 0.15.3, after which every later release auto-applies.
+    def test_version_is_0_15_4(self):
+        # 0.15.4: reliability cut — transport read failures no longer read as
+        # absence anywhere (write path, roles/presence, retention, directives),
+        # soft-delete tombstones are recognized (repairs, archive, restore),
+        # and writes upload only the views that changed (~10x bus fan-out
+        # cut). Hosts on <=0.15.3 generate heavy bus write amplification and
+        # should upgrade promptly; with self-update (0.15.3+) the fleet picks
+        # this up from the announced manifest.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.3")
+        self.assertEqual(__version__, "0.15.4")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
