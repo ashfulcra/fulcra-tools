@@ -713,6 +713,15 @@ def _load_summaries_for_rebuild(
             return SUMMARIES_READ_ERROR
         return [schema.task_summary(t) for t in all_tasks]
 
+    if views.view_staleness_minutes(summaries_view) is not None:
+        # A stale aggregate is not a trustworthy write-path rebuild source.
+        # Rebuilding all views from it preserves dropped tasks and re-uploads an
+        # old generated_at, so ordinary writes can clobber a reconcile repair
+        # right back to "stale summaries" forever. The task body has already
+        # landed; leave views untouched and let reconcile rebuild from task
+        # bodies instead of copying the stale aggregate forward.
+        return SUMMARIES_READ_ERROR
+
     # Start from the downloaded aggregate, keyed by id.
     by_id: dict[str, dict[str, Any]] = {
         s["id"]: s for s in summaries_view["summaries"] if s.get("id")

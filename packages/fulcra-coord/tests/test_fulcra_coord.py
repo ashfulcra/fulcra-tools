@@ -8556,11 +8556,13 @@ class TestRebuildSourceRobustness(unittest.TestCase):
     def tearDown(self):
         del os.environ["XDG_CACHE_HOME"]
 
-    def _agg(self, summaries):
+    def _agg(self, summaries, *, generated_at=None):
         from fulcra_coord import remote
         sum_path = remote.view_remote_path("summaries")
         view = {"schema": "fulcra.coordination.summaries.v1", "view": "summaries",
                 "updated_at": "2026-06-03T00:00:00Z", "summaries": summaries}
+        if generated_at is not None:
+            view["generated_at"] = generated_at
 
         def fake_download(path, *, backend=None, timeout=None):
             return view if path == sum_path else None
@@ -8617,6 +8619,23 @@ class TestRebuildSourceRobustness(unittest.TestCase):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
         entry = next(s for s in out if s["id"] == stale_b["id"])
         self.assertEqual(entry["title"], "FRESH")
+
+    def test_stale_aggregate_is_not_used_as_write_rebuild_source(self):
+        # Live 2026-06-12 failure: reconcile briefly repaired summaries, then
+        # the next ordinary write rebuilt views from a stale summaries aggregate
+        # and uploaded that old generated_at + truncated task set again. A stale
+        # aggregate must therefore read as "no trustworthy rebuild source" for
+        # writes; leave views untouched and let reconcile rebuild from bodies.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        from fulcra_coord.io import SUMMARIES_READ_ERROR
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        old_stamp = "2026-06-10T22:11:02Z"
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)],
+                                         generated_at=old_stamp)):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        self.assertIs(out, SUMMARIES_READ_ERROR)
 
     def test_s2_newer_local_wins_across_mixed_precision_timestamps(self):
         # BUG 1 also affects the aggregate-vs-local freshness decision. A local
