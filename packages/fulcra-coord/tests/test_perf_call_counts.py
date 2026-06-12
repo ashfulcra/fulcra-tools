@@ -303,6 +303,40 @@ def test_cache_remote_task_unchanged_body_is_one_stat_zero_downloads(coord_backe
     assert counter.downloads == []
 
 
+def test_load_task_unchanged_body_uses_stat_gate(coord_backend):
+    """A single-task read must keep the cheap steady-state path while still
+    checking freshness: one stat, zero downloads when the strong version key
+    matches the cached meta."""
+    t = _seed_body(coord_backend)
+    path = remote.task_remote_path(t["id"])
+    warm = io._cache_remote_task(t["id"], backend=coord_backend)  # seeds cache+meta
+    counter = OpCounter()
+    with counter.patch():
+        got = io._load_task(t["id"], backend=coord_backend)
+    assert got == warm
+    assert counter.stats == [path]
+    assert counter.downloads == []
+
+
+def test_load_task_cached_without_meta_stays_local_only(coord_backend):
+    """A cached task with no remote stat meta is local-only/offline work.
+
+    Single-task commands must keep operating on it instead of forcing a remote
+    fetch that can only report "not found" on disconnected fake/offline backends.
+    """
+    from fulcra_coord import cache
+    t = schema.make_task(title="local-only", workstream="ws", agent="a")
+    cache.write_cached_task(t)
+    path = remote.task_remote_path(t["id"])
+    assert cache.read_meta(path) is None
+    counter = OpCounter()
+    with counter.patch():
+        got = io._load_task(t["id"], backend=coord_backend)
+    assert got == t
+    assert counter.stats == []
+    assert counter.downloads == []
+
+
 def test_cache_remote_task_changed_body_stats_then_downloads(coord_backend):
     """A changed task (new strong version key) costs exactly stat + download
     and returns the NEW body — the gate never serves a stale cache."""
@@ -318,6 +352,67 @@ def test_cache_remote_task_changed_body_stats_then_downloads(coord_backend):
     assert got["current_summary"] == "v2"
     assert counter.stats == [path]
     assert counter.downloads == [path]
+
+
+def test_load_task_changed_body_does_not_serve_stale_cache(coord_backend):
+    """Regression: _load_task used to return cache.read_cached_task directly.
+
+    That bypassed the stat gate and could resurrect stale local task state after
+    another agent had already updated the remote body (seen live as review
+    tasks whose summaries were done while direct body reads still looked
+    proposed).
+    """
+    t = _seed_body(coord_backend, summary="v1")
+    path = remote.task_remote_path(t["id"])
+    io._cache_remote_task(t["id"], backend=coord_backend)  # warm
+    t2 = dict(t)
+    t2["current_summary"] = "v2"
+    remote.upload_json(t2, path, backend=coord_backend)
+    counter = OpCounter()
+    with counter.patch():
+        got = io._load_task(t["id"], backend=coord_backend)
+    assert got["current_summary"] == "v2"
+    assert counter.stats == [path]
+    assert counter.downloads == [path]
+
+
+def test_load_task_remote_outage_serves_cached_body_with_warn(coord_backend):
+    """If both the stat probe and body download fail after a task was already
+    synced, keep the cached task visible instead of reporting "not found"."""
+    t = _seed_body(coord_backend, summary="v1")
+    path = remote.task_remote_path(t["id"])
+    warm = io._cache_remote_task(t["id"], backend=coord_backend)  # seeds cache+meta
+    with mock.patch.object(remote, "stat", return_value=None) as stat:
+        with mock.patch.object(remote, "download_json", return_value=None) as dl:
+            with mock.patch("fulcra_coord.io._warn") as warn:
+                got = io._load_task(t["id"], backend=coord_backend)
+    assert got == warm
+    assert stat.call_count == 1
+    dl.assert_called_once_with(path, backend=coord_backend)
+    warn.assert_called_once()
+    assert "freshness not confirmed" in warn.call_args.args[0]
+
+
+def test_load_task_download_failure_does_not_advance_cached_meta(coord_backend):
+    """A changed remote stat followed by a failed download serves the cached
+    body with a warning, but must not pair stale bytes with the new stat."""
+    from fulcra_coord import cache
+
+    t = _seed_body(coord_backend, summary="v1")
+    path = remote.task_remote_path(t["id"])
+    warm = io._cache_remote_task(t["id"], backend=coord_backend)  # seeds cache+meta
+    old_meta = dict(cache.read_meta(path))
+    changed_stat = dict(old_meta)
+    changed_stat["version"] = f"{old_meta.get('version', 'v')}-new"
+    with mock.patch.object(remote, "stat", return_value=changed_stat) as stat:
+        with mock.patch.object(remote, "download_json", return_value=None) as dl:
+            with mock.patch("fulcra_coord.io._warn") as warn:
+                got = io._load_task(t["id"], backend=coord_backend)
+    assert got == warm
+    assert stat.call_count == 1
+    dl.assert_called_once_with(path, backend=coord_backend)
+    warn.assert_called_once()
+    assert cache.read_meta(path) == old_meta
 
 
 def test_cache_remote_task_cold_cache_downloads(coord_backend):
