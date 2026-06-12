@@ -6342,6 +6342,40 @@ class TestNotifyInbox(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(load.call_args.kwargs["skip_stale_fallback"])
 
+    def test_stale_summary_alert_emits_once_when_listener_may_be_deaf(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        def stale_loader(*args, **kwargs):
+            kwargs["on_stale_skipped"](120.0)
+            return []
+        with patch("fulcra_coord.inbox._load_task_summaries",
+                   side_effect=stale_loader), \
+             patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+            rc2 = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                   backend=self.fake_backend)
+        self.assertEqual((rc, rc2), (0, 0))
+        emsg.assert_called_once()
+        self.assertIn("summaries view is", emsg.call_args.args[0])
+        self.assertEqual(emsg.call_args.kwargs["title"],
+                         "fulcra-coord degraded")
+
+    def test_stale_summary_alert_respects_disable_env(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        def stale_loader(*args, **kwargs):
+            kwargs["on_stale_skipped"](120.0)
+            return []
+        with patch.dict(os.environ, {"FULCRA_COORD_NOTIFY_STALE_ALERT_MIN": "0"}), \
+             patch("fulcra_coord.inbox._load_task_summaries",
+                   side_effect=stale_loader), \
+             patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        emsg.assert_not_called()
+
     def test_notify_message_includes_overdue_loop_count(self):
         """An overdue open loop OPENED BY the notifying agent rides the inbox
         notification as a " · N overdue" suffix when the optional scan is
