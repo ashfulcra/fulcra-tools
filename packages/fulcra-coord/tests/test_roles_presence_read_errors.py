@@ -509,14 +509,12 @@ def test_f8_first_connect_uses_index_probe_not_root_listing(
     assert remote.upload_json({"schema": "index"}, index_path,
                               backend=coord_backend)
 
-    real_list_files = remote.list_files
-
-    def fake_list_files(prefix, **kw):
-        if prefix.rstrip("/") == remote.remote_root().rstrip("/"):
-            return []
-        return real_list_files(prefix, **kw)
-
-    monkeypatch.setattr(remote, "list_files", fake_list_files)
+    monkeypatch.setattr(
+        remote,
+        "_store_probe_reachable",
+        lambda backend=None, root=None: False,
+    )
+    assert remote.probe_reachable(backend=coord_backend) is True
 
     with _as_me("codex-prefs"):
         rc = presence.cmd_connect(_connect_args(
