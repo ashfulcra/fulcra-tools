@@ -498,6 +498,45 @@ def test_f8_connect_confirmed_absent_still_writes_fresh_record(coord_backend,
     assert rec["capabilities"] == ["reviewer"]
 
 
+def test_f8_first_connect_uses_index_probe_not_root_listing(
+        coord_backend, monkeypatch, tmp_path):
+    """Live regression (2026-06-12 codex-prefs takeover): the Fulcra Files
+    root listing probe can fail even while the initialized bus anchor
+    (index.json) is stat-able. A first connect with no own presence record must
+    treat that as reachable/confirmed-absent and write the fresh record; using
+    root-list reachability made the agent skip presence writes forever."""
+    index_path = remote.view_remote_path("index")
+    assert remote.upload_json({"schema": "index"}, index_path,
+                              backend=coord_backend)
+
+    monkeypatch.setattr(
+        remote,
+        "_store_probe_reachable",
+        lambda backend=None, root=None: False,
+    )
+    assert remote.probe_reachable(backend=coord_backend) is True
+
+    with _as_me("codex-prefs"):
+        rc = presence.cmd_connect(_connect_args(
+            workstream="fulcra-prefs",
+            role=["fulcra-prefs-maintainer"],
+        ), backend=coord_backend)
+    assert rc == 0
+    rec = _read_store_json(
+        tmp_path, remote.presence_remote_path(views.agent_slug("codex-prefs")))
+    assert rec["agent"] == "codex-prefs"
+    assert rec["workstreams"] == ["fulcra-prefs"]
+    assert rec["capabilities"] == ["fulcra-prefs-maintainer"]
+
+    role = _read_store_json(
+        tmp_path, remote.role_record_path("fulcra-prefs-maintainer"))
+    assert role["name"] == "fulcra-prefs-maintainer"
+    lease = _read_store_json(
+        tmp_path, remote.role_lease_path(
+            "fulcra-prefs-maintainer", "codex-prefs"))
+    assert lease["agent"] == "codex-prefs"
+
+
 def test_f8_workstream_mutations_abort_on_own_read_failure(coord_backend,
                                                            monkeypatch,
                                                            tmp_path):
