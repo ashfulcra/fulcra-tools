@@ -4,7 +4,7 @@ Status: design locked with Ash in-session 2026-06-11, then amended after a
 deep-research pass over field practice (OpenClaw memory-wiki, claude-obsidian
 ~6.5k stars, obsidian-claude-code-mcp, mcpvault; 10 adversarially-verified
 findings — see Research notes at bottom). Pre-implementation review artifact
-for Ashs-MBP-Work:Codex-Review-Workbook.
+for Arc code review.
 
 ## What this is
 
@@ -183,7 +183,8 @@ Notes are mutable files; safety is conventions enforced by the CLI:
 write-section <note> --section <slug> --agent <id> (stdin body) |
 append-log <note> --entry <text> --agent <id> | map [--check] |
 backlinks <note> | reindex | doctor | sync [--push-only|--pull-only] |
-install-sync [--interval-min N] | delete <note> | restructure --from-spec <json>`
+install-sync [--interval-min N] | delete <note> | rename <note> <new> |
+restructure --from-spec <json>`
 
 Conventions carried from fulcra-prefs: dependency-injected `run()` for tests;
 status → stderr, data → stdout; canonical JSON for all derived artifacts;
