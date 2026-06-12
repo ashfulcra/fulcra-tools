@@ -5957,13 +5957,20 @@ class TestInstallListenerCmd(unittest.TestCase):
 
     def test_cmd_installs(self):
         from fulcra_coord import cli as climod
-        with patch("sys.platform", "darwin"):
+        with patch("sys.platform", "darwin"), \
+             patch("fulcra_coord.installers.subprocess.run") as run:
             rc = climod.cmd_install_listener(types.SimpleNamespace(
                 agent="codex:h:r", interval_min=10, uninstall=False,
-                dry_run=False, target_dir=self.target))
+                dry_run=False, target_dir=self.target, logs_dir=None))
         self.assertEqual(rc, 0)
-        self.assertTrue(os.path.exists(os.path.join(
-            self.target, "com.fulcra.coord.listener.codex-h-r.plist")))
+        plist = os.path.join(
+            self.target, "com.fulcra.coord.listener.codex-h-r.plist")
+        self.assertTrue(os.path.exists(plist))
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["launchctl", "unload", "-w", plist])
+        self.assertEqual(run.call_args_list[1].args[0],
+                         ["launchctl", "load", "-w", plist])
 
 
 class TestEnsureListener(unittest.TestCase):
@@ -5991,9 +5998,31 @@ class TestEnsureListener(unittest.TestCase):
              patch.object(listener, "install_listener", return_value=plan), \
              patch.object(listener.subprocess, "run") as run:
             listener.ensure_listener(agent="a:h:r")
-        run.assert_called_once()
-        self.assertEqual(run.call_args.args[0],
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["launchctl", "unload", "-w", "/tmp/a.plist"])
+        self.assertEqual(run.call_args_list[1].args[0],
                          ["launchctl", "load", "-w", "/tmp/a.plist"])
+
+    def test_ensure_listener_loads_existing_plist_without_rewriting_interval(self):
+        from fulcra_coord import listener
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = Path(tmp) / listener._plist_name_for("a:h:r")
+            plist.write_text("<plist/>")
+            with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "1"}), \
+                 patch.object(listener.scheduler_env, "is_macos", return_value=True), \
+                 patch.object(listener.scheduler_env, "launchagents_dir",
+                              return_value=Path(tmp)), \
+                 patch.object(listener, "_listener_armed", return_value=False), \
+                 patch.object(listener, "install_listener") as install, \
+                 patch.object(listener.subprocess, "run") as run:
+                listener.ensure_listener(agent="a:h:r")
+        install.assert_not_called()
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["launchctl", "unload", "-w", str(plist)])
+        self.assertEqual(run.call_args_list[1].args[0],
+                         ["launchctl", "load", "-w", str(plist)])
 
     def test_listener_armed_requires_loaded_launchd_job(self):
         from fulcra_coord import listener
