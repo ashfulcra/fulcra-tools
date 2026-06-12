@@ -260,7 +260,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ---- start ----
     sp = sub.add_parser("start", help="Create and start a new task")
-    sp.add_argument("title", metavar="TITLE", help="Short durable task objective")
+    # NOT a task id: an id-shaped TITLE (TASK-YYYYMMDD-...) is REFUSED by
+    # cmd_start (2026-06-11 live find — `start TASK-...` minted junk tasks
+    # titled after ids when the operator meant to CLAIM one).
+    sp.add_argument("title", metavar="TITLE",
+                    help="Short durable task objective — a NEW task's title, "
+                         "never an existing TASK-id (to claim one: "
+                         "'update <id> --status active')")
     sp.add_argument("--workstream", "-w", required=True, metavar="WS")
     # --agent is OPTIONAL (auto-resolved via identity when omitted) — parity with
     # every sibling write-command; it used to uniquely require it. Stays an override.

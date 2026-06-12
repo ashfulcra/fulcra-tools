@@ -9167,11 +9167,13 @@ class TestStartAgentOptional(_PresenceBackendCase):
 
 
 # ---------------------------------------------------------------------------
-# Onboarding UX hints (Task C): non-blocking STDERR nudges.
-#   1. `start` with a TASK-id-shaped title -> "you probably meant to claim".
+# Onboarding UX hints (Task C) — and the start-vs-claim REFUSAL that replaced
+# the first hint:
+#   1. `start` with a TASK-id-shaped title -> REFUSED, exit 1, nothing written
+#      (2026-06-11 live find: the warn-but-proceed hint let 6 junk tasks titled
+#      after task ids land on the bus; bug filed as option (a) — refuse).
 #   2. `connect`/`start` with a DERIVED identity + a legacy global identity.json
-#      present -> "migrate your legacy identity".
-# Both are warnings only; behavior (task creation, presence write) is unchanged.
+#      present -> "migrate your legacy identity" (still a warning only).
 # ---------------------------------------------------------------------------
 
 class TestOnboardingHints(unittest.TestCase):
@@ -9210,28 +9212,41 @@ class TestOnboardingHints(unittest.TestCase):
         legacy.parent.mkdir(parents=True, exist_ok=True)
         legacy.write_text(json.dumps({"agent": agent}))
 
-    # ---- start-vs-claim hint ----
+    # ---- start-vs-claim refusal ----
 
-    def test_start_with_task_id_title_emits_claim_hint_but_still_creates(self):
+    def test_start_with_task_id_title_refuses_no_task_no_remote_writes(self):
+        # 2026-06-11 live find: `start TASK-...` (the operator meant to CLAIM)
+        # created junk tasks TITLED after task ids — 6 on the live bus. The old
+        # non-blocking hint demonstrably did not prevent them, so an id-shaped
+        # title is now refused outright: exit 1, hint on stderr, NO task
+        # created, ZERO remote writes.
         from fulcra_coord.cli import cmd_start
         title = "TASK-20260101-deploy-the-thing-ab12cd34"
-        rc, out, err = self._run_capturing_stderr(cmd_start, self._ns(
-            title=title, workstream="devops", agent="claude-code:h:r",
-            kind="ops", priority="P2", summary="", next="", surface=None))
-        # Non-blocking: the task is still created (cached) regardless of rc.
-        tasks = cache.list_cached_tasks()
-        self.assertTrue(any(t["title"] == title for t in tasks),
-                        "start must still create the task despite the hint")
-        self.assertIn("update", err)
-        self.assertIn("--status active", err)
+        with patch("fulcra_coord.remote.upload_json") as up:
+            rc, out, err = self._run_capturing_stderr(cmd_start, self._ns(
+                title=title, workstream="devops", agent="claude-code:h:r",
+                kind="ops", priority="P2", summary="", next="", surface=None))
+        self.assertEqual(rc, 1)
+        self.assertIn("looks like a task id", err)
+        self.assertIn("fulcra-coord update <id> --status active", err)
+        # Nothing was created — locally or on the bus.
+        self.assertFalse(any(t["title"] == title
+                             for t in cache.list_cached_tasks()),
+                         "a refused start must not create the task")
+        self.assertEqual(up.call_count, 0,
+                         "a refused start must make zero remote writes")
 
-    def test_start_with_normal_title_no_claim_hint(self):
+    def test_start_with_normal_title_still_creates(self):
+        # No behavior change for genuine titles: the task is created.
         from fulcra_coord.cli import cmd_start
         rc, out, err = self._run_capturing_stderr(cmd_start, self._ns(
             title="Deploy the widget", workstream="devops",
             agent="claude-code:h:r", kind="ops", priority="P2",
             summary="", next="", surface=None))
         self.assertNotIn("--status active", err)
+        self.assertTrue(any(t["title"] == "Deploy the widget"
+                            for t in cache.list_cached_tasks()),
+                        "a genuine title must still create the task")
 
     # ---- legacy-identity migrate hint ----
 
