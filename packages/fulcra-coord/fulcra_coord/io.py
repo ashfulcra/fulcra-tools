@@ -495,6 +495,7 @@ def _release_fallback_throttle(token: Optional[str]) -> None:
 def _load_task_summaries(
     backend: Optional[list[str]] = None, *,
     bypass_fallback_throttle: bool = False,
+    skip_stale_fallback: bool = False,
 ) -> list[dict[str, Any]]:
     """Load the compact task-summary list WITHOUT fetching task bodies.
 
@@ -536,12 +537,22 @@ def _load_task_summaries(
     clearly the lesser evil vs joining the stampede. ``bypass_fallback_throttle``
     is for the RECONCILE path only: reconcile's job is exactly to repair the
     views, so it must never be locked out by listener fallbacks (it neither
-    claims nor releases the listeners' marker)."""
+    claims nor releases the listeners' marker).
+
+    ``skip_stale_fallback`` is for scheduled listener ticks: a listener must not
+    become the host's repair-shaped full task-body rebuild. It may serve the
+    stale summaries view and exit; reconcile/interactive reads can pay the
+    expensive correctness fallback when needed."""
     summaries_view = remote.download_json(
         remote.view_remote_path("summaries"), backend=backend)
     if summaries_view and summaries_view.get("summaries") is not None:
         stale_min = views.view_staleness_minutes(summaries_view)
         if stale_min is None:
+            return summaries_view["summaries"]
+        if skip_stale_fallback:
+            _warn(f"summaries view is {int(stale_min)}m stale — using the "
+                  "stale view without direct-listing fallback for this tick "
+                  "(results may be incomplete)")
             return summaries_view["summaries"]
         window_min = _fallback_window_minutes()
         holding_token: Optional[str] = None

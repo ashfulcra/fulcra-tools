@@ -147,12 +147,12 @@ class TestSummariesStaleGuard(unittest.TestCase):
             mock.patch("fulcra_coord.remote.stat", return_value=None),
         ]
 
-    def _run(self, fake):
+    def _run(self, fake, **kwargs):
         patches = self._patched(fake)
         for p in patches:
             p.start()
         try:
-            return _load_task_summaries(backend=["false"])
+            return _load_task_summaries(backend=["false"], **kwargs)
         finally:
             for p in patches:
                 p.stop()
@@ -178,6 +178,23 @@ class TestSummariesStaleGuard(unittest.TestCase):
         self.assertGreaterEqual(fake.list_calls, 1, "stale view must list tasks/ directly")
         self.assertTrue(warned.called, "staleness must be visible, not silent")
         self.assertIn("stale", warned.call_args_list[0].args[0])
+
+    def test_stale_view_can_skip_direct_listing_for_listener_ticks(self):
+        # notify-inbox's scheduled listener path must be bounded: when a view is
+        # stale, it may serve the stale aggregate for this tick rather than
+        # spawning the full direct-listing fallback.
+        view = views.build_summaries([self.t1])
+        view["generated_at"] = _iso(_now() - timedelta(hours=2))
+        fake = _SummariesBackendFake(view, [self.t1, self.t2])
+        with mock.patch("fulcra_coord.io._warn") as warned:
+            got = self._run(fake, skip_stale_fallback=True)
+        self.assertEqual({s["id"] for s in got}, {self.t1["id"]})
+        self.assertEqual(fake.list_calls, 0, "listener skip must not list tasks/")
+        self.assertEqual(fake.body_downloads, 0,
+                         "listener skip must not fetch task bodies")
+        self.assertTrue(warned.called, "stale-but-skipped read should be visible")
+        self.assertIn("without direct-listing fallback",
+                      warned.call_args_list[0].args[0])
 
     def test_stale_view_directive_surfaces_in_inbox(self):
         # End-to-end through the inbox read path: a directive ADDRESSED TO ME
