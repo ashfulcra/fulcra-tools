@@ -204,8 +204,11 @@ class TestHooksUseBriefing(unittest.TestCase):
         # I1: the briefing call must not pin --agent (it would override a
         # persisted identity, same reasoning as the old inbox call).
         self.assertNotIn("briefing --agent", body)
-        # The background presence connect is untouched.
-        self.assertIn('"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &', body)
+        # The background presence connect is still present, now via a shell-safe
+        # flag array so installers can bake role declarations into the hook.
+        self.assertIn('CONNECT_FLAGS=(__FULCRA_COORD_CONNECT_FLAGS__)', body)
+        self.assertIn('"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}" '
+                      '>/dev/null 2>&1 &', body)
 
     def test_codex_session_start_calls_briefing_with_codex_transforms(self):
         from fulcra_coord import codex
@@ -214,7 +217,9 @@ class TestHooksUseBriefing(unittest.TestCase):
         self.assertNotIn('"${FULCRA_COORD[@]}" status', body)
         # Codex transforms survive: review-capability connect + watch re-arm +
         # codex-derived fallback id.
-        self.assertIn("connect --can-review", body)
+        self.assertIn("CONNECT_FLAGS=(--can-review", body)
+        self.assertIn('"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}"',
+                      body)
         self.assertIn("ensure-codex-watch", body)
         self.assertIn('AGENT="codex:${HOST}:${REPO}"', body)
 

@@ -2862,6 +2862,31 @@ class TestInstallClaudeCode(unittest.TestCase):
         for f in ("session-start.sh", "pre-compact.sh", "session-end.sh"):
             self.assertTrue(os.access(os.path.join(hooks_dir, f), os.X_OK))
 
+    def test_install_can_bake_connect_roles_into_session_start(self):
+        from fulcra_coord import claude_code as cc
+        cc.install_claude_code(scope="global", can_review=True,
+                               roles=["coord-maintainer", "deploy"])
+        body = open(os.path.join(
+            self.home, ".claude", "fulcra-coord-hooks",
+            "session-start.sh")).read()
+        self.assertIn(
+            "CONNECT_FLAGS=(--can-review --role coord-maintainer --role deploy)",
+            body)
+        self.assertIn(
+            '"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}"',
+            body)
+
+    def test_reinstall_preserves_baked_connect_roles(self):
+        from fulcra_coord import claude_code as cc
+        cc.install_claude_code(scope="global", can_review=True,
+                               roles=["coord-maintainer"])
+        cc.install_claude_code(scope="global")
+        body = open(os.path.join(
+            self.home, ".claude", "fulcra-coord-hooks",
+            "session-start.sh")).read()
+        self.assertIn(
+            "CONNECT_FLAGS=(--can-review --role coord-maintainer)", body)
+
     def test_install_is_idempotent(self):
         from fulcra_coord import claude_code as cc
         cc.install_claude_code(scope="global")
@@ -2894,6 +2919,8 @@ class TestInstallClaudeCode(unittest.TestCase):
         s = self._settings()
         cmds = [h["command"] for e in s["hooks"].get("SessionStart", []) for h in e["hooks"]]
         self.assertEqual(cmds, ["/usr/bin/true"])
+        self.assertFalse(os.path.exists(os.path.join(
+            self.home, ".claude", "fulcra-coord-connect-flags.json")))
 
     def test_dry_run_writes_nothing(self):
         from fulcra_coord import claude_code as cc
@@ -2996,7 +3023,8 @@ class TestInstallClaudeCodeCmd(unittest.TestCase):
         from fulcra_coord import cli as climod
         from types import SimpleNamespace
         rc = climod.cmd_install_claude_code(
-            SimpleNamespace(scope="global", uninstall=False, dry_run=False))
+            SimpleNamespace(scope="global", uninstall=False, dry_run=False,
+                            can_review=False, role=None))
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(os.path.join(self.home, ".claude", "settings.json")))
 
@@ -4511,7 +4539,8 @@ class TestCodexTemplates(unittest.TestCase):
             'CWD="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("cwd",""))\' 2>/dev/null)"\n'
             'SESSION_ID="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("session_id",""))\' 2>/dev/null)"',
         ).replace(
-            '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+            'CONNECT_FLAGS=(__FULCRA_COORD_CONNECT_FLAGS__)\n'
+            '"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}" >/dev/null 2>&1 &',
             '# Re-arm Codex hooks + the per-agent inbox listener on every app start.\n'
             '# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.\n'
             '# A headless `codex exec` wake may run SessionStart too. It should refresh\n'
@@ -4522,13 +4551,15 @@ class TestCodexTemplates(unittest.TestCase):
             'else\n'
             '  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
             'fi\n'
-            '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+            'CONNECT_FLAGS=(--can-review __FULCRA_COORD_CONNECT_FLAGS__)\n'
+            '"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}" >/dev/null 2>&1 &',
         ).replace(
             '[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"',
             '[ -z "$AGENT" ] && AGENT="codex:${HOST}:${REPO}"',
         )
         self.assertEqual(codex.SESSION_START_SH, expected)
-        self.assertIn("connect --can-review", codex.SESSION_START_SH)
+        self.assertIn("CONNECT_FLAGS=(--can-review", codex.SESSION_START_SH)
+        self.assertIn("CONNECT_FLAGS=(--can-review", codex.SESSION_START_SH)
         # PreCompact reuses the CC body but keys the session-id env fallback on
         # FULCRA_COORD_SESSION_KEY (Codex's session id env differs).
         self.assertIn("FULCRA_COORD_SESSION_KEY", codex.PRE_COMPACT_SH)
@@ -4541,7 +4572,7 @@ class TestCodexTemplates(unittest.TestCase):
         # a fresh machine that never ran `install-listener` still self-heals and
         # hears directed work. The SessionStart hook backgrounds an
         # `ensure-codex-watch --no-connect` (--no-connect because the hook already
-        # does its own `connect --can-review` right after — avoid double-connect).
+        # does its own review-capability connect right after — avoid double-connect).
         from fulcra_coord import codex
         self.assertIn("ensure-codex-watch", codex.SESSION_START_SH)
         self.assertIn("--no-connect", codex.SESSION_START_SH)
@@ -4551,7 +4582,7 @@ class TestCodexTemplates(unittest.TestCase):
                       codex.SESSION_START_SH)
         # LOAD-BEARING: the self-heal must be ADDED, never at the cost of the
         # review-capability connect (#70). The poisoned PR dropped this; guard it.
-        self.assertIn("connect --can-review", codex.SESSION_START_SH)
+        self.assertIn("CONNECT_FLAGS=(--can-review", codex.SESSION_START_SH)
         # Backgrounded + silenced so it never blocks or slows session boot.
         self.assertIn('ensure-codex-watch --agent "$AGENT" --thread-id '
                       '"$SESSION_ID" --no-connect >/dev/null 2>&1 &',
@@ -4594,6 +4625,29 @@ class TestInstallCodex(unittest.TestCase):
         self.assertNotIn("__FULCRA_COORD_ARGV__", body)
         self.assertIn("FULCRA_COORD=(/opt/bin/fulcra-coord)", body)
 
+    def test_install_can_bake_additional_roles_into_session_start(self):
+        from fulcra_coord import codex
+        codex.install_codex(roles=["coord-maintainer", "deploy"])
+        body = open(os.path.join(
+            self.home, ".codex", "fulcra-coord-hooks",
+            "session-start.sh")).read()
+        self.assertIn(
+            "CONNECT_FLAGS=(--can-review --role coord-maintainer --role deploy)",
+            body)
+        self.assertIn(
+            '"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}"',
+            body)
+
+    def test_reinstall_preserves_baked_additional_roles(self):
+        from fulcra_coord import codex
+        codex.install_codex(roles=["coord-maintainer"])
+        codex.install_codex()
+        body = open(os.path.join(
+            self.home, ".codex", "fulcra-coord-hooks",
+            "session-start.sh")).read()
+        self.assertIn(
+            "CONNECT_FLAGS=(--can-review --role coord-maintainer)", body)
+
     def test_install_is_idempotent(self):
         from fulcra_coord import codex
         codex.install_codex()
@@ -4627,6 +4681,8 @@ class TestInstallCodex(unittest.TestCase):
         cmds = [hh["command"] for e in h["hooks"].get("SessionStart", []) for hh in e["hooks"]]
         self.assertEqual(cmds, ["/usr/bin/true"])
         self.assertNotIn("PreCompact", h["hooks"])
+        self.assertFalse(os.path.exists(os.path.join(
+            self.home, ".codex", "fulcra-coord-connect-flags.json")))
 
     def test_dry_run_writes_nothing(self):
         from fulcra_coord import codex
@@ -4740,7 +4796,7 @@ class TestInstallCodexCmd(unittest.TestCase):
         from fulcra_coord import cli as climod
         rc = climod.cmd_install_codex(types.SimpleNamespace(
             uninstall=False, dry_run=False, target_dir=None,
-            with_wake=False, agent=None))
+            with_wake=False, agent=None, role=None))
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(
             os.path.join(self.home, ".codex", "hooks.json")))
@@ -4750,7 +4806,7 @@ class TestInstallCodexCmd(unittest.TestCase):
         with patch("fulcra_coord.installers.codex.install_wake") as m_wake:
             rc = climod.cmd_install_codex(types.SimpleNamespace(
                 uninstall=False, dry_run=False, target_dir=None,
-                with_wake=True, agent="codex:h:r"))
+                with_wake=True, agent="codex:h:r", role=None))
         self.assertEqual(rc, 0)
         m_wake.assert_called_once_with(
             "codex:h:r", uninstall=False, dry_run=False)
@@ -4999,15 +5055,27 @@ class TestEnsureCodexWatch(unittest.TestCase):
 
 
 class TestEnsureCodexWatchDispatch(unittest.TestCase):
+    def test_install_claude_code_parser_accepts_role_flags(self):
+        from fulcra_coord.entry import build_parser
+        parser = build_parser()
+        ns = parser.parse_args([
+            "install-claude-code", "--can-review", "--role", "coord-maintainer",
+            "--role", "deploy", "--dry-run"])
+        self.assertEqual(ns.command, "install-claude-code")
+        self.assertTrue(ns.can_review)
+        self.assertEqual(ns.role, ["coord-maintainer", "deploy"])
+        self.assertTrue(ns.dry_run)
+
     def test_install_codex_parser_accepts_wake_flags(self):
         from fulcra_coord.entry import build_parser
         parser = build_parser()
         ns = parser.parse_args([
             "install-codex", "--with-wake", "--agent", "codex:h:r",
-            "--dry-run"])
+            "--role", "coord-maintainer", "--dry-run"])
         self.assertEqual(ns.command, "install-codex")
         self.assertTrue(ns.with_wake)
         self.assertEqual(ns.agent, "codex:h:r")
+        self.assertEqual(ns.role, ["coord-maintainer"])
         self.assertTrue(ns.dry_run)
 
     def test_in_command_map(self):

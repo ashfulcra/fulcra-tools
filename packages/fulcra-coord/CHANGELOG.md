@@ -12,6 +12,18 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Installer-baked role declarations
+
+- `install-claude-code` can now bake `--can-review` and repeated `--role ROLE`
+  declarations into the installed SessionStart `connect` hook.
+- `install-codex` can now bake repeated `--role ROLE` declarations into the
+  installed SessionStart hook while preserving Codex's default review
+  capability. The hook materializes connect flags as a bash array so role names
+  stay shell-safe.
+- Baked declarations are persisted beside the managed hook config and reused on
+  later reinstall/self-heal rewrites, so `ensure-codex-watch` does not silently
+  erase roles installed earlier.
+
 ### Scheduled agent reminders
 
 - Added `fulcra-coord remind ASSIGNEE WHEN TITLE`, a bus-native scheduled
@@ -22,6 +34,9 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
   directives stay out of `inbox`, listener notifications, and
   `index.counts.inbox` until the gate passes; malformed/empty gates continue to
   behave as immediately visible.
+- During a mixed-version rollout, pre-196 hosts may still surface scheduled
+  reminders immediately until they self-update. That failure mode is benign
+  early visibility, not missed notification.
 
 ### Listener ticks keep reviewer routing presence fresh
 

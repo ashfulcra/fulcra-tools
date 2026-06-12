@@ -545,6 +545,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Install into ~/.claude/settings.json (default)")
     sp.add_argument("--uninstall", action="store_true", help="Remove the managed hooks")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+    sp.add_argument("--can-review", dest="can_review", action="store_true",
+                    help="Bake review capability declaration into the installed "
+                         "SessionStart connect hook")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Bake a capability/role declaration into the installed "
+                         "SessionStart connect hook (repeatable)")
     # Host wake-exec add-on: seed this agent's entry in the per-adopter
     # wake.json so the durable listener can SPAWN a headless session when
     # directed work arrives (not just notify). The written command is a
@@ -621,6 +627,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "--with-wake")
     sp.add_argument("--uninstall", action="store_true", help="Remove the managed hooks")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+    sp.add_argument("--role", action="append", default=None, metavar="ROLE",
+                    help="Bake an additional capability/role declaration into "
+                         "the installed SessionStart connect hook (repeatable; "
+                         "Codex still declares review by default)")
 
     # ---- ensure-codex-watch ----
     sp = sub.add_parser("ensure-codex-watch",
