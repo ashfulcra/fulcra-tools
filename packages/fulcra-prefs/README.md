@@ -118,20 +118,33 @@ can't override something you explicitly stated — which is what makes passive
 capture safe. The when/what heuristics live in
 [`skill/references/fulcra-prefs-capture.md`](skill/references/fulcra-prefs-capture.md).
 
-## Claude Code session hook
+## Platform hooks
 
-Add to `~/.claude/settings.json`:
+CLI-capable platforms can install managed hooks:
 
-```json
-{"hooks": {"SessionStart": [{"hooks": [{"type": "command",
-  "command": "fulcra-prefs compile >/dev/null 2>&1; fulcra-prefs inject --platform claude-code"}]}]}}
+```bash
+fulcra-prefs install-hooks --platform claude-code
+fulcra-prefs install-hooks --platform codex
 ```
 
-The hook recompiles first (the spec requires compile to run at every tier-1
-session start so the preference docs reflect the latest signals), then prints
-the preference block as session context. If you haven't onboarded yet, or the
-compiled doc is empty, it emits nothing at all — both commands are designed to
-fail silent, so this hook never breaks a session start.
+The SessionStart hook recompiles first (the spec requires compile to run at
+every tier-1 session start so the preference docs reflect the latest signals),
+then emits JSON hook output containing the preference block as session context.
+If you haven't onboarded yet, or the compiled doc is empty, it emits nothing at
+all — hooks are designed to fail silent, so they never break a session start.
+
+Auto-capture hooks drain candidate files at lifecycle boundaries. Agents write
+the same JSON array accepted by `capture-batch` to:
+
+```text
+~/.local/state/fulcra-prefs/candidates/<platform>/<session_id>.json
+```
+
+Claude Code drains on `PreCompact` and `Stop`; Codex drains on `PreCompact`
+because Codex `Stop` fires every turn. On successful capture the file is renamed
+with a `.captured` suffix so repeat lifecycle hooks do not double-ingest it.
+`install-hooks --uninstall` removes the config entries but leaves the generated
+scripts on disk; they are inert unless referenced by the platform config.
 
 ---
 
@@ -261,8 +274,9 @@ and cross-platform compile consistency.
   multi-user sync layer in v1.
 - **No MCP write path.** The Fulcra MCP exposes read operations today; capture
   and compile require a CLI-capable agent. Filed as a platform gap.
-- **Cron documented, not installed.** The recommended cron (`fulcra-prefs compile`
-  on a timer) is described in the skill; the installer is out of scope for v1.
+- **Hooks are installed for Claude Code and Codex only.** Other CLI-capable
+  agents can still use `capture-batch` directly or write the same candidate file
+  convention once a platform adapter exists.
 - **A double-ingest corner case.** If a capture's ingest POST *succeeds* but the
   follow-up cache-shard write fails (rare: network blips between the two calls),
   the record is spooled and re-POSTed on the next `compile` flush — so the raw
