@@ -34,12 +34,18 @@ placeholder.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
 from . import claude_code, cli_invocation, wake
 from .cli_invocation import PLACEHOLDER_ARGV
+from .views import agent_slug
+
+THREAD_AUTOMATION_INTERVAL_MIN_DEFAULT = 15
+CODEX_WAKE_ENV = "FULCRA_COORD_CODEX_WAKE"
 
 # SessionStart mostly matches Claude Code's (same stdin shape, cwd-driven), but
 # Codex is the canonical reviewer in the review-router seed pool. If its startup
@@ -47,6 +53,10 @@ from .cli_invocation import PLACEHOLDER_ARGV
 # sees the right identity but rates it below-floor. Keep Codex findable for PR
 # review requests by declaring review capability on every connect.
 SESSION_START_SH = claude_code.SESSION_START_SH.replace(
+    'CWD="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("cwd",""))\' 2>/dev/null)"',
+    'CWD="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("cwd",""))\' 2>/dev/null)"\n'
+    'SESSION_ID="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("session_id",""))\' 2>/dev/null)"',
+).replace(
     '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
     # Re-arm Codex hooks + the per-agent inbox listener on every app start, THEN
     # connect with the review capability. The self-heal is the whole point on a
@@ -57,7 +67,14 @@ SESSION_START_SH = claude_code.SESSION_START_SH.replace(
     # refreshes presence — avoid a double-connect.
     '# Re-arm Codex hooks + the per-agent inbox listener on every app start.\n'
     '# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.\n'
-    '"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+    '# A headless `codex exec` wake may run SessionStart too. It should refresh\n'
+    '# hooks/listeners, but must not steal this app thread heartbeat by retargeting\n'
+    '# the managed automation at its throwaway exec session id.\n'
+    f'if [ -n "$SESSION_ID" ] && [ -z "${{{CODEX_WAKE_ENV}:-}}" ]; then\n'
+    '  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --thread-id "$SESSION_ID" --no-connect >/dev/null 2>&1 &\n'
+    'else\n'
+    '  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+    'fi\n'
     '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
 ).replace(
     # The shared CC body derives a `claude-code:*` fallback id when the CLI can't
@@ -203,7 +220,8 @@ def _default_wake_prompt(agent: str) -> str:
 def default_wake_entry(agent: str) -> dict[str, Any]:
     codex_bin = shutil.which("codex") or "codex"
     return {
-        "cmd": [codex_bin, "exec", "--dangerously-bypass-approvals-and-sandbox",
+        "cmd": ["/usr/bin/env", f"{CODEX_WAKE_ENV}=1", codex_bin, "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
                 _default_wake_prompt(agent)],
         "cwd": str(Path.cwd()),
         "min_interval_min": 15,
@@ -254,4 +272,127 @@ def install_wake(agent: str, *, uninstall: bool = False,
             pass
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2) + "\n")
+    return plan
+
+
+# Codex app thread automation adapter.
+#
+# Session hooks and launchd listeners are not enough for an already-open Codex
+# app thread: Codex's app-native heartbeat automation is the layer that wakes
+# THIS conversation on a cadence. The SessionStart hook has the current
+# session/thread id, so it can seed a managed automation here.
+
+def _codex_home() -> Path:
+    return Path.home() / ".codex"
+
+
+def _automation_id(agent: str) -> str:
+    return f"fulcra-coord-task-listener-{agent_slug(agent)}"
+
+
+def _automation_path(agent: str) -> Path:
+    codex_home = Path(os.environ.get("CODEX_HOME") or _codex_home())
+    aid = _automation_id(agent)
+    return codex_home / "automations" / aid / "automation.toml"
+
+
+def _toml_str(s: str) -> str:
+    return json.dumps(s)
+
+
+def _automation_prompt(agent: str) -> str:
+    return (
+        f"Check the fulcra-coord bus for work addressed to this agent and "
+        f"surface it in this thread. Run `fulcra-coord inbox --agent {agent}` "
+        "and `fulcra-coord needs-me`; summarize any new actionable tasks, "
+        "review requests, or operator-blocked items. If there is actionable "
+        "work for this agent, continue handling it or clearly state the next "
+        "command/action needed. Also verify the host launchd listener for "
+        f"`{agent}` is still loaded, exiting 0, and writing per-agent listener "
+        "breadcrumbs."
+    )
+
+
+def _parse_simple_toml_fields(text: str) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = [p.strip() for p in line.split("=", 1)]
+        try:
+            out[key] = json.loads(val)
+        except Exception:
+            try:
+                out[key] = int(val)
+            except ValueError:
+                out[key] = val.strip('"')
+    return out
+
+
+def install_thread_automation(
+    agent: str, thread_id: str, *,
+    interval_min: int = THREAD_AUTOMATION_INTERVAL_MIN_DEFAULT,
+    uninstall: bool = False, dry_run: bool = False,
+) -> dict[str, Any]:
+    """Install/update the Codex thread heartbeat automation for this agent.
+
+    The file format mirrors Codex app's automation.toml. We preserve the
+    existing created_at when updating our managed id, and touch no other
+    automations. Without a thread id, callers should skip this entirely.
+    """
+    aid = _automation_id(agent)
+    path = _automation_path(agent)
+    plan: dict[str, Any] = {
+        "id": aid, "path": str(path), "agent": agent, "thread_id": thread_id,
+        "interval_min": max(1, int(interval_min or THREAD_AUTOMATION_INTERVAL_MIN_DEFAULT)),
+        "uninstall": uninstall, "dry_run": dry_run, "would_write": None,
+    }
+    if uninstall:
+        if not dry_run and path.exists():
+            try:
+                path.unlink()
+                path.parent.rmdir()
+            except OSError:
+                pass
+        return plan
+
+    now_ms = int(time.time() * 1000)
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = _parse_simple_toml_fields(path.read_text())
+        except OSError:
+            existing = {}
+    created_at = existing.get("created_at") if isinstance(existing.get("created_at"), int) else now_ms
+    rrule = f"FREQ=MINUTELY;INTERVAL={plan['interval_min']}"
+    fields: dict[str, Any] = {
+        "version": 1,
+        "id": aid,
+        "kind": "heartbeat",
+        "name": "Fulcra Coord task listener",
+        "prompt": _automation_prompt(agent),
+        "status": "ACTIVE",
+        "rrule": rrule,
+        "target_thread_id": thread_id,
+        "created_at": created_at,
+        "updated_at": now_ms,
+    }
+    body = (
+        f"version = {fields['version']}\n"
+        f"id = {_toml_str(fields['id'])}\n"
+        f"kind = {_toml_str(fields['kind'])}\n"
+        f"name = {_toml_str(fields['name'])}\n"
+        f"prompt = {_toml_str(fields['prompt'])}\n"
+        f"status = {_toml_str(fields['status'])}\n"
+        f"rrule = {_toml_str(fields['rrule'])}\n"
+        f"target_thread_id = {_toml_str(fields['target_thread_id'])}\n"
+        f"created_at = {fields['created_at']}\n"
+        f"updated_at = {fields['updated_at']}\n"
+    )
+    plan["would_write"] = body
+    if dry_run:
+        return plan
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
     return plan
