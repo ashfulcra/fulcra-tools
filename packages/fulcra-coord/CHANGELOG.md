@@ -123,6 +123,19 @@ Three operator-approved cuts to remote-op fan-out (every remote op is one
 
 ---
 
+## [0.15.5] — 2026-06-12
+
+**Listener hot-path release.** `notify-inbox` no longer pays the optional
+overdue-loop directive scan by default, so launchd listener ticks can write the
+inbox surface, emit notifications, wake configured agents, run self-update, and
+exit without being pinned behind a large directive download fan-out. When the
+summaries view is stale, scheduled listener ticks now also serve that stale view
+for the tick instead of winning the direct-listing fallback claim and rebuilding
+from every task body. Hosts that want the old notification suffix or
+repair-shaped listener fallback can opt back in with
+`FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX=1` or
+`FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK=1`.
+
 ## [0.15.4] — 2026-06-11
 
 **Reliability release.** The through-line: the transport stops lying to the
