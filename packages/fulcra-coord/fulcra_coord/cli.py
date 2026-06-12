@@ -943,6 +943,7 @@ def _directive_parity_check(
     *, backend: Optional[list[str]] = None,
     records: Optional[list[dict[str, Any]]] = None,
     all_tasks: Optional[list[dict[str, Any]]] = None,
+    deadline: Optional[float] = None,
 ) -> dict:
     """Compare each first-class directive record against its back-ref task.
 
@@ -1020,6 +1021,9 @@ def _directive_parity_check(
     drift_set: set[str] = set()
     checked = 0
     orphans = 0
+    deferred = 0
+    if deadline is not None:
+        import time
 
     # Volatile fields (created_at / updated_at) are ignored BY CONSTRUCTION here:
     # rather than diff whole records and subtract an ignore-set (the
@@ -1062,6 +1066,13 @@ def _directive_parity_check(
         }
 
     for stored in stored_records:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining < 2.0:
+                deferred += 1
+                continue
+        else:
+            remaining = None
         task_id = stored.get("task_id")
         if not task_id:
             continue  # orphan / directly-authored directive — can't compare (gate)
@@ -1083,8 +1094,11 @@ def _directive_parity_check(
             directive_id = expected.get("id")
             if directive_id:
                 try:
+                    ack_timeout = None
+                    if remaining is not None:
+                        ack_timeout = max(1.0, min(5.0, remaining - 1.0))
                     sublog_acks = _directives.read_directive_acks(
-                        directive_id, backend=backend)
+                        directive_id, backend=backend, timeout=ack_timeout)
                     if sublog_acks:
                         expected["acked_by"] = sorted(
                             set(expected.get("acked_by") or []) | set(sublog_acks))
@@ -1116,6 +1130,7 @@ def _directive_parity_check(
         "drift": len(drift_task_ids),
         "drift_task_ids": drift_task_ids,
         "orphans": orphans,
+        "deferred": deferred,
     }
 
 
@@ -1571,6 +1586,21 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     t0 = time.monotonic()
     timeout = env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
     deadline = t0 + timeout
+    skipped_checks: list[str] = []
+
+    class _SkipBestEffortCheck(Exception):
+        pass
+
+    def _deadline_spent(label: str, *, headroom: float = 1.0) -> bool:
+        """Best-effort sub-passes must not consume the heartbeat's last breath."""
+        if time.monotonic() + headroom < deadline:
+            return False
+        skipped_checks.append(label)
+        try:
+            _warn(f"  {label} skipped (reconcile deadline budget spent)")
+        except Exception:
+            pass
+        return True
 
     markers = cache.list_op_markers()
     needs_repair = [m for m in markers if m.get("needs_reconcile")]
@@ -2042,8 +2072,20 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         return view_name, ok
 
     max_workers = min(8, len(upload_items)) or 1
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for view_name, ok in pool.map(_upload_one, upload_items):
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    future_to_view = {
+        executor.submit(_upload_one, item): item[0]
+        for item in upload_items
+    }
+    try:
+        for future in concurrent.futures.as_completed(
+            future_to_view, timeout=max(0, deadline - time.monotonic())
+        ):
+            try:
+                view_name, ok = future.result()
+            except Exception:
+                view_name = future_to_view.get(future, "<unknown>")
+                ok = False
             if ok:
                 # SUCCESS-ONLY fingerprint (main thread, like the write path):
                 # the next WRITE may skip this view (reconcile itself never
@@ -2052,6 +2094,17 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 cache.write_view_fingerprint(view_name, view_digests[view_name])
             else:
                 failures.append(view_name)
+    except concurrent.futures.TimeoutError:
+        pending = [name for future, name in future_to_view.items()
+                   if not future.done()]
+        failures.extend(pending)
+        _warn(f"  View uploads timed out before completion: {pending}")
+    finally:
+        # Do not let a wedged upload worker hold the reconcile command past its
+        # global deadline. Finished futures were consumed above; not-yet-started
+        # futures are cancelled, and already-running subprocesses are allowed to
+        # wind down under their own transport timeout without blocking this tick.
+        executor.shutdown(wait=False, cancel_futures=True)
 
     recovered = retry_stats["recovered"]
     if recovered:
@@ -2074,7 +2127,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # will see, so re-loading it would only spend spawns to learn less. The
     # isinstance guard also protects against a patched/failed rebuild handing
     # back a non-dict.
-    presence_view = _reconcile_presence(backend=backend)
+    if _deadline_spent("Presence rebuild", headroom=5.0):
+        presence_view = None
+    else:
+        presence_view = _reconcile_presence(backend=backend)
     # F5 boundary case: the rebuild read PARTIALLY failed AND the previous
     # aggregate is unreadable — presence is unknowable this tick (the sentinel,
     # distinct from None = "nothing to rebuild, sub-passes may self-load").
@@ -2106,6 +2162,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         _warn("  ⚠ presence unreadable this tick (partial per-agent read, no "
               "usable aggregate) — review-route sweep skipped (no rerouting "
               "on an unknowable roster)")
+    elif _deadline_spent("Review-route sweep", headroom=5.0):
+        pass
     else:
         try:
             _sweep_review_routes(all_tasks, backend=backend, now=now,
@@ -2120,6 +2178,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     # the pass's throttle claim just read (or wrote) retention/last-run.json,
     # so the health write below must not pay a third download for it.
     try:
+        if _deadline_spent("Retention pass", headroom=5.0):
+            raise _SkipBestEffortCheck()
         ret = _run_retention(all_tasks, now=now, deadline=deadline, backend=backend)
         retention_marker = ret.get("retention_marker")
         if not ret.get("skipped"):
@@ -2131,6 +2191,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                   f"{ret.get('pruned_continuity', 0)} continuity, "
                   f"{ret.get('pruned_events', 0)} events, "
                   f"{ret.get('pruned_provenance', 0)} prov.")
+    except _SkipBestEffortCheck:
+        pass
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
@@ -2192,10 +2254,14 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # bodies this tick already loaded (no re-downloads) and the tick's
         # deadline (the pass samples + stops on a spent budget — see the check).
         try:
+            if _deadline_spent("Event-parity check", headroom=5.0):
+                raise _SkipBestEffortCheck()
             parity = _event_parity_check(all_tasks, backend=backend,
                                          deadline=deadline,
                                          summaries_view=summaries_view)
             record["event_parity"] = parity
+        except _SkipBestEffortCheck:
+            pass
         except Exception as _pe:
             # Best-effort, but NOT silent: a checker that eats its own errors
             # would report zero drift and look healthy while actually being
@@ -2211,7 +2277,11 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # self-guarding (the helper never raises); wrapped here too so a future
         # change to it can never break reconcile.
         try:
+            if _deadline_spent("Dual-write health", headroom=2.0):
+                raise _SkipBestEffortCheck()
             record["event_dual_write"] = _event_dual_write_health()
+        except _SkipBestEffortCheck:
+            pass
         except Exception as _de:
             try:
                 _warn(f"  Dual-write health skipped (error): {_de}")
@@ -2223,7 +2293,11 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # self-loading paths (which will most likely fail the same way and
         # degrade as before).
         try:
+            if _deadline_spent("Loop-record load", headroom=10.0):
+                raise _SkipBestEffortCheck()
             loop_records = load_loop_records(backend=backend)
+        except _SkipBestEffortCheck:
+            loop_records = None
         except Exception:
             loop_records = None
         # Directive-parity sub-pass: fold each first-class directive record
@@ -2233,8 +2307,13 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # is swallowed and the result, present or absent, NEVER changes
         # reconcile's exit code. Wrapped exactly like the event-parity pass above.
         try:
+            if _deadline_spent("Directive-parity check", headroom=10.0):
+                raise _SkipBestEffortCheck()
             record["directive_parity"] = _directive_parity_check(
-                backend=backend, records=loop_records, all_tasks=all_tasks)
+                backend=backend, records=loop_records, all_tasks=all_tasks,
+                deadline=deadline)
+        except _SkipBestEffortCheck:
+            pass
         except Exception as _dpe:
             # Best-effort but not silent: a checker that ate its own error would
             # report green while broken. Surface it (guarded so the warn can't
@@ -2250,8 +2329,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # passes above: the result, present or absent, NEVER changes
         # reconcile's exit code, and the error is surfaced rather than eaten.
         try:
+            if _deadline_spent("Loop-health check", headroom=30.0):
+                raise _SkipBestEffortCheck()
             record["loop_health"] = _loop_health_check(backend=backend,
                                                        records=loop_records)
+        except _SkipBestEffortCheck:
+            pass
         except Exception as _lhe:
             try:
                 _warn(f"  Loop-health check skipped (error): {_lhe}")
@@ -2265,12 +2348,16 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # loop-health pass above: the result, present or absent, NEVER
         # changes reconcile's exit code, and the error is surfaced, not eaten.
         try:
+            if _deadline_spent("Role-health check", headroom=30.0):
+                raise _SkipBestEffortCheck()
             # F5: an unknowable roster (sentinel) makes every role's vacancy
             # judgment unknown inside the check — reported, never escalated.
             record["role_health"] = _role_health_check(
                 backend=backend,
                 presence_agents=(_PRESENCE_READ_ERROR if presence_unknown
                                  else presence_agents))
+        except _SkipBestEffortCheck:
+            pass
         except Exception as _rhe:
             try:
                 _warn(f"  Role-health check skipped (error): {_rhe}")
@@ -2283,6 +2370,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # all_tasks is already in hand, so this adds no remote round-trip beyond
         # the single presence-aggregate read inside the check.
         try:
+            if _deadline_spent("Undelivered-directive check", headroom=15.0):
+                raise _SkipBestEffortCheck()
             ud = _undelivered_directive_check(
                 all_tasks, backend=backend,
                 # E4: hand over the freshly-rebuilt presence view when we have
@@ -2312,6 +2401,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                     f"  ⚠ {ud['count']} directive(s) undelivered — assignee "
                     f"offline/stale, never picked up: {ids}"
                 )
+        except _SkipBestEffortCheck:
+            pass
         except Exception as _ue:
             # Best-effort but not silent: a checker that ate its own error would
             # look healthy while the dead-inbox bug it exists to catch festers.
@@ -2330,6 +2421,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # source (and assess_infra_health also judges freshest-per-host, so legacy
         # per-cwd orphans already on the bus are superseded too). Fall back to the
         # agent id only if host is somehow absent.
+        if skipped_checks:
+            record["skipped_checks"] = list(skipped_checks)
         slug = views.agent_slug(record.get("host") or identity.resolve_agent())
         if not remote.upload_json(record, remote.health_remote_path(slug), backend=backend):
             _warn("  Health record upload failed (best-effort; tick unaffected).")

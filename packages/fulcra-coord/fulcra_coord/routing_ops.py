@@ -20,8 +20,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from . import cache, remote, schema, views, identity, routing, env_float
+from . import role_ops as _role_ops
+from . import roles as _roles
 # Ops-log writer, bound under the package-wide conventional name (the writepipe
 # import style). 2026-06-11 wave: cmd_review_done's response-write failure path
 # called ``ops_log.log_op`` WITHOUT this import — the NameError was swallowed by
@@ -97,19 +100,92 @@ def _review_seeds(author: str) -> list[str]:
     return _review_seed_list(cfg.get("seed"))
 
 
-def _review_pool(author: str, presence: list[dict[str, Any]]) -> list[str]:
-    """Preference-ordered candidate pool: configured seed ids first (may be
-    empty — see _review_seeds), then every review-capable agent in presence
-    order. De-duplicated, seeds kept first. An empty seed degrades to a purely
-    capability-driven pool; cmd_request_review escalates via block --on-user when
-    the pool has no live reviewer."""
-    pool = list(_review_seeds(author))
+def _review_role_names() -> tuple[str, list[str]]:
+    """Canonical reviewer role plus migration aliases.
+
+    ``FULCRA_COORD_REVIEW_ROLE`` is an explicit fleet override. When unset, the
+    fleet default is ``review`` and the historical ``reviewer`` role is treated
+    as a migration alias so older agents stay routable while installs converge.
+    """
+    configured = os.environ.get("FULCRA_COORD_REVIEW_ROLE", "").strip()
+    if configured:
+        return configured, []
+    return "review", ["reviewer"]
+
+
+def _presence_by_agent(presence: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(rec.get("agent")): rec
+        for rec in presence
+        if isinstance(rec, dict) and rec.get("agent")
+    }
+
+
+def _review_role_candidates(
+    presence: list[dict[str, Any]], *, backend: Optional[list[str]] = None,
+    now: Optional[datetime] = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Fresh role holders, ordered by presence freshness.
+
+    Lease presence qualifies an agent as a role holder; the holder's own
+    presence heartbeat ranks candidates. A lease read error is skipped rather
+    than treated as vacancy, preserving the role_ops READ_ERROR discipline.
+    """
+    canonical, aliases = _review_role_names()
+    wanted = {canonical, *aliases}
+    try:
+        registry = _role_ops.load_roles_with_leases(backend=backend)
+    except Exception:
+        return [], {}
+    presence_by = _presence_by_agent(presence)
+    now = now or datetime.now(timezone.utc)
+    ranked: list[tuple[int, str, str, str]] = []
+    sources: dict[str, str] = {}
+    for rec, leases in registry:
+        name = rec.get("name") if isinstance(rec, dict) else None
+        if name not in wanted:
+            continue
+        if leases is _role_ops.READ_ERROR:
+            continue
+        status = _roles.role_status(
+            rec, leases, presence_by, now, stale_hours=views._stale_hours(),
+            grace_seconds=views._presence_grace_seconds())
+        source = f"role:{canonical}" if name == canonical else f"role-alias:{name}"
+        priority = 0 if name == canonical else 1
+        for holder in status.get("holders", []):
+            agent = holder.get("agent")
+            if not agent or agent in sources:
+                continue
+            last_seen = presence_by.get(agent, {}).get("last_seen", "") or ""
+            ranked.append((priority, last_seen, str(agent), source))
+            sources[str(agent)] = source
+    ranked.sort(key=lambda item: item[2])
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    ranked.sort(key=lambda item: item[0])
+    return [agent for _priority, _last_seen, agent, _source in ranked], sources
+
+
+def _review_pool(
+    author: str, presence: list[dict[str, Any]], *,
+    backend: Optional[list[str]] = None, now: Optional[datetime] = None,
+) -> list[str]:
+    """Preference-ordered candidate pool.
+
+    Bus role holders are canonical, generic review capability is the live
+    fallback, and env/file seeds are legacy bootstrap hints. De-duplicated in
+    that order. cmd_request_review escalates via block --on-user when the pool
+    has no live reviewer.
+    """
+    role_pool, _sources = _review_role_candidates(
+        presence, backend=backend, now=now)
+    pool = list(role_pool)
     for rec in presence:
         agent = rec.get("agent")
         if not agent:
             continue
         if "review" in (rec.get("capabilities") or []):
             pool.append(agent)
+    pool.extend(_review_seeds(author))
     seen: set[str] = set()
     ordered: list[str] = []
     for a in pool:
@@ -117,6 +193,33 @@ def _review_pool(author: str, presence: list[dict[str, Any]]) -> list[str]:
             seen.add(a)
             ordered.append(a)
     return ordered
+
+
+def _review_candidate_sources(
+    author: str, presence: list[dict[str, Any]], *,
+    backend: Optional[list[str]] = None, now: Optional[datetime] = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Pool plus source labels for dry-run/debug output."""
+    role_pool, sources = _review_role_candidates(
+        presence, backend=backend, now=now)
+    pool = list(role_pool)
+    for rec in presence:
+        agent = rec.get("agent")
+        if not agent:
+            continue
+        if "review" in (rec.get("capabilities") or []):
+            pool.append(agent)
+            sources.setdefault(agent, "capability:review")
+    for agent in _review_seeds(author):
+        pool.append(agent)
+        sources.setdefault(agent, "legacy-seed")
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for agent in pool:
+        if agent and agent not in seen:
+            seen.add(agent)
+            ordered.append(agent)
+    return ordered, sources
 
 
 def _append_route_event_and_assignee(task, *, kind, to, by, attempt, reason,
@@ -163,6 +266,82 @@ def _mirror_route_to_directive_sublog(
                 directives.stable_directive_id(task_id), route_event, backend=backend)
     except Exception:
         pass
+
+
+def _normalized_review_key(artifact: Any, repo: Any) -> tuple[str, str]:
+    """Conservative duplicate key for open review loops."""
+    repo_key = str(repo or "").strip()
+    ref = str(artifact).strip()
+    parsed = urlparse(ref)
+    host = (parsed.netloc or "").lower()
+    if host in {"github.com", "www.github.com"}:
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 4 and parts[2] == "pull":
+            repo_key = f"{parts[0]}/{parts[1]}"
+            ref = f"pull/{parts[3]}"
+    elif repo_key and ref.isdigit():
+        ref = f"pull/{ref}"
+    return (repo_key.lower(), ref)
+
+
+def _find_open_review_for_artifact(
+    artifact: Any, repo: Any, *, backend: Optional[list[str]] = None
+) -> Optional[dict[str, Any]]:
+    """Find an existing non-terminal review loop for this artifact.
+
+    A degraded task read is partial truth, so it is not safe for dedup: return
+    None and let request-review create the route rather than swallowing work.
+    """
+    try:
+        tasks = _load_all_tasks(backend=backend)
+    except Exception:
+        return None
+    if getattr(tasks, "load_degraded", False):
+        return None
+    target = _normalized_review_key(artifact, repo)
+    matches: list[dict[str, Any]] = []
+    for task in tasks:
+        if not routing.is_review_directive(task):
+            continue
+        if _normalized_review_key(task.get("pr"), task.get("repo")) != target:
+            continue
+        # _load_all_tasks seeds from the local cache and refreshes ids named by
+        # current views. A terminal review can fall out of those views while a
+        # stale cached proposed copy remains. Refresh the exact candidate body
+        # before letting it suppress a new request; if the refresh is
+        # unavailable, skip dedup rather than swallowing work on partial truth.
+        task_id = task.get("id")
+        if task_id:
+            fresh = _cache_remote_task(str(task_id), backend=backend)
+            if not isinstance(fresh, dict):
+                continue
+            task = fresh
+        if task.get("status") in schema.TERMINAL_STATUSES:
+            continue
+        matches.append(task)
+    matches.sort(key=lambda t: t.get("updated_at") or t.get("created_at") or "",
+                 reverse=True)
+    return matches[0] if matches else None
+
+
+def _attach_existing_review(
+    task: dict[str, Any], *, by: str, backend: Optional[list[str]] = None,
+) -> bool:
+    """Record that another request attached to an already-open review loop."""
+    attached = _append_route_event_and_assignee(
+        task, kind="routed", to=task.get("assignee") or "", by=by,
+        attempt=max(1, routing.route_attempt_count(task)),
+        reason="duplicate request attached to existing open review",
+        candidate_snapshot=[], observed_updated_at=task.get("updated_at", ""))
+    cache.write_cached_task(attached)
+    try:
+        ok = _write_task_and_views(
+            attached, backend=backend, command="request-review")
+    except (schema.ConflictError, schema.NeedsReconcile):
+        ok = True
+    if ok:
+        _mirror_route_to_directive_sublog(attached, backend=backend)
+    return bool(ok)
 
 
 def _force_block_for_human(task, *, by, ask, human):
@@ -246,6 +425,7 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     repo = getattr(args, "repo", None)
     dry_run = getattr(args, "dry_run", False)
     out_format = getattr(args, "format", "table")
+    note = (getattr(args, "note", None) or "").strip()
     author = identity.resolve_agent(getattr(args, "agent", None))
     try:
         # Staleness-guarded: falls back to per-agent presence records when the
@@ -253,14 +433,19 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
         presence = _load_presence_agents(backend=backend)
     except Exception:
         presence = []  # treat as no live candidate -> escalate
+    existing_review = _find_open_review_for_artifact(
+        artifact, repo, backend=backend)
+    now = datetime.now(timezone.utc)
     override = getattr(args, "candidate_list", None)
     if override:
         pool = [a.strip() for a in override.split(",") if a.strip()]
+        sources = {a: "explicit" for a in pool}
     else:
-        pool = _review_pool(author, presence)
-    now = datetime.now(timezone.utc)
+        pool, sources = _review_candidate_sources(
+            author, presence, backend=backend, now=now)
     snapshot = [
         {"agent": a,
+         "source": sources.get(a, "unknown"),
          "tier": views._effective_routing_liveness(
              next((r.get("last_seen", "") for r in presence if r.get("agent") == a), ""),
              now, views._presence_grace_seconds()) or "below-floor"}
@@ -275,6 +460,8 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     if dry_run:
         report = {"artifact": artifact, "repo": repo, "pool": pool, "snapshot": snapshot,
                   "excluded": [e["agent"] for e in excluded], "winner": winner,
+                  "sources": sources,
+                  "existing_review": existing_review.get("id") if existing_review else None,
                   "reason": "live/idle reviewer found" if winner
                             else "no live reviewer — would escalate"}
         if out_format == "json":
@@ -282,6 +469,18 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
         else:
             _info(f"[dry-run] pool={pool} winner={winner}")
         return 0
+    if existing_review and not override:
+        ok = _attach_existing_review(existing_review, by=author, backend=backend)
+        if ok:
+            _info(f"Review {artifact_display} already routed "
+                  f"({existing_review.get('id')}); attached request.")
+            return 0
+        _warn(f"Review {artifact_display}: existing review attach failed.")
+        return 1
+    if existing_review and override:
+        _info(f"Review {artifact_display} already routed "
+              f"({existing_review.get('id')}); explicit candidate-list "
+              "requested, routing a separate review.")
     if winner is None:
         escalated = _escalate_review_to_human(
             pr=artifact, repo=repo, tried=[s["agent"] for s in snapshot],
@@ -297,11 +496,14 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
     # fall back to "general" and omit the "in <repo>" clause from the summary.
     workstream = repo or "general"
     repo_clause = f" in {repo}" if repo else ""
+    summary = (f"Review {artifact_display}{repo_clause} needs review. Claim it "
+               f"(transition active / emit review-accepted) before working.")
+    if note:
+        summary = f"{summary} Context: {note}"
     task = schema.make_task(
         title=title, workstream=workstream, agent=author,
         owner_agent=author, assignee=winner, priority="P1",
-        summary=(f"Review {artifact_display}{repo_clause} needs review. Claim it "
-                 f"(transition active / emit review-accepted) before working."))
+        summary=summary, next_action=note)
     task["tags"] = sorted(set(task.get("tags", []) + [routing.REVIEW_TAG]))
     task["pr"] = artifact
     if repo is not None:

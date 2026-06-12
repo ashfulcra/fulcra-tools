@@ -82,6 +82,7 @@ def list_json(
     backend: Optional[list[str]] = None,
     suffix: str = ".json",
     max_workers: int = 8,
+    timeout: Optional[float] = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """List ``prefix`` and PARALLEL-download every file ending in ``suffix``,
     returning ``[(path, record), ...]`` for each path whose JSON parsed to a dict.
@@ -99,7 +100,7 @@ def list_json(
     patch surface exactly. See the store version for the full contract docstring.
     """
     return list_json_checked(prefix, backend=backend, suffix=suffix,
-                             max_workers=max_workers)[0]
+                             max_workers=max_workers, timeout=timeout)[0]
 
 
 def list_json_checked(
@@ -108,6 +109,7 @@ def list_json_checked(
     backend: Optional[list[str]] = None,
     suffix: str = ".json",
     max_workers: int = 8,
+    timeout: Optional[float] = None,
 ) -> tuple[list[tuple[str, dict[str, Any]]], bool]:
     """``list_json`` plus a COMPLETENESS verdict: ``(items, complete)``.
 
@@ -137,11 +139,20 @@ def list_json_checked(
         return [], True
     results: dict[str, dict[str, Any]] = {}
     workers = min(max_workers, max(2, len(paths)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(download_json, path, backend=backend): path for path in paths
-        }
-        for fut in concurrent.futures.as_completed(futures):
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    per_download_timeout = (
+        max(1, int(timeout)) if timeout is not None else None
+    )
+    def _download(path: str) -> Optional[dict[str, Any]]:
+        if per_download_timeout is None:
+            return download_json(path, backend=backend)
+        return download_json(path, backend=backend, timeout=per_download_timeout)
+
+    futures = {executor.submit(_download, path): path for path in paths}
+    complete = True
+    try:
+        iterator = concurrent.futures.as_completed(futures, timeout=timeout)
+        for fut in iterator:
             path = futures[fut]
             try:
                 rec = fut.result()
@@ -149,8 +160,12 @@ def list_json_checked(
                 rec = None
             if isinstance(rec, dict):
                 results[path] = rec
+    except concurrent.futures.TimeoutError:
+        complete = False
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     items = [(path, results[path]) for path in paths if path in results]
-    return items, len(items) == len(paths)
+    return items, complete and len(items) == len(paths)
 
 
 # ---------------------------------------------------------------------------
