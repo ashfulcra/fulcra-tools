@@ -36,7 +36,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from fulcra_coord import remote, schema, views
+from fulcra_coord import cache, remote, schema, views
 from fulcra_coord.io import _load_task_summaries
 
 
@@ -274,6 +274,29 @@ class TestSummariesStaleGuard(unittest.TestCase):
                          "stale view beats NO view when the direct path fails")
         self.assertGreaterEqual(warned.call_count, 2,
                                 "listing failure must warn louder, not go silent")
+
+    def test_failed_direct_listing_releases_fallback_claim(self):
+        # The stampede breaker is a concurrency claim, not a rate limiter. If a
+        # fallback attempt fails, the next tick must be allowed to try again
+        # immediately instead of waiting for stale takeover.
+        view = views.build_summaries([self.t1])
+        view["generated_at"] = _iso(_now() - timedelta(hours=2))
+        fake = _SummariesBackendFake(view, [self.t1, self.t2])
+
+        def boom(prefix, *, backend=None, timeout=None):
+            raise RuntimeError("backend list outage")
+
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, {"XDG_CACHE_HOME": td}), \
+             mock.patch("fulcra_coord.remote.download_json",
+                        side_effect=fake.download_json), \
+             mock.patch("fulcra_coord.remote.list_files", side_effect=boom), \
+             mock.patch("fulcra_coord.io._warn"):
+            got = _load_task_summaries(backend=["false"])
+            self.assertEqual({s["id"] for s in got}, {self.t1["id"]})
+            self.assertFalse(
+                cache.fallback_throttle_path().exists(),
+                "failed direct-listing fallback must release the host claim")
 
     def test_empty_direct_listing_falls_back_to_stale_view(self):
         # An empty listing is indistinguishable from a backend without a working
