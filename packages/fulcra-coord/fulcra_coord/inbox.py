@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity, listener, selfupdate, wake
+from . import cache, remote, schema, views, identity, listener, selfupdate, wake, env_int
 from .io import _cache_remote_task, _load_task, _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
 from .writepipe import _view_name_to_remote, _write_task_and_views
@@ -373,6 +373,31 @@ def _overdue_loop_suffix(me: str, backend: Optional[list[str]] = None) -> str:
         return ""  # best-effort: fall back to the plain count message
 
 
+def _notify_overdue_loop_suffix_enabled() -> bool:
+    """Whether notify-inbox may pay the optional directive-loop scan.
+
+    The core listener path must stay cheap enough to run under launchd forever:
+    write the inbox surface, emit the new-item notification, wake if configured,
+    and exit. The overdue-loop suffix is nice operator context, but it walks the
+    directives prefix and can fan out into many remote downloads. Keep it opt-in
+    so optional decoration cannot wedge the listener and suppress future ticks.
+    """
+    return env_int("FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX", 0) != 0
+
+
+def _notify_stale_summary_fallback_enabled() -> bool:
+    """Whether a scheduled listener tick may rebuild stale summaries.
+
+    Interactive reads can trade latency for freshness. A launchd/cron listener
+    cannot: if it wins the direct-listing fallback claim it may spend minutes
+    statting/downloading task bodies, which makes the installed listener look
+    armed while suppressing later interval fires. Default to serving the stale
+    aggregate for this tick; operators can opt into the old repair-shaped path
+    with FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK=1.
+    """
+    return env_int("FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK", 0) != 0
+
+
 def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """Poll the inbox for an agent; on non-empty, surface + notify (Part 3).
 
@@ -389,7 +414,10 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # needs-me pass below (perf loop-2 #2 — each used to pay its own
         # download; under the stale-view guard each re-ran the whole
         # direct-listing fallback, ~one spawn per task on the bus).
-        summaries = _load_task_summaries(backend=backend)
+        summaries = _load_task_summaries(
+            backend=backend,
+            skip_stale_fallback=not _notify_stale_summary_fallback_enabled(),
+        )
         items = _load_inbox(me, backend=backend, summaries=summaries)
         surface = _inbox_surface_path(me)
         cache.cache_root().mkdir(parents=True, exist_ok=True)
@@ -413,9 +441,12 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         if new_ids:
             # Loop signal rides the same notification (spec 2026-06-09 Task 7):
             # count semantics stay untouched; the suffix is best-effort and ""
-            # whenever the loop scan fails or finds nothing overdue.
+            # whenever the loop scan fails or finds nothing overdue. The scan is
+            # opt-in because listener ticks must not block future launchd fires.
+            extra = (_overdue_loop_suffix(me, backend=backend)
+                     if _notify_overdue_loop_suffix_enabled() else "")
             listener.emit_notification(
-                me, len(new_ids), extra=_overdue_loop_suffix(me, backend=backend))
+                me, len(new_ids), extra=extra)
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         seen_path.write_text(json.dumps(sorted(current_ids)))
         # HOST WAKE (operator directive 2026-06-10: "this can't die if i do

@@ -6231,9 +6231,36 @@ class TestNotifyInbox(unittest.TestCase):
             seen = set(json.loads(self._seen_path("codex:h:r").read_text()))
             self.assertEqual(seen, {a["id"], b["id"], c["id"]})
 
+    def test_notify_skips_overdue_loop_suffix_by_default(self):
+        """The listener's new-item alert must not pay the optional loop scan
+        unless explicitly enabled; a wedged decoration pass suppresses future
+        launchd ticks."""
+        from fulcra_coord.cli import cmd_notify_inbox
+        cache.write_cached_task(_directive("codex:h:r"))
+        with patch("fulcra_coord.inbox._overdue_loop_suffix") as suffix, \
+             patch("fulcra_coord.listener.emit_notification") as emit:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        suffix.assert_not_called()
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args.kwargs.get("extra"), "")
+
+    def test_notify_skips_stale_summary_fallback_by_default(self):
+        """A scheduled listener tick must not win the stale-view fallback claim
+        and start rebuilding the bus from every task body."""
+        from fulcra_coord.cli import cmd_notify_inbox
+        with patch("fulcra_coord.inbox._load_task_summaries",
+                   return_value=[]) as load:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        self.assertTrue(load.call_args.kwargs["skip_stale_fallback"])
+
     def test_notify_message_includes_overdue_loop_count(self):
         """An overdue open loop OPENED BY the notifying agent rides the inbox
-        notification as a " · N overdue" suffix (spec 2026-06-09 Task 7).
+        notification as a " · N overdue" suffix when the optional scan is
+        enabled (spec 2026-06-09 Task 7).
         Asserted at the delivered-message level (the suffix is composed in
         cmd_notify_inbox, formatted by listener.emit_notification). A sub-log
         shard is seeded beside the record to pin the top-level-only filter —
@@ -6267,6 +6294,7 @@ class TestNotifyInbox(unittest.TestCase):
         with patch("fulcra_coord.remote.list_files", side_effect=fake_list_files), \
              patch("fulcra_coord.remote.download_json",
                    side_effect=fake_download_json), \
+             patch.dict(os.environ, {"FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX": "1"}), \
              patch("fulcra_coord.listener._deliver") as dl:
             rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
                                   backend=self.fake_backend)
@@ -8131,16 +8159,13 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_4(self):
-        # 0.15.4: reliability cut — transport read failures no longer read as
-        # absence anywhere (write path, roles/presence, retention, directives),
-        # soft-delete tombstones are recognized (repairs, archive, restore),
-        # and writes upload only the views that changed (~10x bus fan-out
-        # cut). Hosts on <=0.15.3 generate heavy bus write amplification and
-        # should upgrade promptly; with self-update (0.15.3+) the fleet picks
-        # this up from the announced manifest.
+    def test_version_is_0_15_5(self):
+        # 0.15.5: listener hot-path cut — notify-inbox no longer pays the
+        # optional overdue-loop directive scan by default, so launchd ticks can
+        # notify and exit even on large directive buses. Opt back into the suffix
+        # with FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX=1.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.4")
+        self.assertEqual(__version__, "0.15.5")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
