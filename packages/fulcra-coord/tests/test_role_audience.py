@@ -22,6 +22,7 @@ Two tiers of test:
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +34,10 @@ from fulcra_coord import inbox, presence, schema, views
 # ---------------------------------------------------------------------------
 # Helpers — pure
 # ---------------------------------------------------------------------------
+
+def _recent_updated_at():
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
 
 def _directive(assignee, *, owner="boss:h:r", status="proposed",
                task_id=None, title="do the thing"):
@@ -48,7 +53,7 @@ def _directive(assignee, *, owner="boss:h:r", status="proposed",
         "owner_agent": owner,
         "status": status,
         "priority": "P2",
-        "updated_at": "2026-06-09T12:00:00Z",
+        "updated_at": _recent_updated_at(),
         "acked_by": [],
     }
 
