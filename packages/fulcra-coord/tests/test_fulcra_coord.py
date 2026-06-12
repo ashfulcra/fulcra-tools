@@ -4310,9 +4310,9 @@ class TestInstallerHardening(unittest.TestCase):
     def test_listener_plist_has_log_paths(self):
         data = self._install_listener_plist()
         self.assertEqual(data["StandardOutPath"],
-                         os.path.join(self.logs, "listener.out.log"))
+                         os.path.join(self.logs, "listener-codex-h-r.out.log"))
         self.assertEqual(data["StandardErrorPath"],
-                         os.path.join(self.logs, "listener.err.log"))
+                         os.path.join(self.logs, "listener-codex-h-r.err.log"))
 
     def test_heartbeat_creates_logs_dir(self):
         self._install_heartbeat_plist()
@@ -4624,6 +4624,36 @@ class TestInstallCodex(unittest.TestCase):
         codex.install_codex(target_dir=target)
         self.assertTrue(os.path.exists(os.path.join(target, "hooks.json")))
 
+    def test_install_wake_writes_codex_exec_entry_and_preserves_custom(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": self.tmp}), \
+             patch("fulcra_coord.codex.shutil.which",
+                   return_value="/Applications/Codex.app/Contents/Resources/codex"):
+            plan = codex.install_wake("codex:h:r")
+            preserved = codex.install_wake("codex:h:r")
+        self.assertFalse(plan["preserved"])
+        self.assertTrue(preserved["preserved"])
+        data = json.load(open(os.path.join(
+            self.tmp, "fulcra-coord", "wake.json")))
+        entry = data["codex:h:r"]
+        self.assertEqual(entry["cmd"][:3], [
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ])
+        self.assertEqual(entry["cwd"], os.getcwd())
+
+    def test_install_wake_uninstall_removes_only_this_agent(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": self.tmp}):
+            codex.install_wake("codex:h:r")
+            codex.install_wake("codex:h:other")
+            codex.install_wake("codex:h:r", uninstall=True)
+        data = json.load(open(os.path.join(
+            self.tmp, "fulcra-coord", "wake.json")))
+        self.assertNotIn("codex:h:r", data)
+        self.assertIn("codex:h:other", data)
+
 
 class TestInstallCodexCmd(unittest.TestCase):
     def setUp(self):
@@ -4637,10 +4667,21 @@ class TestInstallCodexCmd(unittest.TestCase):
     def test_cmd_installs(self):
         from fulcra_coord import cli as climod
         rc = climod.cmd_install_codex(types.SimpleNamespace(
-            uninstall=False, dry_run=False, target_dir=None))
+            uninstall=False, dry_run=False, target_dir=None,
+            with_wake=False, agent=None))
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(
             os.path.join(self.home, ".codex", "hooks.json")))
+
+    def test_cmd_with_wake_delegates(self):
+        from fulcra_coord import cli as climod
+        with patch("fulcra_coord.installers.codex.install_wake") as m_wake:
+            rc = climod.cmd_install_codex(types.SimpleNamespace(
+                uninstall=False, dry_run=False, target_dir=None,
+                with_wake=True, agent="codex:h:r"))
+        self.assertEqual(rc, 0)
+        m_wake.assert_called_once_with(
+            "codex:h:r", uninstall=False, dry_run=False)
 
 
 class TestEnsureCodexWatch(unittest.TestCase):
@@ -4656,7 +4697,8 @@ class TestEnsureCodexWatch(unittest.TestCase):
             agent="codex:h:r", set_identity=None, no_connect=False,
             can_review=False, role=None, summary=None, workstream=None,
             interval_min=None, codex_target_dir=None, listener_target_dir=None,
-            listener_logs_dir=None, no_load=False, dry_run=False, uninstall=False)
+            listener_logs_dir=None, no_load=False, with_wake=False,
+            dry_run=False, uninstall=False)
         base.update(overrides)
         return types.SimpleNamespace(**base)
 
@@ -4680,8 +4722,10 @@ class TestEnsureCodexWatch(unittest.TestCase):
         m_listener.assert_called_once()
         self.assertEqual(m_listener.call_args.kwargs.get("agent"), "codex:h:r")
         # The self-heal launchctl load targets the plan's plist (writes[0]).
-        self.assertTrue(m_run.called, "launchctl load was not attempted")
-        load_argv = m_run.call_args.args[0]
+        self.assertEqual(m_run.call_count, 2)
+        unload_argv = m_run.call_args_list[0].args[0]
+        load_argv = m_run.call_args_list[1].args[0]
+        self.assertEqual(unload_argv[:3], ["launchctl", "unload", "-w"])
         self.assertEqual(load_argv[:3], ["launchctl", "load", "-w"])
         self.assertIn("/tmp/x.plist", load_argv)
         # Presence refreshed exactly once.
@@ -4761,6 +4805,35 @@ class TestEnsureCodexWatch(unittest.TestCase):
         m_run.assert_not_called()
         m_connect.assert_not_called()
 
+    def test_with_wake_delegates_to_codex_wake_installer(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_wake") as m_wake, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args(with_wake=True))
+        self.assertEqual(rc, 0)
+        m_wake.assert_called_once_with(
+            "codex:h:r", uninstall=False, dry_run=False)
+
+    def test_dry_run_with_wake_has_no_load_no_connect(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_wake") as m_wake, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(dry_run=True, with_wake=True))
+        self.assertEqual(rc, 0)
+        m_wake.assert_called_once_with(
+            "codex:h:r", uninstall=False, dry_run=True)
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
     def test_dry_run_set_identity_does_not_persist(self):
         # `--dry-run` promises zero side effects. A declared identity should shape
         # the printed listener plan, but must not write identity state.
@@ -4821,6 +4894,17 @@ class TestEnsureCodexWatch(unittest.TestCase):
 
 
 class TestEnsureCodexWatchDispatch(unittest.TestCase):
+    def test_install_codex_parser_accepts_wake_flags(self):
+        from fulcra_coord.entry import build_parser
+        parser = build_parser()
+        ns = parser.parse_args([
+            "install-codex", "--with-wake", "--agent", "codex:h:r",
+            "--dry-run"])
+        self.assertEqual(ns.command, "install-codex")
+        self.assertTrue(ns.with_wake)
+        self.assertEqual(ns.agent, "codex:h:r")
+        self.assertTrue(ns.dry_run)
+
     def test_in_command_map(self):
         from fulcra_coord.entry import COMMAND_MAP
         from fulcra_coord import cli as climod
@@ -4834,7 +4918,7 @@ class TestEnsureCodexWatchDispatch(unittest.TestCase):
         ns = parser.parse_args([
             "ensure-codex-watch", "--agent", "codex:h:r",
             "--set-identity", "codex:h:r", "--no-connect", "--can-review",
-            "--interval-min", "15", "--no-load", "--dry-run"])
+            "--interval-min", "15", "--no-load", "--with-wake", "--dry-run"])
         self.assertEqual(ns.command, "ensure-codex-watch")
         self.assertEqual(ns.agent, "codex:h:r")
         self.assertEqual(ns.set_identity, "codex:h:r")
@@ -4842,6 +4926,7 @@ class TestEnsureCodexWatchDispatch(unittest.TestCase):
         self.assertTrue(ns.can_review)
         self.assertEqual(ns.interval_min, 15)
         self.assertTrue(ns.no_load)
+        self.assertTrue(ns.with_wake)
         self.assertTrue(ns.dry_run)
 
 
@@ -6231,9 +6316,70 @@ class TestNotifyInbox(unittest.TestCase):
             seen = set(json.loads(self._seen_path("codex:h:r").read_text()))
             self.assertEqual(seen, {a["id"], b["id"], c["id"]})
 
+    def test_notify_skips_overdue_loop_suffix_by_default(self):
+        """The listener's new-item alert must not pay the optional loop scan
+        unless explicitly enabled; a wedged decoration pass suppresses future
+        launchd ticks."""
+        from fulcra_coord.cli import cmd_notify_inbox
+        cache.write_cached_task(_directive("codex:h:r"))
+        with patch("fulcra_coord.inbox._overdue_loop_suffix") as suffix, \
+             patch("fulcra_coord.listener.emit_notification") as emit:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        suffix.assert_not_called()
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args.kwargs.get("extra"), "")
+
+    def test_notify_skips_stale_summary_fallback_by_default(self):
+        """A scheduled listener tick must not win the stale-view fallback claim
+        and start rebuilding the bus from every task body."""
+        from fulcra_coord.cli import cmd_notify_inbox
+        with patch("fulcra_coord.inbox._load_task_summaries",
+                   return_value=[]) as load:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        self.assertTrue(load.call_args.kwargs["skip_stale_fallback"])
+
+    def test_stale_summary_alert_emits_once_when_listener_may_be_deaf(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        def stale_loader(*args, **kwargs):
+            kwargs["on_stale_skipped"](120.0)
+            return []
+        with patch("fulcra_coord.inbox._load_task_summaries",
+                   side_effect=stale_loader), \
+             patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+            rc2 = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                   backend=self.fake_backend)
+        self.assertEqual((rc, rc2), (0, 0))
+        emsg.assert_called_once()
+        self.assertIn("summaries view is", emsg.call_args.args[0])
+        self.assertEqual(emsg.call_args.kwargs["title"],
+                         "fulcra-coord degraded")
+
+    def test_stale_summary_alert_respects_disable_env(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+        def stale_loader(*args, **kwargs):
+            kwargs["on_stale_skipped"](120.0)
+            return []
+        with patch.dict(os.environ, {"FULCRA_COORD_NOTIFY_STALE_ALERT_MIN": "0"}), \
+             patch("fulcra_coord.inbox._load_task_summaries",
+                   side_effect=stale_loader), \
+             patch("fulcra_coord.listener.emit_notification"), \
+             patch("fulcra_coord.listener.emit_message") as emsg:
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        emsg.assert_not_called()
+
     def test_notify_message_includes_overdue_loop_count(self):
         """An overdue open loop OPENED BY the notifying agent rides the inbox
-        notification as a " · N overdue" suffix (spec 2026-06-09 Task 7).
+        notification as a " · N overdue" suffix when the optional scan is
+        enabled (spec 2026-06-09 Task 7).
         Asserted at the delivered-message level (the suffix is composed in
         cmd_notify_inbox, formatted by listener.emit_notification). A sub-log
         shard is seeded beside the record to pin the top-level-only filter —
@@ -6267,6 +6413,7 @@ class TestNotifyInbox(unittest.TestCase):
         with patch("fulcra_coord.remote.list_files", side_effect=fake_list_files), \
              patch("fulcra_coord.remote.download_json",
                    side_effect=fake_download_json), \
+             patch.dict(os.environ, {"FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX": "1"}), \
              patch("fulcra_coord.listener._deliver") as dl:
             rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
                                   backend=self.fake_backend)
@@ -8131,16 +8278,13 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_4(self):
-        # 0.15.4: reliability cut — transport read failures no longer read as
-        # absence anywhere (write path, roles/presence, retention, directives),
-        # soft-delete tombstones are recognized (repairs, archive, restore),
-        # and writes upload only the views that changed (~10x bus fan-out
-        # cut). Hosts on <=0.15.3 generate heavy bus write amplification and
-        # should upgrade promptly; with self-update (0.15.3+) the fleet picks
-        # this up from the announced manifest.
+    def test_version_is_0_15_5(self):
+        # 0.15.5: listener hot-path cut — notify-inbox no longer pays the
+        # optional overdue-loop directive scan by default, so launchd ticks can
+        # notify and exit even on large directive buses. Opt back into the suffix
+        # with FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX=1.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.4")
+        self.assertEqual(__version__, "0.15.5")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
@@ -8531,11 +8675,13 @@ class TestRebuildSourceRobustness(unittest.TestCase):
     def tearDown(self):
         del os.environ["XDG_CACHE_HOME"]
 
-    def _agg(self, summaries):
+    def _agg(self, summaries, *, generated_at=None):
         from fulcra_coord import remote
         sum_path = remote.view_remote_path("summaries")
         view = {"schema": "fulcra.coordination.summaries.v1", "view": "summaries",
                 "updated_at": "2026-06-03T00:00:00Z", "summaries": summaries}
+        if generated_at is not None:
+            view["generated_at"] = generated_at
 
         def fake_download(path, *, backend=None, timeout=None):
             return view if path == sum_path else None
@@ -8592,6 +8738,23 @@ class TestRebuildSourceRobustness(unittest.TestCase):
             out = _load_summaries_for_rebuild(task_a, backend=["false"])
         entry = next(s for s in out if s["id"] == stale_b["id"])
         self.assertEqual(entry["title"], "FRESH")
+
+    def test_stale_aggregate_is_not_used_as_write_rebuild_source(self):
+        # Live 2026-06-12 failure: reconcile briefly repaired summaries, then
+        # the next ordinary write rebuilt views from a stale summaries aggregate
+        # and uploaded that old generated_at + truncated task set again. A stale
+        # aggregate must therefore read as "no trustworthy rebuild source" for
+        # writes; leave views untouched and let reconcile rebuild from bodies.
+        from fulcra_coord.cli import _load_summaries_for_rebuild
+        from fulcra_coord.io import SUMMARIES_READ_ERROR
+        task_a = apply_transition(_sample_task(), "active", by="claude-code")
+        old_stamp = "2026-06-10T22:11:02Z"
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=self._agg([schema.task_summary(task_a)],
+                                         generated_at=old_stamp)):
+            out = _load_summaries_for_rebuild(task_a, backend=["false"])
+        self.assertIs(out, SUMMARIES_READ_ERROR)
 
     def test_s2_newer_local_wins_across_mixed_precision_timestamps(self):
         # BUG 1 also affects the aggregate-vs-local freshness decision. A local

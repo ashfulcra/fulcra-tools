@@ -123,6 +123,35 @@ Three operator-approved cuts to remote-op fan-out (every remote op is one
 
 ---
 
+## [0.15.5] — 2026-06-12
+
+**Listener hot-path release.** `notify-inbox` no longer pays the optional
+overdue-loop directive scan by default, so launchd listener ticks can write the
+inbox surface, emit notifications, wake configured agents, run self-update, and
+exit without being pinned behind a large directive download fan-out. When the
+summaries view is stale, scheduled listener ticks now also serve that stale view
+for the tick instead of winning the direct-listing fallback claim and rebuilding
+from every task body. Hosts that want the old notification suffix or
+repair-shaped listener fallback can opt back in with
+`FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX=1` or
+`FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK=1`.
+
+Follow-up hardening: Codex now has the same installer-owned wake path as Claude
+Code. `install-codex --with-wake` and `ensure-codex-watch --with-wake` seed a
+reviewable `wake.json` entry that lets a pending inbox spawn a headless
+`codex exec` run; without that entry, the listener remains notify/surface-only.
+Listener launchd logs are now per-agent (`listener-<agent-slug>.err.log`), and
+each tick emits a compact breadcrumb with agent, pending count, new count,
+surface path, and wake result so “armed” can be audited from logs.
+`ensure-codex-watch` now reloads an already-loaded launchd listener after
+rewriting its plist; previously `launchctl load -w` left the old in-memory job
+running, so cadence/log-path changes on disk did not take effect.
+Scheduled listener ticks now also emit a throttled operator alert when the
+summaries view is stale past `FULCRA_COORD_NOTIFY_STALE_ALERT_MIN` (default
+60m). This keeps the bounded stale-view mode from failing silently during
+chronic view outages; alert cadence is controlled by
+`FULCRA_COORD_NOTIFY_STALE_ALERT_INTERVAL_H` (default 6h).
+
 ## [0.15.4] — 2026-06-11
 
 **Reliability release.** The through-line: the transport stops lying to the

@@ -589,6 +589,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "Codex end-parking is delegated to the heartbeat.")
     sp.add_argument("--target-dir", dest="target_dir", default=None, metavar="DIR",
                     help="Override the Codex config dir (default: ~/.codex)")
+    sp.add_argument("--with-wake", dest="with_wake", action="store_true",
+                    help="Also write a wake.json entry so the host listener can "
+                         "wake this Codex agent with `codex exec` when directed "
+                         "work arrives. Review the written command before relying on it")
+    sp.add_argument("--agent", "-a", dest="agent", default=None, metavar="AGENT",
+                    help="Agent id the wake entry is keyed by (default: "
+                         "$FULCRA_COORD_AGENT or derived). Only used with "
+                         "--with-wake")
     sp.add_argument("--uninstall", action="store_true", help="Remove the managed hooks")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
 
@@ -618,6 +626,9 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="DIR", help="Override the listener stdout/stderr logs dir")
     sp.add_argument("--no-load", dest="no_load", action="store_true",
                     help="Skip the best-effort launchctl load of the listener plist")
+    sp.add_argument("--with-wake", dest="with_wake", action="store_true",
+                    help="Also write a wake.json entry so pending inbox work can "
+                         "spawn a headless Codex wake via `codex exec`")
     sp.add_argument("--uninstall", action="store_true",
                     help="Tear down the Codex hooks + per-agent listener")
     sp.add_argument("--dry-run", action="store_true",

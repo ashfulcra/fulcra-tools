@@ -258,6 +258,11 @@ def cmd_install_codex(args: Any, backend: Optional[list[str]] = None) -> int:
     plan = codex.install_codex(
         uninstall=args.uninstall, dry_run=args.dry_run,
         target_dir=getattr(args, "target_dir", None))
+    wplan = None
+    if getattr(args, "with_wake", False):
+        agent = getattr(args, "agent", None) or _derive_agent()
+        wplan = codex.install_wake(
+            agent, uninstall=args.uninstall, dry_run=args.dry_run)
     if args.dry_run:
         _info("[dry-run] Would write to: " + plan["hooks_file"])
         _info("[dry-run] Hook scripts: " + plan["hooks_dir"])
@@ -267,9 +272,18 @@ def cmd_install_codex(args: Any, backend: Optional[list[str]] = None) -> int:
             import json as _json
             _info("[dry-run] Resulting hooks.json:")
             _info(_json.dumps(plan["would_write"], indent=2))
+        if wplan is not None:
+            import json as _json
+            verb = "remove wake entry for" if args.uninstall \
+                else "write wake entry for"
+            _info(f"[dry-run] Would {verb} {wplan['agent']} in {wplan['config']}")
+            _info("[dry-run] Resulting wake.json:")
+            _info(_json.dumps(wplan["would_write"], indent=2))
         return 0
     if args.uninstall:
         _info(f"Removed fulcra-coord hooks from {plan['hooks_file']}")
+        if wplan is not None:
+            _info(f"Removed wake entry for {wplan['agent']} from {wplan['config']}")
         return 0
     _info(f"Installed Codex hooks -> {plan['hooks_file']}")
     for e in plan["events"]:
@@ -279,6 +293,17 @@ def cmd_install_codex(args: Any, backend: Optional[list[str]] = None) -> int:
           "before context loss.")
     _info("No Stop hook by design — Codex Stop fires every turn; end-parking is "
           "delegated to the heartbeat. Install it with: fulcra-coord install-heartbeat")
+    if wplan is not None:
+        if wplan["preserved"]:
+            _info(f"Wake entry for {wplan['agent']} already exists in "
+                  f"{wplan['config']} — preserved your customized entry.")
+        else:
+            _info(f"Wrote wake entry for {wplan['agent']} -> {wplan['config']}")
+        _info("")
+        _info("  *** REVIEW THE WAKE COMMAND BEFORE RELYING ON IT ***")
+        _info(f"  The listener will now spawn the `cmd` in {wplan['config']}")
+        _info("  UNATTENDED whenever pending bus work is found for this agent.")
+        _info('  Set "enabled": false to pause it.')
     _info("Verify auth/connectivity with: fulcra-coord doctor")
     return 0
 
@@ -332,6 +357,9 @@ def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> in
         target_dir=getattr(args, "listener_target_dir", None),
         logs_dir=getattr(args, "listener_logs_dir", None))
 
+    if getattr(args, "with_wake", False):
+        codex.install_wake(agent, uninstall=uninstall, dry_run=dry_run)
+
     if dry_run:
         # The installers above already printed their plans; just summarize what
         # WOULD be armed and return WITHOUT loading/connecting (no side effects).
@@ -340,23 +368,31 @@ def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> in
               f"{agent} (no launchctl load, no connect).")
         return 0
 
-    # 3) Self-heal load of the listener plist (macOS launchd only). On uninstall we
-    # best-effort UNLOAD instead. Fully fail-safe: a failed load/unload (already
-    # loaded, launchctl missing, etc.) is a harmless no-op and must never crash
-    # the command. `--no-load` opts out entirely.
+    # 3) Self-heal reload of the listener plist (macOS launchd only). On install,
+    # unload first and then load: `launchctl load -w` against an already-loaded
+    # job does not refresh a changed StartInterval/log path, which made the
+    # scaffold LOOK armed while launchd kept running the stale in-memory job.
+    # On uninstall we best-effort UNLOAD only. Fully fail-safe: a failed
+    # load/unload (already unloaded, launchctl missing, etc.) is a harmless no-op
+    # and must never crash the command. `--no-load` opts out entirely.
     mechanism = plan.get("mechanism")
     no_load = bool(getattr(args, "no_load", False))
     if mechanism == "launchd" and not no_load:
         writes = plan.get("removes") if uninstall else plan.get("writes")
         plist = (writes or [None])[0]
         if plist:
-            action = "unload" if uninstall else "load"
             try:
-                subprocess.run(["launchctl", action, "-w", plist],
-                               capture_output=True, timeout=10, check=False)
+                if uninstall:
+                    subprocess.run(["launchctl", "unload", "-w", plist],
+                                   capture_output=True, timeout=10, check=False)
+                else:
+                    subprocess.run(["launchctl", "unload", "-w", plist],
+                                   capture_output=True, timeout=10, check=False)
+                    subprocess.run(["launchctl", "load", "-w", plist],
+                                   capture_output=True, timeout=10, check=False)
             except Exception:
                 # Best-effort self-heal load: a failure here must never propagate.
-                _warn(f"launchctl {action} of the listener plist was skipped "
+                _warn(f"launchctl reload of the listener plist was skipped "
                       f"(non-fatal): {plist}")
 
     # On uninstall we're done — there's no presence to refresh when tearing down.
