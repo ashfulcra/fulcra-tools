@@ -12,6 +12,17 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Scheduled agent reminders
+
+- Added `fulcra-coord remind ASSIGNEE WHEN TITLE`, a bus-native scheduled
+  directive. It stores `WHEN` as `not_before`, rejects unparseable reminder
+  times, and uses the existing directive writer/dual-write path so reminders
+  behave like normal inbox work once due.
+- Agent inbox routing now respects future `not_before` fields. Future scheduled
+  directives stay out of `inbox`, listener notifications, and
+  `index.counts.inbox` until the gate passes; malformed/empty gates continue to
+  behave as immediately visible.
+
 ### Listener ticks keep reviewer routing presence fresh
 
 - `notify-inbox --agent X` now refreshes `X`'s presence timestamp while

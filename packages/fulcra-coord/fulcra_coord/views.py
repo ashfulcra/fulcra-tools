@@ -995,7 +995,11 @@ def is_open_directive(task: dict[str, Any], assignee: str,
         return False
     if _acked_by(task, assignee):
         return False
-    if not include_aged and is_aged_out_broadcast(task, now, age_days):
+    view_now = now or _now()
+    if not include_aged and is_aged_out_broadcast(task, view_now, age_days):
+        return False
+    nb = _schedule_dt(task.get("not_before"))
+    if nb is not None and nb > view_now:
         return False
     return True
 
@@ -1065,6 +1069,7 @@ def inbox_for(me: str, tasks: list[dict[str, Any]], now: Optional[datetime] = No
     needs_human / is_stale). CONCRETE-assignee directives are never aged out.
     """
     held_roles = roles or set()
+    view_now = now or _now()
     items: list[dict[str, Any]] = []
     for t in tasks:
         assignee = t.get("assignee")
@@ -1089,7 +1094,10 @@ def inbox_for(me: str, tasks: list[dict[str, Any]], now: Optional[datetime] = No
             continue
         if _acked_by(t, me):
             continue
-        if not include_aged and is_aged_out_broadcast(t, now, age_days):
+        if not include_aged and is_aged_out_broadcast(t, view_now, age_days):
+            continue
+        nb = _schedule_dt(t.get("not_before"))
+        if nb is not None and nb > view_now:
             continue
         items.append(task_summary(t))
     return sorted(items, key=lambda x: (x.get("priority", "P9"), x.get("updated_at", "")))

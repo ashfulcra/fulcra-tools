@@ -5423,6 +5423,11 @@ class TestBuildInbox(unittest.TestCase):
                             "by": "codex:h:r", "summary": "seen", "evidence": None})
         self.assertEqual(build_inbox([d]), {})
 
+    def test_future_not_before_excluded_from_index_count(self):
+        from fulcra_coord.views import build_inbox
+        d = _directive("codex:h:r", not_before="2099-01-01T00:00:00Z")
+        self.assertEqual(build_inbox([d]), {})
+
     def test_excludes_self_owned(self):
         # If owner_agent == assignee, it's my own task, not a directive to me.
         from fulcra_coord.views import build_inbox
@@ -5514,6 +5519,15 @@ class TestTellAssignInbox(unittest.TestCase):
         out = json.loads(buf.getvalue())
         self.assertEqual(out["inbox"], [])
 
+    def test_inbox_excludes_future_not_before_until_due(self):
+        from fulcra_coord.views import inbox_for
+        d = _directive("codex:h:r", not_before="2026-06-09T00:00:00Z")
+        before = datetime(2026, 6, 8, 23, 59, tzinfo=timezone.utc)
+        after = datetime(2026, 6, 9, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(inbox_for("codex:h:r", [d], now=before), [])
+        self.assertEqual([i["id"] for i in inbox_for("codex:h:r", [d], now=after)],
+                         [d["id"]])
+
     def test_inbox_ack_removes_from_inbox(self):
         from fulcra_coord.cli import cmd_inbox
         d = _directive("codex:h:r")
@@ -5532,6 +5546,33 @@ class TestTellAssignInbox(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             cmd_inbox(list_args, backend=self.fake_backend)
         self.assertEqual(json.loads(buf.getvalue())["inbox"], [])
+
+    def test_remind_creates_scheduled_directive(self):
+        from fulcra_coord.cli import cmd_remind
+        args = self._ns(assignee="codex:h:r", when="2026-06-09T12:00:00Z",
+                        title="rotate token", workstream="general",
+                        priority="P3", due="2026-06-10",
+                        next="check expiry", summary="maintenance",
+                        **{"from": "claude-code:h:r"})
+        rc = cmd_remind(args, backend=self.fake_backend)
+        self.assertIn(rc, (0, 1))
+        d = next(t for t in cache.list_cached_tasks() if t["title"] == "rotate token")
+        self.assertEqual(d["assignee"], "codex:h:r")
+        self.assertEqual(d["owner_agent"], "claude-code:h:r")
+        self.assertEqual(d["status"], "proposed")
+        self.assertEqual(d["not_before"], "2026-06-09T12:00:00.000000Z")
+        self.assertEqual(d["due"], "2026-06-10T00:00:00.000000Z")
+
+    def test_remind_rejects_unparseable_when_without_writing(self):
+        from fulcra_coord.cli import cmd_remind
+        args = self._ns(assignee="codex:h:r", when="tomorrow-ish",
+                        title="bad reminder", workstream="general",
+                        priority="P3", due=None, next="", summary="",
+                        **{"from": "claude-code:h:r"})
+        rc = cmd_remind(args, backend=self.fake_backend)
+        self.assertEqual(rc, 1)
+        self.assertFalse([t for t in cache.list_cached_tasks()
+                          if t["title"] == "bad reminder"])
 
     def test_inbox_pins_single_now_across_shown_and_hidden(self):
         # BUG 14: inbox_for (shown) and aged_out_inbox_count (hidden) each
