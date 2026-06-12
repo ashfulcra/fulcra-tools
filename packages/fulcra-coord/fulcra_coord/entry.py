@@ -224,6 +224,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
                     help="Handing-off agent (owner); default: derived/env agent")
 
+    # ---- remind ----
+    sp = sub.add_parser("remind",
+                        help="Create a scheduled directive that appears in an "
+                             "agent's inbox at WHEN (ISO date/datetime or "
+                             "relative 5d/36h/10m)")
+    sp.add_argument("assignee", metavar="ASSIGNEE",
+                    help="Agent or @role to remind")
+    sp.add_argument("when", metavar="WHEN",
+                    help="ISO date/datetime or relative offset like 5d/36h/10m")
+    sp.add_argument("title", metavar="TITLE",
+                    help="Short durable reminder objective")
+    sp.add_argument("--next", "-n", default="", metavar="NEXT_ACTION")
+    sp.add_argument("--summary", "-s", default="", metavar="SUMMARY")
+    sp.add_argument("--workstream", "-w", default="general", metavar="WS")
+    sp.add_argument("--priority", "-p", default="P3", metavar="PRIORITY",
+                    help="P0|P1|P2|P3")
+    sp.add_argument("--due", default=None, metavar="WHEN",
+                    help="Optional deadline (ISO date/datetime or relative "
+                         "5d/36h/10m); informational, not the visibility gate")
+    sp.add_argument("--from", dest="from", default=None, metavar="AGENT",
+                    help="Directing agent (owner); default: derived/env agent")
+
     # ---- broadcast ----
     sp = sub.add_parser("broadcast",
                         help="Direct work at EVERY agent: create a proposed "
@@ -802,6 +824,7 @@ COMMAND_MAP = {
     "tell": _cli.cmd_tell,
     "broadcast": _cli.cmd_broadcast,
     "later": _cli.cmd_later,
+    "remind": _cli.cmd_remind,
     "handoff": _cli.cmd_handoff,
     "assign": _cli.cmd_assign,
     "inbox": _cli.cmd_inbox,

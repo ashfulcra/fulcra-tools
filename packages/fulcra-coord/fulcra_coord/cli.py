@@ -125,8 +125,9 @@ from .digest import (
 # command dispatch (entry.py) and the test imports keep resolving. lifecycle.py
 # never imports cli.
 from .lifecycle import (
-    cmd_tell, cmd_broadcast, cmd_later, cmd_handoff, cmd_assign, cmd_start,
-    cmd_update, cmd_block, cmd_pause, cmd_snapshot, cmd_done, cmd_abandon,
+    cmd_tell, cmd_broadcast, cmd_later, cmd_remind, cmd_handoff, cmd_assign,
+    cmd_start, cmd_update, cmd_block, cmd_pause, cmd_snapshot, cmd_done,
+    cmd_abandon,
 )
 # Inbox + blocked-on-you notification extracted from this file. Re-exported so the
 # dispatch (inbox/notify-inbox), _build_health_record's read of the listener

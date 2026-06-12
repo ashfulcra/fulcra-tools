@@ -239,6 +239,34 @@ def cmd_later(args: Any, backend: Optional[list[str]] = None) -> int:
     return cmd_tell(args, backend=backend, marker_tag=routing.IDEA_TAG)
 
 
+def cmd_remind(args: Any, backend: Optional[list[str]] = None) -> int:
+    """Create a scheduled directive that appears in the recipient's inbox later.
+
+    ``remind ASSIGNEE WHEN TITLE`` is intentionally small sugar over ``tell``:
+    it uses the same directive creation/write/dual-write path, but requires a
+    parseable ``WHEN`` and stores it as ``not_before``. The read-side inbox gate
+    keeps the directive hidden until ``now >= not_before``.
+    """
+    when_raw = getattr(args, "when", None)
+    not_before = schema.parse_when(when_raw)
+    if not_before is None:
+        _err("remind requires WHEN as ISO date/datetime or relative Nd/Nh/Nm.")
+        return 1
+    due_raw = getattr(args, "due", None)
+    due = None
+    if due_raw is not None:
+        due = schema.parse_when(due_raw)
+        if due is None:
+            _err("--due must be ISO date/datetime or relative Nd/Nh/Nm.")
+            return 1
+    if not getattr(args, "priority", None):
+        args.priority = "P3"
+    task_fields: dict[str, Any] = {"not_before": not_before}
+    if due is not None:
+        task_fields["due"] = due
+    return cmd_tell(args, backend=backend, task_fields=task_fields)
+
+
 def cmd_handoff(args: Any, backend: Optional[list[str]] = None) -> int:
     """Hand work to another agent/role WITH its resume state (sugar over
     ``tell``, the way ``later`` is).
