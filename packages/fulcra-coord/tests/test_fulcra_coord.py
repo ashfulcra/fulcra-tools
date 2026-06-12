@@ -4310,9 +4310,9 @@ class TestInstallerHardening(unittest.TestCase):
     def test_listener_plist_has_log_paths(self):
         data = self._install_listener_plist()
         self.assertEqual(data["StandardOutPath"],
-                         os.path.join(self.logs, "listener.out.log"))
+                         os.path.join(self.logs, "listener-codex-h-r.out.log"))
         self.assertEqual(data["StandardErrorPath"],
-                         os.path.join(self.logs, "listener.err.log"))
+                         os.path.join(self.logs, "listener-codex-h-r.err.log"))
 
     def test_heartbeat_creates_logs_dir(self):
         self._install_heartbeat_plist()
@@ -4624,6 +4624,36 @@ class TestInstallCodex(unittest.TestCase):
         codex.install_codex(target_dir=target)
         self.assertTrue(os.path.exists(os.path.join(target, "hooks.json")))
 
+    def test_install_wake_writes_codex_exec_entry_and_preserves_custom(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": self.tmp}), \
+             patch("fulcra_coord.codex.shutil.which",
+                   return_value="/Applications/Codex.app/Contents/Resources/codex"):
+            plan = codex.install_wake("codex:h:r")
+            preserved = codex.install_wake("codex:h:r")
+        self.assertFalse(plan["preserved"])
+        self.assertTrue(preserved["preserved"])
+        data = json.load(open(os.path.join(
+            self.tmp, "fulcra-coord", "wake.json")))
+        entry = data["codex:h:r"]
+        self.assertEqual(entry["cmd"][:3], [
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ])
+        self.assertEqual(entry["cwd"], os.getcwd())
+
+    def test_install_wake_uninstall_removes_only_this_agent(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": self.tmp}):
+            codex.install_wake("codex:h:r")
+            codex.install_wake("codex:h:other")
+            codex.install_wake("codex:h:r", uninstall=True)
+        data = json.load(open(os.path.join(
+            self.tmp, "fulcra-coord", "wake.json")))
+        self.assertNotIn("codex:h:r", data)
+        self.assertIn("codex:h:other", data)
+
 
 class TestInstallCodexCmd(unittest.TestCase):
     def setUp(self):
@@ -4637,10 +4667,21 @@ class TestInstallCodexCmd(unittest.TestCase):
     def test_cmd_installs(self):
         from fulcra_coord import cli as climod
         rc = climod.cmd_install_codex(types.SimpleNamespace(
-            uninstall=False, dry_run=False, target_dir=None))
+            uninstall=False, dry_run=False, target_dir=None,
+            with_wake=False, agent=None))
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(
             os.path.join(self.home, ".codex", "hooks.json")))
+
+    def test_cmd_with_wake_delegates(self):
+        from fulcra_coord import cli as climod
+        with patch("fulcra_coord.installers.codex.install_wake") as m_wake:
+            rc = climod.cmd_install_codex(types.SimpleNamespace(
+                uninstall=False, dry_run=False, target_dir=None,
+                with_wake=True, agent="codex:h:r"))
+        self.assertEqual(rc, 0)
+        m_wake.assert_called_once_with(
+            "codex:h:r", uninstall=False, dry_run=False)
 
 
 class TestEnsureCodexWatch(unittest.TestCase):
@@ -4656,7 +4697,8 @@ class TestEnsureCodexWatch(unittest.TestCase):
             agent="codex:h:r", set_identity=None, no_connect=False,
             can_review=False, role=None, summary=None, workstream=None,
             interval_min=None, codex_target_dir=None, listener_target_dir=None,
-            listener_logs_dir=None, no_load=False, dry_run=False, uninstall=False)
+            listener_logs_dir=None, no_load=False, with_wake=False,
+            dry_run=False, uninstall=False)
         base.update(overrides)
         return types.SimpleNamespace(**base)
 
@@ -4680,8 +4722,10 @@ class TestEnsureCodexWatch(unittest.TestCase):
         m_listener.assert_called_once()
         self.assertEqual(m_listener.call_args.kwargs.get("agent"), "codex:h:r")
         # The self-heal launchctl load targets the plan's plist (writes[0]).
-        self.assertTrue(m_run.called, "launchctl load was not attempted")
-        load_argv = m_run.call_args.args[0]
+        self.assertEqual(m_run.call_count, 2)
+        unload_argv = m_run.call_args_list[0].args[0]
+        load_argv = m_run.call_args_list[1].args[0]
+        self.assertEqual(unload_argv[:3], ["launchctl", "unload", "-w"])
         self.assertEqual(load_argv[:3], ["launchctl", "load", "-w"])
         self.assertIn("/tmp/x.plist", load_argv)
         # Presence refreshed exactly once.
@@ -4761,6 +4805,35 @@ class TestEnsureCodexWatch(unittest.TestCase):
         m_run.assert_not_called()
         m_connect.assert_not_called()
 
+    def test_with_wake_delegates_to_codex_wake_installer(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_wake") as m_wake, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args(with_wake=True))
+        self.assertEqual(rc, 0)
+        m_wake.assert_called_once_with(
+            "codex:h:r", uninstall=False, dry_run=False)
+
+    def test_dry_run_with_wake_has_no_load_no_connect(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_wake") as m_wake, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(dry_run=True, with_wake=True))
+        self.assertEqual(rc, 0)
+        m_wake.assert_called_once_with(
+            "codex:h:r", uninstall=False, dry_run=True)
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
     def test_dry_run_set_identity_does_not_persist(self):
         # `--dry-run` promises zero side effects. A declared identity should shape
         # the printed listener plan, but must not write identity state.
@@ -4821,6 +4894,17 @@ class TestEnsureCodexWatch(unittest.TestCase):
 
 
 class TestEnsureCodexWatchDispatch(unittest.TestCase):
+    def test_install_codex_parser_accepts_wake_flags(self):
+        from fulcra_coord.entry import build_parser
+        parser = build_parser()
+        ns = parser.parse_args([
+            "install-codex", "--with-wake", "--agent", "codex:h:r",
+            "--dry-run"])
+        self.assertEqual(ns.command, "install-codex")
+        self.assertTrue(ns.with_wake)
+        self.assertEqual(ns.agent, "codex:h:r")
+        self.assertTrue(ns.dry_run)
+
     def test_in_command_map(self):
         from fulcra_coord.entry import COMMAND_MAP
         from fulcra_coord import cli as climod
@@ -4834,7 +4918,7 @@ class TestEnsureCodexWatchDispatch(unittest.TestCase):
         ns = parser.parse_args([
             "ensure-codex-watch", "--agent", "codex:h:r",
             "--set-identity", "codex:h:r", "--no-connect", "--can-review",
-            "--interval-min", "15", "--no-load", "--dry-run"])
+            "--interval-min", "15", "--no-load", "--with-wake", "--dry-run"])
         self.assertEqual(ns.command, "ensure-codex-watch")
         self.assertEqual(ns.agent, "codex:h:r")
         self.assertEqual(ns.set_identity, "codex:h:r")
@@ -4842,6 +4926,7 @@ class TestEnsureCodexWatchDispatch(unittest.TestCase):
         self.assertTrue(ns.can_review)
         self.assertEqual(ns.interval_min, 15)
         self.assertTrue(ns.no_load)
+        self.assertTrue(ns.with_wake)
         self.assertTrue(ns.dry_run)
 
 
