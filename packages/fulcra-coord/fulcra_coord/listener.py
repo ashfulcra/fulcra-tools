@@ -404,11 +404,25 @@ def ensure_listener(*, agent: str) -> None:
             return
         if _listener_armed(agent):
             return
+        if scheduler_env.is_macos():
+            plist = scheduler_env.launchagents_dir() / _plist_name_for(agent)
+            if plist.exists():
+                try:
+                    subprocess.run(["launchctl", "unload", "-w", str(plist)],
+                                   capture_output=True, timeout=10, check=False)
+                    subprocess.run(["launchctl", "load", "-w", str(plist)],
+                                   capture_output=True, timeout=10, check=False)
+                    if _listener_armed(agent):
+                        return
+                except Exception:
+                    pass
         plan = install_listener(agent=agent)
         if plan.get("mechanism") == "launchd":
             plist = (plan.get("writes") or [None])[0]
             if plist:
                 try:
+                    subprocess.run(["launchctl", "unload", "-w", plist],
+                                   capture_output=True, timeout=10, check=False)
                     subprocess.run(["launchctl", "load", "-w", plist],
                                    capture_output=True, timeout=10, check=False)
                 except Exception:
