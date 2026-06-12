@@ -626,6 +626,13 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="DIR", help="Override the listener stdout/stderr logs dir")
     sp.add_argument("--no-load", dest="no_load", action="store_true",
                     help="Skip the best-effort launchctl load of the listener plist")
+    sp.add_argument("--thread-id", dest="thread_id", default=None, metavar="ID",
+                    help="Codex thread/session id to attach the managed heartbeat "
+                         "automation to (SessionStart passes this automatically)")
+    sp.add_argument("--automation-interval-min", dest="automation_interval_min",
+                    type=int, default=None, metavar="N",
+                    help="Managed Codex heartbeat automation cadence in minutes "
+                         "(default: 15)")
     sp.add_argument("--with-wake", dest="with_wake", action="store_true",
                     help="Also write a wake.json entry so pending inbox work can "
                          "spawn a headless Codex wake via `codex exec`")

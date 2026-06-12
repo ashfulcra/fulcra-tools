@@ -374,6 +374,24 @@ def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> in
     if getattr(args, "with_wake", False):
         codex.install_wake(agent, uninstall=uninstall, dry_run=dry_run)
 
+    thread_id = getattr(args, "thread_id", None)
+    if thread_id:
+        auto_plan = codex.install_thread_automation(
+            agent,
+            thread_id,
+            interval_min=getattr(args, "automation_interval_min", None)
+            or codex.THREAD_AUTOMATION_INTERVAL_MIN_DEFAULT,
+            uninstall=uninstall,
+            dry_run=dry_run,
+        )
+        action = "remove" if uninstall else "write/update"
+        prefix = "[dry-run] Would " if dry_run else ""
+        _info(
+            f"{prefix}{action} Codex heartbeat automation "
+            f"{auto_plan['id']} for thread {thread_id} "
+            f"(every {auto_plan['interval_min']} min)."
+        )
+
     if dry_run:
         # The installers above already printed their plans; just summarize what
         # WOULD be armed and return WITHOUT loading/connecting (no side effects).
