@@ -412,7 +412,8 @@ def ensure_listener(*, agent: str) -> None:
                                    capture_output=True, timeout=10, check=False)
                     subprocess.run(["launchctl", "load", "-w", str(plist)],
                                    capture_output=True, timeout=10, check=False)
-                    return
+                    if _listener_armed(agent):
+                        return
                 except Exception:
                     pass
         plan = install_listener(agent=agent)

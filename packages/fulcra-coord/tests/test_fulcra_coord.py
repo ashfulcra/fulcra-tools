@@ -6013,7 +6013,8 @@ class TestEnsureListener(unittest.TestCase):
                  patch.object(listener.scheduler_env, "is_macos", return_value=True), \
                  patch.object(listener.scheduler_env, "launchagents_dir",
                               return_value=Path(tmp)), \
-                 patch.object(listener, "_listener_armed", return_value=False), \
+                 patch.object(listener, "_listener_armed",
+                              side_effect=[False, True]), \
                  patch.object(listener, "install_listener") as install, \
                  patch.object(listener.subprocess, "run") as run:
                 listener.ensure_listener(agent="a:h:r")
@@ -6023,6 +6024,32 @@ class TestEnsureListener(unittest.TestCase):
                          ["launchctl", "unload", "-w", str(plist)])
         self.assertEqual(run.call_args_list[1].args[0],
                          ["launchctl", "load", "-w", str(plist)])
+
+    def test_ensure_listener_reinstalls_when_existing_plist_load_still_unarmed(self):
+        from fulcra_coord import listener
+        plan = {"mechanism": "launchd", "writes": ["/tmp/repaired.plist"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = Path(tmp) / listener._plist_name_for("a:h:r")
+            plist.write_text("<plist/>")
+            with patch.dict(os.environ, {"FULCRA_COORD_ENSURE_LISTENER": "1"}), \
+                 patch.object(listener.scheduler_env, "is_macos", return_value=True), \
+                 patch.object(listener.scheduler_env, "launchagents_dir",
+                              return_value=Path(tmp)), \
+                 patch.object(listener, "_listener_armed",
+                              side_effect=[False, False]), \
+                 patch.object(listener, "install_listener", return_value=plan) \
+                    as install, \
+                 patch.object(listener.subprocess, "run") as run:
+                listener.ensure_listener(agent="a:h:r")
+        install.assert_called_once_with(agent="a:h:r")
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["launchctl", "unload", "-w", str(plist)])
+        self.assertEqual(run.call_args_list[1].args[0],
+                         ["launchctl", "load", "-w", str(plist)])
+        self.assertEqual(run.call_args_list[2].args[0],
+                         ["launchctl", "unload", "-w", "/tmp/repaired.plist"])
+        self.assertEqual(run.call_args_list[3].args[0],
+                         ["launchctl", "load", "-w", "/tmp/repaired.plist"])
 
     def test_listener_armed_requires_loaded_launchd_job(self):
         from fulcra_coord import listener
