@@ -253,17 +253,31 @@ def _find_task_for_session(
 ) -> Optional[dict[str, Any]]:
     """Find the existing task owned by agent_id carrying this session tag.
 
-    Loads the full task set via the package loader (same path the CLI status
-    uses, so it pulls remote tasks into cache) and matches on owner_agent +
-    the ``session:<key>`` tag. Returns the task dict or None.
+    PERF (1 + at most 1 spawns, was N+3): the match needs only ``owner_agent``
+    and ``tags`` — both carried by the summaries aggregate — so we resolve the
+    task id from ONE ``views/summaries.json`` download instead of the old
+    ``cli._load_all_tasks`` (index + search-index + next + one body fetch per
+    task on the bus, ~480 subprocess spawns at current bus size). Only the
+    MATCHED task's full body is then fetched, because the caller mutates and
+    re-writes the body (events/history/source blocks a summary doesn't carry).
+
+    A failed body fetch for a matched id returns None → the caller creates.
+    That matches the old degraded behavior (a body whose individual fetch
+    failed was dropped from ``_load_all_tasks``' merged set too), and the
+    deterministic ``_session_task_id`` keeps the create from forking a second
+    remote path for the session.
+
+    ``_load_task_summaries`` keeps the older-bus fallback (no aggregate yet →
+    full load) and the stale-view guard, so correctness degrades exactly like
+    every other summaries-reading surface.
     """
     want = _session_tag(session_key)
-    all_tasks = cli._load_all_tasks(backend=backend)
-    for t in all_tasks:
-        if t.get("owner_agent") != agent_id:
+    summaries = cli._load_task_summaries(backend=backend)
+    for s in summaries:
+        if s.get("owner_agent") != agent_id:
             continue
-        if want in t.get("tags", []):
-            return t
+        if want in (s.get("tags") or []):
+            return cli._load_task(s.get("id"), backend=backend)
     return None
 
 
@@ -412,19 +426,28 @@ def status(
 ) -> dict[str, Any]:
     """Return the active coordination view, optionally filtered.
 
-    Reuses the package's task loader + index builder (the same data the CLI
-    ``status --format json`` produces), so the read path here is consistent
-    with what the GPT would otherwise download from pre-built view files.
+    Reuses the package's summaries loader + index builder (the same data the
+    CLI ``status --format json`` produces — cmd_status reads summaries too),
+    so the read path here is consistent with what the GPT would otherwise
+    download from pre-built view files.
+
+    PERF (1 spawn, was N+3): everything this endpoint reads rides the
+    summaries aggregate — the workstream/owner_agent filters match summary
+    fields, and ``views.build_index`` is summary-complete by the
+    build_all_views(summaries) == build_all_views(bodies) invariant
+    (TestBuildAllViewsEquivalence; task_summary is idempotent). The old
+    ``cli._load_all_tasks`` paid index + search-index + next + one body fetch
+    per task (~480 spawns at current bus size) per /status poll.
     """
     backend = _backend()
 
     # Distinguish a real Fulcra outage from a genuinely-empty bus BEFORE
-    # loading. ``cli._load_all_tasks`` swallows remote failures (returns the
-    # empty local cache), so without this probe an unreachable Fulcra would
-    # masquerade as a successful 200 + empty index — the GPT would tell the user
-    # "no in-flight work" when in fact we just couldn't see it. ``probe_reachable``
-    # keys off the backend process exiting cleanly, so a reachable-but-empty bus
-    # still passes and yields a legitimate empty 200 below.
+    # loading. ``cli._load_task_summaries`` swallows remote failures (degrades
+    # toward cache/stale data), so without this probe an unreachable Fulcra
+    # would masquerade as a successful 200 + empty index — the GPT would tell
+    # the user "no in-flight work" when in fact we just couldn't see it.
+    # ``probe_reachable`` keys off the backend process exiting cleanly, so a
+    # reachable-but-empty bus still passes and yields a legitimate empty 200.
     if not remote.probe_reachable(backend=backend):
         raise HTTPException(
             status_code=503,
@@ -435,7 +458,7 @@ def status(
             ),
         )
 
-    all_tasks = cli._load_all_tasks(backend=backend)
+    all_tasks = cli._load_task_summaries(backend=backend)
     if workstream:
         all_tasks = [t for t in all_tasks if t.get("workstream") == workstream]
     if agent_id:

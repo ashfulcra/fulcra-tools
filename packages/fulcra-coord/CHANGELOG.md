@@ -77,6 +77,50 @@ the source:
   remotely, with a pointer at `fulcra-coord update <id> --status active`.
   Genuine titles are unaffected.
 
+### Product-calls perf wave: facade summaries, one-process session start, zero-reader views retired
+
+Three operator-approved cuts to remote-op fan-out (every remote op is one
+`fulcra-api` subprocess spawn, ~1.3s median vs 1-16s natural latency):
+
+- **ChatGPT facade reads summaries, not full bodies.** Both facade read
+  surfaces paid `cli._load_all_tasks` — index + search-index + next + one
+  body fetch per task, N+3 spawns (~480 at current bus size) — on every
+  call. `GET /coordination/status` is now ONE `views/summaries.json`
+  download (build_index is summary-complete by the existing equivalence
+  invariant); `POST /coordination/report`'s find-or-create matches
+  owner_agent + the session tag on summaries and fetches only the matched
+  task's body: 1 + at most 1 spawns. The field-by-field check found no
+  summary gaps. Call-count pins added to the facade tests.
+
+- **`briefing` subcommand + session-start hooks consolidated.** The
+  SessionStart hooks (Claude Code + the Codex twin) ran identity + status +
+  inbox + needs-me as 4 CLI processes, each re-downloading the summaries
+  view — and in stale-view degraded mode each could re-run the whole
+  direct-listing fallback (up to 4 repair-shaped bursts per session start).
+  `fulcra-coord briefing --format json` folds all four sections from ONE
+  summaries load (pinned == 1); both hooks now make a single foreground CLI
+  call, so degraded mode falls back at most once. Hook fail-safe/identity
+  contracts (exit-0 on any error, no pinned `--agent`, declared-id
+  precedence, section order) re-verified end-to-end through bash.
+
+- **Zero-reader views retired.** `agents/<id>.json` (one per owner/toucher
+  identity) and `views/inbox/<slug>.json` (one per open-directive assignee)
+  were rebuilt and uploaded on EVERY write/reconcile — ~A+I ≈ 35+ uploads
+  per pass at current fleet size, scaling with fleet growth — and read by
+  nothing (re-verified by grep: `agents`/`resume` fold the summaries
+  aggregate client-side; `inbox` recomputes from the task set; the
+  per-assignee counts live on as `index.counts.inbox`).
+  `views.build_all_views` no longer emits them; `views.build_agent_view`,
+  `remote.agent_remote_path`, and writepipe's `agents/` name mapping are
+  removed as orphans. Existing remote files under those prefixes are
+  deliberately NOT deleted — bus-state cleanup is deferred pending a Fulcra
+  service review; they are inert and simply never refresh again. The
+  summaries freshness beacon / stale-view guard are unaffected (they key
+  off `generated_at`, which neither retired view carried). Per-write
+  fan-out at the test topology: 9 → 8 first-write uploads, 4 → 3
+  changed-view uploads (test_view_skip pins updated with the why); on the
+  live bus a full view pass drops from ~55 to ~20 files.
+
 ---
 
 ## [0.15.4] — 2026-06-11

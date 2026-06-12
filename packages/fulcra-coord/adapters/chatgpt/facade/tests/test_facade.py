@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from unittest import mock
 
 # Make the facade package importable (adapters/chatgpt/facade) and the repo root
 # (for fulcra_coord) regardless of where pytest is invoked from.
@@ -34,6 +35,7 @@ sys.path.insert(0, str(_FACADE_DIR))
 sys.path.insert(0, str(_REPO_ROOT))
 
 import app as facade_app  # noqa: E402
+from fulcra_coord import remote  # noqa: E402
 
 
 FACADE_TOKEN = "test-token-abc123"
@@ -464,3 +466,149 @@ def test_whitespace_only_title_rejected_422(client):
         json={"agent_id": "a", "session_key": "s", "summary": "ok", "title": "   "},
     )
     assert r.status_code == 422, r.text
+
+
+# ---------------------------------------------------------------------------
+# PERF pins: the facade reads the summaries aggregate, never full task bodies
+# (each remote op is one fulcra-api subprocess spawn, ~1.3s; the old
+# cli._load_all_tasks path cost index + search-index + next + one body fetch
+# per task — N+3 spawns, ~480 at current bus size — on EVERY /status and every
+# find-or-create. The summaries view carries every field these surfaces read.)
+# ---------------------------------------------------------------------------
+
+class _OpCounter:
+    """Delegating counters around the remote layer (the test_perf_call_counts
+    idiom): semantics stay end-to-end real against the fake backend; only the
+    call paths are observed."""
+
+    def __init__(self):
+        self.downloads: list[str] = []
+        self.lists: list[str] = []
+        self.stats: list[str] = []
+
+    def patch(self):
+        real_dl, real_list, real_stat = (
+            remote.download_json, remote.list_files, remote.stat)
+
+        def download_json(path, **kw):
+            self.downloads.append(path)
+            return real_dl(path, **kw)
+
+        def list_files(prefix, **kw):
+            self.lists.append(prefix)
+            return real_list(prefix, **kw)
+
+        def stat(path, **kw):
+            self.stats.append(path)
+            return real_stat(path, **kw)
+
+        return mock.patch.multiple(
+            remote, download_json=download_json, list_files=list_files,
+            stat=stat)
+
+    def downloads_under(self, prefix: str) -> list:
+        return [p for p in self.downloads if p.startswith(prefix)]
+
+    def stats_under(self, prefix: str) -> list:
+        return [p for p in self.stats if p.startswith(prefix)]
+
+
+def _seed_session(client, session_key: str, summary: str = "seed") -> str:
+    """One report = the task lands AND views/summaries.json materializes,
+    so subsequent reads exercise the summaries fast path (not the older-bus
+    fallback)."""
+    r = client.post("/coordination/report", headers=_auth(), json={
+        "agent_id": "chatgpt:fulcra-coord:ash",
+        "session_key": session_key,
+        "summary": summary,
+        "workstream": "fulcra",
+    })
+    assert r.status_code == 200, r.text
+    return r.json()["task_id"]
+
+
+def test_status_downloads_only_the_summaries_view(client):
+    """GET /status must be ONE view download (views/summaries.json) — zero
+    task-body fetches, zero listings, zero index/search-index/next reads.
+    Before: cli._load_all_tasks = N+3 spawns (~480 at current bus size)."""
+    _seed_session(client, "SESS-perf-status")
+    counter = _OpCounter()
+    with counter.patch():
+        r = client.get("/coordination/status", headers=_auth())
+    assert r.status_code == 200, r.text
+    tasks_prefix = f"{remote.remote_root()}/tasks/"
+    assert counter.downloads_under(tasks_prefix) == [], (
+        "status must not fetch task bodies")
+    assert counter.lists == [], "status must not list any prefix"
+    # Exactly one download total: the summaries aggregate.
+    assert counter.downloads == [remote.view_remote_path("summaries")], (
+        f"status read more than the summaries view: {counter.downloads}")
+    # And the seeded task is actually visible through that one read.
+    assert any(t["current_summary"] == "seed" for t in r.json()["active"])
+
+
+def test_find_or_create_update_touches_only_the_session_task(client):
+    """A follow-up report for an existing session resolves the task id from the
+    summaries view and then touches ONLY that task's path (1 summaries read +
+    at most 1 body fetch — the stat-gated cache can even skip the download).
+    The old path fetched EVERY body on the bus. With a second, unrelated task
+    seeded, its body must never be read."""
+    other_id = _seed_session(client, "SESS-perf-noise", "noise")
+    task_id = _seed_session(client, "SESS-perf-update", "first")
+    counter = _OpCounter()
+    with counter.patch():
+        r = client.post("/coordination/report", headers=_auth(), json={
+            "agent_id": "chatgpt:fulcra-coord:ash",
+            "session_key": "SESS-perf-update",
+            "summary": "second",
+            "workstream": "fulcra",
+        })
+    assert r.status_code == 200, r.text
+    assert r.json()["task_id"] == task_id
+    assert r.json()["created"] is False
+    tasks_prefix = f"{remote.remote_root()}/tasks/"
+    own_path = remote.task_remote_path(task_id)
+    # Every tasks/ download AND stat targets the session's own task — the
+    # find side fetches at most that one body (stat-gated: a warm cache costs
+    # one stat, zero downloads) and the write side's optimistic-concurrency
+    # reads are also self-targeted. The unrelated task is NEVER touched.
+    assert set(counter.downloads_under(tasks_prefix)) <= {own_path}, (
+        f"body fetches beyond the session task: "
+        f"{counter.downloads_under(tasks_prefix)}")
+    assert set(counter.stats_under(tasks_prefix)) == {own_path}, (
+        f"task stats beyond the session task: "
+        f"{counter.stats_under(tasks_prefix)}")
+    assert remote.task_remote_path(other_id) not in counter.downloads
+    # The N+3 id-seeding views of _load_all_tasks must never be touched.
+    for view in ("index", "next", "search-index"):
+        assert remote.view_remote_path(view) not in counter.downloads, (
+            f"find-or-create read the {view} view — the _load_all_tasks "
+            "path leaked back in")
+
+
+def test_find_or_create_create_path_fetches_no_other_bodies(client):
+    """A report for a NEW session finds no summary match in ONE summaries read
+    and creates without fetching any existing task body. (The write pipeline's
+    own-path optimistic-concurrency reads on the NEW task id are the write,
+    not the find — only reads of OTHER tasks would betray a full-load leak.)"""
+    other_id = _seed_session(client, "SESS-perf-other")  # unrelated bus task
+    counter = _OpCounter()
+    with counter.patch():
+        r = client.post("/coordination/report", headers=_auth(), json={
+            "agent_id": "chatgpt:fulcra-coord:ash",
+            "session_key": "SESS-perf-new",
+            "summary": "fresh session",
+            "workstream": "fulcra",
+        })
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] is True
+    new_path = remote.task_remote_path(r.json()["task_id"])
+    tasks_prefix = f"{remote.remote_root()}/tasks/"
+    assert set(counter.downloads_under(tasks_prefix)) <= {new_path}, (
+        "create path fetched an existing task body it cannot need: "
+        f"{counter.downloads_under(tasks_prefix)}")
+    assert remote.task_remote_path(other_id) not in counter.downloads
+    for view in ("index", "next", "search-index"):
+        assert remote.view_remote_path(view) not in counter.downloads, (
+            f"create path read the {view} view — the _load_all_tasks "
+            "path leaked back in")

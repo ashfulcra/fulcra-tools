@@ -169,7 +169,8 @@ Example: `TASK-20260531-deploy-search-abc12345`
   "counts": {
     "by_status": {"active": 3, "waiting": 1},
     "by_workstream": {"devops": 2},
-    "by_agent": {"claude-code": 2}
+    "by_agent": {"claude-code": 2},
+    "inbox": {"codex-h-r": 1}
   },
   "active": [/* compact task summaries */],
   "recent_done": [/* compact summaries, last 7 days */]
@@ -219,13 +220,19 @@ Example: `TASK-20260531-deploy-search-abc12345`
 }
 ```
 
-### agents/{agent}.json
-```json
-{
-  "schema": "fulcra.coordination.agent_view.v1",
-  "agent": "claude-code",
-  "updated_at": "...",
-  "active": [/* compact summaries */],
-  "recent_done": [/* compact summaries */]
-}
-```
+### Retired views (2026-06-11): agents/{agent}.json, views/inbox/{slug}.json
+
+The per-agent views (`fulcra.coordination.agent_view.v1`, one
+`agents/{agent}.json` per owner/toucher identity) and the per-assignee inbox
+views (`fulcra.coordination.inbox_view.v1`, one `views/inbox/{slug}.json` per
+open-directive assignee) are **no longer materialized**. They were rebuilt and
+uploaded on every write/reconcile (~35+ files per pass at current fleet size)
+and read by nothing: the `agents`/`resume` surfaces fold the
+`views/summaries.json` aggregate client-side, and `inbox` recomputes from the
+task summaries (the materialized inbox file went stale the moment an inbox
+emptied, so it had already been demoted from the read path). The per-assignee
+counts survive as the `counts.inbox` fold inside `index.json`.
+
+Files already on a bus under `agents/` or `views/inbox/` are inert leftovers
+from older writers: they are deliberately **not deleted** (bus-state cleanup is
+deferred pending a Fulcra service review) and are simply never refreshed again.
