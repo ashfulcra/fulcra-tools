@@ -1006,6 +1006,33 @@ class TestRunRetention(_FakeBus):
                                      deadline=time.monotonic() + 60, backend=self.backend)
         self.assertEqual(res["archived"], 1)  # good-2 still archived
 
+    def test_run_retention_closes_aged_message_on_bus(self):
+        # End-to-end through the REAL writepipe on the fake bus: an aged tell's
+        # body lands back on the bus as done, with the TTL evidence string.
+        now = datetime.now(timezone.utc)
+        tell = _tell(8, now, tid="TASK-msg-1")
+        self._put("/coordination/tasks/TASK-msg-1.json", tell)
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=True):
+            res = cli._run_retention([tell], now=now,
+                                     deadline=time.monotonic() + 60,
+                                     backend=self.backend)
+        self.assertEqual(res["closed_messages"], 1)
+        body = self._read("/coordination/tasks/TASK-msg-1.json")
+        self.assertEqual(body["status"], "done")
+        self.assertEqual(body["done"]["evidence"], _TTL_EVIDENCE)
+
+    def test_run_retention_reports_closed_messages(self):
+        # The message-TTL sweep is wired into the daily pass: its count rides
+        # the result dict and the reconcile deadline threads through (composes
+        # with the budget, never double-counts).
+        with patch("fulcra_coord.retention._claim_retention_marker", return_value=True), \
+             patch("fulcra_coord.retention._close_stale_messages", return_value=3) as csm:
+            res = cli._run_retention([], now=datetime.now(timezone.utc),
+                                     deadline=time.monotonic() + 60, backend=self.backend)
+        self.assertEqual(res["closed_messages"], 3)
+        csm.assert_called_once()
+        self.assertIn("deadline", csm.call_args.kwargs)
+
     def test_never_raises(self):
         with patch("fulcra_coord.retention._claim_retention_marker", side_effect=RuntimeError):
             res = cli._run_retention([], now=datetime.now(timezone.utc),
@@ -1257,6 +1284,214 @@ class TestExpireStaleBroadcasts(unittest.TestCase):
             n = retention._expire_stale_broadcasts([stale], self.now, backend=["false"])
         self.assertEqual(n, 0)
         wct.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Message-class TTL: age-based auto-close of delivered tells / FYI echoes
+# ---------------------------------------------------------------------------
+
+def _tell(created_days_ago, now, status="proposed",
+          assignee="claude-code:peer:repo", tags=None, tid="TASK-tell", **extra):
+    """A message-class directive-task (a `tell` / FYI / verdict echo): concrete
+    assignee, no expects_response marker. created_at drives the TTL (not
+    updated_at), so updated_at is set fresh to prove it's ignored — the same
+    shape (and rationale) as _broadcast above."""
+    created = (now - timedelta(days=created_days_ago)).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+    t = {"id": tid, "title": tid, "status": status, "assignee": assignee,
+         "workstream": "ws", "owner_agent": "sender:host:repo",
+         "tags": list(tags) if tags is not None else ["kind:ops"],
+         "created_at": created,
+         "updated_at": now.isoformat(timespec="microseconds").replace("+00:00", "Z")}
+    t.update(extra)
+    return t
+
+
+_TTL_EVIDENCE = "delivered message auto-closed after 7 days (message-class TTL)"
+
+
+class TestIsClosableMessage(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_aged_tell_is_closable(self):
+        # Concrete assignee, proposed, no expects_response, created 8d ago,
+        # default 7d TTL => closable.
+        self.assertTrue(views.is_closable_message(_tell(8, self.now), self.now))
+
+    def test_exactly_at_cutoff_is_closable(self):
+        # >= boundary matches is_archivable_task / is_expirable_broadcast.
+        self.assertTrue(views.is_closable_message(_tell(7, self.now), self.now))
+
+    def test_fresh_tell_kept(self):
+        # created 3d ago, default 7d TTL => still inside the delivery window.
+        self.assertFalse(views.is_closable_message(_tell(3, self.now), self.now))
+
+    def test_expects_response_never_closable(self):
+        # THE CLOSED-LOOP GUARANTEE (load-bearing pin): a loop that expects a
+        # response stays OPEN until a bus-native response closes it — PERIOD.
+        # No age, however extreme, may auto-close it. Both representations of
+        # expects_response on a task must hold the line:
+        #   * the kind:dispatch marker tag (`tell --expects-response` / handoff)
+        #   * an explicit truthy expects_response field
+        dispatch = _tell(1000, self.now, tags=["kind:ops", "kind:dispatch"])
+        self.assertFalse(views.is_closable_message(dispatch, self.now))
+        explicit = _tell(1000, self.now, expects_response=True)
+        self.assertFalse(views.is_closable_message(explicit, self.now))
+
+    def test_review_kind_never_closable(self):
+        # A review request is an ask with its own lifecycle — never message-class.
+        t = _tell(1000, self.now, tags=["kind:ops", "kind:review"])
+        self.assertFalse(views.is_closable_message(t, self.now))
+
+    def test_question_signoff_idea_kinds_never_closable(self):
+        # question/signoff are asks (registered, not yet wired); idea is the
+        # durable backlog pipeline (`later` -> @backlog) — auto-closing it would
+        # garbage-collect the backlog. Unknown loop kinds fail safe too: only
+        # tell-shaped records are message-class.
+        for kind_tag in ("kind:question", "kind:signoff", "kind:idea",
+                         "kind:some-future-loop"):
+            t = _tell(1000, self.now, tags=["kind:ops", kind_tag])
+            self.assertFalse(views.is_closable_message(t, self.now), kind_tag)
+
+    def test_verdict_echo_is_closable(self):
+        # A review-verdict ECHO is the canonical message-class record: the
+        # verdict was delivered, nothing awaits a response — it may auto-close.
+        t = _tell(8, self.now, tags=["kind:ops", "kind:review-verdict"])
+        self.assertTrue(views.is_closable_message(t, self.now))
+
+    def test_broadcast_never_closable_here(self):
+        # Broadcasts have their OWN expiry (is_expirable_broadcast, 14d window,
+        # proposed->abandoned) — the message TTL must never double-handle them.
+        t = _tell(1000, self.now, assignee=views.BROADCAST)
+        self.assertFalse(views.is_closable_message(t, self.now))
+
+    def test_self_owned_task_never_closable(self):
+        # A plain `start` task has no assignee: it is WORK, not a message. An
+        # aged proposed work item is backlog, never auto-done.
+        t = _tell(1000, self.now, assignee=None)
+        self.assertFalse(views.is_closable_message(t, self.now))
+
+    def test_non_proposed_never_closable(self):
+        # Picked-up / parked / terminal directives were acted on deliberately.
+        for status in ("active", "waiting", "blocked", "done", "abandoned"):
+            t = _tell(1000, self.now, status=status)
+            self.assertFalse(views.is_closable_message(t, self.now), status)
+
+    def test_missing_or_garbage_created_at_fails_safe(self):
+        # Parse-don't-compare: the TTL drives a terminal transition, so an
+        # undatable message is KEPT (same fail-safe direction as
+        # is_expirable_broadcast / is_archivable_task).
+        missing = _tell(8, self.now)
+        del missing["created_at"]
+        self.assertFalse(views.is_closable_message(missing, self.now))
+        garbage = _tell(8, self.now, created_at="not-a-timestamp")
+        self.assertFalse(views.is_closable_message(garbage, self.now))
+
+    def test_env_override_shrinks_window(self):
+        os.environ["FULCRA_COORD_MESSAGE_TTL_DAYS"] = "2"
+        try:
+            t = _tell(5, self.now)  # 5d > 2d window
+            self.assertTrue(views.is_closable_message(t, self.now))
+        finally:
+            del os.environ["FULCRA_COORD_MESSAGE_TTL_DAYS"]
+
+    def test_env_default_is_7(self):
+        self.assertEqual(views._message_ttl_days(), 7.0)
+
+    def test_message_kind_tag_literals_match_routing(self):
+        # views mirrors the loop-kind marker literals (layering: routing /
+        # routing_ops sit ABOVE views, so views can't import them) — pin the
+        # mirrored literals against their canonical sources so a rename there
+        # can't silently desync the message-class predicate.
+        from fulcra_coord import routing
+        from fulcra_coord.routing_ops import REVIEW_VERDICT_TAG
+        self.assertEqual(views._DISPATCH_TAG, routing.DISPATCH_TAG)
+        self.assertIn(REVIEW_VERDICT_TAG, views._MESSAGE_KIND_TAGS)
+        # The ask-kind markers must NOT be in the message allowlist.
+        self.assertNotIn(routing.REVIEW_TAG, views._MESSAGE_KIND_TAGS)
+        self.assertNotIn(routing.DISPATCH_TAG, views._MESSAGE_KIND_TAGS)
+        self.assertNotIn(routing.IDEA_TAG, views._MESSAGE_KIND_TAGS)
+
+
+class TestCloseStaleMessages(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_closes_only_aged_message_class(self):
+        aged = _tell(8, self.now, tid="TASK-aged")
+        fresh = _tell(1, self.now, tid="TASK-fresh")
+        ask = _tell(8, self.now, tid="TASK-ask",
+                    tags=["kind:ops", "kind:dispatch"])
+        review = _tell(8, self.now, tid="TASK-review",
+                       tags=["kind:ops", "kind:review"])
+        written = []
+        with patch("fulcra_coord.retention._write_task_and_views",
+                   side_effect=lambda task, **kw: written.append(task) or True):
+            n = retention._close_stale_messages(
+                [aged, fresh, ask, review], self.now, backend=["false"])
+        self.assertEqual(n, 1)
+        self.assertEqual({t["id"] for t in written}, {"TASK-aged"})
+        self.assertEqual(written[0]["status"], "done")
+        # The evidence string is the audit trail: it must say WHAT closed the
+        # message and WHY, through the normal done machinery.
+        self.assertEqual(written[0]["done"]["evidence"], _TTL_EVIDENCE)
+        self.assertEqual(written[0]["done"]["verification_level"], "automated")
+
+    def test_expects_response_never_closed_regardless_of_age(self):
+        # THE CLOSED-LOOP GUARANTEE at the sweep level: an expecting loop is
+        # NEVER auto-closed, no matter how old. This is the pin that keeps the
+        # TTL from ever eating an open ask.
+        ancient_ask = _tell(10000, self.now, tid="TASK-open-loop",
+                            tags=["kind:ops", "kind:dispatch"])
+        with patch("fulcra_coord.retention._write_task_and_views") as wtv:
+            n = retention._close_stale_messages(
+                [ancient_ask], self.now, backend=["false"])
+        self.assertEqual(n, 0)
+        wtv.assert_not_called()
+
+    def test_per_run_cap_honored(self):
+        t1 = _tell(8, self.now, tid="TASK-m1")
+        t2 = _tell(8, self.now, tid="TASK-m2")
+        with patch("fulcra_coord.retention._write_task_and_views", return_value=True), \
+             patch("fulcra_coord.retention._retention_max_per_run", return_value=1):
+            n = retention._close_stale_messages(
+                [t1, t2], self.now, backend=["false"])
+        self.assertEqual(n, 1)
+
+    def test_deadline_budget_respected(self):
+        # A spent budget closes nothing — the sweep composes with reconcile's
+        # ceiling exactly like the sibling passes.
+        t1 = _tell(8, self.now, tid="TASK-m1")
+        with patch("fulcra_coord.retention._write_task_and_views") as wtv:
+            n = retention._close_stale_messages(
+                [t1], self.now, backend=["false"],
+                deadline=time.monotonic() - 1)
+        self.assertEqual(n, 0)
+        wtv.assert_not_called()
+
+    def test_needs_reconcile_counts_as_closed(self):
+        # NeedsReconcile means the task BODY was written (views lagged) — count it.
+        from fulcra_coord import schema
+        aged = _tell(8, self.now, tid="TASK-nr")
+        with patch("fulcra_coord.retention._write_task_and_views",
+                   side_effect=schema.NeedsReconcile("views lagged")):
+            n = retention._close_stale_messages([aged], self.now, backend=["false"])
+        self.assertEqual(n, 1)
+
+    def test_conflict_does_not_count(self):
+        from fulcra_coord import schema
+        aged = _tell(8, self.now, tid="TASK-cf")
+        with patch("fulcra_coord.retention._write_task_and_views",
+                   side_effect=schema.ConflictError("racing writer")):
+            n = retention._close_stale_messages([aged], self.now, backend=["false"])
+        self.assertEqual(n, 0)
+
+    def test_failed_write_return_does_not_count(self):
+        aged = _tell(8, self.now, tid="TASK-fail")
+        with patch("fulcra_coord.retention._write_task_and_views", return_value=False):
+            n = retention._close_stale_messages([aged], self.now, backend=["false"])
+        self.assertEqual(n, 0)
 
 
 # ---------------------------------------------------------------------------

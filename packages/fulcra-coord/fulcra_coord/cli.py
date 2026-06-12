@@ -2072,7 +2072,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         if not ret.get("skipped"):
             _info(f"  Retention: archived {ret['archived']} task(s) "
                   f"(deferred {ret['deferred']}), expired {ret.get('expired_broadcasts', 0)} "
-                  f"broadcast(s), pruned {ret['pruned_markers']} marker(s), "
+                  f"broadcast(s), closed {ret.get('closed_messages', 0)} "
+                  f"message(s), pruned {ret['pruned_markers']} marker(s), "
                   f"{ret['pruned_presence']} dead presence, {ret.get('pruned_health', 0)} health, "
                   f"{ret.get('pruned_continuity', 0)} continuity, "
                   f"{ret.get('pruned_events', 0)} events, "

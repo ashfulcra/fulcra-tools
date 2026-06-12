@@ -20,7 +20,16 @@ TERMINAL_STATUSES = {"done", "abandoned"}
 
 # Maps current status -> set of allowed next statuses
 STATUS_TRANSITIONS: dict[str, set[str]] = {
-    "proposed": {"active", "waiting", "abandoned"},
+    # proposed -> done is LEGAL (message-class lifecycle, 2026-06-11): a
+    # delivered message's consumer closing the echo is the NORMAL case for
+    # directive-tasks (tells / FYIs / verdict echoes), and forcing the
+    # update->active dance first meant TWO writes over a high-latency
+    # transport — which silently discouraged hygiene and let proposed
+    # message-tasks pile up forever. `done` already requires --evidence (and a
+    # verification level), so the single-write close preserves the audit
+    # trail. proposed -> blocked stays illegal: blocking implies someone
+    # picked the work up first.
+    "proposed": {"active", "waiting", "abandoned", "done"},
     "active": {"waiting", "blocked", "done", "abandoned"},
     "waiting": {"active", "blocked", "abandoned"},
     "blocked": {"active", "waiting", "abandoned"},

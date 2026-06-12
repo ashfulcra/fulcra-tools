@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from . import env_float, task_file_path
 from .schema import task_summary
+from .schema import VALID_KINDS as _schema_valid_kinds
 
 # Statuses at which a directive is "open" in someone's inbox: proposed (not yet
 # acted on) or waiting (parked, still awaiting the assignee). active/blocked are
@@ -85,6 +86,18 @@ INBOX_AGE_DAYS_DEFAULT = 3
 # stale "X is LIVE — UPDATE NOW" directives. The wider window is deliberate: a
 # broadcast must survive well past its inbox-relevance before we abandon it.
 BROADCAST_EXPIRY_DAYS_DEFAULT = 14
+# Default age (days) after which a still-`proposed` MESSAGE-CLASS directive (a
+# tell / FYI / verdict echo with a concrete assignee and NO expected response)
+# is auto-CLOSED (transitioned proposed->done by the retention pass, with an
+# evidence string naming the TTL). Message-class records carry information,
+# they don't request work: once delivered and aged they have served their
+# purpose, but nobody ever marks them done, so they pile up as
+# status=proposed forever and bloat every listing (the 2026-06-11 operational
+# finding: 211 of ~480 hot tasks). Distinct from BROADCAST_EXPIRY_DAYS (fan-out
+# has its own expiry pass) and DELIBERATELY NARROW: anything that expects a
+# response — or carries a non-tell loop kind — is never touched (the
+# closed-loop guarantee; see is_closable_message).
+MESSAGE_TTL_DAYS_DEFAULT = 7
 # Default staleness threshold (hours). An `active` task whose updated_at is older
 # than this is "possibly forgotten" and surfaced in views/needs-attention.json.
 STALE_HOURS_DEFAULT = 2
@@ -254,6 +267,104 @@ def is_expirable_broadcast(task: dict[str, Any], now: Optional[datetime] = None,
     if dt is None:
         return False
     return (now - dt).total_seconds() / 86400.0 >= _broadcast_expiry_days(expiry_days)
+
+
+def _message_ttl_days(ttl_days: Optional[float] = None) -> float:
+    """Resolve the message-class TTL (days): explicit arg > env > default.
+
+    Mirrors _broadcast_expiry_days so the knob is read in exactly one place. The
+    env var FULCRA_COORD_MESSAGE_TTL_DAYS lets a fleet tune how long a delivered
+    message lingers before auto-close; a non-numeric value falls back to the
+    default rather than crashing the best-effort retention pass.
+    """
+    return env_float("FULCRA_COORD_MESSAGE_TTL_DAYS",
+                     MESSAGE_TTL_DAYS_DEFAULT, override=ttl_days)
+
+
+# Task-level kind tags, mirrored as literals (the directives.py pattern: the
+# canonical constants live in routing / routing_ops, which sit ABOVE views in
+# the layering, so importing them here would invert the dependency graph;
+# test_message_kind_tags_match_routing pins the literals against the source).
+#
+#   * `kind:<task-kind>` (ops/feature/...) — schema.VALID_KINDS, the WORK
+#     taxonomy build_tags stamps on every task. Says nothing about loops.
+#   * loop-kind MEMBERSHIP markers — extra tags the directive dual-write maps
+#     to loop kinds: kind:review (routing.REVIEW_TAG, an ask),
+#     kind:dispatch (routing.DISPATCH_TAG, the expects_response marker),
+#     kind:idea (routing.IDEA_TAG, the durable backlog pipeline),
+#     kind:review-verdict (routing_ops.REVIEW_VERDICT_TAG, a delivered echo).
+#
+# is_closable_message ALLOWLISTS: a task is message-class only when every
+# kind: tag it carries is either a plain work-kind or the verdict-echo marker.
+# Any OTHER kind: tag (review/dispatch/idea, the registered-but-unwired
+# question/signoff, or a future loop kind we don't know yet) FAILS SAFE to
+# "keep" — an unknown kind must never be garbage-collected on a guess.
+_TASK_KIND_TAGS = {f"kind:{k}" for k in _schema_valid_kinds}
+_MESSAGE_KIND_TAGS = {"kind:tell", "kind:review-verdict"}
+# The dispatch marker doubles as the on-task expects_response flag
+# (`tell --expects-response` / handoff). Named here for the explicit
+# closed-loop check below, although the allowlist alone would also catch it.
+_DISPATCH_TAG = "kind:dispatch"
+
+
+def is_closable_message(task: dict[str, Any], now: Optional[datetime] = None,
+                        ttl_days: Optional[float] = None) -> bool:
+    """True when `task` is a delivered MESSAGE-CLASS directive that should be
+    auto-CLOSED (transitioned proposed->done by the retention pass, evidence
+    naming the TTL — recoverable via `restore` after the later cold-archive).
+
+    Message-class = a tell / FYI / verdict echo: it CARRIES information to a
+    concrete recipient and expects nothing back. Once delivered and aged it has
+    served its purpose, but nobody ever marks delivered messages done, so they
+    accumulate as status=proposed forever (2026-06-11: 211 of ~480 hot tasks)
+    and bloat every listing the platform gateway serves under its ~15s limit.
+
+    A message closes ONLY when ALL of these hold:
+      * assignee is a CONCRETE audience (truthy, not the BROADCAST "*"): a
+        directive, not a self-owned work item — an aged proposed `start` task
+        is BACKLOG and is never auto-done. Broadcasts have their OWN expiry
+        (is_expirable_broadcast) and are never double-handled here.
+      * expects_response is FALSY — THE CLOSED-LOOP GUARANTEE, the load-bearing
+        exclusion: a loop that expects a response stays open until a bus-native
+        response closes it, PERIOD; no age may override that. Both task-level
+        representations are honored: the explicit field and the kind:dispatch
+        marker tag.
+      * its loop kind is `tell` (or absent — plain directives map to the legacy
+        tell kind): every kind: tag must be a plain work-kind or the
+        verdict-echo marker. review/dispatch/question/signoff are asks with
+        their own lifecycles; idea is the durable backlog pipeline; unknown
+        kinds fail safe to KEEP (see _TASK_KIND_TAGS / _MESSAGE_KIND_TAGS).
+      * status == "proposed" — still un-acted-on. A picked-up / parked /
+        terminal directive was handled deliberately; we never second-guess it.
+      * its created_at is older than the TTL (now - ttl_days). Measured from
+        created_at, not updated_at, for the same reason as broadcast expiry:
+        view rebuilds bump updated_at and would reset the clock forever.
+
+    SAFE DIRECTION on a missing/unparseable created_at: this predicate drives a
+    TERMINAL transition, so parse-don't-compare — _parse_dt failing means we
+    KEEP the message (exactly like is_expirable_broadcast / is_archivable_task).
+    Boundary: age >= ttl_days qualifies, matching the sibling predicates."""
+    assignee = task.get("assignee")
+    if not assignee or assignee == BROADCAST:
+        return False
+    if task.get("status") != "proposed":
+        return False
+    # CLOSED-LOOP GUARANTEE: an expecting loop is never auto-closed.
+    if task.get("expects_response"):
+        return False
+    tags = task.get("tags") or []
+    if _DISPATCH_TAG in tags:
+        return False
+    for tag in tags:
+        if (tag.startswith("kind:") and tag not in _TASK_KIND_TAGS
+                and tag not in _MESSAGE_KIND_TAGS):
+            return False  # ask-kind / pipeline / unknown loop kind: keep
+    if now is None:
+        now = _now()
+    dt = _parse_dt(task.get("created_at"))
+    if dt is None:
+        return False
+    return (now - dt).total_seconds() / 86400.0 >= _message_ttl_days(ttl_days)
 
 
 def _age_hours(updated_at: str, now: datetime) -> float:

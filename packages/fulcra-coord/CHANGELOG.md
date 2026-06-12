@@ -12,6 +12,37 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Message-class lifecycle: delivered tells/FYIs/echoes finally reach a terminal state
+
+The operational symptom (2026-06-11): message-class directives — tells, FYIs,
+acks, review-verdict echoes, anything with `expects_response` falsy — never
+reached a terminal state. Nobody marks a delivered message done, the archive
+sweep only collects done/abandoned tasks, so 211 of ~480 hot tasks sat
+`status=proposed` forever, monotonically bloating every listing the platform
+gateway serves under its ~15s limit. Two fixes:
+
+- **Age-based auto-close in the retention pass** (`_close_stale_messages`,
+  sibling of broadcast expiry): a `proposed` directive with a concrete
+  assignee, a tell-shaped loop kind (or none), and `expects_response` falsy is
+  transitioned proposed→done once `created_at` is ≥
+  `FULCRA_COORD_MESSAGE_TTL_DAYS` (default 7) days old, with evidence
+  `"delivered message auto-closed after N days (message-class TTL)"` through
+  the normal writepipe (views/events stay consistent). Same budget/cap/
+  per-item-isolation discipline as the sibling sweeps; the existing
+  cold-archive then clears the closed message on a later pass (recoverable via
+  `restore`). **Deliberately NEVER auto-closed** (test-pinned): anything with
+  `expects_response` truthy — the closed-loop guarantee: a loop stays open
+  until a bus-native response, period; review/dispatch/question/signoff (and
+  unknown) loop kinds; broadcasts (their own 14d expiry); `kind:idea` backlog
+  items; self-owned work tasks (no assignee); non-proposed statuses; undatable
+  `created_at` (parse-don't-compare — keep what we can't date).
+- **`proposed → done` is now a legal transition** (with the existing
+  `--evidence` + verification-level requirements intact): a delivered
+  message's consumer closing the echo is the NORMAL case, and the old
+  two-write dance (update→active, then done) over a high-latency transport
+  silently discouraged cleanup. proposed→active/waiting/abandoned unchanged;
+  proposed→blocked stays illegal.
+
 ---
 
 ## [0.15.4] — 2026-06-11
