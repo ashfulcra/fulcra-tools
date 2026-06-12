@@ -84,6 +84,32 @@ def test_load_roles_with_leases_pairs_each_role_with_its_sublog(coord_backend):
     ]
 
 
+def test_load_roles_with_leases_falls_back_when_parent_listing_is_nonrecursive(
+        coord_backend, monkeypatch):
+    """Live Fulcra Files can list roles/ as direct children only. In that
+    shape, lease shards are visible from roles/<name>/leases/ but absent from
+    the parent listing; the combined fold must not treat that as confirmed
+    empty leases or every role renders falsely VACANT."""
+    role_ops.upsert_role(schema.make_role("reviewer", "d"),
+                         backend=coord_backend)
+    role_ops.claim_role("reviewer", "a:h:r", backend=coord_backend)
+    real_list_files = remote.list_files
+
+    def nonrecursive_parent(prefix, **kw):
+        paths = real_list_files(prefix, **kw)
+        if prefix == remote.roles_prefix():
+            return [
+                p for p in paths
+                if "/" not in p[len(remote.roles_prefix()):]
+            ]
+        return paths
+
+    monkeypatch.setattr(remote, "list_files", nonrecursive_parent)
+    out = role_ops.load_roles_with_leases(backend=coord_backend)
+    assert [(rec["name"], [l["agent"] for l in leases])
+            for rec, leases in out] == [("reviewer", ["a:h:r"])]
+
+
 def test_load_roles_with_leases_unreadable_shard_is_read_error(coord_backend,
                                                                monkeypatch):
     """F4 carried into the combined fold: a lease shard that was LISTED but

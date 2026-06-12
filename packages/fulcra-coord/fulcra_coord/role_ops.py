@@ -111,6 +111,14 @@ def load_roles_with_leases(
     listing, so the bus demonstrably answered and the emptiness is confirmed
     by construction.
 
+    LIVE BACKEND COMPAT (2026-06-12 handoff audit): some Fulcra Files list
+    implementations return only direct children for ``roles/`` even though a
+    narrower ``roles/<name>/leases/`` listing returns the lease shards. The
+    partitioned one-listing fast path is still used when the parent listing
+    includes subtrees, but a parent listing with NO lease subtrees falls back
+    to per-role ``read_leases``. Otherwise every held role folds as falsely
+    VACANT on those backends.
+
     Best-effort at the edges exactly like ``list_roles``: a failed LISTING
     enumerates nothing (``[]``), and a registry record whose own download
     fails is dropped — along with its leases — from this glance (per-item
@@ -172,6 +180,10 @@ def load_roles_with_leases(
             out.append((rec, None))
             continue
         shards = lease_paths.get(Path(rpath).stem, [])
+        if not lease_paths:
+            out.append((rec, read_leases(rec.get("name") or Path(rpath).stem,
+                                         backend=backend)))
+            continue
         if any(not isinstance(results.get(sp), dict) for sp in shards):
             # F4: a listed-but-unreadable shard is a read ERROR for the whole
             # role — partial lease truth must never masquerade as the union.
