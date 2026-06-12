@@ -714,6 +714,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Include latest Fulcra Continuity checkpoint summaries for active/waiting tasks")
     sp.add_argument("--format", choices=["table", "json"], default="table")
 
+    # ---- briefing ----
+    sp = sub.add_parser("briefing",
+                        help="Session-start briefing in ONE process: resolved "
+                             "identity + status + inbox + needs-me sections "
+                             "from a single summaries load (what the "
+                             "SessionStart hooks consume)")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Whose briefing (default: $FULCRA_COORD_AGENT or "
+                         "derived; the hooks deliberately omit this so a "
+                         "persisted identity wins)")
+    sp.add_argument("--format", choices=["table", "json"], default="json")
+
     # ---- needs-me ----
     sp = sub.add_parser("needs-me",
                         help="What's blocked on YOU (the human): every open task "
@@ -810,6 +822,7 @@ COMMAND_MAP = {
     "human": _cli.cmd_human,
     "annotations": _cli.cmd_annotations,
     "needs-me": _cli.cmd_needs_me,
+    "briefing": _cli.cmd_briefing,
     "digest": _cli.cmd_digest,
     "install-digest": _cli.cmd_install_digest,
     "resume": _cli.cmd_resume,

@@ -31,19 +31,31 @@ STALE_HOURS="${FULCRA_COORD_STALE_HOURS:-2}"
 # expansion — an unquoted string would word-split it into broken tokens (C1).
 FULCRA_COORD=(__FULCRA_COORD_ARGV__)
 
-# Resolve the agent id through the CLI so EVERY section agrees on "who am I"
-# (I-2). inbox/needs-me already resolve via identity.resolve_agent (per-cwd
-# persisted id), so the banner's "mine" filter, title, and resume hint must use
-# the SAME resolution or they diverge the moment a stable id is declared with
-# `identity set` — the shell-derived claude-code:<host>:<repo> would then differ
-# from the declared id and the banner would show the wrong agent's open work.
-# Fail-safe: an old/missing CLI yields empty -> fall back to the shell-derived id
-# (the same shape resolve_agent derives), so the hook still works pre-handshake.
-AGENT="$("${FULCRA_COORD[@]}" identity --format json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("agent",""))' 2>/dev/null)"
-[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"
+# ONE foreground CLI process for identity + status + inbox + needs-me: the
+# `briefing` subcommand folds all four surfaces from a SINGLE summaries load.
+# (PERF: the old four-process shape paid 4 CLI spawns + 4 independent
+# views/summaries.json downloads per session start — and under the stale-view
+# guard each process could re-run the whole direct-listing fallback, so a
+# degraded bus cost up to 4 repair-shaped bursts. One process = one load = at
+# most ONE fallback.)
+# Deliberately NO --agent: passing it is highest-precedence in resolve_agent and
+# would OVERRIDE a persisted (`identity set`) or $FULCRA_COORD_AGENT identity,
+# so directives addressed to a declared id would be missed (I1). Deliberately NO
+# --human either: the CLI resolves the operator's handle from
+# $FULCRA_COORD_HUMAN / persisted config / the 'human' default — never hardcode
+# a name here. Fail-safe: a missing/old CLI without `briefing` yields empty ->
+# inject nothing, never block the session.
+BRIEFING="$("${FULCRA_COORD[@]}" briefing --format json 2>/dev/null)"
+[ -z "$BRIEFING" ] && exit 0
 
-JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
-[ -z "$JSON" ] && exit 0
+# The briefing carries the CLI-resolved agent id so EVERY section agrees on
+# "who am I" (I-2) — the same identity.resolve_agent resolution inbox/needs-me
+# fold with, so the banner's "mine" filter, title, and resume hint can never
+# diverge from a declared (`identity set`) id. Fail-safe: an id-less payload
+# falls back to the shell-derived id (the same shape resolve_agent derives),
+# so the hook still works pre-handshake.
+AGENT="$(printf '%s' "$BRIEFING" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("agent",""))' 2>/dev/null)"
+[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"
 
 # Report presence on connect (situational awareness): record this agent's current
 # workstream(s) on the bus so `agents`/`presence` show what it's working on even
@@ -52,50 +64,27 @@ JSON="$("${FULCRA_COORD[@]}" status --format json 2>/dev/null)"
 # delays session start; a missing/old CLI without `connect` simply no-ops.
 "${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &
 
-# Directives addressed to this agent. status JSON may not carry `assignee`, so
-# we ask the inbox command directly (fail-safe: empty/missing -> no section).
-# This is the only extra call; it is silent and never blocks the session.
-# Deliberately NO --agent: passing it is highest-precedence in resolve_agent and
-# would OVERRIDE a persisted (`identity set`) or $FULCRA_COORD_AGENT identity,
-# so directives addressed to a declared id would be missed. Letting inbox resolve
-# its own agent honors the declared identity and falls back to the same derived
-# "claude-code:${HOST}:${REPO}" id when none is set (I1).
-INBOX="$("${FULCRA_COORD[@]}" inbox --format json 2>/dev/null)"
-
-# What is blocked on the HUMAN — the situational-awareness banner that LEADS the
-# injected context. Deliberately NO --human flag: the CLI resolves the operator's
-# handle from $FULCRA_COORD_HUMAN / persisted config / the 'human' default, so we
-# never hardcode a name here. Fail-safe: a missing/old CLI that lacks needs-me
-# yields empty and simply omits the section.
-NEEDSME="$("${FULCRA_COORD[@]}" needs-me --format json 2>/dev/null)"
-
-CONTEXT="$(JSON="$JSON" INBOX="$INBOX" NEEDSME="$NEEDSME" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null
+CONTEXT="$(BRIEFING="$BRIEFING" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null
 import sys, json, os, datetime, shlex
 agent = os.environ.get("AGENT","")
 stale_h = float(os.environ.get("STALE_HOURS","2"))
 try:
-    d = json.loads(os.environ.get("JSON",""))
+    b = json.loads(os.environ.get("BRIEFING","")) or {}
+    d = b.get("status") or {}
 except Exception:
     sys.exit(0)
-try:
-    inbox = (json.loads(os.environ.get("INBOX","")) or {}).get("inbox", [])
-except Exception:
-    # Inbox is an optional add-on surface; a missing/old CLI that lacks the
-    # subcommand must not break the in-flight+stale section, so default empty.
-    inbox = []
-try:
-    _nm = json.loads(os.environ.get("NEEDSME","")) or {}
-    needsme = _nm.get("items", [])
-    # Upcoming = future-not_before asks the human cannot act on yet. They must
-    # NEVER inflate the BLOCKED ON YOU headline count (the whole point of the
-    # not_before gate); they only add one muted "+N upcoming" line. An old CLI
-    # omits the key -> empty, so the banner degrades to the prior shape.
-    upcoming = _nm.get("upcoming", [])
-except Exception:
-    # Same fail-safe contract as inbox: an old CLI without needs-me omits the
-    # blocked-on-you banner rather than breaking the rest of the injection.
-    needsme = []
-    upcoming = []
+# Inbox / needs-me are optional add-on sections; a briefing payload missing
+# either key (a leaner future CLI) must not break the in-flight+stale section,
+# so each defaults empty — the same fail-safe contract the old per-command
+# calls had.
+inbox = (b.get("inbox") or {}).get("inbox", []) or []
+_nm = b.get("needs_me") or {}
+needsme = _nm.get("items", []) or []
+# Upcoming = future-not_before asks the human cannot act on yet. They must
+# NEVER inflate the BLOCKED ON YOU headline count (the whole point of the
+# not_before gate); they only add one muted "+N upcoming" line. An old CLI
+# omits the key -> empty, so the banner degrades to the prior shape.
+upcoming = _nm.get("upcoming", []) or []
 active = d.get("active", []) or []
 def age_hours(ts):
     try:
@@ -173,11 +162,12 @@ PY
 )"
 [ -z "$CONTEXT" ] && exit 0
 
-# Title = first of my active tasks, if any.
-TITLE="$(JSON="$JSON" AGENT="$AGENT" python3 - <<'PY' 2>/dev/null
+# Title = first of my active tasks, if any (read off the briefing's status
+# section — same data the old standalone `status` call carried).
+TITLE="$(BRIEFING="$BRIEFING" AGENT="$AGENT" python3 - <<'PY' 2>/dev/null
 import sys,json,os
 agent=os.environ.get("AGENT","")
-try: d=json.loads(os.environ.get("JSON",""))
+try: d=(json.loads(os.environ.get("BRIEFING","")) or {}).get("status") or {}
 except Exception: sys.exit(0)
 for t in d.get("active",[]) or []:
     if t.get("owner_agent")==agent and t.get("status")=="active":

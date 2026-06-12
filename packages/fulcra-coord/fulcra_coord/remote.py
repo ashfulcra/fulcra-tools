@@ -219,15 +219,18 @@ def workstream_remote_path(workstream: str) -> str:
     return f"{remote_root()}/workstreams/{workstream}.json"
 
 
-def agent_remote_path(agent: str) -> str:
-    return f"{remote_root()}/agents/{agent}.json"
+# (agent_remote_path — f"{remote_root()}/agents/{agent}.json" — was removed in
+# the 2026-06-11 perf wave together with the per-agent views it addressed:
+# materialized on every write/reconcile, downloaded by nothing. Existing remote
+# files under agents/ are inert; bus-state cleanup is deferred pending a Fulcra
+# service review.)
 
 
 def presence_remote_path(agent_slug: str) -> str:
     """Per-agent presence record path. Takes an ALREADY-SLUGGED agent id (via
     views.agent_slug) so the colons in a raw ``kind:host:repo`` id never reach a
-    filename — mirroring how the inbox views are keyed by slug. Only that agent
-    writes this file, so there is zero cross-agent write contention."""
+    filename — mirroring how the index's inbox counts are keyed by slug. Only
+    that agent writes this file, so there is zero cross-agent write contention."""
     return f"{remote_root()}/presence/{agent_slug}.json"
 
 
