@@ -26,6 +26,10 @@ LOAD them at session start, APPLY them, and CAPTURE new ones.
      session end — `fulcra-prefs capture-batch --file <json-array> --platform
      <your-platform>`; mark inferred items lower `confidence` (compile won't let
      a guess override an explicit pref). See the capture reference.
+   - Hooked auto-capture: if `fulcra-prefs install-hooks --platform
+     <your-platform>` is installed, write candidates during the session to
+     `~/.local/state/fulcra-prefs/candidates/<your-platform>/<session_id>.json`;
+     the lifecycle hook drains that file through `capture-batch`.
    - Refresh: `fulcra-prefs compile` (run after captures; cheap).
 2. **You can make HTTP requests but not run commands** → follow
    references/fulcra-prefs-tier2-http.md (device-flow auth + direct API).
