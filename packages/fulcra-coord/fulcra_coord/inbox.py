@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, listener, selfupdate, wake, env_int
@@ -399,6 +400,60 @@ def _notify_stale_summary_fallback_enabled() -> bool:
     return env_int("FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK", 0) != 0
 
 
+def _stale_summary_alert_threshold_min() -> int:
+    """View-staleness age that should alert the operator from a listener tick.
+
+    The listener's default bounded mode deliberately avoids the direct-listing
+    fallback. That is right for host health, but a chronic stale summaries view
+    can otherwise make listeners silently miss newly-directed work. Alerting is
+    cheap and throttled; set to 0 to disable.
+    """
+    return env_int("FULCRA_COORD_NOTIFY_STALE_ALERT_MIN", 60)
+
+
+def _stale_summary_alert_interval_h() -> int:
+    """Minimum hours between stale-summary operator alerts for one agent."""
+    return env_int("FULCRA_COORD_NOTIFY_STALE_ALERT_INTERVAL_H", 6)
+
+
+def _stale_summary_alert_marker_path(agent: str):
+    return cache.cache_root() / (
+        f"stale-summaries-alert-{listener.agent_slug(agent)}")
+
+
+def _alert_stale_summaries_if_needed(agent: str, stale_min: float) -> None:
+    """Best-effort operator alert when listener-bounded mode may be deaf.
+
+    This is intentionally alert-only: no direct-listing fallback, no task-body
+    fan-out. It makes the degraded mode visible through the same notification
+    path the listener normally uses, throttled per agent on this host.
+    """
+    try:
+        threshold = _stale_summary_alert_threshold_min()
+        if threshold <= 0:
+            return
+        if stale_min < threshold:
+            return
+        marker = _stale_summary_alert_marker_path(agent)
+        interval_h = max(0, _stale_summary_alert_interval_h())
+        try:
+            age_h = (time.time() - marker.stat().st_mtime) / 3600.0
+            if interval_h and age_h < interval_h:
+                return
+        except OSError:
+            pass
+        listener.emit_message(
+            f"coord summaries view is {int(stale_min)}m stale on this host; "
+            "listener ticks are bounded and may miss newly-directed work until "
+            "reconcile repairs views",
+            title="fulcra-coord degraded",
+        )
+        cache.cache_root().mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(int(stale_min)))
+    except Exception:
+        pass
+
+
 def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """Poll the inbox for an agent; on non-empty, surface + notify (Part 3).
 
@@ -418,6 +473,8 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         summaries = _load_task_summaries(
             backend=backend,
             skip_stale_fallback=not _notify_stale_summary_fallback_enabled(),
+            on_stale_skipped=lambda stale_min:
+                _alert_stale_summaries_if_needed(me, stale_min),
         )
         items = _load_inbox(me, backend=backend, summaries=summaries)
         surface = _inbox_surface_path(me)

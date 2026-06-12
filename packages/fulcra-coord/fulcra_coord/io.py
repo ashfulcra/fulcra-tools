@@ -496,6 +496,7 @@ def _load_task_summaries(
     backend: Optional[list[str]] = None, *,
     bypass_fallback_throttle: bool = False,
     skip_stale_fallback: bool = False,
+    on_stale_skipped: Any = None,
 ) -> list[dict[str, Any]]:
     """Load the compact task-summary list WITHOUT fetching task bodies.
 
@@ -553,6 +554,11 @@ def _load_task_summaries(
             _warn(f"summaries view is {int(stale_min)}m stale — using the "
                   "stale view without direct-listing fallback for this tick "
                   "(results may be incomplete)")
+            if on_stale_skipped is not None:
+                try:
+                    on_stale_skipped(stale_min)
+                except Exception:
+                    pass
             return summaries_view["summaries"]
         window_min = _fallback_window_minutes()
         holding_token: Optional[str] = None
