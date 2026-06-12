@@ -4,6 +4,7 @@
 set +e
 INPUT="$(cat 2>/dev/null)"
 CWD="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("cwd",""))' 2>/dev/null)"
+SESSION_ID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
 [ -z "$CWD" ] && CWD="$PWD"
 HOST="$(hostname -s 2>/dev/null || echo host)"
 REPO="$(basename "$CWD")"
@@ -48,7 +49,14 @@ AGENT="$(printf '%s' "$BRIEFING" | python3 -c 'import sys,json;print(json.load(s
 # delays session start; a missing/old CLI without `connect` simply no-ops.
 # Re-arm Codex hooks + the per-agent inbox listener on every app start.
 # Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.
-"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &
+# A headless `codex exec` wake may run SessionStart too. It should refresh
+# hooks/listeners, but must not steal this app thread heartbeat by retargeting
+# the managed automation at its throwaway exec session id.
+if [ -n "$SESSION_ID" ] && [ -z "${FULCRA_COORD_CODEX_WAKE:-}" ]; then
+  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --thread-id "$SESSION_ID" --no-connect >/dev/null 2>&1 &
+else
+  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &
+fi
 "${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &
 
 CONTEXT="$(BRIEFING="$BRIEFING" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null

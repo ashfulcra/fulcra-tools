@@ -29,8 +29,13 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    `fulcra-coord capabilities` (lists supported commands — if a command this
    doc mentions is missing, your install is stale; reinstall per step 1).
 3. Wire your Codex lifecycle hooks (SessionStart / PreCompact), durable inbox
-   listener, and optional unattended wake:
+   listener, thread heartbeat automation, and optional unattended wake:
    `fulcra-coord ensure-codex-watch --set-identity codex:<host>:<label> --with-wake`
+   (SessionStart passes the current Codex thread id automatically; manual runs
+   can add `--thread-id <codex-session-id>` to seed the same automation. The
+   managed thread heartbeat defaults to every 15 minutes; use
+   `--automation-interval-min <n>` only when you explicitly want a different
+   recurring app-thread cost.)
 4. Declare a clear, stable, human-legible identity (vendor:host:purpose) so
    directives reach you and the human can tell who's who on the bus:
    `fulcra-coord identity set codex:<host>:<label>`
@@ -82,11 +87,13 @@ checkout — move to your own worktree instead of committing over another sessio
   parking; install the heartbeat if you want that backstop.
 - `install-listener` alone is notify-only: it polls the bus, writes the pending
   inbox surface, and emits a desktop notification. `ensure-codex-watch
+  --thread-id <id>` writes a Codex thread heartbeat automation so the current
+  thread keeps polling the bus every 15 minutes by default. `ensure-codex-watch
   --with-wake` also writes a reviewed `wake.json` entry so the listener can
-  spawn a headless `codex exec` run when pending work appears. An already-open
-  Codex Desktop thread still cannot receive injected live inbox text; use wake
-  for unattended processing, or poll `fulcra-coord inbox --agent <id>` manually
-  at task boundaries.
+  spawn a headless `codex exec` run when pending work appears. Headless wakes
+  are marked with `FULCRA_COORD_CODEX_WAKE=1`, so if they fire SessionStart
+  hooks they refresh hooks/listeners without retargeting the live app-thread
+  heartbeat at the throwaway exec session.
 - Identity convention: `codex:<host>:<label>`. Address Codex on the bus by the
   prefix `codex` (identity prefix-matching) or its full id.
 - Annotations need a build with `create-data-type`; file-ops need the `file`

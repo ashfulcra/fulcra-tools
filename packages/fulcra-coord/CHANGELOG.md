@@ -151,6 +151,16 @@ summaries view is stale past `FULCRA_COORD_NOTIFY_STALE_ALERT_MIN` (default
 60m). This keeps the bounded stale-view mode from failing silently during
 chronic view outages; alert cadence is controlled by
 `FULCRA_COORD_NOTIFY_STALE_ALERT_INTERVAL_H` (default 6h).
+Codex SessionStart now passes its thread/session id into `ensure-codex-watch`,
+which installs a managed Codex heartbeat automation for that thread. This fixes
+the missing app-layer listener: hooks/listener/wake are no longer expected to
+stand in for the Codex thread automation that actually wakes an open
+conversation to poll the bus. The managed heartbeat defaults to 15 minutes and
+`ensure-codex-watch` prints the automation id/thread/cadence when it writes or
+updates it. Headless `codex exec` wakes are marked with
+`FULCRA_COORD_CODEX_WAKE=1`; if they run SessionStart hooks, they refresh
+hooks/listeners but skip thread automation retargeting so they cannot steal the
+heartbeat from the live app thread.
 
 ## [0.15.4] — 2026-06-11
 

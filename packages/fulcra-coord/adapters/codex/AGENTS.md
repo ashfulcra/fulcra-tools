@@ -26,9 +26,12 @@ fulcra-coord inbox --agent <your-agent-id>
 Check for tasks already `waiting` or `active` that may belong to your workstream.
 For an already-open Codex Desktop thread, remember that `install-listener` emits
 desktop notifications and prepares the next `SessionStart`; it cannot inject
-new broadcast text into the live conversation. Use `ensure-codex-watch
---with-wake` when the host should spawn a headless `codex exec` wake on pending
-work, or poll `inbox` manually at task boundaries.
+new broadcast text into the live conversation by itself. Codex SessionStart
+passes its thread id to `ensure-codex-watch`, which installs a Codex heartbeat
+automation for this thread every 15 minutes by default. Use
+`ensure-codex-watch --with-wake` when the host should also spawn a headless
+`codex exec` wake on pending work; those wakes are marked so they cannot retarget
+the live app-thread heartbeat at a throwaway exec session.
 
 ## Creating a task
 

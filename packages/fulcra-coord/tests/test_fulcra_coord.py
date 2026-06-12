@@ -4507,10 +4507,21 @@ class TestCodexTemplates(unittest.TestCase):
         # `install-listener` still arms its listener); (c) the derived fallback id
         # is `codex:*` not `claude-code:*`.
         expected = cc.SESSION_START_SH.replace(
+            'CWD="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("cwd",""))\' 2>/dev/null)"',
+            'CWD="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("cwd",""))\' 2>/dev/null)"\n'
+            'SESSION_ID="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("session_id",""))\' 2>/dev/null)"',
+        ).replace(
             '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
             '# Re-arm Codex hooks + the per-agent inbox listener on every app start.\n'
             '# Backgrounded + silenced; an old CLI without ensure-codex-watch simply no-ops.\n'
-            '"${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+            '# A headless `codex exec` wake may run SessionStart too. It should refresh\n'
+            '# hooks/listeners, but must not steal this app thread heartbeat by retargeting\n'
+            '# the managed automation at its throwaway exec session id.\n'
+            'if [ -n "$SESSION_ID" ] && [ -z "${FULCRA_COORD_CODEX_WAKE:-}" ]; then\n'
+            '  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --thread-id "$SESSION_ID" --no-connect >/dev/null 2>&1 &\n'
+            'else\n'
+            '  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
+            'fi\n'
             '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
         ).replace(
             '[ -z "$AGENT" ] && AGENT="claude-code:${HOST}:${REPO}"',
@@ -4534,12 +4545,17 @@ class TestCodexTemplates(unittest.TestCase):
         from fulcra_coord import codex
         self.assertIn("ensure-codex-watch", codex.SESSION_START_SH)
         self.assertIn("--no-connect", codex.SESSION_START_SH)
+        self.assertIn("--thread-id \"$SESSION_ID\"", codex.SESSION_START_SH)
+        self.assertIn('FULCRA_COORD_CODEX_WAKE', codex.SESSION_START_SH)
+        self.assertIn('[ -z "${FULCRA_COORD_CODEX_WAKE:-}" ]',
+                      codex.SESSION_START_SH)
         # LOAD-BEARING: the self-heal must be ADDED, never at the cost of the
         # review-capability connect (#70). The poisoned PR dropped this; guard it.
         self.assertIn("connect --can-review", codex.SESSION_START_SH)
         # Backgrounded + silenced so it never blocks or slows session boot.
-        self.assertIn('ensure-codex-watch --agent "$AGENT" --no-connect '
-                      '>/dev/null 2>&1 &', codex.SESSION_START_SH)
+        self.assertIn('ensure-codex-watch --agent "$AGENT" --thread-id '
+                      '"$SESSION_ID" --no-connect >/dev/null 2>&1 &',
+                      codex.SESSION_START_SH)
 
     def test_no_stop_hook(self):
         # Codex Stop fires every turn and would thrash; end-parking is delegated
@@ -4636,7 +4652,9 @@ class TestInstallCodex(unittest.TestCase):
         data = json.load(open(os.path.join(
             self.tmp, "fulcra-coord", "wake.json")))
         entry = data["codex:h:r"]
-        self.assertEqual(entry["cmd"][:3], [
+        self.assertEqual(entry["cmd"][:5], [
+            "/usr/bin/env",
+            "FULCRA_COORD_CODEX_WAKE=1",
             "/Applications/Codex.app/Contents/Resources/codex",
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -4653,6 +4671,60 @@ class TestInstallCodex(unittest.TestCase):
             self.tmp, "fulcra-coord", "wake.json")))
         self.assertNotIn("codex:h:r", data)
         self.assertIn("codex:h:other", data)
+
+    def test_install_thread_automation_writes_codex_heartbeat(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp}):
+            plan = codex.install_thread_automation(
+                "codex:h:r", "thread-123", interval_min=7)
+        path = os.path.join(
+            self.tmp, "automations",
+            "fulcra-coord-task-listener-codex-h-r", "automation.toml")
+        self.assertEqual(plan["path"], path)
+        body = open(path).read()
+        self.assertIn('kind = "heartbeat"', body)
+        self.assertIn('rrule = "FREQ=MINUTELY;INTERVAL=7"', body)
+        self.assertEqual(plan["interval_min"], 7)
+        self.assertIn('target_thread_id = "thread-123"', body)
+        self.assertIn("fulcra-coord inbox --agent codex:h:r", body)
+
+    def test_install_thread_automation_defaults_to_quarter_hour(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp}):
+            plan = codex.install_thread_automation("codex:h:r", "thread-123")
+        self.assertEqual(plan["interval_min"], 15)
+        body = open(plan["path"]).read()
+        self.assertIn('rrule = "FREQ=MINUTELY;INTERVAL=15"', body)
+
+    def test_install_thread_automation_update_preserves_created_at(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp}):
+            codex.install_thread_automation("codex:h:r", "thread-123")
+            path = os.path.join(
+                self.tmp, "automations",
+                "fulcra-coord-task-listener-codex-h-r", "automation.toml")
+            first = open(path).read()
+            codex.install_thread_automation("codex:h:r", "thread-456")
+            second = open(path).read()
+        def field(text, key):
+            for line in text.splitlines():
+                if line.startswith(key + " = "):
+                    return line.split(" = ", 1)[1]
+            return None
+        self.assertEqual(field(first, "created_at"), field(second, "created_at"))
+        self.assertIn('target_thread_id = "thread-456"', second)
+
+    def test_install_thread_automation_uninstall_removes_managed_file(self):
+        from fulcra_coord import codex
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp}):
+            codex.install_thread_automation("codex:h:r", "thread-123")
+            path = os.path.join(
+                self.tmp, "automations",
+                "fulcra-coord-task-listener-codex-h-r", "automation.toml")
+            self.assertTrue(os.path.exists(path))
+            codex.install_thread_automation(
+                "codex:h:r", "thread-123", uninstall=True)
+        self.assertFalse(os.path.exists(path))
 
 
 class TestInstallCodexCmd(unittest.TestCase):
@@ -4698,6 +4770,7 @@ class TestEnsureCodexWatch(unittest.TestCase):
             can_review=False, role=None, summary=None, workstream=None,
             interval_min=None, codex_target_dir=None, listener_target_dir=None,
             listener_logs_dir=None, no_load=False, with_wake=False,
+            thread_id=None, automation_interval_min=None,
             dry_run=False, uninstall=False)
         base.update(overrides)
         return types.SimpleNamespace(**base)
@@ -4834,6 +4907,38 @@ class TestEnsureCodexWatch(unittest.TestCase):
         m_run.assert_not_called()
         m_connect.assert_not_called()
 
+    def test_thread_id_installs_codex_heartbeat_automation(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_thread_automation") as m_auto, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(thread_id="thread-123", automation_interval_min=7))
+        self.assertEqual(rc, 0)
+        m_auto.assert_called_once_with(
+            "codex:h:r", "thread-123", interval_min=7,
+            uninstall=False, dry_run=False)
+
+    def test_dry_run_thread_id_delegates_without_load_or_connect(self):
+        from fulcra_coord import installers
+        with patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_thread_automation") as m_auto, \
+             patch("fulcra_coord.installers.subprocess.run") as m_run, \
+             patch("fulcra_coord.installers.cmd_connect") as m_connect:
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(dry_run=True, thread_id="thread-123"))
+        self.assertEqual(rc, 0)
+        m_auto.assert_called_once_with(
+            "codex:h:r", "thread-123", interval_min=15,
+            uninstall=False, dry_run=True)
+        m_run.assert_not_called()
+        m_connect.assert_not_called()
+
     def test_dry_run_set_identity_does_not_persist(self):
         # `--dry-run` promises zero side effects. A declared identity should shape
         # the printed listener plan, but must not write identity state.
@@ -4918,7 +5023,9 @@ class TestEnsureCodexWatchDispatch(unittest.TestCase):
         ns = parser.parse_args([
             "ensure-codex-watch", "--agent", "codex:h:r",
             "--set-identity", "codex:h:r", "--no-connect", "--can-review",
-            "--interval-min", "15", "--no-load", "--with-wake", "--dry-run"])
+            "--interval-min", "15", "--no-load", "--with-wake",
+            "--thread-id", "thread-123", "--automation-interval-min", "7",
+            "--dry-run"])
         self.assertEqual(ns.command, "ensure-codex-watch")
         self.assertEqual(ns.agent, "codex:h:r")
         self.assertEqual(ns.set_identity, "codex:h:r")
@@ -4927,6 +5034,8 @@ class TestEnsureCodexWatchDispatch(unittest.TestCase):
         self.assertEqual(ns.interval_min, 15)
         self.assertTrue(ns.no_load)
         self.assertTrue(ns.with_wake)
+        self.assertEqual(ns.thread_id, "thread-123")
+        self.assertEqual(ns.automation_interval_min, 7)
         self.assertTrue(ns.dry_run)
 
 
