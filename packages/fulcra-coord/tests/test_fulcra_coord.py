@@ -6592,6 +6592,57 @@ class TestNotifyInbox(unittest.TestCase):
         self.assertNotIn(shard_path, downloaded)
 
 
+def test_notify_inbox_refreshes_reviewer_presence_for_routing(coord_backend):
+    from contextlib import redirect_stdout
+    import io as _io
+
+    from fulcra_coord import inbox, remote, routing_ops, schema, views
+    from fulcra_coord.timeutil import now_iso
+
+    agent = "claude-code:ArcBot:Arc-Code-Review"
+    stale_seen = (
+        datetime.now(timezone.utc) - timedelta(hours=6)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    record = schema.make_presence(
+        agent,
+        workstreams=["fulcra-coord"],
+        summary="Arc Code Review available",
+        last_seen=stale_seen,
+        capabilities=["review", "reviewer"],
+    )
+    remote.upload_json(
+        record, remote.presence_remote_path(views.agent_slug(agent)),
+        backend=coord_backend)
+    remote.upload_json(
+        {"generated_at": now_iso(), "summaries": []},
+        remote.view_remote_path("summaries"), backend=coord_backend)
+
+    args = types.SimpleNamespace(agent=agent)
+    with patch("fulcra_coord.listener.emit_notification"), \
+         patch("fulcra_coord.listener.emit_message"), \
+         patch("fulcra_coord.selfupdate.maybe_self_update"):
+        assert inbox.cmd_notify_inbox(args, backend=coord_backend) == 0
+
+    refreshed = remote.download_json(
+        remote.presence_remote_path(views.agent_slug(agent)),
+        backend=coord_backend)
+    assert refreshed["agent"] == agent
+    assert refreshed["workstreams"] == ["fulcra-coord"]
+    assert refreshed["summary"] == "Arc Code Review available"
+    assert refreshed["capabilities"] == ["review", "reviewer"]
+    assert refreshed["last_seen"] != stale_seen
+
+    buf = _io.StringIO()
+    rr = types.SimpleNamespace(
+        pr="194", repo="ashfulcra/fulcra-tools", dry_run=True,
+        format="json", agent="author:h:r", candidate_list=agent)
+    with redirect_stdout(buf):
+        assert routing_ops.cmd_request_review(rr, backend=coord_backend) == 0
+    report = json.loads(buf.getvalue())
+    assert report["winner"] == agent
+    assert report["snapshot"] == [{"agent": agent, "tier": "live"}]
+
+
 class TestNotifyBlockedOnYou(unittest.TestCase):
     """notify-inbox ALSO notifies on NEW blocked-on-you items for the resolved
     human, once per item (idempotent seen-set), no-op when empty."""

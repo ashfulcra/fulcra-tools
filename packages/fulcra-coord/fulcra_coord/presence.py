@@ -304,6 +304,33 @@ def _load_own_presence(
         return PRESENCE_READ_ERROR
 
 
+def touch_presence(me: str, backend: Optional[list[str]] = None) -> bool:
+    """Refresh this agent's presence timestamp without changing declarations.
+
+    Durable listeners run ``notify-inbox --agent X`` while the agent runtime is
+    idle. Without this touch, a reviewer can have a healthy listener that sees
+    direct work, yet age out of liveness-aware routing because its presence
+    record is never refreshed. Preserve workstreams, summary, session, and
+    capabilities; if the own-record read fails, skip the write rather than
+    blindly shrinking those fields.
+    """
+    try:
+        current = _load_own_presence(me, backend=backend)
+        if current is PRESENCE_READ_ERROR:
+            return False
+        current = current or {}
+        record = schema.make_presence(
+            me,
+            workstreams=list(current.get("workstreams") or []),
+            summary=current.get("summary", "") or "",
+            session=current.get("session"),
+            capabilities=list(current.get("capabilities") or []),
+        )
+        return _write_presence(record, backend=backend)
+    except Exception:
+        return False
+
+
 def _read_own_capabilities(
     me: str, backend: Optional[list[str]] = None) -> Any:
     """This agent's currently declared capabilities: a list, or

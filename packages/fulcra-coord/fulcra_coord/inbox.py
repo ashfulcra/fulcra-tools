@@ -466,6 +466,11 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """
     me = getattr(args, "agent", None) or _derive_agent()
     try:
+        try:
+            from . import presence
+            presence.touch_presence(me, backend=backend)
+        except Exception:
+            pass
         # ONE summaries load per tick, shared by the inbox fold AND the
         # needs-me pass below (perf loop-2 #2 — each used to pay its own
         # download; under the stale-view guard each re-ran the whole

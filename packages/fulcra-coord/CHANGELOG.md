@@ -12,6 +12,14 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Listener ticks keep reviewer routing presence fresh
+
+- `notify-inbox --agent X` now refreshes `X`'s presence timestamp while
+  preserving workstreams, summary, session, and capabilities. This closes the
+  gap where a durable listener could keep seeing direct inbox work for a
+  reviewer, while `request-review` still classified that reviewer as
+  below-floor because no full agent session had refreshed presence recently.
+
 ### Message-class lifecycle: delivered tells/FYIs/echoes finally reach a terminal state
 
 The operational symptom (2026-06-11): message-class directives — tells, FYIs,
