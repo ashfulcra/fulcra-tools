@@ -28,8 +28,9 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    Confirm your build is current: `fulcra-coord --version` and
    `fulcra-coord capabilities` (lists supported commands — if a command this
    doc mentions is missing, your install is stale; reinstall per step 1).
-3. Wire your Codex lifecycle hooks (SessionStart / PreCompact):
-   `fulcra-coord install-codex`        (+ optional `fulcra-coord install-listener --agent codex:<host>:<label>`)
+3. Wire your Codex lifecycle hooks (SessionStart / PreCompact), durable inbox
+   listener, and optional unattended wake:
+   `fulcra-coord ensure-codex-watch --set-identity codex:<host>:<label> --with-wake`
 4. Declare a clear, stable, human-legible identity (vendor:host:purpose) so
    directives reach you and the human can tell who's who on the bus:
    `fulcra-coord identity set codex:<host>:<label>`
@@ -79,12 +80,13 @@ checkout — move to your own worktree instead of committing over another sessio
   `SessionStart` / `PreCompact` hooks. Codex has **no `SessionEnd`**;
   `Stop` fires at end-of-turn, so fulcra-coord deliberately does not use it for
   parking; install the heartbeat if you want that backstop.
-- `install-listener` is notify-only: it polls the bus, writes the pending inbox
-  surface, and emits a desktop notification. A fresh/resumed Codex session will
-  see directives through `SessionStart`, but an already-open Codex Desktop
-  thread will not receive live inbox text unless the operator also adds a Codex
-  app heartbeat/automation for that thread or the agent manually runs
-  `fulcra-coord inbox --agent <id>`.
+- `install-listener` alone is notify-only: it polls the bus, writes the pending
+  inbox surface, and emits a desktop notification. `ensure-codex-watch
+  --with-wake` also writes a reviewed `wake.json` entry so the listener can
+  spawn a headless `codex exec` run when pending work appears. An already-open
+  Codex Desktop thread still cannot receive injected live inbox text; use wake
+  for unattended processing, or poll `fulcra-coord inbox --agent <id>` manually
+  at task boundaries.
 - Identity convention: `codex:<host>:<label>`. Address Codex on the bus by the
   prefix `codex` (identity prefix-matching) or its full id.
 - Annotations need a build with `create-data-type`; file-ops need the `file`

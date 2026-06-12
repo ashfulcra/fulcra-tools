@@ -15,9 +15,11 @@ the listener's last-fire mtime from it; ``_derive_agent`` is the usual thin alia
 from __future__ import annotations
 
 import json
+import sys
+import time
 from typing import Any, Optional
 
-from . import cache, remote, schema, views, identity, listener, selfupdate, wake
+from . import cache, remote, schema, views, identity, listener, selfupdate, wake, env_int
 from .io import _cache_remote_task, _load_task, _load_task_summaries
 from .output import info as _info, print_json as _print_json, warn as _warn, err as _err
 from .writepipe import _view_name_to_remote, _write_task_and_views
@@ -373,6 +375,85 @@ def _overdue_loop_suffix(me: str, backend: Optional[list[str]] = None) -> str:
         return ""  # best-effort: fall back to the plain count message
 
 
+def _notify_overdue_loop_suffix_enabled() -> bool:
+    """Whether notify-inbox may pay the optional directive-loop scan.
+
+    The core listener path must stay cheap enough to run under launchd forever:
+    write the inbox surface, emit the new-item notification, wake if configured,
+    and exit. The overdue-loop suffix is nice operator context, but it walks the
+    directives prefix and can fan out into many remote downloads. Keep it opt-in
+    so optional decoration cannot wedge the listener and suppress future ticks.
+    """
+    return env_int("FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX", 0) != 0
+
+
+def _notify_stale_summary_fallback_enabled() -> bool:
+    """Whether a scheduled listener tick may rebuild stale summaries.
+
+    Interactive reads can trade latency for freshness. A launchd/cron listener
+    cannot: if it wins the direct-listing fallback claim it may spend minutes
+    statting/downloading task bodies, which makes the installed listener look
+    armed while suppressing later interval fires. Default to serving the stale
+    aggregate for this tick; operators can opt into the old repair-shaped path
+    with FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK=1.
+    """
+    return env_int("FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK", 0) != 0
+
+
+def _stale_summary_alert_threshold_min() -> int:
+    """View-staleness age that should alert the operator from a listener tick.
+
+    The listener's default bounded mode deliberately avoids the direct-listing
+    fallback. That is right for host health, but a chronic stale summaries view
+    can otherwise make listeners silently miss newly-directed work. Alerting is
+    cheap and throttled; set to 0 to disable.
+    """
+    return env_int("FULCRA_COORD_NOTIFY_STALE_ALERT_MIN", 60)
+
+
+def _stale_summary_alert_interval_h() -> int:
+    """Minimum hours between stale-summary operator alerts for one agent."""
+    return env_int("FULCRA_COORD_NOTIFY_STALE_ALERT_INTERVAL_H", 6)
+
+
+def _stale_summary_alert_marker_path(agent: str):
+    return cache.cache_root() / (
+        f"stale-summaries-alert-{listener.agent_slug(agent)}")
+
+
+def _alert_stale_summaries_if_needed(agent: str, stale_min: float) -> None:
+    """Best-effort operator alert when listener-bounded mode may be deaf.
+
+    This is intentionally alert-only: no direct-listing fallback, no task-body
+    fan-out. It makes the degraded mode visible through the same notification
+    path the listener normally uses, throttled per agent on this host.
+    """
+    try:
+        threshold = _stale_summary_alert_threshold_min()
+        if threshold <= 0:
+            return
+        if stale_min < threshold:
+            return
+        marker = _stale_summary_alert_marker_path(agent)
+        interval_h = max(0, _stale_summary_alert_interval_h())
+        try:
+            age_h = (time.time() - marker.stat().st_mtime) / 3600.0
+            if interval_h and age_h < interval_h:
+                return
+        except OSError:
+            pass
+        listener.emit_message(
+            f"coord summaries view is {int(stale_min)}m stale on this host; "
+            "listener ticks are bounded and may miss newly-directed work until "
+            "reconcile repairs views",
+            title="fulcra-coord degraded",
+        )
+        cache.cache_root().mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(int(stale_min)))
+    except Exception:
+        pass
+
+
 def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     """Poll the inbox for an agent; on non-empty, surface + notify (Part 3).
 
@@ -389,7 +470,12 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # needs-me pass below (perf loop-2 #2 — each used to pay its own
         # download; under the stale-view guard each re-ran the whole
         # direct-listing fallback, ~one spawn per task on the bus).
-        summaries = _load_task_summaries(backend=backend)
+        summaries = _load_task_summaries(
+            backend=backend,
+            skip_stale_fallback=not _notify_stale_summary_fallback_enabled(),
+            on_stale_skipped=lambda stale_min:
+                _alert_stale_summaries_if_needed(me, stale_min),
+        )
         items = _load_inbox(me, backend=backend, summaries=summaries)
         surface = _inbox_surface_path(me)
         cache.cache_root().mkdir(parents=True, exist_ok=True)
@@ -413,9 +499,12 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         if new_ids:
             # Loop signal rides the same notification (spec 2026-06-09 Task 7):
             # count semantics stay untouched; the suffix is best-effort and ""
-            # whenever the loop scan fails or finds nothing overdue.
+            # whenever the loop scan fails or finds nothing overdue. The scan is
+            # opt-in because listener ticks must not block future launchd fires.
+            extra = (_overdue_loop_suffix(me, backend=backend)
+                     if _notify_overdue_loop_suffix_enabled() else "")
             listener.emit_notification(
-                me, len(new_ids), extra=_overdue_loop_suffix(me, backend=backend))
+                me, len(new_ids), extra=extra)
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         seen_path.write_text(json.dumps(sorted(current_ids)))
         # HOST WAKE (operator directive 2026-06-10: "this can't die if i do
@@ -427,7 +516,12 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # exactly the case a wake exists for; wake.maybe_wake's own
         # min-interval throttle + single-flight pidfile prevent spam. Fail-safe
         # (never raises) by contract — no config means exactly the old behavior.
-        wake.maybe_wake(me, len(items))
+        woke = wake.maybe_wake(me, len(items))
+        print(
+            f"[fulcra-coord] notify-inbox: agent={me} pending={len(items)} "
+            f"new={len(new_ids)} surface={surface} wake={'spawned' if woke else 'no'}",
+            file=sys.stderr,
+        )
         # ALSO notice anything newly blocked on the human (Part 5). Independent
         # of the agent's own inbox: a tick with an empty inbox can still alert on
         # a new blocked-on-you item. Best-effort within the same fail-safe guard.

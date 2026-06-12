@@ -34,10 +34,11 @@ placeholder.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
-from . import claude_code, cli_invocation
+from . import claude_code, cli_invocation, wake
 from .cli_invocation import PLACEHOLDER_ARGV
 
 # SessionStart mostly matches Claude Code's (same stdin shape, cwd-driven), but
@@ -181,4 +182,76 @@ def install_codex(*, uninstall: bool = False, dry_run: bool = False,
     config["hooks"] = hooks
     hooks_path.parent.mkdir(parents=True, exist_ok=True)
     hooks_path.write_text(json.dumps(config, indent=2) + "\n")
+    return plan
+
+
+# Host wake-exec adapter (--with-wake / ensure-codex-watch --with-wake).
+#
+# Core wake.py is platform-neutral; the concrete Codex command lives here, in the
+# Codex adopter layer, and is written to the operator-owned wake.json file. This
+# mirrors Claude Code's --with-wake flow but uses `codex exec` so the listener can
+# wake a headless Codex worker instead of only preparing the next SessionStart.
+
+def _default_wake_prompt(agent: str) -> str:
+    return (f"BUS WAKE: you are {agent}. Use the fulcra-coord CLI as the bus "
+            "source of truth: run `fulcra-coord inbox --agent "
+            f"{agent}` and `fulcra-coord resume --agent {agent}`. Do not look "
+            "for a local tasks/ directory. Act only on directives/verdicts for "
+            "this agent, close loops with evidence, then exit.")
+
+
+def default_wake_entry(agent: str) -> dict[str, Any]:
+    codex_bin = shutil.which("codex") or "codex"
+    return {
+        "cmd": [codex_bin, "exec", "--dangerously-bypass-approvals-and-sandbox",
+                _default_wake_prompt(agent)],
+        "cwd": str(Path.cwd()),
+        "min_interval_min": 15,
+        "max_runtime_s": 900,
+        "enabled": True,
+    }
+
+
+def install_wake(agent: str, *, uninstall: bool = False,
+                 dry_run: bool = False) -> dict[str, Any]:
+    """Merge (or remove) this Codex agent's wake entry in wake.json.
+
+    Existing operator-tuned entries are preserved; uninstall removes only this
+    agent's key. A corrupt wake.json is backed up before replacement, matching
+    the Claude Code adopter semantics.
+    """
+    path = wake._wake_config_path()
+    plan: dict[str, Any] = {"config": str(path), "agent": agent,
+                            "uninstall": uninstall, "dry_run": dry_run,
+                            "preserved": False, "would_write": None}
+
+    cfg: Any = {}
+    corrupt_bytes: "bytes | None" = None
+    if path.is_file():
+        try:
+            cfg = json.loads(path.read_text())
+        except ValueError:
+            corrupt_bytes = path.read_bytes()
+            cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    if uninstall:
+        cfg.pop(agent, None)
+    elif agent in cfg and isinstance(cfg[agent], dict):
+        plan["preserved"] = True
+    else:
+        cfg[agent] = default_wake_entry(agent)
+
+    plan["would_write"] = cfg
+    if dry_run:
+        return plan
+
+    if corrupt_bytes is not None:
+        try:
+            path.with_suffix(path.suffix + ".bak").write_bytes(corrupt_bytes)
+        except OSError:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2) + "\n")
     return plan
