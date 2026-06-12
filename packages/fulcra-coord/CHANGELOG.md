@@ -136,6 +136,17 @@ repair-shaped listener fallback can opt back in with
 `FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX=1` or
 `FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK=1`.
 
+Follow-up hardening: Codex now has the same installer-owned wake path as Claude
+Code. `install-codex --with-wake` and `ensure-codex-watch --with-wake` seed a
+reviewable `wake.json` entry that lets a pending inbox spawn a headless
+`codex exec` run; without that entry, the listener remains notify/surface-only.
+Listener launchd logs are now per-agent (`listener-<agent-slug>.err.log`), and
+each tick emits a compact breadcrumb with agent, pending count, new count,
+surface path, and wake result so “armed” can be audited from logs.
+`ensure-codex-watch` now reloads an already-loaded launchd listener after
+rewriting its plist; previously `launchctl load -w` left the old in-memory job
+running, so cadence/log-path changes on disk did not take effect.
+
 ## [0.15.4] — 2026-06-11
 
 **Reliability release.** The through-line: the transport stops lying to the

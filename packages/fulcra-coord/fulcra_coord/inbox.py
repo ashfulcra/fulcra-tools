@@ -15,6 +15,7 @@ the listener's last-fire mtime from it; ``_derive_agent`` is the usual thin alia
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, identity, listener, selfupdate, wake, env_int
@@ -458,7 +459,12 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # exactly the case a wake exists for; wake.maybe_wake's own
         # min-interval throttle + single-flight pidfile prevent spam. Fail-safe
         # (never raises) by contract — no config means exactly the old behavior.
-        wake.maybe_wake(me, len(items))
+        woke = wake.maybe_wake(me, len(items))
+        print(
+            f"[fulcra-coord] notify-inbox: agent={me} pending={len(items)} "
+            f"new={len(new_ids)} surface={surface} wake={'spawned' if woke else 'no'}",
+            file=sys.stderr,
+        )
         # ALSO notice anything newly blocked on the human (Part 5). Independent
         # of the agent's own inbox: a tick with an empty inbox can still alert on
         # a new blocked-on-you item. Best-effort within the same fail-safe guard.

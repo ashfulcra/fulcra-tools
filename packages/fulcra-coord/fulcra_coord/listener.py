@@ -105,7 +105,9 @@ def _cron_marker_for(agent: str) -> str:
             "(managed; do not edit this line)")
 
 # stdout/stderr basename stem under ~/Library/Logs/fulcra-coord (#25): a failing
-# listener job leaves listener.{out,err}.log instead of vanishing.
+# listener job leaves logs instead of vanishing. The actual launchd stem includes
+# the agent slug so co-located listeners do not smear every identity into one
+# opaque listener.err.log.
 LOG_STEM = "listener"
 
 INTERVAL_MIN_DEFAULT = 10
@@ -132,7 +134,8 @@ def _plist_body(argv: list[str], agent: str, interval_sec: int,
     #25 hardening: bakes ``EnvironmentVariables.PATH`` (common bins + the
     resolved CLI's own dir) since launchd's bare PATH cannot find the binary, and
     ``StandardOut/ErrorPath`` so a failing tick leaves a log."""
-    out_path, err_path = scheduler_env.log_paths(logs_dir, LOG_STEM)
+    out_path, err_path = scheduler_env.log_paths(
+        logs_dir, f"{LOG_STEM}-{agent_slug(agent)}")
     body: dict[str, Any] = {
         "Label": label,
         "ProgramArguments": list(argv) + _notify_args(agent),

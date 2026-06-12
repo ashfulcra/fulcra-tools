@@ -399,9 +399,11 @@ def _default_wake_prompt(agent: str) -> str:
     agent identity (so the fresh session resolves the right inbox), point it at
     the standing rules, demand evidence-closed loops, and END — a wake session
     is disposable by design; continuity lives on the bus, not in the session."""
-    return (f"BUS WAKE: you are {agent}. Process your fulcra-coord inbox: "
-            "direct-list tasks/, act on directives/verdicts per AGENTS.md "
-            "rules, close loops with evidence, then exit.")
+    return (f"BUS WAKE: you are {agent}. Use the fulcra-coord CLI as the bus "
+            "source of truth: run `fulcra-coord inbox --agent "
+            f"{agent}` and `fulcra-coord resume --agent {agent}`. Do not look "
+            "for a local tasks/ directory. Act only on directives/verdicts for "
+            "this agent, close loops with evidence, then exit.")
 
 
 def default_wake_entry(agent: str) -> dict[str, Any]:

@@ -6,7 +6,7 @@
       "claude",
       "-p",
       "--dangerously-skip-permissions",
-      "BUS WAKE: you are claude-code:EXAMPLE-HOST:repo. Process your fulcra-coord inbox: direct-list tasks/, act on directives/verdicts per AGENTS.md rules, close loops with evidence, then exit."
+      "BUS WAKE: you are claude-code:EXAMPLE-HOST:repo. Use the fulcra-coord CLI as the bus source of truth: run `fulcra-coord inbox --agent claude-code:EXAMPLE-HOST:repo` and `fulcra-coord resume --agent claude-code:EXAMPLE-HOST:repo`. Do not look for a local tasks/ directory. Act only on directives/verdicts for this agent, close loops with evidence, then exit."
     ],
     "cwd": "/path/to/your/fulcra-tools-worktree",
     "min_interval_min": 15,
@@ -19,7 +19,7 @@
     "cmd": [
       "codex",
       "exec",
-      "BUS WAKE: you are codex:EXAMPLE-HOST:main. Process your fulcra-coord inbox: direct-list tasks/, act on directives/verdicts per AGENTS.md rules, close loops with evidence, then exit."
+      "BUS WAKE: you are codex:EXAMPLE-HOST:main. Use the fulcra-coord CLI as the bus source of truth: run `fulcra-coord inbox --agent codex:EXAMPLE-HOST:main` and `fulcra-coord resume --agent codex:EXAMPLE-HOST:main`. Do not look for a local tasks/ directory. Act only on directives/verdicts for this agent, close loops with evidence, then exit."
     ],
     "cwd": "/path/to/your/fulcra-tools-worktree",
     "min_interval_min": 15,
