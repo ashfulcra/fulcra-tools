@@ -802,6 +802,79 @@ def _expire_stale_broadcasts(all_tasks: list[dict[str, Any]], now: datetime, *,
     return expired
 
 
+def _close_stale_messages(all_tasks: list[dict[str, Any]], now: datetime, *,
+                          backend: Optional[list[str]] = None,
+                          deadline: Optional[float] = None) -> int:
+    """Auto-CLOSE aged delivered MESSAGE-CLASS directives: transition each
+    views.is_closable_message task proposed->done (evidence names the TTL), so
+    the existing cold-archive sweeps it out of the hot path on a LATER pass
+    (archive eligibility ages from the done timestamp, which we set to `now`).
+    Recoverable via `restore` after that archive. Returns the count closed.
+
+    Why this exists: tells / FYIs / verdict echoes carry information and expect
+    nothing back, so NOBODY ever marks them done — they sat status=proposed
+    forever (2026-06-11: 211 of ~480 hot tasks), monotonically bloating every
+    listing the platform gateway serves under its ~15s limit. Broadcast expiry
+    (above) clears the fan-out flavor; this is the GC for the one-to-one
+    flavor. The transition is `done` (not abandoned): a delivered message DID
+    its job — closing it is completion, not abandonment — and the evidence
+    string preserves the audit trail through the normal done machinery.
+
+    WHAT IS DELIBERATELY NEVER AUTO-CLOSED (the predicate's exclusions, pinned
+    by tests): anything with expects_response truthy — THE CLOSED-LOOP
+    GUARANTEE, a loop stays open until a bus-native response, period;
+    review/dispatch/question/signoff (and unknown) loop kinds; broadcasts
+    (their own expiry pass); kind:idea backlog items; self-owned work tasks
+    (no assignee); non-proposed statuses; undatable created_at (parse-don't-
+    compare — keep what we can't date).
+
+    Discipline mirrors _expire_stale_broadcasts exactly:
+      * BUDGET/CAP: stop once _retention_max_per_run() closes are done, or
+        (only when a deadline was supplied) once the wall-clock budget is nearly
+        spent — composes with reconcile's ceiling instead of overrunning it.
+      * PER-ITEM ISOLATION: one task's transition/write failure is skipped,
+        never fatal. A NeedsReconcile means the task BODY was written (views
+        merely lagged), so it IS closed and counts; a ConflictError / any other
+        error means the write did NOT land, so we skip it WITHOUT counting (it
+        retries next pass).
+    """
+    import time
+    budget_floor = (deadline - _RETENTION_DEADLINE_HEADROOM_SECONDS
+                    if deadline is not None else None)
+    cap = _retention_max_per_run()
+    ttl_days = views._message_ttl_days()
+    # :g renders the default as "7", not "7.0" — the evidence string is read
+    # by humans auditing why a message closed.
+    evidence = (f"delivered message auto-closed after {ttl_days:g} days "
+                "(message-class TTL)")
+    closed = 0
+    for t in all_tasks:
+        if closed >= cap:
+            break
+        if budget_floor is not None and time.monotonic() >= budget_floor:
+            break
+        if not views.is_closable_message(t, now):
+            continue
+        try:
+            new_task = schema.apply_transition(
+                t, "done", by="reconcile-retention",
+                evidence=evidence,
+                verification_level="automated",
+                dt=now)
+            if _write_task_and_views(new_task, backend=backend, command="done"):
+                closed += 1
+        except schema.NeedsReconcile:
+            # The body WAS written (only the view rebuild lagged) — the message
+            # is closed on the bus, so count it. The next reconcile heals views.
+            closed += 1
+        except Exception:
+            # Any other failure (TransitionError / SchemaError / ConflictError /
+            # transport) => the body did NOT land; skip without counting and let
+            # the next pass retry. One bad task never aborts the sweep.
+            continue
+    return closed
+
+
 def _prune_provenance_sidecars(all_tasks: list[dict[str, Any]], *,
                                deadline: Optional[float] = None) -> int:
     """Prune orphaned ``*.prov.json`` provenance sidecars under ``cache.meta_dir()``.
@@ -875,7 +948,8 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     """The retention pass, folded into reconcile. Best-effort: NEVER raises into
     the reconcile tick — any failure returns a result dict, logged by the caller.
     Returns {"skipped": True} when throttled/errored, else
-    {"archived": N, "deferred": D, "expired_broadcasts": E, "pruned_markers": M,
+    {"archived": N, "deferred": D, "expired_broadcasts": E,
+    "closed_messages": T, "pruned_markers": M,
     "pruned_presence": K, "pruned_health": H, "pruned_continuity": C,
     "pruned_events": V, "pruned_provenance": P}. Either shape MAY carry
     "retention_marker" — the freshest retention/last-run.json record the
@@ -951,6 +1025,15 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     expired_broadcasts = _expire_stale_broadcasts(
         all_tasks, now, backend=backend, deadline=deadline)
 
+    # Close aged delivered message-class directives (tells / FYIs / verdict
+    # echoes — never anything expecting a response: the closed-loop guarantee).
+    # Same placement rationale as broadcast expiry: the archive candidate list
+    # above was computed from PRE-close states, and a just-closed message can't
+    # archive this tick anyway (archive ages from the done timestamp = now), so
+    # it drains on a later pass. Same budget/cap discipline.
+    closed_messages = _close_stale_messages(
+        all_tasks, now, backend=backend, deadline=deadline)
+
     pruned_markers = _prune_markers(now, backend=backend)
     pruned_presence = _prune_dead_presence(now, backend=backend)
     pruned_health = _prune_dead_health(now, backend=backend)
@@ -973,6 +1056,7 @@ def _run_retention(all_tasks: list[dict[str, Any]], *, now: datetime,
     pruned_provenance = _prune_provenance_sidecars(all_tasks, deadline=deadline)
     return {"archived": archived, "deferred": deferred,
             "expired_broadcasts": expired_broadcasts,
+            "closed_messages": closed_messages,
             "pruned_markers": pruned_markers, "pruned_presence": pruned_presence,
             "pruned_health": pruned_health,
             "pruned_continuity": pruned_continuity,

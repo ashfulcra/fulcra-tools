@@ -153,10 +153,42 @@ class TestStatusTransitions(unittest.TestCase):
         self.assertEqual(t2["done"]["verification_level"], "agent-verified")
 
     def test_invalid_transition_raises(self):
-        t = _sample_task()  # status = proposed
+        # waiting -> done stays illegal: parked work must be picked up (active)
+        # before it can be completed. (proposed -> done became legal with the
+        # message-class lifecycle — see the tests below — so the pin moved here.)
+        t = _with_status(_sample_task(), "waiting")
         with self.assertRaises(TransitionError):
             apply_transition(t, "done", by="agent-a",
                              evidence="x", verification_level="agent-verified")
+
+    def test_proposed_to_done_with_evidence(self):
+        # Message-class lifecycle (2026-06-11): a delivered message's consumer
+        # closing the echo is the NORMAL case, and the old two-write dance
+        # (update->active, then done) over a high-latency transport silently
+        # discouraged cleanup. proposed -> done is legal in ONE write; evidence
+        # stays mandatory (next test), so the audit trail is preserved.
+        t = _sample_task()  # status = proposed
+        t2 = apply_transition(t, "done", by="agent-a",
+                              evidence="delivered; echo closed",
+                              verification_level="agent-verified")
+        self.assertEqual(t2["status"], "done")
+        self.assertEqual(t2["done"]["evidence"], "delivered; echo closed")
+
+    def test_proposed_to_done_still_requires_evidence(self):
+        # The single-write close must NOT weaken the done contract: evidence
+        # (and a verification level) is enforced exactly as from active.
+        t = _sample_task()
+        with self.assertRaises(SchemaError):
+            apply_transition(t, "done", by="agent-a")
+
+    def test_proposed_transitions_otherwise_unchanged(self):
+        # Only `done` was added; active/waiting/abandoned stay, blocked stays
+        # illegal from proposed (block implies someone picked it up first).
+        self.assertEqual(schema.STATUS_TRANSITIONS["proposed"],
+                         {"active", "waiting", "abandoned", "done"})
+        t = _sample_task()
+        with self.assertRaises(TransitionError):
+            apply_transition(t, "blocked", by="agent-a", blocked_on="x")
 
     def test_terminal_status_blocks_transition(self):
         t = _with_status(_sample_task(), "done")
@@ -912,6 +944,41 @@ class TestCLIWithFakeBackend(unittest.TestCase):
         cached = cache.read_cached_task(task_id)
         if cached:
             self.assertEqual(cached.get("status"), "done")
+
+    def test_done_directly_from_proposed(self):
+        """proposed -> done in ONE write via the done command (message-class
+        lifecycle): closing a delivered tell/echo must not require the
+        update->active dance. --evidence is still required by the parser and
+        enforced by apply_transition."""
+        from fulcra_coord.cli import cmd_start, cmd_done
+
+        start_args = self._args(
+            title="Proposed close task",
+            workstream="devops",
+            agent="claude-code",
+            kind="ops",
+            priority="P2",
+            summary="",
+            next="",
+            surface=None,
+        )
+        cmd_start(start_args, backend=self.fake_backend)
+        task = next(t for t in cache.list_cached_tasks()
+                    if t["title"] == "Proposed close task")
+        self.assertEqual(task["status"], "proposed")
+
+        done_args = self._args(
+            task_id=task["id"],
+            evidence="delivered; closing echo",
+            verification_level="agent-verified",
+            confidence=None,
+            agent="claude-code",
+        )
+        rc = cmd_done(done_args, backend=self.fake_backend)
+        self.assertIn(rc, (0, 1))  # 1 = upload-fail offline; transition still applies
+        cached = cache.read_cached_task(task["id"])
+        self.assertEqual(cached.get("status"), "done")
+        self.assertEqual(cached["done"]["evidence"], "delivered; closing echo")
 
     def test_block_flow(self):
         """Create task, force to active, block it."""
