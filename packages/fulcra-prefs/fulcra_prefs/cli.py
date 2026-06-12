@@ -36,6 +36,7 @@ from .capture import capture_signal
 from .compileprefs import compile_signals
 from .consent import disclosure_signal, filter_for_audience
 from .inject import render_block
+from .installers import install_platform_hooks
 from .outbox import Outbox
 from .schema import Signal, canonical_json, parse_record, TEMP_ID_PREFIX
 from .solver import solve
@@ -354,6 +355,27 @@ def cmd_solve(args, api, outbox_dir, now) -> int:
     return 0
 
 
+def cmd_install_hooks(args) -> int:
+    try:
+        plan = install_platform_hooks(
+            platform=args.platform,
+            target_dir=args.target_dir,
+            uninstall=args.uninstall,
+            dry_run=args.dry_run,
+        )
+    except ValueError as e:
+        print(f"fulcra-prefs: {e}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        print(canonical_json(plan))
+    elif args.uninstall:
+        print(f"removed fulcra-prefs hooks from {plan['config']}", file=sys.stderr)
+    else:
+        print(f"installed fulcra-prefs {args.platform} hooks -> {plan['config']}",
+              file=sys.stderr)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fulcra-prefs")
     sub = p.add_subparsers(dest="command", required=True)
@@ -410,6 +432,14 @@ def _parser() -> argparse.ArgumentParser:
                    choices=["weighted-sum", "hard-veto"])
     s.add_argument("--veto-threshold", type=float, default=-0.5,
                    dest="veto_threshold")
+
+    ih = sub.add_parser("install-hooks",
+                        help="install platform session inject/capture hooks")
+    ih.add_argument("--platform", required=True, choices=["claude-code", "codex"])
+    ih.add_argument("--target-dir",
+                    help="override platform config dir (default ~/.claude or ~/.codex)")
+    ih.add_argument("--uninstall", action="store_true")
+    ih.add_argument("--dry-run", action="store_true")
     return p
 
 
@@ -422,7 +452,8 @@ def run(argv, api, outbox_dir, now) -> int:
                 "get": lambda: cmd_get(args, api, outbox_dir, now),
                 "consent": lambda: cmd_consent(args, api, outbox_dir, now),
                 "inject": lambda: cmd_inject(args, api, outbox_dir, now),
-                "solve": lambda: cmd_solve(args, api, outbox_dir, now)}
+                "solve": lambda: cmd_solve(args, api, outbox_dir, now),
+                "install-hooks": lambda: cmd_install_hooks(args)}
     return handlers[args.command]()
 
 

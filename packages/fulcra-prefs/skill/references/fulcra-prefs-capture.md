@@ -41,6 +41,11 @@ conservative rules above. The safe pattern:
    `fulcra-prefs capture-batch --file <path> --platform <your-platform>`
    (each item may set its own `kind`/`scope`/`confidence`/`half_life_days`/
    `supersedes`). One call, one disclosure to the user, no mid-task spam.
+   If platform hooks are installed, use the durable drain path instead of an
+   ad-hoc temp file:
+   `~/.local/state/fulcra-prefs/candidates/<platform>/<session_id>.json`.
+   Claude Code drains that file on `PreCompact`/`Stop`; Codex drains it on
+   `PreCompact` because Codex `Stop` fires every turn.
 4. **Still never auto-capture** unconfirmed *sensitive* data (credentials,
    health/financial details the user didn't ask to store) or another person's
    preferences — confidence weighting doesn't make those acceptable.
