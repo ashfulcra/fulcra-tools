@@ -37,6 +37,20 @@ def _derive_agent() -> str:
     so the duplication carries no state or drift risk."""
     return identity.resolve_agent()
 
+
+def _reload_launchd_plist(plist: str, *, uninstall: bool = False) -> None:
+    """Best-effort launchd refresh for a plist we just wrote or removed."""
+    try:
+        subprocess.run(["launchctl", "unload", "-w", plist],
+                       capture_output=True, timeout=10, check=False)
+        if not uninstall:
+            subprocess.run(["launchctl", "load", "-w", plist],
+                           capture_output=True, timeout=10, check=False)
+    except Exception:
+        _warn(f"launchctl reload of the listener plist was skipped "
+              f"(non-fatal): {plist}")
+
+
 def _report_resolved_cli(plan: dict[str, Any]) -> None:
     """Print the CLI invocation baked into the just-installed hooks, and warn if
     it had to fall back to `python -m` (Gap 1) — that works, but signals the
@@ -491,14 +505,21 @@ def cmd_install_listener(args: Any, backend: Optional[list[str]] = None) -> int:
         return 0
     if args.uninstall:
         _info(f"Removed fulcra-coord listener ({plan['mechanism']}).")
+        if plan["mechanism"] == "launchd":
+            plist = (plan.get("removes") or [None])[0]
+            if plist:
+                _reload_launchd_plist(plist, uninstall=True)
         return 0
+    if plan["mechanism"] == "launchd":
+        plist = (plan.get("writes") or [None])[0]
+        if plist:
+            _reload_launchd_plist(plist)
     _info(f"Installed fulcra-coord listener ({plan['mechanism']}) for {agent} — "
           f"notify-inbox every {plan['interval_min']} min.")
     for w in plan.get("writes", []):
         _info(f"  + {w}")
     if plan["mechanism"] == "launchd":
-        _info("Load it now (or it loads at next login): "
-              f"launchctl load -w {plan['writes'][0]}")
+        _info("launchd reloaded so the live job picks up the current plist.")
     else:
         _info("Apply it now: crontab " + plan["writes"][0])
     _info(f"Scheduled command: {plan['cli_command']} notify-inbox --agent {agent}")
