@@ -164,10 +164,25 @@ def list_json_checked(
 # as ``remote.probe_reachable(backend=...)`` / ``remote.check_remote_access(...)``.
 
 def probe_reachable(backend: Optional[list[str]] = None) -> bool:
-    """Cheap liveness probe against the coordination root. See
-    :func:`fulcra_coord_files.store.probe_reachable` for the full rationale
-    (disambiguates "empty but reachable" from "unreachable"). Binds the bus's
-    ``remote_root()`` as the list target."""
+    """Cheap liveness probe against the coordination bus.
+
+    Historically this delegated to the transport's root ``list`` probe. Live
+    Fulcra Files installations can allow stat/read of well-known child objects
+    while root directory listing is unavailable or empty-looking, and that made
+    absence checks fail closed forever: a first ``connect --agent X --role Y``
+    saw no own presence record, could not prove the bus was reachable via root
+    listing, and skipped the presence write as a possible blind clobber.
+
+    Try the same well-known ``index.json`` stat probe as ``doctor`` first.
+    Decision-making absence checks only need to know "did the bus answer?",
+    and the index file is the durable bus anchor every initialized coord root
+    already carries. Fall back to the transport's root-list probe for genuinely
+    fresh/test roots that have not written an index yet.
+    """
+    ok, _msg = _store_check_remote_access(
+        backend, probe_path=f"{remote_root()}/index.json")
+    if ok:
+        return True
     return _store_probe_reachable(backend, root=remote_root())
 
 
