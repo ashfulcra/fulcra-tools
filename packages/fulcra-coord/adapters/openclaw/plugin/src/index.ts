@@ -2,9 +2,10 @@
 // before-compaction checkpoints to the fulcra-coord coordination bus.
 //
 // This is the higher-fidelity upgrade over Track A's file-based automation
-// hooks. It registers three in-process Plugin-SDK lifecycle hooks that Track A
-// cannot reach as file-based events — most importantly `before_compaction`,
-// the guarantee Track A lacks.
+// hooks. It registers three in-process Plugin-SDK lifecycle hooks. Track B's
+// unique value is deterministic per-session start/end; before_compaction is
+// also present as the plugin-form twin of Track A's session:compact:before file
+// hook for single-plugin installs.
 //
 // EVERY SDK call below is validated against the published OpenClaw source
 // (github.com/openclaw/openclaw) and docs (docs.openclaw.ai/plugins/hooks).
@@ -114,10 +115,10 @@ export default definePluginEntry({
 
     // ----------------------------------------------------------------------
     // Checkpoint 2 — before_compaction: ALWAYS checkpoint the session's task.
-    // This is the guarantee Track A lacks. The event carries no sessionKey, so
-    // we read it from ctx (PluginHookAgentContext). Stamp a fresh timestamp via
-    // `update` so the task does not look stale across the context-loss boundary;
-    // status stays `active`.
+    // The event carries no sessionKey, so we read it from ctx
+    // (PluginHookAgentContext). Stamp a fresh timestamp via `update` and archive
+    // a continuity snapshot so the task does not look stale across the
+    // context-loss boundary; status stays `active`.
     // ----------------------------------------------------------------------
     api.on("before_compaction", async (_event, ctx) => {
       try {
