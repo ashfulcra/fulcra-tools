@@ -4742,7 +4742,13 @@ class TestInstallCodex(unittest.TestCase):
         self.assertIn('rrule = "FREQ=MINUTELY;INTERVAL=7"', body)
         self.assertEqual(plan["interval_min"], 7)
         self.assertIn('target_thread_id = "thread-123"', body)
-        self.assertIn("fulcra-coord inbox --agent codex:h:r", body)
+        self.assertIn("fulcra-coord inbox --agent codex:h:r --format json", body)
+        self.assertIn("fulcra-coord board --format json", body)
+        self.assertIn("fulcra-coord health", body)
+        self.assertIn("fulcra-coord reconcile", body)
+        self.assertIn("fulcra-coord request-review", body)
+        self.assertIn("never raw tells for review work", body)
+        self.assertIn("ensure-codex-watch --agent codex:h:r", body)
 
     def test_install_thread_automation_defaults_to_quarter_hour(self):
         from fulcra_coord import codex

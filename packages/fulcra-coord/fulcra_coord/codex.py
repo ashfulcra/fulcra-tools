@@ -320,14 +320,23 @@ def _toml_str(s: str) -> str:
 
 def _automation_prompt(agent: str) -> str:
     return (
-        f"Check the fulcra-coord bus for work addressed to this agent and "
-        f"surface it in this thread. Run `fulcra-coord inbox --agent {agent}` "
-        "and `fulcra-coord needs-me`; summarize any new actionable tasks, "
-        "review requests, or operator-blocked items. If there is actionable "
-        "work for this agent, continue handling it or clearly state the next "
-        "command/action needed. Also verify the host launchd listener for "
-        f"`{agent}` is still loaded, exiting 0, and writing per-agent listener "
-        "breadcrumbs."
+        f"Continue the fulcra-coord maintainer/listener loop for `{agent}`. "
+        f"Run `fulcra-coord inbox --agent {agent} --format json`, "
+        "`fulcra-coord board --format json`, `fulcra-coord needs-me`, and check "
+        "open PR/reviewer state when this workspace has a GitHub remote. If the "
+        "inbox, board, review delivery, or summaries look stale or inconsistent, "
+        "run `fulcra-coord health`; if this host's scheduled reconcile is fresh, "
+        "trust that heartbeat and re-check reads, and only run `fulcra-coord "
+        "reconcile` yourself when the scheduled heartbeat is missing/stale. If "
+        "there is actionable work for this agent, continue handling it end-to-end, "
+        "route unrouted PRs via `fulcra-coord request-review` after the reviewer "
+        "role/dedup routing change has landed — never raw tells for review work, "
+        "so duplicate suppression applies — notify reviewer inboxes, update bus "
+        "tasks with evidence, and stop only when blocked on user input or external "
+        "review. Also verify the host launchd listener for this agent is still "
+        "loaded, exiting 0, and writing per-agent listener breadcrumbs; run "
+        f"`fulcra-coord ensure-codex-watch --agent {agent}` if it needs to be "
+        "re-armed."
     )
 
 
