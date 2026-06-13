@@ -30,6 +30,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
+from . import env_int
 from . import remote, schema
 from .output import warn as _warn
 # The bus clock format ("UTC, microsecond precision, trailing Z") has ONE home:
@@ -54,6 +55,10 @@ class _RegistryReadError:
 #: wholesale-replaced the operator's rich role definition with a minimal
 #: make_role(name, ""). Callers must treat READ_ERROR as "do not write".
 READ_ERROR = _RegistryReadError()
+
+
+def _role_record_workers() -> int:
+    return max(2, env_int("FULCRA_COORD_ROLE_RECORD_WORKERS", 32))
 
 
 def read_role(name: str, *, backend: Optional[list[str]] = None
@@ -159,7 +164,7 @@ def load_roles_with_leases(
     # shape): independent subprocesses, no shared state. Callees resolve via
     # the remote module so test patches on remote.download_json still apply.
     results: dict[str, Any] = {}
-    workers = min(8, max(2, len(wanted)))
+    workers = min(_role_record_workers(), max(2, len(wanted)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(remote.download_json, p, backend=backend): p
@@ -171,6 +176,28 @@ def load_roles_with_leases(
                 results[path] = fut.result()
             except Exception:
                 results[path] = None   # reads as a failed download below
+
+    fallback_leases: dict[str, Any] = {}
+    if include_leases and not lease_paths:
+        role_names: list[tuple[str, str]] = []
+        for rpath in registry_paths:
+            rec = results.get(rpath)
+            if isinstance(rec, dict):
+                role_names.append((rpath, rec.get("name") or Path(rpath).stem))
+        if role_names:
+            workers = min(_role_record_workers(), max(2, len(role_names)))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(read_leases, name, backend=backend): rpath
+                    for rpath, name in role_names
+                }
+                for fut in concurrent.futures.as_completed(futures):
+                    rpath = futures[fut]
+                    try:
+                        fallback_leases[rpath] = fut.result()
+                    except Exception:
+                        fallback_leases[rpath] = READ_ERROR
+
     out: list[tuple[dict[str, Any], Any]] = []
     for rpath in registry_paths:
         rec = results.get(rpath)
@@ -181,8 +208,7 @@ def load_roles_with_leases(
             continue
         shards = lease_paths.get(Path(rpath).stem, [])
         if not lease_paths:
-            out.append((rec, read_leases(rec.get("name") or Path(rpath).stem,
-                                         backend=backend)))
+            out.append((rec, fallback_leases.get(rpath, READ_ERROR)))
             continue
         if any(not isinstance(results.get(sp), dict) for sp in shards):
             # F4: a listed-but-unreadable shard is a read ERROR for the whole

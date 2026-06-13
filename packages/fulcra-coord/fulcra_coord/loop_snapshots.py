@@ -7,8 +7,10 @@ records that still appear open.
 """
 from __future__ import annotations
 
+import concurrent.futures
 from typing import Any, Optional
 
+from . import env_int
 from . import directives, loops, remote
 
 
@@ -30,6 +32,10 @@ _TASK_DERIVED_FIELDS = (
     "expects_response",
     "sla_hours",
 )
+
+
+def _fallback_task_workers() -> int:
+    return max(2, env_int("FULCRA_COORD_LOOP_TASK_FALLBACK_WORKERS", 16))
 
 
 def overlay_open_records_from_tasks(
@@ -56,6 +62,36 @@ def overlay_open_records_from_tasks(
             for task in tasks
             if isinstance(task, dict) and (task_id := task.get("id"))
         }
+    if fetch_missing:
+        missing_ids = sorted({
+            str(record.get("task_id"))
+            for record in records
+            if isinstance(record, dict)
+            and record.get("task_id")
+            and loops.is_open_loop(record)
+            and (task_map is None or record.get("task_id") not in task_map)
+        })
+        if missing_ids:
+            if task_map is None:
+                task_map = {}
+            workers = min(_fallback_task_workers(), max(2, len(missing_ids)))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(
+                        remote.download_json,
+                        remote.task_remote_path(task_id),
+                        backend=backend,
+                    ): task_id
+                    for task_id in missing_ids
+                }
+                for fut in concurrent.futures.as_completed(futures):
+                    task_id = futures[fut]
+                    try:
+                        task = fut.result()
+                    except Exception:
+                        task = None
+                    if isinstance(task, dict):
+                        task_map[task_id] = task
 
     out: list[dict[str, Any]] = []
     for record in records:
@@ -69,12 +105,6 @@ def overlay_open_records_from_tasks(
         try:
             if task_map is not None:
                 task = task_map.get(task_id)
-                if task is None and fetch_missing:
-                    task = remote.download_json(
-                        remote.task_remote_path(task_id), backend=backend)
-            elif fetch_missing:
-                task = remote.download_json(
-                    remote.task_remote_path(task_id), backend=backend)
             else:
                 task = None
             if not isinstance(task, dict):
