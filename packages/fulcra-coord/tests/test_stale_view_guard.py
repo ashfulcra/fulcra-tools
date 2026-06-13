@@ -179,9 +179,25 @@ class TestSummariesStaleGuard(unittest.TestCase):
             got = self._run(fake, heal_missing_entries=True)
         self.assertEqual({s["id"] for s in got}, {self.t1["id"], self.t2["id"]})
         self.assertEqual(fake.list_calls, 1)
-        self.assertEqual(fake.body_downloads, 1)
+        self.assertEqual(fake.body_downloads, 2)
         self.assertTrue(warned.called, "fresh-but-incomplete view must be visible")
-        self.assertIn("freshly stamped", warned.call_args.args[0])
+        self.assertTrue(
+            any("freshly stamped" in call.args[0]
+                for call in warned.call_args_list)
+        )
+
+    def test_fresh_open_summary_row_refreshes_from_task_body(self):
+        stale = dict(self.t2)
+        stale["status"] = "waiting"
+        fresh = dict(self.t2)
+        fresh["status"] = "done"
+        fresh["updated_at"] = _iso(_now())
+        view = views.build_summaries([self.t1, stale])
+        fake = _SummariesBackendFake(view, [self.t1, fresh])
+        with mock.patch("fulcra_coord.io._warn"):
+            got = self._run(fake, heal_missing_entries=True)
+        by_id = {s["id"]: s for s in got}
+        self.assertEqual(by_id[self.t2["id"]]["status"], "done")
 
     def test_stale_view_falls_back_to_direct_listing(self):
         # Stale view KNOWS ONLY t1; t2's body landed on the bus but no view
@@ -274,6 +290,34 @@ class TestSummariesStaleGuard(unittest.TestCase):
         payload = json.loads(buf.getvalue())
         self.assertIn(self.t2["id"], {i["id"] for i in payload["inbox"]},
                       "cmd_inbox must not report a false empty inbox")
+
+    def test_fresh_stale_open_row_does_not_surface_through_status_command(self):
+        from fulcra_coord import cli
+        stale = dict(self.t2)
+        stale["status"] = "waiting"
+        fresh = dict(self.t2)
+        fresh["status"] = "done"
+        fresh["updated_at"] = _iso(_now())
+        view = views.build_summaries([self.t1, stale])
+        fake = _SummariesBackendFake(view, [self.t1, fresh])
+        patches = self._patched(fake)
+        for p in patches:
+            p.start()
+        try:
+            buf = io.StringIO()
+            args = types.SimpleNamespace(
+                format="json", workstream=None, agent=None)
+            with mock.patch("fulcra_coord.io._warn"), \
+                 contextlib.redirect_stdout(buf):
+                rc = cli.cmd_status(args, backend=["false"])
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        active_ids = {i["id"] for i in payload["active"]}
+        self.assertNotIn(self.t2["id"], active_ids,
+                         "cmd_status must not show body-done tasks as open")
 
     def test_direct_listing_does_not_resurrect_unlisted_cached_tasks(self):
         # The stale fallback is driven by the authoritative raw tasks/ listing.
