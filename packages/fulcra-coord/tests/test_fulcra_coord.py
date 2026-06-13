@@ -788,6 +788,43 @@ class TestCLIWithFakeBackend(unittest.TestCase):
             cmd_connect(args, backend=["false"])
         self.assertEqual(sorted(captured["rec"]["capabilities"]), ["deploy", "review"])
 
+    def test_connect_declares_fleet_topology(self):
+        from fulcra_coord.cli import cmd_connect
+        captured = {}
+        with patch("fulcra_coord.presence._write_presence",
+                   side_effect=lambda record, backend=None: captured.update(rec=record) or True), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True):
+            args = self._args(
+                agent="arcbot:h:r", workstream=None, summary="", format="json",
+                can_review=False, role=None, clear_roles=False,
+                host_profile="always-on",
+                maintains=["claude-code:ArcBot", "openclaw:discord"])
+            cmd_connect(args, backend=["false"])
+        self.assertEqual(captured["rec"]["host_profile"], "always-on")
+        self.assertEqual(captured["rec"]["maintains"],
+                         ["claude-code:ArcBot", "openclaw:discord"])
+
+    def test_bare_connect_preserves_fleet_topology(self):
+        from fulcra_coord.cli import cmd_connect
+        existing = schema.make_presence(
+            "arcbot:h:r", host_profile="always-on",
+            maintains=["claude-code:ArcBot"])
+        captured = {}
+        with patch("fulcra_coord.presence._load_own_presence",
+                   return_value=existing), \
+             patch("fulcra_coord.presence._write_presence",
+                   side_effect=lambda record, backend=None: captured.update(rec=record) or True), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True):
+            args = self._args(
+                agent="arcbot:h:r", workstream=None, summary="", format="json",
+                can_review=False, role=None, clear_roles=False,
+                host_profile=None, maintains=None)
+            cmd_connect(args, backend=["false"])
+        self.assertEqual(captured["rec"]["host_profile"], "always-on")
+        self.assertEqual(captured["rec"]["maintains"], ["claude-code:ArcBot"])
+
     def test_status_empty_cache(self):
         from fulcra_coord.cli import cmd_status
         args = self._args(workstream=None, agent=None, format="table")
@@ -7682,6 +7719,18 @@ class TestInstallLogsDirArg(unittest.TestCase):
         self.assertTrue(args.with_forge_mirror)
         self.assertTrue(args.dry_run)
 
+    def test_connect_accepts_fleet_topology_flags(self):
+        from fulcra_coord.entry import build_parser
+        p = build_parser()
+        args = p.parse_args([
+            "connect", "--host-profile", "always-on",
+            "--maintains", "claude-code:ArcBot",
+            "--maintains", "openclaw:discord",
+        ])
+        self.assertEqual(args.host_profile, "always-on")
+        self.assertEqual(args.maintains,
+                         ["claude-code:ArcBot", "openclaw:discord"])
+
     def test_install_heartbeat_accepts_logs_dir(self):
         from fulcra_coord.entry import build_parser
         p = build_parser()
@@ -9363,6 +9412,19 @@ class TestMakePresence(unittest.TestCase):
         self.assertEqual(rec["last_seen"], "2026-06-03T00:00:00Z")
         self.assertEqual(rec["session"], "sess-1")
         self.assertEqual(rec["summary"], "on it")
+
+    def test_fleet_topology_fields(self):
+        rec = schema.make_presence(
+            "a", host_profile="always-on",
+            maintains=[" claude-code:ArcBot ", "openclaw:discord",
+                       "claude-code:ArcBot"])
+        self.assertEqual(rec["host_profile"], "always-on")
+        self.assertEqual(rec["maintains"],
+                         ["claude-code:ArcBot", "openclaw:discord"])
+
+    def test_invalid_host_profile_rejected(self):
+        with self.assertRaises(schema.SchemaError):
+            schema.make_presence("a", host_profile="sometimes")
 
 
 class TestBuildPresence(unittest.TestCase):

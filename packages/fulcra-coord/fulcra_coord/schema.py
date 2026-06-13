@@ -311,6 +311,17 @@ def _normalize_capabilities(capabilities: Optional[list[str]]) -> list[str]:
     return sorted(seen)
 
 
+def _normalize_declared_edges(values: Optional[list[str]]) -> list[str]:
+    """Normalize declared topology edges such as presence ``maintains``."""
+    seen: set[str] = set()
+    for value in values or []:
+        for part in str(value).split(","):
+            part = part.strip()
+            if part:
+                seen.add(part)
+    return sorted(seen)
+
+
 def make_presence(
     agent: str,
     *,
@@ -319,6 +330,8 @@ def make_presence(
     last_seen: Optional[str] = None,
     session: Optional[str] = None,
     capabilities: Optional[list[str]] = None,
+    host_profile: Optional[str] = None,
+    maintains: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Build a validated per-agent presence record (``presence/<slug>.json``).
 
@@ -333,9 +346,15 @@ def make_presence(
     connecting surface may pass for traceability. ``capabilities`` is the set of
     declared roles (e.g. ``review``) that liveness-aware routing uses to build a
     candidate pool; it defaults to ``[]`` so records from agents predating the
-    field stay valid and backward-compatible."""
+    field stay valid and backward-compatible. ``host_profile`` and
+    ``maintains`` are additive fleet-topology declarations: old readers ignore
+    them, while new routing/health surfaces can use them to understand which
+    always-on hosts maintain intermittent agents or runtime prefixes."""
     if last_seen is None:
         last_seen = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    profile = (host_profile or "").strip() or None
+    if profile not in {None, "always-on", "intermittent"}:
+        raise SchemaError("host_profile must be always-on or intermittent")
     return {
         "schema": PRESENCE_SCHEMA,
         "agent": agent,
@@ -344,6 +363,8 @@ def make_presence(
         "last_seen": last_seen,
         "session": session,
         "capabilities": _normalize_capabilities(capabilities),
+        "host_profile": profile,
+        "maintains": _normalize_declared_edges(maintains),
     }
 
 

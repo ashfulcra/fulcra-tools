@@ -373,6 +373,8 @@ def _rewrite_own_capabilities(
             summary=current.get("summary", "") or "",
             session=current.get("session"),
             capabilities=capabilities,
+            host_profile=current.get("host_profile"),
+            maintains=list(current.get("maintains") or []),
         )
         return _write_presence(record, backend=backend)
     except Exception:
@@ -443,6 +445,8 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     me = identity.resolve_agent(explicit_agent)
     out_format = getattr(args, "format", "table")
     summary = getattr(args, "summary", "") or ""
+    requested_host_profile = getattr(args, "host_profile", None)
+    requested_maintains = list(getattr(args, "maintains", None) or [])
 
     # Non-blocking onboarding nudge (Task C): a derived identity + a lingering
     # legacy global identity.json means the operator's old declared id is being
@@ -482,16 +486,30 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     # than a wiped record (only healed by an operator noticing). An explicit
     # --clear-roles still writes: the operator sanctioned the rebuild.
     own_read_failed = False
+    own_record: Any = _load_own_presence(me, backend=backend)
+    if own_record is PRESENCE_READ_ERROR:
+        own_read_failed = True
+        own_record = {}
+    else:
+        own_record = own_record or {}
     if getattr(args, "clear_roles", False):
         roles = sorted(set(roles))   # explicit drop of prior declarations
     else:
-        # Shared read half with the C5 add/remove capability helpers below.
-        existing = _read_own_capabilities(me, backend=backend)
-        if existing is PRESENCE_READ_ERROR:
-            own_read_failed = True
+        if own_read_failed:
             roles = sorted(set(roles))   # flags only — used for lease claims
         else:
+            existing = [
+                c for c in (own_record.get("capabilities") or []) if c
+            ]
             roles = sorted(set(existing) | set(roles))
+
+    host_profile = requested_host_profile
+    maintains = requested_maintains
+    if not own_read_failed:
+        prior = own_record if isinstance(own_record, dict) else {}
+        if host_profile is None:
+            host_profile = prior.get("host_profile")
+        maintains = sorted(set(prior.get("maintains") or []) | set(maintains))
 
     # Staleness suffix from the PERSISTED marker (2026-06-11 bug hunt S2):
     # read BEFORE the presence write so a host already known-behind renders
@@ -508,7 +526,9 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
 
     record = schema.make_presence(me, workstreams=workstreams, summary=summary,
                                   capabilities=roles or None,
-                                  session=os.environ.get("FULCRA_COORD_SESSION") or None)
+                                  session=os.environ.get("FULCRA_COORD_SESSION") or None,
+                                  host_profile=host_profile,
+                                  maintains=maintains or None)
     if own_read_failed:
         # F8: the record demonstrably exists (or the bus is dark) but could not
         # be read — uploading the rebuilt record above would shrink it to what
