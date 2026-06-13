@@ -594,6 +594,34 @@ def _load_task_summaries(
     become the host's repair-shaped full task-body rebuild. It may serve the
     stale summaries view and exit; reconcile/interactive reads can pay the
     expensive correctness fallback when needed."""
+    def _with_cached_overlay(view: dict[str, Any]) -> list[dict[str, Any]]:
+        summaries = view.get("summaries") or []
+        cached = cache.read_cached_view("summaries")
+        cached_summaries = (
+            cached.get("summaries") if isinstance(cached, dict) else None
+        ) or []
+
+        by_id: dict[str, dict[str, Any]] = {
+            s["id"]: s for s in summaries
+            if isinstance(s, dict) and s.get("id")
+        }
+        overlay_summaries = list(cached_summaries)
+        for t in cache.list_cached_tasks():
+            try:
+                overlay_summaries.append(schema.task_summary(t))
+            except Exception:
+                continue
+
+        for s in overlay_summaries:
+            if not isinstance(s, dict) or not s.get("id"):
+                continue
+            if s.get("status") in schema.TERMINAL_STATUSES:
+                continue
+            prev = by_id.get(s["id"])
+            if prev is None or _updated_at_key(s) > _updated_at_key(prev):
+                by_id[s["id"]] = s
+        return list(by_id.values())
+
     summaries_view = remote.download_json(
         remote.view_remote_path("summaries"), backend=backend)
     if summaries_view and summaries_view.get("summaries") is not None:
@@ -602,9 +630,12 @@ def _load_task_summaries(
             if (not heal_missing_entries
                     or not summaries_view.get("generated_at")
                     or views._view_stale_min() <= 0):
-                return summaries_view["summaries"]
-            return _heal_missing_summary_entries(
+                return _with_cached_overlay(summaries_view)
+            healed = _heal_missing_summary_entries(
                 summaries_view["summaries"], backend=backend)
+            merged_view = dict(summaries_view)
+            merged_view["summaries"] = healed
+            return _with_cached_overlay(merged_view)
         if skip_stale_fallback:
             _warn(f"summaries view is {int(stale_min)}m stale — using the "
                   "stale view without direct-listing fallback for this tick "
@@ -614,7 +645,7 @@ def _load_task_summaries(
                     on_stale_skipped(stale_min)
                 except Exception:
                     pass
-            return summaries_view["summaries"]
+            return _with_cached_overlay(summaries_view)
         window_min = _fallback_window_minutes()
         holding_token: Optional[str] = None
         if not bypass_fallback_throttle and window_min > 0:
@@ -626,7 +657,7 @@ def _load_task_summaries(
                       "direct-listing fallback is rate-limited — another "
                       f"process on this host claimed it ({age_txt}); "
                       "using the stale view (results may be incomplete)")
-                return summaries_view["summaries"]
+                return _with_cached_overlay(summaries_view)
             holding_token = token
         _warn(f"summaries view is {int(stale_min)}m stale — "
               "reading task bodies directly")
@@ -642,7 +673,7 @@ def _load_task_summaries(
             return [schema.task_summary(t) for t in direct]
         _warn(f"summaries view is {int(stale_min)}m stale AND the direct task "
               "listing failed — using the stale view (results may be incomplete)")
-        return summaries_view["summaries"]
+        return _with_cached_overlay(summaries_view)
     # Older bus: no aggregate yet — fall back to the authoritative full load.
     return [schema.task_summary(t) for t in _load_all_tasks(backend=backend)]
 
