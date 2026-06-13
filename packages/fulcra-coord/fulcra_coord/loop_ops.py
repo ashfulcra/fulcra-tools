@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from . import env_int
 from . import remote, loops
 from . import log as ops_log
 from .output import info as _info, warn as _warn, print_json as _print_json
@@ -29,6 +30,10 @@ from .output import info as _info, warn as _warn, print_json as _print_json
 # loop_ops import pin forbids only up-layer modules). Bound under the local
 # historical name; this replaced an inlined duplicate of the same function.
 from .timeutil import now_iso as _now_z
+
+
+def _loop_record_workers() -> int:
+    return max(2, env_int("FULCRA_COORD_LOOP_RECORD_WORKERS", 32))
 
 
 def append_loop_response(
@@ -172,7 +177,7 @@ def load_loop_records(
     # pool shape): independent subprocesses, no shared state. Results keep the
     # listing's path order so callers see a stable order for a given bus.
     results: dict[str, dict[str, Any]] = {}
-    workers = min(8, max(2, len(paths)))
+    workers = min(_loop_record_workers(), max(2, len(paths)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(remote.download_json, p, backend=backend): p

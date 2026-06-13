@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fulcra_coord import schema
+from fulcra_coord import directives, loops, schema
 from fulcra_coord.schema import (
     DIRECTIVE_SCHEMA,
     make_directive,
@@ -587,3 +587,57 @@ class TestLoopFieldsOnDirective(unittest.TestCase):
         d["kind"] = "not-a-kind"
         errs = schema.validate_directive(d)
         self.assertTrue(any("kind" in e for e in errs))
+
+    def _review_task(self, status: str) -> dict:
+        task = schema.make_task(
+            title="Review https://example.test/pr/1",
+            workstream="general",
+            agent="author:h:r",
+            assignee="reviewer:h:r",
+            kind="ops",
+            task_id=f"TASK-review-{status}",
+        )
+        task["status"] = status
+        task["tags"] = sorted(set(schema.build_tags(
+            status=status,
+            workstream=task["workstream"],
+            agent=task["owner_agent"],
+            kind="ops",
+            priority=task["priority"],
+        ) + ["kind:review"]))
+        return task
+
+    def test_review_task_status_maps_to_loop_state(self):
+        cases = {
+            "proposed": "requested",
+            "active": "in_review",
+            "waiting": "in_review",
+            "blocked": "in_review",
+            "done": "closed",
+            "abandoned": "closed",
+        }
+        for status, expected_state in cases.items():
+            with self.subTest(status=status):
+                d = directives.directive_from_task(self._review_task(status))
+                self.assertEqual(d["kind"], "review")
+                self.assertTrue(d["expects_response"])
+                self.assertEqual(d["state"], expected_state)
+
+    def test_done_review_task_does_not_surface_as_awaiting_other(self):
+        d = directives.directive_from_task(self._review_task("done"))
+        board = loops.loop_board("author:h:r", [d], now=_FIXED_DT)
+        self.assertEqual(board["awaiting_others"], [])
+
+    def test_in_review_task_still_surfaces_on_both_sides(self):
+        d = directives.directive_from_task(self._review_task("active"))
+        board_for_author = loops.loop_board("author:h:r", [d], now=_FIXED_DT)
+        board_for_reviewer = loops.loop_board("reviewer:h:r", [d], now=_FIXED_DT)
+
+        self.assertEqual(
+            [item["id"] for item in board_for_author["awaiting_others"]],
+            [d["id"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in board_for_reviewer["awaiting_me"]],
+            [d["id"]],
+        )
