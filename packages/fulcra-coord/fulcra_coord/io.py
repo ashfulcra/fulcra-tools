@@ -234,6 +234,7 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
     # File source (default, OR events-mode fallback when the fold was
     # incomplete/absent/errored). This is the authoritative mutable snapshot.
     task_stat: Optional[dict[str, Any]] = None
+    task_stat_confirmed = True
     if task is None:
         # STAT GATE (see docstring): only worth probing when we hold BOTH a
         # prior meta and a cached body — otherwise the stat can't save the
@@ -247,7 +248,14 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
         if task is None:
             task = remote.download_json(task_path, backend=backend)
             if not task:
-                return None
+                if cached_body is not None:
+                    _warn(
+                        f"remote read failed for {task_id} — serving cached "
+                        "body; freshness not confirmed")
+                    task = cached_body
+                    task_stat_confirmed = False
+                else:
+                    return None
             # When the gate ran, task_stat is the PRE-download stat — keep it.
             # If a writer lands between that stat and this download, the meta
             # is OLDER than the body, so the next write sees stat_changed and
@@ -260,9 +268,9 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
     # Always stat the FILE (not the fold) so the write-path concurrency baseline
     # stays correct regardless of where the body was sourced from. Skipped only
     # when the stat gate above already holds THIS read's fresh file stat.
-    if task_stat is None:
+    if task_stat is None and task_stat_confirmed:
         task_stat = remote.stat(task_path, backend=backend)
-    if task_stat:
+    if task_stat and task_stat_confirmed:
         cache.write_meta(task_path, task_stat)
 
     # Record provenance for the write path (root cause A2). Best-effort: a
@@ -794,12 +802,23 @@ def _load_summaries_for_rebuild(
 
 
 def _load_task(task_id: str, *, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
-    """Load a specific task from cache or remote."""
-    if read_source() == "events":
-        return _cache_remote_task(task_id, backend=backend)
-    t = cache.read_cached_task(task_id)
-    if t is not None:
-        return t
+    """Load a specific task through the freshness-checked body funnel.
+
+    A task-specific read is often followed by a state transition (`done`,
+    `update`, review-loop closure). Returning a cached body without first
+    checking the remote stat can resurrect stale local state over a newer remote
+    task. `_cache_remote_task` already has the cheap steady-state path: one stat
+    and zero downloads when the strong version key is unchanged.
+
+    Local-only/offline tasks are the exception: a cached body with no remote stat
+    meta has never been proven to exist on the bus, so the command must keep
+    operating on the local cached body instead of treating the missing remote as
+    "task not found".
+    """
+    if read_source() != "events":
+        cached = cache.read_cached_task(task_id)
+        if cached is not None and cache.read_meta(remote.task_remote_path(task_id)) is None:
+            return cached
     return _cache_remote_task(task_id, backend=backend)
 
 
