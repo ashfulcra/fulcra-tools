@@ -384,6 +384,7 @@ def cmd_ensure_codex_watch(args: Any, backend: Optional[list[str]] = None) -> in
         # as the ordinary manual-repair path so a plain `ensure-codex-watch`
         # fixes the app heartbeat too; wake-exec sessions deliberately opt out
         # so their throwaway thread ids never steal the managed listener.
+        # CODEX_WAKE_ENV is presence-sensed: any non-empty value means "wake".
         if not os.environ.get(codex.CODEX_WAKE_ENV):
             thread_id = os.environ.get("CODEX_THREAD_ID")
     if thread_id:
