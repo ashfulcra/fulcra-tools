@@ -627,3 +627,17 @@ class TestLoopFieldsOnDirective(unittest.TestCase):
         d = directives.directive_from_task(self._review_task("done"))
         board = loops.loop_board("author:h:r", [d], now=_FIXED_DT)
         self.assertEqual(board["awaiting_others"], [])
+
+    def test_in_review_task_still_surfaces_on_both_sides(self):
+        d = directives.directive_from_task(self._review_task("active"))
+        board_for_author = loops.loop_board("author:h:r", [d], now=_FIXED_DT)
+        board_for_reviewer = loops.loop_board("reviewer:h:r", [d], now=_FIXED_DT)
+
+        self.assertEqual(
+            [item["id"] for item in board_for_author["awaiting_others"]],
+            [d["id"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in board_for_reviewer["awaiting_me"]],
+            [d["id"]],
+        )
