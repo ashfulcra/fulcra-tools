@@ -36,6 +36,7 @@ from .candidates import append_candidate, candidate_file, mark_captured
 from .capture import capture_signal
 from .compileprefs import compile_signals
 from .consent import disclosure_signal, filter_for_audience
+from .extract import extract_candidates
 from .inject import render_block
 from .installers import install_platform_hooks
 from .outbox import Outbox
@@ -318,6 +319,33 @@ def cmd_drain_candidates(args, api, outbox_dir, now) -> int:
     return 0
 
 
+def _read_extract_text(args) -> str:
+    if args.text is not None:
+        return args.text
+    if args.file:
+        return Path(args.file).read_text()
+    return sys.stdin.read()
+
+
+def cmd_extract_candidates(args, api, outbox_dir, now) -> int:
+    try:
+        text = _read_extract_text(args)
+        candidates = extract_candidates(
+            text, platform=args.platform, session=args.session, agent=args.agent)
+        if args.write:
+            path = candidate_file(args.platform, args.session, root=args.candidate_dir)
+            for candidate in candidates:
+                append_candidate(path, candidate)
+            print(f"queued {len(candidates)} extracted candidate(s) in {path}",
+                  file=sys.stderr)
+        else:
+            print(canonical_json(candidates))
+    except (OSError, ValueError) as e:
+        print(f"fulcra-prefs: could not extract candidates: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def cmd_compile(args, api, outbox_dir, now) -> int:
     store = _store(api)
     meta = _require_meta(store)
@@ -503,6 +531,17 @@ def _parser() -> argparse.ArgumentParser:
     dc.add_argument("--agent")
     dc.add_argument("--candidate-dir")
 
+    ex = sub.add_parser("extract-candidates",
+                        help="extract explicit preference candidates from text")
+    ex.add_argument("--platform", required=True)
+    ex.add_argument("--session", required=True)
+    ex.add_argument("--agent")
+    ex.add_argument("--text")
+    ex.add_argument("--file")
+    ex.add_argument("--write", action="store_true",
+                    help="append extracted candidates to the session queue")
+    ex.add_argument("--candidate-dir")
+
     sub.add_parser("compile")
 
     g = sub.add_parser("get")
@@ -551,6 +590,7 @@ def run(argv, api, outbox_dir, now) -> int:
                 "notice": lambda: cmd_notice(args, api, outbox_dir, now),
                 "candidate-path": lambda: cmd_candidate_path(args),
                 "drain-candidates": lambda: cmd_drain_candidates(args, api, outbox_dir, now),
+                "extract-candidates": lambda: cmd_extract_candidates(args, api, outbox_dir, now),
                 "compile": lambda: cmd_compile(args, api, outbox_dir, now),
                 "get": lambda: cmd_get(args, api, outbox_dir, now),
                 "consent": lambda: cmd_consent(args, api, outbox_dir, now),

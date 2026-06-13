@@ -153,6 +153,18 @@ fulcra-prefs notice \
   --half-life 365
 ```
 
+If the agent has raw session text rather than a key/value pair, use the
+conservative extractor. It only emits candidates for explicit preference
+language and never ingests directly:
+
+```bash
+fulcra-prefs extract-candidates \
+  --platform codex \
+  --session "$CODEX_SESSION_ID" \
+  --text "I prefer concise tone in status updates." \
+  --write
+```
+
 Claude Code drains on `PreCompact` and `Stop`; Codex drains on `PreCompact`
 because Codex `Stop` fires every turn. On successful capture the file is renamed
 with a `.captured` suffix so repeat lifecycle hooks do not double-ingest it.

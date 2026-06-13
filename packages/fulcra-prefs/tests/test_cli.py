@@ -283,6 +283,40 @@ def test_drain_candidates_captures_and_marks_file(env, tmp_path, capsys):
     assert "comms.tone.concise" in compiled["keys"]
 
 
+def test_extract_candidates_prints_json_without_writing(env, tmp_path, capsys):
+    call, _fake_api, _store = env
+
+    assert call(
+        "extract-candidates",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(tmp_path / "candidates"),
+        "--text", "I prefer concise tone in updates.",
+    ) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out[0]["key"] == "comms.tone"
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_extract_candidates_write_appends_to_queue(env, tmp_path, capsys):
+    call, _fake_api, _store = env
+
+    assert call(
+        "extract-candidates",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(tmp_path / "candidates"),
+        "--write",
+        "--text", "I want documentation for humans and agents.",
+    ) == 0
+
+    path = tmp_path / "candidates" / "codex" / "sess-1.json"
+    queued = json.loads(path.read_text())
+    assert queued[0]["key"] == "docs.style.human_agent_quality"
+    assert "queued 1 extracted candidate" in capsys.readouterr().err
+
+
 def test_capture_batch_rejects_non_array(env, tmp_path, capsys):
     call, fake_api, store = env
     f = tmp_path / "bad.json"
