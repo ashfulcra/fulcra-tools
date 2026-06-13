@@ -735,6 +735,8 @@ def cmd_pause(args: Any, backend: Optional[list[str]] = None) -> int:
         if snap_ok:
             _info(f"  Continuity snapshot: {checkpoint['checkpoint_id']}")
             _info(f"  Snapshot path: {snap_path}")
+            for warning in continuity.quality_warnings(checkpoint):
+                _warn(f"Continuity snapshot quality: {warning}.")
         else:
             _warn("Task paused, but continuity snapshot upload failed.")
 
@@ -769,6 +771,8 @@ def cmd_snapshot(args: Any, backend: Optional[list[str]] = None) -> int:
 
     _info(f"Continuity snapshot: {checkpoint['checkpoint_id']}")
     _info(f"  Snapshot path: {snap_path}")
+    for warning in continuity.quality_warnings(checkpoint):
+        _warn(f"Continuity snapshot quality: {warning}.")
     return 0
 
 

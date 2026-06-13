@@ -34,6 +34,8 @@ import ast
 import unittest
 from pathlib import Path
 
+from fulcra_coord import continuity
+
 
 def _writepipe_source() -> str:
     pkg_dir = Path(__file__).resolve().parent.parent / "fulcra_coord"
@@ -157,6 +159,62 @@ class SnapshotCheckerNonVacuityTest(unittest.TestCase):
     def test_rejects_deepcopy_of_subset(self) -> None:
         node = self._payload_of("make_event(payload=copy.deepcopy(task['source']))\n")
         self.assertFalse(_payload_is_full_task_deepcopy(node))
+
+
+class ContinuityCheckpointQualityTest(unittest.TestCase):
+    """Coord-generated Continuity checkpoints should self-report thin spots."""
+
+    def test_make_checkpoint_derives_thin_context_warnings(self) -> None:
+        checkpoint = continuity.make_checkpoint(
+            {
+                "id": "TASK-QUALITY",
+                "title": "Quality gate",
+                "status": "active",
+                "workstream": "fulcra-coord",
+                "owner_agent": "codex:box:repo",
+                "current_summary": "Build snapshot quality gate.",
+                "next_action": "Add warning tests.",
+                "task_file": "/coordination/tasks/TASK-QUALITY.json",
+            },
+            agent="codex:box:repo",
+            reason="manual",
+        )
+
+        self.assertNotIn("quality_warnings", checkpoint)
+        warnings = continuity.quality_warnings(checkpoint)
+        self.assertIn("thin checkpoint: no decisions recorded", warnings)
+        self.assertIn("thin checkpoint: no open_questions recorded", warnings)
+        self.assertNotIn("missing objective/current state", warnings)
+        self.assertNotIn("missing concrete next_actions", warnings)
+        self.assertFalse(
+            any(w.startswith("artifact refs may be local-only") for w in warnings),
+            warnings,
+        )
+
+    def test_quality_warnings_flag_local_only_artifact_refs(self) -> None:
+        warnings = continuity.quality_warnings(
+            {
+                "objective": "Hand work to another host.",
+                "next_actions": ["Resume from portable artifacts."],
+                "identity": {
+                    "workstream_id": "fulcra-coord",
+                    "agent_id": "codex:box:repo",
+                    "coord_task_id": "TASK-QUALITY",
+                },
+                "decisions": ["Do not assume shared filesystem."],
+                "open_questions": ["Which host picks this up?"],
+                "artifacts": [
+                    {"path": "packages/fulcra-coord/README.md"},
+                    {"path": "/coordination/tasks/TASK-QUALITY.json"},
+                    {"path": "https://github.com/ashfulcra/fulcra-tools/pull/220"},
+                ],
+            }
+        )
+
+        self.assertIn(
+            "artifact refs may be local-only: packages/fulcra-coord/README.md",
+            warnings,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -82,6 +82,11 @@ fulcra-coord abandon TASK-... --reason "Why." --agent codex:paperclip
   Conflict markers or staged files you didn't create = you're sharing a checkout.
 - Write at **boundaries**: start, pause, block, done, abandon.
 - Never write for every internal step.
+- Write Fulcra Continuity snapshots at durable pause points. Codex has no
+  `SessionEnd` hook, so do this explicitly before handoff/review request,
+  after a long code-edit/test/push stretch, when the user says pause/done, and
+  at overnight or idle stopping points:
+  `fulcra-coord snapshot TASK-... --reason "<pause-point>" --next "<pickup step>"`.
 - **Mark anything you need the operator to do** with `block --on-user "<ask>"`.
 - `next_action` is required when pausing or blocking — it's the handoff.
 - `evidence` is required when marking done.
@@ -91,6 +96,9 @@ fulcra-coord abandon TASK-... --reason "Why." --agent codex:paperclip
   objective, decisions, open questions, next actions, and portable artifacts
   (URL, Fulcra remote path, coord task ID, or repo/ref/path tuple), not local-only
   paths. See `packages/fulcra-coord/docs/continuity-handoff.md`.
+- If `snapshot` prints quality warnings, enrich the task summary/next action or
+  write a richer checkpoint before relying on it for handoff. A thin checkpoint
+  is acceptable for plumbing tests, not for production handoff.
 
 ## Code review & merge (global — every repo)
 
