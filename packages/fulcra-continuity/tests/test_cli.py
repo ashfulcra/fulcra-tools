@@ -35,6 +35,8 @@ def test_checkpoint_command_writes_json_and_brief(tmp_path: Path) -> None:
         "TASK-123",
         "--coord-owner-agent",
         "openclaw:discord:main-comms",
+        "--session-context",
+        "This migration belongs to the check-in modernization program.",
         "--decision",
         "Avoid broad broadcasts",
         "--artifact",
@@ -56,13 +58,20 @@ def test_checkpoint_command_writes_json_and_brief(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     data = json.loads(checkpoint_path.read_text())
     assert data["task_id"] == "TASK-123"
+    assert "Fulcra Continuity checkpoint" in data["bootstrap_primer"]
+    assert data["session_context"] == (
+        "This migration belongs to the check-in modernization program."
+    )
     assert data["identity"]["workstream_id"] == "openclaw:discord:main-comms"
     assert data["identity"]["agent_id"] == "arc"
     assert data["identity"]["coord_task_id"] == "TASK-123"
     assert data["decisions"] == ["Avoid broad broadcasts"]
     assert data["artifacts"] == [{"path": "parser.py", "note": "entry point"}]
     assert data["memory_writes"][0]["scope"] == "project:fulcra"
-    assert "Find parser" in brief_path.read_text()
+    brief = brief_path.read_text()
+    assert "Session context:" in brief
+    assert "check-in modernization program" in brief
+    assert "Find parser" in brief
 
 
 def test_resume_command_prints_brief(tmp_path: Path) -> None:
@@ -94,6 +103,9 @@ def test_demo_command_writes_fixture(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "context-cliff-rescue.checkpoint.json").exists()
     assert (tmp_path / "context-cliff-rescue.resume.md").exists()
+    data = json.loads((tmp_path / "context-cliff-rescue.checkpoint.json").read_text())
+    assert "Fulcra Continuity checkpoint" in data["bootstrap_primer"]
+    assert "context-cliff handoff" in data["session_context"]
 
 
 def test_resume_missing_file_reports_clean_error(tmp_path: Path) -> None:

@@ -39,6 +39,8 @@ def test_make_checkpoint_round_trips_to_dict() -> None:
     assert data["schema_version"] == SCHEMA_VERSION
     assert data["checkpoint_id"].startswith("CHK-20260606T140000z-task-1-")
     assert data["task_id"] == "TASK-1"
+    assert "Fulcra Continuity checkpoint" in data["bootstrap_primer"]
+    assert "portable resume state" in data["session_context"]
     assert data["identity"] == {
         "agent_id": "arc",
         "coord_owner_agent": "openclaw:discord:main-comms",
@@ -80,6 +82,9 @@ def test_resume_brief_highlights_operating_state() -> None:
 
     assert "Resume brief for TASK-2" in brief
     assert "Objective: Prove continuity" in brief
+    assert "Bootstrap primer:" in brief
+    assert "Fulcra Continuity checkpoint" in brief
+    assert "Session context:" in brief
     assert "- Workstream: openclaw:discord:main-comms" in brief
     assert "- Agent: arc" in brief
     assert "- Coord task: TASK-2" in brief
@@ -118,6 +123,20 @@ def test_checkpoint_from_dict_coerces_context_percent() -> None:
     )
 
     assert checkpoint.context_used_percent == 82
+
+
+def test_checkpoint_from_dict_defaults_self_contained_fields() -> None:
+    checkpoint = checkpoint_from_dict(
+        {
+            "task_id": "TASK-1",
+            "title": "x",
+            "objective": "y",
+            "created_at": "2026-06-06T14:00:00Z",
+        }
+    )
+
+    assert "Fulcra Continuity checkpoint" in checkpoint.bootstrap_primer
+    assert "portable resume state" in checkpoint.session_context
 
 
 def test_checkpoint_from_dict_ignores_invalid_context_percent() -> None:

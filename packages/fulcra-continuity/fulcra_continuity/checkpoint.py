@@ -9,6 +9,17 @@ from typing import Any
 from uuid import uuid4
 
 SCHEMA_VERSION = "fulcra.continuity.checkpoint.v1"
+DEFAULT_BOOTSTRAP_PRIMER = (
+    "This is a Fulcra Continuity checkpoint. Resume it with "
+    "`fulcra-continuity resume <checkpoint>` or read this JSON directly. "
+    "Use objective, identity, decisions, artifacts, open_questions, "
+    "next_actions, and memory_writes to continue without the original "
+    "transcript."
+)
+DEFAULT_SESSION_CONTEXT = (
+    "No additional session context was provided; treat this checkpoint as the "
+    "portable resume state for the task named by task_id/title."
+)
 
 
 def utc_now_iso() -> str:
@@ -54,6 +65,8 @@ class ContinuityCheckpoint:
     source: str = "manual"
     transcript_path: str = ""
     context_used_percent: int | None = None
+    bootstrap_primer: str = DEFAULT_BOOTSTRAP_PRIMER
+    session_context: str = DEFAULT_SESSION_CONTEXT
     decisions: list[str] = field(default_factory=list)
     artifacts: list[Artifact] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
@@ -98,6 +111,8 @@ def make_checkpoint(
     source: str = "manual",
     transcript_path: str = "",
     context_used_percent: int | None = None,
+    bootstrap_primer: str = DEFAULT_BOOTSTRAP_PRIMER,
+    session_context: str = DEFAULT_SESSION_CONTEXT,
     decisions: list[str] | None = None,
     artifacts: list[Artifact] | None = None,
     open_questions: list[str] | None = None,
@@ -133,6 +148,8 @@ def make_checkpoint(
         source=source,
         transcript_path=transcript_path,
         context_used_percent=_optional_int(context_used_percent),
+        bootstrap_primer=bootstrap_primer or DEFAULT_BOOTSTRAP_PRIMER,
+        session_context=session_context or DEFAULT_SESSION_CONTEXT,
         decisions=decisions or [],
         artifacts=artifacts or [],
         open_questions=open_questions or [],
@@ -205,6 +222,10 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
         source=str(data.get("source", "manual")),
         transcript_path=str(data.get("transcript_path", "")),
         context_used_percent=_optional_int(data.get("context_used_percent")),
+        bootstrap_primer=str(data.get("bootstrap_primer", DEFAULT_BOOTSTRAP_PRIMER))
+        or DEFAULT_BOOTSTRAP_PRIMER,
+        session_context=str(data.get("session_context", DEFAULT_SESSION_CONTEXT))
+        or DEFAULT_SESSION_CONTEXT,
         decisions=_coerce_str_list(data.get("decisions")),
         artifacts=artifacts,
         open_questions=_coerce_str_list(data.get("open_questions")),
@@ -253,6 +274,14 @@ def render_resume_brief(checkpoint: ContinuityCheckpoint) -> str:
         lines.append(f"Context used: {checkpoint.context_used_percent}%")
     if checkpoint.transcript_path:
         lines.append(f"Transcript: {checkpoint.transcript_path}")
+    if checkpoint.bootstrap_primer:
+        lines.append("")
+        lines.append("Bootstrap primer:")
+        lines.append(checkpoint.bootstrap_primer)
+    if checkpoint.session_context:
+        lines.append("")
+        lines.append("Session context:")
+        lines.append(checkpoint.session_context)
 
     def section(name: str, items: list[str]) -> None:
         if not items:
@@ -299,6 +328,11 @@ def default_demo_checkpoint() -> ContinuityCheckpoint:
         coord_owner_agent="openclaw:discord:main-comms",
         source="demo",
         context_used_percent=82,
+        session_context=(
+            "Demo checkpoint for a context-cliff handoff: the next agent should "
+            "continue the migration from the structured state below, not from "
+            "the original chat transcript."
+        ),
         decisions=[
             "Use task lifecycle updates instead of broadcast messages.",
             "Keep spreadsheet parsing audit separate from bus write implementation.",
