@@ -43,7 +43,8 @@ def cmd_status(args: Any, backend: Optional[list[str]] = None) -> int:
     every task body — every field this command and build_index read is present
     on a summary. Falls back to a full load on an older bus (see
     _load_task_summaries)."""
-    all_tasks = _load_task_summaries(backend=backend)
+    all_tasks = _load_task_summaries(
+        backend=backend, heal_missing_entries=True)
 
     workstream_filter = getattr(args, "workstream", None)
     agent_filter = getattr(args, "agent", None)
@@ -485,7 +486,8 @@ def cmd_needs_me(args: Any, backend: Optional[list[str]] = None) -> int:
 
     # needs_human / upcoming_for_human read status/assignee/tags/not_before/due —
     # all on a summary; no body fetch. now=None -> wall-clock.
-    all_tasks = _load_task_summaries(backend=backend)
+    all_tasks = _load_task_summaries(
+        backend=backend, heal_missing_entries=True)
     items = views.needs_human(all_tasks, human)
     upcoming = views.upcoming_for_human(all_tasks, human)
 
@@ -648,7 +650,8 @@ def cmd_resume(args: Any, backend: Optional[list[str]] = None) -> int:
     # Summaries fast-path: resume reads owner_agent/status/assignee and re-wraps
     # entries with task_summary (now idempotent, so summarizing a summary is a
     # no-op). No task body is needed; falls back to a full load on an older bus.
-    all_tasks = _load_task_summaries(backend=backend)
+    all_tasks = _load_task_summaries(
+        backend=backend, heal_missing_entries=True)
     open_statuses = ("proposed", "active", "waiting", "blocked")
 
     active = [

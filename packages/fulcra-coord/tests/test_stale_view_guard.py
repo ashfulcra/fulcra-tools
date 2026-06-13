@@ -29,6 +29,8 @@ THE CONTRACT under test:
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import os
 import tempfile
 import types
@@ -135,8 +137,15 @@ class TestSummariesStaleGuard(unittest.TestCase):
     """Contract 2+3 for ``_load_task_summaries``."""
 
     def setUp(self):
+        self._xdg = tempfile.TemporaryDirectory()
+        self._env = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": self._xdg.name})
+        self._env.start()
         self.t1 = _task("in the view")
         self.t2 = _task("MISSING from the stale view", assignee="me:h:r")
+
+    def tearDown(self):
+        self._env.stop()
+        self._xdg.cleanup()
 
     def _patched(self, fake):
         return [
@@ -157,13 +166,69 @@ class TestSummariesStaleGuard(unittest.TestCase):
             for p in patches:
                 p.stop()
 
-    def test_fresh_view_uses_fast_path_no_listing(self):
+    def test_fresh_complete_view_uses_fast_path_no_listing_by_default(self):
         view = views.build_summaries([self.t1, self.t2])  # fresh generated_at
         fake = _SummariesBackendFake(view, [self.t1, self.t2])
         got = self._run(fake)
         self.assertEqual({s["id"] for s in got}, {self.t1["id"], self.t2["id"]})
         self.assertEqual(fake.list_calls, 0, "fresh view must not list tasks/")
-        self.assertEqual(fake.body_downloads, 0, "fresh view must not fetch bodies")
+        self.assertEqual(fake.body_downloads, 0,
+                         "complete fresh view must not fetch bodies")
+
+    def test_fresh_incomplete_view_can_heal_missing_task_files(self):
+        # Live 2026-06-13 failure: summaries was freshly stamped but omitted
+        # newly-routed Arc review tasks. Staleness detection could not fire, so
+        # listener/inbox reads saw an empty inbox while durable task files and
+        # directive loops existed.
+        view = views.build_summaries([self.t1])
+        fake = _SummariesBackendFake(view, [self.t1, self.t2])
+        with mock.patch("fulcra_coord.io._warn") as warned:
+            got = self._run(fake, heal_missing_entries=True)
+        self.assertEqual({s["id"] for s in got}, {self.t1["id"], self.t2["id"]})
+        self.assertEqual(fake.list_calls, 1)
+        self.assertEqual(fake.body_downloads, 2)
+        self.assertTrue(warned.called, "fresh-but-incomplete view must be visible")
+        self.assertTrue(
+            any("freshly stamped" in call.args[0]
+                for call in warned.call_args_list)
+        )
+
+    def test_fresh_open_summary_row_refreshes_from_task_body(self):
+        stale = dict(self.t2)
+        stale["status"] = "waiting"
+        fresh = dict(self.t2)
+        fresh["status"] = "done"
+        fresh["updated_at"] = _iso(_now())
+        view = views.build_summaries([self.t1, stale])
+        fake = _SummariesBackendFake(view, [self.t1, fresh])
+        with mock.patch("fulcra_coord.io._warn"):
+            got = self._run(fake, heal_missing_entries=True)
+        by_id = {s["id"]: s for s in got}
+        self.assertEqual(by_id[self.t2["id"]]["status"], "done")
+
+    def test_fresh_open_summary_row_refresh_is_rate_limited(self):
+        closed = dict(self.t1)
+        closed["status"] = "done"
+        stale = dict(self.t2)
+        stale["status"] = "waiting"
+        fresh = dict(self.t2)
+        fresh["status"] = "done"
+        fresh["updated_at"] = _iso(_now())
+        view = views.build_summaries([closed, stale])
+        fake = _SummariesBackendFake(view, [closed, fresh])
+
+        with mock.patch("fulcra_coord.io._warn"):
+            first = self._run(fake, heal_missing_entries=True)
+            first_downloads = fake.body_downloads
+            second = self._run(fake, heal_missing_entries=True)
+
+        self.assertEqual(
+            {s["id"]: s for s in first}[self.t2["id"]]["status"], "done")
+        self.assertEqual(
+            {s["id"]: s for s in second}[self.t2["id"]]["status"], "waiting")
+        self.assertEqual(
+            fake.body_downloads, first_downloads,
+            "nearby readers must not re-fetch every open row")
 
     def test_stale_view_falls_back_to_direct_listing(self):
         # Stale view KNOWS ONLY t1; t2's body landed on the bus but no view
@@ -214,6 +279,76 @@ class TestSummariesStaleGuard(unittest.TestCase):
                 p.stop()
         self.assertIn(self.t2["id"], {i["id"] for i in items},
                       "directive invisible in the stale view must surface in inbox")
+
+    def test_fresh_incomplete_view_directive_surfaces_in_inbox(self):
+        # End-to-end for the listener failure: a fresh summaries view can still
+        # be incomplete after write races. The inbox delivery path opts into
+        # missing-entry healing so concrete assignees do not see a false empty
+        # inbox.
+        from fulcra_coord.inbox import _load_inbox
+        view = views.build_summaries([self.t1])
+        fake = _SummariesBackendFake(view, [self.t1, self.t2])
+        patches = self._patched(fake)
+        for p in patches:
+            p.start()
+        try:
+            with mock.patch("fulcra_coord.io._warn"):
+                items = _load_inbox("me:h:r", backend=["false"])
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertIn(self.t2["id"], {i["id"] for i in items},
+                      "directive missing from a fresh view must surface in inbox")
+
+    def test_fresh_incomplete_view_surfaces_through_inbox_command(self):
+        from fulcra_coord import cli
+        view = views.build_summaries([self.t1])
+        fake = _SummariesBackendFake(view, [self.t1, self.t2])
+        patches = self._patched(fake)
+        for p in patches:
+            p.start()
+        try:
+            buf = io.StringIO()
+            args = types.SimpleNamespace(
+                agent="me:h:r", format="json", ack=None, all=False)
+            with mock.patch("fulcra_coord.io._warn"), \
+                 contextlib.redirect_stdout(buf):
+                rc = cli.cmd_inbox(args, backend=["false"])
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertIn(self.t2["id"], {i["id"] for i in payload["inbox"]},
+                      "cmd_inbox must not report a false empty inbox")
+
+    def test_fresh_stale_open_row_does_not_surface_through_status_command(self):
+        from fulcra_coord import cli
+        stale = dict(self.t2)
+        stale["status"] = "waiting"
+        fresh = dict(self.t2)
+        fresh["status"] = "done"
+        fresh["updated_at"] = _iso(_now())
+        view = views.build_summaries([self.t1, stale])
+        fake = _SummariesBackendFake(view, [self.t1, fresh])
+        patches = self._patched(fake)
+        for p in patches:
+            p.start()
+        try:
+            buf = io.StringIO()
+            args = types.SimpleNamespace(
+                format="json", workstream=None, agent=None)
+            with mock.patch("fulcra_coord.io._warn"), \
+                 contextlib.redirect_stdout(buf):
+                rc = cli.cmd_status(args, backend=["false"])
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        active_ids = {i["id"] for i in payload["active"]}
+        self.assertNotIn(self.t2["id"], active_ids,
+                         "cmd_status must not show body-done tasks as open")
 
     def test_direct_listing_does_not_resurrect_unlisted_cached_tasks(self):
         # The stale fallback is driven by the authoritative raw tasks/ listing.

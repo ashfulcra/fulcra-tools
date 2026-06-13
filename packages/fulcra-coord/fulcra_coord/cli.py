@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -2122,6 +2123,12 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # retry exists for) — invisible if only surfaced next to failures.
         _info(f"  View uploads: {recovered} recovered on retry.")
 
+    if "summaries" not in failures and "summaries" in all_views:
+        if not _verify_reconciled_summaries_view(
+            all_views["summaries"], backend=backend, deadline=deadline
+        ):
+            failures.append("summaries")
+
     if time.monotonic() - t0 > timeout:
         _err("Reconcile timeout exceeded mid-upload.")
         ops_log.log_op("reconcile", status="timeout")
@@ -2454,3 +2461,61 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
+
+
+def _verify_reconciled_summaries_view(
+    expected: dict[str, Any], *, backend: Optional[list[str]] = None,
+    deadline: Optional[float] = None,
+) -> bool:
+    """Read-back proof for reconcile's most important view.
+
+    The parallel upload batch can receive a success-shaped result while the
+    shared ``views/summaries.json`` path remains stale. That leaves every reader
+    with a freshly-stamped but incomplete aggregate, exactly the false-empty /
+    false-open listener and status failures this reconcile is supposed to heal.
+    Verify by fingerprint; on mismatch, retry this one view once and verify
+    again. ``False`` feeds reconcile's existing partial-failure path.
+    """
+    path = remote.view_remote_path("summaries")
+    expected_fp = _view_fingerprint(expected)
+
+    def _read_matches() -> bool:
+        remaining = (deadline - time.monotonic()) if deadline else None
+        if remaining is not None and remaining < 1:
+            return False
+        try:
+            timeout = None
+            if remaining is not None:
+                timeout = min(int(remaining), remote._read_timeout())
+            actual = remote.download_json(path, backend=backend, timeout=timeout)
+        except Exception:
+            return False
+        return isinstance(actual, dict) and _view_fingerprint(actual) == expected_fp
+
+    if _read_matches():
+        return True
+
+    remaining = (deadline - time.monotonic()) if deadline else None
+    if remaining is not None and remaining < 2:
+        _warn("  summaries view read-back mismatch and no deadline headroom "
+              "for retry")
+        return False
+    _warn("  summaries view read-back mismatch after upload — retrying once")
+    try:
+        timeout = None
+        if remaining is not None:
+            timeout = min(int(remaining), remote._write_timeout())
+        if not remote.upload_json(expected, path, backend=backend, timeout=timeout):
+            return False
+    except Exception:
+        pass
+    if _read_matches():
+        return True
+    try:
+        ops_log.log_op(
+            "reconcile", "summaries", status="view_upload_failed",
+            error="summaries upload reported success but read-back differed",
+        )
+    except Exception:
+        pass
+    return False
