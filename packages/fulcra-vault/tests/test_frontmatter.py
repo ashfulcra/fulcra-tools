@@ -108,6 +108,19 @@ def test_type_ambiguous_strings_round_trip_as_strings():
     assert body == "# Body\n"
 
 
+def test_quote_prefixed_strings_round_trip_as_strings():
+    values = {
+        "single": "'tis the season",
+        "double": '"quoted start',
+    }
+
+    changed = update_keys("# Body\n", values)
+
+    fm, body = parse_note(changed)
+    assert fm == values
+    assert body == "# Body\n"
+
+
 def test_single_quoted_scalars_parse_like_yaml_strings():
     fm, body = parse_note("---\ntitle: 'Ash''s note'\n---\nBody\n")
 

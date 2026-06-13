@@ -138,6 +138,8 @@ def _format_scalar(value: Any) -> str:
 def _needs_quoted_string(value: str) -> bool:
     if value == "" or value.strip() != value or any(c in value for c in "\n:#[]{}"):
         return True
+    if value[:1] in ("'", '"'):
+        return True
     if value in ("true", "false", "null"):
         return True
     try:
