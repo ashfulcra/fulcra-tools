@@ -64,6 +64,9 @@ def test_pause_snapshot_writes_latest_and_archived_checkpoint(capsys) -> None:
     assert any("/checkpoints/chk-" in path for path in paths)
     checkpoint = uploaded[0][0]
     assert checkpoint["schema_version"] == continuity.SCHEMA_VERSION
+    assert "Fulcra Continuity checkpoint" in checkpoint["bootstrap_primer"]
+    assert "fulcra-coord" in checkpoint["session_context"]
+    assert task["id"] in checkpoint["session_context"]
     assert checkpoint["identity"]["coord_task_id"] == task["id"]
     assert checkpoint["next_actions"] == ["Resume from checkpoint"]
 
@@ -96,6 +99,8 @@ def test_snapshot_writes_checkpoint_without_task_transition(capsys) -> None:
     checkpoint = uploaded[0][0]
     assert checkpoint["source"] == "fulcra-coord:pre-compact"
     assert checkpoint["transcript_path"] == "/tmp/session.jsonl"
+    assert checkpoint["bootstrap_primer"]
+    assert "pre-compact checkpoint" in checkpoint["session_context"]
     assert checkpoint["next_actions"] == ["Pick up from latest checkpoint"]
 
 

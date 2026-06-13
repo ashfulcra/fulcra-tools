@@ -9,6 +9,17 @@ from typing import Any
 from uuid import uuid4
 
 SCHEMA_VERSION = "fulcra.continuity.checkpoint.v1"
+DEFAULT_BOOTSTRAP_PRIMER = (
+    "This is a Fulcra Continuity checkpoint. Resume it with "
+    "`fulcra-continuity resume <checkpoint>` or read this JSON directly. "
+    "Use objective, identity, decisions, artifacts, open_questions, "
+    "next_actions, and memory_writes to continue without the original "
+    "transcript."
+)
+DEFAULT_SESSION_CONTEXT = (
+    "No additional session context was provided; treat this checkpoint as the "
+    "portable resume state for the task named by task_id/title."
+)
 
 
 def utc_now_iso() -> str:
@@ -54,6 +65,8 @@ class ContinuityCheckpoint:
     source: str = "manual"
     transcript_path: str = ""
     context_used_percent: int | None = None
+    bootstrap_primer: str = DEFAULT_BOOTSTRAP_PRIMER
+    session_context: str = DEFAULT_SESSION_CONTEXT
     decisions: list[str] = field(default_factory=list)
     artifacts: list[Artifact] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
@@ -98,6 +111,8 @@ def make_checkpoint(
     source: str = "manual",
     transcript_path: str = "",
     context_used_percent: int | None = None,
+    bootstrap_primer: str = DEFAULT_BOOTSTRAP_PRIMER,
+    session_context: str = DEFAULT_SESSION_CONTEXT,
     decisions: list[str] | None = None,
     artifacts: list[Artifact] | None = None,
     open_questions: list[str] | None = None,
@@ -133,6 +148,8 @@ def make_checkpoint(
         source=source,
         transcript_path=transcript_path,
         context_used_percent=_optional_int(context_used_percent),
+        bootstrap_primer=bootstrap_primer or DEFAULT_BOOTSTRAP_PRIMER,
+        session_context=session_context or DEFAULT_SESSION_CONTEXT,
         decisions=decisions or [],
         artifacts=artifacts or [],
         open_questions=open_questions or [],
@@ -154,6 +171,12 @@ def _coerce_str_list(value: Any) -> list[str]:
     return [str(item) for item in _coerce_list(value)]
 
 
+def _str_or_default(value: Any, default: str) -> str:
+    if value is None:
+        return default
+    return str(value) or default
+
+
 def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
     # Valid JSON that isn't an object (a list, null, or a scalar) would
     # otherwise reach `data.get(...)` below and raise AttributeError/TypeError
@@ -173,11 +196,11 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
     memory_writes = [
         (
             MemoryWrite(
-                claim=str(item.get("claim", "")),
-                scope=str(item.get("scope", "task")),
-                source=str(item.get("source", "checkpoint")),
-                ttl=str(item.get("ttl", "")),
-                supersedes=str(item.get("supersedes", "")),
+                claim=_str_or_default(item.get("claim"), ""),
+                scope=_str_or_default(item.get("scope"), "task"),
+                source=_str_or_default(item.get("source"), "checkpoint"),
+                ttl=_str_or_default(item.get("ttl"), ""),
+                supersedes=_str_or_default(item.get("supersedes"), ""),
             )
             if isinstance(item, dict)
             else MemoryWrite(claim=str(item))
@@ -188,23 +211,27 @@ def checkpoint_from_dict(data: dict[str, Any]) -> ContinuityCheckpoint:
     if not isinstance(identity_data, dict):
         identity_data = {}
     identity = WorkstreamIdentity(
-        workstream_id=str(identity_data.get("workstream_id", "")),
-        agent_id=str(identity_data.get("agent_id", "")),
-        coord_task_id=str(identity_data.get("coord_task_id", "")),
-        coord_owner_agent=str(identity_data.get("coord_owner_agent", "")),
+        workstream_id=_str_or_default(identity_data.get("workstream_id"), ""),
+        agent_id=_str_or_default(identity_data.get("agent_id"), ""),
+        coord_task_id=_str_or_default(identity_data.get("coord_task_id"), ""),
+        coord_owner_agent=_str_or_default(identity_data.get("coord_owner_agent"), ""),
     )
     return ContinuityCheckpoint(
-        schema_version=str(data.get("schema_version", SCHEMA_VERSION)),
-        checkpoint_id=str(data.get("checkpoint_id", "")),
-        task_id=str(data.get("task_id", "")),
-        title=str(data.get("title", "")),
-        objective=str(data.get("objective", "")),
-        created_at=str(data.get("created_at", "")),
-        owner_agent=str(data.get("owner_agent", "")),
+        schema_version=_str_or_default(data.get("schema_version"), SCHEMA_VERSION),
+        checkpoint_id=_str_or_default(data.get("checkpoint_id"), ""),
+        task_id=_str_or_default(data.get("task_id"), ""),
+        title=_str_or_default(data.get("title"), ""),
+        objective=_str_or_default(data.get("objective"), ""),
+        created_at=_str_or_default(data.get("created_at"), ""),
+        owner_agent=_str_or_default(data.get("owner_agent"), ""),
         identity=identity,
-        source=str(data.get("source", "manual")),
-        transcript_path=str(data.get("transcript_path", "")),
+        source=_str_or_default(data.get("source"), "manual"),
+        transcript_path=_str_or_default(data.get("transcript_path"), ""),
         context_used_percent=_optional_int(data.get("context_used_percent")),
+        bootstrap_primer=_str_or_default(
+            data.get("bootstrap_primer"), DEFAULT_BOOTSTRAP_PRIMER),
+        session_context=_str_or_default(
+            data.get("session_context"), DEFAULT_SESSION_CONTEXT),
         decisions=_coerce_str_list(data.get("decisions")),
         artifacts=artifacts,
         open_questions=_coerce_str_list(data.get("open_questions")),
@@ -253,6 +280,14 @@ def render_resume_brief(checkpoint: ContinuityCheckpoint) -> str:
         lines.append(f"Context used: {checkpoint.context_used_percent}%")
     if checkpoint.transcript_path:
         lines.append(f"Transcript: {checkpoint.transcript_path}")
+    if checkpoint.bootstrap_primer:
+        lines.append("")
+        lines.append("Bootstrap primer:")
+        lines.append(checkpoint.bootstrap_primer)
+    if checkpoint.session_context:
+        lines.append("")
+        lines.append("Session context:")
+        lines.append(checkpoint.session_context)
 
     def section(name: str, items: list[str]) -> None:
         if not items:
@@ -299,6 +334,11 @@ def default_demo_checkpoint() -> ContinuityCheckpoint:
         coord_owner_agent="openclaw:discord:main-comms",
         source="demo",
         context_used_percent=82,
+        session_context=(
+            "Demo checkpoint for a context-cliff handoff: the next agent should "
+            "continue the migration from the structured state below, not from "
+            "the original chat transcript."
+        ),
         decisions=[
             "Use task lifecycle updates instead of broadcast messages.",
             "Keep spreadsheet parsing audit separate from bus write implementation.",
