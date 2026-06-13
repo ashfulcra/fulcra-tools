@@ -23,6 +23,7 @@ from typing import Any, Optional
 from . import remote, views, schema, identity, cache, continuity
 from . import loops as _loops
 from . import roles as _roles
+from .loop_snapshots import overlay_open_records_from_tasks
 # Shared records-sweep + bounded-evidence-probe pair (cmd_board). loop_ops is
 # BELOW this module (it never imports query/cli) — the single home for the
 # load-bearing top-level-shard filter all three loop surfaces need.
@@ -193,6 +194,12 @@ def cmd_board(args: Any, backend: Optional[list[str]] = None) -> int:
 
     try:
         records = load_loop_records(backend=backend)
+        records = overlay_open_records_from_tasks(
+            records,
+            backend=backend,
+            tasks=_load_task_summaries(backend=backend),
+            fetch_missing=True,
+        )
     except Exception:
         records = []   # glance surface: a half-readable bus still renders
 
