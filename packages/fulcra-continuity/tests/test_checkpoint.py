@@ -139,6 +139,47 @@ def test_checkpoint_from_dict_defaults_self_contained_fields() -> None:
     assert "portable resume state" in checkpoint.session_context
 
 
+def test_checkpoint_from_dict_treats_null_defaulted_strings_as_missing() -> None:
+    checkpoint = checkpoint_from_dict(
+        {
+            "schema_version": None,
+            "checkpoint_id": None,
+            "task_id": "TASK-1",
+            "title": "x",
+            "objective": "y",
+            "created_at": "2026-06-06T14:00:00Z",
+            "source": None,
+            "bootstrap_primer": None,
+            "session_context": None,
+            "memory_writes": [
+                {
+                    "claim": "persist this",
+                    "scope": None,
+                    "source": None,
+                    "ttl": None,
+                    "supersedes": None,
+                }
+            ],
+            "identity": {
+                "workstream_id": None,
+                "agent_id": None,
+                "coord_task_id": None,
+                "coord_owner_agent": None,
+            },
+        }
+    )
+
+    assert checkpoint.schema_version == SCHEMA_VERSION
+    assert checkpoint.checkpoint_id == ""
+    assert checkpoint.source == "manual"
+    assert "Fulcra Continuity checkpoint" in checkpoint.bootstrap_primer
+    assert "portable resume state" in checkpoint.session_context
+    assert checkpoint.identity.is_empty()
+    assert checkpoint.memory_writes == [
+        MemoryWrite(claim="persist this", scope="task", source="checkpoint")
+    ]
+
+
 def test_checkpoint_from_dict_ignores_invalid_context_percent() -> None:
     checkpoint = checkpoint_from_dict(
         {
