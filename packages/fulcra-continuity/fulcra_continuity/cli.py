@@ -56,6 +56,16 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("--source", default="manual")
     checkpoint.add_argument("--transcript-path", default="")
     checkpoint.add_argument("--context-used", type=int, default=None)
+    checkpoint.add_argument(
+        "--bootstrap-primer",
+        default=os.environ.get("FULCRA_CONTINUITY_BOOTSTRAP_PRIMER", ""),
+        help="Override the default cold-start explanation carried in the checkpoint",
+    )
+    checkpoint.add_argument(
+        "--session-context",
+        default=os.environ.get("FULCRA_CONTINUITY_SESSION_CONTEXT", ""),
+        help="Broader session/program context the next agent should know",
+    )
     checkpoint.add_argument("--decision", action="append", default=[])
     checkpoint.add_argument("--artifact", action="append", default=[], help="PATH or PATH=NOTE")
     checkpoint.add_argument("--open-question", action="append", default=[])
@@ -116,6 +126,8 @@ def run(argv: list[str] | None = None) -> int:
             source=args.source,
             transcript_path=args.transcript_path,
             context_used_percent=args.context_used,
+            bootstrap_primer=args.bootstrap_primer,
+            session_context=args.session_context,
             decisions=args.decision,
             artifacts=[parse_artifact(item) for item in args.artifact],
             open_questions=args.open_question,
