@@ -504,6 +504,7 @@ def _load_task_summaries(
     backend: Optional[list[str]] = None, *,
     bypass_fallback_throttle: bool = False,
     skip_stale_fallback: bool = False,
+    heal_missing_entries: bool = False,
     on_stale_skipped: Any = None,
 ) -> list[dict[str, Any]]:
     """Load the compact task-summary list WITHOUT fetching task bodies.
@@ -557,7 +558,12 @@ def _load_task_summaries(
     if summaries_view and summaries_view.get("summaries") is not None:
         stale_min = views.view_staleness_minutes(summaries_view)
         if stale_min is None:
-            return summaries_view["summaries"]
+            if (not heal_missing_entries
+                    or not summaries_view.get("generated_at")
+                    or views._view_stale_min() <= 0):
+                return summaries_view["summaries"]
+            return _heal_missing_summary_entries(
+                summaries_view["summaries"], backend=backend)
         if skip_stale_fallback:
             _warn(f"summaries view is {int(stale_min)}m stale — using the "
                   "stale view without direct-listing fallback for this tick "
@@ -598,6 +604,63 @@ def _load_task_summaries(
         return summaries_view["summaries"]
     # Older bus: no aggregate yet — fall back to the authoritative full load.
     return [schema.task_summary(t) for t in _load_all_tasks(backend=backend)]
+
+
+def _heal_missing_summary_entries(
+    summaries: list[dict[str, Any]],
+    *,
+    backend: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    """Merge task files that a freshly-stamped summaries aggregate dropped.
+
+    The stale-view guard catches old aggregates, but the live 2026-06-13
+    listener failure was sharper: ``views/summaries.json`` was freshly stamped
+    yet missing dozens of durable ``tasks/*.json`` bodies. A fresh timestamp then
+    made inbox/listener reads trust an incomplete fast path and report "empty"
+    while the board's directive records still showed work directed at Arc.
+
+    Read-side gap healing is intentionally add-only. We pay one raw ``tasks/``
+    listing, and fetch bodies only for IDs absent from the aggregate. If listing
+    or a per-body fetch fails, return the original summaries; a repair attempt
+    must never make a read less correct than the fast path it is guarding.
+    """
+    if os.environ.get("FULCRA_COORD_SUMMARIES_GAP_HEAL", "1") == "0":
+        return summaries
+    by_id: dict[str, dict[str, Any]] = {
+        s["id"]: s for s in summaries
+        if isinstance(s, dict) and s.get("id")
+    }
+    try:
+        prefix = f"{remote.remote_root()}/tasks/"
+        paths = remote.list_files(prefix, backend=backend)
+    except Exception:
+        return summaries
+    missing = sorted({
+        p.rsplit("/", 1)[-1][: -len(".json")]
+        for p in paths if p.endswith(".json")
+    } - set(by_id))
+    if not missing:
+        return summaries
+    _warn(f"summaries view is freshly stamped but missing {len(missing)} "
+          "task file(s) — healing read from task bodies")
+    max_workers = min(16, max(4, len(missing)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_cache_remote_task, tid, backend=backend): tid
+            for tid in missing
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                body = fut.result()
+            except Exception:
+                body = None
+            if not (body and body.get("id")):
+                continue
+            try:
+                by_id[body["id"]] = schema.task_summary(body)
+            except Exception:
+                continue
+    return list(by_id.values())
 
 
 def _load_all_tasks_by_listing(
