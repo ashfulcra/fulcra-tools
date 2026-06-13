@@ -23,6 +23,7 @@ from typing import Any, Optional
 from . import remote, views, identity, digest_schedule
 from . import annotations as lifecycle_annotations
 from . import loops as _loops
+from .loop_snapshots import overlay_open_records_from_tasks
 # Shared records-sweep + bounded-evidence-probe pair (_loop_board_summary).
 # loop_ops is BELOW this module (it never imports digest/cli) — the single
 # home for the load-bearing top-level-shard filter all three loop surfaces need.
@@ -120,7 +121,8 @@ def cmd_health(args: Any, backend: Optional[list[str]] = None) -> int:
 
 
 def _loop_board_summary(*, now: datetime,
-                        backend: Optional[list[str]] = None) -> dict:
+                        backend: Optional[list[str]] = None,
+                        summaries: Optional[list[dict[str, Any]]] = None) -> dict:
     """Coordination-loop counts for the digest's one-line section — the SAME
     pure ``loops.loop_board`` fold the health record uses, over the digest's
     own agent identity (the reader the "awaiting-you" count belongs to).
@@ -134,7 +136,13 @@ def _loop_board_summary(*, now: datetime,
     best-effort) — the CALLER (cmd_digest) wraps the whole call so any failure
     simply omits the section, leaving the digest unchanged (the infra-line
     discipline)."""
-    records = load_loop_records(backend=backend)
+    records = overlay_open_records_from_tasks(
+        load_loop_records(backend=backend),
+        backend=backend,
+        tasks=summaries if summaries is not None
+        else _load_task_summaries(backend=backend),
+        fetch_missing=True,
+    )
     me = identity.resolve_agent()
     evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
     board = _loops.loop_board(me, records, now=now, evidence_ids=evidence_ids)
@@ -365,7 +373,8 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     # optional section). Stamped onto the built digest (not threaded through
     # the pure builder) so views.build_operator_digest's surface is untouched.
     try:
-        digest["loops"] = _loop_board_summary(now=now, backend=backend)
+        digest["loops"] = _loop_board_summary(
+            now=now, backend=backend, summaries=summaries)
     except Exception:
         digest["loops"] = None
 

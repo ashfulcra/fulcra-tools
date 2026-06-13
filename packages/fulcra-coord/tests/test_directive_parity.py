@@ -153,6 +153,38 @@ def test_directive_parity_flags_status_drift(coord_backend):
     assert "TASK-ST" in report["drift_task_ids"]
 
 
+def test_directive_parity_flags_loop_state_drift(coord_backend):
+    """A done review task whose snapshot still reads requested must be health
+    debt; otherwise stale board rows for completed reviews are invisible to
+    reconcile diagnostics."""
+    task, directive = _seed_directive_task(
+        coord_backend, task_id="TASK-LOOP-STATE", status="proposed",
+    )
+    task["tags"] = sorted(set(task.get("tags") or []) | {"kind:review"})
+    directive = directives.directive_from_task(task)
+    assert directive["state"] == "requested"
+    remote.upload_json(
+        directive, remote.directive_remote_path(directive["id"]),
+        backend=coord_backend,
+    )
+
+    task["status"] = "done"
+    task["tags"] = sorted(set(schema.build_tags(
+        status="done",
+        workstream=task["workstream"],
+        agent=task["owner_agent"],
+        kind="ops",
+        priority=task["priority"],
+    ) + ["kind:review"]))
+    remote.upload_json(
+        task, remote.task_remote_path("TASK-LOOP-STATE"), backend=coord_backend)
+
+    report = cli._directive_parity_check(backend=coord_backend)
+
+    assert report["drift"] >= 1
+    assert "TASK-LOOP-STATE" in report["drift_task_ids"]
+
+
 # ---------------------------------------------------------------------------
 # 4. Ack drift: stored record MISSING an acker the task / sub-log has
 # ---------------------------------------------------------------------------
