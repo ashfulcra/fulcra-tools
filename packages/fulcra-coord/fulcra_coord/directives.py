@@ -408,7 +408,13 @@ def directive_from_task(task: dict[str, Any]) -> dict[str, Any]:
     loop_sla_hours = None
     if directive_type == "review":
         loop_kind = "review"
-        loop_state = "requested"
+        status = task.get("status", "proposed")
+        if status in ("active", "waiting", "blocked"):
+            loop_state = "in_review"
+        elif status in ("done", "abandoned"):
+            loop_state = "closed"
+        else:
+            loop_state = "requested"
         loop_expects_response = True
         loop_sla_hours = 24
     elif IDEA_TAG in (task.get("tags") or []):
