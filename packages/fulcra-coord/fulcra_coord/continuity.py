@@ -23,6 +23,13 @@ from . import remote_root
 from . import remote, views
 
 SCHEMA_VERSION = "fulcra.continuity.checkpoint.v1"
+DEFAULT_BOOTSTRAP_PRIMER = (
+    "This is a Fulcra Continuity checkpoint. Resume it with "
+    "`fulcra-continuity resume <checkpoint>` or read this JSON directly. "
+    "Use objective, identity, decisions, artifacts, open_questions, "
+    "next_actions, and memory_writes to continue without the original "
+    "transcript."
+)
 
 
 def _now_iso() -> str:
@@ -87,6 +94,13 @@ def make_checkpoint(
     nexts = [item for item in nexts if item]
     tag_list = list(tags or [])
     tag_list.extend(["fulcra-coord", f"reason:{reason}"])
+    session_context = (
+        f"Created by fulcra-coord during a {reason} checkpoint for task "
+        f"{task_id or '(unknown task)'} in workstream "
+        f"{task.get('workstream') or '(unknown workstream)'}. Current status: "
+        f"{task.get('status') or '(unknown)'}; owner: "
+        f"{task.get('owner_agent') or agent or '(unknown)'}."
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "checkpoint_id": checkpoint_id,
@@ -99,6 +113,8 @@ def make_checkpoint(
         "source": f"fulcra-coord:{reason}",
         "transcript_path": transcript_path,
         "context_used_percent": None,
+        "bootstrap_primer": DEFAULT_BOOTSTRAP_PRIMER,
+        "session_context": session_context,
         "decisions": decisions or [],
         "artifacts": [
             {

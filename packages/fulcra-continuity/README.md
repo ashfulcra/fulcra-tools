@@ -69,9 +69,9 @@ not required identity.
 Checkpoints must be portable. Do not rely on bare local paths when handing work
 to another agent or machine; include a URL, Fulcra remote path, coord task ID, or
 repo/ref/path triple. Also assume the receiving agent may not know what
-Continuity is: the checkpoint should explain that it is a Fulcra Continuity
-resume packet and point the agent to `fulcra-continuity resume <checkpoint>` or
-the JSON fields to read directly.
+Continuity is: every checkpoint carries `bootstrap_primer` and `session_context`
+fields so the resume packet explains how to render/read it and what broader
+program/session context the next agent should keep in mind.
 
 ## Resume from a checkpoint
 

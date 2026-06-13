@@ -43,12 +43,14 @@ Every useful checkpoint should include:
 - `artifacts`: files, remote paths, task IDs, docs, branches, or URLs to inspect.
 - `identity`: workstream, logical agent, and coord task identity when available.
 - `memory_writes`: durable facts or requirements that should be saved elsewhere.
+- `bootstrap_primer`: what Fulcra Continuity is and how to resume/read the packet.
+- `session_context`: broader program/session context the next agent would lack
+  without the original transcript.
 
-For a receiver that has no continuity-specific bootstrap, include a short primer
-in the checkpoint objective, decisions, or first next action: "This is a Fulcra
-Continuity checkpoint. Render it with `fulcra-continuity resume <checkpoint>` or
-read the JSON fields `objective`, `decisions`, `open_questions`, `next_actions`,
-and `artifacts`."
+For a receiver that has no continuity-specific bootstrap, keep the
+`bootstrap_primer` direct and plain: "This is a Fulcra Continuity checkpoint.
+Render it with `fulcra-continuity resume <checkpoint>` or read the JSON fields
+directly."
 
 If the automatic writer cannot populate these fields, update the task summary
 first or write a richer checkpoint through the structured CLI/API path.
