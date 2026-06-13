@@ -18,26 +18,26 @@ best-effort view/event/directive side-writes are untouched):
    sleep (``FULCRA_COORD_WRITE_RETRY``, default 1, ``0`` disables). A second
    failure falls through to today's exact cached-locally path (return False,
    marker failed + needs_reconcile).
-2. VERIFY: after a successful-looking upload, the existing post-write
-   ``remote.stat`` doubles as delivery verification when
-   ``FULCRA_COORD_WRITE_VERIFY`` is on (default 1). A None stat (file not
-   visible on the bus) triggers one more re-upload + re-stat; if STILL
-   unverified, an UNMISSABLE ``DELIVERY NOT CONFIRMED: <task-id>`` warning is
-   emitted and the op marker is left needs_reconcile — but the write still
-   returns True (the self-heal contract stands: cached locally, repaired at the
-   next reconcile; the sender's exit code must not flip).
+2. VERIFY: after a successful-looking upload, ``FULCRA_COORD_WRITE_VERIFY``
+   (default 1) downloads the task body back and requires it to equal the exact
+   body the writer intended to publish. A missing body, unreadable body, or
+   stale older body triggers one more re-upload + re-read; if STILL unverified,
+   an UNMISSABLE ``DELIVERY NOT CONFIRMED: <task-id>`` warning is emitted and
+   the op marker is left needs_reconcile — but the write still returns True
+   (the self-heal contract stands: cached locally, repaired at the next
+   reconcile; the sender's exit code must not flip).
 
-The successful upload path still verifies with one post-upload stat —
-verification reuses the version-tracking stat, it does not add another
-round-trip after the upload. Confirmed-new writes may spend an extra pre-upload
-stat to disambiguate absence from a read failure.
+The successful upload path still pays the post-upload stat needed for version
+tracking, plus one body read-back for delivery proof. Confirmed-new writes may
+spend an extra pre-upload stat/download to disambiguate absence from a read
+failure.
 """
 
 import io as _io
 import contextlib
 from types import SimpleNamespace
 
-from fulcra_coord import cache, cli, remote, schema, writepipe
+from fulcra_coord import cache, cli, eventlog, remote, schema, writepipe
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +52,11 @@ class _BodyScript:
     ``upload_results`` / ``stat_results`` are consumed per call against the
     task path; when a list is exhausted the LAST element repeats (so "always
     absent" is just ``[None]``). Calls for any other path delegate to the real
-    functions. ``stat_calls_after_upload`` counts task-path stats issued after
-    the first body-upload attempt — the verification-cost observable (the
-    pre-write optimistic-concurrency stat is excluded by design).
+    functions. ``True`` means "successful upload that really writes";
+    ``"claim"`` means "returns True without writing", the incident shape.
+    ``stat_calls_after_upload`` counts task-path stats issued after the first
+    body-upload attempt; ``download_calls_after_upload`` does the same for the
+    body read-back verification.
     """
 
     def __init__(self, monkeypatch, task_path, *, upload_results, stat_results):
@@ -64,10 +66,13 @@ class _BodyScript:
         self.upload_calls = 0
         self.stat_calls = 0
         self.stat_calls_after_upload = 0
+        self.download_calls = 0
+        self.download_calls_after_upload = 0
         self.sleeps = []
 
         real_upload = remote.upload_json
         real_stat = remote.stat
+        real_download = remote.download_json
 
         def fake_upload(data, path, **kw):
             if path == self.task_path:
@@ -77,6 +82,10 @@ class _BodyScript:
                           else self.upload_results[0])
                 if isinstance(result, Exception):
                     raise result
+                if result is True:
+                    return real_upload(data, path, **kw)
+                if result == "claim":
+                    return True
                 return result
             return real_upload(data, path, **kw)
 
@@ -90,8 +99,16 @@ class _BodyScript:
                         else self.stat_results[0])
             return real_stat(path, **kw)
 
+        def fake_download(path, **kw):
+            if path == self.task_path:
+                self.download_calls += 1
+                if self.upload_calls:
+                    self.download_calls_after_upload += 1
+            return real_download(path, **kw)
+
         monkeypatch.setattr(remote, "upload_json", fake_upload)
         monkeypatch.setattr(remote, "stat", fake_stat)
+        monkeypatch.setattr(remote, "download_json", fake_download)
         monkeypatch.setattr(writepipe, "_retry_sleep", self.sleeps.append)
 
 
@@ -179,7 +196,7 @@ def test_verify_missing_write_warns_delivery_not_confirmed(coord_backend, monkey
     t = _make_task()
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
-        upload_results=[True],                 # upload always CLAIMS success
+        upload_results=["claim"],              # upload always CLAIMS success
         stat_results=[None],                   # ...but the bus never shows the file
     )
     ok, err = _write(t, coord_backend)
@@ -247,18 +264,69 @@ def test_reconcile_replays_unverified_cached_task_body(coord_backend, monkeypatc
 
 
 def test_verify_recovers_on_reupload_no_warn(coord_backend, monkeypatch):
-    """First post-stat misses, the re-upload + re-stat verifies -> quiet success."""
+    """First upload lies, the re-upload writes + read-back verifies -> quiet success."""
     t = _make_task()
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
-        # pre-stat None, confirm absent, post-stat None (unverified), re-stat OK
-        upload_results=[True],
+        upload_results=["claim", True],
         stat_results=[None, None, None, _OK_STAT],
     )
     ok, err = _write(t, coord_backend)
     assert ok is True
     assert "DELIVERY NOT CONFIRMED" not in err
     assert script.upload_calls == 2
+
+
+def test_verify_catches_stale_body_when_stat_still_visible(coord_backend, monkeypatch):
+    """A visible stat is not proof that THIS write landed.
+
+    Regression guard for the gap left by stat-only verification: if the upload
+    returns success while an older body remains at the task path, post-stat sees
+    "some file" and the old verifier declared success. The body read-back must
+    catch the stale content, warn, and leave a reconcile marker.
+    """
+    t = _make_task()
+    task_path = remote.task_remote_path(t["id"])
+    old = dict(t)
+    old["title"] = "old body still on bus"
+    assert remote.upload_json(old, task_path, backend=coord_backend)
+    old_stat = remote.stat(task_path, backend=coord_backend)
+    cache.write_meta(task_path, old_stat)
+
+    real_upload = remote.upload_json
+
+    def upload_claims_success_without_writing(data, path, **kw):
+        if path == task_path:
+            return True
+        return real_upload(data, path, **kw)
+
+    monkeypatch.setattr(remote, "upload_json", upload_claims_success_without_writing)
+    monkeypatch.setattr(writepipe, "_retry_sleep", lambda seconds: None)
+
+    ok, err = _write(t, coord_backend)
+    assert ok is True
+    assert "DELIVERY NOT CONFIRMED" in err
+    assert remote.download_json(task_path, backend=coord_backend)["title"] == old["title"]
+    assert any(
+        m.get("task_id") == t["id"]
+        and m.get("status") == "unverified"
+        and m.get("needs_reconcile")
+        for m in cache.list_op_markers()
+    )
+
+
+def test_unverified_write_does_not_append_event(coord_backend, monkeypatch):
+    t = _make_task()
+    script = _BodyScript(
+        monkeypatch, remote.task_remote_path(t["id"]),
+        upload_results=["claim"],
+        stat_results=[None],
+    )
+    ok, err = _write(t, coord_backend)
+    assert ok is True
+    assert "DELIVERY NOT CONFIRMED" in err
+    assert script.upload_calls == 2
+    assert eventlog.read_events(t["id"], backend=coord_backend) == []
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +352,7 @@ def test_write_verify_knob_zero_disables_verification(coord_backend, monkeypatch
     t = _make_task()
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
-        upload_results=[True],
+        upload_results=["claim"],
         stat_results=[None],                   # stat never sees it — but verify is off
     )
     ok, err = _write(t, coord_backend)
@@ -294,10 +362,10 @@ def test_write_verify_knob_zero_disables_verification(coord_backend, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# 5. upload fast path: success + verified costs exactly 1 post-upload stat
+# 5. upload fast path: success + verified costs 1 post-upload stat + 1 read-back
 # ---------------------------------------------------------------------------
 
-def test_fast_path_costs_one_upload_one_verify_stat(coord_backend, monkeypatch):
+def test_fast_path_costs_one_upload_one_stat_one_readback(coord_backend, monkeypatch):
     t = _make_task()
     script = _BodyScript(
         monkeypatch, remote.task_remote_path(t["id"]),
@@ -308,7 +376,8 @@ def test_fast_path_costs_one_upload_one_verify_stat(coord_backend, monkeypatch):
     assert ok is True
     assert "DELIVERY NOT CONFIRMED" not in err
     assert script.upload_calls == 1
-    # Verification reuses the version-tracking post-stat: exactly ONE task-path
-    # stat after the upload, no extra verification round-trip.
+    # Version tracking still costs exactly ONE task-path stat after the upload;
+    # verification adds exactly ONE body read-back for proof of delivery.
     assert script.stat_calls_after_upload == 1
+    assert script.download_calls_after_upload == 1
     assert script.sleeps == []
