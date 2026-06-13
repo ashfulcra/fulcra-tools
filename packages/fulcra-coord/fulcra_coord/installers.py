@@ -77,7 +77,9 @@ def cmd_install_claude_code(args: Any, backend: Optional[list[str]] = None) -> i
     single ``return 0`` is at the end."""
     scope = "project" if getattr(args, "scope", "global") == "project" else "global"
     plan = claude_code.install_claude_code(
-        scope=scope, uninstall=args.uninstall, dry_run=args.dry_run)
+        scope=scope, uninstall=args.uninstall, dry_run=args.dry_run,
+        can_review=getattr(args, "can_review", False),
+        roles=getattr(args, "role", None))
     # Emit the hooks summary WITHOUT returning — the wake add-on must still run.
     if args.dry_run:
         _info("[dry-run] Would write to: " + plan["settings"])
@@ -271,7 +273,8 @@ def cmd_install_codex(args: Any, backend: Optional[list[str]] = None) -> int:
     """Install/uninstall Codex lifecycle hooks for coordination (Gap 4)."""
     plan = codex.install_codex(
         uninstall=args.uninstall, dry_run=args.dry_run,
-        target_dir=getattr(args, "target_dir", None))
+        target_dir=getattr(args, "target_dir", None),
+        roles=getattr(args, "role", None))
     wplan = None
     if getattr(args, "with_wake", False):
         agent = getattr(args, "agent", None) or _derive_agent()

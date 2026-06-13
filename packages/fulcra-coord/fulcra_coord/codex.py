@@ -57,7 +57,8 @@ SESSION_START_SH = claude_code.SESSION_START_SH.replace(
     'CWD="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("cwd",""))\' 2>/dev/null)"\n'
     'SESSION_ID="$(printf \'%s\' "$INPUT" | python3 -c \'import sys,json;print(json.load(sys.stdin).get("session_id",""))\' 2>/dev/null)"',
 ).replace(
-    '"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &',
+    'CONNECT_FLAGS=(__FULCRA_COORD_CONNECT_FLAGS__)\n'
+    '"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}" >/dev/null 2>&1 &',
     # Re-arm Codex hooks + the per-agent inbox listener on every app start, THEN
     # connect with the review capability. The self-heal is the whole point on a
     # fresh Codex box where nobody ever ran `install-listener`: without a listener
@@ -75,7 +76,8 @@ SESSION_START_SH = claude_code.SESSION_START_SH.replace(
     'else\n'
     '  "${FULCRA_COORD[@]}" ensure-codex-watch --agent "$AGENT" --no-connect >/dev/null 2>&1 &\n'
     'fi\n'
-    '"${FULCRA_COORD[@]}" connect --can-review >/dev/null 2>&1 &',
+    'CONNECT_FLAGS=(--can-review __FULCRA_COORD_CONNECT_FLAGS__)\n'
+    '"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}" >/dev/null 2>&1 &',
 ).replace(
     # The shared CC body derives a `claude-code:*` fallback id when the CLI can't
     # resolve one (pre-handshake / old CLI). In a Codex hook that derived shape
@@ -113,7 +115,8 @@ def _is_managed(cmd: str) -> bool:
 
 
 def install_codex(*, uninstall: bool = False, dry_run: bool = False,
-                  target_dir: "str | Path | None" = None) -> dict[str, Any]:
+                  target_dir: "str | Path | None" = None,
+                  roles: "list[str] | None" = None) -> dict[str, Any]:
     """Install/uninstall the Codex coordination hooks.
 
     Materializes the SessionStart + PreCompact scripts under
@@ -124,8 +127,15 @@ def install_codex(*, uninstall: bool = False, dry_run: bool = False,
     codex_dir = _codex_dir(target_dir)
     hooks_path = codex_dir / "hooks.json"
     hooks_dir = codex_dir / MANAGED_DIRNAME
+    flags_path = claude_code._connect_flags_path(codex_dir)
     plan: dict[str, Any] = {"hooks_file": str(hooks_path), "hooks_dir": str(hooks_dir),
+                            "connect_flags_file": str(flags_path),
                             "uninstall": uninstall, "scripts": [], "events": []}
+    _effective_can_review, effective_roles = claude_code._effective_connect_flags(
+        flags_path, roles=roles, persist=(not uninstall and roles is not None),
+        dry_run=dry_run)
+    plan["connect_flags"] = claude_code.materialize_connect_flags(
+        roles=effective_roles)
 
     config: Any = {}
     if hooks_path.is_file():
@@ -193,8 +203,16 @@ def install_codex(*, uninstall: bool = False, dry_run: bool = False,
         hooks_dir.mkdir(parents=True, exist_ok=True)
         for fname, body in _SCRIPTS.items():
             p = hooks_dir / fname
-            p.write_text(body.replace(PLACEHOLDER_ARGV, substituted))
+            p.write_text(claude_code.materialize_script(
+                body, substituted, roles=effective_roles))
             p.chmod(0o755)
+    else:
+        try:
+            flags_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     config["hooks"] = hooks
     hooks_path.parent.mkdir(parents=True, exist_ok=True)

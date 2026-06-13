@@ -8,11 +8,15 @@ by a parity test for repo readability.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
 from . import wake
 from .cli_invocation import PLACEHOLDER_ARGV  # re-exported for adapter/test use
+
+CONNECT_FLAGS_PLACEHOLDER = "__FULCRA_COORD_CONNECT_FLAGS__"
+CONNECT_FLAGS_FILENAME = "fulcra-coord-connect-flags.json"
 
 SESSION_START_SH = r'''#!/usr/bin/env bash
 # fulcra-coord SessionStart hook — surface in-flight + possibly-forgotten work.
@@ -62,7 +66,8 @@ AGENT="$(printf '%s' "$BRIEFING" | python3 -c 'import sys,json;print(json.load(s
 # when it owns no active task. `connect` auto-derives workstreams from this
 # agent's open tasks. Backgrounded + silenced — best-effort, never blocks or
 # delays session start; a missing/old CLI without `connect` simply no-ops.
-"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &
+CONNECT_FLAGS=(__FULCRA_COORD_CONNECT_FLAGS__)
+"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}" >/dev/null 2>&1 &
 
 CONTEXT="$(BRIEFING="$BRIEFING" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null
 import sys, json, os, datetime, shlex
@@ -274,16 +279,88 @@ def _hooks_dir(scope: str = "global") -> Path:
     return base / MANAGED_DIRNAME
 
 
+def _connect_flags_path(base_dir: Path) -> Path:
+    return base_dir / CONNECT_FLAGS_FILENAME
+
+
 def _is_managed(cmd: str) -> bool:
     return MANAGED_DIRNAME in cmd
 
 
+def _normalize_roles(roles: "list[str] | None") -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for role in roles or []:
+        role = (role or "").strip()
+        if role and role not in seen:
+            seen.add(role)
+            out.append(role)
+    return out
+
+
+def _load_connect_flags(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _effective_connect_flags(
+    path: Path, *, can_review: bool = False, roles: "list[str] | None" = None,
+    persist: bool = False, dry_run: bool = False,
+) -> tuple[bool, list[str]]:
+    saved = _load_connect_flags(path)
+    saved_can_review = bool(saved.get("can_review"))
+    saved_roles = _normalize_roles(saved.get("roles") if isinstance(saved.get("roles"), list) else None)
+    effective_can_review = saved_can_review or bool(can_review)
+    effective_roles = _normalize_roles(roles) if roles is not None else saved_roles
+    if persist and not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "can_review": effective_can_review,
+            "roles": effective_roles,
+        }, indent=2) + "\n")
+    return effective_can_review, effective_roles
+
+
+def materialize_connect_flags(*, can_review: bool = False,
+                              roles: "list[str] | None" = None) -> str:
+    flags: list[str] = []
+    if can_review:
+        flags.append("--can-review")
+    for role in roles or []:
+        role = (role or "").strip()
+        if role:
+            flags.extend(["--role", role])
+    return " ".join(shlex.quote(flag) for flag in flags)
+
+
+def materialize_script(body: str, argv_body: str, *,
+                       can_review: bool = False,
+                       roles: "list[str] | None" = None) -> str:
+    return (
+        body.replace(PLACEHOLDER_ARGV, argv_body)
+        .replace(CONNECT_FLAGS_PLACEHOLDER,
+                 materialize_connect_flags(can_review=can_review, roles=roles))
+    )
+
+
 def install_claude_code(*, scope: str = "global", uninstall: bool = False,
-                        dry_run: bool = False) -> dict[str, Any]:
+                        dry_run: bool = False, can_review: bool = False,
+                        roles: "list[str] | None" = None) -> dict[str, Any]:
     settings_path = _settings_path(scope)
     hooks_dir = _hooks_dir(scope)
+    flags_path = _connect_flags_path(settings_path.parent)
     plan: dict[str, Any] = {"settings": str(settings_path), "hooks_dir": str(hooks_dir),
+                            "connect_flags_file": str(flags_path),
                             "uninstall": uninstall, "scripts": [], "events": []}
+    effective_can_review, effective_roles = _effective_connect_flags(
+        flags_path, can_review=can_review, roles=roles,
+        persist=(not uninstall and (can_review or roles is not None)),
+        dry_run=dry_run)
+    plan["connect_flags"] = materialize_connect_flags(
+        can_review=effective_can_review, roles=effective_roles)
 
     settings: Any = {}
     if settings_path.is_file():
@@ -370,8 +447,17 @@ def install_claude_code(*, scope: str = "global", uninstall: bool = False,
         hooks_dir.mkdir(parents=True, exist_ok=True)
         for fname, body in _SCRIPTS.items():
             p = hooks_dir / fname
-            p.write_text(body.replace(PLACEHOLDER_ARGV, substituted))
+            p.write_text(materialize_script(
+                body, substituted, can_review=effective_can_review,
+                roles=effective_roles))
             p.chmod(0o755)
+    else:
+        try:
+            flags_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
 
     settings["hooks"] = hooks
     settings_path.parent.mkdir(parents=True, exist_ok=True)
