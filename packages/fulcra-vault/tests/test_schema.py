@@ -6,6 +6,7 @@ from fulcra_vault.schema import (
     SCHEMA_VERSION,
     SchemaError,
     StructureSpec,
+    VaultMeta,
     fulcra_absolute_path,
     normalize_note_path,
     vault_relative_path,
@@ -64,3 +65,27 @@ def test_note_path_helpers_normalize_without_escaping_vault():
 def test_note_path_helpers_reject_escape_and_non_markdown(name):
     with pytest.raises(SchemaError):
         normalize_note_path(name)
+
+
+def test_vault_meta_extra_cannot_override_canonical_keys():
+    spec = StructureSpec.from_dict({"sections": [{"slug": "projects", "title": "Projects"}]})
+    meta = VaultMeta(
+        spec=spec,
+        created_at="2026-06-13T00:00:00+00:00",
+        updated_at="2026-06-13T00:00:01+00:00",
+        extra={
+            "schema_version": 999,
+            "created_at": "bad",
+            "updated_at": "bad",
+            "spec": {"bad": True},
+            "owner": "codex-prefs",
+        },
+    )
+
+    data = meta.to_dict()
+
+    assert data["schema_version"] == SCHEMA_VERSION
+    assert data["created_at"] == "2026-06-13T00:00:00+00:00"
+    assert data["updated_at"] == "2026-06-13T00:00:01+00:00"
+    assert data["spec"] == spec.to_dict()
+    assert data["owner"] == "codex-prefs"

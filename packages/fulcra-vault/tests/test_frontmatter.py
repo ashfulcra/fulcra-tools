@@ -89,3 +89,27 @@ def test_quoted_and_special_strings_round_trip():
     fm, body = parse_note(changed)
     assert fm == {"title": "A: B", "empty": ""}
     assert body == "# Body\n"
+
+
+def test_type_ambiguous_strings_round_trip_as_strings():
+    values = {
+        "zip": "02134",
+        "count": "123",
+        "rating": "7.5",
+        "enabled": "true",
+        "disabled": "false",
+        "nothing": "null",
+    }
+
+    changed = update_keys("# Body\n", values)
+
+    fm, body = parse_note(changed)
+    assert fm == values
+    assert body == "# Body\n"
+
+
+def test_single_quoted_scalars_parse_like_yaml_strings():
+    fm, body = parse_note("---\ntitle: 'Ash''s note'\n---\nBody\n")
+
+    assert fm == {"title": "Ash's note"}
+    assert body == "Body\n"

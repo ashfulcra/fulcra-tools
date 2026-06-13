@@ -110,12 +110,14 @@ class VaultMeta:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        reserved = {"schema_version", "created_at", "updated_at", "spec"}
+        extras = {k: v for k, v in self.extra.items() if k not in reserved}
         return {
             "schema_version": self.schema_version,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "spec": self.spec.to_dict(),
-            **self.extra,
+            **extras,
         }
 
 

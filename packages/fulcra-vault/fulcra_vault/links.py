@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from .schema import canonical_json, normalize_note_path
+from .schema import SchemaError, canonical_json, normalize_note_path
 
 
 WIKILINK_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
@@ -23,7 +23,10 @@ def extract_wikilinks(markdown: str) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
     for match in WIKILINK_RE.finditer(markdown):
-        target = normalize_note_path(match.group("target").strip())
+        try:
+            target = normalize_note_path(match.group("target").strip())
+        except SchemaError:
+            continue
         if target not in seen:
             links.append(target)
             seen.add(target)
@@ -83,7 +86,10 @@ def _rewrite_links(markdown: str, source: str, destination: str) -> str:
     dest_stem = destination[:-3] if destination.endswith(".md") else destination
 
     def repl(match: re.Match[str]) -> str:
-        target = normalize_note_path(match.group("target").strip())
+        try:
+            target = normalize_note_path(match.group("target").strip())
+        except SchemaError:
+            return match.group(0)
         if target != source:
             return match.group(0)
         inner = match.group(0)[2:-2]

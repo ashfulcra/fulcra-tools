@@ -20,6 +20,12 @@ def test_extract_wikilinks_handles_aliases_headings_and_duplicates():
     assert extract_wikilinks(markdown) == ["People/Ash.md", "Project Alpha.md"]
 
 
+def test_extract_wikilinks_skips_invalid_free_text_targets():
+    markdown = "Ignore [[../x]], [[ ]], [[/abs]], and keep [[Valid Note]]."
+
+    assert extract_wikilinks(markdown) == ["Valid Note.md"]
+
+
 def test_index_is_deterministic_for_shuffled_input():
     a = {
         "B.md": "[[A]] [[C]]",
@@ -39,6 +45,7 @@ def test_backlinks_for_returns_deterministic_sources():
     index = build_index({
         "z.md": "[[target]]",
         "a.md": "[[target]]",
+        "bad.md": "[[../target]]",
     })
 
     assert backlinks_for(index, "target") == ["a.md", "z.md"]
@@ -47,7 +54,7 @@ def test_backlinks_for_returns_deterministic_sources():
 def test_plan_rename_rewrites_referring_wikilinks_and_target_path():
     notes = {
         "Alpha.md": "# Alpha\n",
-        "Refs.md": "[[Alpha|old]] and [[Alpha#Heading]] and [[Other]]",
+        "Refs.md": "[[Alpha|old]] and [[Alpha#Heading]] and [[Other]] and [[../bad]]",
     }
 
     plan = plan_rename(notes, "Alpha", "Projects/Alpha")
