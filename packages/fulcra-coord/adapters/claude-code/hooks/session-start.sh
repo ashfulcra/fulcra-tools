@@ -46,7 +46,8 @@ AGENT="$(printf '%s' "$BRIEFING" | python3 -c 'import sys,json;print(json.load(s
 # when it owns no active task. `connect` auto-derives workstreams from this
 # agent's open tasks. Backgrounded + silenced — best-effort, never blocks or
 # delays session start; a missing/old CLI without `connect` simply no-ops.
-"${FULCRA_COORD[@]}" connect >/dev/null 2>&1 &
+CONNECT_FLAGS=(__FULCRA_COORD_CONNECT_FLAGS__)
+"${FULCRA_COORD[@]}" connect "${CONNECT_FLAGS[@]}" >/dev/null 2>&1 &
 
 CONTEXT="$(BRIEFING="$BRIEFING" AGENT="$AGENT" STALE_HOURS="$STALE_HOURS" FULCRA_COORD="${FULCRA_COORD[*]}" python3 - <<'PY' 2>/dev/null
 import sys, json, os, datetime, shlex
