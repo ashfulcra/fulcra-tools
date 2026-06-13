@@ -436,7 +436,9 @@ def test_reconcile_tick_loads_each_shared_snapshot_once(coord_backend):
     acks, event-parity ack authority, undelivered-check ack map), load presence
     3x (reroute sweep, role health, undelivered live-set), and sweep the
     directives prefix 2x (directive parity, loop health). Each snapshot is now
-    loaded ONCE at the top of the relevant section and threaded through."""
+    loaded ONCE at the top of the relevant section and threaded through, with
+    one additional summaries read-back after upload to prove reconcile did not
+    leave a stale aggregate in place."""
     import types
     from fulcra_coord import views
     from fulcra_coord.timeutil import now_iso
@@ -464,11 +466,11 @@ def test_reconcile_tick_loads_each_shared_snapshot_once(coord_backend):
         rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
     assert rc == 0
 
-    # Summaries view: exactly ONE download per tick (was 3).
+    # Summaries view: one shared snapshot read plus one post-upload read-back.
     summaries_path = remote.view_remote_path("summaries")
-    assert counter.downloads.count(summaries_path) == 1, (
+    assert counter.downloads.count(summaries_path) == 2, (
         f"summaries view downloaded "
-        f"{counter.downloads.count(summaries_path)}x — must be once per tick")
+        f"{counter.downloads.count(summaries_path)}x — must be two per tick")
 
     # Presence aggregate view: ZERO downloads — the tick rebuilds it from the
     # per-agent records and shares the rebuilt roster with every sub-pass.
