@@ -209,6 +209,114 @@ def test_capture_batch_ingests_all_items(env, tmp_path, capsys):
     assert "comms.tone.concise" in out["keys"]
 
 
+def test_notice_queues_candidate_for_lifecycle_drain(env, tmp_path, capsys):
+    call, _fake_api, _store = env
+
+    assert call(
+        "notice",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(tmp_path / "candidates"),
+        "--key", "docs.style.human_agent_quality",
+        "--value", '{"preferred": true}',
+        "--strength", "1.0",
+        "--confidence", "1.0",
+        "--half-life", "365",
+        "--agent", "codex-prefs",
+    ) == 0
+
+    path = tmp_path / "candidates" / "codex" / "sess-1.json"
+    queued = json.loads(path.read_text())
+    assert queued == [{
+        "key": "docs.style.human_agent_quality",
+        "value": {"preferred": True},
+        "strength": 1.0,
+        "kind": "preference",
+        "scope": "global",
+        "confidence": 1.0,
+        "half_life_days": 365.0,
+        "platform": "codex",
+        "agent": "codex-prefs",
+        "session": "sess-1",
+        "supersedes": None,
+    }]
+    assert "queued 1 candidate" in capsys.readouterr().err
+
+
+def test_candidate_path_prints_queue_path(fake_api, tmp_path, capsys):
+    rc = run([
+        "candidate-path",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(tmp_path),
+    ], api=fake_api, outbox_dir=tmp_path / "outbox", now=NOW)
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == str(tmp_path / "codex" / "sess-1.json")
+
+
+def test_drain_candidates_captures_and_marks_file(env, tmp_path, capsys):
+    call, fake_api, store = env
+    candidate_dir = tmp_path / "candidates"
+    assert call(
+        "notice",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(candidate_dir),
+        "--key", "comms.tone.concise",
+        "--value", '{"preferred": true}',
+        "--strength", "0.8",
+    ) == 0
+
+    assert call(
+        "drain-candidates",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(candidate_dir),
+    ) == 0
+
+    assert len(fake_api.ingested) == 1
+    assert not (candidate_dir / "codex" / "sess-1.json").exists()
+    assert (candidate_dir / "codex" / "sess-1.json.captured").exists()
+    assert call("compile") == 0
+    compiled = store.read_json(COMPILED_PATH)
+    assert "comms.tone.concise" in compiled["keys"]
+
+
+def test_extract_candidates_prints_json_without_writing(env, tmp_path, capsys):
+    call, _fake_api, _store = env
+
+    assert call(
+        "extract-candidates",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(tmp_path / "candidates"),
+        "--text", "I prefer concise tone in updates.",
+    ) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out[0]["key"] == "comms.tone"
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_extract_candidates_write_appends_to_queue(env, tmp_path, capsys):
+    call, _fake_api, _store = env
+
+    assert call(
+        "extract-candidates",
+        "--platform", "codex",
+        "--session", "sess-1",
+        "--candidate-dir", str(tmp_path / "candidates"),
+        "--write",
+        "--text", "I want documentation for humans and agents.",
+    ) == 0
+
+    path = tmp_path / "candidates" / "codex" / "sess-1.json"
+    queued = json.loads(path.read_text())
+    assert queued[0]["key"] == "docs.style.human_agent_quality"
+    assert "queued 1 extracted candidate" in capsys.readouterr().err
+
+
 def test_capture_batch_rejects_non_array(env, tmp_path, capsys):
     call, fake_api, store = env
     f = tmp_path / "bad.json"

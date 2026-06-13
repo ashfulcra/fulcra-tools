@@ -26,10 +26,17 @@ LOAD them at session start, APPLY them, and CAPTURE new ones.
      session end — `fulcra-prefs capture-batch --file <json-array> --platform
      <your-platform>`; mark inferred items lower `confidence` (compile won't let
      a guess override an explicit pref). See the capture reference.
+   - Text extraction: when you have raw user text but not a hand-built key/value,
+     run `fulcra-prefs extract-candidates --platform <your-platform> --session
+     <session_id> --text '<user text>' --write`. It only queues explicit
+     preference language; lifecycle hooks still perform the capture.
    - Hooked auto-capture: if `fulcra-prefs install-hooks --platform
      <your-platform>` is installed, write candidates during the session to
      `~/.local/state/fulcra-prefs/candidates/<your-platform>/<session_id>.json`;
      the lifecycle hook drains that file through `capture-batch`.
+     Prefer the helper command:
+     `fulcra-prefs notice --platform <your-platform> --session <session_id>
+     --key <ns.key> --value '<json>' --strength <n>`.
    - Refresh: `fulcra-prefs compile` (run after captures; cheap).
 2. **You can make HTTP requests but not run commands** → follow
    references/fulcra-prefs-tier2-http.md (device-flow auth + direct API).
@@ -51,3 +58,5 @@ https://github.com/fulcradynamics/agent-skills/blob/main/skills/fulcra-onboardin
   aversion (don't suggest what they dislike).
 - Capture is consent-adjacent: only capture what the user said or confirmed —
   see the capture reference for the heuristics.
+- Platform details for Claude, Claude Code, ChatGPT, Codex, OpenClaw, and
+  Hermes are in `references/platforms.md`.

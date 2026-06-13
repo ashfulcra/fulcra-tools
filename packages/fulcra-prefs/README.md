@@ -140,11 +140,40 @@ the same JSON array accepted by `capture-batch` to:
 ~/.local/state/fulcra-prefs/candidates/<platform>/<session_id>.json
 ```
 
+The helper command is safer than hand-editing JSON:
+
+```bash
+fulcra-prefs notice \
+  --platform codex \
+  --session "$CODEX_SESSION_ID" \
+  --key docs.style.human_agent_quality \
+  --value '{"preference":"Write direct, concrete docs for humans and agents."}' \
+  --strength 1.0 \
+  --confidence 1.0 \
+  --half-life 365
+```
+
+If the agent has raw session text rather than a key/value pair, use the
+conservative extractor. It only emits candidates for explicit preference
+language and never ingests directly:
+
+```bash
+fulcra-prefs extract-candidates \
+  --platform codex \
+  --session "$CODEX_SESSION_ID" \
+  --text "I prefer concise tone in status updates." \
+  --write
+```
+
 Claude Code drains on `PreCompact` and `Stop`; Codex drains on `PreCompact`
 because Codex `Stop` fires every turn. On successful capture the file is renamed
 with a `.captured` suffix so repeat lifecycle hooks do not double-ingest it.
 `install-hooks --uninstall` removes the config entries but leaves the generated
 scripts on disk; they are inert unless referenced by the platform config.
+
+Other agents use the same queue and signal shape. See
+[`skill/references/platforms.md`](skill/references/platforms.md) for Claude,
+Claude Code, ChatGPT, Codex, OpenClaw, and Hermes.
 
 ---
 
@@ -274,9 +303,10 @@ and cross-platform compile consistency.
   multi-user sync layer in v1.
 - **No MCP write path.** The Fulcra MCP exposes read operations today; capture
   and compile require a CLI-capable agent. Filed as a platform gap.
-- **Hooks are installed for Claude Code and Codex only.** Other CLI-capable
-  agents can still use `capture-batch` directly or write the same candidate file
-  convention once a platform adapter exists.
+- **Lifecycle support differs by platform.** Claude Code and Codex have managed
+  local hook installers. ChatGPT and general Claude need an app/action/MCP or
+  raw-HTTP bridge. OpenClaw and Hermes use the same candidate queue from their
+  own lifecycle surfaces.
 - **A double-ingest corner case.** If a capture's ingest POST *succeeds* but the
   follow-up cache-shard write fails (rare: network blips between the two calls),
   the record is spooled and re-POSTed on the next `compile` flush — so the raw
