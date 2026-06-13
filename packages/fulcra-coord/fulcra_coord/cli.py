@@ -57,7 +57,8 @@ from .retention import (
 # so there is no import cycle.
 from .io import (
     _confirmed_absent, _load_all_tasks, _load_task_summaries,
-    _load_summaries_for_rebuild, _load_task, _updated_at_key,
+    _load_all_tasks_by_listing, _load_summaries_for_rebuild, _load_task,
+    _updated_at_key,
 )
 # Presence subsystem extracted from this file. Re-exported under the historical
 # names so the command dispatch (cmd_connect/cmd_workstream/cmd_presence),
@@ -1896,10 +1897,18 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         return 1
 
     try:
-        all_tasks = _load_all_tasks(backend=backend)
-        load_degraded = bool(getattr(all_tasks, "load_degraded", False))
+        # Reconcile is the authoritative view repair path, so its task set must
+        # come from durable task files when the raw listing is available. The
+        # view-seeded loader can miss ids, or keep a stale cached body for an id
+        # absent from every stale view, which makes reconcile faithfully re-upload
+        # the stale view forever.
+        all_tasks = _load_all_tasks_by_listing(backend=backend)
+        load_degraded = False
+        if all_tasks is None:
+            all_tasks = _load_all_tasks(backend=backend)
+            load_degraded = bool(getattr(all_tasks, "load_degraded", False))
     except Exception as e:
-        _warn(f"Could not load remote index: {e}")
+        _warn(f"Could not load remote tasks: {e}")
         all_tasks = cache.list_cached_tasks()
         load_degraded = True
 
