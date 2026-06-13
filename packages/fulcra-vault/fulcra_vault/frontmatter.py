@@ -89,7 +89,11 @@ def _parse_scalar(text: str) -> Any:
         return text == "true"
     if text == "null":
         raise FrontmatterError("null frontmatter values are not supported")
-    if text[0:1] in ("'", '"'):
+    if text.startswith("'"):
+        if not text.endswith("'") or len(text) == 1:
+            raise FrontmatterError("invalid quoted scalar: missing closing '")
+        return text[1:-1].replace("''", "'")
+    if text.startswith('"'):
         try:
             return json.loads(text)
         except json.JSONDecodeError as e:
@@ -125,10 +129,29 @@ def _format_scalar(value: Any) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, str):
-        if value == "" or value.strip() != value or any(c in value for c in "\n:#[]{}"):
+        if _needs_quoted_string(value):
             return json.dumps(value)
         return value
     raise FrontmatterError(f"unsupported scalar type: {type(value).__name__}")
+
+
+def _needs_quoted_string(value: str) -> bool:
+    if value == "" or value.strip() != value or any(c in value for c in "\n:#[]{}"):
+        return True
+    if value[:1] in ("'", '"'):
+        return True
+    if value in ("true", "false", "null"):
+        return True
+    try:
+        int(value)
+        return True
+    except ValueError:
+        pass
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _validate_key(key: str) -> None:
