@@ -113,6 +113,41 @@ def test_select_hot_items_honors_max_items():
     assert [item.path for item in items] == ["Project Alpha.md"]
 
 
+def test_select_hot_items_ranks_undated_notes_after_dated_notes():
+    notes = {
+        "Old.md": "---\ntitle: Old\nupdated_at: 2020-01-01T00:00:00+00:00\n---\n# Old\n",
+        "Undated.md": "---\ntitle: Undated\n---\n# Undated\n",
+        "New.md": "---\ntitle: New\nupdated_at: 2026-06-13T00:00:00+00:00\n---\n# New\n",
+        "NonAscii.md": "---\ntitle: NonAscii\nupdated_at: 2026-06-13T00:00:00+00:00\U0001f642\n---\n# NonAscii\n",
+    }
+
+    items = select_hot_items(notes, build_index(notes), datetime(2026, 6, 13, tzinfo=timezone.utc))
+
+    assert [item.path for item in items] == [
+        "New.md",
+        "Old.md",
+        "NonAscii.md",
+        "Undated.md",
+    ]
+
+
+def test_recent_decision_accepts_extra_space_in_log_heading():
+    notes = {
+        "Decision.md": """---
+title: Decision
+---
+# Decision
+
+##  Log
+- 2026-06-12T12:00:00+00:00 codex: decided the thing
+""",
+    }
+
+    items = select_hot_items(notes, build_index(notes), datetime(2026, 6, 13, tzinfo=timezone.utc))
+
+    assert items[0].reasons == ("recent-decision",)
+
+
 def test_render_hot_is_budgeted_at_section_boundaries():
     items = [
         HotItem(path="A.md", title="A", summary="one two", reasons=("active",), updated_at="2026-06-12", backlink_count=0),

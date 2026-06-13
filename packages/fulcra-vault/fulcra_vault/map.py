@@ -12,7 +12,9 @@ from .schema import StructureSpec, normalize_note_path
 
 
 TRUNCATION_MARKER = "(truncated - run fulcra-vault map)"
+LOG_HEADING_RE = re.compile(r"^##\s+Log\s*$")
 LOG_LINE_RE = re.compile(r"^-\s+(?P<stamp>\d{4}-\d{2}-\d{2}T\S+)\s+[^:]+:\s+(?P<text>.+)$")
+NO_TIMESTAMP_SORT_KEY = "\xff" * 32
 
 
 class BudgetError(ValueError):
@@ -179,7 +181,7 @@ def _has_recent_decision(body: str, now: datetime) -> bool:
     cutoff = now.astimezone(timezone.utc).timestamp() - (14 * 24 * 60 * 60)
     in_log = False
     for raw in body.splitlines():
-        if raw.strip() == "## Log":
+        if LOG_HEADING_RE.match(raw):
             in_log = True
             continue
         if in_log and raw.startswith("## "):
@@ -236,8 +238,8 @@ def _plural(count: int, noun: str) -> str:
 
 
 def _reverse_timestamp(value: str) -> str:
-    if not value:
-        return "9999"
+    if not value or any(ord(ch) > 255 for ch in value):
+        return NO_TIMESTAMP_SORT_KEY
     return "".join(chr(255 - ord(ch)) for ch in value)
 
 
