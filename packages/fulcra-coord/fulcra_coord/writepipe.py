@@ -90,6 +90,17 @@ def _upload_task_body(
     return ok
 
 
+def _task_body_verified(
+    task: dict[str, Any], task_path: str, *, backend: Optional[list[str]] = None
+) -> bool:
+    """True when the bus can read back the exact task body we just wrote."""
+    try:
+        visible = remote.download_json(task_path, backend=backend)
+    except Exception:
+        return False
+    return isinstance(visible, dict) and visible == task
+
+
 def _fail_write_pre_read_error(
     task: dict[str, Any], op_id: str, command: str
 ) -> bool:
@@ -299,26 +310,31 @@ def _write_task_and_views(
         ops_log.log_op(command, task_id, status="error", error="Task upload failed")
         return False
 
-    # Post-stat for version tracking. This stat DOUBLES as verify-after-write:
-    # the 2026-06-10 losses showed an upload can return success-shaped output
-    # with nothing on the bus, so "upload returned True" is not proof of
-    # delivery — a visible stat is. Reusing the version-tracking stat keeps the
-    # fast path at exactly one post-upload round-trip (no extra HEAD).
+    # Post-stat for version tracking. Verification is stronger than stat:
+    # the 2026-06-10 losses showed an upload can return success-shaped output,
+    # and store.stat_changed's own NO-CAS contract says a matching stat is only
+    # a staleness hint. Delivery is confirmed only when a read-back returns the
+    # exact body this writer intended to publish.
     post_stat = remote.stat(task_path, backend=backend)
     unverified = False
-    if post_stat is None and env_int("FULCRA_COORD_WRITE_VERIFY", 1) != 0:
-        # UNVERIFIED: stat can't see the file (absent, or stat itself failed —
-        # indistinguishable, and both mean we cannot claim delivery). One more
-        # jittered re-upload + re-stat, then warn. Gated by
-        # FULCRA_COORD_WRITE_VERIFY (default ON) so a backend whose stat is
-        # flaky-by-design can opt out without losing the upload retry above.
-        _retry_sleep(random.uniform(0.5, 2.0))
-        try:
-            remote.upload_json(task, task_path, backend=backend)
-        except Exception:
-            pass  # the re-stat below is the arbiter, not the upload's claim
-        post_stat = remote.stat(task_path, backend=backend)
-        if post_stat is None:
+    if env_int("FULCRA_COORD_WRITE_VERIFY", 1) != 0:
+        verified = _task_body_verified(task, task_path, backend=backend)
+        if not verified:
+            # UNVERIFIED: read-back cannot see the body we wrote. This covers
+            # both absence/read failure and the more subtle stale-body case
+            # where stat sees SOME file at the path but the successful-looking
+            # upload did not replace it. One more jittered re-upload + stat +
+            # read-back, then warn. Gated by FULCRA_COORD_WRITE_VERIFY
+            # (default ON) so an unusual backend can opt out without losing the
+            # upload retry above.
+            _retry_sleep(random.uniform(0.5, 2.0))
+            try:
+                remote.upload_json(task, task_path, backend=backend)
+            except Exception:
+                pass  # the read-back below is the arbiter, not the upload's claim
+            post_stat = remote.stat(task_path, backend=backend)
+            verified = _task_body_verified(task, task_path, backend=backend)
+        if not verified:
             unverified = True
             # UNMISSABLE by contract: the sender must SEE that the recipient
             # may not. But NEVER flip the exit code — the body is cached
@@ -327,10 +343,14 @@ def _write_task_and_views(
             # cached-locally failure path.
             _warn(
                 f"DELIVERY NOT CONFIRMED: {task_id} — upload reported success "
-                f"but the write is not visible on the bus. Body cached "
+                f"but the written body is not visible on the bus. Body cached "
                 f"locally; recipients may not see it until the next "
                 f"successful reconcile."
             )
+    elif post_stat is None:
+        # Verification is explicitly disabled. Keep the old behavior: no warning
+        # and no verification re-upload, but also no meta update.
+        pass
     if post_stat:
         cache.write_meta(task_path, post_stat)
 
@@ -506,8 +526,9 @@ def _write_task_and_views(
         op_marker["needs_reconcile"] = True
         cache.write_op_marker(op_id, op_marker)
         ops_log.log_op(command, task_id, status="unverified",
-                       error="Upload reported success but post-write stat "
+                       error="Upload reported success but post-write read-back "
                              "could not confirm the body on the bus")
+        return True
     else:
         op_marker["status"] = "done"
         cache.write_op_marker(op_id, op_marker)
