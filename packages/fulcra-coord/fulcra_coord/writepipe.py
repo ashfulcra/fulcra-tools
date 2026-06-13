@@ -94,6 +94,10 @@ def _task_body_verified(
     task: dict[str, Any], task_path: str, *, backend: Optional[list[str]] = None
 ) -> bool:
     """True when the bus can read back the exact task body we just wrote."""
+    # A false negative can leave an unverified marker even if the upload landed
+    # and a concurrent writer moved the file before this read-back. That remains
+    # safe only because reconcile replays unverified bodies through the
+    # merge-protected repair path, never a blind upload.
     try:
         visible = remote.download_json(task_path, backend=backend)
     except Exception:
