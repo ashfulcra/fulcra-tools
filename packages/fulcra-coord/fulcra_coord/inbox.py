@@ -184,7 +184,8 @@ def cmd_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
     # count from it — no second backend round-trip. With --all the age-out filter
     # is bypassed and aged-out broadcasts are included; otherwise stale
     # informational broadcasts are hidden and only counted for the note below.
-    all_tasks = _load_task_summaries(backend=backend)
+    all_tasks = _load_task_summaries(
+        backend=backend, heal_missing_entries=True)
     # BUG 14: pin a single `now` for the whole command. inbox_for and
     # aged_out_inbox_count each resolve _now() independently (3+ reads per
     # cmd_inbox), so at the age-out boundary the same broadcast could be SHOWN by
@@ -265,7 +266,8 @@ def _load_inbox(me: str, backend: Optional[list[str]] = None,
     # loads once and shares it with the needs-me pass — one spawn saved per
     # tick, and in stale-guard mode one full direct-listing fallback re-run).
     all_tasks = (summaries if summaries is not None
-                 else _load_task_summaries(backend=backend))
+                 else _load_task_summaries(
+                     backend=backend, heal_missing_entries=True))
     # Role resolution: load `me`'s declared roles so a directive addressed to a
     # role this agent HOLDS (@<role>) is delivered here, not lost. Empty set for
     # an agent with no roles / old presence record — backward-compatible.
@@ -477,6 +479,7 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # direct-listing fallback, ~one spawn per task on the bus).
         summaries = _load_task_summaries(
             backend=backend,
+            heal_missing_entries=True,
             skip_stale_fallback=not _notify_stale_summary_fallback_enabled(),
             on_stale_skipped=lambda stale_min:
                 _alert_stale_summaries_if_needed(me, stale_min),
