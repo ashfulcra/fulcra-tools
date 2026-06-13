@@ -1826,13 +1826,23 @@ class TestReconcilePreservesMarkersOnFailure(unittest.TestCase):
             "started_at": "2026-01-01T00:00:00Z",
         })
 
-        # Patch remote.upload_json to always succeed so reconcile completes
+        stored = {}
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            stored[path] = json.loads(json.dumps(data))
+            return True
+
+        def download_json(path, *, backend=None, timeout=None):
+            value = stored.get(path)
+            return json.loads(json.dumps(value)) if value is not None else None
+
+        # Patch remote.upload_json to persist in memory so reconcile completes
         # cleanly. probe_reachable=True declares the mocked world a REACHABLE
         # bus whose index is confirmed absent (F3): without it, all-None reads
         # now correctly read as "can't see the bus" and the tick refuses to
         # rebuild views (degraded skip) instead of completing.
-        with patch("fulcra_coord.cli.remote.upload_json", return_value=True), \
-             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+        with patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli.remote.download_json", side_effect=download_json), \
              patch("fulcra_coord.cli.remote.probe_reachable", return_value=True):
             args = types.SimpleNamespace()
             rc = cmd_reconcile(args, backend=["false"])
@@ -10459,15 +10469,23 @@ class TestReconcileParallelUpload(unittest.TestCase):
         from fulcra_coord.cli import cmd_reconcile
         task = apply_transition(_sample_task(), "active", by="claude-code")
         uploaded = []
+        stored = {}
         lock = __import__("threading").Lock()
 
         def upload_json(data, path, *, backend=None, timeout=None):
             with lock:
                 uploaded.append(path)
+                stored[path] = json.loads(json.dumps(data))
             return True
+
+        def download_json(path, *, backend=None, timeout=None):
+            with lock:
+                value = stored.get(path)
+            return json.loads(json.dumps(value)) if value is not None else None
 
         with patch("fulcra_coord.cli._load_all_tasks", return_value=[task]), \
              patch("fulcra_coord.cli.remote.upload_json", side_effect=upload_json), \
+             patch("fulcra_coord.cli.remote.download_json", side_effect=download_json), \
              patch("fulcra_coord.cli._reconcile_presence"):
             rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
 
@@ -12361,16 +12379,24 @@ class TestReconcileHealthWrite(unittest.TestCase):
     def _run_capturing_uploads(self, upload_side_effect):
         from fulcra_coord.cli import cmd_reconcile
         uploaded = []
+        stored = {}
 
         def _capture(data, path, **kw):
             uploaded.append(path)
-            return upload_side_effect(data, path, **kw)
+            ok = upload_side_effect(data, path, **kw)
+            if ok:
+                stored[path] = json.loads(json.dumps(data))
+            return ok
+
+        def _download(path, **kw):
+            value = stored.get(path)
+            return json.loads(json.dumps(value)) if value is not None else None
 
         # probe_reachable=True (F3 guard): a reachable bus with no index yet —
         # all-None reads on an UNREACHABLE bus now correctly skip the view
         # phase (degraded) and would never reach the health write under test.
         with patch("fulcra_coord.cli.remote.upload_json", side_effect=_capture), \
-             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.download_json", side_effect=_download), \
              patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
@@ -12398,10 +12424,17 @@ class TestReconcileHealthWrite(unittest.TestCase):
         def _side(data, path, **kw):
             if "/health/" in path:
                 raise RuntimeError("boom")
+            stored[path] = json.loads(json.dumps(data))
             return True
 
+        def _download(path, **kw):
+            value = stored.get(path)
+            return json.loads(json.dumps(value)) if value is not None else None
+
+        stored = {}
+
         with patch("fulcra_coord.cli.remote.upload_json", side_effect=_side), \
-             patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+             patch("fulcra_coord.cli.remote.download_json", side_effect=_download), \
              patch("fulcra_coord.cli.remote.probe_reachable", return_value=True), \
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
