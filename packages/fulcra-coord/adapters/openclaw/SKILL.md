@@ -21,7 +21,7 @@ Invoke fulcra-coord coordination when:
 fulcra-coord status [--workstream <ws>] [--agent <agent>]
 
 # Start
-fulcra-coord start "Title" --workstream <ws> --agent arc --priority P2
+fulcra-coord start "Title" --workstream <ws> --agent openclaw:<host>:<surface> --priority P2
 
 # Transitions
 fulcra-coord update TASK-... --summary "..." --next "..."
@@ -40,11 +40,12 @@ fulcra-coord search "keyword"
 ## Continuity handoff
 
 Fulcra Continuity is the cold-start handoff layer for `fulcra-coord` work. Use
-it when a task may survive compaction, transfer from OpenClaw/Arc to Claude or
-another agent, or continue without this chat transcript. A useful checkpoint must
-be self-describing for an agent that may not know Continuity yet, and its
-artifacts must be portable: URL, Fulcra remote path, coord task ID, or
-repo/ref/path tuple. Do not rely on local-only OpenClaw paths.
+it when a task may survive compaction, transfer from OpenClaw to Claude Code,
+Codex, Hermes, CI, another OpenClaw deployment, or continue without this chat
+transcript. A useful checkpoint must be self-describing for an agent that may not
+know Continuity yet, and its artifacts must be portable: URL, Fulcra remote path,
+coord task ID, or repo/ref/path tuple. Do not rely on local-only OpenClaw paths.
+Arc is one possible OpenClaw deployment/persona, not the OpenClaw model.
 
 Read `packages/fulcra-coord/docs/continuity-handoff.md` and
 `packages/fulcra-continuity/docs/agent-handoff.md` when implementing or
@@ -79,8 +80,8 @@ Workstream keys are open strings — not validated.
 Use descriptive agent IDs that include the context:
 
 ```
-arc                          # Arc main session
-arc:discord:devops           # Arc in devops channel
+openclaw:host:main-comms     # OpenClaw session on a host/surface
+openclaw:discord:devops      # OpenClaw in a Discord devops surface
 claude-code:repo:my-repo     # Claude Code in a specific repo
 codex:paperclip              # Codex Paperclip agent
 ci:github-actions            # CI pipeline

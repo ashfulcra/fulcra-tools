@@ -2,8 +2,8 @@
 //
 // WHY THIS FILE EXISTS: the `openclaw` package is a *peerDependency* — the host
 // gateway provides it at load time and it is deliberately NOT installed into
-// node_modules (see .npmrc `omit=peer`; arc's live finding
-// TASK-...-install-f0e6511a was `openclaw plugins install .` choking on a
+// node_modules (see .npmrc `omit=peer`; a live OpenClaw install finding was
+// `openclaw plugins install .` choking on a
 // bundled node_modules/openclaw). Without the real package present, `tsc` cannot
 // resolve `import ... from "openclaw/plugin-sdk/plugin-entry"`. This shim makes
 // the import type-check against a loose-but-faithful surface so the plugin builds
