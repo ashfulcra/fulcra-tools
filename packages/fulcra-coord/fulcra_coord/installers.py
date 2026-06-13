@@ -511,11 +511,13 @@ def cmd_install_listener(args: Any, backend: Optional[list[str]] = None) -> int:
         dry_run=args.dry_run,
         target_dir=getattr(args, "target_dir", None),
         logs_dir=getattr(args, "logs_dir", None),
+        with_forge_mirror=bool(getattr(args, "with_forge_mirror", False)),
     )
+    tick_cmd = "listener-tick --forge-mirror" if plan.get("with_forge_mirror") else "notify-inbox"
     if args.dry_run:
         _info(f"[dry-run] Listener mechanism: {plan['mechanism']}")
         _info(f"[dry-run] Scheduled command: {plan['cli_command']} "
-              f"notify-inbox --agent {agent} (every {plan['interval_min']} min)")
+              f"{tick_cmd} --agent {agent} (every {plan['interval_min']} min)")
         if plan.get("supersedes_legacy"):
             _info("[dry-run] Would supersede the legacy machine-global listener "
                   f"job watching {agent} (it migrates to a per-agent job).")
@@ -536,14 +538,14 @@ def cmd_install_listener(args: Any, backend: Optional[list[str]] = None) -> int:
         if plist:
             _reload_launchd_plist(plist)
     _info(f"Installed fulcra-coord listener ({plan['mechanism']}) for {agent} — "
-          f"notify-inbox every {plan['interval_min']} min.")
+          f"{tick_cmd} every {plan['interval_min']} min.")
     for w in plan.get("writes", []):
         _info(f"  + {w}")
     if plan["mechanism"] == "launchd":
         _info("launchd reloaded so the live job picks up the current plist.")
     else:
         _info("Apply it now: crontab " + plan["writes"][0])
-    _info(f"Scheduled command: {plan['cli_command']} notify-inbox --agent {agent}")
+    _info(f"Scheduled command: {plan['cli_command']} {tick_cmd} --agent {agent}")
     return 0
 
 
