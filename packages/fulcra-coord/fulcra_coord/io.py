@@ -619,10 +619,13 @@ def _heal_missing_summary_entries(
     made inbox/listener reads trust an incomplete fast path and report "empty"
     while the board's directive records still showed work directed at Arc.
 
-    Read-side gap healing is intentionally add-only. We pay one raw ``tasks/``
-    listing, and fetch bodies only for IDs absent from the aggregate. If listing
-    or a per-body fetch fails, return the original summaries; a repair attempt
-    must never make a read less correct than the fast path it is guarding.
+    Read-side gap healing is intentionally narrow. We pay one raw ``tasks/``
+    listing, fetch bodies for IDs absent from the aggregate, and refresh rows
+    whose summary claims a non-terminal status. The latter catches fresh-looking
+    aggregates that still show old ``active``/``waiting`` rows after the durable
+    task body moved to ``done``. If listing or a per-body fetch fails, return the
+    original summaries; a repair attempt must never make a read less correct
+    than the fast path it is guarding.
     """
     if os.environ.get("FULCRA_COORD_SUMMARIES_GAP_HEAL", "1") == "0":
         return summaries
@@ -635,19 +638,29 @@ def _heal_missing_summary_entries(
         paths = remote.list_files(prefix, backend=backend)
     except Exception:
         return summaries
-    missing = sorted({
+    listed_ids = {
         p.rsplit("/", 1)[-1][: -len(".json")]
         for p in paths if p.endswith(".json")
-    } - set(by_id))
-    if not missing:
+    }
+    missing = listed_ids - set(by_id)
+    refresh = {
+        tid for tid, row in by_id.items()
+        if row.get("status") in {"proposed", "active", "waiting", "blocked"}
+    }
+    to_fetch = sorted((missing | refresh) & listed_ids)
+    if not to_fetch:
         return summaries
-    _warn(f"summaries view is freshly stamped but missing {len(missing)} "
-          "task file(s) — healing read from task bodies")
-    max_workers = min(16, max(4, len(missing)))
+    if missing:
+        _warn(f"summaries view is freshly stamped but missing {len(missing)} "
+              "task file(s) — healing read from task bodies")
+    if refresh:
+        _warn(f"summaries view has {len(refresh)} open task row(s) — "
+              "refreshing them from task bodies")
+    max_workers = min(16, max(4, len(to_fetch)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_cache_remote_task, tid, backend=backend): tid
-            for tid in missing
+            for tid in to_fetch
         }
         for fut in concurrent.futures.as_completed(futures):
             try:
@@ -657,7 +670,14 @@ def _heal_missing_summary_entries(
             if not (body and body.get("id")):
                 continue
             try:
-                by_id[body["id"]] = schema.task_summary(body)
+                refreshed = schema.task_summary(body)
+                prior = by_id.get(body["id"])
+                if prior:
+                    refreshed["acked_by"] = sorted(
+                        set(refreshed.get("acked_by", []) or [])
+                        | set(prior.get("acked_by", []) or [])
+                    )
+                by_id[body["id"]] = refreshed
             except Exception:
                 continue
     return list(by_id.values())
