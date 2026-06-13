@@ -44,7 +44,7 @@ from . import claude_code, cli_invocation, wake
 from .cli_invocation import PLACEHOLDER_ARGV
 from .views import agent_slug
 
-THREAD_AUTOMATION_INTERVAL_MIN_DEFAULT = 15
+THREAD_AUTOMATION_INTERVAL_MIN_DEFAULT = 5
 CODEX_WAKE_ENV = "FULCRA_COORD_CODEX_WAKE"
 
 # SessionStart mostly matches Claude Code's (same stdin shape, cwd-driven), but

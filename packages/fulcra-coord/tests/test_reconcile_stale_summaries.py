@@ -1,6 +1,7 @@
 """Reconcile must repair views from task files, not stale view-derived ids."""
 
 from types import SimpleNamespace
+from unittest import mock
 
 from fulcra_coord import cache, cli, remote, schema, views
 
@@ -52,3 +53,36 @@ def test_reconcile_repairs_stale_summary_entry_from_task_file(coord_backend):
     assert entry["status"] == "done"
     assert entry["updated_at"] == fresh["updated_at"]
 
+
+def test_reconcile_retries_success_shaped_summaries_upload_miss(coord_backend):
+    task = schema.make_task(
+        title="fresh task omitted by stale summaries",
+        workstream="coordination",
+        agent="agent-a",
+    )
+    task["id"] = "TASK-RECONCILE-SUMMARIES-VERIFY"
+    assert remote.upload_json(task, remote.task_remote_path(task["id"]),
+                              backend=coord_backend)
+
+    stale_summaries = views.build_all_views([])["summaries"]
+    assert remote.upload_json(stale_summaries, remote.view_remote_path("summaries"),
+                              backend=coord_backend)
+
+    real_upload = remote.upload_json
+    summaries_path = remote.view_remote_path("summaries")
+    skipped_once = {"done": False}
+
+    def upload_json(data, path, *, backend=None, timeout=None):
+        if path == summaries_path and not skipped_once["done"]:
+            skipped_once["done"] = True
+            return True
+        return real_upload(data, path, backend=backend, timeout=timeout)
+
+    with mock.patch("fulcra_coord.cli.remote.upload_json",
+                    side_effect=upload_json):
+        assert cli.cmd_reconcile(SimpleNamespace(), backend=coord_backend) == 0
+
+    repaired = remote.download_json(summaries_path, backend=coord_backend)
+    ids = {s.get("id") for s in repaired.get("summaries", [])}
+    assert task["id"] in ids
+    assert skipped_once["done"], "test must exercise the success-shaped miss"
