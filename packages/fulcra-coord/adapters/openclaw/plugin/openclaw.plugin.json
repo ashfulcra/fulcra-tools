@@ -1,7 +1,7 @@
 {
   "id": "fulcra-coord",
   "name": "Fulcra Coordination",
-  "description": "Deterministic per-session lifecycle checkpoints to the fulcra-coord coordination bus. Surfaces in-flight/stale work at session start (no file-based session:start event exists, so this needs the plugin), ALWAYS checkpoints the session's task before compaction, and parks active tasks as waiting on session teardown (session:end is plugin-only).",
+  "description": "Deterministic OpenClaw lifecycle checkpoints to the fulcra-coord coordination bus. Surfaces in-flight/stale work at session start (no file-based session:start event exists, so this needs the plugin), checkpoints the session's task before compaction, and parks active tasks as waiting with a continuity snapshot on session teardown (session:end is plugin-only).",
   "activation": { "onStartup": true },
   "configSchema": { "type": "object" }
 }

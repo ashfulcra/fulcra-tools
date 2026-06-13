@@ -45,7 +45,7 @@ _PLUGIN_FILES = (
     "src/openclaw-sdk.d.ts",
     # `.npmrc` carries `omit=peer`: keeps `npm install` from pulling the
     # `openclaw` runtime into node_modules, which `openclaw plugins install .`
-    # would otherwise choke on (arc live finding, TASK-...-install-f0e6511a).
+    # would otherwise choke on (live OpenClaw install finding).
     ".npmrc",
     # Backstop so a stray node_modules can never be staged on install/pack.
     ".npmignore",
