@@ -423,6 +423,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="The author (default: derived) — selects the canonical reviewer")
     sp.add_argument("--candidate-list", dest="candidate_list", default=None, metavar="A,B,C",
                     help="Explicit preference-ordered pool override (advanced)")
+    sp.add_argument("--note", default=None, metavar="TEXT",
+                    help="Optional request context carried to the reviewer")
     sp.add_argument("--dry-run", dest="dry_run", action="store_true",
                     help="Print ranked pool / tiers / excluded / winner / reason; write nothing")
     sp.add_argument("--format", choices=["table", "json"], default="table")

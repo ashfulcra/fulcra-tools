@@ -199,6 +199,55 @@ def test_directive_parity_no_ack_drift_when_record_has_acker(coord_backend):
     assert "TASK-ACKOK" not in report["drift_task_ids"]
 
 
+def test_directive_parity_deadline_bounds_ack_reads():
+    """A reconcile-supplied deadline must bound durable ack sub-log reads."""
+    import time
+
+    task = schema.make_task(
+        title="bounded", workstream="ws", agent="alice",
+        owner_agent="alice", assignee="bob", task_id="TASK-DEADLINE",
+    )
+    stored = directives.directive_from_task(task)
+    seen_timeouts = []
+
+    def fake_read_acks(directive_id, *, backend=None, timeout=None):
+        seen_timeouts.append(timeout)
+        return []
+
+    with mock.patch.object(directives, "read_directive_acks",
+                           side_effect=fake_read_acks):
+        report = cli._directive_parity_check(
+            records=[stored], all_tasks=[task],
+            deadline=time.monotonic() + 3.0,
+        )
+
+    assert report["checked"] == 1
+    assert report["deferred"] == 0
+    assert seen_timeouts
+    assert 1.0 <= seen_timeouts[0] <= 2.0
+
+
+def test_directive_parity_deadline_defers_before_unbounded_ack_read():
+    """Near deadline, parity reports deferral instead of starting ack I/O."""
+    import time
+
+    task = schema.make_task(
+        title="deferred", workstream="ws", agent="alice",
+        owner_agent="alice", assignee="bob", task_id="TASK-DEFER",
+    )
+    stored = directives.directive_from_task(task)
+
+    with mock.patch.object(directives, "read_directive_acks") as read_acks:
+        report = cli._directive_parity_check(
+            records=[stored], all_tasks=[task],
+            deadline=time.monotonic() + 1.0,
+        )
+
+    assert report["checked"] == 0
+    assert report["deferred"] == 1
+    read_acks.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # 5. Orphan / gate: no task_id, or back-ref task gone -> skipped, not crashed
 # ---------------------------------------------------------------------------
