@@ -531,6 +531,36 @@ def test_review_done_closes_original_review_loop(coord_backend, monkeypatch):
     assert not loops.is_open_loop(folded)
 
 
+def test_review_done_with_fix_closes_loop_with_fix_sha(coord_backend, monkeypatch):
+    from fulcra_coord import routing_ops
+    _patch_presence(monkeypatch, routing_ops)
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "claude-code:author:r")
+    assert routing_ops.cmd_request_review(_rr_args(), backend=coord_backend) == 0
+    review_id = next(
+        did for did in _list_directive_ids(coord_backend)
+        if _read_directive(coord_backend, did)["directive_type"] == "review"
+    )
+
+    monkeypatch.setattr(routing_ops.identity, "resolve_agent",
+                        lambda *a, **k: "codex:rev:main")
+    rc = routing_ops.cmd_review_done(
+        _rd_args(artifact="42", verdict="approve", repo="fulcra-tools",
+                 note="suite green", with_fix="abc1234"),
+        backend=coord_backend)
+
+    assert rc == 0
+    events = loop_ops.read_loop_responses(review_id, backend=coord_backend)
+    assert events[0]["outcome"] == {
+        "verdict": "approve",
+        "note": "suite green",
+        "fix_sha": "abc1234",
+    }
+    folded = loop_ops.fold_loop(_read_directive(coord_backend, review_id),
+                                backend=coord_backend)
+    assert folded["outcome"]["fix_sha"] == "abc1234"
+
+
 def test_review_done_response_write_failure_is_ops_logged(coord_backend, monkeypatch):
     """NAMEERROR pin (2026-06-11 wave): routing_ops.cmd_review_done's
     response-write failure path calls ``ops_log.log_op(...)`` — but routing_ops

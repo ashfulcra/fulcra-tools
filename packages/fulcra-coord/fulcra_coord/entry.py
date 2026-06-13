@@ -442,6 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="approve|changes — the review outcome")
     sp.add_argument("--note", default=None, metavar="TEXT",
                     help="Optional reviewer note carried in the directive")
+    sp.add_argument("--with-fix", dest="with_fix", default=None, metavar="SHA",
+                    help="Commit SHA for a reviewer fix pushed with this verdict")
     sp.add_argument("--repo", required=False, default=None, metavar="REPO")
     sp.add_argument("--to", dest="to", default=None, metavar="AGENT",
                     help="Explicit author override (skips author resolution)")
