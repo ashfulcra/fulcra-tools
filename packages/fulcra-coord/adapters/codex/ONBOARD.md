@@ -50,6 +50,13 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    When you need the OPERATOR to do something, mark it with
    `fulcra-coord block <id> --on-user "<the ask>"` — it lands on the human's
    `needs-me` plate and leads their next SessionStart.
+   Also write Fulcra Continuity snapshots at durable pause points:
+   `fulcra-coord snapshot TASK-... --reason "<pause-point>" --next "<pickup step>"`.
+   Codex has no SessionEnd hook, so do this explicitly before handoff/review
+   request, after long edit/test/push stretches, when the user says pause/done,
+   and at overnight or idle stopping points. If the snapshot command prints
+   quality warnings, enrich the task state or write a richer checkpoint before
+   trusting it as a handoff packet.
 7. (Optional) Agent-Tasks Fulcra timeline annotations:
    `export FULCRA_COORD_ANNOTATIONS=cli` and point
    `FULCRA_COORD_ANNOTATION_CLI` at a create-annotations-commands fulcra build
@@ -84,7 +91,9 @@ checkout — move to your own worktree instead of committing over another sessio
 - Use **`install-codex`** (not `install-claude-code`). It wires Codex's
   `SessionStart` / `PreCompact` hooks. Codex has **no `SessionEnd`**;
   `Stop` fires at end-of-turn, so fulcra-coord deliberately does not use it for
-  parking; install the heartbeat if you want that backstop.
+  parking; install the heartbeat if you want that backstop. The heartbeat keeps
+  the loop alive, but it is not a substitute for explicit Continuity snapshots
+  at durable handoff/idle/review boundaries.
 - `install-listener` alone is notify-only: it polls the bus, writes the pending
   inbox surface, and emits a desktop notification. `ensure-codex-watch
   --thread-id <id>` writes a Codex thread heartbeat automation so the current
