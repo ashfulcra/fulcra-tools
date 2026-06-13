@@ -113,14 +113,17 @@ LOG_STEM = "listener"
 INTERVAL_MIN_DEFAULT = 10
 
 
-def _notify_args(agent: str) -> list[str]:
+def _notify_args(agent: str, *, with_forge_mirror: bool = False) -> list[str]:
     """The subcommand tail appended to the resolved CLI argv: poll this agent's
     inbox, surface + notify. One call so the scheduler line is a single command."""
+    if with_forge_mirror:
+        return ["listener-tick", "--forge-mirror", "--agent", agent]
     return ["notify-inbox", "--agent", agent]
 
 
 def _plist_body(argv: list[str], agent: str, interval_sec: int,
-                logs_dir: Path, label: str) -> str:
+                logs_dir: Path, label: str, *,
+                with_forge_mirror: bool = False) -> str:
     """A launchd plist that runs ``<argv...> notify-inbox --agent <me>`` every
     interval_sec. Built via plistlib from an explicit argv (C1 + M1): each token
     is a real ProgramArguments element (no word-splitting on a spaced argv[0]),
@@ -138,7 +141,8 @@ def _plist_body(argv: list[str], agent: str, interval_sec: int,
         logs_dir, f"{LOG_STEM}-{agent_slug(agent)}")
     body: dict[str, Any] = {
         "Label": label,
-        "ProgramArguments": list(argv) + _notify_args(agent),
+        "ProgramArguments": list(argv) + _notify_args(
+            agent, with_forge_mirror=with_forge_mirror),
         "StartInterval": interval_sec,
         "RunAtLoad": True,
         "EnvironmentVariables": {"PATH": scheduler_env.scheduler_path(argv)},
@@ -148,7 +152,8 @@ def _plist_body(argv: list[str], agent: str, interval_sec: int,
     return plistlib.dumps(body).decode("utf-8")
 
 
-def _cron_line(argv: list[str], agent: str, interval_min: int) -> str:
+def _cron_line(argv: list[str], agent: str, interval_min: int, *,
+               with_forge_mirror: bool = False) -> str:
     """A crontab entry running notify-inbox every interval_min minutes, tagged
     with THIS agent's per-agent managed marker so uninstall is surgical and only
     touches one agent's block. argv + the agent arg are shell-quoted
@@ -161,7 +166,8 @@ def _cron_line(argv: list[str], agent: str, interval_min: int) -> str:
     surgical uninstall still matches exactly our command."""
     schedule = f"*/{interval_min} * * * *"
     path = shlex.quote(scheduler_env.scheduler_path(argv))
-    cmd = " ".join(shlex.quote(t) for t in (list(argv) + _notify_args(agent)))
+    cmd = " ".join(shlex.quote(t) for t in (
+        list(argv) + _notify_args(agent, with_forge_mirror=with_forge_mirror)))
     return (f"{_cron_marker_for(agent)}\n"
             f"{schedule} PATH={path} {cmd} >/dev/null 2>&1\n")
 
@@ -250,7 +256,8 @@ def install_listener(*, agent: str, interval_min: int = INTERVAL_MIN_DEFAULT,
                      uninstall: bool = False, dry_run: bool = False,
                      target_dir: "str | Path | None" = None,
                      crontab_path: "str | Path | None" = None,
-                     logs_dir: "str | Path | None" = None) -> dict[str, Any]:
+                     logs_dir: "str | Path | None" = None,
+                     with_forge_mirror: bool = False) -> dict[str, Any]:
     """Install/uninstall a scheduled ``fulcra-coord notify-inbox --agent`` job.
 
     The listener is PER-AGENT: identity (launchd label / plist basename / cron
@@ -281,6 +288,7 @@ def install_listener(*, agent: str, interval_min: int = INTERVAL_MIN_DEFAULT,
         "interval_min": interval_min,
         "uninstall": uninstall,
         "dry_run": dry_run,
+        "with_forge_mirror": with_forge_mirror,
         "writes": [],
         "removes": [],
         # True when a legacy un-slugged job watching THIS agent was found and
@@ -326,7 +334,9 @@ def install_listener(*, agent: str, interval_min: int = INTERVAL_MIN_DEFAULT,
             # from the first tick (launchd will not create it for us).
             logs.mkdir(parents=True, exist_ok=True)
             plist.write_text(
-                _plist_body(argv, agent, interval_sec, logs, _label_for(agent)))
+                _plist_body(
+                    argv, agent, interval_sec, logs, _label_for(agent),
+                    with_forge_mirror=with_forge_mirror))
         return plan
 
     # --- crontab fallback (Linux / other) ----------------------------------
@@ -350,7 +360,8 @@ def install_listener(*, agent: str, interval_min: int = INTERVAL_MIN_DEFAULT,
         return plan
 
     new_text = (stripped.rstrip("\n") + "\n" if stripped.strip() else "") \
-        + _cron_line(argv, agent, interval_min)
+        + _cron_line(argv, agent, interval_min,
+                     with_forge_mirror=with_forge_mirror)
     plan["writes"].append(str(cron))
     if not dry_run:
         cron.parent.mkdir(parents=True, exist_ok=True)
