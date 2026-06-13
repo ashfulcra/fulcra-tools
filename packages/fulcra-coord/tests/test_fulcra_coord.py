@@ -3452,6 +3452,28 @@ class TestOpenClawTemplates(unittest.TestCase):
         for ts in (oc.SHUTDOWN_HANDLER_TS, oc.BOOTSTRAP_HANDLER_TS):
             self.assertIn("catch", ts)  # swallows errors, never blocks
 
+    def test_openclaw_docs_are_generalized_not_arc_specific(self):
+        from fulcra_coord import openclaw as oc
+        import pathlib
+
+        adapter = pathlib.Path(__file__).parents[1] / "adapters" / "openclaw"
+        docs = [
+            (adapter / "SKILL.md").read_text(),
+            (adapter / "plugin" / "README.md").read_text(),
+            (adapter / "plugin" / "openclaw.plugin.json").read_text(),
+            (adapter / "plugin" / "src" / "index.ts").read_text(),
+            (adapter / "plugin" / "src" / "openclaw-sdk.d.ts").read_text(),
+            oc.BOOT_MD_BODY,
+            oc.HEARTBEAT_MD_BODY,
+            oc.SHUTDOWN_HOOK_MD,
+            oc.COMPACT_HOOK_MD,
+        ]
+        combined = "\n".join(docs)
+        self.assertIn("Arc is one possible OpenClaw deployment/persona", combined)
+        self.assertNotIn("agent arc", combined)
+        self.assertNotIn("arc's live finding", combined)
+        self.assertNotIn("Track A lacks", combined)
+
 
 class TestInstallOpenClaw(unittest.TestCase):
     def setUp(self):
@@ -3663,6 +3685,18 @@ class TestOpenClawPluginSource(unittest.TestCase):
         # Entry point is the real definePluginEntry from the SDK subpath.
         self.assertIn("definePluginEntry", ts)
         self.assertIn("openclaw/plugin-sdk/plugin-entry", ts)
+
+    def test_plugin_docs_match_runtime_checkpoint_commands(self):
+        root = self._src_root()
+        readme = (root / "README.md").read_text()
+        manifest = (root / "openclaw.plugin.json").read_text()
+        ts = (root / "src" / "index.ts").read_text()
+        self.assertIn("fulcra-coord snapshot <task>", readme)
+        self.assertIn("--snapshot", readme)
+        self.assertIn("continuity snapshot", manifest)
+        self.assertIn("Track B's", ts)
+        self.assertIn("unique value is deterministic per-session start/end", ts)
+        self.assertNotIn("Track A lacks", readme + manifest + ts)
 
 
 class TestInstallOpenClawPlugin(unittest.TestCase):

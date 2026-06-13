@@ -5,19 +5,19 @@ an **OpenClaw Plugin-SDK plugin** that registers three in-process lifecycle
 hooks. Its unique differentiator is **deterministic per-session start/end**:
 there is no file-based `session:start` automation event, and session-end is
 plugin-only — so true per-session `session_start` / `session_end` requires the
-plugin. (The before-compaction checkpoint is also provided here as
+plugin. The before-compaction checkpoint is also provided here as
 `before_compaction`, but it is **not** Track B's differentiator: per the
-authoritative OpenClaw docs, `session:compact:before` IS a file-based automation
+authoritative OpenClaw docs, `session:compact:before` is a file-based automation
 event, so Track A already checkpoints compaction with a file hook. The plugin's
-`before_compaction` is the underscore-form equivalent for single-plugin installs.)
+`before_compaction` is the underscore-form equivalent for single-plugin installs.
 
 ## What it does — the three checkpoints
 
 | Hook | Trigger | Action (shells `fulcra-coord`) |
 |------|---------|--------------------------------|
 | `session_start` | a new session begins | `fulcra-coord status` → surface in-flight + stale work into the session log |
-| `before_compaction` | OpenClaw is about to summarize history (guaranteed context loss) | **ALWAYS** `fulcra-coord update <task> --summary "…"` for the session's task, stamping a fresh timestamp; status stays `active` |
-| `session_end` | a real teardown (`idle` / `daily` / `reset` / `deleted` / `shutdown` / `restart`) | `fulcra-coord pause <task> --next "…"` → parks `active`→`waiting`. **Skips `compaction`** (the session continues) |
+| `before_compaction` | OpenClaw is about to summarize history (guaranteed context loss) | **ALWAYS** `fulcra-coord update <task> --summary "…"` plus `fulcra-coord snapshot <task> --reason openclaw-before-compaction`; status stays `active` |
+| `session_end` | a real teardown (`idle` / `daily` / `reset` / `deleted` / `shutdown` / `restart`) | `fulcra-coord pause <task> --next "…" --snapshot` → parks `active`→`waiting` and writes a continuity checkpoint. **Skips `compaction`** (the session continues) |
 
 The session's task is resolved via the CLI's session→task pointer, keyed on
 OpenClaw's stable **`sessionKey`** through the `FULCRA_COORD_SESSION_KEY` env
@@ -94,7 +94,7 @@ the **deterministic per-session start/end** fidelity Track A structurally cannot
 (no file-based `session:start`; `session:end` is plugin-only). Compaction is
 covered by *both* — Track A's `session:compact:before` file hook and Track B's
 `before_compaction` plugin hook both checkpoint; if you run both, the duplicate
-`update` is harmless (it just stamps the same task twice). Likewise the
-`gateway:shutdown` file hook (Track A) and the plugin `session_end` hook (Track B)
-both aim to park active work on shutdown — both are idempotent (`pause` on an
-already-`waiting` task is a no-op), so the overlap is safe.
+`update`/`snapshot` pair is harmless. Likewise the `gateway:shutdown` file hook
+(Track A) and the plugin `session_end` hook (Track B) both aim to park active
+work on shutdown — both are idempotent (`pause` on an already-`waiting` task is a
+no-op), so the overlap is safe.
