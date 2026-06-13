@@ -100,6 +100,18 @@ def fallback_throttle_path() -> Path:
     return _root_cache() / "fallback-throttle.json"
 
 
+def open_refresh_throttle_path() -> Path:
+    """The per-host open-summary-row refresh throttle marker.
+
+    ``io._heal_missing_summary_entries`` may need to refresh summaries that
+    still claim an open status from task bodies, but doing that in every
+    listener/status/inbox reader turns one defensive check into a host-wide
+    remote-probe loop. This marker is scoped the same way as the stale fallback
+    throttle: host-wide, per remote root.
+    """
+    return _root_cache() / "open-refresh-throttle.json"
+
+
 def sessions_dir() -> Path:
     # Intentionally GLOBAL (not per-root): session pointers are keyed by the
     # globally-unique CLAUDE_CODE_SESSION_ID / FULCRA_COORD_SESSION_KEY and

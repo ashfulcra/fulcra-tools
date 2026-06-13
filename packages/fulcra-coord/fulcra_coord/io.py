@@ -388,6 +388,7 @@ def _load_all_tasks(backend: Optional[list[str]] = None) -> list[dict[str, Any]]
 #: and may be taken over — the crash-recovery bound, sized to comfortably
 #: cover one full direct-listing fallback (listing + ~450 body fetches).
 FALLBACK_WINDOW_MINUTES_DEFAULT = 10.0
+OPEN_REFRESH_WINDOW_MINUTES_DEFAULT = 10.0
 
 
 def _fallback_window_minutes() -> float:
@@ -395,6 +396,46 @@ def _fallback_window_minutes() -> float:
     entirely (operator escape hatch, mirroring FULCRA_COORD_VIEW_STALE_MIN=0)."""
     return env_float("FULCRA_COORD_FALLBACK_WINDOW_MINUTES",
                      FALLBACK_WINDOW_MINUTES_DEFAULT)
+
+
+def _open_refresh_window_minutes() -> float:
+    """Rate window for freshly-stamped open-row body refreshes.
+
+    ``<= 0`` disables the rate limit for operators/tests that want the previous
+    always-refresh behavior.
+    """
+    return env_float("FULCRA_COORD_OPEN_REFRESH_WINDOW_MINUTES",
+                     OPEN_REFRESH_WINDOW_MINUTES_DEFAULT)
+
+
+def _claim_open_refresh_throttle(
+    window_min: float,
+) -> tuple[bool, Optional[float]]:
+    """Return whether this process should run the open-row refresh sweep.
+
+    Unlike the stale-view fallback throttle, this is a RATE throttle, not a
+    mutex: the open-row sweep is a defensive freshness check. Once one reader on
+    this host has paid it, nearby readers can use the summaries aggregate and
+    let the next window re-check. The marker's mtime is the authority.
+    """
+    path = cache.open_refresh_throttle_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return True, None
+    try:
+        age_min = (time.time() - path.stat().st_mtime) / 60.0
+        if age_min < window_min:
+            return False, age_min
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return True, None
+    try:
+        path.write_text(json.dumps({"at": _now_iso(), "holder": os.getpid()}))
+    except OSError:
+        return True, None
+    return True, None
 
 
 def _claim_fallback_throttle(
@@ -643,10 +684,19 @@ def _heal_missing_summary_entries(
         for p in paths if p.endswith(".json")
     }
     missing = listed_ids - set(by_id)
-    refresh = {
+    open_rows = {
         tid for tid, row in by_id.items()
         if row.get("status") in {"proposed", "active", "waiting", "blocked"}
     }
+    refresh: set[str] = set()
+    if open_rows:
+        window_min = _open_refresh_window_minutes()
+        if window_min <= 0:
+            refresh = open_rows
+        else:
+            claimed, _holder_age = _claim_open_refresh_throttle(window_min)
+            if claimed:
+                refresh = open_rows
     to_fetch = sorted((missing | refresh) & listed_ids)
     if not to_fetch:
         return summaries

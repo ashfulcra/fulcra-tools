@@ -137,8 +137,15 @@ class TestSummariesStaleGuard(unittest.TestCase):
     """Contract 2+3 for ``_load_task_summaries``."""
 
     def setUp(self):
+        self._xdg = tempfile.TemporaryDirectory()
+        self._env = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": self._xdg.name})
+        self._env.start()
         self.t1 = _task("in the view")
         self.t2 = _task("MISSING from the stale view", assignee="me:h:r")
+
+    def tearDown(self):
+        self._env.stop()
+        self._xdg.cleanup()
 
     def _patched(self, fake):
         return [
@@ -198,6 +205,30 @@ class TestSummariesStaleGuard(unittest.TestCase):
             got = self._run(fake, heal_missing_entries=True)
         by_id = {s["id"]: s for s in got}
         self.assertEqual(by_id[self.t2["id"]]["status"], "done")
+
+    def test_fresh_open_summary_row_refresh_is_rate_limited(self):
+        closed = dict(self.t1)
+        closed["status"] = "done"
+        stale = dict(self.t2)
+        stale["status"] = "waiting"
+        fresh = dict(self.t2)
+        fresh["status"] = "done"
+        fresh["updated_at"] = _iso(_now())
+        view = views.build_summaries([closed, stale])
+        fake = _SummariesBackendFake(view, [closed, fresh])
+
+        with mock.patch("fulcra_coord.io._warn"):
+            first = self._run(fake, heal_missing_entries=True)
+            first_downloads = fake.body_downloads
+            second = self._run(fake, heal_missing_entries=True)
+
+        self.assertEqual(
+            {s["id"]: s for s in first}[self.t2["id"]]["status"], "done")
+        self.assertEqual(
+            {s["id"]: s for s in second}[self.t2["id"]]["status"], "waiting")
+        self.assertEqual(
+            fake.body_downloads, first_downloads,
+            "nearby readers must not re-fetch every open row")
 
     def test_stale_view_falls_back_to_direct_listing(self):
         # Stale view KNOWS ONLY t1; t2's body landed on the bus but no view
