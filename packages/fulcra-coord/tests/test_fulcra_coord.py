@@ -4750,13 +4750,13 @@ class TestInstallCodex(unittest.TestCase):
         self.assertIn("never raw tells for review work", body)
         self.assertIn("ensure-codex-watch --agent codex:h:r", body)
 
-    def test_install_thread_automation_defaults_to_quarter_hour(self):
+    def test_install_thread_automation_defaults_to_five_minutes(self):
         from fulcra_coord import codex
         with patch.dict(os.environ, {"CODEX_HOME": self.tmp}):
             plan = codex.install_thread_automation("codex:h:r", "thread-123")
-        self.assertEqual(plan["interval_min"], 15)
+        self.assertEqual(plan["interval_min"], 5)
         body = open(plan["path"]).read()
-        self.assertIn('rrule = "FREQ=MINUTELY;INTERVAL=15"', body)
+        self.assertIn('rrule = "FREQ=MINUTELY;INTERVAL=5"', body)
 
     def test_install_thread_automation_update_preserves_created_at(self):
         from fulcra_coord import codex
@@ -4984,6 +4984,53 @@ class TestEnsureCodexWatch(unittest.TestCase):
             "codex:h:r", "thread-123", interval_min=7,
             uninstall=False, dry_run=False)
 
+    def test_codex_thread_env_installs_heartbeat_automation(self):
+        from fulcra_coord import installers
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-env"}, clear=False), \
+             patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_thread_automation") as m_auto, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+        m_auto.assert_called_once_with(
+            "codex:h:r", "thread-env", interval_min=5,
+            uninstall=False, dry_run=False)
+
+    def test_explicit_thread_id_wins_over_codex_thread_env(self):
+        from fulcra_coord import installers
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-env"}, clear=False), \
+             patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_thread_automation") as m_auto, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(
+                self._args(thread_id="thread-arg"))
+        self.assertEqual(rc, 0)
+        m_auto.assert_called_once_with(
+            "codex:h:r", "thread-arg", interval_min=5,
+            uninstall=False, dry_run=False)
+
+    def test_wake_exec_does_not_use_codex_thread_env(self):
+        from fulcra_coord import installers, codex
+        with patch.dict(os.environ, {
+                "CODEX_THREAD_ID": "throwaway-thread",
+                codex.CODEX_WAKE_ENV: "1",
+             }, clear=False), \
+             patch("fulcra_coord.installers.codex.install_codex"), \
+             patch("fulcra_coord.installers.listener.install_listener",
+                   return_value=self._listener_plan()), \
+             patch("fulcra_coord.installers.codex.install_thread_automation") as m_auto, \
+             patch("fulcra_coord.installers.subprocess.run"), \
+             patch("fulcra_coord.installers.cmd_connect", return_value=0):
+            rc = installers.cmd_ensure_codex_watch(self._args())
+        self.assertEqual(rc, 0)
+        m_auto.assert_not_called()
+
     def test_dry_run_thread_id_delegates_without_load_or_connect(self):
         from fulcra_coord import installers
         with patch("fulcra_coord.installers.codex.install_codex"), \
@@ -4996,7 +5043,7 @@ class TestEnsureCodexWatch(unittest.TestCase):
                 self._args(dry_run=True, thread_id="thread-123"))
         self.assertEqual(rc, 0)
         m_auto.assert_called_once_with(
-            "codex:h:r", "thread-123", interval_min=15,
+            "codex:h:r", "thread-123", interval_min=5,
             uninstall=False, dry_run=True)
         m_run.assert_not_called()
         m_connect.assert_not_called()
