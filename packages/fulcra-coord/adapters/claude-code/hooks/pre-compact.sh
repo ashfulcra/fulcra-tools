@@ -19,7 +19,7 @@ TP="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.std
 TASK="$("${FULCRA_COORD[@]}" __session-task "$SID" 2>/dev/null)"
 [ -z "$TASK" ] && exit 0
 "${FULCRA_COORD[@]}" update "$TASK" \
-  --summary "Context compaction checkpoint ($(date -u +%Y-%m-%dT%H:%M:%SZ)). Transcript: ${TP:-n/a}" \
+  --summary "PreCompact continuity checkpoint ($(date -u +%Y-%m-%dT%H:%M:%SZ)). Context is about to be summarized; use resume --with-continuity and inspect transcript ${TP:-n/a}. If decisions, artifacts, or open questions changed since the last update, enrich the task before handoff." \
   >/dev/null 2>&1
 "${FULCRA_COORD[@]}" snapshot "$TASK" \
   --reason pre-compact \

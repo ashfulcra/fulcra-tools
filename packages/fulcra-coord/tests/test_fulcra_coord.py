@@ -2805,8 +2805,12 @@ class TestHookTemplates(unittest.TestCase):
         self.assertIn("status", cc.SESSION_START_SH)
         self.assertIn("update", cc.PRE_COMPACT_SH)
         self.assertIn("snapshot", cc.PRE_COMPACT_SH)
+        self.assertIn("resume --with-continuity", cc.PRE_COMPACT_SH)
+        self.assertIn("decisions, artifacts, or open questions", cc.PRE_COMPACT_SH)
         self.assertIn("pause", cc.SESSION_END_SH)
         self.assertIn("--snapshot", cc.SESSION_END_SH)
+        self.assertIn("SessionEnd continuity checkpoint", cc.SESSION_END_SH)
+        self.assertIn("resume --with-continuity", cc.SESSION_END_SH)
 
 
 class TestSessionTaskCmd(unittest.TestCase):
@@ -3109,6 +3113,9 @@ class TestHookScriptsE2E(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         calls = open(self.calls).read()
         self.assertIn("update TASK-live", calls)
+        self.assertIn("PreCompact continuity checkpoint", calls)
+        self.assertIn("use resume --with-continuity", calls)
+        self.assertIn("/t.json", calls)
         self.assertIn("snapshot TASK-live", calls)
         self.assertIn("--reason pre-compact", calls)
 
@@ -3127,10 +3134,14 @@ class TestHookScriptsE2E(unittest.TestCase):
 
     def test_session_end_pauses_active_task(self):
         sj = json.dumps({"active": [{"id": "TASK-live", "status": "active"}]})
-        r = self._run("session-end.sh", json.dumps({"session_id": "s"}), sj)
+        r = self._run("session-end.sh", json.dumps({"session_id": "s", "transcript_path": "/end.json"}), sj)
         self.assertEqual(r.returncode, 0)
         calls = open(self.calls).read()
+        self.assertIn("update TASK-live", calls)
+        self.assertIn("SessionEnd continuity checkpoint", calls)
+        self.assertIn("/end.json", calls)
         self.assertIn("pause TASK-live", calls)
+        self.assertIn("use resume --with-continuity", calls)
         self.assertIn("--snapshot", calls)
 
     def test_session_end_noop_when_not_active(self):
