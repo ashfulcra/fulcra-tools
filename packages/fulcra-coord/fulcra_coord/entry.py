@@ -14,6 +14,7 @@ from . import cli as _cli
 # core from importing the mirror — entry.py sits above core, so this is the
 # one place the production-side bridge may be wired in.
 from . import forge_mirror as _forge_mirror
+from . import listener_tick as _listener_tick
 from . import selfupdate as _selfupdate
 
 
@@ -703,7 +704,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--logs-dir", dest="logs_dir", default=None, metavar="DIR",
                     help="Override the directory for listener stdout/stderr logs")
     sp.add_argument("--uninstall", action="store_true", help="Remove the listener")
+    sp.add_argument("--with-forge-mirror", dest="with_forge_mirror",
+                    action="store_true",
+                    help="Schedule listener-tick --forge-mirror so review "
+                         "verdict-shaped forge signals are mirrored before "
+                         "the inbox poll")
     sp.add_argument("--dry-run", action="store_true", help="Print intended changes, write nothing")
+
+    # ---- listener-tick ----
+    sp = sub.add_parser("listener-tick",
+                        help="Run one scheduled listener tick; optionally "
+                             "mirror forge review signals before notify-inbox")
+    sp.add_argument("--agent", "-a", default=None, metavar="AGENT",
+                    help="Whose inbox (default: $FULCRA_COORD_AGENT or derived)")
+    sp.add_argument("--forge-mirror", dest="forge_mirror", action="store_true",
+                    help="Run forge-mirror once before notify-inbox")
+    sp.add_argument("--repo", default=None, metavar="REPO",
+                    help="Only mirror review loops for REPO")
+    sp.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- notify-inbox ----
     sp = sub.add_parser("notify-inbox",
@@ -868,6 +886,7 @@ COMMAND_MAP = {
     "install-openclaw": _cli.cmd_install_openclaw,
     "install-heartbeat": _cli.cmd_install_heartbeat,
     "install-listener": _cli.cmd_install_listener,
+    "listener-tick": _listener_tick.cmd_listener_tick,
     "notify-inbox": _cli.cmd_notify_inbox,
     "install-codex": _cli.cmd_install_codex,
     "ensure-codex-watch": _cli.cmd_ensure_codex_watch,

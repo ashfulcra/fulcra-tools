@@ -5958,6 +5958,21 @@ class TestInstallListener(unittest.TestCase):
         self.assertIn("notify-inbox", body)
         self.assertIn("codex:h:r", body)
 
+    def test_install_with_forge_mirror_uses_listener_tick(self):
+        from fulcra_coord import listener
+        with patch("fulcra_coord.cli_invocation.resolve_cli_argv",
+                   return_value=["/opt/bin/fulcra-coord"]), \
+             patch("sys.platform", "darwin"):
+            listener.install_listener(
+                agent="codex:h:r", target_dir=self.target,
+                interval_min=10, with_forge_mirror=True)
+        plist = os.path.join(self.target,
+                             "com.fulcra.coord.listener.codex-h-r.plist")
+        body = open(plist).read()
+        self.assertIn("listener-tick", body)
+        self.assertIn("--forge-mirror", body)
+        self.assertIn("codex:h:r", body)
+
     def test_crontab_uninstall_is_surgical(self):
         from fulcra_coord import listener
         crontab = os.path.join(self.tmp, "crontab.txt")
@@ -7656,6 +7671,15 @@ class TestInstallLogsDirArg(unittest.TestCase):
             "--dry-run",
         ])
         self.assertEqual(args.logs_dir, "/tmp/x")
+        self.assertTrue(args.dry_run)
+
+    def test_install_listener_accepts_with_forge_mirror(self):
+        from fulcra_coord.entry import build_parser
+        p = build_parser()
+        args = p.parse_args([
+            "install-listener", "--with-forge-mirror", "--dry-run",
+        ])
+        self.assertTrue(args.with_forge_mirror)
         self.assertTrue(args.dry_run)
 
     def test_install_heartbeat_accepts_logs_dir(self):
