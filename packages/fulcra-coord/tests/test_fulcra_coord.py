@@ -11726,7 +11726,7 @@ class TestReviewDone(unittest.TestCase):
 
     def _args(self, **kw):
         base = dict(artifact="101", verdict="approve", note=None, repo=None,
-                    to=None, format="table")
+                    to=None, format="table", with_fix=None)
         base.update(kw)
         ns = types.SimpleNamespace(**{k: v for k, v in base.items() if k != "from"})
         setattr(ns, "from", base.get("from"))
@@ -11765,6 +11765,24 @@ class TestReviewDone(unittest.TestCase):
         self.assertIn("#101", t["title"])
         blob = json.dumps(t)
         self.assertIn("LGTM", blob)
+
+    def test_with_fix_lands_structured_fix_sha(self):
+        from fulcra_coord.cli import cmd_review_done
+        captured = {}
+
+        with patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=lambda task, **kw: captured.update(task=task) or True), \
+             patch("fulcra_coord.directives.dual_write"), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"):
+            rc = cmd_review_done(
+                self._args(verdict="approve", to="claude-code:h:r",
+                           with_fix="abc1234"),
+                backend=["false"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["task"]["review_fix_sha"], "abc1234")
+        self.assertIn("abc1234", captured["task"]["current_summary"])
 
     def test_changes_verdict_in_title(self):
         from fulcra_coord.cli import cmd_review_done
@@ -11939,6 +11957,27 @@ class TestReviewDone(unittest.TestCase):
                                             to=None, dry_run=True), backend=["false"])
         self.assertEqual(rc, 0)
         self.assertFalse(wrote["called"])
+
+    def test_dry_run_json_includes_fix_sha(self):
+        from fulcra_coord.cli import cmd_review_done
+        with patch("fulcra_coord.routing_ops._load_all_tasks", return_value=[]), \
+             patch("fulcra_coord.routing_ops.identity.resolve_agent",
+                   return_value="codex:rev:main"), \
+             patch("fulcra_coord.routing_ops._print_json") as out:
+            rc = cmd_review_done(
+                self._args(artifact="feat/x", verdict="approve", to=None,
+                           dry_run=True, format="json", with_fix="abc1234"),
+                backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.call_args.args[0]["fix_sha"], "abc1234")
+
+    def test_parser_accepts_with_fix(self):
+        from fulcra_coord.entry import build_parser
+        args = build_parser().parse_args([
+            "review-done", "101", "--verdict", "approve",
+            "--with-fix", "abc1234",
+        ])
+        self.assertEqual(args.with_fix, "abc1234")
 
 
 # ---------------------------------------------------------------------------

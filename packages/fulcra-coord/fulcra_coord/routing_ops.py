@@ -582,6 +582,7 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     artifact = args.artifact
     verdict = args.verdict
     note = getattr(args, "note", None) or ""
+    fix_sha = getattr(args, "with_fix", None) or None
     repo = getattr(args, "repo", None)
     to = getattr(args, "to", None)
     reviewer = getattr(args, "from", None)
@@ -606,6 +607,7 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
         to_display = author or "<unresolved — pass --to>"
         report = {"artifact": artifact, "verdict": verdict, "to": to_display,
                   "from": reviewer, "note": note, "repo": repo,
+                  "fix_sha": fix_sha,
                   "tag": REVIEW_VERDICT_TAG}
         if getattr(args, "format", "table") == "json":
             _print_json(report)
@@ -622,6 +624,8 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
     summary = f"Reviewer {reviewer} verdict: {verdict}."
     if note:
         summary += f" Note: {note}"
+    if fix_sha:
+        summary += f" Fix: {fix_sha}"
     # next_action nudges the author toward the obvious follow-up per verdict.
     next_action = ("Address the requested changes." if verdict == "changes"
                    else "Approved — proceed to land.")
@@ -634,6 +638,8 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
             summary=summary, next_action=next_action)
         task["tags"] = sorted(set(task.get("tags", []) + [REVIEW_VERDICT_TAG]))
         task["pr"] = artifact
+        if fix_sha:
+            task["review_fix_sha"] = str(fix_sha)
         if repo is not None:
             task["repo"] = repo
         cache.write_cached_task(task)
@@ -659,6 +665,8 @@ def cmd_review_done(args: Any, backend: Optional[list[str]] = None) -> int:
                 outcome: dict[str, Any] = {"verdict": verdict}
                 if note:
                     outcome["note"] = note
+                if fix_sha:
+                    outcome["fix_sha"] = str(fix_sha)
                 response_ok = loop_ops.append_loop_response(
                     loop_id, {"by": reviewer, "outcome": outcome}, backend=backend)
                 if not response_ok:
