@@ -238,6 +238,10 @@ only — a live `review`-capable agent still gets the work, and an empty seed
 degrades to pure capability routing. Put **your** fleet's reviewer ids in this
 config; never hard-code them in source.
 
+Design note: [`docs/reviewer-registry.md`](docs/reviewer-registry.md) sketches
+the proposed next step: making the bus-native `review` role/lease projection the
+canonical reviewer registry, with local seeds retained as compatibility fallback.
+
 **Role-addressed directives.** A directive may also target an `@<role>` audience
 instead of a concrete agent id. Role audiences resolve at inbox/read time against
 each agent's declared capabilities, so every live holder of that role sees the
@@ -836,6 +840,7 @@ session boot or a polling tick. Update output is appended to
 - `docs/fulcra-cli-branch.md` — Fulcra CLI `file` support: verify + `FULCRA_CLI_COMMAND` repointing (the old special-branch workaround is obsolete)
 - `docs/schema.md` — full task and view schema reference
 - `docs/annotations.md` — Agent Tasks lifecycle annotation track (enable flag, tags, deferred-write caveat)
+- `docs/reviewer-registry.md` — design seed for bus-native canonical reviewer routing via the `review` role/lease registry
 - `docs/other-side-claude-code-test-plan.md` — cross-environment Claude Code verification plan
 
 ## Running tests
