@@ -26,6 +26,10 @@ LOAD them at session start, APPLY them, and CAPTURE new ones.
      session end — `fulcra-prefs capture-batch --file <json-array> --platform
      <your-platform>`; mark inferred items lower `confidence` (compile won't let
      a guess override an explicit pref). See the capture reference.
+   - Text extraction: when you have raw user text but not a hand-built key/value,
+     run `fulcra-prefs extract-candidates --platform <your-platform> --session
+     <session_id> --text '<user text>' --write`. It only queues explicit
+     preference language; lifecycle hooks still perform the capture.
    - Hooked auto-capture: if `fulcra-prefs install-hooks --platform
      <your-platform>` is installed, write candidates during the session to
      `~/.local/state/fulcra-prefs/candidates/<your-platform>/<session_id>.json`;
