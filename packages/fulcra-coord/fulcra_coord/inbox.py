@@ -402,6 +402,18 @@ def _notify_stale_summary_fallback_enabled() -> bool:
     return env_int("FULCRA_COORD_NOTIFY_STALE_SUMMARY_FALLBACK", 0) != 0
 
 
+def _notify_empty_stale_fallback_enabled() -> bool:
+    """Whether notify-inbox may retry with the bounded stale-view fallback.
+
+    The normal listener tick serves stale summaries without direct-listing every
+    task body. That keeps launchd from stampeding the bus, but it can also make
+    an agent look idle when the stale aggregate is missing newly-routed work.
+    Retrying only when the fast path finds *nothing* keeps the hot path bounded
+    while failing open for the dangerous "listener says zero" case.
+    """
+    return env_int("FULCRA_COORD_NOTIFY_EMPTY_STALE_FALLBACK", 1) != 0
+
+
 def _stale_summary_alert_threshold_min() -> int:
     """View-staleness age that should alert the operator from a listener tick.
 
@@ -477,14 +489,35 @@ def cmd_notify_inbox(args: Any, backend: Optional[list[str]] = None) -> int:
         # needs-me pass below (perf loop-2 #2 — each used to pay its own
         # download; under the stale-view guard each re-ran the whole
         # direct-listing fallback, ~one spawn per task on the bus).
+        stale_skipped: list[float] = []
+
+        def on_stale_skipped(stale_min: float) -> None:
+            stale_skipped.append(stale_min)
+            _alert_stale_summaries_if_needed(me, stale_min)
+
         summaries = _load_task_summaries(
             backend=backend,
             heal_missing_entries=True,
             skip_stale_fallback=not _notify_stale_summary_fallback_enabled(),
-            on_stale_skipped=lambda stale_min:
-                _alert_stale_summaries_if_needed(me, stale_min),
+            on_stale_skipped=on_stale_skipped,
         )
         items = _load_inbox(me, backend=backend, summaries=summaries)
+        if (
+            not items
+            and stale_skipped
+            and not _notify_stale_summary_fallback_enabled()
+            and _notify_empty_stale_fallback_enabled()
+        ):
+            # Fail open for delivery without restoring the old hot-path cost:
+            # this second load enters io.py's per-host fallback throttle, so at
+            # most one listener does the direct listing while the rest serve
+            # their stale cache. We only pay it when the stale fast path would
+            # otherwise report "pending=0", the exact silent-miss failure mode.
+            summaries = _load_task_summaries(
+                backend=backend,
+                skip_stale_fallback=False,
+            )
+            items = _load_inbox(me, backend=backend, summaries=summaries)
         surface = _inbox_surface_path(me)
         cache.cache_root().mkdir(parents=True, exist_ok=True)
         payload = {"agent": me, "count": len(items), "inbox": items}

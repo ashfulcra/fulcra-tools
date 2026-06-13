@@ -6810,6 +6810,57 @@ class TestNotifyInbox(unittest.TestCase):
         self.assertEqual(rc, 0)
         emsg.assert_not_called()
 
+    def test_notify_empty_stale_fast_path_retries_bounded_fallback(self):
+        """If the stale fast path says empty, notify-inbox must fail open once.
+
+        This is the listener-miss shape from the live Arc queue: direct inbox can
+        recover through stale-view fallback, but the scheduled listener reported
+        pending=0 because it served a stale summaries aggregate only.
+        """
+        from fulcra_coord.cli import cmd_notify_inbox
+        d = _directive("codex:h:r")
+
+        def stale_then_current(*args, **kwargs):
+            if kwargs.get("skip_stale_fallback"):
+                kwargs["on_stale_skipped"](120.0)
+                return []
+            return [d]
+
+        with patch("fulcra_coord.inbox._load_task_summaries",
+                   side_effect=stale_then_current) as load, \
+             patch("fulcra_coord.listener.emit_notification") as emit, \
+             patch("fulcra_coord.listener.emit_message"):
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        self.assertEqual(load.call_count, 2)
+        self.assertTrue(load.call_args_list[0].kwargs["skip_stale_fallback"])
+        self.assertFalse(load.call_args_list[1].kwargs["skip_stale_fallback"])
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args[0][1], 1)
+        data = json.loads(self._surface_path("codex:h:r").read_text())
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["inbox"][0]["id"], d["id"])
+
+    def test_notify_empty_stale_retry_can_be_disabled(self):
+        from fulcra_coord.cli import cmd_notify_inbox
+
+        def stale_loader(*args, **kwargs):
+            kwargs["on_stale_skipped"](120.0)
+            return []
+
+        with patch.dict(os.environ,
+                        {"FULCRA_COORD_NOTIFY_EMPTY_STALE_FALLBACK": "0"}), \
+             patch("fulcra_coord.inbox._load_task_summaries",
+                   side_effect=stale_loader) as load, \
+             patch("fulcra_coord.listener.emit_notification") as emit, \
+             patch("fulcra_coord.listener.emit_message"):
+            rc = cmd_notify_inbox(types.SimpleNamespace(agent="codex:h:r"),
+                                  backend=self.fake_backend)
+        self.assertEqual(rc, 0)
+        self.assertEqual(load.call_count, 1)
+        emit.assert_not_called()
+
     def test_notify_message_includes_overdue_loop_count(self):
         """An overdue open loop OPENED BY the notifying agent rides the inbox
         notification as a " · N overdue" suffix when the optional scan is
@@ -11405,6 +11456,33 @@ class TestReviewPool(unittest.TestCase):
             pool = cli._review_pool(author="who:h:r", presence=presence)
             self.assertEqual(pool.count("dup:h:r"), 1)
 
+    def test_explicit_candidate_list_routes_even_when_below_floor(self):
+        from fulcra_coord import routing_ops
+        captured = {}
+
+        def fake_write(task, *, backend=None, command=None):
+            captured["task"] = task
+            return True
+
+        args = types.SimpleNamespace(
+            pr="https://github.com/o/r/pull/220",
+            repo="o/r",
+            agent="author:h:r",
+            candidate_list="claude-code:ArcBot:Arc-Code-Review",
+            note="",
+            dry_run=False,
+            format="table",
+        )
+        with patch.object(routing_ops, "_load_presence_agents", return_value=[]), \
+             patch.object(routing_ops, "_find_open_review_for_artifact", return_value=None), \
+             patch.object(routing_ops, "_write_task_and_views", side_effect=fake_write), \
+             patch.object(routing_ops, "_mirror_route_to_directive_sublog"), \
+             patch("fulcra_coord.directives.dual_write"):
+            self.assertEqual(routing_ops.cmd_request_review(args, backend=["false"]), 0)
+
+        self.assertEqual(captured["task"]["assignee"],
+                         "claude-code:ArcBot:Arc-Code-Review")
+
 
 def test_review_role_candidates_prefer_canonical_before_alias(coord_backend, monkeypatch):
     from fulcra_coord import role_ops, routing_ops, schema
@@ -12278,6 +12356,13 @@ class TestReviewClassification(unittest.TestCase):
         t = self._routed_review("alive:h:r", routed_minutes_ago=20, priority="P1")
         self.assertEqual(cli._classify_review(t, self._presence("alive:h:r", 5), self.NOW),
                          "none")  # live, give it time
+
+    def test_manual_assignee_override_is_not_rerouted_by_stale_route(self):
+        from fulcra_coord import cli
+        t = self._routed_review("old:h:r", routed_minutes_ago=20, priority="P1")
+        t["assignee"] = "claude-code:ArcBot:Arc-Code-Review"
+        self.assertEqual(cli._classify_review(t, self._presence("old:h:r", 300), self.NOW),
+                         "none")
 
     def test_cap_reached_escalates(self):
         from fulcra_coord import cli
