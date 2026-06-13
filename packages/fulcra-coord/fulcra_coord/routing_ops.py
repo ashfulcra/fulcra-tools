@@ -452,6 +452,12 @@ def cmd_request_review(args: Any, backend: Optional[list[str]] = None) -> int:
         for a in pool
     ]
     winner = views.resolve_live_recipient(pool, presence, floor="idle", now=now)
+    if winner is None and override and pool:
+        # Explicit candidate-list is an operator directive, not a suggestion:
+        # route to it even when presence says below-floor. This is how the
+        # maintainer can intentionally hand work to a known reviewer whose
+        # listener/wake path is itself being debugged.
+        winner = pool[0]
     excluded = [s for s in snapshot if s["tier"] == "below-floor"]
     # Display form of the artifact: bare-number refs keep the "#<n>" convention
     # (backward compat with the old "Review PR #<n>", minus the hardcoded "PR ");
@@ -742,6 +748,11 @@ def _classify_review(task, presence, now):
     if route is None:
         return "none"
     assignee = route.get("to")
+    if task.get("assignee") and task.get("assignee") != assignee:
+        # A later direct assignment is a manual routing override. The route
+        # sub-log may lag that correction, so the sweep must not keep following
+        # an older route event and undo the explicit assignee.
+        return "none"
     routed_dt = views._parse_dt(route.get("at", ""))
     accepted_at = _review_accepted_by_assignee(task, assignee, routed_dt)
     if accepted_at is not None:

@@ -565,6 +565,84 @@ def _reconcile_rebuild_source_preserving_acks(
     return rebuild_source
 
 
+def _summaries_upload_would_clobber(candidate: dict[str, Any],
+                                    current: Any) -> Optional[str]:
+    """Return a reason when uploading ``candidate`` would rewind summaries.
+
+    Reconcile can run concurrently on stale hosts. The task files are the truth,
+    but views/summaries.json is a shared last-writer-wins file; an older host
+    must not replace a newer aggregate with one that drops open tasks or rolls
+    back per-task updates already visible on the bus.
+    """
+    if not isinstance(current, dict):
+        return None
+    current_summaries = current.get("summaries")
+    candidate_summaries = candidate.get("summaries")
+    if (not isinstance(current_summaries, list)
+            or not isinstance(candidate_summaries, list)):
+        return None
+    candidate_by_id = {
+        s.get("id"): s for s in candidate_summaries
+        if isinstance(s, dict) and s.get("id")
+    }
+    for cur in current_summaries:
+        if not isinstance(cur, dict) or not cur.get("id"):
+            continue
+        cid = cur["id"]
+        nxt = candidate_by_id.get(cid)
+        if nxt is None:
+            if cur.get("status") not in schema.TERMINAL_STATUSES:
+                return f"would drop open task {cid}"
+            continue
+        if _updated_at_key(cur) > _updated_at_key(nxt):
+            return f"would rewind task {cid} from {cur.get('updated_at')}"
+    return None
+
+
+def _merge_summaries_for_upload(candidate: dict[str, Any],
+                                current: Any) -> dict[str, Any]:
+    """Merge remote open/newer summaries into a rebuilt summaries candidate.
+
+    A patched host may see 715 task bodies while an unpatched stale host just
+    uploaded a fresh-but-truncated 620-task aggregate. Guard-only behavior
+    prevents clobbering, but it also prevents repair when the current remote
+    aggregate contains one open task this host failed to see. For summaries,
+    unioning open missing rows and taking the newer per-task row is safer than
+    either last-writer-wins or refusing to upload forever.
+    """
+    if not isinstance(current, dict):
+        return candidate
+    current_summaries = current.get("summaries")
+    candidate_summaries = candidate.get("summaries")
+    if (not isinstance(current_summaries, list)
+            or not isinstance(candidate_summaries, list)):
+        return candidate
+
+    by_id: dict[str, dict[str, Any]] = {
+        s.get("id"): s for s in candidate_summaries
+        if isinstance(s, dict) and s.get("id")
+    }
+    changed = False
+    for cur in current_summaries:
+        if not isinstance(cur, dict) or not cur.get("id"):
+            continue
+        cid = cur["id"]
+        nxt = by_id.get(cid)
+        if nxt is None:
+            if cur.get("status") not in schema.TERMINAL_STATUSES:
+                by_id[cid] = cur
+                changed = True
+            continue
+        if _updated_at_key(cur) > _updated_at_key(nxt):
+            by_id[cid] = cur
+            changed = True
+    if not changed:
+        return candidate
+    merged = dict(candidate)
+    merged["summaries"] = list(by_id.values())
+    return merged
+
+
 #: Wall-clock seconds of headroom the parity pass leaves before reconcile's
 #: deadline — the _RETENTION_DEADLINE_HEADROOM_SECONDS discipline applied to the
 #: parity sub-pass: probing one more task (a listing + K shard downloads) is
@@ -1962,6 +2040,9 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         _reconcile_rebuild_source_preserving_acks(
             all_tasks, backend=backend, summaries_view=summaries_view)
     )
+    if "summaries" in all_views:
+        all_views["summaries"] = _merge_summaries_for_upload(
+            all_views["summaries"], summaries_view)
     view_items = list(all_views.items())
 
     # Cache every view locally regardless of upload outcome — matches the prior
@@ -2023,6 +2104,18 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         if remaining < 1:
             return view_name, False
         vpath = _view_name_to_remote(view_name)
+        if view_name == "summaries":
+            current = summaries_view
+            clobber_reason = _summaries_upload_would_clobber(view_data, current)
+            if clobber_reason:
+                _warn(f"  summaries upload skipped: {clobber_reason}")
+                try:
+                    ops_log.log_op("reconcile", view_name,
+                                   status="view_upload_clobber_guard",
+                                   detail=clobber_reason)
+                except Exception:
+                    pass
+                return view_name, False
         # Treat a RAISING upload as a failed view, not an escape hatch: an
         # unguarded pool.map would re-raise out of cmd_reconcile, bypassing the
         # failures -> "preserve markers, return 1" path and crashing the
