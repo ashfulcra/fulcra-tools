@@ -424,11 +424,12 @@ def test_f3_load_all_tasks_confirmed_absent_index_is_not_degraded(
 def test_f3_reconcile_skips_view_rebuild_when_load_degraded(coord_backend,
                                                             monkeypatch,
                                                             tmp_path):
-    """THE F3 FAILURE SEQUENCE: a thin-cache host's heartbeat reconcile hits
-    an index read failure; _load_all_tasks silently degrades to its local
-    cache and the tick rebuilds + uploads ~all views from the truncated set —
-    and reconcile can never re-discover the dropped tasks. The degraded tick
-    must SKIP the view rebuild/upload phase and fail loudly instead."""
+    """THE F3 FAILURE SEQUENCE: a thin-cache host's heartbeat reconcile cannot
+    enumerate task files AND hits an index read failure; _load_all_tasks silently
+    degrades to its local cache and the tick rebuilds + uploads ~all views from
+    the truncated set — and reconcile can never re-discover the dropped tasks.
+    The degraded tick must SKIP the view rebuild/upload phase and fail loudly
+    instead."""
     victim = _seed_bus_with_victim(coord_backend)
     index_path = remote.view_remote_path("index")
     index_before = _store_file(tmp_path, index_path).read_text()
@@ -438,6 +439,7 @@ def test_f3_reconcile_skips_view_rebuild_when_load_degraded(coord_backend,
     cache.write_cached_task(t)
 
     _patch_download_none_for(monkeypatch, lambda p: p == index_path)
+    monkeypatch.setattr(remote, "list_files", lambda *a, **k: [])
 
     rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
     assert rc == 1, "a reconcile that can't see the bus must not report success"
