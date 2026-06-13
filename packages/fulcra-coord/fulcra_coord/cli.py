@@ -113,6 +113,7 @@ from .routing_ops import (
 # consumed by _loop_health_check here and by query/digest (which may not import
 # cli) — the single home for the top-level-shard filter.
 from .loop_ops import cmd_respond, load_loop_records, evidence_ids_for
+from .loop_snapshots import overlay_open_records_from_tasks
 # Operator situational-awareness output (digest push + health pull) extracted from
 # this file. Re-exported so the digest/health/install-digest dispatch, cmd_doctor's
 # _assess_fleet fold, and the test patch targets keep resolving. digest.py never
@@ -1109,11 +1110,20 @@ def _directive_parity_check(
             # A mapping failure on one record must not abort the whole sweep.
             continue
 
-        # Compare the mapped fields. directive_type / audience / status are exact;
-        # acked_by compares as SETS — the meaningful drift is the stored record
-        # MISSING an acker the expected (task/sub-log) set holds.
+        # Compare the mapped fields. directive_type / audience / status and the
+        # loop-state fields are exact; acked_by compares as SETS — the
+        # meaningful drift is the stored record MISSING an acker the expected
+        # (task/sub-log) set holds.
         drifted = False
-        for field in ("directive_type", "audience", "status"):
+        for field in (
+            "directive_type",
+            "audience",
+            "status",
+            "kind",
+            "state",
+            "expects_response",
+            "sla_hours",
+        ):
             if stored.get(field) != expected.get(field):
                 drifted = True
                 break
@@ -1138,6 +1148,7 @@ def _directive_parity_check(
 def _loop_health_check(
     *, backend: Optional[list[str]] = None,
     records: Optional[list[dict[str, Any]]] = None,
+    tasks: Optional[list[dict[str, Any]]] = None,
 ) -> dict:
     """Open/overdue coordination-loop counts for the health record (spec
     2026-06-09 Task 5).
@@ -1173,6 +1184,8 @@ def _loop_health_check(
             records = load_loop_records(backend=backend)
         except Exception:
             records = []   # report-only: an unreadable bus reads as "no loops"
+    records = overlay_open_records_from_tasks(
+        records, backend=backend, tasks=tasks)
     me = identity.resolve_agent(None)
     now = datetime.now(timezone.utc)
     evidence_ids = evidence_ids_for(me, records, now=now, backend=backend)
@@ -2340,8 +2353,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         try:
             if _deadline_spent("Loop-health check", headroom=30.0):
                 raise _SkipBestEffortCheck()
-            record["loop_health"] = _loop_health_check(backend=backend,
-                                                       records=loop_records)
+            record["loop_health"] = _loop_health_check(
+                backend=backend, records=loop_records, tasks=all_tasks)
         except _SkipBestEffortCheck:
             pass
         except Exception as _lhe:
