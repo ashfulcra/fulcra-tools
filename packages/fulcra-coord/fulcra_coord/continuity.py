@@ -129,6 +129,75 @@ def make_checkpoint(
     }
 
 
+def _artifact_ref(artifact: Any) -> str:
+    if isinstance(artifact, dict):
+        return str(
+            artifact.get("path")
+            or artifact.get("url")
+            or artifact.get("ref")
+            or artifact.get("remote_path")
+            or ""
+        )
+    return str(artifact or "")
+
+
+def _is_portable_artifact_ref(ref: str) -> bool:
+    if not ref:
+        return False
+    ref = ref.strip()
+    portable_prefixes = (
+        "http://",
+        "https://",
+        "fulcra-file:",
+        "continuity-latest:",
+        "coord-task-id:",
+        "repo=",
+        "repo:",
+    )
+    if ref.startswith(portable_prefixes):
+        return True
+    # Fulcra Files paths are remote bus paths, not host-local filesystem paths.
+    if ref.startswith(f"{remote_root().rstrip('/')}/"):
+        return True
+    return False
+
+
+def quality_warnings(checkpoint: dict[str, Any]) -> list[str]:
+    """Return checkpoint quality warnings for cold-start handoff usefulness.
+
+    Coord snapshots are best-effort and must not fail hook paths, but they
+    should still say when they are thin. These warnings are derived from the
+    checkpoint body so the portable checkpoint schema stays identical to the
+    standalone fulcra-continuity package.
+    """
+    warnings: list[str] = []
+    if not str(checkpoint.get("objective") or "").strip():
+        warnings.append("missing objective/current state")
+    if not checkpoint.get("next_actions"):
+        warnings.append("missing concrete next_actions")
+    identity = checkpoint.get("identity") or {}
+    for key in ("workstream_id", "agent_id", "coord_task_id"):
+        if not str(identity.get(key) or "").strip():
+            warnings.append(f"missing identity.{key}")
+    artifacts = checkpoint.get("artifacts") or []
+    if not artifacts:
+        warnings.append("missing portable artifacts")
+    else:
+        nonportable = [
+            ref for ref in (_artifact_ref(item) for item in artifacts)
+            if not _is_portable_artifact_ref(ref)
+        ]
+        if nonportable:
+            warnings.append(
+                "artifact refs may be local-only: " + ", ".join(nonportable[:3])
+            )
+    if not checkpoint.get("decisions"):
+        warnings.append("thin checkpoint: no decisions recorded")
+    if not checkpoint.get("open_questions"):
+        warnings.append("thin checkpoint: no open_questions recorded")
+    return warnings
+
+
 def write_checkpoint(
     checkpoint: dict[str, Any],
     *,
