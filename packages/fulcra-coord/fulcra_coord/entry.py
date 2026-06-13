@@ -79,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Declare this agent can review PRs (sugar for --role review)")
     sp.add_argument("--role", action="append", default=None, metavar="ROLE",
                     help="Declare a capability/role (repeatable), e.g. --role review")
+    sp.add_argument("--host-profile", dest="host_profile", default=None,
+                    choices=["always-on", "intermittent"],
+                    help="Declare this host/agent as always-on or intermittent")
+    sp.add_argument("--maintains", action="append", default=None,
+                    metavar="AGENT_OR_PREFIX",
+                    help="Declare an agent/runtime prefix this presence record maintains; repeatable")
     sp.add_argument("--clear-roles", dest="clear_roles", action="store_true",
                     help="EXPLICITLY drop previously declared roles (a bare "
                          "connect preserves them; 2026-06-11 bug hunt C4)")
