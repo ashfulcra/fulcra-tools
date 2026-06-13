@@ -290,7 +290,8 @@ def _read_sublog_shards(
 
 
 def read_directive_acks(
-    directive_id: str, *, backend: Optional[list[str]] = None
+    directive_id: str, *, backend: Optional[list[str]] = None,
+    timeout: Optional[float] = None,
 ) -> list[str]:
     """The sorted UNION of agents who have acked a directive (list the acks prefix).
 
@@ -300,7 +301,7 @@ def read_directive_acks(
     missing/empty prefix or any read failure -> ``[]`` (never raises)."""
     try:
         records = remote.list_json(remote.directive_acks_prefix(directive_id),
-                                   backend=backend)
+                                   backend=backend, timeout=timeout)
     except Exception:
         return []
     agents: set[str] = set()

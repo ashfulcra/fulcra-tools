@@ -6681,7 +6681,9 @@ def test_notify_inbox_refreshes_reviewer_presence_for_routing(coord_backend):
         assert routing_ops.cmd_request_review(rr, backend=coord_backend) == 0
     report = json.loads(buf.getvalue())
     assert report["winner"] == agent
-    assert report["snapshot"] == [{"agent": agent, "tier": "live"}]
+    assert report["snapshot"] == [
+        {"agent": agent, "source": "explicit", "tier": "live"}
+    ]
 
 
 class TestNotifyBlockedOnYou(unittest.TestCase):
@@ -10449,6 +10451,49 @@ class TestReconcileParallelUpload(unittest.TestCase):
         self.assertLessEqual(total_calls, 8,
                              "queued views past the deadline must not start uploads")
 
+    def test_parallel_upload_does_not_wait_forever_for_wedged_worker(self):
+        """The global reconcile deadline must bound collection of upload futures.
+
+        A transport call can wedge despite the per-call timeout argument (live
+        repro: foreground reconcile loaded tasks, then sat silent past its
+        deadline). Reconcile should mark that view failed and return instead of
+        blocking in ThreadPoolExecutor.map waiting for every worker.
+        """
+        import threading
+        import time
+        from fulcra_coord.cli import cmd_reconcile
+
+        views_to_upload = {"index": {"tasks": []}, "active": {"tasks": []}}
+        release = threading.Event()
+
+        def upload_json(data, path, *, backend=None, timeout=None):
+            if path.endswith("/index.json"):
+                release.wait(10)
+                return False
+            return True
+
+        old_timeout = os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS")
+        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "1"
+        started = time.monotonic()
+        try:
+            with patch("fulcra_coord.cli._load_all_tasks", return_value=[]), \
+                 patch("fulcra_coord.cli.views.build_all_views",
+                       return_value=views_to_upload), \
+                 patch("fulcra_coord.cli.remote.upload_json",
+                       side_effect=upload_json), \
+                 patch("fulcra_coord.cli._reconcile_presence"):
+                rc = cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+        finally:
+            release.set()
+            if old_timeout is None:
+                del os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"]
+            else:
+                os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = old_timeout
+
+        self.assertEqual(rc, 1)
+        self.assertLess(time.monotonic() - started, 5,
+                        "reconcile must not wait for the wedged upload worker")
+
 
 class TestReconcileUploadRetry(unittest.TestCase):
     """Bounded in-tick retry for reconcile view uploads (burst-throttling fix).
@@ -11043,17 +11088,27 @@ class TestRoutingEvents(unittest.TestCase):
 
 
 class TestReviewPool(unittest.TestCase):
-    def test_pool_seeds_from_config_even_when_undeclared(self):
+    def test_pool_uses_legacy_seeds_after_live_capability(self):
         from fulcra_coord import cli, routing_ops as ro
-        with patch.object(ro, "_review_seeds", lambda a: ["seed:h:r"]):
+        with patch.object(ro, "_review_role_candidates", return_value=([], {})), \
+             patch.object(ro, "_review_seeds", lambda a: ["seed:h:r"]):
             presence = [{"agent": "x:y:z", "capabilities": ["review"]}]
             pool = cli._review_pool(author="who:h:r", presence=presence)
-            self.assertEqual(pool[0], "seed:h:r")
-            self.assertIn("x:y:z", pool)
+            self.assertEqual(pool, ["x:y:z", "seed:h:r"])
+
+    def test_pool_prefers_role_holders_before_capability_and_seed(self):
+        from fulcra_coord import cli, routing_ops as ro
+        with patch.object(ro, "_review_role_candidates",
+                          return_value=(["role:h:r"], {"role:h:r": "role:review"})), \
+             patch.object(ro, "_review_seeds", lambda a: ["seed:h:r"]):
+            presence = [{"agent": "cap:h:r", "capabilities": ["review"]}]
+            pool = cli._review_pool(author="who:h:r", presence=presence)
+            self.assertEqual(pool, ["role:h:r", "cap:h:r", "seed:h:r"])
 
     def test_pool_empty_seed_is_capability_only(self):
         from fulcra_coord import cli, routing_ops as ro
-        with patch.object(ro, "_review_seeds", lambda a: []):
+        with patch.object(ro, "_review_role_candidates", return_value=([], {})), \
+             patch.object(ro, "_review_seeds", lambda a: []):
             presence = [{"agent": "rev:h:r", "capabilities": ["review"]},
                         {"agent": "no:h:r", "capabilities": []}]
             pool = cli._review_pool(author="who:h:r", presence=presence)
@@ -11061,7 +11116,8 @@ class TestReviewPool(unittest.TestCase):
 
     def test_pool_excludes_non_review_capable_and_devops(self):
         from fulcra_coord import cli, routing_ops as ro
-        with patch.object(ro, "_review_seeds", lambda a: []):
+        with patch.object(ro, "_review_role_candidates", return_value=([], {})), \
+             patch.object(ro, "_review_seeds", lambda a: []):
             presence = [
                 {"agent": "openclaw:discord:devops", "last_seen": "...", "capabilities": []},
                 {"agent": "rev:h:r", "last_seen": "...", "capabilities": ["review"]},
@@ -11072,11 +11128,76 @@ class TestReviewPool(unittest.TestCase):
 
     def test_pool_no_duplicate_when_seed_also_declares(self):
         from fulcra_coord import cli, routing_ops as ro
-        with patch.object(ro, "_review_seeds", lambda a: ["dup:h:r"]):
+        with patch.object(ro, "_review_role_candidates", return_value=([], {})), \
+             patch.object(ro, "_review_seeds", lambda a: ["dup:h:r"]):
             presence = [{"agent": "dup:h:r", "last_seen": "...",
                          "capabilities": ["review"]}]
             pool = cli._review_pool(author="who:h:r", presence=presence)
             self.assertEqual(pool.count("dup:h:r"), 1)
+
+
+def test_review_role_candidates_prefer_canonical_before_alias(coord_backend, monkeypatch):
+    from fulcra_coord import role_ops, routing_ops, schema
+    monkeypatch.delenv("FULCRA_COORD_REVIEW_ROLE", raising=False)
+    role_ops.upsert_role(schema.make_role("review", "canonical"),
+                         backend=coord_backend)
+    role_ops.upsert_role(schema.make_role("reviewer", "alias"),
+                         backend=coord_backend)
+    role_ops.claim_role("review", "canon:h:r", backend=coord_backend)
+    role_ops.claim_role("reviewer", "alias:h:r", backend=coord_backend)
+    now = datetime.now(timezone.utc)
+    fresh = now.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    older = (now - timedelta(minutes=10)).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+    presence = [
+        {"agent": "alias:h:r", "last_seen": fresh, "capabilities": ["reviewer"]},
+        {"agent": "canon:h:r", "last_seen": older, "capabilities": ["review"]},
+    ]
+    pool, sources = routing_ops._review_candidate_sources(
+        "author:h:r", presence, backend=coord_backend, now=now)
+    assert pool[:2] == ["canon:h:r", "alias:h:r"]
+    assert sources["canon:h:r"] == "role:review"
+    assert sources["alias:h:r"] == "role-alias:reviewer"
+
+
+def test_find_open_review_for_artifact_matches_repo_and_skips_terminal(monkeypatch):
+    from fulcra_coord import routing_ops
+    tasks = [
+        {"id": "done", "status": "done", "tags": ["kind:review"],
+         "pr": "https://github.com/o/r/pull/42", "repo": "o/r",
+         "updated_at": "2026-06-12T00:00:00Z"},
+        {"id": "wrong-repo", "status": "proposed", "tags": ["kind:review"],
+         "pr": "42", "repo": "other/r", "updated_at": "2026-06-12T00:01:00Z"},
+        {"id": "open", "status": "waiting", "tags": ["kind:review"],
+         "pr": "https://github.com/o/r/pull/42", "repo": "o/r",
+         "updated_at": "2026-06-12T00:02:00Z"},
+    ]
+    monkeypatch.setattr(routing_ops, "_load_all_tasks", lambda backend=None: tasks)
+    by_id = {task["id"]: task for task in tasks}
+    monkeypatch.setattr(
+        routing_ops, "_cache_remote_task",
+        lambda task_id, backend=None: by_id.get(task_id))
+    got = routing_ops._find_open_review_for_artifact(
+        "42", "o/r", backend=["false"])
+    assert got["id"] == "open"
+
+
+def test_find_open_review_refreshes_cached_candidate_before_dedup(monkeypatch):
+    from fulcra_coord import routing_ops
+    cached = [
+        {"id": "stale", "status": "proposed", "tags": ["kind:review"],
+         "pr": "42", "repo": "o/r", "updated_at": "2026-06-12T00:00:00Z"},
+    ]
+    fresh_terminal = {
+        "id": "stale", "status": "done", "tags": ["kind:review"],
+        "pr": "42", "repo": "o/r", "updated_at": "2026-06-12T00:01:00Z",
+    }
+    monkeypatch.setattr(routing_ops, "_load_all_tasks", lambda backend=None: cached)
+    monkeypatch.setattr(
+        routing_ops, "_cache_remote_task",
+        lambda task_id, backend=None: fresh_terminal)
+    assert routing_ops._find_open_review_for_artifact(
+        "42", "o/r", backend=["false"]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -11142,6 +11263,136 @@ class TestRequestReview(unittest.TestCase):
         self.assertEqual(len(routed), 1)
         self.assertIn("route_id", routed[0])
         self.assertEqual(routed[0]["to"], "codex:Mac.localdomain:main")
+
+    def test_note_is_carried_to_review_task(self):
+        from fulcra_coord.cli import cmd_request_review
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "codex:Mac.localdomain:main",
+                                   "last_seen": now_ls, "capabilities": ["review"]}])
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        note = "Re-review head abc123: addressed Arc outage fallback ask."
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.routing_ops._write_task_and_views", side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_agent", return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None,
+                                         note=note)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertIn(note, captured["task"]["current_summary"])
+        self.assertEqual(captured["task"]["next_action"], note)
+
+    def test_dry_run_reports_candidate_sources(self):
+        from fulcra_coord.cli import cmd_request_review
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        agg = self._presence_agg([{"agent": "role:h:r",
+                                   "last_seen": now_ls, "capabilities": []}])
+        printed = {}
+        with patch("fulcra_coord.cli.remote.download_json", return_value=agg), \
+             patch("fulcra_coord.routing_ops._review_candidate_sources",
+                   return_value=(["role:h:r"], {"role:h:r": "role:review"})), \
+             patch("fulcra_coord.routing_ops._find_open_review_for_artifact",
+                   return_value=None), \
+             patch("fulcra_coord.routing_ops._print_json",
+                   side_effect=lambda payload: printed.update(payload=payload)), \
+             patch("fulcra_coord.cli.identity.resolve_agent",
+                   return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=True,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(printed["payload"]["sources"]["role:h:r"], "role:review")
+        self.assertEqual(printed["payload"]["snapshot"][0]["source"], "role:review")
+
+    def test_existing_open_review_attaches_without_new_route(self):
+        from fulcra_coord.cli import cmd_request_review
+        existing = {
+            "id": "TASK-20260612-review-abc12345",
+            "status": "proposed",
+            "title": "Review #42",
+            "owner_agent": "author:h:r",
+            "assignee": "reviewer:h:r",
+            "tags": ["kind:review"],
+            "events": [],
+            "workstream": "fulcra-tools",
+            "pr": "42",
+            "repo": "fulcra-tools",
+            "updated_at": "2026-06-12T00:00:00.000000Z",
+        }
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   return_value=self._presence_agg([])), \
+             patch("fulcra_coord.routing_ops._find_open_review_for_artifact",
+                   return_value=existing), \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=fake_write), \
+             patch("fulcra_coord.routing_ops.directives", create=True), \
+             patch("fulcra_coord.cli.identity.resolve_agent",
+                   return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(pr="42", repo="fulcra-tools", dry_run=False,
+                                         candidate_list=None, format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["task"]["id"], existing["id"])
+        self.assertEqual(captured["task"]["assignee"], "reviewer:h:r")
+        self.assertEqual(captured["task"]["events"][-1]["reason"],
+                         "duplicate request attached to existing open review")
+
+    def test_explicit_candidate_list_bypasses_existing_review_dedup(self):
+        from fulcra_coord.cli import cmd_request_review
+        now_ls = datetime.now(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+        existing = {
+            "id": "TASK-20260612-review-existing",
+            "status": "proposed",
+            "title": "Review #42",
+            "owner_agent": "author:h:r",
+            "assignee": "reviewer-a:h:r",
+            "tags": ["kind:review"],
+            "events": [],
+            "workstream": "fulcra-tools",
+            "pr": "42",
+            "repo": "fulcra-tools",
+            "updated_at": "2026-06-12T00:00:00.000000Z",
+        }
+        captured = {}
+
+        def fake_write(task, backend=None, command="write", lifecycle=None):
+            captured["task"] = task
+            return True
+
+        with patch("fulcra_coord.cli.remote.download_json",
+                   return_value=self._presence_agg([
+                       {"agent": "reviewer-b:h:r", "last_seen": now_ls,
+                        "capabilities": ["review"]},
+                   ])), \
+             patch("fulcra_coord.routing_ops._find_open_review_for_artifact",
+                   return_value=existing), \
+             patch("fulcra_coord.routing_ops._attach_existing_review") as attach, \
+             patch("fulcra_coord.routing_ops._write_task_and_views",
+                   side_effect=fake_write), \
+             patch("fulcra_coord.cli.identity.resolve_agent",
+                   return_value="claude-code:h:r"):
+            args = types.SimpleNamespace(
+                pr="42", repo="fulcra-tools", dry_run=False,
+                candidate_list="reviewer-b:h:r", format="json", agent=None)
+            rc = cmd_request_review(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        attach.assert_not_called()
+        self.assertNotEqual(captured["task"]["id"], existing["id"])
+        self.assertEqual(captured["task"]["assignee"], "reviewer-b:h:r")
 
     def test_miss_escalates_via_block_on_user(self):
         from fulcra_coord.cli import cmd_request_review
@@ -12034,6 +12285,64 @@ class TestReconcileHealthWrite(unittest.TestCase):
              patch("fulcra_coord.cli.remote.list_files", return_value=[]):
             rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
         self.assertEqual(rc, 0, "a health-write failure must never fail the tick")
+
+    def test_health_subpasses_skip_after_deadline_spent(self):
+        """Report-only health checks must not overrun a successful view rebuild."""
+        import time
+        from fulcra_coord.cli import cmd_reconcile
+
+        health_records = []
+
+        def _upload(data, path, **kw):
+            if "/health/" in path:
+                health_records.append(data)
+            return True
+
+        def _slow_event_parity(*args, **kwargs):
+            time.sleep(2.5)
+            return {"checked": True}
+
+        old_timeout = os.environ.get("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS")
+        os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = "7"
+        try:
+            with patch("fulcra_coord.cli._load_all_tasks", return_value=[]), \
+                 patch("fulcra_coord.cli.views.build_all_views",
+                       return_value={"index": {"tasks": []}}), \
+                 patch("fulcra_coord.cli.remote.upload_json", side_effect=_upload), \
+                 patch("fulcra_coord.cli.remote.download_json", return_value=None), \
+                 patch("fulcra_coord.cli._reconcile_presence",
+                       return_value={"agents": []}), \
+                 patch("fulcra_coord.cli._sweep_review_routes"), \
+                 patch("fulcra_coord.cli._run_retention",
+                       return_value={"skipped": True}), \
+                 patch("fulcra_coord.cli._event_parity_check",
+                       side_effect=_slow_event_parity) as event_parity, \
+                 patch("fulcra_coord.cli._event_dual_write_health") as dual_write, \
+                 patch("fulcra_coord.cli.load_loop_records") as load_loops, \
+                 patch("fulcra_coord.cli._directive_parity_check") as directive, \
+                 patch("fulcra_coord.cli._loop_health_check") as loop_health, \
+                 patch("fulcra_coord.cli._role_health_check") as role_health, \
+                 patch("fulcra_coord.cli._undelivered_directive_check") as undelivered:
+                rc = cmd_reconcile(self.types.SimpleNamespace(), backend=["false"])
+        finally:
+            if old_timeout is None:
+                del os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"]
+            else:
+                os.environ["FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS"] = old_timeout
+
+        self.assertEqual(rc, 0)
+        event_parity.assert_called_once()
+        dual_write.assert_called_once()
+        load_loops.assert_not_called()
+        directive.assert_not_called()
+        loop_health.assert_not_called()
+        role_health.assert_not_called()
+        undelivered.assert_not_called()
+        self.assertEqual(len(health_records), 1)
+        self.assertEqual(health_records[0]["event_parity"], {"checked": True})
+        self.assertIn("Loop-record load", health_records[0]["skipped_checks"])
+        self.assertIn("Undelivered-directive check",
+                      health_records[0]["skipped_checks"])
 
 
 class TestUnroutedPrReviews(unittest.TestCase):
