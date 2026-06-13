@@ -32,6 +32,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from .candidates import append_candidate, candidate_file, mark_captured
 from .capture import capture_signal
 from .compileprefs import compile_signals
 from .consent import disclosure_signal, filter_for_audience
@@ -247,6 +248,76 @@ def cmd_capture_batch(args, api, outbox_dir, now) -> int:
     return 0
 
 
+def _notice_spec(args) -> dict:
+    spec = {
+        "key": args.key,
+        "value": json.loads(args.value),
+        "strength": args.strength,
+        "kind": args.kind,
+        "scope": args.scope,
+        "confidence": args.confidence,
+        "half_life_days": args.half_life,
+    }
+    if args.agent:
+        spec["agent"] = args.agent
+    if args.supersedes:
+        spec["supersedes"] = args.supersedes
+    if args.session:
+        spec["session"] = args.session
+    normalized, err = _normalize_batch_spec(spec, 1, args)
+    if err:
+        raise ValueError(err)
+    return normalized or {}
+
+
+def cmd_notice(args, api, outbox_dir, now) -> int:
+    try:
+        path = candidate_file(args.platform, args.session, root=args.candidate_dir)
+        spec = _notice_spec(args)
+        count = append_candidate(path, spec)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        print(f"fulcra-prefs: could not write candidate: {e}", file=sys.stderr)
+        return 2
+    print(f"queued {count} candidate(s) in {path}", file=sys.stderr)
+    return 0
+
+
+def cmd_candidate_path(args) -> int:
+    try:
+        path = candidate_file(args.platform, args.session, root=args.candidate_dir)
+    except ValueError as e:
+        print(f"fulcra-prefs: {e}", file=sys.stderr)
+        return 2
+    print(path)
+    return 0
+
+
+def cmd_drain_candidates(args, api, outbox_dir, now) -> int:
+    try:
+        path = candidate_file(args.platform, args.session, root=args.candidate_dir)
+    except ValueError as e:
+        print(f"fulcra-prefs: {e}", file=sys.stderr)
+        return 2
+    if not path.is_file():
+        print(f"no candidates at {path}", file=sys.stderr)
+        return 0
+    rc = cmd_capture_batch(
+        argparse.Namespace(file=str(path), platform=args.platform,
+                           agent=args.agent, session=args.session),
+        api, outbox_dir, now,
+    )
+    if rc != 0:
+        return rc
+    try:
+        captured = mark_captured(path)
+    except OSError as e:
+        print(f"fulcra-prefs: warning: captured but could not rename {path}: {e}",
+              file=sys.stderr)
+        return 0
+    print(f"drained candidates -> {captured}", file=sys.stderr)
+    return 0
+
+
 def cmd_compile(args, api, outbox_dir, now) -> int:
     store = _store(api)
     meta = _require_meta(store)
@@ -403,6 +474,35 @@ def _parser() -> argparse.ArgumentParser:
     cb.add_argument("--agent")
     cb.add_argument("--session")
 
+    n = sub.add_parser("notice",
+                       help="queue one auto-capture candidate for lifecycle drain")
+    n.add_argument("--key", required=True)
+    n.add_argument("--value", required=True, help="JSON value")
+    n.add_argument("--strength", type=float, required=True)
+    n.add_argument("--kind", default="preference",
+                   choices=["preference", "fact", "consent"])
+    n.add_argument("--scope", default="global")
+    n.add_argument("--confidence", type=float, default=1.0)
+    n.add_argument("--half-life", type=float, default=90.0, dest="half_life")
+    n.add_argument("--platform", required=True)
+    n.add_argument("--session", required=True)
+    n.add_argument("--agent")
+    n.add_argument("--supersedes")
+    n.add_argument("--candidate-dir")
+
+    cp = sub.add_parser("candidate-path",
+                        help="print the auto-capture candidate queue path")
+    cp.add_argument("--platform", required=True)
+    cp.add_argument("--session", required=True)
+    cp.add_argument("--candidate-dir")
+
+    dc = sub.add_parser("drain-candidates",
+                        help="capture and mark one session candidate queue")
+    dc.add_argument("--platform", required=True)
+    dc.add_argument("--session", required=True)
+    dc.add_argument("--agent")
+    dc.add_argument("--candidate-dir")
+
     sub.add_parser("compile")
 
     g = sub.add_parser("get")
@@ -448,6 +548,9 @@ def run(argv, api, outbox_dir, now) -> int:
     handlers = {"onboard": lambda: cmd_onboard(args, api, now),
                 "capture": lambda: cmd_capture(args, api, outbox_dir, now),
                 "capture-batch": lambda: cmd_capture_batch(args, api, outbox_dir, now),
+                "notice": lambda: cmd_notice(args, api, outbox_dir, now),
+                "candidate-path": lambda: cmd_candidate_path(args),
+                "drain-candidates": lambda: cmd_drain_candidates(args, api, outbox_dir, now),
                 "compile": lambda: cmd_compile(args, api, outbox_dir, now),
                 "get": lambda: cmd_get(args, api, outbox_dir, now),
                 "consent": lambda: cmd_consent(args, api, outbox_dir, now),

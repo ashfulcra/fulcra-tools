@@ -149,11 +149,10 @@ def test_capture_hook_uses_session_candidate_file_and_marks_captured(tmp_path):
     script = (tmp_path / "fulcra-prefs-hooks/capture-candidates.sh").read_text()
 
     assert "$PLATFORM/$SID.json" in script
-    assert "capture-batch --file" in script
+    assert "drain-candidates" in script
     assert "--platform \"$PLATFORM\"" in script
     assert "--session \"$SID\"" in script
     assert "case \"$SID\"" in script
-    assert ".captured" in script
 
 
 def test_cli_install_hooks_dry_run(fake_api, tmp_path, capsys):

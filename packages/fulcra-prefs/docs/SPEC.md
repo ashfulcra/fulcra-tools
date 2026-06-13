@@ -93,6 +93,7 @@ created at onboard, tagged `fulcra-prefs`; UUID cached in `prefs/meta.json`
 | `prefs/compiled.json` | global compiled doc |
 | `prefs/platforms/<p>.json` | per-platform merged views |
 | `prefs/consent.json` | grants |
+| `~/.local/state/fulcra-prefs/candidates/<platform>/<session>.json` | local auto-capture candidates awaiting lifecycle drain |
 
 History/audit = the file library's native versioning (`file stat`).
 
@@ -138,11 +139,20 @@ work, derived rather than built.
 
 - **CLI** (`fulcra-prefs`): `onboard`, `capture`, `compile`, `get [--for
   <audience>] [--platform <p>]`, `solve`, `consent grant|revoke|list`,
-  `inject --platform <p>`.
-- **Claude Code adapter (first):** SessionStart hook runs `fulcra-prefs
-  inject --platform claude-code` → compiled block as session context.
-- **Codex:** managed block in AGENTS.md. **ChatGPT (tier 2):** skill recipe —
-  download compiled doc into custom instructions; capture via ingest POST.
+  `inject --platform <p>`, `notice`, `candidate-path`, `drain-candidates`.
+- **Candidate queue:** CLI-capable agents call `notice` during a session to append
+  durable candidates; lifecycle hooks call `drain-candidates` to ingest and mark
+  the queue `.captured`.
+- **Claude Code adapter:** SessionStart hook runs `compile` and
+  `inject --platform claude-code`; PreCompact and Stop drain candidates.
+- **Codex adapter:** SessionStart hook runs `compile` and
+  `inject --platform codex`; PreCompact drains candidates. Stop is turn-scoped
+  in current Codex, so it is not used for draining.
+- **ChatGPT / Claude (tier 2):** app/action/MCP or raw-HTTP bridge reads compiled
+  docs and posts signals. These platforms do not provide deterministic local
+  lifecycle hooks.
+- **OpenClaw / Hermes:** use their own lifecycle surfaces to call `inject`,
+  `notice`, and `drain-candidates`; OpenClaw should key sessions by `sessionKey`.
 - **Skill:** SKILL.md + references: tier routing, the tier-2 HTTP recipes,
   and capture heuristics (capture on explicit "remember…", corrections, and
   user-confirmed repeated patterns — not silent bulk inference).
@@ -171,7 +181,7 @@ docs, single participant).
 ## v1 cut-line
 
 **In:** everything above. **Out:** MCP write path (platform gap, filed),
-cross-user doc sharing, ChatGPT auto-injection, incremental compile, cron
-installer (documented only). Isolation: all work in `packages/fulcra-prefs/**`
-on branch `claude-code/fulcra-prefs`; PR + adversarial review per the global
-rule (reviewer: Ashs-MBP-Work:Codex-Review-Workbook).
+cross-user doc sharing, deterministic ChatGPT lifecycle hooks, incremental
+compile, cron installer (documented only). Isolation: all work in
+`packages/fulcra-prefs/**` on branch `claude-code/fulcra-prefs`; PR +
+adversarial review per the global rule.

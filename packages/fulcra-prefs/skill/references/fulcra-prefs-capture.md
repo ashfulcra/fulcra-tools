@@ -44,6 +44,9 @@ conservative rules above. The safe pattern:
    If platform hooks are installed, use the durable drain path instead of an
    ad-hoc temp file:
    `~/.local/state/fulcra-prefs/candidates/<platform>/<session_id>.json`.
+   The easiest way to append to that file is:
+   `fulcra-prefs notice --platform <platform> --session <session_id> --key <key>
+   --value '<json>' --strength <n> --confidence <n>`.
    Claude Code drains that file on `PreCompact`/`Stop`; Codex drains it on
    `PreCompact` because Codex `Stop` fires every turn.
 4. **Still never auto-capture** unconfirmed *sensitive* data (credentials,

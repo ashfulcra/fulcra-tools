@@ -81,10 +81,9 @@ case "$SID" in */*|*..*) exit 0;; esac
 ROOT="${{FULCRA_PREFS_CANDIDATE_DIR:-$HOME/.local/state/fulcra-prefs/candidates}}"
 FILE="$ROOT/$PLATFORM/$SID.json"
 [ -f "$FILE" ] || exit 0
-"$FULCRA_PREFS" capture-batch --file "$FILE" --platform "$PLATFORM" --session "$SID" >/dev/null 2>&1
+"$FULCRA_PREFS" drain-candidates --platform "$PLATFORM" --session "$SID" >/dev/null 2>&1
 RC=$?
 [ "$RC" -eq 0 ] || exit 0
-mv "$FILE" "$FILE.captured" >/dev/null 2>&1 || rm -f "$FILE" >/dev/null 2>&1
 exit 0
 """
 
