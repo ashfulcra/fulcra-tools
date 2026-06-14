@@ -393,7 +393,7 @@ def cmd_get(args, api, outbox_dir, now) -> int:
         doc = store.read_json(COMPILED_PATH)
     doc = doc or {"v": 1, "compiled_at": now.isoformat(), "keys": {}}
     if args.audience:
-        grants = (store.read_json(CONSENT_PATH) or {"grants": []})["grants"]
+        grants = (store.read_json(CONSENT_PATH) or {}).get("grants", [])
         doc = filter_for_audience(doc, grants, args.audience, now)
         meta = store.read_json(META_PATH)
         if meta and doc["keys"]:
@@ -414,6 +414,7 @@ def cmd_get(args, api, outbox_dir, now) -> int:
 def cmd_consent(args, api, outbox_dir, now) -> int:
     store = _store(api)
     consent = store.read_json(CONSENT_PATH) or {"v": 1, "grants": []}
+    consent.setdefault("grants", [])  # tolerate a legacy/partial file w/o 'grants'
     if args.consent_action == "grant":
         consent["grants"].append({"key_glob": args.key_glob,
                                   "audience": args.audience,
@@ -425,8 +426,8 @@ def cmd_consent(args, api, outbox_dir, now) -> int:
     elif args.consent_action == "revoke":
         before = len(consent["grants"])
         consent["grants"] = [g for g in consent["grants"]
-                             if not (g["audience"] == args.audience
-                                     and g["key_glob"] == args.key_glob)]
+                             if not (g.get("audience") == args.audience
+                                     and g.get("key_glob") == args.key_glob)]
         store.write_json(CONSENT_PATH, consent)
         print(f"revoked {before - len(consent['grants'])} grant(s)", file=sys.stderr)
     else:
