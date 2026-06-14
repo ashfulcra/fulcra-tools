@@ -9,6 +9,35 @@ from .schema import SchemaError, canonical_json, normalize_note_path
 
 
 WIKILINK_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+FENCE_RE = re.compile(r"^\s*(?P<marker>`{3,}|~{3,})")
+INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _fence_marker(line: str) -> tuple[str, int] | None:
+    match = FENCE_RE.match(line)
+    if not match:
+        return None
+    marker = match.group("marker")
+    return marker[0], len(marker)
+
+
+def _strip_code(markdown: str) -> str:
+    """Drop fenced code blocks and inline code spans so [[links]] shown as
+    examples (in docs) don't become phantom backlinks / rename targets."""
+    out: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in markdown.splitlines():
+        marker = _fence_marker(line)
+        if marker is not None and fence is None:
+            fence = marker
+            continue
+        if marker is not None and fence is not None and marker[0] == fence[0] and marker[1] >= fence[1]:
+            fence = None
+            continue
+        if fence is not None:
+            continue
+        out.append(INLINE_CODE_RE.sub(" ", line))
+    return "\n".join(out)
 
 
 @dataclass(frozen=True)
@@ -22,7 +51,7 @@ class RenamePlan:
 def extract_wikilinks(markdown: str) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
-    for match in WIKILINK_RE.finditer(markdown):
+    for match in WIKILINK_RE.finditer(_strip_code(markdown)):
         try:
             target = normalize_note_path(match.group("target").strip())
         except SchemaError:
@@ -96,4 +125,29 @@ def _rewrite_links(markdown: str, source: str, destination: str) -> str:
         suffix = inner[len(match.group("target")):]
         return "[[" + dest_stem + suffix + "]]"
 
-    return WIKILINK_RE.sub(repl, markdown)
+    # Rewrite only real links: skip fenced code blocks entirely and inline code
+    # spans within a line, so [[source]] shown as an example stays verbatim.
+    out: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in markdown.splitlines(keepends=True):
+        marker = _fence_marker(line.rstrip("\n"))
+        if marker is not None and fence is None:
+            fence = marker
+            out.append(line)
+            continue
+        if marker is not None and fence is not None and marker[0] == fence[0] and marker[1] >= fence[1]:
+            fence = None
+            out.append(line)
+            continue
+        if fence is not None:
+            out.append(line)
+            continue
+        last = 0
+        pieces: list[str] = []
+        for span in INLINE_CODE_RE.finditer(line):
+            pieces.append(WIKILINK_RE.sub(repl, line[last:span.start()]))
+            pieces.append(span.group(0))   # inline code span unchanged
+            last = span.end()
+        pieces.append(WIKILINK_RE.sub(repl, line[last:]))
+        out.append("".join(pieces))
+    return "".join(out)
