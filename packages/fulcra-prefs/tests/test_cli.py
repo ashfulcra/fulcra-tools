@@ -425,3 +425,27 @@ def test_successful_capture_spools_when_cache_write_fails(fake_api, tmp_path, ca
     out = json.loads(capsys.readouterr().out)
     assert "dining.cuisine.thai" in out["keys"]
     assert Outbox(outbox_dir).pending() == []
+
+
+def test_capture_invalid_json_value_returns_2(env):
+    """capture --value with malformed JSON should return rc 2, not a traceback."""
+    call, *_ = env
+    assert call("capture", "--key", "k", "--value", "not-json",
+                "--strength", "0.5", "--platform", "claude-code") == 2
+
+
+def test_solve_missing_options_file_returns_2(env, tmp_path):
+    call, *_ = env
+    parts = tmp_path / "p.json"
+    parts.write_text("{}")
+    assert call("solve", "--options", str(tmp_path / "nope.json"),
+                "--participants", str(parts)) == 2
+
+
+def test_solve_invalid_json_file_returns_2(env, tmp_path):
+    call, *_ = env
+    opt = tmp_path / "o.json"
+    opt.write_text("not json")
+    parts = tmp_path / "p.json"
+    parts.write_text("{}")
+    assert call("solve", "--options", str(opt), "--participants", str(parts)) == 2

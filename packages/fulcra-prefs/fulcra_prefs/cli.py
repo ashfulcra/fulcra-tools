@@ -170,9 +170,14 @@ def cmd_capture(args, api, outbox_dir, now) -> int:
     meta = _require_meta(store)
     if not meta:
         return 2
+    try:
+        value = json.loads(args.value)
+    except ValueError as e:
+        print(f"fulcra-prefs: invalid JSON for --value: {e}", file=sys.stderr)
+        return 2
     sig = _capture_one(
         store, Outbox(outbox_dir), meta, now,
-        key=args.key, value=json.loads(args.value), strength=args.strength,
+        key=args.key, value=value, strength=args.strength,
         kind=args.kind, scope=args.scope, confidence=args.confidence,
         half_life_days=args.half_life, platform=args.platform,
         agent=args.agent, session=args.session, supersedes=args.supersedes)
@@ -446,8 +451,12 @@ def cmd_inject(args, api, outbox_dir, now) -> int:
 
 
 def cmd_solve(args, api, outbox_dir, now) -> int:
-    options = json.loads(Path(args.options).read_text())
-    participants = json.loads(Path(args.participants).read_text())
+    try:
+        options = json.loads(Path(args.options).read_text())
+        participants = json.loads(Path(args.participants).read_text())
+    except (OSError, ValueError) as e:
+        print(f"fulcra-prefs: could not read solve input: {e}", file=sys.stderr)
+        return 2
     result = solve(options, participants, policy=args.policy,
                    veto_threshold=args.veto_threshold)
     print(canonical_json(result))
