@@ -63,7 +63,7 @@ SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
 def extract_candidates(text: str, *, platform: str, session: str,
                        agent: str | None = None) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, float, str]] = set()
     for sentence in _sentences(text):
         if not EXPLICIT_RE.search(sentence):
             continue
@@ -76,7 +76,7 @@ def extract_candidates(text: str, *, platform: str, session: str,
             continue
         strength = -0.8 if NEGATIVE_RE.search(sentence) else 0.8
         value = _value_for(key, sentence, strength)
-        dedup = (key, str(value))
+        dedup = (key, strength, _dedup_text(sentence))
         if dedup in seen:
             continue
         seen.add(dedup)
@@ -119,6 +119,12 @@ def _classify_key(sentence: str) -> str | None:
     if "review" in s and any(term in s for term in ("arc", "code", "pr", "pull request")):
         return "process.review"
     return None
+
+
+def _dedup_text(sentence: str) -> str:
+    # Normalize for dedup so the same preference restated with different casing
+    # or punctuation collapses: lowercase, non-alphanumeric runs -> single space.
+    return re.sub(r"[^a-z0-9]+", " ", sentence.lower()).strip()
 
 
 def _value_for(key: str, sentence: str, strength: float) -> dict[str, Any]:
