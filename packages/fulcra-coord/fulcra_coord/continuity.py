@@ -175,7 +175,11 @@ def quality_warnings(checkpoint: dict[str, Any]) -> list[str]:
         warnings.append("missing objective/current state")
     if not checkpoint.get("next_actions"):
         warnings.append("missing concrete next_actions")
-    identity = checkpoint.get("identity") or {}
+    identity = checkpoint.get("identity")
+    if not isinstance(identity, dict):
+        # Best-effort contract: a malformed (non-dict) identity must flag as
+        # missing, not raise out of a hook path. Mirrors checkpoint_from_dict.
+        identity = {}
     for key in ("workstream_id", "agent_id", "coord_task_id"):
         if not str(identity.get(key) or "").strip():
             warnings.append(f"missing identity.{key}")
