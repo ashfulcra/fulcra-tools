@@ -11,6 +11,7 @@ OPEN_RE = re.compile(
 )
 CLOSE_RE = re.compile(r"^<!--\s*/section:(?P<slug>[a-z][a-z0-9-]*)\s*-->\s*$")
 LOG_HEADING_RE = re.compile(r"^##\s+Log\s*$")
+FENCE_RE = re.compile(r"^\s*(?:```+|~~~+)")
 
 
 class SectionError(ValueError):
@@ -48,8 +49,14 @@ def parse_sections(markdown: str) -> list[Section]:
     sections: list[Section] = []
     active: tuple[str, str, int] | None = None
     seen: set[str] = set()
+    in_fence = False
     for idx, line in enumerate(lines):
         text = line.rstrip("\r\n")
+        if FENCE_RE.match(text):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue   # markers inside a fenced code block are documentation
         open_match = OPEN_RE.match(text)
         close_match = CLOSE_RE.match(text)
         if open_match:
