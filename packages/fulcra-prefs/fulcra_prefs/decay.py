@@ -23,7 +23,11 @@ def _age_days(observed_at: str, now: datetime) -> float:
 def effective_weight(sig: Signal, now: datetime) -> float:
     if sig.half_life_days is None:
         return sig.strength
-    return sig.strength * 2 ** (-_age_days(sig.observed_at, now) / sig.half_life_days)
+    # Clamp age at 0: a future-dated observed_at (clock skew) would otherwise
+    # give 2**(+x) > 1 and amplify the weight ABOVE strength. A not-yet-aged
+    # signal decays toward, at most equal to, its strength.
+    age = max(0.0, _age_days(sig.observed_at, now))
+    return sig.strength * 2 ** (-age / sig.half_life_days)
 
 
 def is_stale(sig: Signal, now: datetime) -> bool:
