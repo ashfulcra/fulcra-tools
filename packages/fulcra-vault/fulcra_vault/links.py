@@ -9,6 +9,23 @@ from .schema import SchemaError, canonical_json, normalize_note_path
 
 
 WIKILINK_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+FENCE_RE = re.compile(r"^\s*(?:```+|~~~+)")
+INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _strip_code(markdown: str) -> str:
+    """Drop fenced code blocks and inline code spans so [[links]] shown as
+    examples (in docs) don't become phantom backlinks / rename targets."""
+    out: list[str] = []
+    in_fence = False
+    for line in markdown.splitlines():
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        out.append(INLINE_CODE_RE.sub(" ", line))
+    return "\n".join(out)
 
 
 @dataclass(frozen=True)
@@ -22,7 +39,7 @@ class RenamePlan:
 def extract_wikilinks(markdown: str) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
-    for match in WIKILINK_RE.finditer(markdown):
+    for match in WIKILINK_RE.finditer(_strip_code(markdown)):
         try:
             target = normalize_note_path(match.group("target").strip())
         except SchemaError:
@@ -96,4 +113,24 @@ def _rewrite_links(markdown: str, source: str, destination: str) -> str:
         suffix = inner[len(match.group("target")):]
         return "[[" + dest_stem + suffix + "]]"
 
-    return WIKILINK_RE.sub(repl, markdown)
+    # Rewrite only real links: skip fenced code blocks entirely and inline code
+    # spans within a line, so [[source]] shown as an example stays verbatim.
+    out: list[str] = []
+    in_fence = False
+    for line in markdown.splitlines(keepends=True):
+        if FENCE_RE.match(line.rstrip("\n")):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        last = 0
+        pieces: list[str] = []
+        for span in INLINE_CODE_RE.finditer(line):
+            pieces.append(WIKILINK_RE.sub(repl, line[last:span.start()]))
+            pieces.append(span.group(0))   # inline code span unchanged
+            last = span.end()
+        pieces.append(WIKILINK_RE.sub(repl, line[last:]))
+        out.append("".join(pieces))
+    return "".join(out)
