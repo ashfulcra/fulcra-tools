@@ -22,18 +22,30 @@ class Outbox:
         # Same key+observed_at+platform => same temp id => same filename: identical re-captures dedup by overwrite (intentional).
         sid = record["metadata"]["source"][0].rsplit(".", 1)[-1]
         p = self.root / f"{sid}.json"
-        p.write_text(json.dumps(record, sort_keys=True))
+        # Atomic write: a crash mid-write leaves the .tmp (ignored by *.json
+        # globs), never a truncated spool file that wedges later flushes.
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(record, sort_keys=True))
+        tmp.replace(p)
         return p
 
     def pending(self) -> list[dict]:
-        return [json.loads(p.read_text())
-                for p in sorted(self.root.glob("*.json"))]
+        out: list[dict] = []
+        for p in sorted(self.root.glob("*.json")):
+            try:
+                out.append(json.loads(p.read_text()))
+            except ValueError:
+                continue   # skip a corrupt/partial spool file, don't crash
+        return out
 
     def flush(self, store) -> int:
         from .store import SIGNALS_CACHE_PREFIX
         flushed = 0
         for p in sorted(self.root.glob("*.json")):
-            record = json.loads(p.read_text())
+            try:
+                record = json.loads(p.read_text())
+            except ValueError:
+                continue   # corrupt spool file: skip it, don't wedge the flush
             try:
                 store._api.fulcra_api("/ingest/v1/record", data=record,
                                       method="POST")
