@@ -161,7 +161,7 @@ uv run fulcra-vault map --check
 - A write aborts if the note changes between read and pre-write stat.
 - Every CLI mutation appends one line to `vault/LOG.md`.
 - Excluded paths from `meta.json` refuse writes.
-- Deletes and applied renames are separate commands, not side effects.
+- Deletes and applied renames (planned) will be explicit commands, never write side effects.
 
 Locks coordinate agent writes. They do not restrict direct human edits through
 the future local mirror.
