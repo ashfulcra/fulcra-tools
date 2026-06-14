@@ -186,10 +186,14 @@ def _review_pool(
         if "review" in (rec.get("capabilities") or []):
             pool.append(agent)
     pool.extend(_review_seeds(author))
+    # Exclude the author: an independent-review gate is not satisfied by a
+    # self-review, and an author that declared the review capability (or holds
+    # a review role) would otherwise rank into its OWN pool. An empty pool then
+    # escalates via block --on-user — the right failure, not a silent self-route.
     seen: set[str] = set()
     ordered: list[str] = []
     for a in pool:
-        if a and a not in seen:
+        if a and a not in seen and a != author:
             seen.add(a)
             ordered.append(a)
     return ordered
@@ -216,9 +220,10 @@ def _review_candidate_sources(
     seen: set[str] = set()
     ordered: list[str] = []
     for agent in pool:
-        if agent and agent not in seen:
+        if agent and agent not in seen and agent != author:
             seen.add(agent)
             ordered.append(agent)
+    sources = {agent: sources[agent] for agent in ordered if agent in sources}
     return ordered, sources
 
 

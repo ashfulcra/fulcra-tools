@@ -11456,6 +11456,26 @@ class TestReviewPool(unittest.TestCase):
             pool = cli._review_pool(author="who:h:r", presence=presence)
             self.assertEqual(pool.count("dup:h:r"), 1)
 
+    def test_pool_excludes_the_author_even_when_review_capable(self):
+        # BUG-C: an author that declared the review capability (e.g. a
+        # coord-maintainer connected with --can-review) must not appear in its
+        # OWN review pool — a self-review satisfies no independent-review gate.
+        from fulcra_coord import cli, routing_ops as ro
+        with patch.object(ro, "_review_role_candidates", return_value=([], {})), \
+             patch.object(ro, "_review_seeds", lambda a: []):
+            presence = [
+                {"agent": "who:h:r", "capabilities": ["review"]},   # the author
+                {"agent": "rev:h:r", "capabilities": ["review"]},
+            ]
+            pool = cli._review_pool(author="who:h:r", presence=presence)
+            self.assertNotIn("who:h:r", pool)
+            self.assertIn("rev:h:r", pool)
+            ordered, _src = ro._review_candidate_sources(
+                "who:h:r", presence)
+            self.assertNotIn("who:h:r", ordered)
+            self.assertNotIn("who:h:r", _src)
+            self.assertEqual(_src.get("rev:h:r"), "capability:review")
+
     def test_explicit_candidate_list_routes_even_when_below_floor(self):
         from fulcra_coord import routing_ops
         captured = {}
