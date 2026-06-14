@@ -16,7 +16,8 @@ ANNOTATION_SOURCE_PREFIX = "com.fulcradynamics.annotation."
 
 def _normalize(obj):
     if isinstance(obj, float):
-        return round(obj, FLOAT_DP)
+        r = round(obj, FLOAT_DP)
+        return 0.0 if r == 0 else r  # collapse -0.0 -> 0.0 for byte-stable output
     if isinstance(obj, dict):
         return {k: _normalize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
