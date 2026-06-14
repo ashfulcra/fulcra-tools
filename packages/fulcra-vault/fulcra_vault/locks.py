@@ -8,6 +8,7 @@ import json
 from typing import Iterator, Protocol
 
 from .schema import canonical_json, normalize_note_path
+from .store import MissingFileError
 
 
 DEFAULT_TTL_SECONDS = 120
@@ -101,7 +102,7 @@ def lock_path(note: str) -> str:
 def _read_lock(store: LockStore, path: str) -> dict | None:
     try:
         text = store.read_text(path)
-    except FileNotFoundError:
+    except (FileNotFoundError, MissingFileError):
         return None
     try:
         data = json.loads(text)
@@ -130,7 +131,7 @@ def _is_stale(record: dict, now: datetime) -> bool:
 def _delete_lock(store: LockStore, path: str) -> bool:
     try:
         return bool(store.delete_explicit(path))
-    except FileNotFoundError:
+    except (FileNotFoundError, MissingFileError):
         return False
 
 
