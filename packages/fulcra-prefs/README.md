@@ -209,7 +209,7 @@ has no overrides of its own they fall back to the plain global doc (rather than
 nothing) — a platform with no special-casing simply sees your global prefs.
 
 How agents consume the compiled doc: `inject` prints a compact preference block
-at session start (e.g. `- comms.tone.concise: {"preferred": true} [+0.90]`). It
+at session start (e.g. `- comms.tone.concise: {'preferred': True} [+0.90]`). It
 is a file read — no math, no API call. Because every platform reads the same
 compiled file, preferences are consistent across Claude Code, Codex, ChatGPT, or
 any other agent you run. Shell-less agents that can't run the CLI follow the
@@ -290,7 +290,7 @@ and cross-platform compile consistency.
 
 ---
 
-## v1 limitations (honest)
+## v1 limitations
 
 - **Read path is get-records + a shard cache.** `compile` reads authoritatively
   via `get-records` and unions a write-through shard cache (for offline/lag),
