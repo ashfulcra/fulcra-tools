@@ -550,7 +550,18 @@ def cmd_connect(args: Any, backend: Optional[list[str]] = None) -> int:
     # never fail the session boot, mirroring _write_presence's contract.
     for role_name in record["capabilities"]:
         try:
-            _role_ops.claim_role(role_name, me, backend=backend)
+            if not _role_ops.claim_role(role_name, me, backend=backend):
+                # A failed lease upload returns False rather than raising, so
+                # the guard below never saw it: an interactive `connect --role
+                # X` printed "Connected" while the role stayed unheld. Surface
+                # it (cmd_roles claim already does). Still best-effort — the
+                # SessionStart hook backgrounds connect and discards stderr, so
+                # this never fails boot. Skip the resume brief: printing where
+                # the role "left off" when the claim did not land misleads.
+                _warn(f"connect: lease claim for role '{role_name}' did not "
+                      f"land — check `fulcra-coord roles`, retry with "
+                      f"`fulcra-coord roles claim {role_name}`")
+                continue
             # Role claim → resume (continuity spec 2026-06-10): connect IS the
             # spawn-session → claim-role moment of the ArcBot backbone, so a
             # role that carries a checkpoint_ref prints its where-it-left-off
