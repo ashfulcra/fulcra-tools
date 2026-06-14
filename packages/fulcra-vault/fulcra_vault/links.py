@@ -9,20 +9,32 @@ from .schema import SchemaError, canonical_json, normalize_note_path
 
 
 WIKILINK_RE = re.compile(r"\[\[(?P<target>[^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
-FENCE_RE = re.compile(r"^\s*(?:```+|~~~+)")
+FENCE_RE = re.compile(r"^\s*(?P<marker>`{3,}|~{3,})")
 INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _fence_marker(line: str) -> tuple[str, int] | None:
+    match = FENCE_RE.match(line)
+    if not match:
+        return None
+    marker = match.group("marker")
+    return marker[0], len(marker)
 
 
 def _strip_code(markdown: str) -> str:
     """Drop fenced code blocks and inline code spans so [[links]] shown as
     examples (in docs) don't become phantom backlinks / rename targets."""
     out: list[str] = []
-    in_fence = False
+    fence: tuple[str, int] | None = None
     for line in markdown.splitlines():
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
+        marker = _fence_marker(line)
+        if marker is not None and fence is None:
+            fence = marker
             continue
-        if in_fence:
+        if marker is not None and fence is not None and marker[0] == fence[0] and marker[1] >= fence[1]:
+            fence = None
+            continue
+        if fence is not None:
             continue
         out.append(INLINE_CODE_RE.sub(" ", line))
     return "\n".join(out)
@@ -116,13 +128,18 @@ def _rewrite_links(markdown: str, source: str, destination: str) -> str:
     # Rewrite only real links: skip fenced code blocks entirely and inline code
     # spans within a line, so [[source]] shown as an example stays verbatim.
     out: list[str] = []
-    in_fence = False
+    fence: tuple[str, int] | None = None
     for line in markdown.splitlines(keepends=True):
-        if FENCE_RE.match(line.rstrip("\n")):
-            in_fence = not in_fence
+        marker = _fence_marker(line.rstrip("\n"))
+        if marker is not None and fence is None:
+            fence = marker
             out.append(line)
             continue
-        if in_fence:
+        if marker is not None and fence is not None and marker[0] == fence[0] and marker[1] >= fence[1]:
+            fence = None
+            out.append(line)
+            continue
+        if fence is not None:
             out.append(line)
             continue
         last = 0
