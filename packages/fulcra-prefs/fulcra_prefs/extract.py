@@ -26,6 +26,37 @@ SENSITIVE_RE = re.compile(
     r"medical|diagnosis|bank|credit card)\b",
     re.IGNORECASE,
 )
+# PII that must never be stored verbatim in a shareable/injectable record.
+# The stored value is the raw sentence, so a sentence carrying PII is skipped
+# entirely (conservative, like SENSITIVE_RE) rather than partially redacted.
+PII_RE = re.compile(
+    r"[\w.+-]+@[\w-]+(?:\.[\w.-]+)?"                      # email (TLD optional)
+    r"|\b(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b",  # phone
+    re.IGNORECASE,
+)
+# Disavowed / reported / hypothetical statements: the user is negating the act
+# of stating or assuming a preference, or quoting someone — not expressing one.
+# Targets negated META verbs (say/mean/assume/claim) and reported "said", so it
+# does NOT catch valid aversions like "I don't want X" (handled by NEGATIVE_RE).
+DISAVOW_RE = re.compile(
+    r"\b(?:never|do(?:es)?\s*n'?t|do(?:es)?\s+not|did\s*n'?t|did\s+not)\s+"
+    r"(?:say|said|mean|meant|assume|claim)\b"
+    r"|\bnever\s+(?:said|claimed|meant)\b"
+    r"|\bnot\s+assume\b"
+    r"|\bsaid\b",                                         # reported speech
+    re.IGNORECASE,
+)
+NON_ASSERTIVE_RE = re.compile(
+    r"^\s*(?:if|when|suppose)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|^\s*do\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|\b(?:ask|tell)\s+me\s+(?:if|whether)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|\blet\s+me\s+know\s+(?:if|whether)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b",
+    re.IGNORECASE,
+)
 SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
 
 
@@ -36,7 +67,9 @@ def extract_candidates(text: str, *, platform: str, session: str,
     for sentence in _sentences(text):
         if not EXPLICIT_RE.search(sentence):
             continue
-        if SENSITIVE_RE.search(sentence):
+        if SENSITIVE_RE.search(sentence) or PII_RE.search(sentence):
+            continue
+        if DISAVOW_RE.search(sentence) or NON_ASSERTIVE_RE.search(sentence):
             continue
         key = _classify_key(sentence)
         if key is None:
