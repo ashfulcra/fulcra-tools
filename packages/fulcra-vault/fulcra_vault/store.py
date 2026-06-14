@@ -149,7 +149,7 @@ def _parse_stat(text: str) -> dict:
 
 
 def _normalize_list_entry(line: str, prefix: str) -> str:
-    name = line.strip().split()[-1]
+    name = line.strip()  # `file list` emits one bare path per line; keep spaces
     if name.startswith("/"):
         return name
     if name.startswith(prefix.lstrip("/") + "/"):
