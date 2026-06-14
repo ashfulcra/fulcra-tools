@@ -11473,6 +11473,8 @@ class TestReviewPool(unittest.TestCase):
             ordered, _src = ro._review_candidate_sources(
                 "who:h:r", presence)
             self.assertNotIn("who:h:r", ordered)
+            self.assertNotIn("who:h:r", _src)
+            self.assertEqual(_src.get("rev:h:r"), "capability:review")
 
     def test_explicit_candidate_list_routes_even_when_below_floor(self):
         from fulcra_coord import routing_ops

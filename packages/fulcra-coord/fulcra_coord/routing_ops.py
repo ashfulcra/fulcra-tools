@@ -223,6 +223,7 @@ def _review_candidate_sources(
         if agent and agent not in seen and agent != author:
             seen.add(agent)
             ordered.append(agent)
+    sources = {agent: sources[agent] for agent in ordered if agent in sources}
     return ordered, sources
 
 
