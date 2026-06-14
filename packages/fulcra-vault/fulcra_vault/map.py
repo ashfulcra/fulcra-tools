@@ -156,7 +156,10 @@ def _map_line(path: str, markdown: str, links: dict[str, Any], *, hot: bool) -> 
 def _hot_reasons(fm: dict[str, Any], body: str, now: datetime) -> tuple[str, ...]:
     reasons: list[str] = []
     status = str(fm.get("status", "")).lower()
-    tags = {str(tag).lower() for tag in fm.get("tags", []) if isinstance(tag, str)}
+    raw_tags = fm.get("tags", [])
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]  # a scalar `tags:` value is a single tag, not chars
+    tags = {str(tag).lower() for tag in raw_tags if isinstance(tag, str)}
     if status in {"active", "current", "open"}:
         reasons.append("active")
     if "standing-correction" in tags or "correction" in tags:
@@ -190,7 +193,7 @@ def _has_recent_decision(body: str, now: datetime) -> bool:
         if not match:
             continue
         text = match.group("text").lower()
-        if "decid" not in text:
+        if not re.search(r"\bdecid", text):  # word-boundary: "decided", not "undecided"
             continue
         stamp = _parse_stamp(match.group("stamp"))
         if stamp is not None and stamp.timestamp() >= cutoff:
@@ -238,9 +241,14 @@ def _plural(count: int, noun: str) -> str:
 
 
 def _reverse_timestamp(value: str) -> str:
-    if not value or any(ord(ch) > 255 for ch in value):
+    # Key on the parsed UTC instant so equal instants spelled differently
+    # (e.g. "...Z" vs "...+00:00") produce an identical key; fall back to the
+    # raw string only when it isn't a parseable timestamp.
+    stamp = _parse_stamp(value) if value else None
+    basis = stamp.isoformat() if stamp is not None else value
+    if not basis or any(ord(ch) > 255 for ch in basis):
         return NO_TIMESTAMP_SORT_KEY
-    return "".join(chr(255 - ord(ch)) for ch in value)
+    return "".join(chr(255 - ord(ch)) for ch in basis)
 
 
 def _parse_stamp(value: str) -> datetime | None:
