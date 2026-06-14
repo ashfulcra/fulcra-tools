@@ -788,6 +788,28 @@ class TestCLIWithFakeBackend(unittest.TestCase):
             cmd_connect(args, backend=["false"])
         self.assertEqual(sorted(captured["rec"]["capabilities"]), ["deploy", "review"])
 
+    def test_connect_role_claim_failure_warns_without_failing_boot(self):
+        # BUG-A: a failed lease claim during an interactive `connect --role X`
+        # must surface to the operator (warn naming the role) rather than being
+        # swallowed by the per-claim guard — while still never failing boot.
+        from fulcra_coord.cli import cmd_connect
+        warns = []
+        with patch("fulcra_coord.presence._write_presence",
+                   side_effect=lambda record, backend=None: True), \
+             patch("fulcra_coord.presence._derive_workstreams_from_open_tasks", return_value=[]), \
+             patch("fulcra_coord.presence._read_own_capabilities", return_value=[]), \
+             patch("fulcra_coord.remote.probe_reachable", return_value=True), \
+             patch("fulcra_coord.role_ops.claim_role", return_value=False), \
+             patch("fulcra_coord.continuity_ops.print_role_resume", return_value=None), \
+             patch("fulcra_coord.presence._warn", side_effect=lambda m: warns.append(m)):
+            args = self._args(agent="claude-code:h:r", workstream=None, summary="",
+                              format="json", can_review=False, role=["coord-maintainer"])
+            rc = cmd_connect(args, backend=["false"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(
+            any("coord-maintainer" in w for w in warns),
+            f"expected a claim-failure warn naming the role; got {warns}")
+
     def test_connect_declares_fleet_topology(self):
         from fulcra_coord.cli import cmd_connect
         captured = {}
