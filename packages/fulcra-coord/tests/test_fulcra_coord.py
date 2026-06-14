@@ -10815,6 +10815,55 @@ class TestReconcileParallelUpload(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5,
                         "reconcile must not wait for the wedged upload worker")
 
+    def test_critical_checks_get_reserved_budget_past_core_deadline(self):
+        # At scale the core view refresh alone can spend the whole reconcile
+        # deadline, which used to starve the cheap-but-critical role-health /
+        # undelivered-directive checks (leases stopped re-escalating; directives
+        # rotted in dead inboxes). They now run on a reserved critical budget.
+        # Simulate a core that succeeds but burns the budget by advancing a fake
+        # clock in _build_health_record (runs after uploads, before the checks).
+        from fulcra_coord import cli
+
+        def run(reconcile_timeout, critical_timeout):
+            clock = {"t": 1000.0}
+            role_calls = {"n": 0}
+
+            def fake_build_health_record(*a, **k):
+                clock["t"] += 50.0   # the slow core spent the budget
+                return {}
+
+            def fake_role_health(*a, **k):
+                role_calls["n"] += 1
+                return {}
+
+            env = {
+                "FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS": str(reconcile_timeout),
+                "FULCRA_COORD_CRITICAL_TIMEOUT_SECONDS": str(critical_timeout),
+            }
+            with patch.dict(os.environ, env), \
+                 patch("time.monotonic", lambda: clock["t"]), \
+                 patch.object(cli, "_load_all_tasks", return_value=[]), \
+                 patch.object(cli.views, "build_all_views", return_value={}), \
+                 patch.object(cli.remote, "upload_json", return_value=True), \
+                 patch.object(cli, "_reconcile_presence",
+                              return_value={"agents": []}), \
+                 patch.object(cli, "_build_health_record",
+                              side_effect=fake_build_health_record), \
+                 patch.object(cli, "_undelivered_directive_check",
+                              return_value={"count": 0, "undelivered": []}), \
+                 patch.object(cli, "_role_health_check",
+                              side_effect=fake_role_health):
+                cli.cmd_reconcile(types.SimpleNamespace(), backend=["false"])
+            return role_calls["n"]
+
+        # Core budget (10s) is spent by the +50s core, but the reserved 300s
+        # budget lets role-health run.
+        self.assertEqual(run(10, 300), 1,
+                         "role-health must run on the reserved critical budget")
+        # With no reserved budget (critical == core), it skips as before.
+        self.assertEqual(run(10, 10), 0,
+                         "with no reserved budget the check still skips")
+
 
 class TestReconcileUploadRetry(unittest.TestCase):
     """Bounded in-tick retry for reconcile view uploads (burst-throttling fix).
@@ -12765,13 +12814,17 @@ class TestReconcileHealthWrite(unittest.TestCase):
         load_loops.assert_not_called()
         directive.assert_not_called()
         loop_health.assert_not_called()
-        role_health.assert_not_called()
-        undelivered.assert_not_called()
+        # role-health + undelivered-directive run on the RESERVED critical
+        # budget, so a spent CORE deadline no longer starves them (leases keep
+        # re-escalating; directives don't rot). The non-critical passes above
+        # still respect the core deadline and skip.
+        role_health.assert_called_once()
+        undelivered.assert_called_once()
         self.assertEqual(len(health_records), 1)
         self.assertEqual(health_records[0]["event_parity"], {"checked": True})
         self.assertIn("Loop-record load", health_records[0]["skipped_checks"])
-        self.assertIn("Undelivered-directive check",
-                      health_records[0]["skipped_checks"])
+        self.assertNotIn("Undelivered-directive check",
+                         health_records[0]["skipped_checks"])
 
 
 class TestUnroutedPrReviews(unittest.TestCase):

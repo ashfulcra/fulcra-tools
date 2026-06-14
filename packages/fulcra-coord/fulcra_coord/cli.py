@@ -1679,14 +1679,32 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     t0 = time.monotonic()
     timeout = env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
     deadline = t0 + timeout
+    # Reserved budget for the cheap-but-critical maintenance checks (role-health
+    # /vacancy escalation, undelivered-directive). At scale the core view
+    # refresh alone can spend the whole `deadline` (e.g. ~85s of a 90s budget at
+    # ~800 tasks), starving EVERY later sub-pass — so role leases never get
+    # their SLA escalation and directives rot in dead inboxes (the maintainer is
+    # never told). These checks only read already-loaded roles+presence, so they
+    # run against this larger deadline and still complete in seconds past the
+    # core ceiling. Retention deliberately stays on `deadline`: a tight budget
+    # keeps it skipped, which is how the operator freeze is preserved.
+    critical_timeout = env_int("FULCRA_COORD_CRITICAL_TIMEOUT_SECONDS",
+                               max(timeout + 60, 150))
+    critical_deadline = t0 + max(timeout, critical_timeout)
     skipped_checks: list[str] = []
 
     class _SkipBestEffortCheck(Exception):
         pass
 
-    def _deadline_spent(label: str, *, headroom: float = 1.0) -> bool:
-        """Best-effort sub-passes must not consume the heartbeat's last breath."""
-        if time.monotonic() + headroom < deadline:
+    def _deadline_spent(label: str, *, headroom: float = 1.0,
+                        against: Optional[float] = None) -> bool:
+        """Best-effort sub-passes must not consume the heartbeat's last breath.
+
+        Pass ``against=critical_deadline`` for the reserved-budget checks that
+        must run even when the core budget is spent.
+        """
+        dl = against if against is not None else deadline
+        if time.monotonic() + headroom < dl:
             return False
         skipped_checks.append(label)
         try:
@@ -2470,7 +2488,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # loop-health pass above: the result, present or absent, NEVER
         # changes reconcile's exit code, and the error is surfaced, not eaten.
         try:
-            if _deadline_spent("Role-health check", headroom=30.0):
+            if _deadline_spent("Role-health check", headroom=30.0,
+                               against=critical_deadline):
                 raise _SkipBestEffortCheck()
             # F5: an unknowable roster (sentinel) makes every role's vacancy
             # judgment unknown inside the check — reported, never escalated.
@@ -2492,7 +2511,8 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # all_tasks is already in hand, so this adds no remote round-trip beyond
         # the single presence-aggregate read inside the check.
         try:
-            if _deadline_spent("Undelivered-directive check", headroom=15.0):
+            if _deadline_spent("Undelivered-directive check", headroom=15.0,
+                               against=critical_deadline):
                 raise _SkipBestEffortCheck()
             ud = _undelivered_directive_check(
                 all_tasks, backend=backend,
