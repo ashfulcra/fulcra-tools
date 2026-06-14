@@ -81,7 +81,16 @@ def _gather_signals(store: FulcraStore, meta: dict | None = None
     Confirmed = the dedup keys that came from get-records — i.e. captures the
     authoritative source has, whose write-through shards are now safe to GC."""
     records = store.read_signal_records(meta.get("definition_id")) if meta else []
-    shards = [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
+    shards: list[Signal] = []
+    skipped_shards = 0
+    for env in store.list_json(SIGNALS_CACHE_PREFIX):
+        try:
+            shards.append(parse_record(env))
+        except (KeyError, ValueError, TypeError):
+            skipped_shards += 1
+    if skipped_shards:
+        print(f"fulcra-prefs: skipped {skipped_shards} invalid cached signal shard(s)",
+              file=sys.stderr)
     by_id: dict[str, Signal] = {}
     for sig in (*records, *shards):
         by_id.setdefault(_dedup_key(sig), sig)
