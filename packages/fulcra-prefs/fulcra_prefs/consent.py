@@ -36,7 +36,8 @@ def disclosure_signal(shared_keys: list[str], audience: str, platform: str,
     observed = now.isoformat()
     key = f"consent.disclosure.{audience}"
     return Signal(
-        id=temp_signal_id(key, observed, platform),
+        id=temp_signal_id(key, observed, platform,
+                          {"keys": sorted(shared_keys), "audience": audience}),
         kind="consent", key=key, scope="global",
         value={"keys": sorted(shared_keys), "audience": audience},
         strength=1.0, confidence=1.0, half_life_days=None,
