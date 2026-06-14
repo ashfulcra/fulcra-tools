@@ -48,6 +48,22 @@ def test_skips_hypothetical_if():
         "If I want concise tone, use it.", platform="p", session="s") == []
 
 
+def test_skips_embedded_hypothetical_request():
+    assert extract_candidates(
+        "Ask me if I want concise tone.", platform="p", session="s") == []
+
+
+def test_skips_when_hypothetical():
+    assert extract_candidates(
+        "When I want concise tone, I will say so.", platform="p",
+        session="s") == []
+
+
+def test_skips_preference_question():
+    assert extract_candidates(
+        "Do I want concise tone?", platform="p", session="s") == []
+
+
 def test_still_extracts_plain_preference():
     c = extract_candidates("I want concise tone.", platform="p", session="s")
     assert c and c[0]["key"] == "comms.tone" and c[0]["strength"] == 0.8

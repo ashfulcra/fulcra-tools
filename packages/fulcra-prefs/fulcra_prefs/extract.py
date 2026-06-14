@@ -46,6 +46,17 @@ DISAVOW_RE = re.compile(
     r"|\bsaid\b",                                         # reported speech
     re.IGNORECASE,
 )
+NON_ASSERTIVE_RE = re.compile(
+    r"^\s*(?:if|when|suppose)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|^\s*do\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|\b(?:ask|tell)\s+me\s+(?:if|whether)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|\blet\s+me\s+know\s+(?:if|whether)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b",
+    re.IGNORECASE,
+)
 SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
 
 
@@ -58,7 +69,7 @@ def extract_candidates(text: str, *, platform: str, session: str,
             continue
         if SENSITIVE_RE.search(sentence) or PII_RE.search(sentence):
             continue
-        if DISAVOW_RE.search(sentence) or sentence.lstrip().lower().startswith("if "):
+        if DISAVOW_RE.search(sentence) or NON_ASSERTIVE_RE.search(sentence):
             continue
         key = _classify_key(sentence)
         if key is None:
