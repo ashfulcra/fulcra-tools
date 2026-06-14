@@ -16,7 +16,7 @@ def capture_signal(store: FulcraStore, outbox: Outbox, *, data_type: str,
                    session: str | None = None,
                    supersedes: str | None = None) -> Signal:
     observed = now.isoformat()
-    sig = Signal(id=temp_signal_id(key, observed, platform), kind=kind, key=key,
+    sig = Signal(id=temp_signal_id(key, observed, platform, value), kind=kind, key=key,
                  scope=scope, value=value, strength=strength,
                  confidence=confidence, half_life_days=half_life_days,
                  observed_at=observed, platform=platform, agent=agent,

@@ -53,7 +53,7 @@ def build_record(sig: Signal, data_type: str) -> dict:
       - meta.json stores "data_type": "MomentAnnotation/<id>" as a read-side
         shorthand; only build_record decomposes it for the wire.
     """
-    sid = sig.id or temp_signal_id(sig.key, sig.observed_at, sig.platform)
+    sid = sig.id or temp_signal_id(sig.key, sig.observed_at, sig.platform, sig.value)
     base_type, _, definition_id = data_type.partition("/")
     source: list[str] = [sid]
     if definition_id:

@@ -425,3 +425,19 @@ def test_successful_capture_spools_when_cache_write_fails(fake_api, tmp_path, ca
     out = json.loads(capsys.readouterr().out)
     assert "dining.cuisine.thai" in out["keys"]
     assert Outbox(outbox_dir).pending() == []
+
+
+def test_capture_batch_same_key_distinct_values_persist_two_shards(env, tmp_path):
+    """Same-key items in one batch share observed_at. Before value was part of
+    the signal id they collided on one cache shard and compile deduped them,
+    silently losing a signal."""
+    call, fake_api, _store = env
+    batch = [
+        {"key": "comms.tone", "value": "a", "strength": 0.8, "confidence": 1.0},
+        {"key": "comms.tone", "value": "b", "strength": 0.9, "confidence": 1.0},
+    ]
+    f = tmp_path / "dup.json"
+    f.write_text(json.dumps(batch))
+    assert call("capture-batch", "--file", str(f), "--platform", "codex") == 0
+    shards = [p for p in fake_api.files if "signals-cache" in p]
+    assert len(shards) == 2, f"both signals must persist distinct shards, got {shards}"
