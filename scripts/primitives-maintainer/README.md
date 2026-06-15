@@ -13,7 +13,7 @@ session when a script flags drift — the scripts never edit the doc.
 
 | Script | Cadence | What it checks |
 |---|---|---|
-| `drift-check.sh` | daily | Narrow fingerprint — OpenAPI endpoint paths + annotation methods, `fulcra-api-python` main HEAD, annotation-command count, MCP scopes — vs `.primitives-state/baseline.json`. The fast tripwire for the documented full-rewrite trigger (annotation **record** commands, incl. delete, landing in the CLI). |
+| `drift-check.sh` | daily | Narrow fingerprint — OpenAPI endpoint paths + annotation methods, `fulcra-api-python` main HEAD, published `fulcra-api` PyPI version, annotation-command count, MCP scopes — vs `.primitives-state/baseline.json`. The fast tripwire for the documented full-rewrite trigger (annotation **record** commands, incl. delete, landing in the CLI). |
 | `weekly-review.sh` | weekly | Wide fingerprint — full path+method set, all schema names, docs page + MCP discovery hashes — vs `weekly-baseline.json`, **and** always drops `WEEKLY-REVIEW-DUE.txt` so a session does a genuine end-to-end human-eyes re-read (catches docs prose / new MCP tools a hash can't judge). |
 
 On drift either script posts a bus alert to `claude-code:Mac:fulcra-tools` as
