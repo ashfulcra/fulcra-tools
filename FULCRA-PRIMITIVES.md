@@ -2,15 +2,20 @@
 
 What the Fulcra platform actually provides and how to use it, **by agent
 capability tier**. Written so you don't have to re-research the platform
-surface. Verified against live services on 2026-06-10 (fulcra-api-python main
-@ `7e470a4`, api.fulcradynamics.com OpenAPI, docs.fulcradynamics.com,
-mcp.fulcradynamics.com discovery docs).
+surface. Verified against live services on 2026-06-14 (`fulcra-api` CLI/lib
+**0.1.34** from PyPI, fulcra-api-python main @ `7e470a4`,
+api.fulcradynamics.com OpenAPI, docs.fulcradynamics.com, mcp.fulcradynamics.com
+discovery docs).
 
-> **Staleness warning:** the platform moves fast. Annotation commands (incl.
-> delete/replace) are being folded into the CLI, and API-direct capabilities
-> change with them. When that lands, this doc gets **rewritten end-to-end**
-> (tracked as a recurring bus task), not patched. If `fulcra data-type --help`
-> shows record-level commands, this doc is out of date — say so on the bus.
+> **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
+> git main on PyPI — **check the installed `fulcra-api` version, not just the
+> repo**. As of 0.1.34 the annotation-**definition** and **tag** commands are in
+> the released CLI (`fulcra data-type …`, `fulcra tag …`); annotation **record**
+> write/delete/replace are still NOT (records are ingest-only — see below). The
+> day record-level commands land (`fulcra data-type --help` shows a `record`/
+> `delete-record`/`append`-style verb, or a `fulcra record …` group appears),
+> the tier-2 API-direct guidance shifts with them and this doc gets a full
+> re-verification + rewrite, not a patch — say so on the bus.
 
 ## Pick your tier
 
@@ -69,12 +74,19 @@ runs on, so it is battle-tested at load.
 **Definitions** (the user's custom data types) have full CRUD today:
 
 - Tier 1: `fulcra data-type create|archive|restore` (types: moment, duration,
-  boolean, numeric, scale; options for tags/units/scale labels).
+  boolean, numeric, scale; options for tags/units/scale labels/`--add-to-timeline`).
+  **New in CLI 0.1.34** — these (and the `tag` group) are now in the released
+  CLI; earlier releases (0.1.33) lacked them, so older agents hand-rolled
+  definition creation via the tier-2 POST below. The Python lib exposes the
+  same: `create_annotation`, `delete_annotation`, `restore_annotation`,
+  `annotations_catalog`. Prefer the CLI/lib over raw REST when you have a shell.
 - Tier 2: `POST|GET|PUT|DELETE /user/v1alpha1/annotation[/{id}]`, soft-delete
   with `POST /{id}/cancel_deletion` to restore. JSON-schema discovery:
   `GET /user/v1alpha1/schema/annotation`.
 
-**Records** (instances on the timeline) are **write-via-ingest only** for now:
+**Records** (instances on the timeline) are **write-via-ingest only** — still
+true as of CLI 0.1.34; there is no `fulcra` record-write/delete command and no
+record-write/delete lib method, only definition + tag management:
 
 - `POST /ingest/v1/record` with `DataRecordV1`:
   `{"data": "<string payload>", "metadata": {"data_type": <type>,
@@ -82,16 +94,19 @@ runs on, so it is battle-tested at load.
   "content_type": <optional>}, "specversion": 1}`
 - Batch: `POST /ingest/v1/record/batch`, content-type `application/x-jsonl`,
   one record per line. (This is the Attention extension's write path.)
-- **No record-level delete/replace yet** — it's coming, alongside CLI record
-  commands. That arrival triggers this doc's rewrite.
+- **No record-level delete/replace yet** — corrections are modeled as new
+  records (e.g. a superseding signal), not edits. CLI record commands are the
+  next thing expected to land; that arrival triggers this doc's full rewrite.
 - **Reads:** tier 1 `fulcra get-records <DataType> "<range>"` (user-defined:
   `MomentAnnotation/<definition-uuid>`); tier 2 via
   `/data/v1alpha1/event/{data_type}`.
 
 ## Tags (tiers 1 & 2)
 
-Group/label annotations. Tier 1: `fulcra tag list|get|create`. Tier 2:
-`GET|POST /user/v1alpha1/tag`, lookup by `/tag/id/{id}` or `/tag/name/{name}`.
+Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list`
+(lib: `create_tag`/`create_tags`/`delete_tag`/`get_tag_by_name`/`get_tag_by_id`/
+`tags`). Tier 2: `GET|POST /user/v1alpha1/tag`, lookup by `/tag/id/{id}` or
+`/tag/name/{name}`.
 
 ## Data queries (read-side, tiers 1 & 2)
 
