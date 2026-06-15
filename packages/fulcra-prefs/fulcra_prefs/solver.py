@@ -22,7 +22,7 @@ def solve(options: list[dict], participant_docs: dict[str, dict],
         veto = None
         for who in participants:
             keys = participant_docs[who].get("keys", {})
-            for k in opt["keys"]:
+            for k in sorted(opt["keys"]):  # canonical: float add is non-associative
                 if k not in keys:
                     continue
                 w = keys[k]["weight"]
