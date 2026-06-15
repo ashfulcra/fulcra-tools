@@ -51,8 +51,13 @@ CLI_HEAD="$(gh api repos/fulcradynamics/fulcra-api-python/commits/main --jq '.sh
 # annotation RECORD write/delete commands in CLI = the rewrite trigger
 ANN_CMDS="$(gh api repos/fulcradynamics/fulcra-api-python/contents/fulcra_api/cli/data_types.py --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | grep -E '@data_type\.command|@records?\.command' | wc -l | tr -d '[:space:]')"
 MCP_SCOPES="$(curl -s --max-time 12 https://mcp.fulcradynamics.com/.well-known/oauth-authorization-server | python3 -c 'import sys,json;print(",".join(json.load(sys.stdin).get("scopes_supported",[])))' 2>/dev/null || echo UNKNOWN)"
+# The CLI ships to PyPI AHEAD of git main (0.1.34 exposed the data-type/tag
+# commands while main HEAD was unchanged), so a main-HEAD-only fingerprint
+# misses real releases. Track the published version too — a version bump is the
+# signal that a release may have changed the agent-facing surface.
+PYPI_VER="$(curl -s --max-time 12 https://pypi.org/pypi/fulcra-api/json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["info"]["version"])' 2>/dev/null || echo UNKNOWN)"
 
-CUR="$(python3 -c "import json,sys;print(json.dumps({'spec_hash':sys.argv[1],'cli_head':sys.argv[2],'ann_cmd_count':sys.argv[3],'mcp_scopes':sys.argv[4]},sort_keys=True))" "$SPEC_HASH" "$CLI_HEAD" "$ANN_CMDS" "$MCP_SCOPES")"
+CUR="$(python3 -c "import json,sys;print(json.dumps({'spec_hash':sys.argv[1],'cli_head':sys.argv[2],'ann_cmd_count':sys.argv[3],'mcp_scopes':sys.argv[4],'pypi_version':sys.argv[5]},sort_keys=True))" "$SPEC_HASH" "$CLI_HEAD" "$ANN_CMDS" "$MCP_SCOPES" "$PYPI_VER")"
 echo "$CUR" > "$TMP"
 
 # --- first run: write baseline, done ---
