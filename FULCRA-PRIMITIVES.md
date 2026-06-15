@@ -105,8 +105,8 @@ record-write/delete lib method, only definition + tag management:
 
 Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list`
 (lib: `create_tag`/`create_tags`/`delete_tag`/`get_tag_by_name`/`get_tag_by_id`/
-`tags`). Tier 2: `GET|POST /user/v1alpha1/tag`, lookup by `/tag/id/{id}` or
-`/tag/name/{name}`.
+`tags`). Tier 2: `GET|POST /user/v1alpha1/tag`; lookup `GET /tag/id/{id}` or
+`GET /tag/name/{name}`; delete `DELETE /tag/id/{id}`.
 
 ## Data queries (read-side, tiers 1 & 2)
 
