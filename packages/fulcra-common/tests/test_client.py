@@ -238,34 +238,56 @@ def test_soft_delete_definition_false_on_404(monkeypatch):
     assert client.soft_delete_definition("missing") is False
 
 
-def test_fetch_records_normalises_list_and_data_envelope(recording_transport):
-    def responder(r: httpx.Request) -> httpx.Response:
-        # Bare-list response shape.
-        return httpx.Response(200, json=[{"source_id": "a"}])
+def test_fetch_records_normalises_list_and_data_envelope(monkeypatch):
+    """fetch_records routes through the lib's fulcra_v1_api (raw bytes) and
+    normalises both the bare-list and `{"data": [...]}` envelope to a list.
 
-    client = BaseFulcraClient(transport=recording_transport(responder))
+    The lib returns bytes; fetch_records json.loads them. We also assert the
+    generic event call is made with the right data_type and that the window
+    params keep the `...Z` ISO formatting.
+    """
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
     t0 = datetime(2026, 5, 21, tzinfo=timezone.utc)
     t1 = datetime(2026, 5, 22, tzinfo=timezone.utc)
-    assert client.fetch_records(t0, t1) == [{"source_id": "a"}]
 
-    client2 = BaseFulcraClient(
-        transport=recording_transport(
-            lambda r: httpx.Response(200, json={"data": [{"source_id": "b"}]}),
-        ),
+    # Bare-list response shape.
+    fake_lib = MagicMock()
+    fake_lib.fulcra_v1_api.return_value = json.dumps([{"source_id": "a"}]).encode()
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+    client = BaseFulcraClient()
+    assert client.fetch_records(t0, t1) == [{"source_id": "a"}]
+    # Generic event call: data_class "event", default data_type, Z-formatted window.
+    fake_lib.fulcra_v1_api.assert_called_once_with(
+        "event",
+        "DurationAnnotation",
+        {
+            "start_time": "2026-05-21T00:00:00Z",
+            "end_time": "2026-05-22T00:00:00Z",
+        },
     )
+
+    # `{"data": [...]}` envelope shape.
+    fake_lib2 = MagicMock()
+    fake_lib2.fulcra_v1_api.return_value = json.dumps(
+        {"data": [{"source_id": "b"}]}
+    ).encode()
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib2)
+    client2 = BaseFulcraClient()
     assert client2.fetch_records(t0, t1) == [{"source_id": "b"}]
 
 
-def test_fetch_existing_source_ids_collects_and_filters_by_def(recording_transport):
+def test_fetch_existing_source_ids_collects_and_filters_by_def(monkeypatch):
     records = [
         {"source_id": "com.fulcradynamics.annotation.def-keep",
          "metadata": {"source": ["src-1", "com.fulcradynamics.annotation.def-keep"]}},
         {"source_id": "com.fulcradynamics.annotation.def-orphan",
          "metadata": {"source": ["src-orphan"]}},
     ]
-    client = BaseFulcraClient(
-        transport=recording_transport(lambda r: httpx.Response(200, json=records)),
-    )
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    fake_lib = MagicMock()
+    fake_lib.fulcra_v1_api.return_value = json.dumps(records).encode()
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+    client = BaseFulcraClient()
     t0 = datetime(2026, 5, 21, tzinfo=timezone.utc)
     t1 = datetime(2026, 5, 22, tzinfo=timezone.utc)
     # No filter: every source string is collected.
