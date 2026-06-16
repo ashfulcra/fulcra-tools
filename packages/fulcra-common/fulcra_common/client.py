@@ -8,7 +8,6 @@ calls. That shared core lives here. Each package subclasses
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -244,22 +243,17 @@ class BaseFulcraClient:
 
         The Fulcra endpoint returns either a plain list or `{"data": [...]}`;
         both shapes are normalised to a list here.
-
-        Routes through the `fulcra_api` lib's generic `fulcra_v1_api`, which
-        builds `/data/v1alpha1/event/{data_type}` and returns the raw response
-        bytes. We pass the window as pre-formatted ISO strings (`...Z`) under
-        the `start_time`/`end_time` param names: the lib urlencodes the params
-        dict, so raw datetimes would serialise with a space instead of `T`/`Z`.
         """
-        raw = self._lib().fulcra_v1_api(
-            "event",
-            data_type,
-            {
+        r = self._client().get(
+            f"/data/v1alpha1/event/{data_type}",
+            params={
                 "start_time": start.isoformat().replace("+00:00", "Z"),
                 "end_time": end.isoformat().replace("+00:00", "Z"),
             },
+            headers=self._authed_headers(),
         )
-        body = json.loads(raw)
+        r.raise_for_status()
+        body = r.json()
         if isinstance(body, list):
             return body
         return body.get("data", []) or []
