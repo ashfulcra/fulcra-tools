@@ -128,16 +128,28 @@ class BaseFulcraClient:
         `get_tag_by_name`; on not-found (HTTP 404 or missing id), creates
         it via `create_tag`.
 
-        `quote_name` is accepted for backwards-compatibility — the lib
-        handles URL-encoding of the name internally, so this parameter has
-        no runtime effect when using the lib transport.  Callers that set
-        it continue to work without changes.
+        The lib does NOT percent-encode the name it interpolates into the
+        lookup path (`get_tag_by_name` builds `/tag/name/{name}` verbatim and
+        `urlunparse` passes it through unescaped). Real Agent-Tasks tag names
+        contain colons (`agent:claude`, `session:Mac`) and other names may
+        carry `/` or spaces — an unescaped space even makes urllib raise. So
+        we percent-encode the name for the LOOKUP path here, exactly as the
+        old httpx path did, and pass the RAW name to `create_tag` (whose body
+        is JSON, where no URL-encoding is wanted).
+
+        `quote_name` is accepted for backwards-compatibility. Encoding the
+        lookup path is now unconditional (it's a no-op for names with no
+        reserved chars and the safe behavior for those that do), so the flag
+        has no effect; callers that set it continue to work unchanged.
         """
         import urllib.error
+        from urllib.parse import quote
 
         lib = self._lib()
+        # Encode the name for the GET lookup PATH; the lib won't do it for us.
+        path_name = quote(name, safe="")
         try:
-            tag = lib.get_tag_by_name(name)
+            tag = lib.get_tag_by_name(path_name)
             tag_id = tag.get("id") if isinstance(tag, dict) else None
             if tag_id:
                 return tag_id
@@ -145,6 +157,7 @@ class BaseFulcraClient:
             if exc.code != 404:
                 raise
             # 404 → tag not found; fall through to create
+        # create_tag puts the name in the JSON body — use the RAW name.
         result = lib.create_tag(name)
         # The lib type hint says List[Dict]; the server may return a plain
         # dict or a list depending on the API version — handle both.

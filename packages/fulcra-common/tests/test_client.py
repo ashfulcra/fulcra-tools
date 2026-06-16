@@ -106,6 +106,49 @@ def test_resolve_tag_uses_lib_get_then_create_on_not_found(monkeypatch):
     fake_lib.create_tag.assert_called_once_with("brand-new")
 
 
+def test_resolve_tag_handles_colon_in_name(monkeypatch):
+    """Real Agent-Tasks tag names contain colons (agent:claude, session:Mac).
+
+    The lib does not percent-encode the name it puts in the lookup path, so
+    _resolve_tag must encode it. Verify a colon name resolves: the LOOKUP
+    receives the percent-encoded name (agent%3Aclaude) and the returned id is
+    passed through intact.
+    """
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.get_tag_by_name.return_value = {"id": "tag-agent-claude", "name": "agent:claude"}
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
+
+    result = client._resolve_tag("agent:claude")
+    assert result == "tag-agent-claude"
+    # The colon must be percent-encoded for the GET lookup path.
+    fake_lib.get_tag_by_name.assert_called_once_with("agent%3Aclaude")
+    fake_lib.create_tag.assert_not_called()
+
+
+def test_resolve_tag_creates_colon_name_with_raw_body(monkeypatch):
+    """When a colon tag is missing, it is created with the RAW (un-encoded)
+    name in the create_tag JSON body — only the lookup PATH gets encoded."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    not_found = urllib.error.HTTPError(
+        url="http://x", code=404, msg="Not Found", hdrs=None, fp=None
+    )
+    fake_lib.get_tag_by_name.side_effect = not_found
+    fake_lib.create_tag.return_value = [{"id": "tag-sess", "name": "session:Mac"}]
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
+
+    result = client._resolve_tag("session:Mac")
+    assert result == "tag-sess"
+    # Lookup path is encoded; create body uses the raw name.
+    fake_lib.get_tag_by_name.assert_called_once_with("session%3AMac")
+    fake_lib.create_tag.assert_called_once_with("session:Mac")
+
+
 def test_resolve_tag_returns_existing_tag(monkeypatch):
     # Kept for historical compat; superseded by test_resolve_tag_uses_lib_get_when_tag_exists.
     monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
@@ -132,8 +175,10 @@ def test_resolve_tag_creates_when_missing(monkeypatch):
 
 
 def test_resolve_tag_quote_name_encodes_the_lookup_path(monkeypatch):
-    # quote_name is now a compat-only no-op: the lib handles URL encoding
-    # internally, so we only verify the param is accepted without error.
+    # The lib does NOT URL-encode the name, so _resolve_tag percent-encodes
+    # it for the lookup path itself. A '/' must reach get_tag_by_name already
+    # encoded as %2F so it stays one path segment. quote_name is compat-only
+    # (encoding is unconditional now); we pass it to prove it's still accepted.
     monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
     client = BaseFulcraClient()
     fake_lib = MagicMock()
@@ -141,7 +186,8 @@ def test_resolve_tag_quote_name_encodes_the_lookup_path(monkeypatch):
     monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
     result = client._resolve_tag("a/b", quote_name=True)
     assert result == "x"
-    fake_lib.get_tag_by_name.assert_called_once_with("a/b")
+    # The lookup path name is percent-encoded; the slash becomes %2F.
+    fake_lib.get_tag_by_name.assert_called_once_with("a%2Fb")
 
 
 def test_soft_delete_definition_true_on_204(recording_transport):
