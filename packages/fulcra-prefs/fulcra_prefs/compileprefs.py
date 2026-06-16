@@ -3,7 +3,7 @@
 that ordering is part of the reviewed determinism contract (PR #146)."""
 from __future__ import annotations
 from datetime import datetime
-from .decay import effective_weight, is_stale
+from .decay import effective_weight, is_stale, parse_instant
 from .schema import Signal, SCHEMA_V
 
 
@@ -39,7 +39,7 @@ def _reduce(signals: list[Signal], now: datetime) -> dict:
         # confidence only influences which signal wins. Deterministic: ties fall
         # back to observed_at, then the id pre-sort above.
         best = max(group, key=lambda s: (abs(effective_weight(s, now)) * s.confidence,
-                                         s.observed_at))
+                                         parse_instant(s.observed_at)))
         keys[key] = _entry(best, effective_weight(best, now), len(group), now)
     return keys
 

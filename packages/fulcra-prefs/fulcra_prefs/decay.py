@@ -7,6 +7,17 @@ from .schema import Signal
 STALE_FACT_DAYS = 180  # undecaying facts older than this get flagged, not dropped
 
 
+def parse_instant(observed_at: str) -> datetime:
+    """observed_at as a tz-aware UTC datetime. Naive timestamps (real
+    get-records values, hand-written shards) are treated as UTC so callers can
+    compare/sort instants without TypeError on mixed naive/aware input, and so
+    chronology is correct across timezone offsets (not lexicographic)."""
+    dt = datetime.fromisoformat(observed_at)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _age_days(observed_at: str, now: datetime) -> float:
     observed = datetime.fromisoformat(observed_at)
     # observed_at may arrive tz-naive (real get-records timestamps, a hand-written
