@@ -123,6 +123,34 @@ def test_compile_does_not_fail_when_cache_gc_delete_fails(env, capsys):
         "failed GC delete should leave shard for a later retry"
 
 
+def test_compile_skips_invalid_cached_signal_shard(env, capsys):
+    """Old clients may already have written out-of-range shards before schema
+    validation existed. Compile should skip that poisoned cache entry, not crash
+    forever on every session-start hook."""
+    call, _fake_api, store = env
+    good = make_signal(id="sig-good", key="dining.cuisine.thai")
+    bad = make_signal(id="sig-bad", key="dining.cuisine.sushi").to_payload()
+    bad["strength"] = 9.99
+    store.write_json("/prefs/signals-cache/sig-good.json", {
+        "id": "sig-good",
+        "recorded_at": good.observed_at,
+        "sources": ["sig-good"],
+        "data": json.dumps(good.to_payload()),
+    })
+    store.write_json("/prefs/signals-cache/sig-bad.json", {
+        "id": "sig-bad",
+        "recorded_at": good.observed_at,
+        "sources": ["sig-bad"],
+        "data": json.dumps(bad),
+    })
+
+    assert call("compile") == 0
+    compiled = store.read_json(COMPILED_PATH)
+    assert "dining.cuisine.thai" in compiled["keys"]
+    assert "dining.cuisine.sushi" not in compiled["keys"]
+    assert "skipped 1 invalid cached signal shard" in capsys.readouterr().err
+
+
 def test_compile_keeps_shard_when_record_unconfirmed(env, capsys):
     """A shard whose record isn't visible in get-records (read outage / lag)
     must be KEPT — pruning it would lose the only copy of that signal."""
@@ -446,3 +474,27 @@ def test_consent_revoke_tolerates_malformed_grant(env):
     store.write_json("prefs/consent.json",
                      {"v": 1, "grants": [{"audience": "ea", "granted_at": "x"}]})
     assert call("consent", "revoke", "--key-glob", "dining.*", "--audience", "ea") == 0
+
+
+def test_capture_invalid_json_value_returns_2(env):
+    """capture --value with malformed JSON should return rc 2, not a traceback."""
+    call, *_ = env
+    assert call("capture", "--key", "k", "--value", "not-json",
+                "--strength", "0.5", "--platform", "claude-code") == 2
+
+
+def test_solve_missing_options_file_returns_2(env, tmp_path):
+    call, *_ = env
+    parts = tmp_path / "p.json"
+    parts.write_text("{}")
+    assert call("solve", "--options", str(tmp_path / "nope.json"),
+                "--participants", str(parts)) == 2
+
+
+def test_solve_invalid_json_file_returns_2(env, tmp_path):
+    call, *_ = env
+    opt = tmp_path / "o.json"
+    opt.write_text("not json")
+    parts = tmp_path / "p.json"
+    parts.write_text("{}")
+    assert call("solve", "--options", str(opt), "--participants", str(parts)) == 2

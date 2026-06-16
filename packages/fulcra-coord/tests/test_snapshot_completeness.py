@@ -216,6 +216,15 @@ class ContinuityCheckpointQualityTest(unittest.TestCase):
             warnings,
         )
 
+    def test_quality_warnings_tolerates_non_dict_identity(self) -> None:
+        # quality_warnings is best-effort ("must not fail hook paths"), but a
+        # malformed (non-dict) identity made identity.get(...) raise
+        # AttributeError. The standalone checkpoint_from_dict guards this; the
+        # bridge must too — fall back to no-identity and flag it.
+        for bad in (["x"], "str", 7):
+            warnings = continuity.quality_warnings({"identity": bad})
+            self.assertIn("missing identity.workstream_id", warnings)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

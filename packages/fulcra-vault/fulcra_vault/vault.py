@@ -9,6 +9,7 @@ from .frontmatter import update_keys
 from .links import build_index
 from .map import render_hot, render_map, select_hot_items
 from .schema import SCHEMA_VERSION, StructureSpec, VaultMeta, canonical_json
+from .store import MissingFileError
 
 
 AGENT = "fulcra-vault"
@@ -113,7 +114,7 @@ def apply_restructure(meta: VaultMeta, new_spec: StructureSpec,
         if op.path.startswith("/vault/") and op.path.endswith(".md"):
             try:
                 store.read_text(op.path)
-            except FileNotFoundError:
+            except (FileNotFoundError, MissingFileError):
                 pass
             else:
                 raise RestructureError(f"target changed before write: {op.path}")
@@ -160,7 +161,7 @@ def _read_existing_seed_notes(store: TextStore, meta: VaultMeta,
     for path in sorted(paths):
         try:
             existing[path] = store.read_text(f"/vault/{path}")
-        except FileNotFoundError:
+        except (FileNotFoundError, MissingFileError):
             continue
     return existing
 
@@ -187,7 +188,7 @@ def _seed_note(path: str, *, section_slug: str, now: datetime) -> str:
 def _exists(store: TextStore, path: str) -> bool:
     try:
         store.read_text(path)
-    except FileNotFoundError:
+    except (FileNotFoundError, MissingFileError):
         return False
     return True
 

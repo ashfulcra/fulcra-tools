@@ -61,5 +61,15 @@ def append_candidate(path: Path, spec: dict[str, Any]) -> int:
 
 def mark_captured(path: Path) -> Path:
     captured = path.with_name(path.name + ".captured")
+    # A re-drain of the same (platform, session) must not clobber the prior
+    # archive: pick the next free .captured[.N] name instead of overwriting.
+    if captured.exists():
+        i = 1
+        while True:
+            alt = path.with_name(f"{path.name}.captured.{i}")
+            if not alt.exists():
+                captured = alt
+                break
+            i += 1
     path.replace(captured)
     return captured

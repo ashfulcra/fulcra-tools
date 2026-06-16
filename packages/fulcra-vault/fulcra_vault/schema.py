@@ -146,10 +146,9 @@ def normalize_note_path(name: str) -> str:
         if len(path.parts) == 1:
             raise SchemaError("note path must name a file under vault/")
         path = PurePosixPath(*path.parts[1:])
-    if path.suffix and path.suffix != ".md":
+    if path.suffix and path.suffix.lower() != ".md":
         raise SchemaError("note path must be markdown (.md)")
-    if not path.suffix:
-        path = path.with_suffix(".md")
+    path = path.with_suffix(".md")  # add .md if missing; normalize .MD/.Md -> .md
     return path.as_posix()
 
 

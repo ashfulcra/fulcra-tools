@@ -171,13 +171,19 @@ def _parser() -> argparse.ArgumentParser:
 
 def _load_meta(store) -> VaultMeta:
     data = json.loads(store.read_text("/vault/meta.json"))
-    spec = StructureSpec.from_dict(data["spec"])
-    return VaultMeta(
-        spec=spec,
-        created_at=data["created_at"],
-        updated_at=data["updated_at"],
-        schema_version=data.get("schema_version", 1),
-    )
+    if not isinstance(data, dict):
+        raise ValueError("meta.json must be a JSON object")
+    try:
+        spec = StructureSpec.from_dict(data["spec"])
+        return VaultMeta(
+            spec=spec,
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+            schema_version=data.get("schema_version", 1),
+        )
+    except KeyError as e:
+        # surface as ValueError so run()'s handler returns rc 2 instead of a traceback
+        raise ValueError(f"meta.json missing required key: {e}") from e
 
 
 def _ensure_not_excluded(store, note: str) -> None:

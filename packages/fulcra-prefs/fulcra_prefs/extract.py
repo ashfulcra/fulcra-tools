@@ -26,24 +26,57 @@ SENSITIVE_RE = re.compile(
     r"medical|diagnosis|bank|credit card)\b",
     re.IGNORECASE,
 )
+# PII that must never be stored verbatim in a shareable/injectable record.
+# The stored value is the raw sentence, so a sentence carrying PII is skipped
+# entirely (conservative, like SENSITIVE_RE) rather than partially redacted.
+PII_RE = re.compile(
+    r"[\w.+-]+@[\w-]+(?:\.[\w.-]+)?"                      # email (TLD optional)
+    r"|\b(?:\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b",  # phone
+    re.IGNORECASE,
+)
+# Disavowed / reported / hypothetical statements: the user is negating the act
+# of stating or assuming a preference, or quoting someone — not expressing one.
+# Targets negated META verbs (say/mean/assume/claim) and reported "said", so it
+# does NOT catch valid aversions like "I don't want X" (handled by NEGATIVE_RE).
+DISAVOW_RE = re.compile(
+    r"\b(?:never|do(?:es)?\s*n'?t|do(?:es)?\s+not|did\s*n'?t|did\s+not)\s+"
+    r"(?:say|said|mean|meant|assume|claim)\b"
+    r"|\bnever\s+(?:said|claimed|meant)\b"
+    r"|\bnot\s+assume\b"
+    r"|\bsaid\b",                                         # reported speech
+    re.IGNORECASE,
+)
+NON_ASSERTIVE_RE = re.compile(
+    r"^\s*(?:if|when|suppose)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|^\s*do\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|\b(?:ask|tell)\s+me\s+(?:if|whether)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b"
+    r"|\blet\s+me\s+know\s+(?:if|whether)\s+(?:i|we)\s+"
+    r"(?:prefer|want|need|like|dislike|hate)\b",
+    re.IGNORECASE,
+)
 SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
 
 
 def extract_candidates(text: str, *, platform: str, session: str,
                        agent: str | None = None) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, float, str]] = set()
     for sentence in _sentences(text):
         if not EXPLICIT_RE.search(sentence):
             continue
-        if SENSITIVE_RE.search(sentence):
+        if SENSITIVE_RE.search(sentence) or PII_RE.search(sentence):
+            continue
+        if DISAVOW_RE.search(sentence) or NON_ASSERTIVE_RE.search(sentence):
             continue
         key = _classify_key(sentence)
         if key is None:
             continue
         strength = -0.8 if NEGATIVE_RE.search(sentence) else 0.8
         value = _value_for(key, sentence, strength)
-        dedup = (key, str(value))
+        dedup = (key, strength, _dedup_text(sentence))
         if dedup in seen:
             continue
         seen.add(dedup)
@@ -86,6 +119,12 @@ def _classify_key(sentence: str) -> str | None:
     if "review" in s and any(term in s for term in ("arc", "code", "pr", "pull request")):
         return "process.review"
     return None
+
+
+def _dedup_text(sentence: str) -> str:
+    # Normalize for dedup so the same preference restated with different casing
+    # or punctuation collapses: lowercase, non-alphanumeric runs -> single space.
+    return re.sub(r"[^a-z0-9]+", " ", sentence.lower()).strip()
 
 
 def _value_for(key: str, sentence: str, strength: float) -> dict[str, Any]:

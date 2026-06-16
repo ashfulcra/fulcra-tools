@@ -16,7 +16,8 @@ ANNOTATION_SOURCE_PREFIX = "com.fulcradynamics.annotation."
 
 def _normalize(obj):
     if isinstance(obj, float):
-        return round(obj, FLOAT_DP)
+        r = round(obj, FLOAT_DP)
+        return 0.0 if r == 0 else r  # collapse -0.0 -> 0.0 for byte-stable output
     if isinstance(obj, dict):
         return {k: _normalize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -63,6 +64,15 @@ class Signal:
             raise ValueError(f"scope must be 'global' or 'platform:<p>', got {self.scope!r}")
         if not self.key:
             raise ValueError("key is required")
+        if not -1.0 <= self.strength <= 1.0:
+            # inject advertises "weights in [-1, 1]" and compile selects on
+            # effective_weight * confidence; an out-of-range value forges a
+            # high weight or dominates selection. Reject like half_life_days.
+            raise ValueError(
+                f"strength must be in [-1, 1], got {self.strength!r}")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError(
+                f"confidence must be in [0, 1], got {self.confidence!r}")
         if self.half_life_days is not None and self.half_life_days <= 0:
             # 0 → divide-by-zero in effective_weight; <0 → decay that grows.
             # Reject at construction so a poisoned signal never reaches the

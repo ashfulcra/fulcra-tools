@@ -81,7 +81,16 @@ def _gather_signals(store: FulcraStore, meta: dict | None = None
     Confirmed = the dedup keys that came from get-records — i.e. captures the
     authoritative source has, whose write-through shards are now safe to GC."""
     records = store.read_signal_records(meta.get("definition_id")) if meta else []
-    shards = [parse_record(env) for env in store.list_json(SIGNALS_CACHE_PREFIX)]
+    shards: list[Signal] = []
+    skipped_shards = 0
+    for env in store.list_json(SIGNALS_CACHE_PREFIX):
+        try:
+            shards.append(parse_record(env))
+        except (KeyError, ValueError, TypeError):
+            skipped_shards += 1
+    if skipped_shards:
+        print(f"fulcra-prefs: skipped {skipped_shards} invalid cached signal shard(s)",
+              file=sys.stderr)
     by_id: dict[str, Signal] = {}
     for sig in (*records, *shards):
         by_id.setdefault(_dedup_key(sig), sig)
@@ -170,9 +179,14 @@ def cmd_capture(args, api, outbox_dir, now) -> int:
     meta = _require_meta(store)
     if not meta:
         return 2
+    try:
+        value = json.loads(args.value)
+    except ValueError as e:
+        print(f"fulcra-prefs: invalid JSON for --value: {e}", file=sys.stderr)
+        return 2
     sig = _capture_one(
         store, Outbox(outbox_dir), meta, now,
-        key=args.key, value=json.loads(args.value), strength=args.strength,
+        key=args.key, value=value, strength=args.strength,
         kind=args.kind, scope=args.scope, confidence=args.confidence,
         half_life_days=args.half_life, platform=args.platform,
         agent=args.agent, session=args.session, supersedes=args.supersedes)
@@ -447,8 +461,12 @@ def cmd_inject(args, api, outbox_dir, now) -> int:
 
 
 def cmd_solve(args, api, outbox_dir, now) -> int:
-    options = json.loads(Path(args.options).read_text())
-    participants = json.loads(Path(args.participants).read_text())
+    try:
+        options = json.loads(Path(args.options).read_text())
+        participants = json.loads(Path(args.participants).read_text())
+    except (OSError, ValueError) as e:
+        print(f"fulcra-prefs: could not read solve input: {e}", file=sys.stderr)
+        return 2
     result = solve(options, participants, policy=args.policy,
                    veto_threshold=args.veto_threshold)
     print(canonical_json(result))
