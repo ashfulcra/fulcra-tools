@@ -17,10 +17,14 @@ def _active(grant: dict, audience: str, now: datetime) -> bool:
     if exp is None:
         return True
     exp_dt = datetime.fromisoformat(exp)
+    # Either side may arrive tz-naive (a user-supplied expires string, or a
+    # caller passing datetime.now() without a tz). Coerce both to a common UTC
+    # basis rather than raising TypeError on the comparison -- mirrors
+    # decay._age_days.
     if exp_dt.tzinfo is None:
-        # User-supplied expires strings may be naive; treat them as UTC
-        # rather than raising TypeError against the tz-aware `now`.
         exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     return exp_dt > now
 
 
