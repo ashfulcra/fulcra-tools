@@ -198,6 +198,24 @@ def test_map_truncates_hot_to_max_hot_words_instead_of_failing():
     assert "MAP/HOT render check passed" in err.getvalue()
 
 
+def test_map_truncated_hot_still_fits_budget_after_marker():
+    store = _scaffolded_store()
+    for i in range(6):
+        store.write_text(
+            f"/vault/Note {i}.md",
+            f"---\nstatus: active\ntitle: Note {i}\n"
+            f"updated_at: 2026-06-1{i}T00:00:00+00:00\n---\n# Note {i}\n\n"
+            "This is a reasonably wordy summary line for the hot list entry.\n",
+        )
+    err = StringIO()
+
+    rc = run(["map", "--check", "--max-hot-words", "26", "--max-map-words", "100000"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 0, err.getvalue()
+    assert "MAP/HOT render check passed" in err.getvalue()
+
+
 def _scaffolded_store() -> FakeStore:
     store = FakeStore()
     _load_scaffold(store)

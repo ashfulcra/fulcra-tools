@@ -106,6 +106,8 @@ def check_budget(markdown: str, *, max_words: int, label: str) -> str:
 def truncate_markdown(markdown: str, *, max_words: int) -> str:
     if _word_count(markdown) <= max_words:
         return markdown
+    marker_words = _word_count(TRUNCATION_MARKER)
+    content_budget = max_words - marker_words
     lines = markdown.splitlines(keepends=True)
     output: list[str] = []
     words = 0
@@ -113,7 +115,7 @@ def truncate_markdown(markdown: str, *, max_words: int) -> str:
     current_words = 0
     for line in lines:
         if line.startswith("## ") and current_section:
-            if words + current_words > max_words:
+            if words + current_words > content_budget:
                 break
             output.extend(current_section)
             words += current_words
@@ -121,7 +123,7 @@ def truncate_markdown(markdown: str, *, max_words: int) -> str:
             current_words = 0
         if not current_section and not line.startswith("## "):
             line_words = _word_count(line)
-            if words + line_words > max_words:
+            if words + line_words > content_budget:
                 break
             output.append(line)
             words += line_words
@@ -129,11 +131,29 @@ def truncate_markdown(markdown: str, *, max_words: int) -> str:
         current_section.append(line)
         current_words += _word_count(line)
     else:
-        if current_section and words + current_words <= max_words:
+        if current_section and words + current_words <= content_budget:
             output.extend(current_section)
             return "".join(output)
-    text = "".join(output).rstrip() + "\n\n" + TRUNCATION_MARKER + "\n"
-    return text
+    if content_budget >= 0:
+        return "".join(output).rstrip() + "\n\n" + TRUNCATION_MARKER + "\n"
+    return _truncate_lines(markdown, max_words=max_words)
+
+
+def _truncate_lines(markdown: str, *, max_words: int) -> str:
+    if max_words <= 0:
+        return ""
+    output: list[str] = []
+    words = 0
+    for line in markdown.splitlines(keepends=True):
+        line_words = _word_count(line)
+        if words + line_words > max_words:
+            break
+        output.append(line)
+        words += line_words
+    if output:
+        return "".join(output)
+    words = re.findall(r"\b[\w'-]+\b", markdown)
+    return " ".join(words[:max_words]) + "\n"
 
 
 def _map_line(path: str, markdown: str, links: dict[str, Any], *, hot: bool) -> str:
