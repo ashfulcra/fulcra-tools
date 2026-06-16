@@ -12,6 +12,28 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.6] — 2026-06-15
+
+### Coordination reliability fixes
+
+- `connect --role` now surfaces a failed lease claim instead of swallowing it,
+  so an interactive operator sees when a role did not actually get held; the
+  resume brief is skipped when the claim did not land (#224).
+- `quality_warnings` no longer raises `AttributeError` on a malformed (non-dict)
+  `identity` — it flags `missing identity.*` and stays best-effort on hook
+  paths, matching `checkpoint_from_dict` (#226).
+- Reconcile gives the cheap-but-critical role-health / vacancy-escalation and
+  undelivered-directive checks a reserved budget
+  (`FULCRA_COORD_CRITICAL_TIMEOUT_SECONDS`, default `max(timeout+60, 150)`), so a
+  slow core view refresh at scale no longer starves them — role leases keep
+  getting their SLA escalation and directives stop rotting in dead inboxes.
+  Retention stays gated on the core deadline, preserving the operator freeze
+  (#229).
+- Added a cross-package interop guard asserting the coord checkpoint bridge and
+  the `fulcra-continuity` package keep an identical bootstrap primer and
+  checkpoint key set, so the deliberately-independent implementations cannot
+  silently diverge (#232).
+
 ### Installer-baked role declarations
 
 - `install-claude-code` can now bake `--can-review` and repeated `--role ROLE`

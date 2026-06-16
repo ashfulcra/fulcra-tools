@@ -8859,13 +8859,14 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_5(self):
-        # 0.15.5: listener hot-path cut — notify-inbox no longer pays the
-        # optional overdue-loop directive scan by default, so launchd ticks can
-        # notify and exit even on large directive buses. Opt back into the suffix
-        # with FULCRA_COORD_NOTIFY_OVERDUE_SUFFIX=1.
+    def test_version_is_0_15_6(self):
+        # 0.15.6: coordination reliability bundle — connect surfaces failed
+        # lease claims (#224), quality_warnings tolerates a non-dict identity
+        # (#226), reconcile reserves budget for role-health/undelivered checks
+        # so they aren't starved at scale (#229), and a coord<->continuity
+        # interop drift-guard (#232).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.5")
+        self.assertEqual(__version__, "0.15.6")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
