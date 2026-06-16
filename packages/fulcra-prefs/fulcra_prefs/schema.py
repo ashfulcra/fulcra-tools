@@ -30,16 +30,20 @@ def canonical_json(obj) -> str:
                       separators=(",", ":"), ensure_ascii=False)
 
 
+_NO_VALUE = object()
+
+
 def temp_signal_id(key: str, observed_at: str, platform: str,
-                   value: object = None) -> str:
-    parts = f"{key}|{observed_at}|{platform}"
-    if value is not None:
-        # Some signals (consent disclosures) share key+instant+platform but
-        # carry distinct payloads; fold the value in so they get distinct ids
-        # instead of collapsing to one record. Omitted by default to keep
-        # existing callers' ids byte-stable.
-        parts = f"{parts}|{canonical_json(value)}"
-    digest = hashlib.sha256(parts.encode()).hexdigest()[:24]
+                   value: object = _NO_VALUE) -> str:
+    # value is part of a signal's identity: a batch/drain captures every item
+    # with the same observed_at, so two same-key/platform items with different
+    # values would otherwise collide on one id and silently overwrite/dedup.
+    # Callers that have the value MUST pass it; the no-value default keeps the
+    # id byte-stable for the rare caller that legitimately has none. A literal
+    # None value is distinct from no value, so the sentinel (not None) gates it.
+    suffix = "" if value is _NO_VALUE else f"|{canonical_json(value)}"
+    digest = hashlib.sha256(
+        f"{key}|{observed_at}|{platform}{suffix}".encode()).hexdigest()[:24]
     return f"{TEMP_ID_PREFIX}{digest}"
 
 
