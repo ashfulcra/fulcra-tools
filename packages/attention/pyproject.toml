@@ -20,7 +20,7 @@ fulcra-collect = { workspace = true }
 # to the binary); installed separately via `uv tool install fulcra-api`. Out
 # of base deps so it doesn't drag pyarrow into installs / the bundled app.
 fulcra-cli = [
-    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+    "fulcra-api>=0.1.34",
 ]
 dev = [
     # fulcra-api currently pins pytest<8 in its runtime deps, so we must
