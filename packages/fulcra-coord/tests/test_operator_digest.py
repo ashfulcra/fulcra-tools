@@ -181,7 +181,7 @@ class TestEmitDigestAnnotation(unittest.TestCase):
         os.environ["FULCRA_ACCESS_TOKEN"] = "tkn-abc"
         os.environ["FULCRA_API_BASE"] = "https://api.example.test"
         os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination-digesttest"
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
 
     def tearDown(self):
         os.environ.pop("XDG_CACHE_HOME", None)

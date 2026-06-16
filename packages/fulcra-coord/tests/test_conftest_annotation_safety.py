@@ -6,10 +6,10 @@ WHY THIS EXISTS — a real incident, not a nicety:
 
 The annotation writer resolves its mode from ``FULCRA_COORD_ANNOTATIONS`` (env)
 > a persisted file at ``${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/annotations``
-> ``off``. An operator who runs ``fulcra-coord annotations on`` persists
-``http`` there machine-wide. The hermetic conftest fixture isolates
-``XDG_CACHE_HOME`` and defaults the *CLI* backend to ``false`` — but the HTTP
-annotation path uses ``urllib`` directly, NOT the CLI backend, and reads its
+> ``off``. An operator who runs ``fulcra-coord annotations on`` persists ``on``
+there machine-wide. The hermetic conftest fixture isolates
+``XDG_CACHE_HOME`` and defaults the *CLI* backend to ``false`` — but the
+annotation writer uses ``urllib`` directly, NOT the CLI backend, and reads its
 mode from ``XDG_CONFIG_HOME`` (which the fixture did NOT isolate). So end-to-end
 command tests (``cmd_start`` / ``cmd_tell`` / ``cmd_update`` …) that emit a
 lifecycle annotation as a side effect, on a machine with ``http`` persisted,
@@ -41,17 +41,17 @@ def test_fixture_forces_annotations_off_by_default():
     assert os.environ.get("FULCRA_COORD_ANNOTATIONS") == "off"
 
 
-def test_persisted_http_config_cannot_leak_under_fixture():
-    """Even if a persisted ``http`` config file exists, the fixture's env
-    default must win (env > config), so ``_mode()`` is ``off`` and the live
-    HTTP path is never reached."""
+def test_persisted_on_config_cannot_leak_under_fixture():
+    """Even if a persisted ``on`` config file exists, the fixture's env default
+    must win (env > config), so ``_mode()`` is ``off`` and the live HTTP path is
+    never reached."""
     # Simulate the operator's machine-wide enablement in an isolated config root.
     cfg = tempfile.mkdtemp(prefix="fulcra-coord-test-cfg-")
     prev_cfg = os.environ.get("XDG_CONFIG_HOME")
     os.environ["XDG_CONFIG_HOME"] = cfg
     try:
-        annotations.set_persisted_mode("http")
-        assert annotations._persisted_mode() == "http"  # config really says http
+        annotations.set_persisted_mode("on")
+        assert annotations._persisted_mode() == "on"  # config really says on
         # ...yet the fixture's env default disables it:
         assert annotations._mode() == "off"
     finally:
@@ -64,9 +64,9 @@ def test_persisted_http_config_cannot_leak_under_fixture():
 def test_explicit_env_override_still_wins():
     """A test that deliberately sets a mode must still override the default."""
     prev = os.environ.get("FULCRA_COORD_ANNOTATIONS")
-    os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+    os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
     try:
-        assert annotations._mode() == "cli"
+        assert annotations._mode() == "on"
     finally:
         if prev is None:
             os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
