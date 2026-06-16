@@ -158,12 +158,9 @@ def test_render_hot_is_budgeted_at_section_boundaries():
 
     assert rendered == (
         "# Hot\n\n"
-        "## [[A|A]]\n"
-        "- Reasons: active\n"
-        "- Updated: 2026-06-12\n"
-        "- Summary: one two\n\n"
         "(truncated - run fulcra-vault map)\n"
     )
+    check_budget(rendered, max_words=10, label="HOT")
 
 
 def test_render_hot_empty_state_is_deterministic():
@@ -182,4 +179,22 @@ def test_budget_check_reports_without_mutating():
 def test_truncate_markdown_never_cuts_mid_section():
     markdown = "# Hot\n\n## A\none two three\n\n## B\nfour five six\n"
 
-    assert truncate_markdown(markdown, max_words=6) == "# Hot\n\n## A\none two three\n\n(truncated - run fulcra-vault map)\n"
+    assert truncate_markdown(markdown, max_words=6) == "# Hot\n\n(truncated - run fulcra-vault map)\n"
+
+
+def test_truncate_markdown_reserves_marker_budget():
+    markdown = "# Hot\n\n## A\none two three\n\n## B\nfour five six\n\n## C\nseven eight nine\n"
+
+    truncated = truncate_markdown(markdown, max_words=9)
+
+    assert truncated == "# Hot\n\n## A\none two three\n\n(truncated - run fulcra-vault map)\n"
+    check_budget(truncated, max_words=9, label="HOT")
+
+
+def test_truncate_markdown_tiny_budget_still_fits():
+    markdown = "# Hot\n\n## A\none two three\n"
+
+    truncated = truncate_markdown(markdown, max_words=2)
+
+    assert truncated == "# Hot\n\n## A\n"
+    check_budget(truncated, max_words=2, label="HOT")

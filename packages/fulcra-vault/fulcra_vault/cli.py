@@ -118,7 +118,10 @@ def cmd_map(args, store, now, stdin, stdout, stderr) -> int:
     notes = _read_note_map(store)
     links = build_index(notes)
     rendered_map = render_map(meta.spec, notes, links)
-    hot = render_hot(select_hot_items(notes, links, now))
+    # Truncate HOT to the SAME budget check_budget enforces; otherwise render_hot
+    # self-truncates at its hardcoded default and --max-hot-words just fails the
+    # command instead of bounding HOT.
+    hot = render_hot(select_hot_items(notes, links, now), max_words=args.max_hot_words)
     check_budget(rendered_map, max_words=args.max_map_words, label="MAP")
     check_budget(hot, max_words=args.max_hot_words, label="HOT")
     if args.check:
