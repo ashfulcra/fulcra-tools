@@ -36,6 +36,19 @@ def test_disclosure_signal_records_what_was_shared():
     assert sig.value == {"keys": ["dining.cuisine.thai"], "audience": "ea-agent"}
     assert sig.observed_at == "2026-06-10T12:00:00+00:00"
 
+def test_disclosure_signal_disambiguates_same_instant_different_keys():
+    # Two disclosures to the same audience/platform at the same instant but
+    # covering different keys are distinct Privacy Ledger entries. Their signal
+    # ids (the record identity) must differ, or the store collapses one away.
+    a = disclosure_signal(["dining.cuisine.thai"], "ea-agent", "ios", NOW)
+    b = disclosure_signal(["health.weight", "health.steps"], "ea-agent", "ios", NOW)
+    assert a.id != b.id
+
+def test_disclosure_signal_id_stable_for_same_disclosure():
+    a = disclosure_signal(["a", "b"], "ea-agent", "ios", NOW)
+    b = disclosure_signal(["b", "a"], "ea-agent", "ios", NOW)  # value keys sorted
+    assert a.id == b.id
+
 def test_naive_expires_string_treated_as_utc_not_crash():
     live = grant(expires="2099-01-01T00:00:00")      # naive, far future
     dead = grant(expires="2020-01-01T00:00:00")      # naive, past
