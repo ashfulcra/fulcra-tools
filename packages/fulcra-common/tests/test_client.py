@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.error
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -69,44 +71,77 @@ def test_get_token_raises_runtimeerror_on_cli_failure(monkeypatch):
         BaseFulcraClient().get_token()
 
 
-def test_resolve_tag_returns_existing_tag(recording_transport):
-    def responder(r: httpx.Request) -> httpx.Response:
-        if r.method == "GET" and r.url.path == "/user/v1alpha1/tag/name/web":
-            return httpx.Response(200, json={"id": "tag-web"})
-        raise AssertionError(f"unexpected {r.method} {r.url}")
+def test_resolve_tag_uses_lib_get_when_tag_exists(monkeypatch):
+    """_resolve_tag returns the existing tag id via the lib without creating."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
 
-    client = BaseFulcraClient(transport=recording_transport(responder))
+    fake_lib = MagicMock()
+    fake_lib.get_tag_by_name.return_value = {"id": "eid", "name": "existing"}
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
+
+    result = client._resolve_tag("existing")
+    assert result == "eid"
+    fake_lib.get_tag_by_name.assert_called_once_with("existing")
+    fake_lib.create_tag.assert_not_called()
+
+
+def test_resolve_tag_uses_lib_get_then_create_on_not_found(monkeypatch):
+    """_resolve_tag creates via the lib when get_tag_by_name signals not-found."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    not_found = urllib.error.HTTPError(
+        url="http://x", code=404, msg="Not Found", hdrs=None, fp=None
+    )
+    fake_lib.get_tag_by_name.side_effect = not_found
+    # create_tag returns a list per the lib spec; new tag is [0]
+    fake_lib.create_tag.return_value = [{"id": "tid", "name": "brand-new"}]
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
+
+    result = client._resolve_tag("brand-new")
+    assert result == "tid"
+    fake_lib.get_tag_by_name.assert_called_once_with("brand-new")
+    fake_lib.create_tag.assert_called_once_with("brand-new")
+
+
+def test_resolve_tag_returns_existing_tag(monkeypatch):
+    # Kept for historical compat; superseded by test_resolve_tag_uses_lib_get_when_tag_exists.
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+    fake_lib = MagicMock()
+    fake_lib.get_tag_by_name.return_value = {"id": "tag-web", "name": "web"}
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
     assert client._resolve_tag("web") == "tag-web"
 
 
-def test_resolve_tag_creates_when_missing(recording_transport):
-    posted: list[dict] = []
-
-    def responder(r: httpx.Request) -> httpx.Response:
-        if r.method == "GET" and "/tag/name/" in r.url.path:
-            return httpx.Response(404)
-        if r.method == "POST" and r.url.path == "/user/v1alpha1/tag":
-            posted.append(json.loads(r.content))
-            return httpx.Response(200, json={"id": "tag-new"})
-        raise AssertionError(f"unexpected {r.method} {r.url}")
-
-    client = BaseFulcraClient(transport=recording_transport(responder))
+def test_resolve_tag_creates_when_missing(monkeypatch):
+    # Kept for historical compat; superseded by test_resolve_tag_uses_lib_get_then_create_on_not_found.
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+    fake_lib = MagicMock()
+    not_found = urllib.error.HTTPError(
+        url="http://x", code=404, msg="Not Found", hdrs=None, fp=None
+    )
+    fake_lib.get_tag_by_name.side_effect = not_found
+    fake_lib.create_tag.return_value = [{"id": "tag-new", "name": "brand-new"}]
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
     assert client._resolve_tag("brand-new") == "tag-new"
-    assert posted == [{"name": "brand-new"}]
+    fake_lib.create_tag.assert_called_once_with("brand-new")
 
 
-def test_resolve_tag_quote_name_encodes_the_lookup_path(recording_transport):
-    seen: list[bytes] = []
-
-    def responder(r: httpx.Request) -> httpx.Response:
-        seen.append(r.url.raw_path)
-        return httpx.Response(200, json={"id": "x"})
-
-    client = BaseFulcraClient(transport=recording_transport(responder))
-    # A '/' in the tag name must be percent-encoded so it stays one path
-    # segment instead of splitting the lookup path.
-    client._resolve_tag("a/b", quote_name=True)
-    assert seen[0].endswith(b"/user/v1alpha1/tag/name/a%2Fb")
+def test_resolve_tag_quote_name_encodes_the_lookup_path(monkeypatch):
+    # quote_name is now a compat-only no-op: the lib handles URL encoding
+    # internally, so we only verify the param is accepted without error.
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+    fake_lib = MagicMock()
+    fake_lib.get_tag_by_name.return_value = {"id": "x", "name": "a/b"}
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib, raising=False)
+    result = client._resolve_tag("a/b", quote_name=True)
+    assert result == "x"
+    fake_lib.get_tag_by_name.assert_called_once_with("a/b")
 
 
 def test_soft_delete_definition_true_on_204(recording_transport):

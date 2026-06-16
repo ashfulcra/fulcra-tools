@@ -108,28 +108,49 @@ class BaseFulcraClient:
     def _authed_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.get_token()}"}
 
+    def _lib(self):
+        """Lazily build and cache a FulcraAPI lib client from the current token.
+
+        The lib client is reused across calls on this instance. It is built
+        from the same bearer token source as `_authed_headers()` so auth
+        stays consistent.
+        """
+        from fulcra_api.core import FulcraAPI
+
+        if getattr(self, "_lib_client", None) is None:
+            self._lib_client = FulcraAPI(access_token=self.get_token())
+        return self._lib_client
+
     def _resolve_tag(self, name: str, *, quote_name: bool = False) -> str:
         """Return the id of the tag called `name`, creating it if absent.
 
-        `quote_name` percent-encodes the name in the lookup path — needed
-        for names with `/`, `?`, `#`, or spaces. The POST body always uses
-        the raw name.
+        Delegates to the `fulcra_api` lib: looks up the tag by name via
+        `get_tag_by_name`; on not-found (HTTP 404 or missing id), creates
+        it via `create_tag`.
+
+        `quote_name` is accepted for backwards-compatibility — the lib
+        handles URL-encoding of the name internally, so this parameter has
+        no runtime effect when using the lib transport.  Callers that set
+        it continue to work without changes.
         """
-        path_name = quote(name, safe="") if quote_name else name
-        c = self._client()
-        r = c.get(
-            f"/user/v1alpha1/tag/name/{path_name}",
-            headers=self._authed_headers(),
-        )
-        if r.status_code == 200:
-            return r.json()["id"]
-        r = c.post(
-            "/user/v1alpha1/tag",
-            json={"name": name},
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        return r.json()["id"]
+        import urllib.error
+
+        lib = self._lib()
+        try:
+            tag = lib.get_tag_by_name(name)
+            tag_id = tag.get("id") if isinstance(tag, dict) else None
+            if tag_id:
+                return tag_id
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            # 404 → tag not found; fall through to create
+        result = lib.create_tag(name)
+        # The lib type hint says List[Dict]; the server may return a plain
+        # dict or a list depending on the API version — handle both.
+        if isinstance(result, list):
+            return result[0]["id"]
+        return result["id"]
 
     def definition_exists(self, definition_id: str) -> bool:
         """Return True iff `definition_id` is a live (non-deleted)
