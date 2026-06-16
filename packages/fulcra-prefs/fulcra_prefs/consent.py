@@ -9,7 +9,9 @@ from .schema import Signal, temp_signal_id
 
 
 def _active(grant: dict, audience: str, now: datetime) -> bool:
-    if grant["audience"] != audience:
+    # Grants are raw dicts with no schema validation; a legacy/partial grant
+    # missing 'audience' must read as inactive, never raise.
+    if grant.get("audience") != audience:
         return False
     exp = grant.get("expires")
     if exp is None:
@@ -27,7 +29,7 @@ def filter_for_audience(doc: dict, grants: list[dict], audience: str,
     live = [g for g in grants if _active(g, audience, now)]
     # NOTE: grant 'level' (read|solve) is recorded but not yet enforced anywhere; enforcement arrives with cross-user sharing post-v1.
     keys = {k: v for k, v in doc.get("keys", {}).items()
-            if any(fnmatch(k, g["key_glob"]) for g in live)}  # fnmatch '*' crosses dots: 'dining.*' matches all depths
+            if any(fnmatch(k, g["key_glob"]) for g in live if g.get("key_glob"))}  # fnmatch '*' crosses dots: 'dining.*' matches all depths; skip grants w/o key_glob
     return {**doc, "keys": keys}
 
 

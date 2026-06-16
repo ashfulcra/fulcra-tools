@@ -455,6 +455,27 @@ def test_successful_capture_spools_when_cache_write_fails(fake_api, tmp_path, ca
     assert Outbox(outbox_dir).pending() == []
 
 
+def test_get_for_tolerates_legacy_consent_doc(env):
+    """A consent.json present but without 'grants' (legacy/partial) must not
+    crash the consent-gated export path."""
+    call, _api, store = env
+    store.write_json("prefs/consent.json", {"v": 1})
+    assert call("get", "--for", "ea") == 0
+
+
+def test_consent_grant_tolerates_legacy_consent_doc(env):
+    call, _api, store = env
+    store.write_json("prefs/consent.json", {"v": 1})
+    assert call("consent", "grant", "--key-glob", "dining.*", "--audience", "ea") == 0
+
+
+def test_consent_revoke_tolerates_malformed_grant(env):
+    call, _api, store = env
+    store.write_json("prefs/consent.json",
+                     {"v": 1, "grants": [{"audience": "ea", "granted_at": "x"}]})
+    assert call("consent", "revoke", "--key-glob", "dining.*", "--audience", "ea") == 0
+
+
 def test_capture_invalid_json_value_returns_2(env):
     """capture --value with malformed JSON should return rc 2, not a traceback."""
     call, *_ = env
