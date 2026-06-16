@@ -4,6 +4,16 @@ start (SPEC.md errors & edges)."""
 from __future__ import annotations
 
 
+def _safe_key(key: str) -> str:
+    """Keys render on a single line; neutralize control chars so a crafted key
+    (the schema accepts any non-empty string) can't forge extra preference
+    lines in the bootstrap block. Printable chars pass through unchanged."""
+    return "".join(
+        ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii")
+        for ch in key
+    )
+
+
 def render_block(doc: dict | None, platform: str) -> str:
     if not doc or not doc.get("keys"):
         return ""
@@ -12,7 +22,7 @@ def render_block(doc: dict | None, platform: str) -> str:
     for key in sorted(doc["keys"]):
         e = doc["keys"][key]
         stale = " (stale)" if e.get("stale") else ""
-        lines.append(f"- {key}: {e['value']!r} "
+        lines.append(f"- {_safe_key(key)}: {e['value']!r} "
                      f"[{e['weight']:+.2f}]{stale}")
     lines.append("")
     lines.append("Apply these as standing user preferences. Weights in [-1,1]; "
