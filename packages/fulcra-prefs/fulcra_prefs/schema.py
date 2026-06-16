@@ -30,9 +30,16 @@ def canonical_json(obj) -> str:
                       separators=(",", ":"), ensure_ascii=False)
 
 
-def temp_signal_id(key: str, observed_at: str, platform: str) -> str:
-    digest = hashlib.sha256(
-        f"{key}|{observed_at}|{platform}".encode()).hexdigest()[:24]
+def temp_signal_id(key: str, observed_at: str, platform: str,
+                   value: object = None) -> str:
+    parts = f"{key}|{observed_at}|{platform}"
+    if value is not None:
+        # Some signals (consent disclosures) share key+instant+platform but
+        # carry distinct payloads; fold the value in so they get distinct ids
+        # instead of collapsing to one record. Omitted by default to keep
+        # existing callers' ids byte-stable.
+        parts = f"{parts}|{canonical_json(value)}"
+    digest = hashlib.sha256(parts.encode()).hexdigest()[:24]
     return f"{TEMP_ID_PREFIX}{digest}"
 
 
