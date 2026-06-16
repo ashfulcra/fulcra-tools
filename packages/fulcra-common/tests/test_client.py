@@ -216,17 +216,25 @@ def test_resolve_tag_quote_name_encodes_the_lookup_path(monkeypatch):
     fake_lib.get_tag_by_name.assert_called_once_with("a%2Fb")
 
 
-def test_soft_delete_definition_true_on_204(recording_transport):
-    client = BaseFulcraClient(
-        transport=recording_transport(lambda r: httpx.Response(204)),
-    )
+def test_soft_delete_definition_true_on_204(monkeypatch):
+    # Legacy name kept for history; now exercises the lib path.
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+    fake_lib = MagicMock()
+    fake_lib.delete_annotation.return_value = None
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
     assert client.soft_delete_definition("def-1") is True
 
 
-def test_soft_delete_definition_false_on_404(recording_transport):
-    client = BaseFulcraClient(
-        transport=recording_transport(lambda r: httpx.Response(404)),
+def test_soft_delete_definition_false_on_404(monkeypatch):
+    # Legacy name kept for history; now exercises the lib path.
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+    fake_lib = MagicMock()
+    fake_lib.delete_annotation.side_effect = urllib.error.HTTPError(
+        url="http://x", code=404, msg="Not Found", hdrs=None, fp=None
     )
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
     assert client.soft_delete_definition("missing") is False
 
 
@@ -273,3 +281,112 @@ def test_fetch_existing_source_ids_collects_and_filters_by_def(recording_transpo
 def test_import_result_is_a_plain_record():
     r = ImportResult(total=10, skipped_existing=3, posted=7, verified=7)
     assert (r.total, r.skipped_existing, r.posted, r.verified) == (10, 3, 7, 7)
+
+
+# ---------------------------------------------------------------------------
+# definition_exists (A2)
+# ---------------------------------------------------------------------------
+
+def test_definition_exists_true_when_present_and_not_deleted(monkeypatch):
+    """Returns True when the id is in the catalog and has no deleted_at."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.annotations_catalog.return_value = [
+        {"id": "def-a", "deleted_at": None},
+        {"id": "def-b"},
+    ]
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.definition_exists("def-a") is True
+    fake_lib.annotations_catalog.assert_called_once()
+
+
+def test_definition_exists_false_when_absent(monkeypatch):
+    """Returns False when the id is not in the catalog at all."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.annotations_catalog.return_value = [
+        {"id": "def-other"},
+    ]
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.definition_exists("def-missing") is False
+
+
+def test_definition_exists_false_when_soft_deleted(monkeypatch):
+    """Returns False when the id is present but has a non-None deleted_at."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.annotations_catalog.return_value = [
+        {"id": "def-gone", "deleted_at": "2026-01-01T00:00:00Z"},
+    ]
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.definition_exists("def-gone") is False
+
+
+def test_definition_exists_true_on_lib_exception(monkeypatch):
+    """Conservative: returns True on any network/lib failure (assume-exists).
+
+    A flaky API must never trigger spurious re-resolution.
+    """
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.annotations_catalog.side_effect = Exception("network error")
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.definition_exists("def-any") is True
+
+
+# ---------------------------------------------------------------------------
+# soft_delete_definition (A2)
+# ---------------------------------------------------------------------------
+
+def test_soft_delete_definition_true_on_success(monkeypatch):
+    """Returns True when delete_annotation succeeds (no exception)."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.delete_annotation.return_value = None  # lib returns nothing on success
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.soft_delete_definition("def-1") is True
+    fake_lib.delete_annotation.assert_called_once_with("def-1")
+
+
+def test_soft_delete_definition_false_on_not_found(monkeypatch):
+    """Returns False when delete_annotation raises HTTPError 404 (not found)."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.delete_annotation.side_effect = urllib.error.HTTPError(
+        url="http://x", code=404, msg="Not Found", hdrs=None, fp=None
+    )
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.soft_delete_definition("def-missing") is False
+
+
+def test_soft_delete_definition_propagates_other_errors(monkeypatch):
+    """Non-404 HTTPErrors (e.g. 500) are re-raised, not swallowed."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.delete_annotation.side_effect = urllib.error.HTTPError(
+        url="http://x", code=500, msg="Server Error", hdrs=None, fp=None
+    )
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    with pytest.raises(urllib.error.HTTPError):
+        client.soft_delete_definition("def-err")

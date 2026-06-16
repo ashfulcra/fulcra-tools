@@ -204,12 +204,8 @@ class BaseFulcraClient:
         never trigger spurious re-resolutions.
         """
         try:
-            r = self._client().get(
-                "/user/v1alpha1/annotation",
-                headers=self._authed_headers(),
-            )
-            r.raise_for_status()
-            for d in r.json():
+            catalog = self._lib().annotations_catalog()
+            for d in catalog:
                 if d.get("id") == definition_id and not d.get("deleted_at"):
                     return True
             return False
@@ -219,21 +215,22 @@ class BaseFulcraClient:
     def soft_delete_definition(self, definition_id: str) -> bool:
         """Soft-delete an annotation definition.
 
-        Returns True on a 204, False on a 404. Events under the def are
-        NOT removed from query results — they stay visible but their
-        source_id points at a deleted def. This is the only delete
+        Returns True on success, False on a 404 (not found). Events under
+        the def are NOT removed from query results — they stay visible but
+        their source_id points at a deleted def. This is the only delete
         primitive Fulcra exposes; there is no per-event delete.
+
+        Any non-404 error from the lib is propagated to the caller.
         """
-        r = self._client().delete(
-            f"/user/v1alpha1/annotation/{definition_id}",
-            headers=self._authed_headers(),
-        )
-        if r.status_code == 204:
+        import urllib.error as _ue
+
+        try:
+            self._lib().delete_annotation(definition_id)
             return True
-        if r.status_code == 404:
-            return False
-        r.raise_for_status()
-        return False
+        except _ue.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            raise
 
     def fetch_records(
         self,
