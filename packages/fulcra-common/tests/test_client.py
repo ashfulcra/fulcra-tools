@@ -24,6 +24,32 @@ def test_authed_headers_carry_the_bearer_token(monkeypatch):
     assert BaseFulcraClient()._authed_headers() == {"Authorization": "Bearer abc123"}
 
 
+def test_lib_builds_non_expiring_client(monkeypatch):
+    """_lib() must build a FulcraAPI whose credentials are NOT expired.
+
+    Regression guard: `FulcraAPI(access_token=...)` leaves the expiration
+    None, so `is_expired()` is True on the first call and the lib then
+    attempts an impossible token refresh ("No refresh token available"),
+    breaking every real network call. The other _lib() tests mock _lib()
+    wholesale and so never exercised the real client construction — this
+    test does NOT mock _lib(); it only patches get_token() and inspects the
+    real client the method built.
+    """
+    monkeypatch.setattr(BaseFulcraClient, "get_token", lambda self: "dummy-tok")
+    client = BaseFulcraClient()
+
+    lib = client._lib()
+    creds = lib.fulcra_credentials
+    # The whole point: never expired, so the lib never tries to refresh.
+    assert creds.is_expired() is False
+    assert creds.access_token == "dummy-tok"
+    # Expiration must be naive — is_expired() compares against a naive
+    # datetime.now() and a tz-aware value would raise TypeError.
+    assert creds.access_token_expiration.tzinfo is None
+    # Cached: a second call returns the same client.
+    assert client._lib() is lib
+
+
 def test_get_token_shells_out_when_env_unset(monkeypatch):
     """With FULCRA_ACCESS_TOKEN unset, get_token runs
     `fulcra auth print-access-token` with a 30s timeout."""
