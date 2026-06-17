@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import sys
 from typing import TextIO
 
@@ -14,6 +15,19 @@ from .map import check_budget, render_hot, render_map, select_hot_items
 from .schema import StructureSpec, VaultMeta, normalize_note_path
 from .sections import append_log, replace_owned_section
 from .store import FulcraVaultStore, MissingFileError, StoreError
+from .vault import InitializedVaultError, onboard
+
+
+# Built-in starter structure so `init` produces a usable vault out of the box.
+DEFAULT_SPEC = {
+    "sections": [
+        {"slug": "projects", "title": "Projects", "seed_notes": ["Projects/Overview"]},
+        {"slug": "people", "title": "People", "seed_notes": ["People/Overview"]},
+        {"slug": "decisions", "title": "Decisions",
+         "seed_notes": ["Decisions/Overview"]},
+        {"slug": "domain", "title": "Domain Notes", "seed_notes": ["Domain/Overview"]},
+    ],
+}
 
 
 def run(argv: list[str] | None = None, *, store=None, now: datetime | None = None,
@@ -134,9 +148,35 @@ def cmd_map(args, store, now, stdin, stdout, stderr) -> int:
     return 0
 
 
+def cmd_init(args, store, now, stdin, stdout, stderr) -> int:
+    if args.spec:
+        try:
+            data = json.loads(Path(args.spec).read_text())
+        except (OSError, ValueError) as e:
+            print(f"fulcra-vault: could not read --spec: {e}", file=stderr)
+            return 2
+    else:
+        data = DEFAULT_SPEC
+    spec = StructureSpec.from_dict(data)  # SchemaError(ValueError) -> run() returns rc 2
+    try:
+        ops = onboard(spec, store, now, force=args.force)
+    except InitializedVaultError:
+        print("fulcra-vault: vault already initialized (use --force to re-scaffold)",
+              file=stderr)
+        return 0
+    print(f"initialized vault: {len(ops)} files", file=stderr)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fulcra-vault")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    init = sub.add_parser("init")
+    init.add_argument("--spec", help="StructureSpec JSON file; omit for the default")
+    init.add_argument("--force", action="store_true",
+                      help="re-scaffold over an already-initialized vault")
+    init.set_defaults(func=cmd_init)
+
     read = sub.add_parser("read")
     read.add_argument("note")
     read.add_argument("--with-backlinks", action="store_true")
