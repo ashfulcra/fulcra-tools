@@ -173,6 +173,40 @@ def test_claim_writes_per_agent_lease_shard(coord_backend):
     assert leases[0]["at"]   # stamped by the writer
 
 
+def test_claim_verifies_shard_landed_and_retries(coord_backend):
+    # BUG-B: a lease upload can report success without the shard becoming
+    # stat'able, and the role fold then reads the lease VACANT despite a
+    # "successful" claim (the live lease-flapping). claim_role must verify-
+    # after-write (like upsert_role) and, because a lease is critical liveness
+    # state, retry once on a miss rather than trusting the phantom write.
+    role_ops.upsert_role(schema.make_role("reviewer", "d"), backend=coord_backend)
+    real_stat = remote.stat
+    calls = {"n": 0}
+
+    def flaky_stat(path, *, backend=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None   # first verify misses
+        return real_stat(path, backend=backend)
+
+    with mock.patch("fulcra_coord.remote.stat", side_effect=flaky_stat):
+        assert role_ops.claim_role("reviewer", "a:h:r",
+                                   backend=coord_backend) is True
+    assert calls["n"] >= 2, "claim must re-verify after a missed stat"
+    leases = role_ops.read_leases("reviewer", backend=coord_backend)
+    assert [l["agent"] for l in leases] == ["a:h:r"]
+
+
+def test_claim_fails_closed_when_shard_never_stats(coord_backend):
+    # If the shard can never be confirmed on remote, the claim reports failure
+    # so the caller (connect/roles claim) surfaces it instead of believing a
+    # phantom lease that the role fold will read VACANT.
+    role_ops.upsert_role(schema.make_role("reviewer", "d"), backend=coord_backend)
+    with mock.patch("fulcra_coord.remote.stat", return_value=None):
+        assert role_ops.claim_role("reviewer", "a:h:r",
+                                   backend=coord_backend) is False
+
+
 def test_two_agents_claim_without_clobbering(coord_backend):
     role_ops.upsert_role(schema.make_role("reviewer", "d"),
                          backend=coord_backend)

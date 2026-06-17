@@ -360,8 +360,20 @@ def claim_role(name: str, agent: str, *,
             "agent": agent,
             "at": _now_z(),
         }
-        return bool(remote.upload_json(
-            lease, remote.role_lease_path(name, agent), backend=backend))
+        path = remote.role_lease_path(name, agent)
+        # Verify-after-write, mirroring upsert_role: an upload can claim success
+        # without the shard becoming stat'able, and the role fold then reads the
+        # lease VACANT despite a "successful" claim (the live lease-flapping a
+        # held maintainer kept hitting). A lease is critical liveness state, so
+        # retry once on a missed verify before reporting failure — the caller
+        # (connect / roles claim) surfaces a False instead of trusting a phantom.
+        if not remote.upload_json(lease, path, backend=backend):
+            return False
+        if remote.stat(path, backend=backend) is not None:
+            return True
+        if not remote.upload_json(lease, path, backend=backend):
+            return False
+        return remote.stat(path, backend=backend) is not None
     except Exception:
         return False
 
