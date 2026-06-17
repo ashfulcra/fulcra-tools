@@ -21,7 +21,8 @@ each note carries flat frontmatter, agent-owned sections, and an append-only
 ## Pick your path
 
 1. **You can run shell commands** → use the CLI. Setup once:
-   `uv tool install fulcra-vault` (and `fulcra auth login` if not authed).
+   `uv tool install "git+https://github.com/ashfulcra/fulcra-tools.git#subdirectory=packages/fulcra-vault"`
+   (and `fulcra auth login` if not authed).
    - Load: if the SessionStart hook is installed, `HOT.md` is already in your
      context. Otherwise `fulcra-vault read HOT` and read it. Empty output = no
      vault yet; see onboarding.
