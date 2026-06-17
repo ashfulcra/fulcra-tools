@@ -12,6 +12,30 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.7] — 2026-06-17
+
+### Annotation transport consolidation (#259)
+
+- Removed the dead `_write_cli` path — it shelled out to `create-data-type`, a
+  command that does not exist in the current `fulcra` CLI; the stdlib-`urllib`
+  writer was already the live path.
+- Collapsed the `cli`/`http`/`api` mode duality to a single **on/off** toggle.
+  There is one writer (stdlib `urllib`, no `httpx`/`fulcra-common` dependency —
+  fulcra-coord stays stdlib-only). Any legacy persisted/env value (`cli`,
+  `http`, `api`) normalizes to `on`, so existing enablements keep working.
+- `annotations on` now persists `on` (not `http`); `config`/`doctor` report
+  `on`/`off` with no transport mode. Never-raise + idempotency-marker contracts
+  preserved.
+- Docs corrected: records are **ingest-only** (no CLI/lib record-write verb);
+  the whole writer migrates to the `fulcra` CLI only when the platform ships a
+  record-write verb. Removed the stale "interim http, flip to cli later" and
+  `FULCRA_COORD_ANNOTATION_CLI` narrative.
+
+> Part of the workspace-wide Fulcra primitive transport consolidation: in
+> `fulcra-common`, tag/definition CRUD moved onto the `fulcra_api` lib and the
+> workspace `fulcra-api` pin moved from the `file-commands` git branch (0.1.30)
+> to PyPI `>=0.1.34` (which carries the tag/definition write methods).
+
 ## [0.15.6] — 2026-06-15
 
 ### Coordination reliability fixes
