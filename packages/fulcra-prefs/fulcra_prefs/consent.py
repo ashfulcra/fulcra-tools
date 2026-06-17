@@ -56,10 +56,13 @@ def filter_for_audience(doc: dict, grants: list[dict], audience: str,
 
 
 def disclosure_signal(shared_keys: list[str], audience: str, platform: str,
-                      now: datetime) -> Signal:
+                      now: datetime, *, purpose: str = "read") -> Signal:
     observed = now.isoformat()
     key = f"consent.disclosure.{audience}"
-    value = {"keys": sorted(shared_keys), "audience": audience}
+    # purpose is part of the ledger entry: a solve disclosure (feeds group
+    # decisions) must be distinguishable from a read one, and folds into the id
+    # so same-instant read/solve exports don't collapse to one record.
+    value = {"keys": sorted(shared_keys), "audience": audience, "purpose": purpose}
     return Signal(
         id=temp_signal_id(key, observed, platform, value),
         kind="consent", key=key, scope="global",

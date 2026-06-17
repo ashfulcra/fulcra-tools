@@ -404,7 +404,8 @@ def cmd_get(args, api, outbox_dir, now) -> int:
         meta = store.read_json(META_PATH)
         if meta and doc["keys"]:
             sig = disclosure_signal(sorted(doc["keys"]), args.audience,
-                                    platform=args.platform or "cli", now=now)
+                                    platform=args.platform or "cli", now=now,
+                                    purpose=args.purpose)
             try:
                 store.ingest_signal(sig, data_type=meta["data_type"])
             except (OSError, ConnectionError, TimeoutError):

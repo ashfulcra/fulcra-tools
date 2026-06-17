@@ -67,8 +67,19 @@ def test_disclosure_signal_records_what_was_shared():
                             platform="claude-code", now=NOW)
     assert sig.kind == "consent"
     assert sig.key == "consent.disclosure.ea-agent"
-    assert sig.value == {"keys": ["dining.cuisine.thai"], "audience": "ea-agent"}
+    assert sig.value == {"keys": ["dining.cuisine.thai"], "audience": "ea-agent",
+                         "purpose": "read"}
     assert sig.observed_at == "2026-06-10T12:00:00+00:00"
+
+def test_disclosure_signal_records_purpose():
+    # The Privacy Ledger must distinguish a solve-purpose disclosure (feeds group
+    # decisions) from a read one — purpose is part of the recorded value and id.
+    read = disclosure_signal(["dining.cuisine.thai"], "ea-agent", "ios", NOW)
+    solve = disclosure_signal(["dining.cuisine.thai"], "ea-agent", "ios", NOW,
+                              purpose="solve")
+    assert solve.value["purpose"] == "solve"
+    assert read.value["purpose"] == "read"
+    assert read.id != solve.id  # same keys/instant, different purpose -> distinct ledger entries
 
 def test_disclosure_signal_disambiguates_same_instant_different_keys():
     # Two disclosures to the same audience/platform at the same instant but

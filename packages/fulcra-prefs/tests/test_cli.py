@@ -68,9 +68,13 @@ def test_get_for_purpose_solve_excludes_read_only_grants(env, capsys):
     assert call("get", "--for", "ea") == 0
     assert sorted(json.loads(capsys.readouterr().out)["keys"]) == \
         ["dining.cuisine.thai", "health.sleep.target"]
-    # solve purpose sees only the solve-level grant
+    # solve purpose sees only the solve-level grant, and logs a solve disclosure
+    n_before = len(fake_api.ingested)
     assert call("get", "--for", "ea", "--purpose", "solve") == 0
     assert list(json.loads(capsys.readouterr().out)["keys"]) == ["dining.cuisine.thai"]
+    assert len(fake_api.ingested) == n_before + 1
+    disclosure = json.loads(fake_api.ingested[-1]["data"])
+    assert disclosure["value"]["purpose"] == "solve"
 
 def test_get_platform_falls_back_to_global_when_no_overlay(env, capsys):
     """BUG A: `get --platform X` for a platform with NO platform-scoped
