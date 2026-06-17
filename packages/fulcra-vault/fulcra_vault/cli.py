@@ -9,10 +9,11 @@ import sys
 from typing import TextIO
 
 from .frontmatter import parse_note
+from .installers import install_platform_hooks
 from .links import backlinks_for, build_index, index_json
 from .locks import LockError, locked
 from .map import check_budget, render_hot, render_map, select_hot_items
-from .schema import StructureSpec, VaultMeta, normalize_note_path
+from .schema import StructureSpec, VaultMeta, canonical_json, normalize_note_path
 from .sections import append_log, replace_owned_section
 from .store import FulcraVaultStore, MissingFileError, StoreError
 from .vault import InitializedVaultError, onboard
@@ -168,6 +169,27 @@ def cmd_init(args, store, now, stdin, stdout, stderr) -> int:
     return 0
 
 
+def cmd_install_hooks(args, store, now, stdin, stdout, stderr) -> int:
+    try:
+        plan = install_platform_hooks(
+            platform=args.platform,
+            target_dir=args.target_dir,
+            uninstall=args.uninstall,
+            dry_run=args.dry_run,
+        )
+    except ValueError as e:
+        print(f"fulcra-vault: {e}", file=stderr)
+        return 2
+    if args.dry_run:
+        print(canonical_json(plan), file=stdout)
+    elif args.uninstall:
+        print(f"removed fulcra-vault hooks from {plan['config']}", file=stderr)
+    else:
+        print(f"installed fulcra-vault {args.platform} hooks -> {plan['config']}",
+              file=stderr)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fulcra-vault")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -176,6 +198,13 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true",
                       help="re-scaffold over an already-initialized vault")
     init.set_defaults(func=cmd_init)
+
+    ih = sub.add_parser("install-hooks")
+    ih.add_argument("--platform", required=True, choices=["claude-code", "codex"])
+    ih.add_argument("--target-dir", default=None)
+    ih.add_argument("--uninstall", action="store_true")
+    ih.add_argument("--dry-run", action="store_true")
+    ih.set_defaults(func=cmd_install_hooks)
 
     read = sub.add_parser("read")
     read.add_argument("note")
