@@ -13,8 +13,10 @@ Fulcra wire-format change is a one-place change here.
 
 ```
 fulcra_common/
-├─ client.py        BaseFulcraClient — auth, httpx, tag lookup,
-│                    soft-delete, event readback. Subclass it.
+├─ client.py        BaseFulcraClient — auth + event readback over
+│                    httpx; tag + annotation-definition CRUD via the
+│                    fulcra_api lib (get_tag_by_name/create_tag,
+│                    annotations_catalog/delete_annotation). Subclass it.
 ├─ definitions.py   resolve_definition_id — adopt-or-create flow
 │                    for annotation definitions with schema mismatch
 │                    detection (DefinitionSchemaMismatch).
