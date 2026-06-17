@@ -172,14 +172,14 @@ def cmd_annotations(args: Any, backend: Optional[list[str]] = None) -> int:
 
     Annotations drop a durable breadcrumb on the operator's Fulcra timeline every
     time an agent creates/picks-up/updates/completes a task. Historically they
-    only fired if ``FULCRA_COORD_ANNOTATIONS=http`` was exported in each shell, so
-    the timeline rarely filled. This command PERSISTS the enablement once
+    only fired if ``FULCRA_COORD_ANNOTATIONS`` was exported in each shell, so the
+    timeline rarely filled. This command PERSISTS the enablement once
     (machine-wide) so every agent emits without a per-session export.
 
-    - ``annotations on``     → persist ``http`` to the config file.
+    - ``annotations on``     → persist ``on`` to the config file.
     - ``annotations off``    → remove the config file (resolves to off unless the
                                env var is set — env always wins).
-    - ``annotations`` / ``status`` → report the resolved mode, its SOURCE
+    - ``annotations`` / ``status`` → report the resolved mode (on/off), its SOURCE
                                (env/config/default), and whether a bearer token
                                resolves (the token VALUE is never printed).
     """
@@ -187,11 +187,11 @@ def cmd_annotations(args: Any, backend: Optional[list[str]] = None) -> int:
     out_format = getattr(args, "format", "table")
 
     if action == "on":
-        path = lifecycle_annotations.set_persisted_mode("http")
+        path = lifecycle_annotations.set_persisted_mode("on")
         if out_format == "json":
-            _print_json({"mode": "http", "source": "config", "action": "on"})
+            _print_json({"mode": "on", "source": "config", "action": "on"})
         else:
-            _info("Annotations enabled (mode: http).")
+            _info("Annotations enabled.")
             _info(f"  Persisted to: {path}")
             _info("  Every agent on this machine will now emit Agent-Tasks "
                   "timeline annotations.")

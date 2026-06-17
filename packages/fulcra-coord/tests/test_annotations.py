@@ -190,15 +190,15 @@ class TestEmitGating(unittest.TestCase):
         )
         self.assertFalse(result)
 
-    def test_cli_mode_invokes_writer_once(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+    def test_on_mode_invokes_writer_once(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
         calls = []
 
         def fake_writer(payload, *, backend=None):
             calls.append(payload)
             return True
 
-        with patch.object(annotations, "_write_cli", side_effect=fake_writer):
+        with patch.object(annotations, "_write_http", side_effect=fake_writer):
             result = annotations.emit_lifecycle_annotation(
                 lifecycle="create", task=self._task(), agent="claude-code:mb:repo"
             )
@@ -207,12 +207,12 @@ class TestEmitGating(unittest.TestCase):
         self.assertEqual(calls[0]["track"], "Agent Tasks")
 
     def test_raising_writer_never_propagates(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
 
         def boom(payload, *, backend=None):
             raise RuntimeError("annotation backend exploded")
 
-        with patch.object(annotations, "_write_cli", side_effect=boom):
+        with patch.object(annotations, "_write_http", side_effect=boom):
             # Must NOT raise; returns False.
             result = annotations.emit_lifecycle_annotation(
                 lifecycle="create", task=self._task(), agent="claude-code:mb:repo"
@@ -269,15 +269,15 @@ class TestNeedsUserAnnotation(unittest.TestCase):
             task=self._task(), agent="claude-code:mb:vercel")
         self.assertFalse(r)
 
-    def test_cli_mode_invokes_writer_once(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+    def test_on_mode_invokes_writer_once(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
         calls = []
 
         def fake_writer(payload, *, backend=None):
             calls.append(payload)
             return True
 
-        with patch.object(annotations, "_write_cli", side_effect=fake_writer):
+        with patch.object(annotations, "_write_http", side_effect=fake_writer):
             r = annotations.emit_needs_user_annotation(
                 task=self._task(), agent="claude-code:mb:vercel")
         self.assertTrue(r)
@@ -285,12 +285,12 @@ class TestNeedsUserAnnotation(unittest.TestCase):
         self.assertIn("needs-user", calls[0]["cli_tags"])
 
     def test_raising_writer_never_propagates(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
 
         def boom(payload, *, backend=None):
             raise RuntimeError("boom")
 
-        with patch.object(annotations, "_write_cli", side_effect=boom):
+        with patch.object(annotations, "_write_http", side_effect=boom):
             r = annotations.emit_needs_user_annotation(
                 task=self._task(), agent="claude-code:mb:vercel")
         self.assertFalse(r)
@@ -304,7 +304,7 @@ class TestIdempotency(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         os.environ["XDG_CACHE_HOME"] = self.tmp
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
 
     def tearDown(self):
         os.environ.pop("XDG_CACHE_HOME", None)
@@ -318,7 +318,7 @@ class TestIdempotency(unittest.TestCase):
     def test_repeated_same_transition_emits_once(self):
         task = self._task()
         calls = []
-        with patch.object(annotations, "_write_cli",
+        with patch.object(annotations, "_write_http",
                           side_effect=lambda p, *, backend=None: calls.append(p) or True):
             r1 = annotations.emit_lifecycle_annotation(
                 lifecycle="create", task=task, agent="claude-code:mb:repo")
@@ -349,7 +349,7 @@ class TestIdempotency(unittest.TestCase):
         self.assertNotEqual(a1, a2,
                             "distinct same-second transitions must differ")
         calls = []
-        with patch.object(annotations, "_write_cli",
+        with patch.object(annotations, "_write_http",
                           side_effect=lambda p, *, backend=None: calls.append(p) or True):
             r1 = annotations.emit_lifecycle_annotation(
                 lifecycle="update", task=t1, agent="claude-code:mb:repo")
@@ -365,7 +365,7 @@ class TestIdempotency(unittest.TestCase):
         # anchor, so the second call is a no-op.
         task = self._task()
         calls = []
-        with patch.object(annotations, "_write_cli",
+        with patch.object(annotations, "_write_http",
                           side_effect=lambda p, *, backend=None: calls.append(p) or True):
             r1 = annotations.emit_lifecycle_annotation(
                 lifecycle="create", task=task, agent="claude-code:mb:repo")
@@ -378,7 +378,7 @@ class TestIdempotency(unittest.TestCase):
     def test_different_lifecycle_on_same_task_emits_again(self):
         task = self._task()
         calls = []
-        with patch.object(annotations, "_write_cli",
+        with patch.object(annotations, "_write_http",
                           side_effect=lambda p, *, backend=None: calls.append(p) or True):
             annotations.emit_lifecycle_annotation(
                 lifecycle="create", task=task, agent="claude-code:mb:repo")
@@ -388,237 +388,6 @@ class TestIdempotency(unittest.TestCase):
                 lifecycle="pickup", task=task, agent="claude-code:mb:repo")
         self.assertEqual(len(calls), 2)
 
-
-# ---------------------------------------------------------------------------
-# CLI transport: _write_cli builds the create-data-type invocation
-# ---------------------------------------------------------------------------
-
-class TestWriteCli(unittest.TestCase):
-    """Unit-test the real `_write_cli` transport with a MOCKED subprocess.
-
-    These tests NEVER shell out. They assert the exact `create-data-type`
-    invocation shape: MomentAnnotation base type, the resolved CLI base
-    (honouring FULCRA_CLI_COMMAND), the agent-tasks track tag plus lifecycle /
-    agent / session tags, --add-to-timeline, and best-effort rc handling.
-    """
-
-    def setUp(self):
-        self._saved_cli = os.environ.get("FULCRA_CLI_COMMAND")
-        self._saved_backend = os.environ.get("FULCRA_COORD_BACKEND")
-        # Pin an explicit CLI base so the resolver is deterministic and we can
-        # assert it propagates into the built command. Clear the file-ops fake
-        # backend override so it can't leak into annotation resolution.
-        os.environ["FULCRA_CLI_COMMAND"] = "myfulcra --flag"
-        os.environ.pop("FULCRA_COORD_BACKEND", None)
-
-    def tearDown(self):
-        for k, v in (
-            ("FULCRA_CLI_COMMAND", self._saved_cli),
-            ("FULCRA_COORD_BACKEND", self._saved_backend),
-        ):
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-    def _payload(self, lifecycle="complete", agent="claude-code:mb:repo"):
-        task = schema.make_task(
-            title="Fix the widget pipeline",
-            workstream="devops",
-            agent=agent,
-            summary="rewiring the spline",
-            next_action="ship it",
-        )
-        task["id"] = "20260602-fix-the-widget"
-        return annotations.build_annotation(
-            lifecycle=lifecycle, task=task, agent=agent
-        )
-
-    def _capture_cmd(self, returncode=0, raises=None):
-        """Patch subprocess.run; return (recorded_cmds, fake_run)."""
-        recorded = []
-
-        def fake_run(cmd, *args, **kwargs):
-            recorded.append(cmd)
-            if raises is not None:
-                raise raises
-            return types.SimpleNamespace(returncode=returncode, stdout="", stderr="")
-
-        return recorded, fake_run
-
-    def test_annotation_cli_override_decouples_from_file_cli(self):
-        # FULCRA_COORD_ANNOTATION_CLI must take precedence over FULCRA_CLI_COMMAND
-        # so the annotation writer can point at the annotations-capable build while
-        # file-ops stay on the Files-capable build (no single fulcra-api build has
-        # both create-data-type AND the file group yet).
-        recorded, fake_run = self._capture_cmd(returncode=0)
-        with patch.dict(os.environ, {"FULCRA_COORD_ANNOTATION_CLI": "annfulcra --x"}):
-            with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-                annotations._write_cli(self._payload())
-        self.assertEqual(recorded[0][:2], ["annfulcra", "--x"])  # override, not myfulcra
-        # and unset -> falls back to the shared file CLI base (FULCRA_CLI_COMMAND)
-        self.assertEqual(annotations._annotation_cli_base()[:1], ["myfulcra"])
-
-    def test_builds_create_data_type_momentannotation(self):
-        recorded, fake_run = self._capture_cmd(returncode=0)
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            ok = annotations._write_cli(self._payload())
-        self.assertTrue(ok)
-        self.assertEqual(len(recorded), 1)
-        cmd = recorded[0]
-        self.assertIn("create-data-type", cmd)
-        self.assertIn("MomentAnnotation", cmd)
-        self.assertIn("--add-to-timeline", cmd)
-
-    def test_uses_resolved_cli_base(self):
-        # Honours FULCRA_CLI_COMMAND — never hardcodes `fulcra`.
-        recorded, fake_run = self._capture_cmd(returncode=0)
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            annotations._write_cli(self._payload())
-        cmd = recorded[0]
-        self.assertEqual(cmd[:2], ["myfulcra", "--flag"])
-        self.assertEqual(cmd[2], "create-data-type")
-
-    def test_name_is_annotation_text(self):
-        recorded, fake_run = self._capture_cmd(returncode=0)
-        payload = self._payload(lifecycle="complete")
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            annotations._write_cli(payload)
-        cmd = recorded[0]
-        # NAME is the positional after MomentAnnotation.
-        name_idx = cmd.index("MomentAnnotation") + 1
-        name = cmd[name_idx]
-        self.assertIn("complete", name)
-        self.assertIn("Fix the widget pipeline", name)
-        self.assertIn("20260602-fix-the-widget", name)
-
-    def test_tag_set_is_track_lifecycle_agent_session(self):
-        recorded, fake_run = self._capture_cmd(returncode=0)
-        payload = self._payload(lifecycle="complete", agent="claude-code:mb:repo")
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            annotations._write_cli(payload)
-        cmd = recorded[0]
-        tags = [cmd[i + 1] for i, a in enumerate(cmd) if a in ("--tag", "-t")]
-        self.assertIn("agent-tasks", tags)          # shared TRACK tag
-        self.assertIn("complete", tags)             # lifecycle
-        self.assertIn("agent:claude", tags)         # agent:<kind>
-        self.assertIn("session:mb", tags)           # session:<sess>
-
-    def test_description_present(self):
-        recorded, fake_run = self._capture_cmd(returncode=0)
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            annotations._write_cli(self._payload())
-        cmd = recorded[0]
-        self.assertTrue("--description" in cmd or "-d" in cmd)
-
-    def test_each_lifecycle_carries_its_tag(self):
-        for lc in ("create", "pickup", "update", "complete"):
-            recorded, fake_run = self._capture_cmd(returncode=0)
-            with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-                annotations._write_cli(self._payload(lifecycle=lc))
-            cmd = recorded[0]
-            tags = [cmd[i + 1] for i, a in enumerate(cmd) if a in ("--tag", "-t")]
-            self.assertIn(lc, tags, f"lifecycle {lc} missing from tags")
-            self.assertIn("agent-tasks", tags)
-
-    def test_nonzero_rc_returns_false(self):
-        recorded, fake_run = self._capture_cmd(returncode=2)
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            ok = annotations._write_cli(self._payload())
-        self.assertFalse(ok)
-
-    def test_raising_subprocess_returns_false(self):
-        recorded, fake_run = self._capture_cmd(raises=FileNotFoundError("no cli"))
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            ok = annotations._write_cli(self._payload())
-        self.assertFalse(ok)
-
-
-# ---------------------------------------------------------------------------
-# emit gating drives the real _write_cli: default off makes no subprocess call
-# ---------------------------------------------------------------------------
-
-class TestEmitCliIntegration(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        os.environ["XDG_CACHE_HOME"] = self.tmp
-        # Isolate config so a persisted `annotations on` can't flip default-off.
-        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "config")
-        self._saved_mode = os.environ.get("FULCRA_COORD_ANNOTATIONS")
-        self._saved_cli = os.environ.get("FULCRA_CLI_COMMAND")
-        self._saved_backend = os.environ.get("FULCRA_COORD_BACKEND")
-        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
-        os.environ["FULCRA_CLI_COMMAND"] = "myfulcra"
-        os.environ.pop("FULCRA_COORD_BACKEND", None)
-
-    def tearDown(self):
-        os.environ.pop("XDG_CACHE_HOME", None)
-        os.environ.pop("XDG_CONFIG_HOME", None)
-        for k, v in (
-            ("FULCRA_COORD_ANNOTATIONS", self._saved_mode),
-            ("FULCRA_CLI_COMMAND", self._saved_cli),
-            ("FULCRA_COORD_BACKEND", self._saved_backend),
-        ):
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-    def _task(self):
-        return schema.make_task(
-            title="A task", workstream="devops", agent="claude-code:mb:repo"
-        )
-
-    def test_default_off_makes_no_subprocess_call(self):
-        os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
-        recorded = []
-        with patch.object(annotations.subprocess, "run",
-                          side_effect=lambda *a, **k: recorded.append(a)):
-            result = annotations.emit_lifecycle_annotation(
-                lifecycle="create", task=self._task(), agent="claude-code:mb:repo")
-        self.assertFalse(result)
-        self.assertEqual(recorded, [])
-
-    def test_cli_mode_shells_out_and_records_marker(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
-        recorded = []
-
-        def fake_run(cmd, *a, **k):
-            recorded.append(cmd)
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        task = self._task()
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            r1 = annotations.emit_lifecycle_annotation(
-                lifecycle="create", task=task, agent="claude-code:mb:repo")
-            # Retry the identical transition -> idempotent, no second shell-out.
-            r2 = annotations.emit_lifecycle_annotation(
-                lifecycle="create", task=task, agent="claude-code:mb:repo")
-        self.assertTrue(r1)
-        self.assertFalse(r2)
-        self.assertEqual(len(recorded), 1)
-
-    def test_cli_mode_failure_writes_no_marker(self):
-        # A non-zero rc on the first call must NOT record a marker, so a later
-        # retry is free to try again (failure is not "already annotated").
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
-        rcs = [2, 0]
-        calls = []
-
-        def fake_run(cmd, *a, **k):
-            calls.append(cmd)
-            return types.SimpleNamespace(returncode=rcs[len(calls) - 1],
-                                         stdout="", stderr="")
-
-        task = self._task()
-        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            r1 = annotations.emit_lifecycle_annotation(
-                lifecycle="create", task=task, agent="claude-code:mb:repo")
-            r2 = annotations.emit_lifecycle_annotation(
-                lifecycle="create", task=task, agent="claude-code:mb:repo")
-        self.assertFalse(r1)   # rc 2 -> failure
-        self.assertTrue(r2)    # retry succeeds (no marker blocked it)
-        self.assertEqual(len(calls), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1203,8 +972,9 @@ class TestHttpTokenResolution(unittest.TestCase):
 
 
 class TestEmitHttpIntegration(unittest.TestCase):
-    """emit_* gating routes mode=http (and the `api` alias) to _write_http,
-    records the marker on success, and stays a no-op when the flag is off."""
+    """emit_* gating routes the enabled mode (``on``, and the legacy ``http`` /
+    ``api`` aliases) to the single _write_http writer, records the marker on
+    success, and stays a no-op when the flag is off."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -1229,8 +999,8 @@ class TestEmitHttpIntegration(unittest.TestCase):
         return schema.make_task(title="A task", workstream="devops",
                                 agent="claude-code:mb:repo")
 
-    def test_http_mode_routes_to_write_http(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+    def test_on_mode_routes_to_write_http(self):
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
         calls = []
         with patch.object(annotations, "_write_http",
                           side_effect=lambda p, *, backend=None: calls.append(p) or True):
@@ -1239,17 +1009,21 @@ class TestEmitHttpIntegration(unittest.TestCase):
         self.assertTrue(r)
         self.assertEqual(len(calls), 1)
 
-    def test_api_alias_routes_to_write_http(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "api"
-        calls = []
-        with patch.object(annotations, "_write_http",
-                          side_effect=lambda p, *, backend=None: calls.append(p) or True):
-            r = annotations.emit_lifecycle_annotation(
-                lifecycle="create", task=self._task(), agent="claude-code:mb:repo")
-        self.assertTrue(r)
-        self.assertEqual(len(calls), 1)
+    def test_legacy_aliases_route_to_write_http(self):
+        # Legacy enable tokens from the old transport-duality era still enable the
+        # single writer (back-compat): a machine with an inherited http/api/cli
+        # env export keeps emitting after the mode collapse.
+        for legacy in ("http", "api", "cli"):
+            os.environ["FULCRA_COORD_ANNOTATIONS"] = legacy
+            calls = []
+            with patch.object(annotations, "_write_http",
+                              side_effect=lambda p, *, backend=None: calls.append(p) or True):
+                r = annotations.emit_lifecycle_annotation(
+                    lifecycle="create", task=self._task(), agent="claude-code:mb:repo")
+            self.assertTrue(r, f"legacy {legacy!r} should enable the writer")
+            self.assertEqual(len(calls), 1)
 
-    def test_http_mode_off_default_no_call(self):
+    def test_off_default_no_call(self):
         os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         calls = []
         with patch.object(annotations, "_write_http",
@@ -1260,7 +1034,7 @@ class TestEmitHttpIntegration(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_needs_user_routes_to_write_http(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
         t = self._task()
         t["status"] = "blocked"
         t["blocked_on"] = "approve it"
@@ -1272,13 +1046,19 @@ class TestEmitHttpIntegration(unittest.TestCase):
         self.assertTrue(r)
         self.assertEqual(len(calls), 1)
 
-    def test_mode_resolves_http_and_api(self):
+    def test_mode_resolves_on_and_legacy_aliases(self):
+        # The new ``on`` token and every legacy enable token collapse to ``on``;
+        # anything unrecognized or unset is ``off``.
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
+        self.assertEqual(annotations._mode(), "on")
         os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
-        self.assertEqual(annotations._mode(), "http")
+        self.assertEqual(annotations._mode(), "on")
         os.environ["FULCRA_COORD_ANNOTATIONS"] = "api"
-        self.assertEqual(annotations._mode(), "http")
+        self.assertEqual(annotations._mode(), "on")
         os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
-        self.assertEqual(annotations._mode(), "cli")
+        self.assertEqual(annotations._mode(), "on")
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "bogus"
+        self.assertEqual(annotations._mode(), "off")
         os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         self.assertEqual(annotations._mode(), "off")
 
@@ -1313,27 +1093,30 @@ class TestPersistedAnnotationMode(unittest.TestCase):
         self.assertEqual(annotations._mode(), "off")
         self.assertIsNone(annotations._persisted_mode())
 
-    def test_persisted_http_resolves_when_no_env(self):
-        annotations.set_persisted_mode("http")
-        self.assertEqual(annotations._persisted_mode(), "http")
-        self.assertEqual(annotations._mode(), "http")
+    def test_persisted_on_resolves_when_no_env(self):
+        annotations.set_persisted_mode("on")
+        self.assertEqual(annotations._persisted_mode(), "on")
+        self.assertEqual(annotations._mode(), "on")
 
     def test_env_wins_over_persisted_config(self):
         # A session can override the persisted enablement: env always takes
-        # precedence so a single shell can force a different mode (or off).
-        annotations.set_persisted_mode("http")
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "cli"
-        self.assertEqual(annotations._mode(), "cli")
+        # precedence so a single shell can force off (or a legacy enable token).
+        annotations.set_persisted_mode("on")
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "off"
+        self.assertEqual(annotations._mode(), "off")
 
-    def test_api_alias_normalizes_in_persisted_file(self):
-        # The api->http alias applies to the FILE too, not just the env, so an
-        # operator who wrote the legacy `api` value still gets the working path.
-        annotations.set_persisted_mode("api")
-        self.assertEqual(annotations._persisted_mode(), "http")
-        self.assertEqual(annotations._mode(), "http")
+    def test_legacy_persisted_value_normalizes_to_on(self):
+        # Back-compat: a machine that persisted a legacy transport token
+        # (``http``/``api``/``cli``) under the old duality keeps emitting — the
+        # value normalizes to ``on`` on read, so the writer is NOT silently inert.
+        for legacy in ("http", "api", "cli"):
+            annotations.set_persisted_mode(legacy)
+            self.assertEqual(annotations._persisted_mode(), "on",
+                             f"legacy persisted {legacy!r} must resolve to on")
+            self.assertEqual(annotations._mode(), "on")
 
     def test_clear_persisted_reverts_to_off(self):
-        annotations.set_persisted_mode("http")
+        annotations.set_persisted_mode("on")
         removed = annotations.clear_persisted_mode()
         self.assertTrue(removed)
         self.assertIsNone(annotations._persisted_mode())
@@ -1344,12 +1127,12 @@ class TestPersistedAnnotationMode(unittest.TestCase):
 
     def test_resolve_mode_source_reports_env_config_default(self):
         # env source
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
-        self.assertEqual(annotations.resolve_mode_source(), ("http", "env"))
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
+        self.assertEqual(annotations.resolve_mode_source(), ("on", "env"))
         os.environ.pop("FULCRA_COORD_ANNOTATIONS", None)
         # config source
-        annotations.set_persisted_mode("http")
-        self.assertEqual(annotations.resolve_mode_source(), ("http", "config"))
+        annotations.set_persisted_mode("on")
+        self.assertEqual(annotations.resolve_mode_source(), ("on", "config"))
         # default source
         annotations.clear_persisted_mode()
         self.assertEqual(annotations.resolve_mode_source(), ("off", "default"))
@@ -1384,10 +1167,11 @@ class TestAnnotationsCommand(unittest.TestCase):
             rc = cmd_annotations(args)
         return rc, buf.getvalue()
 
-    def test_on_persists_http(self):
+    def test_on_persists_on(self):
         rc, _ = self._run("on")
         self.assertEqual(rc, 0)
-        self.assertEqual(annotations._mode(), "http")
+        self.assertEqual(annotations._mode(), "on")
+        self.assertEqual(annotations._persisted_mode(), "on")
 
     def test_off_clears_config(self):
         self._run("on")
@@ -1402,7 +1186,7 @@ class TestAnnotationsCommand(unittest.TestCase):
             rc, out = self._run("status", out_format="json")
         self.assertEqual(rc, 0)
         data = json.loads(out)
-        self.assertEqual(data["mode"], "http")
+        self.assertEqual(data["mode"], "on")
         self.assertEqual(data["source"], "config")
         self.assertFalse(data["token_ok"])
         # The token value itself must NEVER appear in output.
@@ -1417,10 +1201,11 @@ class TestAnnotationsCommand(unittest.TestCase):
         self.assertEqual(data["source"], "default")
 
     def test_status_env_source(self):
-        os.environ["FULCRA_COORD_ANNOTATIONS"] = "http"
+        os.environ["FULCRA_COORD_ANNOTATIONS"] = "on"
         with patch.object(annotations, "_resolve_token", return_value="tok"):
             rc, out = self._run("status", out_format="json")
         data = json.loads(out)
+        self.assertEqual(data["mode"], "on")
         self.assertEqual(data["source"], "env")
         self.assertTrue(data["token_ok"])
 

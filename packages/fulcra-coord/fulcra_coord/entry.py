@@ -837,7 +837,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "without a per-shell FULCRA_COORD_ANNOTATIONS export)")
     sp.add_argument("--format", choices=["table", "json"], default="table")
     asub = sp.add_subparsers(dest="annotations_action")
-    asp_on = asub.add_parser("on", help="Persist annotations on (mode: http)")
+    asp_on = asub.add_parser("on", help="Persist annotations on")
     asp_on.add_argument("--format", choices=["table", "json"], default="table")
     asp_off = asub.add_parser("off", help="Remove the persisted mode (off unless env set)")
     asp_off.add_argument("--format", choices=["table", "json"], default="table")

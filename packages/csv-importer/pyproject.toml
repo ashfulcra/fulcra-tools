@@ -26,7 +26,7 @@ fulcra-csv = "fulcra_csv.cli:cli"
 # via `uv tool install fulcra-api`. Out of base deps so it doesn't drag
 # pyarrow into installs / the bundled app.
 fulcra-cli = [
-    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+    "fulcra-api>=0.1.34",
 ]
 dev = [
     "pytest>=7.4,<8",

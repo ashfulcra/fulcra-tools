@@ -56,7 +56,7 @@ fulcra-collect = { workspace = true }
 # (`uv tool install fulcra-api`, per docs/TESTING.md). Kept out of base deps
 # so it doesn't drag pyarrow (~100 MB) into every install or the bundled app.
 fulcra-cli = [
-    "fulcra-api @ git+https://github.com/fulcradynamics/fulcra-api-python.git@file-commands",
+    "fulcra-api>=0.1.34",
 ]
 dev = [
     # fulcra-api currently pins pytest<8 in its runtime deps, so we must

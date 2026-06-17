@@ -214,15 +214,20 @@ wheels = [
 
 [[package]]
 name = "fulcra-api"
-version = "0.1.30"
-source = { git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands#f054e476275e254be59a25c497b67be7fb13f3a0" }
+version = "0.1.34"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "dateparser" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "puremagic" },
     { name = "pyarrow" },
     { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/96/41503a85523cc4541a06f6a1fb4e6e6df81ca450b755d13a40a52ad2800a/fulcra_api-0.1.34.tar.gz", hash = "sha256:65435dd07762098e47ad3a7e671f7c0bf37128b2e7ffcb43735dea5d5d224482", size = 27386, upload-time = "2026-06-12T05:05:40.817Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ee/b6/bc49bda2f9f83444510a1e6290d2599e3fc10115caaac4fc13c97267130c/fulcra_api-0.1.34-py3-none-any.whl", hash = "sha256:a86eb03b327868b92ca0e9258defddb6ad683af23b796410b6cff534c6f3811b", size = 32155, upload-time = "2026-06-12T05:05:39.75Z" },
 ]
 
 [[package]]
@@ -246,7 +251,7 @@ fulcra-cli = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", specifier = ">=0.1.34" },
     { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
@@ -300,6 +305,7 @@ name = "fulcra-common"
 version = "0.1.0"
 source = { editable = "packages/fulcra-common" }
 dependencies = [
+    { name = "fulcra-api" },
     { name = "httpx" },
 ]
 
@@ -310,6 +316,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fulcra-api", specifier = ">=0.1.34" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
 ]
@@ -388,7 +395,7 @@ fulcra-cli = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "dateparser", specifier = ">=1.2" },
-    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", specifier = ">=0.1.34" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
@@ -456,7 +463,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "dateparser", specifier = ">=1.2" },
     { name = "feedparser", specifier = ">=6.0" },
-    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", specifier = ">=0.1.34" },
     { name = "fulcra-collect", editable = "packages/collect" },
     { name = "fulcra-common", editable = "packages/fulcra-common" },
     { name = "fulcra-csv-importer", editable = "packages/csv-importer" },
@@ -521,7 +528,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fulcra-api", git = "https://github.com/fulcradynamics/fulcra-api-python.git?rev=file-commands" },
+    { name = "fulcra-api", specifier = ">=0.1.34" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
 ]
 provides-extras = ["dev"]
@@ -828,6 +835,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "puremagic"
+version = "2.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/74/ce5987ab9b8aec4ced06e2723ebb604205c9eb58abdad91453da93166380/puremagic-2.2.0.tar.gz", hash = "sha256:eb4bddf07c177c4b434554b92165b67449f5a51e152b976202d6254498810eef", size = 1189752, upload-time = "2026-04-08T01:39:55.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/95/81/314320aeffd88dadeac553ff9eb10f54507ab41deccd0c69f6221d254a0a/puremagic-2.2.0-py3-none-any.whl", hash = "sha256:c4f7ed7307f056c787199acfda839555921be1df13abba61e8e6db0c787ae1d0", size = 71971, upload-time = "2026-04-08T01:39:54.169Z" },
 ]
 
 [[package]]

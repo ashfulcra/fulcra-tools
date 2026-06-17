@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from click.testing import CliRunner
+from fulcra_common.client import BaseFulcraClient
 
 import fulcra_dayone.cli as cli_mod
 from fulcra_dayone.client import DayOneFulcraClient
@@ -67,8 +69,6 @@ def test_import_posts_to_fulcra(tmp_path: Path, monkeypatch):
             return httpx.Response(200, json=[])
         if r.method == "POST" and path == "/user/v1alpha1/annotation":
             return httpx.Response(200, json={"id": "def-journal"})
-        if r.method == "GET" and path.startswith("/user/v1alpha1/tag/name/"):
-            return httpx.Response(200, json={"id": "tag-x"})
         if r.method == "GET" and path.startswith("/data/v1alpha1/event/"):
             return httpx.Response(200, json=[])
         if r.method == "POST" and path == "/ingest/v1/record/batch":
@@ -76,6 +76,12 @@ def test_import_posts_to_fulcra(tmp_path: Path, monkeypatch):
         raise AssertionError(f"unexpected {r.method} {r.url}")
 
     transport = httpx.MockTransport(responder)
+    # Tag resolution routes through the fulcra_api lib (BaseFulcraClient._lib),
+    # not the httpx transport, so stub the lib's get_tag_by_name here. The
+    # definition + event + ingest paths still go over httpx (above).
+    fake_lib = MagicMock()
+    fake_lib.get_tag_by_name.return_value = {"id": "tag-x"}
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
     monkeypatch.setattr(
         cli_mod, "DayOneFulcraClient",
         lambda **kw: DayOneFulcraClient(transport=transport, **kw),

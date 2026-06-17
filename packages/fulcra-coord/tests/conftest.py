@@ -82,13 +82,13 @@ def _hermetic_cache_and_backend():
 
     # Safety net for the OTHER live-write path: annotations. The annotation mode
     # resolves from FULCRA_COORD_ANNOTATIONS (env) > a persisted file under
-    # ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/annotations > off. The HTTP
-    # transport writes over urllib DIRECTLY — it does NOT go through
+    # ${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/annotations > off. The
+    # annotation writer uses urllib DIRECTLY — it does NOT go through
     # FULCRA_COORD_BACKEND, and the persisted file lives under XDG_CONFIG_HOME
     # (which this fixture does not isolate). So on a machine where the operator
-    # ran ``fulcra-coord annotations on`` (persisting ``http``), an end-to-end
+    # ran ``fulcra-coord annotations on`` (persisting ``on``), an end-to-end
     # command test that emits a lifecycle annotation as a side effect resolved
-    # mode ``http``, obtained a real bearer token, and POSTed fixture titles
+    # mode ``on``, obtained a real bearer token, and POSTed fixture titles
     # ("Fix the widget pipeline", "do x", "t1", "resolve me", …) to the
     # operator's LIVE Agent-Tasks timeline — the very surface their
     # situational-awareness reports read from. The pre-push hook runs the whole

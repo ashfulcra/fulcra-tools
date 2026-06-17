@@ -151,7 +151,7 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
     _info(f"  Mode:          {ann_mode}  (source: {ann_source})")
     if ann_mode == "off":
         _info("  -> disabled — run `fulcra-coord annotations on` to enable for "
-              "every agent (or set FULCRA_COORD_ANNOTATIONS=http for this shell)")
+              "every agent (or set FULCRA_COORD_ANNOTATIONS=on for this shell)")
     else:
         _info(f"  API base:      {lifecycle_annotations._api_base()}")
         # Resolve the token only to confirm one EXISTS; never echo its value.

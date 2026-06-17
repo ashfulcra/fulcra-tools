@@ -11,12 +11,17 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import urllib.error
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import httpx
+
+if TYPE_CHECKING:
+    from fulcra_api.core import FulcraAPI
 
 DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
 
@@ -55,6 +60,7 @@ class BaseFulcraClient:
         self.base_url = base_url
         self._transport = transport
         self._http: httpx.Client | None = None
+        self._lib_client: "FulcraAPI | None" = None
 
     def get_token(self) -> str:
         """Return a bearer token: the FULCRA_ACCESS_TOKEN env var if set,
@@ -108,28 +114,78 @@ class BaseFulcraClient:
     def _authed_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.get_token()}"}
 
+    def _lib(self) -> "FulcraAPI":
+        """Lazily build and cache a FulcraAPI lib client from the current token.
+
+        The lib client is reused across calls on this instance. It is built
+        from the same bearer token source as `_authed_headers()` so auth
+        stays consistent.
+
+        We construct it from an explicit `FulcraCredentials` with a far-future
+        expiration rather than via `FulcraAPI(access_token=...)`. That ctor path
+        leaves `access_token_expiration=None`, so `credentials.is_expired()`
+        returns True on the very first call, and `fulcra_api()` then tries to
+        `refresh_access_token()` — which raises "No refresh token available"
+        because we only ever hold a bare access token. `get_token()` already
+        owns token freshness (env var or `fulcra auth print-access-token`), so
+        we tell the lib the token never expires and never let it refresh.
+
+        The expiration MUST be a naive datetime: `is_expired()` compares it
+        against `datetime.now()` (naive), and a tz-aware value raises
+        `TypeError: can't compare offset-naive and offset-aware datetimes`.
+        """
+        from fulcra_api.core import FulcraAPI
+        from fulcra_api.credentials import FulcraCredentials
+
+        if self._lib_client is None:
+            creds = FulcraCredentials(
+                access_token=self.get_token(),
+                # Naive (no tzinfo) on purpose — see docstring.
+                access_token_expiration=datetime.now() + timedelta(days=3650),
+            )
+            self._lib_client = FulcraAPI(credentials=creds)
+        return self._lib_client
+
     def _resolve_tag(self, name: str, *, quote_name: bool = False) -> str:
         """Return the id of the tag called `name`, creating it if absent.
 
-        `quote_name` percent-encodes the name in the lookup path — needed
-        for names with `/`, `?`, `#`, or spaces. The POST body always uses
-        the raw name.
+        Delegates to the `fulcra_api` lib: looks up the tag by name via
+        `get_tag_by_name`; on not-found (HTTP 404 or missing id), creates
+        it via `create_tag`.
+
+        The lib does NOT percent-encode the name it interpolates into the
+        lookup path (`get_tag_by_name` builds `/tag/name/{name}` verbatim and
+        `urlunparse` passes it through unescaped). Real Agent-Tasks tag names
+        contain colons (`agent:claude`, `session:Mac`) and other names may
+        carry `/` or spaces — an unescaped space even makes urllib raise. So
+        we percent-encode the name for the LOOKUP path here, exactly as the
+        old httpx path did, and pass the RAW name to `create_tag` (whose body
+        is JSON, where no URL-encoding is wanted).
+
+        `quote_name` is accepted for backwards-compatibility. Encoding the
+        lookup path is now unconditional (it's a no-op for names with no
+        reserved chars and the safe behavior for those that do), so the flag
+        has no effect; callers that set it continue to work unchanged.
         """
-        path_name = quote(name, safe="") if quote_name else name
-        c = self._client()
-        r = c.get(
-            f"/user/v1alpha1/tag/name/{path_name}",
-            headers=self._authed_headers(),
-        )
-        if r.status_code == 200:
-            return r.json()["id"]
-        r = c.post(
-            "/user/v1alpha1/tag",
-            json={"name": name},
-            headers=self._authed_headers(),
-        )
-        r.raise_for_status()
-        return r.json()["id"]
+        lib = self._lib()
+        # Encode the name for the GET lookup PATH; the lib won't do it for us.
+        path_name = quote(name, safe="")
+        try:
+            tag = lib.get_tag_by_name(path_name)
+            tag_id = tag.get("id") if isinstance(tag, dict) else None
+            if tag_id:
+                return tag_id
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            # 404 → tag not found; fall through to create
+        # create_tag puts the name in the JSON body — use the RAW name.
+        result = lib.create_tag(name)
+        # The lib type hint says List[Dict]; the server may return a plain
+        # dict or a list depending on the API version — handle both.
+        if isinstance(result, list):
+            return result[0]["id"]
+        return result["id"]
 
     def definition_exists(self, definition_id: str) -> bool:
         """Return True iff `definition_id` is a live (non-deleted)
@@ -148,12 +204,8 @@ class BaseFulcraClient:
         never trigger spurious re-resolutions.
         """
         try:
-            r = self._client().get(
-                "/user/v1alpha1/annotation",
-                headers=self._authed_headers(),
-            )
-            r.raise_for_status()
-            for d in r.json():
+            catalog = self._lib().annotations_catalog()
+            for d in catalog:
                 if d.get("id") == definition_id and not d.get("deleted_at"):
                     return True
             return False
@@ -163,21 +215,22 @@ class BaseFulcraClient:
     def soft_delete_definition(self, definition_id: str) -> bool:
         """Soft-delete an annotation definition.
 
-        Returns True on a 204, False on a 404. Events under the def are
-        NOT removed from query results — they stay visible but their
-        source_id points at a deleted def. This is the only delete
+        Returns True on success, False on a 404 (not found). Events under
+        the def are NOT removed from query results — they stay visible but
+        their source_id points at a deleted def. This is the only delete
         primitive Fulcra exposes; there is no per-event delete.
+
+        Any non-404 error from the lib is propagated to the caller.
         """
-        r = self._client().delete(
-            f"/user/v1alpha1/annotation/{definition_id}",
-            headers=self._authed_headers(),
-        )
-        if r.status_code == 204:
+        import urllib.error as _ue
+
+        try:
+            self._lib().delete_annotation(definition_id)
             return True
-        if r.status_code == 404:
-            return False
-        r.raise_for_status()
-        return False
+        except _ue.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            raise
 
     def fetch_records(
         self,

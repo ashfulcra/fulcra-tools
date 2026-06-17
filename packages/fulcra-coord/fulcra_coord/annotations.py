@@ -8,53 +8,54 @@ task, we want a single durable breadcrumb on the operator's Fulcra timeline — 
 their own Life timeline, *what the agents were doing and when*. One track, one
 annotation per real lifecycle transition.
 
-THE WRITE MECHANISMS
---------------------
-The CLI per-occurrence write is a *moment annotation* created on the timeline via
-the Fulcra CLI's ``create-data-type`` command::
+THE WRITE MECHANISM
+-------------------
+There is a SINGLE writer: a *moment annotation* POSTed directly to the Fulcra
+API over the Python standard library's ``urllib`` (no httpx / fulcra-common
+dependency), replicating the proven ``fulcra-collect`` write path. ``_write_http``
+does three things, in order:
 
-    fulcra create-data-type MomentAnnotation "<NAME>" \
-        --description "<desc>" --add-to-timeline \
-        --tag agent-tasks --tag <lifecycle> --tag agent:<kind> --tag session:<sess>
+  1. resolve/create each tag name to a tag id;
+  2. resolve/create the shared "Agent Tasks" moment definition (cached locally so
+     this happens once, not per annotation);
+  3. POST a single JSONL record to ``/ingest/v1/record/batch`` with metadata
+     ``data_type: MomentAnnotation``, the resolved tag ids, and a ``source`` array
+     carrying a lifecycle-stamped fulcra-coord source id plus the definition
+     source.
 
-``--add-to-timeline`` makes it a real occurrence on the operator's Life
-timeline; tags passed by name are auto-created. The shared track tag
-``agent-tasks`` lets every Agent-Tasks moment be filtered together regardless
-of lifecycle/agent. The created annotation returns JSON including its ``id`` and
-``fulcra_source_id`` and is deletable via ``fulcra delete-data-type <id>`` (used
-only by the live smoke test, never in the task path).
+The record lands as a real occurrence on the operator's Life timeline. The shared
+track tag ``agent-tasks`` lets every Agent-Tasks moment be filtered together
+regardless of lifecycle/agent.
 
-This CLI support has been live-smoked on the Fulcra CLI's
-``create-annotations-commands`` branch, but the released file-capable
-``fulcra-api`` 0.1.32/0.1.33 builds do not yet include ``create-data-type``. Until
-one released CLI build has both file commands and annotation writes, use the HTTP
-writer for fleet rollout; CLI mode is only for hosts that intentionally point
-``FULCRA_COORD_ANNOTATION_CLI`` at an annotations-capable dev build.
+WHY urllib (and not the CLI or the fulcra_api lib)
+--------------------------------------------------
+fulcra-coord is intentionally stdlib-only (see pyproject: "No OTHER non-stdlib
+deps") — it is a coordination *bus* and must stay dependency-light. So tags,
+definitions, AND records all go over ``urllib`` BY DESIGN rather than pulling in a
+client library.
+
+Records are also *ingest-only*: the Fulcra platform exposes no CLI or library
+record-WRITE verb today (the CLI's ``data-type`` group + ``create`` subcommand
+manages definitions, not record occurrences). A partial migration — tags/defs via
+the CLI but records still over ``urllib`` — would be a NET NEGATIVE: two transports
+to reason about, two failure surfaces, no reduction in HTTP code. The long-term
+intent is to migrate the WHOLE writer (tags + defs + records) to the ``fulcra``
+CLI once the platform ships a first-class record-write verb; until then this one
+``urllib`` path is the right call.
 
 WHY IT IS CAPABILITY-GATED (and OFF by default)
 -----------------------------------------------
-Even though the write is now live, the feature stays GATED behind
-``FULCRA_COORD_ANNOTATIONS`` so it cannot perturb task ops unless an operator
-opts in, and so machines without the annotations-capable CLI stay inert:
+The feature stays GATED behind ``FULCRA_COORD_ANNOTATIONS`` so it cannot perturb
+task ops unless an operator opts in. The mode is simply on/off:
 
   * unset / "off" / anything unrecognized  -> NO-OP (the default; safe)
-  * "http" (or its alias "api")  -> POST to the Fulcra HTTP API directly via
-    stdlib ``urllib`` (no httpx / fulcra-common dep), replicating the proven
-    fulcra-collect write path: resolve/create tags, resolve/create the shared
-    "Agent Tasks" moment definition (cached), then POST a JSONL record to
-    ``/ingest/v1/record/batch``. See ``_write_http``.
-  * "cli"  -> shell ``create-data-type MomentAnnotation ... --add-to-timeline``
-    through the resolved annotation CLI (preferred future transport; today only
-    usable when ``FULCRA_COORD_ANNOTATION_CLI`` points at an annotations-capable
-    dev build because released fulcra-api 0.1.32/0.1.33 lack the command)
+  * "on"  -> run the single ``urllib`` writer described above. (Legacy enable
+    tokens ``http`` / ``api`` / ``cli`` from the old transport-duality era still
+    normalize to "on" for back-compat — a machine with a persisted legacy value
+    keeps emitting.)
 
-The HTTP path (urllib → ``/ingest/v1/record/batch``) is the **interim
-recommendation** only because the CLI lacks the annotation-write command today.
-Annotation-write support is coming to the Fulcra CLI soon, and when a CLI
-annotation-write command ships, the `cli` mode should be wired/repaired to use it
-and the recommended/default mode should flip from `http` to `cli` (`http` retained
-as a fallback). The public contract, tag mapping, text/link building, gating,
-idempotency, and the CLI hook points are unchanged regardless of transport.
+The public contract, tag mapping, text/link building, gating, idempotency, and
+the CLI hook points are independent of this gate.
 
 CONTRACT
 --------
@@ -202,14 +203,16 @@ def build_annotation(
     Two tag lists coexist on purpose:
 
       * ``tags`` is the legacy bare list (``[lifecycle, kind, session]``) kept for
-        the API transport / existing readers.
-      * ``cli_tags`` is the form the CLI ``create-data-type`` write uses:
+        existing readers.
+      * ``cli_tags`` is the namespaced form the writer resolves/creates and
+        attaches to the record (the historical field name predates the
+        transport collapse and is retained to avoid a payload-shape change):
         ``agent-tasks`` first as the shared TRACK tag (so every Agent-Tasks
         moment is filterable together), then the lifecycle, then PREFIXED
         ``agent:<kind>`` / ``session:<sess>`` so the timeline UI's flat tag space
         stays namespaced and unambiguous.
 
-    ``name`` is the CLI annotation NAME — the concise, link-free
+    ``name`` is the annotation NAME — the concise, link-free
     ``<lifecycle>: <title> (<id>)`` (kept short; the deep link lives in ``desc``
     instead so the timeline label stays readable). ``desc`` carries the WORK
     SUBSTANCE (operator-digest spec §7): ``[<workstream>/<kind>] <title> —
@@ -218,8 +221,8 @@ def build_annotation(
     optional; a sparse task still yields a non-empty desc (prefix + title), and
     when nothing substantive is present it falls back to the library link.
 
-    Kept separate from the writers so tests (and the API/CLI shaping steps)
-    operate on a stable dict regardless of transport."""
+    Kept separate from the writer so tests (and the record-shaping step) operate
+    on a stable dict."""
     title = task.get("title", "(untitled)")
     task_id = task.get("id", "")
     link = library_link(task)
@@ -348,22 +351,29 @@ def _annotations_config_path() -> "Path":
 
 
 def _normalize_mode(raw: str) -> Optional[str]:
-    """Map a raw mode token to one of ``cli`` | ``http``, or None if unrecognized.
+    """Map a raw mode token to ``"on"``, or None if it does not enable the writer.
 
-    The ``api``->``http`` alias is honoured HERE so it applies uniformly to both
-    the env var and the persisted config file: an operator who wrote the legacy
-    ``api`` value (the original deferred-stub flag) gets the working HTTP path,
-    not a no-op, no matter which source it came from."""
+    There is ONE annotation writer (the stdlib-urllib HTTP path), so the mode is
+    simply on/off. Any recognized enable value normalizes to ``"on"``:
+
+      * ``on``  — the current enable token (what ``annotations on`` persists);
+      * ``http`` / ``api`` / ``cli``  — legacy enable tokens from the old
+        transport-duality era. They still mean "enabled" so a machine carrying a
+        persisted legacy value (or an inherited legacy env export) keeps working
+        after this collapse instead of silently going inert.
+
+    Anything else — ``off``, empty, or an unrecognized token — returns None,
+    preserving the "unknown value is off" contract (the writer stays inert unless
+    an operator explicitly opts in). Normalization is applied HERE so it covers
+    both the env var and the persisted config file uniformly."""
     raw = (raw or "").strip().lower()
-    if raw == "cli":
-        return "cli"
-    if raw in ("http", "api"):
-        return "http"
+    if raw in ("on", "http", "api", "cli"):
+        return "on"
     return None
 
 
 def _persisted_mode() -> Optional[str]:
-    """Return the persisted annotation mode (``cli``/``http``), or None.
+    """Return the persisted annotation mode (``"on"``), or None when not enabled.
 
     The mode is enabled ONCE by the operator (``annotations on``) and stored as a
     single trimmed line in ``${XDG_CONFIG_HOME:-~/.config}/fulcra-coord/annotations``
@@ -372,7 +382,8 @@ def _persisted_mode() -> Optional[str]:
     shell) is what lets EVERY agent on the machine emit, so the operator's
     timeline actually fills. Tolerant of a missing/empty/unreadable/garbage file
     — a broken config must never wedge a task op, so we fall through to ``off``.
-    The ``api`` alias normalizes here too (see ``_normalize_mode``)."""
+    A persisted legacy transport token (``http``/``api``/``cli``) normalizes to
+    ``"on"`` here too (see ``_normalize_mode``), so an older config keeps working."""
     path = _annotations_config_path()
     if not path.exists():
         return None
@@ -384,11 +395,12 @@ def _persisted_mode() -> Optional[str]:
 
 
 def set_persisted_mode(mode: str) -> "Path":
-    """Persist ``mode`` (normalized to ``cli``/``http``) so every agent emits.
+    """Persist ``mode`` (normalized to ``"on"``/``"off"``) so every agent emits.
 
     Mirrors ``identity.set_human``: creates the config dir and writes a single
-    trimmed line. The value is normalized through ``_normalize_mode`` so an
-    ``api`` alias lands as ``http`` on disk. Returns the file path."""
+    trimmed line. The value is normalized through ``_normalize_mode`` — any
+    recognized enable token (``on`` or a legacy ``http``/``api``/``cli``) lands as
+    ``"on"`` on disk; anything else lands as ``"off"``. Returns the file path."""
     normalized = _normalize_mode(mode) or "off"
     path = _annotations_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -411,7 +423,7 @@ def clear_persisted_mode() -> bool:
 def resolve_mode_source() -> tuple[str, str]:
     """Resolve the annotation mode AND report its source.
 
-    Returns ``(mode, source)`` where ``mode`` ∈ ``off``|``cli``|``http`` and
+    Returns ``(mode, source)`` where ``mode`` ∈ ``off``|``on`` and
     ``source`` ∈ ``env``|``config``|``default``. Order: ``FULCRA_COORD_ANNOTATIONS``
     (when non-empty and recognized) > persisted config file > ``off``. Surfacing
     the source lets ``annotations status`` / ``doctor`` explain *why* it resolved
@@ -431,7 +443,7 @@ def resolve_mode_source() -> tuple[str, str]:
 
 
 def _mode() -> str:
-    """Resolve the enable mode. Returns one of ``off`` | ``cli`` | ``http``.
+    """Resolve the enable mode. Returns one of ``off`` | ``on``.
 
     Resolution order: ``FULCRA_COORD_ANNOTATIONS`` env (when non-empty) > the
     persisted config file (``annotations on``) > ``off``. The persisted file is
@@ -439,12 +451,11 @@ def _mode() -> str:
     export; env still wins so a session can override. Unset/unrecognized -> ``off``
     so the feature is inert by default and an operator must opt in explicitly.
 
-    ``http`` is the proven path: it writes annotations directly over the Fulcra
-    HTTP API exactly the way ``fulcra-collect`` does (tag resolve -> moment-def
-    resolve/create -> JSONL record POST). ``api`` is a back-compat ALIAS for
-    ``http`` (normalized for both env and file). ``cli`` still routes to the
-    legacy ``create-data-type`` shell-out for any environment pinned to the
-    annotations-capable CLI build."""
+    When ``on``, there is a SINGLE writer: the stdlib-``urllib`` HTTP path that
+    writes annotations directly over the Fulcra API exactly the way
+    ``fulcra-collect`` does (tag resolve -> moment-def resolve/create -> JSONL
+    record POST). Legacy enable tokens (``http``/``api``/``cli``) all normalize to
+    ``on`` for back-compat (see ``_normalize_mode``)."""
     return resolve_mode_source()[0]
 
 
@@ -491,87 +502,7 @@ def _record_annotated(lifecycle: str, task: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Transport writers
-#   _write_cli  — legacy: create-data-type MomentAnnotation --add-to-timeline
-#   _write_http — LIVE: direct Fulcra HTTP API via urllib (recommended path)
-# ---------------------------------------------------------------------------
-
-def _write_timeout() -> int:
-    """Timeout (s) for the annotation create shell-out.
-
-    Reuses the file-write timeout floor (>=15s) so a slow ``create-data-type``
-    can't hang a task op indefinitely while still tolerating normal latency."""
-    return remote._write_timeout()
-
-
-def _annotation_cli_base() -> list[str]:
-    """CLI base for the annotation write — separable from the file/coordination CLI.
-
-    Annotations use ``create-data-type``, which today lives only on the fulcra-api
-    ``create-annotations-commands`` branch — a build that does NOT carry the
-    ``file`` command group the core coordination ops require (and the Files-capable
-    build lacks ``create-data-type``). No single fulcra-api build has both yet, and
-    file-ops + annotations otherwise resolve from the SAME base — so enabling
-    annotations would break task I/O. Until both command sets land on fulcra-api
-    ``main``, honour a dedicated ``FULCRA_COORD_ANNOTATION_CLI`` (whitespace-split)
-    so an operator can point the annotation writer at the annotations build while
-    ``FULCRA_CLI_COMMAND`` stays on the Files build. Falls back to the shared
-    ``remote.cli_base_cmd()`` when unset (correct once one build has both)."""
-    override = os.environ.get("FULCRA_COORD_ANNOTATION_CLI", "").strip()
-    if override:
-        return override.split()
-    return remote.cli_base_cmd()
-
-
-def _write_cli(payload: dict[str, Any], *, backend: Optional[list[str]] = None) -> bool:
-    """Write the annotation by shelling out to the Fulcra CLI (CONFIRMED LIVE).
-
-    Builds and runs::
-
-        <cli-base> create-data-type MomentAnnotation "<NAME>" \
-            --description "<desc>" --add-to-timeline \
-            --tag agent-tasks --tag <lifecycle> --tag agent:<kind> --tag session:<sess>
-
-    ``<cli-base>`` comes from :func:`remote.cli_base_cmd` — the SAME resolution
-    file ops use (``FULCRA_CLI_COMMAND`` -> ``fulcra-api`` on PATH -> ``uv tool
-    run fulcra-api``) — so we never hardcode the binary. ``--add-to-timeline``
-    makes it a real moment occurrence; tags passed by name are auto-created.
-
-    BEST-EFFORT: rc == 0 is success; any non-zero rc, missing CLI, timeout, or OS
-    error returns False and is swallowed so it can NEVER raise into the caller's
-    task op. (The public ``emit_lifecycle_annotation`` only records the
-    idempotency marker on a True return, so a failure here leaves the transition
-    free to be retried.)
-
-    Implemented as a function (not inlined) so tests can monkeypatch
-    ``subprocess.run`` and assert the exact invocation without a live backend.
-    """
-    base = backend if backend is not None else _annotation_cli_base()
-    cmd = list(base) + [
-        "create-data-type",
-        "MomentAnnotation",
-        payload["name"],
-        "--description",
-        payload["desc"],
-        "--add-to-timeline",
-    ]
-    for tag in payload.get("cli_tags", []):
-        cmd += ["--tag", tag]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_write_timeout(),
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-
-
-# ---------------------------------------------------------------------------
-# HTTP transport (stdlib-only) — replicates the fulcra-collect / fulcra-common
+# The single annotation writer (stdlib-only) — replicates the fulcra-collect / fulcra-common
 # annotation write over urllib.request, so fulcra-coord needs NO httpx /
 # fulcra-common dependency. Three Fulcra endpoints, in order:
 #   1. resolve/create each tag        GET/POST  /user/v1alpha1/tag(/name/{n})
@@ -978,8 +909,8 @@ def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None)
     failure here leaves the transition free to retry.)
 
     The inner ``data`` dict is ``{"title": <name>, "note": <description>}`` with
-    empty values omitted. ``backend`` is accepted for signature symmetry with the
-    other writers; the HTTP path resolves its own base/token and ignores it."""
+    empty values omitted. ``backend`` is accepted only for direct unit-test
+    injection; the writer resolves its own API base/token and ignores it."""
     try:
         token = _resolve_token()
         if not token:
@@ -1047,18 +978,17 @@ def emit_lifecycle_annotation(
     """Emit one Agent-Tasks lifecycle annotation. BEST-EFFORT, NEVER RAISES.
 
     Returns True only when an annotation was actually written on THIS call;
-    False for every no-op path (feature off, deferred `api` transport, already
-    annotated, or any swallowed error). The whole body is wrapped so a broken or
-    slow annotation backend can never break — or even slow the failure of — the
-    coordination task write that triggered it.
+    False for every no-op path (feature off, already annotated, or any swallowed
+    error). The whole body is wrapped so a broken or slow annotation backend can
+    never break — or even slow the failure of — the coordination task write that
+    triggered it.
 
     Idempotency: guarded by a per-(task, lifecycle, transition-anchor) marker in
     the local cache, so a write-retry of the same transition does not double
     annotate, while a genuinely new transition does emit again.
     """
     try:
-        mode = _mode()
-        if mode == "off":
+        if _mode() == "off":
             return False
 
         if lifecycle not in LIFECYCLES:
@@ -1071,20 +1001,7 @@ def emit_lifecycle_annotation(
 
         payload = build_annotation(lifecycle=lifecycle, task=task, agent=agent)
 
-        # NOTE: the ``backend`` threaded in here is the FILE-OPS backend (e.g.
-        # ``[... , "file"]`` or the test fake-backend emulator) — it speaks the
-        # file protocol, NOT the CLI's top-level command surface, so it is the
-        # wrong base for ``create-data-type``. We therefore do NOT forward it to
-        # ``_write_cli``; that helper resolves the real CLI base itself via
-        # ``remote.cli_base_cmd()`` (honouring ``FULCRA_CLI_COMMAND``). The
-        # ``backend`` kwarg on the writers exists only for direct unit-test
-        # injection.
-        if mode == "cli":
-            wrote = _write_cli(payload)
-        elif mode == "http":
-            wrote = _write_http(payload, backend=backend)
-        else:  # pragma: no cover - _mode only returns off/cli/http
-            wrote = False
+        wrote = _write_http(payload, backend=backend)
 
         if wrote:
             _record_annotated(lifecycle, task)
@@ -1107,25 +1024,20 @@ def emit_needs_user_annotation(
     operator's Fulcra timeline (tagged ``needs-user`` + ``agent-tasks`` + the
     requesting agent). Same gating/transport/idempotency contract as
     :func:`emit_lifecycle_annotation`: honours ``FULCRA_COORD_ANNOTATIONS``
-    (off by default -> no-op), routes through the same ``_write_cli``, dedupes on
-    a per-(task, needs-user, transition-anchor) marker, and NEVER raises into the
-    caller — a task op must not fail because a timeline write was slow/missing.
-    Returns True only when a moment was actually written on THIS call."""
+    (off by default -> no-op), routes through the same single ``_write_http``
+    writer, dedupes on a per-(task, needs-user, transition-anchor) marker, and
+    NEVER raises into the caller — a task op must not fail because a timeline
+    write was slow/missing. Returns True only when a moment was actually written
+    on THIS call."""
     try:
-        mode = _mode()
-        if mode == "off":
+        if _mode() == "off":
             return False
         if _already_annotated(NEEDS_USER_TAG, task):
             return False
 
         payload = build_needs_user_annotation(task=task, agent=agent)
 
-        if mode == "cli":
-            wrote = _write_cli(payload)
-        elif mode == "http":
-            wrote = _write_http(payload, backend=backend)
-        else:  # pragma: no cover - _mode only returns off/cli/http
-            wrote = False
+        wrote = _write_http(payload, backend=backend)
 
         if wrote:
             _record_annotated(NEEDS_USER_TAG, task)
