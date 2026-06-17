@@ -23,8 +23,8 @@ def _missing_tag_lib() -> MagicMock:
 
 
 @pytest.fixture(autouse=True)
-def fake_token(mocker):
-    mocker.patch.dict("os.environ", {"FULCRA_ACCESS_TOKEN": "test-token"})
+def fake_token(monkeypatch):
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-token")
 
 
 def test_ensure_tag_returns_cached_id_without_hitting_api(recording_transport):
@@ -35,10 +35,10 @@ def test_ensure_tag_returns_cached_id_without_hitting_api(recording_transport):
     assert state.tag_ids == {"netflix": "cached-uuid"}
 
 
-def test_ensure_tag_looks_up_existing_then_caches(recording_transport, mocker):
+def test_ensure_tag_looks_up_existing_then_caches(recording_transport, monkeypatch):
     fake_lib = MagicMock()
     fake_lib.get_tag_by_name.return_value = {"id": "server-uuid", "name": "netflix"}
-    mocker.patch.object(BaseFulcraClient, "_lib", lambda self: fake_lib)
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
     # Tag resolution goes through the lib, never httpx — fail on any request.
     transport = recording_transport(lambda r: pytest.fail(f"unexpected {r.url}"))
     client = FulcraClient(transport=transport)
@@ -48,13 +48,13 @@ def test_ensure_tag_looks_up_existing_then_caches(recording_transport, mocker):
     assert state.tag_ids["netflix"] == "server-uuid"
 
 
-def test_ensure_tag_creates_when_missing(recording_transport, mocker):
+def test_ensure_tag_creates_when_missing(recording_transport, monkeypatch):
     fake_lib = MagicMock()
     fake_lib.get_tag_by_name.side_effect = urllib.error.HTTPError(
         url="http://x", code=404, msg="Not Found", hdrs=None, fp=None
     )
     fake_lib.create_tag.return_value = [{"id": "new-uuid", "name": "netflix"}]
-    mocker.patch.object(BaseFulcraClient, "_lib", lambda self: fake_lib)
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
     transport = recording_transport(lambda r: pytest.fail(f"unexpected {r.url}"))
     client = FulcraClient(transport=transport)
     state = State()
@@ -64,7 +64,7 @@ def test_ensure_tag_creates_when_missing(recording_transport, mocker):
     fake_lib.create_tag.assert_called_once_with("netflix")
 
 
-def test_ensure_definitions_creates_watched_and_listened(recording_transport, mocker):
+def test_ensure_definitions_creates_watched_and_listened(recording_transport, monkeypatch):
     posted: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -79,7 +79,7 @@ def test_ensure_definitions_creates_watched_and_listened(recording_transport, mo
         pytest.fail(f"unexpected {request.method} {request.url}")
 
     # The three default tags are missing → created as `tag-<name>` via the lib.
-    mocker.patch.object(BaseFulcraClient, "_lib", lambda self: _missing_tag_lib())
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: _missing_tag_lib())
     transport = recording_transport(handler)
     client = FulcraClient(transport=transport)
     state = State()

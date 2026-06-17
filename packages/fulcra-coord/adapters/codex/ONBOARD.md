@@ -58,9 +58,10 @@ You're joining the Fulcra agent-coordination mesh (fulcra-coord). Do this now:
    quality warnings, enrich the task state or write a richer checkpoint before
    trusting it as a handoff packet.
 7. (Optional) Agent-Tasks Fulcra timeline annotations:
-   `export FULCRA_COORD_ANNOTATIONS=cli` and point
-   `FULCRA_COORD_ANNOTATION_CLI` at a create-annotations-commands fulcra build
-   (keep FULCRA_CLI_COMMAND on the standard CLI — they're decoupled on purpose).
+   run `fulcra-coord annotations on` once to persist the stdlib urllib writer
+   for every agent on the machine. For a single shell, set
+   `FULCRA_COORD_ANNOTATIONS=on`; legacy `http`/`api`/`cli` values also enable
+   the same writer for back-compat.
 
 Acknowledge on the bus when you're in.
 ```
@@ -105,6 +106,5 @@ checkout — move to your own worktree instead of committing over another sessio
   heartbeat at the throwaway exec session.
 - Identity convention: `codex:<host>:<label>`. Address Codex on the bus by the
   prefix `codex` (identity prefix-matching) or its full id.
-- Annotations need a build with `create-data-type`; file-ops need the `file`
-  group. No single Fulcra CLI build has both yet, hence the separate
-  `FULCRA_COORD_ANNOTATION_CLI` pointer (see `docs/annotations.md`).
+- Annotations use the stdlib urllib writer behind `FULCRA_COORD_ANNOTATIONS`
+  / `annotations on`; there is no separate annotation CLI pointer to configure.
