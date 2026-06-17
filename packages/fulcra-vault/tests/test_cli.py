@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from io import StringIO
 
@@ -214,6 +215,75 @@ def test_map_truncated_hot_still_fits_budget_after_marker():
 
     assert rc == 0, err.getvalue()
     assert "MAP/HOT render check passed" in err.getvalue()
+
+
+def test_init_scaffolds_empty_vault():
+    store = FakeStore()
+    err = StringIO()
+
+    rc = run(["init"], store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 0, err.getvalue()
+    for path in ("/vault/meta.json", "/vault/MAP.md", "/vault/HOT.md", "/vault/LOG.md"):
+        assert path in store.files, path
+    spec = json.loads(store.files["/vault/meta.json"])["spec"]
+    slugs = [s["slug"] for s in spec["sections"]]
+    assert slugs == ["projects", "people", "decisions", "domain"]
+    # at least one seed note was written
+    assert any(p.endswith(".md") and p not in
+               {"/vault/MAP.md", "/vault/HOT.md", "/vault/LOG.md"}
+               for p in store.files)
+
+
+def test_init_refuses_existing_vault_without_force():
+    store = _scaffolded_store()
+    before = store.files["/vault/meta.json"]
+    err = StringIO()
+
+    rc = run(["init"], store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 0
+    assert store.files["/vault/meta.json"] == before  # not overwritten
+    assert "already initialized" in err.getvalue()
+
+
+def test_init_force_rescaffolds_with_default_spec():
+    store = _scaffolded_store()  # seeded with a single "projects" section
+    err = StringIO()
+
+    rc = run(["init", "--force"], store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 0, err.getvalue()
+    spec = json.loads(store.files["/vault/meta.json"])["spec"]
+    assert [s["slug"] for s in spec["sections"]] == \
+        ["projects", "people", "decisions", "domain"]
+
+
+def test_init_with_spec_file(tmp_path):
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(json.dumps({
+        "sections": [{"slug": "lab", "title": "Lab", "seed_notes": ["Lab/Intro"]}],
+    }))
+    store = FakeStore()
+
+    rc = run(["init", "--spec", str(spec_file)], store=store, now=NOW,
+             stdout=StringIO(), stderr=StringIO())
+
+    assert rc == 0
+    spec = json.loads(store.files["/vault/meta.json"])["spec"]
+    assert [s["slug"] for s in spec["sections"]] == ["lab"]
+
+
+def test_init_malformed_spec_returns_2(tmp_path):
+    spec_file = tmp_path / "bad.json"
+    spec_file.write_text("{not json")
+    err = StringIO()
+
+    rc = run(["init", "--spec", str(spec_file)], store=FakeStore(), now=NOW,
+             stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "/vault/meta.json" not in FakeStore().files
 
 
 def _scaffolded_store() -> FakeStore:
