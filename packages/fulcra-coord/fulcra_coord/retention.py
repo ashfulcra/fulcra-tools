@@ -237,7 +237,7 @@ def _claim_retention_marker(now: datetime, *,
                             backend: Optional[list[str]] = None
                             ) -> tuple[bool, Optional[dict[str, Any]]]:
     """First-host-wins daily throttle for the retention pass — the digest-marker
-    pattern (_claim_digest_marker), one rolling file keyed by date-INSIDE-the-JSON.
+    dedup pattern (cf. _record_digest_marker), one rolling file keyed by date-INSIDE-the-JSON.
 
     Read retention/last-run.json: if its date == today (UTC) another host already
     ran today -> claimed False (skip). Else write {date, by, at} and re-read; if a

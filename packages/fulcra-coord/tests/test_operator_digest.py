@@ -290,7 +290,8 @@ class TestDigestCommand(unittest.TestCase):
     def test_real_run_emits(self):
         with patch("fulcra_coord.digest._load_task_summaries", return_value=self.summaries), \
              patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
-             patch("fulcra_coord.digest._claim_digest_marker", return_value=True), \
+             patch("fulcra_coord.digest._digest_marker_present", return_value=False), \
+             patch("fulcra_coord.digest._record_digest_marker") as record, \
              patch("fulcra_coord.cli.lifecycle_annotations.emit_digest_annotation",
                    return_value=True) as emit:
             rc = cli.cmd_digest(self._args(), backend=["false"])
@@ -299,6 +300,35 @@ class TestDigestCommand(unittest.TestCase):
         _, kw = emit.call_args
         self.assertEqual(kw["window"], "evening")
         self.assertIn("on you", kw["name"])
+        # On a CONFIRMED emit, the marker IS recorded (so the next tick dedups).
+        record.assert_called_once()
+
+    def test_failed_emit_records_no_marker(self):
+        # The bug: when emit_digest_annotation returns False (transient error),
+        # NO marker must be recorded, so a later tick retries instead of the
+        # window being silently dropped for the rest of the day.
+        with patch("fulcra_coord.digest._load_task_summaries", return_value=self.summaries), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
+             patch("fulcra_coord.digest._digest_marker_present", return_value=False), \
+             patch("fulcra_coord.digest._record_digest_marker") as record, \
+             patch("fulcra_coord.cli.lifecycle_annotations.emit_digest_annotation",
+                   return_value=False) as emit:
+            rc = cli.cmd_digest(self._args(), backend=["false"])
+        self.assertEqual(rc, 0)
+        emit.assert_called_once()
+        record.assert_not_called()
+
+    def test_present_marker_skips_emit(self):
+        # A marker already present (a prior CONFIRMED write) -> skip the emit.
+        with patch("fulcra_coord.digest._load_task_summaries", return_value=self.summaries), \
+             patch("fulcra_coord.cli.remote.download_json", return_value=self.presence), \
+             patch("fulcra_coord.digest._digest_marker_present", return_value=True), \
+             patch("fulcra_coord.digest._record_digest_marker") as record, \
+             patch("fulcra_coord.cli.lifecycle_annotations.emit_digest_annotation") as emit:
+            rc = cli.cmd_digest(self._args(), backend=["false"])
+        self.assertEqual(rc, 0)
+        emit.assert_not_called()
+        record.assert_not_called()
 
     def test_json_format_prints_structured_digest(self):
         import io, contextlib
@@ -320,35 +350,53 @@ class TestDigestMarker(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 6, 4, 18, 0, 0, tzinfo=timezone.utc)
 
-    def test_absent_marker_is_claimed_and_written(self):
+    # --- _digest_marker_present: a marker exists only after a CONFIRMED write ---
+
+    def test_present_true_when_download_returns_dict(self):
+        with patch("fulcra_coord.cli.remote.download_json",
+                   return_value={"window": "evening", "by": "codex:mb:main"}):
+            self.assertTrue(
+                cli._digest_marker_present("evening", self.now, backend=["false"]))
+
+    def test_present_false_when_download_returns_none(self):
+        with patch("fulcra_coord.cli.remote.download_json", return_value=None):
+            self.assertFalse(
+                cli._digest_marker_present("evening", self.now, backend=["false"]))
+
+    def test_present_false_when_download_raises(self):
+        # A transient read error self-heals: treat as absent so the next tick
+        # re-emits (a harmless double) rather than silently dropping the window.
+        with patch("fulcra_coord.cli.remote.download_json",
+                   side_effect=RuntimeError("boom")):
+            self.assertFalse(
+                cli._digest_marker_present("evening", self.now, backend=["false"]))
+
+    # --- _record_digest_marker: written ONLY after a confirmed emit ---
+
+    def test_record_uploads_marker_to_window_path(self):
         uploaded = {}
-        def fake_download_json(path, *, backend=None, timeout=None):
-            return None  # marker absent
         def fake_upload_json(data, path, *, backend=None, timeout=None):
             uploaded["path"] = path
             uploaded["data"] = data
             return True
-        with patch("fulcra_coord.cli.remote.download_json", side_effect=fake_download_json), \
-             patch("fulcra_coord.cli.remote.upload_json", side_effect=fake_upload_json):
-            granted = cli._claim_digest_marker("evening", self.now, backend=["false"])
-        self.assertTrue(granted)
+        with patch("fulcra_coord.cli.remote.upload_json", side_effect=fake_upload_json):
+            ok = cli._record_digest_marker("evening", self.now, backend=["false"])
+        self.assertTrue(ok)
         self.assertTrue(uploaded["path"].endswith("digest/markers/2026-06-04-evening.json"))
         self.assertEqual(uploaded["data"]["window"], "evening")
+        # Field name kept (claimed_at) for back-compat with existing markers.
         self.assertRegex(uploaded["data"]["claimed_at"], r"\.\d{6}Z$")
 
-    def test_present_marker_is_noop(self):
-        with patch("fulcra_coord.cli.remote.download_json",
-                   return_value={"window": "evening", "by": "codex:mb:main"}), \
-             patch("fulcra_coord.cli.remote.upload_json") as up:
-            granted = cli._claim_digest_marker("evening", self.now, backend=["false"])
-        self.assertFalse(granted)
-        up.assert_not_called()
+    def test_record_returns_false_when_upload_returns_false(self):
+        with patch("fulcra_coord.cli.remote.upload_json", return_value=False):
+            self.assertFalse(
+                cli._record_digest_marker("evening", self.now, backend=["false"]))
 
-    def test_upload_failure_skips(self):
-        with patch("fulcra_coord.cli.remote.download_json", return_value=None), \
-             patch("fulcra_coord.cli.remote.upload_json", return_value=False):
-            granted = cli._claim_digest_marker("evening", self.now, backend=["false"])
-        self.assertFalse(granted)  # don't risk a double on a failed claim
+    def test_record_returns_false_when_upload_raises(self):
+        with patch("fulcra_coord.cli.remote.upload_json",
+                   side_effect=RuntimeError("boom")):
+            self.assertFalse(
+                cli._record_digest_marker("evening", self.now, backend=["false"]))
 
 
 import plistlib

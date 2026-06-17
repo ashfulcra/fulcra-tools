@@ -1,7 +1,7 @@
 """Operator situational-awareness output for fulcra-coord: digest + fleet health.
 
 The PUSH surface (the twice-daily ``digest`` written to the timeline, its render +
-window + per-window dedup-marker claim + the launchd installer) and the PULL surface
+window + per-window dedup marker recorded after a confirmed emit + the launchd installer) and the PULL surface
 (the ``health`` fleet dashboard: load per-host health records, assess infra health,
 and the bus-global digest-emit freshness). Both reuse the pure judgment in
 views.assess_infra_health and the summaries aggregate; they read + annotate, never
@@ -295,38 +295,38 @@ def _digest_marker_path(window: str, now: datetime) -> str:
     return f"{remote_root()}/digest/markers/{day}-{window}.json"
 
 
-def _claim_digest_marker(window: str, now: datetime, *,
-                         backend: Optional[list[str]] = None) -> bool:
-    """Any-agent first-writer-wins claim for one window's digest. Returns True
-    when THIS caller won the claim and should write the digest; False to skip.
-
-    Protocol (spec §5): download the marker — if it exists, another agent already
-    wrote this window, so NO-OP (return False). If absent, upload a marker
-    stamping this agent + timestamp; on a successful upload, grant the claim.
-
-    RACE (accepted): Fulcra Files has no compare-and-swap, so two agents firing
-    in the same ~second can both see 'absent' and both write → a rare double
-    digest. Harmless on a timeline; logged, not prevented (a single-owner schedule
-    would remove the race but add a single point of failure — rejected per the
-    any-agent decision). MARKER-CLAIM FAILURE (download or upload error) → return
-    False (skip) so a transient bus error never risks a double; the next window
-    retries. Never raises — best-effort like the rest of the digest path."""
+def _digest_marker_present(window: str, now: datetime, *,
+                           backend: Optional[list[str]] = None) -> bool:
+    """True iff this window's digest marker already exists (i.e. a prior tick
+    CONFIRMED-wrote it — see _record_digest_marker). Absent OR unreadable →
+    False (proceed): a transient read error self-heals on the next tick, and a
+    re-emit is a harmless timeline double, never a silent daily drop. Keyed by
+    UTC date + window so any agent on any machine checks the SAME path."""
     try:
         path = _digest_marker_path(window, now)
-        existing = remote.download_json(path, backend=backend)
-        if existing is not None:
-            return False  # already claimed this window
+        return remote.download_json(path, backend=backend) is not None
+    except Exception:
+        return False
+
+
+def _record_digest_marker(window: str, now: datetime, *,
+                          backend: Optional[list[str]] = None) -> bool:
+    """Record that this window's digest was written. Called ONLY after a
+    CONFIRMED emit, so a failed/short-circuited emit leaves no marker and the
+    next tick retries instead of dropping the window. Best-effort: a record
+    failure just means a later tick may re-emit (a harmless double). Returns
+    True on a successful upload. Never raises."""
+    try:
         marker = {
             "schema": "fulcra.coordination.digest_marker.v1",
             "window": window,
             "date": now.astimezone(timezone.utc).strftime("%Y-%m-%d"),
             "by": identity.resolve_agent(),
-            "claimed_at": _iso_z(now),
+            "claimed_at": _iso_z(now),  # field name kept for back-compat with existing markers
         }
+        path = _digest_marker_path(window, now)
         return bool(remote.upload_json(marker, path, backend=backend))
     except Exception:
-        # Best-effort: a marker error must never raise into a scheduled tick, and
-        # must skip (not write) so we never risk a double on an uncertain claim.
         return False
 
 
@@ -338,11 +338,14 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
     window's ``since``/``now``, builds the four-block digest, and renders it to a
     timeline (name, note). ``--dry-run`` prints the rendered text and writes
     NOTHING. ``--format json`` prints the structured digest (for tooling/tests).
-    Otherwise it claims the per-window dedup marker (first writer wins; others
-    no-op) and emits the moment on the ``Agent Tasks — Digest`` track.
+    Otherwise it checks the per-window dedup marker (skipping if a prior tick
+    already CONFIRMED-wrote this window), emits the moment on the
+    ``Agent Tasks — Digest`` track, and records the marker ONLY after a confirmed
+    emit — so a failed emit leaves no marker and the next tick retries instead of
+    silently dropping the window for the rest of the day.
 
-    BEST-EFFORT end to end: a failed marker claim or a failed emit is logged and
-    returns 0 — a scheduled tick must never error out."""
+    BEST-EFFORT end to end: a failed emit is logged and returns 0 — a scheduled
+    tick must never error out."""
     window = getattr(args, "window", None) or "ondemand"
     out_format = getattr(args, "format", "table")
     dry_run = getattr(args, "dry_run", False)
@@ -389,11 +392,12 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
         _info(note or "(nothing to report)")
         return 0
 
-    # Any-agent dedup: claim the per-window marker first; if another agent
-    # already wrote this window (or the claim errored), skip — never risk a
-    # double, and never raise into a scheduled tick.
-    if not _claim_digest_marker(window, now, backend=backend):
-        _info(f"Digest for {window} already written (or marker claim failed) — skipping.")
+    # Any-agent dedup: a marker exists only after a CONFIRMED write, so skip if
+    # this window already landed. Recording is DEFERRED to after a successful
+    # emit (below) — claiming up-front permanently dropped the window on a
+    # transient emit failure (the marker blocked every retry).
+    if _digest_marker_present(window, now, backend=backend):
+        _info(f"Digest for {window} already written — skipping.")
         return 0
 
     wrote = False
@@ -403,6 +407,8 @@ def cmd_digest(args: Any, backend: Optional[list[str]] = None) -> int:
             agent=identity.resolve_agent(), backend=backend)
     except Exception:
         wrote = False
+    if wrote:
+        _record_digest_marker(window, now, backend=backend)
     _info(f"Digest ({window}): {'written' if wrote else 'not written (annotations off or error)'}.")
     return 0
 

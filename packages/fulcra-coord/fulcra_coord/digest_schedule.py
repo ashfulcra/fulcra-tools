@@ -11,8 +11,8 @@ heartbeat/listener jobs.
 
 Two windows -> two jobs: ``digest --window morning`` at 08:00 and
 ``digest --window evening`` at 18:00. Installable on any/all machines; the
-any-agent dedup marker (cli._claim_digest_marker) makes concurrent installs safe
-(first writer wins, others no-op). Contract mirrors the other installers:
+any-agent dedup marker (cli._record_digest_marker, recorded after a confirmed
+emit) makes concurrent installs safe (one digest per window, others no-op). Contract mirrors the other installers:
 idempotent, dry-run writes nothing, surgical uninstall, fail-safe, stdlib-only.
 ``target_dir`` / ``crontab_path`` / ``logs_dir`` are overridable so tests never
 touch the real scheduler or ~/Library.
