@@ -28,20 +28,41 @@ def _active(grant: dict, audience: str, now: datetime) -> bool:
     return exp_dt > now
 
 
+# Capability ladder: a higher level satisfies every purpose at or below it.
+# 'read' = may be read/displayed; 'solve' = may also feed group decisions.
+_LEVEL_RANK = {"read": 0, "solve": 1}
+
+
+def _level_allows(grant_level: object, purpose: str) -> bool:
+    # A grant satisfies a purpose when its level ranks >= the purpose. An unknown
+    # or missing grant level reads as 'read' (the floor) so a legacy/partial grant
+    # never confers solve capability.
+    have = _LEVEL_RANK.get(grant_level if isinstance(grant_level, str) else "", 0)
+    return have >= _LEVEL_RANK[purpose]
+
+
 def filter_for_audience(doc: dict, grants: list[dict], audience: str,
-                        now: datetime) -> dict:
+                        now: datetime, *, purpose: str = "read") -> dict:
+    if purpose not in _LEVEL_RANK:
+        raise ValueError(f"purpose must be one of {sorted(_LEVEL_RANK)}, got {purpose!r}")
     live = [g for g in grants if _active(g, audience, now)]
-    # NOTE: grant 'level' (read|solve) is recorded but not yet enforced anywhere; enforcement arrives with cross-user sharing post-v1.
+    # A key is exposed only if some active grant both matches its glob AND carries
+    # a level that permits this purpose — so a read-only grant can't feed the solver.
     keys = {k: v for k, v in doc.get("keys", {}).items()
-            if any(fnmatch(k, g["key_glob"]) for g in live if g.get("key_glob"))}  # fnmatch '*' crosses dots: 'dining.*' matches all depths; skip grants w/o key_glob
+            if any(fnmatch(k, g["key_glob"]) for g in live
+                   if g.get("key_glob") and _level_allows(g.get("level"), purpose))}
+    # fnmatch '*' crosses dots: 'dining.*' matches all depths; skip grants w/o key_glob.
     return {**doc, "keys": keys}
 
 
 def disclosure_signal(shared_keys: list[str], audience: str, platform: str,
-                      now: datetime) -> Signal:
+                      now: datetime, *, purpose: str = "read") -> Signal:
     observed = now.isoformat()
     key = f"consent.disclosure.{audience}"
-    value = {"keys": sorted(shared_keys), "audience": audience}
+    # purpose is part of the ledger entry: a solve disclosure (feeds group
+    # decisions) must be distinguishable from a read one, and folds into the id
+    # so same-instant read/solve exports don't collapse to one record.
+    value = {"keys": sorted(shared_keys), "audience": audience, "purpose": purpose}
     return Signal(
         id=temp_signal_id(key, observed, platform, value),
         kind="consent", key=key, scope="global",

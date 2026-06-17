@@ -399,11 +399,13 @@ def cmd_get(args, api, outbox_dir, now) -> int:
     doc = doc or {"v": 1, "compiled_at": now.isoformat(), "keys": {}}
     if args.audience:
         grants = (store.read_json(CONSENT_PATH) or {}).get("grants", [])
-        doc = filter_for_audience(doc, grants, args.audience, now)
+        doc = filter_for_audience(doc, grants, args.audience, now,
+                                  purpose=args.purpose)
         meta = store.read_json(META_PATH)
         if meta and doc["keys"]:
             sig = disclosure_signal(sorted(doc["keys"]), args.audience,
-                                    platform=args.platform or "cli", now=now)
+                                    platform=args.platform or "cli", now=now,
+                                    purpose=args.purpose)
             try:
                 store.ingest_signal(sig, data_type=meta["data_type"])
             except (OSError, ConnectionError, TimeoutError):
@@ -566,6 +568,9 @@ def _parser() -> argparse.ArgumentParser:
     g = sub.add_parser("get")
     g.add_argument("--platform")
     g.add_argument("--for", dest="audience")
+    g.add_argument("--purpose", default="read", choices=["read", "solve"],
+                   help="consent purpose for --for: 'solve' exports only "
+                        "solve-level grants; 'read' (default) exports all")
 
     co = sub.add_parser("consent")
     co_sub = co.add_subparsers(dest="consent_action", required=True)
