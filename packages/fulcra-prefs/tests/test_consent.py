@@ -16,6 +16,40 @@ def test_filter_keeps_only_granted_keys():
     out = filter_for_audience(DOC, [grant()], "ea-agent", NOW)
     assert sorted(out["keys"]) == ["dining.cuisine.thai", "dining.noise.quiet"]
 
+def test_default_purpose_is_read_includes_read_grant():
+    # Back-compat: no purpose arg behaves as read; a read grant exposes keys.
+    out = filter_for_audience(DOC, [grant(level="read")], "ea-agent", NOW)
+    assert sorted(out["keys"]) == ["dining.cuisine.thai", "dining.noise.quiet"]
+
+def test_read_purpose_includes_solve_grant():
+    # solve >= read: a solve-level grant is also readable.
+    out = filter_for_audience(DOC, [grant(level="solve")], "ea-agent", NOW,
+                              purpose="read")
+    assert sorted(out["keys"]) == ["dining.cuisine.thai", "dining.noise.quiet"]
+
+def test_solve_purpose_includes_solve_grant():
+    out = filter_for_audience(DOC, [grant(level="solve")], "ea-agent", NOW,
+                              purpose="solve")
+    assert sorted(out["keys"]) == ["dining.cuisine.thai", "dining.noise.quiet"]
+
+def test_solve_purpose_excludes_read_only_grant():
+    # A read grant must NOT feed the solver.
+    out = filter_for_audience(DOC, [grant(level="read")], "ea-agent", NOW,
+                              purpose="solve")
+    assert out["keys"] == {}
+
+def test_solve_purpose_excludes_grant_missing_level():
+    # Legacy/partial grant without 'level' defaults to read -> no solve capability.
+    g = {"key_glob": "dining.*", "audience": "ea-agent",
+         "granted_at": "2026-06-01T00:00:00+00:00", "expires": None}
+    out = filter_for_audience(DOC, [g], "ea-agent", NOW, purpose="solve")
+    assert out["keys"] == {}
+
+def test_invalid_purpose_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        filter_for_audience(DOC, [grant()], "ea-agent", NOW, purpose="bogus")
+
 def test_no_grants_means_empty_doc():
     out = filter_for_audience(DOC, [], "ea-agent", NOW)
     assert out["keys"] == {}
