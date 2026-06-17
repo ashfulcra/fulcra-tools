@@ -479,7 +479,9 @@ def _transition_anchor(task: dict[str, Any]) -> str:
     between them (a transition appends an event) and ``type`` disambiguates
     further, so distinct transitions never collide — while a true retry, which
     re-uploads the identical task, reproduces the identical anchor and is
-    correctly skipped."""
+    correctly skipped. Past the ``MAX_EVENTS_INLINE`` (20) cap ``len(events)`` is
+    pinned at 20 and no longer varies, so disambiguation there rests on the
+    microsecond ``at`` (+ ``type``), which never collides for sequential writes."""
     events = task.get("events") or []
     if events:
         last = events[-1]

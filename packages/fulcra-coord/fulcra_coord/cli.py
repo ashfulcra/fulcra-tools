@@ -122,7 +122,7 @@ from .loop_snapshots import overlay_open_records_from_tasks
 from .digest import (
     _load_health_records, _freshest_digest_emit, _assess_fleet, cmd_health,
     _digest_lines, _render_digest, _digest_window_since, _digest_marker_path,
-    _claim_digest_marker, cmd_digest, cmd_install_digest,
+    _digest_marker_present, _record_digest_marker, cmd_digest, cmd_install_digest,
 )
 # Task lifecycle + directive commands extracted from this file. Re-exported so the
 # command dispatch (entry.py) and the test imports keep resolving. lifecycle.py
@@ -1287,8 +1287,9 @@ def _maybe_escalate_role_vacancy(
     maintainer. Returns True iff THIS call emitted the directive.
 
     IDEMPOTENCE: first-writer-wins DAILY marker
-    (``roles/<name>/escalations/<YYYY-MM-DD>.json``) — the _claim_digest_marker
-    protocol verbatim: an existing marker means today's escalation already
+    (``roles/<name>/escalations/<YYYY-MM-DD>.json``) — the date-keyed
+    digest-marker dedup pattern (cf. _record_digest_marker), but claimed
+    up-front here: an existing marker means today's escalation already
     went out (this tick or another host's), so NO-OP; a marker claim failure
     also no-ops so a flaky bus never risks a double. One directive per
     vacancy-DAY, not per 20-minute reconcile tick — a vacancy that persists

@@ -475,7 +475,7 @@ def role_escalation_marker_path(name: str, day: str) -> str:
 
     Keyed by the UTC date (``YYYY-MM-DD``) so a role vacant past its SLA
     escalates to its maintainer ONCE PER DAY, not once per reconcile tick —
-    the digest-marker dedup pattern (_claim_digest_marker), applied per role.
+    the digest-marker dedup pattern (_record_digest_marker), applied per role.
     Lives under the role's subtree so the top-level registry filter already
     excludes it from listings."""
     return f"{roles_prefix()}{_filename_slug(name)}/escalations/{day}.json"
