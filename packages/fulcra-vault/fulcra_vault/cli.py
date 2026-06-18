@@ -214,9 +214,10 @@ def cmd_delete(args, store, now, stdin, stdout, stderr) -> int:
     if pre_stat is None:
         print(f"fulcra-vault: not found: {note}", file=stderr)
         return 2
-    # expected_stat makes the delete abort if the note changed since the stat.
-    store.delete_explicit(remote, expected_stat=pre_stat)
-    _append_vault_log(store, f"delete {note}", now, args.agent)
+    with locked(store, note, holder=args.agent, now=now):
+        # expected_stat makes the delete abort if the note changed since the stat.
+        store.delete_explicit(remote, expected_stat=pre_stat)
+        _append_vault_log(store, f"delete {note}", now, args.agent)
     print(f"deleted {note} (run `reindex`/`map` to refresh derived files)", file=stderr)
     return 0
 
