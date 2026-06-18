@@ -203,6 +203,25 @@ def cmd_rename(args, store, now, stdin, stdout, stderr) -> int:
     return 0
 
 
+def cmd_delete(args, store, now, stdin, stdout, stderr) -> int:
+    note = normalize_note_path(args.note)
+    _ensure_not_excluded(store, note)  # excluded paths refuse deletes, like writes
+    if not args.force:
+        print(f"fulcra-vault: refusing to delete {note} without --force", file=stderr)
+        return 2
+    remote = _note_remote(note)
+    pre_stat = store.stat(remote)
+    if pre_stat is None:
+        print(f"fulcra-vault: not found: {note}", file=stderr)
+        return 2
+    with locked(store, note, holder=args.agent, now=now):
+        # expected_stat makes the delete abort if the note changed since the stat.
+        store.delete_explicit(remote, expected_stat=pre_stat)
+        _append_vault_log(store, f"delete {note}", now, args.agent)
+    print(f"deleted {note} (run `reindex`/`map` to refresh derived files)", file=stderr)
+    return 0
+
+
 def cmd_install_hooks(args, store, now, stdin, stdout, stderr) -> int:
     try:
         plan = install_platform_hooks(
@@ -240,6 +259,13 @@ def _parser() -> argparse.ArgumentParser:
     ren.add_argument("--force", action="store_true",
                      help="required: rename moves the note and rewrites inbound links")
     ren.set_defaults(func=cmd_rename)
+
+    dele = sub.add_parser("delete")
+    dele.add_argument("note")
+    dele.add_argument("--agent", required=True)
+    dele.add_argument("--force", action="store_true",
+                      help="required: deleting a note is destructive")
+    dele.set_defaults(func=cmd_delete)
 
     ih = sub.add_parser("install-hooks")
     ih.add_argument("--platform", required=True, choices=["claude-code", "codex"])

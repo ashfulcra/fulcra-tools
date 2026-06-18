@@ -35,6 +35,8 @@ class FakeStore:
     def delete_explicit(self, path: str, expected_stat=None) -> bool:
         if path not in self.files:
             raise FileNotFoundError(path)
+        if expected_stat is not None and self.stat(path) != expected_stat:
+            raise ValueError(f"confirmation stat mismatch for {path}")
         del self.files[path]
         return True
 
@@ -377,6 +379,89 @@ def test_rename_aborts_if_touched_note_changes_before_mutation():
     assert store.files["/vault/Project Alpha.md"] == source_body
     assert store.files["/vault/Project Beta.md"] == beta_body
     assert "/vault/Project Gamma.md" not in store.files
+
+
+def test_delete_removes_note_and_logs():
+    store = _scaffolded_store()
+    assert "/vault/Project Alpha.md" in store.files
+    err = StringIO()
+
+    rc = run(["delete", "Project Alpha", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 0, err.getvalue()
+    assert "/vault/Project Alpha.md" not in store.files
+    assert "delete Project Alpha.md" in store.files["/vault/LOG.md"]
+
+
+def test_delete_without_force_refuses():
+    store = _scaffolded_store()
+    err = StringIO()
+
+    rc = run(["delete", "Project Alpha", "--agent", "agent-a"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "/vault/Project Alpha.md" in store.files          # untouched
+    assert "--force" in err.getvalue()
+
+
+def test_delete_missing_note_returns_2():
+    store = _scaffolded_store()
+    err = StringIO()
+
+    rc = run(["delete", "Nope", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "not found" in err.getvalue() or "missing" in err.getvalue()
+
+
+def test_delete_refuses_excluded_path():
+    store = _scaffolded_store()
+    store.files["/vault/private/Secret.md"] = "# secret\n"
+    err = StringIO()
+
+    rc = run(["delete", "private/Secret", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "/vault/private/Secret.md" in store.files          # untouched
+    assert "excluded" in err.getvalue()
+
+
+def test_delete_refuses_active_lock_before_mutation():
+    store = _scaffolded_store()
+    note_body = store.files["/vault/Project Alpha.md"]
+    store.files["/vault/.locks/Project Alpha.md.lock"] = canonical_json({
+        "acquired_at": NOW.isoformat(),
+        "holder": "other-agent",
+        "note": "Project Alpha.md",
+        "ttl_seconds": 120,
+    }) + "\n"
+    err = StringIO()
+
+    rc = run(["delete", "Project Alpha", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "held by other-agent" in err.getvalue()
+    assert store.files["/vault/Project Alpha.md"] == note_body
+
+
+def test_delete_aborts_if_note_changes_before_delete():
+    store = RacingStore("/vault/Project Alpha.md")
+    _load_scaffold(store)
+    note_body = store.files["/vault/Project Alpha.md"]
+    err = StringIO()
+
+    rc = run(["delete", "Project Alpha", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "confirmation stat mismatch" in err.getvalue()
+    assert store.files["/vault/Project Alpha.md"] == note_body
+    assert "/vault/.locks/Project Alpha.md.lock" not in store.files
 
 
 def _scaffolded_store() -> FakeStore:
