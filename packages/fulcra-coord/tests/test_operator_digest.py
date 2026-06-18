@@ -253,6 +253,31 @@ class TestEmitDigestAnnotation(unittest.TestCase):
                 name="n", note="b", window="morning", agent="claude-code:mb:repo")
         self.assertFalse(ok)
 
+    def test_definition_resolution_failure_returns_false_without_ingest(self):
+        def fake_cli(args, **k):
+            if args[:2] == ["tag", "get"]:
+                return {"id": "tag-1"}
+            if args[:2] == ["data-type", "create"]:
+                return None
+            return None
+
+        def fake_cli_lines(args, **k):
+            return []
+
+        urls = []
+
+        def fake_urlopen(req, *a, **k):
+            urls.append(req.full_url)
+            return _FakeResp(b"", status=202)
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli), \
+                patch.object(annotations, "_fulcra_cli_json_lines", side_effect=fake_cli_lines), \
+                patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok = annotations.emit_digest_annotation(
+                name="n", note="b", window="morning", agent="claude-code:mb:repo")
+        self.assertFalse(ok)
+        self.assertFalse([u for u in urls if "/ingest/v1/record/batch" in u])
+
     def test_digest_definition_cache_obeys_ttl(self):
         annotations._store_digest_definition_id("digest-def-fresh")
         self.assertEqual(annotations._cached_digest_definition_id(), "digest-def-fresh")

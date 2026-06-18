@@ -898,6 +898,58 @@ class TestWriteHttp(unittest.TestCase):
         rec = json.loads(body.decode().strip())
         self.assertIn("tag-created", rec["metadata"]["tags"])
 
+    def test_empty_tag_ids_are_skipped_before_ingest(self):
+        # A single tag CLI failure must not leak "" into metadata.tags.
+        def fake_cli(args, **k):
+            if args == ["tag", "get", "agent-tasks"]:
+                return None
+            if args == ["tag", "create", "agent-tasks"]:
+                return None
+            if args[:2] == ["tag", "get"]:
+                return {"id": f"tag-{args[2]}"}
+            if args[:2] == ["data-type", "create"]:
+                return {"id": "def-1"}
+            return None
+
+        def fake_cli_lines(args, **k):
+            return []  # catalog empty -> create path
+
+        router = _Router([
+            ("POST", "/ingest/v1/record/batch", lambda r: _FakeResp(b"", 200)),
+        ])
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli), \
+                patch.object(annotations, "_fulcra_cli_json_lines", side_effect=fake_cli_lines):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                ok = annotations._write_http(self._payload())
+        self.assertTrue(ok)
+        _, _, body, _ = router.posts_to("/ingest/v1/record/batch")[0]
+        rec = json.loads(body.decode().strip())
+        self.assertNotIn("", rec["metadata"]["tags"])
+        self.assertNotIn("tag-agent-tasks", rec["metadata"]["tags"])
+
+    def test_definition_resolution_failure_returns_false_without_ingest(self):
+        # Without a definition id the annotation source would be invalid, so the
+        # writer must stop before the record POST and leave the event retryable.
+        def fake_cli(args, **k):
+            if args[:2] == ["tag", "get"]:
+                return {"id": f"tag-{args[2]}"}
+            if args[:2] == ["data-type", "create"]:
+                return None
+            return None
+
+        def fake_cli_lines(args, **k):
+            return []  # no catalog hit, create also fails
+
+        router = _Router([
+            ("POST", "/ingest/v1/record/batch", lambda r: _FakeResp(b"", 200)),
+        ])
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli), \
+                patch.object(annotations, "_fulcra_cli_json_lines", side_effect=fake_cli_lines):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                ok = annotations._write_http(self._payload())
+        self.assertFalse(ok)
+        self.assertFalse(router.posts_to("/ingest/v1/record/batch"))
+
     def test_http_error_anywhere_returns_false_never_raises(self):
         # A 500 on the ingest POST must yield False, not an exception.
         _, fake_cli, fake_cli_lines = self._cli_resolver()

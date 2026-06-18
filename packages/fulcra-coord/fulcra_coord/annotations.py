@@ -1016,11 +1016,15 @@ def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None)
         for name in tag_names:
             if not name:
                 continue
-            tag_ids.append(_resolve_tag_id(name, token))
+            tag_id = _resolve_tag_id(name, token)
+            if tag_id:
+                tag_ids.append(tag_id)
 
         # The definition resolver takes tag NAMES (data-type create --tag takes
         # names); the record below still carries the resolved tag IDS.
         def_id = _resolve_definition_id(list(tag_names), token=token)
+        if not def_id:
+            return False
 
         inner: dict[str, Any] = {}
         title = (payload.get("name") or "").strip()
@@ -1166,10 +1170,18 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
             return False
         kind = agent_kind(agent)
         tag_names = [DIGEST_TRACK_TAG, window, f"agent:{kind}"]
-        tag_ids = [_resolve_tag_id(n, token) for n in tag_names if n]
+        tag_ids = []
+        for n in tag_names:
+            if not n:
+                continue
+            tag_id = _resolve_tag_id(n, token)
+            if tag_id:
+                tag_ids.append(tag_id)
         # Definition resolver takes tag NAMES; the record still uses tag IDS.
         def_id = _resolve_digest_definition_id(
             [n for n in tag_names if n], token=token)
+        if not def_id:
+            return False
 
         inner: dict[str, Any] = {}
         if name.strip():
