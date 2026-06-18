@@ -338,6 +338,47 @@ def test_rename_refuses_when_destination_exists():
     assert "/vault/Project Alpha.md" in store.files          # untouched
 
 
+def test_rename_refuses_active_lock_before_mutation():
+    store = _scaffolded_store()
+    store.files["/vault/Project Beta.md"] = "# Beta\n\nSee [[Project Alpha]].\n"
+    source_body = store.files["/vault/Project Alpha.md"]
+    beta_body = store.files["/vault/Project Beta.md"]
+    store.files["/vault/.locks/Project Alpha.md.lock"] = canonical_json({
+        "acquired_at": NOW.isoformat(),
+        "holder": "other-agent",
+        "note": "Project Alpha.md",
+        "ttl_seconds": 120,
+    }) + "\n"
+    err = StringIO()
+
+    rc = run(["rename", "Project Alpha", "Project Gamma", "--agent", "agent-a",
+              "--force"], store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "held by other-agent" in err.getvalue()
+    assert store.files["/vault/Project Alpha.md"] == source_body
+    assert store.files["/vault/Project Beta.md"] == beta_body
+    assert "/vault/Project Gamma.md" not in store.files
+
+
+def test_rename_aborts_if_touched_note_changes_before_mutation():
+    store = RacingStore("/vault/Project Beta.md")
+    _load_scaffold(store)
+    store.files["/vault/Project Beta.md"] = "# Beta\n\nSee [[Project Alpha]].\n"
+    source_body = store.files["/vault/Project Alpha.md"]
+    beta_body = store.files["/vault/Project Beta.md"]
+    err = StringIO()
+
+    rc = run(["rename", "Project Alpha", "Project Gamma", "--agent", "agent-a",
+              "--force"], store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "changed since read; retry" in err.getvalue()
+    assert store.files["/vault/Project Alpha.md"] == source_body
+    assert store.files["/vault/Project Beta.md"] == beta_body
+    assert "/vault/Project Gamma.md" not in store.files
+
+
 def _scaffolded_store() -> FakeStore:
     store = FakeStore()
     _load_scaffold(store)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -177,15 +178,23 @@ def cmd_rename(args, store, now, stdin, stdout, stderr) -> int:
     if not args.force:
         print("fulcra-vault: refusing to rename without --force", file=stderr)
         return 2
-    notes = _read_note_map(store)
+    notes, pre_stats = _read_note_map_with_stats(store)
     # plan_rename raises ValueError if the source is missing or the destination
     # exists (it never overwrites) -> run() returns rc 2.
     plan = plan_rename(notes, source, dest)
-    for path, text in sorted(plan.rewrites.items()):  # dest content + inbound link rewrites
-        store.write_text(_note_remote(path), text)
-    store.delete_explicit(_note_remote(plan.source))
-    _append_vault_log(store, f"rename {plan.source} -> {plan.destination}",
-                      now, args.agent)
+    touched = sorted({plan.source, plan.destination, *plan.rewrites})
+    with ExitStack() as stack:
+        for note in touched:
+            stack.enter_context(locked(store, note, holder=args.agent, now=now))
+        if store.stat(_note_remote(plan.destination)) is not None:
+            raise ValueError(f"rename destination already exists: {plan.destination}")
+        for path in sorted({plan.source, *(plan.rewrites.keys() - {plan.destination})}):
+            _abort_if_changed(store, _note_remote(path), pre_stats[path])
+        for path, text in sorted(plan.rewrites.items()):  # dest content + inbound link rewrites
+            store.write_text(_note_remote(path), text)
+        store.delete_explicit(_note_remote(plan.source), expected_stat=pre_stats[plan.source])
+        _append_vault_log(store, f"rename {plan.source} -> {plan.destination}",
+                          now, args.agent)
     if plan.dangling:
         print(f"fulcra-vault: warning: dangling links after rename: "
               f"{', '.join(plan.dangling)}", file=stderr)
@@ -321,7 +330,13 @@ def _append_vault_log(store, action: str, now: datetime, agent: str) -> None:
 
 
 def _read_note_map(store) -> dict[str, str]:
+    notes, _stats = _read_note_map_with_stats(store)
+    return notes
+
+
+def _read_note_map_with_stats(store) -> tuple[dict[str, str], dict[str, dict | None]]:
     out: dict[str, str] = {}
+    stats: dict[str, dict | None] = {}
     for path in store.list("vault"):
         if not path.endswith(".md"):
             continue
@@ -330,8 +345,10 @@ def _read_note_map(store) -> dict[str, str]:
         if path in {"/vault/MAP.md", "/vault/HOT.md", "/vault/LOG.md"}:
             continue
         rel = path.removeprefix("/vault/")
-        out[rel] = store.read_text(path)
-    return out
+        text, stat = _read_with_stat(store, path)
+        out[rel] = text
+        stats[rel] = stat
+    return out, stats
 
 
 def _load_index(store) -> dict:
