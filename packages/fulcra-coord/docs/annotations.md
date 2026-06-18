@@ -8,46 +8,51 @@ agents were doing, and when* — interleaved with everything else Fulcra records
 All Agent-Tasks moments share a single **track tag `agent-tasks`** so they can
 be filtered together on the timeline regardless of lifecycle or agent.
 
-## Status: real write LIVE via the Fulcra HTTP API (gated, off by default)
+## Status: real write LIVE (gated, off by default)
 
-There is one writer. When enabled, it writes annotations **directly over the
-Fulcra HTTP API** using only the Python standard library (`urllib` + `json`) —
-no `httpx`, no `fulcra-common` dependency — replicating the proven path
-`fulcra-collect` uses. Enable it with `fulcra-coord annotations on`, or set
-`FULCRA_COORD_ANNOTATIONS=on` for one shell.
+There is one writer. When enabled, it resolves tags and the shared moment
+definition through the **public `fulcra` CLI** (which fulcra-coord shells out
+to), then posts the timeline record itself over the Python standard library's
+`urllib` — no `httpx`, no `fulcra-common` dependency. Enable it with
+`fulcra-coord annotations on`, or set `FULCRA_COORD_ANNOTATIONS=on` for one shell.
 
-For each lifecycle event the writer runs three Fulcra endpoints in order:
+For each lifecycle event the writer runs three steps in order:
 
-1. **Resolve/create each tag** — `GET /user/v1alpha1/tag/name/{name}` (200 → id),
-   else `POST /user/v1alpha1/tag {"name": ...}` on a 404.
-2. **Resolve/create the shared `Agent Tasks` moment definition** —
-   `GET /user/v1alpha1/annotation` (adopt the existing def by name), else
-   `POST /user/v1alpha1/annotation` with an `annotation_type: moment` body. The
+1. **Resolve/create each tag — via the `fulcra` CLI.** `fulcra tag get <name>`
+   (emits the tag with its id), else `fulcra tag create <name>` to mint it. No
+   raw REST.
+2. **Resolve/create the shared `Agent Tasks` moment definition — via the `fulcra`
+   CLI.** `fulcra catalog --name "Agent Tasks"` to adopt an existing
+   `MomentAnnotation` definition by exact name, else `fulcra data-type create
+   MomentAnnotation "Agent Tasks" --tag <lifecycle-tags>` to mint it. The
    resolved definition id is **cached locally** (`<cache-root>/.../annotations/
    definition.json`) so this resolve/create happens once, not per annotation.
-3. **Post the record** — `POST /ingest/v1/record/batch` with header
-   `content-type: application/x-jsonl` and a one-line JSONL body whose
-   `metadata.data_type` is `MomentAnnotation`, `metadata.tags` are the resolved
-   tag ids, and `metadata.source` carries both a lifecycle-stamped
+3. **Post the record — over stdlib `urllib`.** `POST /ingest/v1/record/batch`
+   with header `content-type: application/x-jsonl` and a one-line JSONL body
+   whose `metadata.data_type` is `MomentAnnotation`, `metadata.tags` are the
+   resolved tag ids, and `metadata.source` carries both a lifecycle-stamped
    `com.fulcradynamics.fulcra-coord.<lifecycle>.<uuid>` id and the
    `com.fulcradynamics.annotation.<definition_id>` definition source.
 
-The bearer token comes from `FULCRA_ACCESS_TOKEN` if set, else the stdout of
-`fulcra auth print-access-token`; with no token the write cleanly no-ops. The
-API base is `FULCRA_API_BASE` (default `https://api.fulcradynamics.com`).
+The bearer token (needed only for step 3, the record POST) comes from
+`FULCRA_ACCESS_TOKEN` if set, else the stdout of `fulcra auth
+print-access-token`; with no token the write cleanly no-ops. The API base is
+`FULCRA_API_BASE` (default `https://api.fulcradynamics.com`).
 
-## Why not the CLI?
+## Why tags + defs via the CLI, but the record over urllib?
 
-fulcra-coord is intentionally stdlib-only: it is a coordination bus, so it avoids
-new runtime dependencies and uses the same proven HTTP ingest shape as
-fulcra-collect.
+fulcra-coord is intentionally stdlib-only: it is a coordination bus, so it
+imports no Fulcra client library. For the operations the platform exposes as CLI
+verbs — tags (`fulcra tag`), annotation-definitions (`fulcra data-type`,
+`fulcra catalog`) — it shells out to the public `fulcra` CLI rather than calling
+raw REST.
 
-Records are also ingest-only today. The Fulcra platform exposes CLI/library
-commands for definitions and tags, but no first-class record-write verb for the
-timeline occurrence itself. Splitting the path — tags/defs through a CLI but the
-record over HTTP — would add a second transport without removing the HTTP write
-surface. The whole writer can move to the Fulcra CLI once a record-write command
-exists.
+The record write is the one exception, and only because it is ingest-only: the
+Fulcra platform exposes no first-class record-write CLI/library verb for the
+timeline occurrence itself today. So the single `POST /ingest/v1/record/batch`
+is the **one remaining raw-REST path** in this writer, done over stdlib `urllib`.
+That path moves to the CLI as soon as a record-write verb ships; until then it
+stays on `urllib` by necessity.
 
 Legacy `FULCRA_COORD_ANNOTATIONS=http`, `api`, and `cli` values still normalize
 to `on` for back-compat, so old machine config keeps emitting. They do not select
@@ -60,8 +65,8 @@ Set `FULCRA_COORD_ANNOTATIONS` or persist the setting:
 | Value | Behaviour |
 |---|---|
 | unset / `off` / anything unrecognized | No-op (default). Task ops behave exactly as before. |
-| `on` | Write via the single stdlib `urllib` path (tag resolve → moment-def resolve/create+cache → `POST /ingest/v1/record/batch`). Needs a token (`FULCRA_ACCESS_TOKEN` or `fulcra auth print-access-token`); base from `FULCRA_API_BASE`. |
-| `http` / `api` / `cli` | Back-compat aliases for `on`. They all route to the same stdlib `urllib` writer. |
+| `on` | Write via the single writer: tag resolve/create (`fulcra tag`) → moment-def resolve/create+cache (`fulcra catalog` / `fulcra data-type`) → record `POST /ingest/v1/record/batch` over stdlib `urllib`. Needs a token (`FULCRA_ACCESS_TOKEN` or `fulcra auth print-access-token`) for the record POST; base from `FULCRA_API_BASE`. |
+| `http` / `api` / `cli` | Back-compat aliases for `on`. They all route to the same writer (no separate transports). |
 
 For durable machine-wide enablement:
 
@@ -150,10 +155,11 @@ existing marker and is skipped; a new transition gets a fresh anchor and emits
 again. The marker is deliberately **local** (not stored on the shared task JSON)
 so it never pollutes the cross-agent payload or tangles with merge logic.
 
-## HTTP wire shape
+## Record wire shape (the one raw-REST path)
 
 The writer (`fulcra_coord/annotations.py::_write_http`) posts a single JSONL
-record:
+record over stdlib `urllib` — tags and the definition having already been
+resolved through the `fulcra` CLI:
 
 ```http
 POST <FULCRA_API_BASE>/ingest/v1/record/batch
@@ -172,10 +178,10 @@ content-type: application/x-jsonl
 ```
 
 The `<definition_id>` is the resolved/created `Agent Tasks` moment definition
-(`/user/v1alpha1/annotation`), cached locally so it is resolved once. Tag ids are
-resolved/created via `/user/v1alpha1/tag`. This mirrors the `fulcra-collect`
-ingest path in shape, implemented with stdlib `urllib` so fulcra-coord stays
-dependency-free.
+(via `fulcra catalog` / `fulcra data-type create`), cached locally so it is
+resolved once. Tag ids are resolved/created via `fulcra tag get` / `fulcra tag
+create`. Only this final record POST touches raw REST — implemented with stdlib
+`urllib` so fulcra-coord stays dependency-free.
 
 ## doctor
 
@@ -183,3 +189,8 @@ dependency-free.
 (`off`/`on`), and when enabled, the API base and whether a token is resolvable
 (it never prints the token). An `off` mode says so plainly with the enable hint
 — the fast answer to "why didn't anything appear on my timeline?".
+
+Because the writer now resolves tags and definitions through the `fulcra` CLI,
+the `[CLI]` section also probes the `file`, `tag`, and `data-type` command groups
+(`File commands` / `Tag commands` / `Data-type commands` — `OK`/`FAIL`). A `FAIL`
+there means the resolved CLI lacks a group the writer needs.

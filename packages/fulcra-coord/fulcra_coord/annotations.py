@@ -10,38 +10,38 @@ annotation per real lifecycle transition.
 
 THE WRITE MECHANISM
 -------------------
-There is a SINGLE writer: a *moment annotation* POSTed directly to the Fulcra
-API over the Python standard library's ``urllib`` (no httpx / fulcra-common
-dependency), replicating the proven ``fulcra-collect`` write path. ``_write_http``
-does three things, in order:
+There is a SINGLE writer (``_write_http``) that does three things, in order:
 
-  1. resolve/create each tag name to a tag id;
-  2. resolve/create the shared "Agent Tasks" moment definition (cached locally so
-     this happens once, not per annotation);
-  3. POST a single JSONL record to ``/ingest/v1/record/batch`` with metadata
-     ``data_type: MomentAnnotation``, the resolved tag ids, and a ``source`` array
-     carrying a lifecycle-stamped fulcra-coord source id plus the definition
-     source.
+  1. resolve/create each tag name to a tag id — via the public ``fulcra`` CLI
+     (``fulcra tag get`` / ``fulcra tag create``), shelled out;
+  2. resolve/create the shared "Agent Tasks" moment definition — also via the
+     CLI (``fulcra catalog`` to find by name, ``fulcra data-type create`` to mint
+     it), cached locally so this happens once, not per annotation;
+  3. POST a single JSONL record to ``/ingest/v1/record/batch`` over the Python
+     standard library's ``urllib`` — with metadata ``data_type:
+     MomentAnnotation``, the resolved tag ids, and a ``source`` array carrying a
+     lifecycle-stamped fulcra-coord source id plus the definition source.
 
 The record lands as a real occurrence on the operator's Life timeline. The shared
 track tag ``agent-tasks`` lets every Agent-Tasks moment be filtered together
 regardless of lifecycle/agent.
 
-WHY urllib (and not the CLI or the fulcra_api lib)
---------------------------------------------------
+WHY tags + defs go via the CLI, but records stay on urllib
+----------------------------------------------------------
 fulcra-coord is intentionally stdlib-only (see pyproject: "No OTHER non-stdlib
-deps") — it is a coordination *bus* and must stay dependency-light. So tags,
-definitions, AND records all go over ``urllib`` BY DESIGN rather than pulling in a
-client library.
+deps") — it is a coordination *bus* and must stay dependency-light. It does NOT
+import a Fulcra client library; instead it SHELLS OUT to the public ``fulcra``
+CLI for the operations the CLI supports. Tag and definition resolution/creation
+have first-class CLI verbs (``tag``, ``data-type``, ``catalog``), so they go
+through the CLI — no raw REST.
 
-Records are also *ingest-only*: the Fulcra platform exposes no CLI or library
-record-WRITE verb today (the CLI's ``data-type`` group + ``create`` subcommand
-manages definitions, not record occurrences). A partial migration — tags/defs via
-the CLI but records still over ``urllib`` — would be a NET NEGATIVE: two transports
-to reason about, two failure surfaces, no reduction in HTTP code. The long-term
-intent is to migrate the WHOLE writer (tags + defs + records) to the ``fulcra``
-CLI once the platform ships a first-class record-write verb; until then this one
-``urllib`` path is the right call.
+Records are the one exception, and only because they are *ingest-only*: the
+Fulcra platform exposes no CLI or library record-WRITE verb today (the CLI's
+``data-type`` group manages definitions, not record occurrences). So the single
+record POST to ``/ingest/v1/record/batch`` is the ONE remaining raw-REST path in
+this writer, done over stdlib ``urllib`` (no httpx / fulcra-common dependency).
+That path migrates to the CLI as soon as the platform ships a first-class
+record-write verb; until then it stays on ``urllib`` by necessity, not choice.
 
 WHY IT IS CAPABILITY-GATED (and OFF by default)
 -----------------------------------------------
