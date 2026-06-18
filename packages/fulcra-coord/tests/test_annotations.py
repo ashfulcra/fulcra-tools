@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -969,6 +970,94 @@ class TestHttpTokenResolution(unittest.TestCase):
 
         with patch.object(annotations.subprocess, "run", side_effect=fake_run):
             self.assertIsNone(annotations._resolve_token())
+
+
+class TestFulcraCliJson(unittest.TestCase):
+    """`_fulcra_cli_json` shells out to the resolved CLI base + args and parses
+    stdout as JSON. It is the shared subprocess->JSON helper the annotation
+    writer uses for tag/definition resolution. Best-effort: ANY failure
+    (rc!=0, timeout, missing CLI, non-JSON) yields None and NEVER raises."""
+
+    def test_rc0_dict_json_returned(self):
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(returncode=0, stdout='{"id": "T"}', stderr="")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(
+                annotations._fulcra_cli_json(["tag", "name", "x"]), {"id": "T"})
+
+    def test_rc0_list_json_returned(self):
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(
+                returncode=0, stdout='[{"id": "N"}]', stderr="")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(
+                annotations._fulcra_cli_json(["annotation", "list"]), [{"id": "N"}])
+
+    def test_rc_nonzero_returns_none(self):
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(returncode=1, stdout='{"id": "T"}', stderr="x")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._fulcra_cli_json(["tag"]))
+
+    def test_timeout_returns_none(self):
+        def fake_run(cmd, *a, **k):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._fulcra_cli_json(["tag"]))
+
+    def test_missing_cli_returns_none(self):
+        def fake_run(cmd, *a, **k):
+            raise FileNotFoundError("no such binary")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._fulcra_cli_json(["tag"]))
+
+    def test_oserror_returns_none(self):
+        def fake_run(cmd, *a, **k):
+            raise OSError("boom")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._fulcra_cli_json(["tag"]))
+
+    def test_non_json_stdout_returns_none(self):
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(returncode=0, stdout="not json", stderr="")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._fulcra_cli_json(["tag"]))
+
+    def test_backend_override_is_used_as_base(self):
+        recorded = {}
+
+        def fake_run(cmd, *a, **k):
+            recorded["cmd"] = cmd
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            annotations._fulcra_cli_json(["tag", "name", "x"], backend=["false"])
+        # The override base must prefix the argv passed to subprocess.run.
+        self.assertEqual(recorded["cmd"][:1], ["false"])
+        self.assertEqual(recorded["cmd"], ["false", "tag", "name", "x"])
+
+    def test_default_base_is_annotation_cli_base(self):
+        # With no backend override, the base must come from
+        # _annotation_cli_base() (the same resolution file ops use via
+        # remote.cli_base_cmd), not a hardcoded command.
+        recorded = {}
+
+        def fake_run(cmd, *a, **k):
+            recorded["cmd"] = cmd
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(annotations, "_annotation_cli_base",
+                          return_value=["base-cli", "--flag"]):
+            with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+                annotations._fulcra_cli_json(["tag"])
+        self.assertEqual(recorded["cmd"], ["base-cli", "--flag", "tag"])
 
 
 class TestEmitHttpIntegration(unittest.TestCase):

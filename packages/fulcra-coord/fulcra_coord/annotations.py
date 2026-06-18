@@ -533,6 +533,46 @@ def _api_base() -> str:
     return base.rstrip("/")
 
 
+def _annotation_cli_base() -> list[str]:
+    """Resolved CLI base command (argv prefix) for annotation shell-outs.
+
+    Thin wrapper over ``remote.cli_base_cmd()`` — the SAME base resolution the
+    Files transport uses (honouring ``FULCRA_CLI_COMMAND`` -> ``fulcra-api`` ->
+    ``uv tool run fulcra-api``). Kept as a named indirection here so the
+    annotation writer (and its tests) have one patch point for the CLI base
+    independent of the file transport, and so tag/definition resolution can
+    never drift onto a hardcoded ``fulcra`` that a fulcra-api-only install
+    lacks (BUG 11)."""
+    return list(remote.cli_base_cmd())
+
+
+def _write_timeout() -> int:
+    """Subprocess timeout (seconds) for annotation CLI shell-outs.
+
+    Delegates to ``remote._write_timeout()`` so annotation shell-outs share the
+    same env-tunable write timeout as the Files transport instead of a constant.
+    """
+    return remote._write_timeout()
+
+
+def _fulcra_cli_json(args: list[str], *, backend: Optional[list[str]] = None) -> Any:
+    """Run ``<cli-base> <args>`` and return parsed stdout JSON, or None on ANY
+    failure (rc!=0, timeout, missing CLI, non-JSON). Never raises — the
+    annotation writer is best-effort. ``backend`` overrides the CLI base for
+    tests (e.g. ``["false"]`` to force rc!=0). Uses the SAME base resolution as
+    file ops (``_annotation_cli_base`` -> ``remote.cli_base_cmd``)."""
+    base = backend if backend is not None else _annotation_cli_base()
+    try:
+        result = subprocess.run(
+            list(base) + args, capture_output=True, text=True, timeout=_write_timeout(),
+        )
+        if result.returncode != 0:
+            return None
+        return json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+
+
 def _resolve_token() -> Optional[str]:
     """Return a Fulcra bearer token, or None if one can't be obtained.
 
