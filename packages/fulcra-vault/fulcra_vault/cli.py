@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import TextIO
 
 from .frontmatter import parse_note
 from .installers import install_platform_hooks
-from .links import backlinks_for, build_index, index_json
+from .links import backlinks_for, build_index, index_json, plan_rename
 from .locks import LockError, locked
 from .map import check_budget, render_hot, render_map, select_hot_items
 from .schema import StructureSpec, VaultMeta, canonical_json, normalize_note_path
@@ -169,6 +170,39 @@ def cmd_init(args, store, now, stdin, stdout, stderr) -> int:
     return 0
 
 
+def cmd_rename(args, store, now, stdin, stdout, stderr) -> int:
+    source = normalize_note_path(args.source)
+    dest = normalize_note_path(args.destination)
+    _ensure_not_excluded(store, source)
+    _ensure_not_excluded(store, dest)
+    if not args.force:
+        print("fulcra-vault: refusing to rename without --force", file=stderr)
+        return 2
+    notes, pre_stats = _read_note_map_with_stats(store)
+    # plan_rename raises ValueError if the source is missing or the destination
+    # exists (it never overwrites) -> run() returns rc 2.
+    plan = plan_rename(notes, source, dest)
+    touched = sorted({plan.source, plan.destination, *plan.rewrites})
+    with ExitStack() as stack:
+        for note in touched:
+            stack.enter_context(locked(store, note, holder=args.agent, now=now))
+        if store.stat(_note_remote(plan.destination)) is not None:
+            raise ValueError(f"rename destination already exists: {plan.destination}")
+        for path in sorted({plan.source, *(plan.rewrites.keys() - {plan.destination})}):
+            _abort_if_changed(store, _note_remote(path), pre_stats[path])
+        for path, text in sorted(plan.rewrites.items()):  # dest content + inbound link rewrites
+            store.write_text(_note_remote(path), text)
+        store.delete_explicit(_note_remote(plan.source), expected_stat=pre_stats[plan.source])
+        _append_vault_log(store, f"rename {plan.source} -> {plan.destination}",
+                          now, args.agent)
+    if plan.dangling:
+        print(f"fulcra-vault: warning: dangling links after rename: "
+              f"{', '.join(plan.dangling)}", file=stderr)
+    print(f"renamed {plan.source} -> {plan.destination} "
+          "(run reindex/map to refresh derived files)", file=stderr)
+    return 0
+
+
 def cmd_install_hooks(args, store, now, stdin, stdout, stderr) -> int:
     try:
         plan = install_platform_hooks(
@@ -198,6 +232,14 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true",
                       help="re-scaffold over an already-initialized vault")
     init.set_defaults(func=cmd_init)
+
+    ren = sub.add_parser("rename")
+    ren.add_argument("source")
+    ren.add_argument("destination")
+    ren.add_argument("--agent", required=True)
+    ren.add_argument("--force", action="store_true",
+                     help="required: rename moves the note and rewrites inbound links")
+    ren.set_defaults(func=cmd_rename)
 
     ih = sub.add_parser("install-hooks")
     ih.add_argument("--platform", required=True, choices=["claude-code", "codex"])
@@ -288,7 +330,13 @@ def _append_vault_log(store, action: str, now: datetime, agent: str) -> None:
 
 
 def _read_note_map(store) -> dict[str, str]:
+    notes, _stats = _read_note_map_with_stats(store)
+    return notes
+
+
+def _read_note_map_with_stats(store) -> tuple[dict[str, str], dict[str, dict | None]]:
     out: dict[str, str] = {}
+    stats: dict[str, dict | None] = {}
     for path in store.list("vault"):
         if not path.endswith(".md"):
             continue
@@ -297,8 +345,10 @@ def _read_note_map(store) -> dict[str, str]:
         if path in {"/vault/MAP.md", "/vault/HOT.md", "/vault/LOG.md"}:
             continue
         rel = path.removeprefix("/vault/")
-        out[rel] = store.read_text(path)
-    return out
+        text, stat = _read_with_stat(store, path)
+        out[rel] = text
+        stats[rel] = stat
+    return out, stats
 
 
 def _load_index(store) -> dict:
