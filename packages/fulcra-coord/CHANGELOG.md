@@ -12,6 +12,29 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.8] — 2026-06-18
+
+### Annotation writer → public CLI (ClawHub genericization)
+
+- The annotation writer now resolves **tags** and **annotation-definitions**
+  through the public `fulcra` CLI instead of hand-rolled raw REST: tags via
+  `fulcra tag get`/`fulcra tag create`, definitions via `fulcra catalog --name`
+  (resolve-by-exact-name, skipping substring + soft-deleted matches) /
+  `fulcra data-type create … --add-to-timeline`. fulcra-coord stays stdlib-only
+  (subprocess + JSON), now depending on the **public CLI surface** rather than
+  internal REST endpoints. Caches/TTL, never-raise, and idempotency preserved.
+- **Records remain ingest-only** over stdlib `urllib` (`/ingest/v1/record/batch`)
+  — the one remaining raw-REST path, since the platform has no record-write CLI
+  verb yet. It migrates to the CLI when that verb ships.
+- `doctor` now checks **tag** and **data-type** CLI capability alongside
+  **file** (the annotation writer needs all three).
+- Public/ClawHub-ready install + capability docs: `uv tool install fulcra-api`
+  provides `file`/`tag`/`data-type`/`catalog`; no special-build/branch needed.
+
+> Unblocks the long-standing "Genericize fulcra-coord for ClawHub" item: the
+> released CLI 0.1.34 ships the file + annotation-definition/tag commands the
+> bus depends on. Verified live against api.fulcradynamics.com 2026-06-18.
+
 ## [0.15.7] — 2026-06-17
 
 ### Annotation transport consolidation (#259)

@@ -9008,14 +9008,14 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_7(self):
-        # 0.15.7: annotation transport consolidation — the dead `_write_cli`
-        # shell-out path is removed and the cli/http/api mode duality collapses
-        # to a single stdlib-urllib writer with an on/off toggle (legacy values
-        # normalize to `on`); config/doctor report on/off; docs corrected
-        # (records are ingest-only) (#259).
+    def test_version_is_0_15_8(self):
+        # 0.15.8: CLI genericization — the annotation writer resolves tags +
+        # definitions through the public `fulcra` CLI (`tag`, `data-type`,
+        # `catalog`) instead of raw REST; records remain ingest-only over
+        # stdlib urllib (no record-write CLI verb yet); doctor checks tag +
+        # data-type capability; ClawHub-ready packaging docs.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.7")
+        self.assertEqual(__version__, "0.15.8")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
