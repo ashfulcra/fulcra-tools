@@ -802,8 +802,35 @@ def check_file_commands(backend: Optional[list[str]] = None) -> tuple[bool, str]
     Returns ``(ok, message)`` where ``message`` names the probed base on success
     or describes the failure otherwise.
     """
+    return check_command_group("file", backend=backend)
+
+
+def check_command_group(
+    group: str, backend: Optional[list[str]] = None
+) -> tuple[bool, str]:
+    """Probe whether the resolved Fulcra CLI exposes a given ``<group>`` command.
+
+    Generalizes the ``file`` group probe (see ``check_file_commands``) to any
+    public CLI command group fulcra-coord shells out to. The annotation writer
+    now resolves tags + annotation-definitions through the public CLI's ``tag``
+    and ``data-type`` groups (``fulcra tag get/create``, ``fulcra data-type
+    create``), so doctor probes those groups alongside ``file`` — a stale install
+    or a mispointed ``FULCRA_CLI_COMMAND`` that lacks one of them reproduces the
+    same silent-failure mode the ``file`` probe was built to catch.
+
+    Targets the **resolved real CLI base** (``cli_base_cmd()``) + ``<group>
+    --help``, the same base every real op shells, so it answers exactly "does the
+    installed CLI have ``<group>``?".
+
+    Robust by contract: a missing binary, a non-zero exit, a timeout, or any OS
+    error all degrade to ``(False, message)`` — this must never raise, so doctor
+    can call it without a guard and never crash on a hung or absent CLI.
+
+    Returns ``(ok, message)`` where ``message`` names the probed base on success
+    or describes the failure otherwise.
+    """
     base = backend or cli_base_cmd()
-    cmd = base + ["file", "--help"]
+    cmd = base + [group, "--help"]
     try:
         result = subprocess.run(
             cmd,
@@ -815,13 +842,32 @@ def check_file_commands(backend: Optional[list[str]] = None) -> tuple[bool, str]
             return True, " ".join(base)
         detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
         suffix = f": {detail[0]}" if detail else ""
-        return False, f"`{' '.join(base)} file` returned code {result.returncode}{suffix}"
+        return False, f"`{' '.join(base)} {group}` returned code {result.returncode}{suffix}"
     except FileNotFoundError:
         return False, f"Command not found: {base[0]}"
     except (subprocess.TimeoutExpired, OSError) as e:
-        return False, f"file probe failed: {e}"
+        return False, f"{group} probe failed: {e}"
     except Exception as e:  # pragma: no cover - defensive: never crash doctor
-        return False, f"file probe error: {e}"
+        return False, f"{group} probe error: {e}"
+
+
+def check_tag_commands(backend: Optional[list[str]] = None) -> tuple[bool, str]:
+    """Probe whether the resolved Fulcra CLI exposes the ``tag`` command group.
+
+    The annotation writer resolves (and creates) tags via ``fulcra tag
+    get/create``; see ``check_command_group`` for the probe contract.
+    """
+    return check_command_group("tag", backend=backend)
+
+
+def check_data_type_commands(backend: Optional[list[str]] = None) -> tuple[bool, str]:
+    """Probe whether the resolved Fulcra CLI exposes the ``data-type`` group.
+
+    The annotation writer resolves (and creates) annotation-definitions via
+    ``fulcra data-type create`` (+ ``fulcra catalog``); see
+    ``check_command_group`` for the probe contract.
+    """
+    return check_command_group("data-type", backend=backend)
 
 
 def probe_reachable(backend: Optional[list[str]] = None, *, root: str = "/coordination") -> bool:
