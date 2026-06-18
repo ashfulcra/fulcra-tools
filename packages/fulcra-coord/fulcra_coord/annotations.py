@@ -504,12 +504,14 @@ def _record_annotated(lifecycle: str, task: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The single annotation writer (stdlib-only) — replicates the fulcra-collect / fulcra-common
-# annotation write over urllib.request, so fulcra-coord needs NO httpx /
-# fulcra-common dependency. Three Fulcra endpoints, in order:
-#   1. resolve/create each tag        GET/POST  /user/v1alpha1/tag(/name/{n})
-#   2. resolve/create the moment def  GET/POST  /user/v1alpha1/annotation
-#   3. post the annotation record     POST      /ingest/v1/record/batch
+# The single annotation writer (stdlib-only) — needs NO httpx / fulcra-common
+# dependency. Tags AND the moment definition resolve through the public ``fulcra``
+# CLI (shelled out via _fulcra_cli_json / _fulcra_cli_json_lines); only the RECORD
+# write stays on urllib.request (the platform has no record-write CLI verb yet).
+# Three steps, in order:
+#   1. resolve/create each tag        fulcra tag get / tag create
+#   2. resolve/create the moment def  fulcra catalog / data-type create
+#   3. post the annotation record     POST  /ingest/v1/record/batch  (urllib)
 # ---------------------------------------------------------------------------
 
 #: Canonical name of the moment-annotation definition every Agent-Tasks moment
@@ -571,6 +573,37 @@ def _fulcra_cli_json(args: list[str], *, backend: Optional[list[str]] = None) ->
         return json.loads(result.stdout)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, json.JSONDecodeError):
         return None
+
+
+def _fulcra_cli_json_lines(args: list[str], *, backend: Optional[list[str]] = None) -> list:
+    """Run ``<cli-base> <args>`` and parse stdout as JSONL — one JSON object PER
+    LINE — returning the parsed list, or ``[]`` on ANY failure (rc!=0, timeout,
+    missing CLI). Sibling of ``_fulcra_cli_json`` for commands like ``catalog``
+    that emit one ``json.dumps(entry)`` per line rather than a single JSON value
+    (``_fulcra_cli_json`` would fail to parse that multi-line output). Each
+    non-empty line is parsed independently; an UNPARSEABLE line is SKIPPED (not
+    fatal) so a stray log line can't drop the rest. Never raises — the annotation
+    writer is best-effort. ``backend`` overrides the CLI base for tests; uses the
+    SAME base resolution as file ops (``_annotation_cli_base``)."""
+    base = backend if backend is not None else _annotation_cli_base()
+    try:
+        result = subprocess.run(
+            list(base) + args, capture_output=True, text=True, timeout=_write_timeout(),
+        )
+        if result.returncode != 0:
+            return []
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    out: list = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 def _resolve_token() -> Optional[str]:
@@ -808,35 +841,55 @@ def _store_definition_id(def_id: str) -> None:
         pass
 
 
-def _resolve_definition_id(token: str, tag_ids: list[str]) -> str:
-    """Return the ``Agent Tasks`` moment-definition id, resolving once + caching.
+def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) -> str:
+    """Resolve-or-create the moment definition named `def_name`, returning its
+    UUID (or "" on total failure). Resolve by EXACT name via `fulcra catalog`
+    (skipping substring-only and soft-deleted matches); else create it via
+    `fulcra data-type create` with the lifecycle tag NAMES. Never raises.
 
-    Cache hit -> return immediately (no HTTP). On a miss: GET
-    ``/user/v1alpha1/annotation`` (the catalog of definitions), adopt the first
-    live one named ``Agent Tasks`` if present; otherwise POST a new ``moment``
-    definition (no measurement_spec — moments carry none) carrying the resolved
-    tag ids. The resolved id is cached so this whole resolve/create dance runs
-    at most once per machine per remote root."""
+    ``fulcra catalog --name`` is a SUBSTRING filter and emits JSONL (one entry
+    per line), so we parse via ``_fulcra_cli_json_lines`` and keep only the entry
+    whose ``name`` matches ``def_name`` EXACTLY, is a ``moment`` annotation, and
+    is not soft-deleted — taking its ``metadata.id`` (the def UUID). On no live
+    exact match we ``data-type create MomentAnnotation <def_name>
+    --add-to-timeline`` with the tag NAMES (``--tag`` auto-creates them); its
+    single-line stdout carries the new def's ``id``."""
+    for e in _fulcra_cli_json_lines(["catalog", "--name", def_name]):
+        if not isinstance(e, dict):
+            continue
+        meta = e.get("metadata") or {}
+        if (e.get("name") == def_name and meta.get("annotation_type") == "moment"
+                and not meta.get("deleted_at") and meta.get("id")):
+            return meta["id"]
+    cmd = ["data-type", "create", "MomentAnnotation", def_name,
+           "--description", description, "--add-to-timeline"]
+    for t in tag_names:
+        if t:
+            cmd += ["--tag", t]
+    made = _fulcra_cli_json(cmd)
+    if isinstance(made, dict) and made.get("id"):
+        return made["id"]
+    return ""
+
+
+def _resolve_definition_id(tag_names: list[str], *, token: Optional[str] = None) -> str:
+    """Return the ``Agent Tasks`` moment-definition UUID, resolving once + caching.
+
+    Cache hit -> return immediately (no CLI). On a miss, resolve-or-create via
+    ``_resolve_def_via_cli(DEFINITION_NAME, DEFINITION_DESCRIPTION, tag_names)``
+    — ``fulcra catalog`` then ``fulcra data-type create`` — caching the non-empty
+    UUID so the dance runs at most once per machine per remote root.
+
+    Takes tag NAMES now (not ids), because ``data-type create --tag`` takes tag
+    names (auto-created). ``token`` is accepted for caller back-compat but UNUSED
+    — the CLI carries its own auth. Best-effort: a total failure returns ``""``
+    (and is NOT cached) so the caller's source falls back gracefully."""
     cached = _cached_definition_id()
     if cached:
         return cached
-
-    base = _api_base()
-    status, raw = _request("GET", f"{base}/user/v1alpha1/annotation", token)
-    for d in json.loads(raw) or []:
-        if d.get("name") == DEFINITION_NAME and not d.get("deleted_at"):
-            _store_definition_id(d["id"])
-            return d["id"]
-
-    body = json.dumps({
-        "annotation_type": "moment",
-        "name": DEFINITION_NAME,
-        "description": DEFINITION_DESCRIPTION,
-        "tags": tag_ids,
-    }).encode()
-    _, raw = _request("POST", f"{base}/user/v1alpha1/annotation", token, body=body)
-    def_id = json.loads(raw)["id"]
-    _store_definition_id(def_id)
+    def_id = _resolve_def_via_cli(DEFINITION_NAME, DEFINITION_DESCRIPTION, tag_names)
+    if def_id:
+        _store_definition_id(def_id)
     return def_id
 
 
@@ -896,33 +949,22 @@ def _store_digest_definition_id(def_id: str) -> None:
         pass
 
 
-def _resolve_digest_definition_id(token: str, tag_ids: list[str]) -> str:
-    """Return the ``Agent Tasks — Digest`` moment-definition id (resolve once + cache).
+def _resolve_digest_definition_id(tag_names: list[str], *, token: Optional[str] = None) -> str:
+    """Return the ``Agent Tasks — Digest`` moment-definition UUID (resolve once + cache).
 
     Same resolve/create dance as ``_resolve_definition_id`` but matched on
     ``DIGEST_DEFINITION_NAME`` and cached in the digest-specific file, so the two
-    tracks converge on two distinct definitions across machines."""
+    tracks converge on two distinct definitions across machines. Takes tag NAMES
+    (not ids); ``token`` is accepted for back-compat but unused (the CLI carries
+    its own auth). The em-dash in the name reaches the CLI verbatim as an argv
+    string. Best-effort: a total failure returns ``""`` and is NOT cached."""
     cached = _cached_digest_definition_id()
     if cached:
         return cached
-    base = _api_base()
-    _, raw = _request("GET", f"{base}/user/v1alpha1/annotation", token)
-    for d in json.loads(raw) or []:
-        if d.get("name") == DIGEST_DEFINITION_NAME and not d.get("deleted_at"):
-            _store_digest_definition_id(d["id"])
-            return d["id"]
-    # ensure_ascii=False so the em-dash in DIGEST_DEFINITION_NAME goes on the
-    # wire as real UTF-8 (encoded utf-8 below), not an escaped \uXXXX sequence —
-    # the definition name must match byte-for-byte across machines to converge.
-    body = json.dumps({
-        "annotation_type": "moment",
-        "name": DIGEST_DEFINITION_NAME,
-        "description": DIGEST_DEFINITION_DESCRIPTION,
-        "tags": tag_ids,
-    }, ensure_ascii=False).encode("utf-8")
-    _, raw = _request("POST", f"{base}/user/v1alpha1/annotation", token, body=body)
-    def_id = json.loads(raw)["id"]
-    _store_digest_definition_id(def_id)
+    def_id = _resolve_def_via_cli(
+        DIGEST_DEFINITION_NAME, DIGEST_DEFINITION_DESCRIPTION, tag_names)
+    if def_id:
+        _store_digest_definition_id(def_id)
     return def_id
 
 
@@ -976,7 +1018,9 @@ def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None)
                 continue
             tag_ids.append(_resolve_tag_id(name, token))
 
-        def_id = _resolve_definition_id(token, tag_ids)
+        # The definition resolver takes tag NAMES (data-type create --tag takes
+        # names); the record below still carries the resolved tag IDS.
+        def_id = _resolve_definition_id(list(tag_names), token=token)
 
         inner: dict[str, Any] = {}
         title = (payload.get("name") or "").strip()
@@ -1123,7 +1167,9 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
         kind = agent_kind(agent)
         tag_names = [DIGEST_TRACK_TAG, window, f"agent:{kind}"]
         tag_ids = [_resolve_tag_id(n, token) for n in tag_names if n]
-        def_id = _resolve_digest_definition_id(token, tag_ids)
+        # Definition resolver takes tag NAMES; the record still uses tag IDS.
+        def_id = _resolve_digest_definition_id(
+            [n for n in tag_names if n], token=token)
 
         inner: dict[str, Any] = {}
         if name.strip():
