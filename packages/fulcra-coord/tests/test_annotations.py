@@ -722,15 +722,28 @@ class TestWriteHttp(unittest.TestCase):
         return annotations.build_annotation(
             lifecycle=lifecycle, task=task, agent=agent)
 
-    def _happy_router(self, defs_initially_empty=True):
-        """A router that resolves every tag to id 'tag-<name>', returns an
-        empty (or pre-populated) annotation list, creates the def as 'def-1',
-        and accepts the ingest POST."""
+    def _cli_tag_resolver(self):
+        """Patch target for tag resolution: ``fulcra tag get <name>`` returns a
+        dict ``{"id": "tag-<name>"}``, the deterministic id the assertions key on.
 
-        def tag_get(req):
-            # Every tag name resolves on GET (200) -> deterministic id.
-            name = req.full_url.rsplit("/", 1)[-1]
-            return _FakeResp({"id": f"tag-{name}"})
+        Tags now resolve through ``_fulcra_cli_json`` (the ``fulcra tag`` CLI),
+        not urllib, so the routers below carry only the annotation-def + ingest
+        endpoints. Records the resolved names so callers can count CLI hits."""
+        calls = []
+
+        def fake_cli(args, **k):
+            calls.append(list(args))
+            if args[:2] == ["tag", "get"]:
+                return {"id": f"tag-{args[2]}"}
+            return None
+
+        return calls, fake_cli
+
+    def _happy_router(self, defs_initially_empty=True):
+        """A router that returns an empty (or pre-populated) annotation list,
+        creates the def as 'def-1', and accepts the ingest POST. Tags are NOT
+        routed here — they resolve via ``_fulcra_cli_json`` (see
+        ``_cli_tag_resolver``)."""
 
         def ann_list(req):
             if defs_initially_empty:
@@ -741,8 +754,6 @@ class TestWriteHttp(unittest.TestCase):
             return _FakeResp({"id": "def-1"})
 
         return _Router([
-            ("GET", "/user/v1alpha1/tag/name/", tag_get),
-            ("POST", "/user/v1alpha1/tag", lambda r: _FakeResp({"id": "tag-posted"})),
             ("GET", "/user/v1alpha1/annotation", ann_list),
             ("POST", "/user/v1alpha1/annotation", ann_create),
             ("POST", "/ingest/v1/record/batch", lambda r: _FakeResp(b"", 200)),
@@ -750,11 +761,13 @@ class TestWriteHttp(unittest.TestCase):
 
     def test_happy_path_three_endpoint_flow(self):
         router = self._happy_router()
-        with patch.object(urllib_request, "urlopen", side_effect=router):
-            ok = annotations._write_http(self._payload())
+        tag_calls, fake_cli = self._cli_tag_resolver()
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                ok = annotations._write_http(self._payload())
         self.assertTrue(ok)
-        # (a) tag resolution happened for each cli_tag
-        self.assertTrue(router.gets_to("/user/v1alpha1/tag/name/"))
+        # (a) tag resolution happened for each cli_tag via the fulcra tag CLI
+        self.assertTrue(any(c[:2] == ["tag", "get"] for c in tag_calls))
         # (b) definition resolve (GET list) + create (POST) happened
         self.assertTrue(router.gets_to("/user/v1alpha1/annotation"))
         self.assertTrue(router.posts_to("/user/v1alpha1/annotation"))
@@ -764,8 +777,10 @@ class TestWriteHttp(unittest.TestCase):
 
     def test_ingest_post_shape(self):
         router = self._happy_router()
-        with patch.object(urllib_request, "urlopen", side_effect=router):
-            annotations._write_http(self._payload(lifecycle="complete"))
+        _, fake_cli = self._cli_tag_resolver()
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                annotations._write_http(self._payload(lifecycle="complete"))
         _, url, body, headers = router.posts_to("/ingest/v1/record/batch")[0]
         self.assertEqual(headers.get("content-type"), "application/x-jsonl")
         self.assertEqual(headers.get("authorization"), "Bearer tkn-abc")
@@ -793,9 +808,11 @@ class TestWriteHttp(unittest.TestCase):
         # Second annotation must NOT re-resolve the definition: the GET list /
         # POST create pair runs once, then the cached id is reused.
         router = self._happy_router()
-        with patch.object(urllib_request, "urlopen", side_effect=router):
-            annotations._write_http(self._payload(lifecycle="create"))
-            annotations._write_http(self._payload(lifecycle="update"))
+        _, fake_cli = self._cli_tag_resolver()
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                annotations._write_http(self._payload(lifecycle="create"))
+                annotations._write_http(self._payload(lifecycle="update"))
         self.assertEqual(len(router.gets_to("/user/v1alpha1/annotation")), 1)
         self.assertEqual(len(router.posts_to("/user/v1alpha1/annotation")), 1)
         # Both ingests still posted.
@@ -803,26 +820,30 @@ class TestWriteHttp(unittest.TestCase):
 
     def test_tag_ids_are_cached_across_calls(self):
         # BUG 6 (perf): tag ids must be cached per-name like the definition id.
-        # Two emits with the SAME tag set must resolve each tag over HTTP ONCE
+        # Two emits with the SAME tag set must resolve each tag via the CLI ONCE
         # total (cache hit on the second emit), not once per emit.
         router = self._happy_router()
-        with patch.object(urllib_request, "urlopen", side_effect=router):
-            annotations._write_http(self._payload(lifecycle="create"))
-            annotations._write_http(self._payload(lifecycle="update"))
-        # Per distinct tag name, exactly one GET across BOTH emits.
+        tag_calls, fake_cli = self._cli_tag_resolver()
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                annotations._write_http(self._payload(lifecycle="create"))
+                annotations._write_http(self._payload(lifecycle="update"))
+        # Per distinct tag name, exactly one `tag get` across BOTH emits.
         from collections import Counter
-        get_paths = Counter(c[1] for c in router.gets_to("/user/v1alpha1/tag/name/"))
-        self.assertTrue(get_paths, "expected at least one tag resolution")
-        for path, count in get_paths.items():
+        gets = Counter(c[2] for c in tag_calls if c[:2] == ["tag", "get"])
+        self.assertTrue(gets, "expected at least one tag resolution")
+        for name, count in gets.items():
             self.assertEqual(count, 1,
-                             f"tag {path} resolved {count}x over HTTP; expected 1 (cached)")
+                             f"tag {name} resolved {count}x via CLI; expected 1 (cached)")
         # Both ingests still posted (the emits themselves still happen).
         self.assertEqual(len(router.posts_to("/ingest/v1/record/batch")), 2)
 
     def test_existing_definition_is_adopted_not_created(self):
         router = self._happy_router(defs_initially_empty=False)
-        with patch.object(urllib_request, "urlopen", side_effect=router):
-            ok = annotations._write_http(self._payload())
+        _, fake_cli = self._cli_tag_resolver()
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                ok = annotations._write_http(self._payload())
         self.assertTrue(ok)
         # No create POST when an "Agent Tasks" def already exists.
         self.assertEqual(len(router.posts_to("/user/v1alpha1/annotation")), 0)
@@ -831,45 +852,52 @@ class TestWriteHttp(unittest.TestCase):
         self.assertIn("com.fulcradynamics.annotation.def-existing",
                       rec["metadata"]["source"])
 
-    def test_tag_404_then_create(self):
-        # On a 404 GET, the writer POSTs to create the tag and uses that id.
-        def tag_get(req):
-            raise _http_error(404)
+    def test_tag_get_miss_then_create_rides_into_record(self):
+        # `tag get` misses (None) -> `tag create` mints a LIST, and the new id
+        # rides into the ingest record's metadata.tags. (Tag resolution is now
+        # the fulcra tag CLI; record write stays over urllib.)
+        def fake_cli(args, **k):
+            if args[:2] == ["tag", "get"]:
+                return None
+            if args[:2] == ["tag", "create"]:
+                return [{"id": "tag-created"}]
+            return None
 
         router = _Router([
-            ("GET", "/user/v1alpha1/tag/name/", tag_get),
-            ("POST", "/user/v1alpha1/tag", lambda r: _FakeResp({"id": "tag-created"})),
             ("GET", "/user/v1alpha1/annotation", lambda r: _FakeResp([])),
             ("POST", "/user/v1alpha1/annotation", lambda r: _FakeResp({"id": "def-1"})),
             ("POST", "/ingest/v1/record/batch", lambda r: _FakeResp(b"", 200)),
         ])
-        with patch.object(urllib_request, "urlopen", side_effect=router):
-            ok = annotations._write_http(self._payload())
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                ok = annotations._write_http(self._payload())
         self.assertTrue(ok)
-        self.assertTrue(router.posts_to("/user/v1alpha1/tag"))
         _, _, body, _ = router.posts_to("/ingest/v1/record/batch")[0]
         rec = json.loads(body.decode().strip())
         self.assertIn("tag-created", rec["metadata"]["tags"])
 
     def test_http_error_anywhere_returns_false_never_raises(self):
         # A 500 on the ingest POST must yield False, not an exception.
+        _, fake_cli = self._cli_tag_resolver()
         router = _Router([
-            ("GET", "/user/v1alpha1/tag/name/",
-             lambda r: _FakeResp({"id": "tag-x"})),
             ("GET", "/user/v1alpha1/annotation", lambda r: _FakeResp([])),
             ("POST", "/user/v1alpha1/annotation", lambda r: _FakeResp({"id": "def-1"})),
             ("POST", "/ingest/v1/record/batch", _http_error(500)),
         ])
-        with patch.object(urllib_request, "urlopen", side_effect=router):
-            ok = annotations._write_http(self._payload())
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=router):
+                ok = annotations._write_http(self._payload())
         self.assertFalse(ok)
 
     def test_urlerror_returns_false(self):
+        _, fake_cli = self._cli_tag_resolver()
+
         def boom(req, *a, **k):
             raise urllib.error.URLError("connection refused")
 
-        with patch.object(urllib_request, "urlopen", side_effect=boom):
-            ok = annotations._write_http(self._payload())
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli):
+            with patch.object(urllib_request, "urlopen", side_effect=boom):
+                ok = annotations._write_http(self._payload())
         self.assertFalse(ok)
 
 
@@ -1058,6 +1086,136 @@ class TestFulcraCliJson(unittest.TestCase):
             with patch.object(annotations.subprocess, "run", side_effect=fake_run):
                 annotations._fulcra_cli_json(["tag"])
         self.assertEqual(recorded["cmd"], ["base-cli", "--flag", "tag"])
+
+
+class TestResolveTagId(unittest.TestCase):
+    """`_resolve_tag_id` resolves a tag NAME -> id via the ``fulcra tag`` CLI
+    (`_fulcra_cli_json`), no longer raw urllib.
+
+    Contract:
+      * cache hit -> return cached id, no CLI call;
+      * ``tag get <name>`` returning a dict with an ``id`` -> use + cache it;
+      * a get miss (None) falls back to ``tag create <name>`` whose stdout is a
+        LIST ``[created]`` (existing -> ``[]``) or, defensively, a dict;
+      * total failure -> ``""`` (caller skips empty tag ids), nothing cached;
+      * NEVER raises (best-effort writer).
+
+    Tag names with colons (``agent:claude``) are passed as a plain argv argument
+    — NO percent-encoding (that was a urllib-path concern only)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+        self._saved_root = os.environ.get("FULCRA_COORD_REMOTE_ROOT")
+        os.environ["FULCRA_COORD_REMOTE_ROOT"] = "/coordination-tagtest"
+
+    def tearDown(self):
+        os.environ.pop("XDG_CACHE_HOME", None)
+        if self._saved_root is None:
+            os.environ.pop("FULCRA_COORD_REMOTE_ROOT", None)
+        else:
+            os.environ["FULCRA_COORD_REMOTE_ROOT"] = self._saved_root
+
+    def test_cache_hit_skips_cli(self):
+        annotations._store_tag_id("status:active", "tag-cached")
+        with patch.object(annotations, "_fulcra_cli_json") as cli:
+            got = annotations._resolve_tag_id("status:active")
+        self.assertEqual(got, "tag-cached")
+        cli.assert_not_called()
+
+    def test_get_hit_returns_id_and_caches(self):
+        with patch.object(annotations, "_fulcra_cli_json",
+                          return_value={"id": "tag-got"}) as cli:
+            got = annotations._resolve_tag_id("agent-tasks")
+        self.assertEqual(got, "tag-got")
+        cli.assert_called_once_with(["tag", "get", "agent-tasks"])
+        # Persisted so a second resolve is a zero-CLI cache hit.
+        self.assertEqual(annotations._load_tag_cache().get("agent-tasks"), "tag-got")
+
+    def test_get_miss_then_create_list_returns_id_and_caches(self):
+        # get -> None (404), create -> LIST [{"id": ...}].
+        calls = []
+
+        def fake(args, **k):
+            calls.append(args)
+            if args[:2] == ["tag", "get"]:
+                return None
+            if args[:2] == ["tag", "create"]:
+                return [{"id": "tag-made"}]
+            return None
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake):
+            got = annotations._resolve_tag_id("create")
+        self.assertEqual(got, "tag-made")
+        self.assertEqual(
+            calls, [["tag", "get", "create"], ["tag", "create", "create"]])
+        self.assertEqual(annotations._load_tag_cache().get("create"), "tag-made")
+
+    def test_get_miss_then_create_dict_returns_id(self):
+        # Defensive: a create that yields a bare dict (not a list) still works.
+        def fake(args, **k):
+            if args[:2] == ["tag", "get"]:
+                return None
+            return {"id": "tag-dict"}
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake):
+            got = annotations._resolve_tag_id("pickup")
+        self.assertEqual(got, "tag-dict")
+        self.assertEqual(annotations._load_tag_cache().get("pickup"), "tag-dict")
+
+    def test_total_failure_returns_empty_and_does_not_cache(self):
+        # get None AND create None -> "" and nothing persisted.
+        with patch.object(annotations, "_fulcra_cli_json", return_value=None):
+            got = annotations._resolve_tag_id("complete")
+        self.assertEqual(got, "")
+        self.assertNotIn("complete", annotations._load_tag_cache())
+
+    def test_create_empty_list_is_total_failure(self):
+        # An existing tag yields create -> [] (409 skipped); with get already a
+        # miss there is no id to extract, so the resolve fails to "" (the caller
+        # skips it) rather than caching a bogus id.
+        def fake(args, **k):
+            if args[:2] == ["tag", "get"]:
+                return None
+            return []  # create: nothing minted
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake):
+            got = annotations._resolve_tag_id("update")
+        self.assertEqual(got, "")
+        self.assertNotIn("update", annotations._load_tag_cache())
+
+    def test_colon_name_passed_through_unescaped(self):
+        # A namespaced tag name must reach the CLI as a plain argv arg, NOT
+        # percent-encoded the way the old urllib path required.
+        recorded = {}
+
+        def fake(args, **k):
+            recorded.setdefault("get", args)
+            return {"id": "tag-x"}
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake):
+            annotations._resolve_tag_id("agent:claude")
+        self.assertEqual(recorded["get"], ["tag", "get", "agent:claude"])
+
+    def test_never_raises_on_unexpected_shape(self):
+        # A get returning a non-dict and create returning a non-list/dict must
+        # not raise — best-effort writer.
+        def fake(args, **k):
+            if args[:2] == ["tag", "get"]:
+                return "weird"
+            return 42
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake):
+            got = annotations._resolve_tag_id("session:Mac")
+        self.assertEqual(got, "")
+
+    def test_token_arg_is_ignored_back_compat(self):
+        # The legacy positional ``token`` is accepted (callers still pass it) but
+        # unused — resolution goes through the CLI regardless.
+        with patch.object(annotations, "_fulcra_cli_json",
+                          return_value={"id": "tag-y"}):
+            got = annotations._resolve_tag_id("agent:claude", "ignored-token")
+        self.assertEqual(got, "tag-y")
 
 
 class TestEmitHttpIntegration(unittest.TestCase):

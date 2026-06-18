@@ -673,36 +673,47 @@ def _store_tag_id(name: str, tag_id: str) -> None:
         pass
 
 
-def _resolve_tag_id(name: str, token: str) -> str:
+def _resolve_tag_id(name: str, token: Optional[str] = None) -> str:
     """Return the id of the tag named ``name``, creating it if absent.
 
-    Cache hit (BUG 6) -> return immediately, no HTTP. On a miss: GET
-    ``/user/v1alpha1/tag/name/{quoted}`` -> 200 ``{"id": ...}``; on a 404 the
-    tag doesn't exist yet so POST ``/user/v1alpha1/tag`` ``{"name": name}`` to
-    create it and return the new id. The resolved id is cached per-name so a
-    repeated tag set across emits costs zero HTTP after the first resolve. The
-    name is percent-encoded (``safe=''``) so spaces / slashes in a tag name
-    can't break the path — matching fulcra-common's
-    ``_resolve_tag(quote_name=True)`` shape."""
+    Resolves via the ``fulcra tag`` CLI (through ``_fulcra_cli_json``), NOT raw
+    urllib. ``token`` is accepted for caller back-compat (the writer still passes
+    it positionally) but is UNUSED — the CLI carries its own auth.
+
+    Flow:
+      * Cache hit (BUG 6) -> return immediately, no CLI call.
+      * ``fulcra tag get <name>`` emits ``json.dumps(tag_dict)`` with an ``id``
+        (rc!=0 on a 404, so ``_fulcra_cli_json`` returns None). A dict with an
+        ``id`` -> store + return it.
+      * Otherwise ``fulcra tag create <name>`` MINTS the tag. Its stdout is a
+        LIST ``[created_tag, ...]`` (a 409 "already exists" is skipped, so an
+        existing name yields ``[]`` — which is why ``get`` is the resolver and
+        ``create`` only mints new ones). Defensively also accept a bare dict.
+        Extract the new id -> store + return it.
+      * Total failure (both calls yield nothing usable) -> ``""``; the caller
+        skips empty tag ids. NEVER raises and an empty id is NEVER cached.
+
+    Unlike the old urllib path, the name is passed as a PLAIN argv argument — no
+    percent-encoding — so colon-namespaced names (``agent:claude``,
+    ``session:Mac``) go through verbatim."""
     cached = _load_tag_cache().get(name)
     if cached:
         return cached
 
-    base = _api_base()
-    quoted = urllib.parse.quote(name, safe="")
     tag_id: Optional[str] = None
-    try:
-        status, raw = _request("GET", f"{base}/user/v1alpha1/tag/name/{quoted}", token)
-        if status == 200:
-            tag_id = json.loads(raw)["id"]
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404:
-            raise
-    if tag_id is None:
-        # Absent (404) -> create.
-        payload = json.dumps({"name": name}).encode()
-        _, raw = _request("POST", f"{base}/user/v1alpha1/tag", token, body=payload)
-        tag_id = json.loads(raw)["id"]
+    got = _fulcra_cli_json(["tag", "get", name])
+    if isinstance(got, dict) and got.get("id"):
+        tag_id = got["id"]
+    else:
+        made = _fulcra_cli_json(["tag", "create", name])
+        if isinstance(made, list) and made and isinstance(made[0], dict) and made[0].get("id"):
+            tag_id = made[0]["id"]
+        elif isinstance(made, dict) and made.get("id"):
+            tag_id = made["id"]
+
+    if not tag_id:
+        # Best-effort: never raise, never cache an empty id (caller skips it).
+        return ""
     _store_tag_id(name, tag_id)
     return tag_id
 
