@@ -379,6 +379,55 @@ def test_rename_aborts_if_touched_note_changes_before_mutation():
     assert "/vault/Project Gamma.md" not in store.files
 
 
+def test_delete_removes_note_and_logs():
+    store = _scaffolded_store()
+    assert "/vault/Project Alpha.md" in store.files
+    err = StringIO()
+
+    rc = run(["delete", "Project Alpha", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 0, err.getvalue()
+    assert "/vault/Project Alpha.md" not in store.files
+    assert "delete Project Alpha.md" in store.files["/vault/LOG.md"]
+
+
+def test_delete_without_force_refuses():
+    store = _scaffolded_store()
+    err = StringIO()
+
+    rc = run(["delete", "Project Alpha", "--agent", "agent-a"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "/vault/Project Alpha.md" in store.files          # untouched
+    assert "--force" in err.getvalue()
+
+
+def test_delete_missing_note_returns_2():
+    store = _scaffolded_store()
+    err = StringIO()
+
+    rc = run(["delete", "Nope", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "not found" in err.getvalue() or "missing" in err.getvalue()
+
+
+def test_delete_refuses_excluded_path():
+    store = _scaffolded_store()
+    store.files["/vault/private/Secret.md"] = "# secret\n"
+    err = StringIO()
+
+    rc = run(["delete", "private/Secret", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "/vault/private/Secret.md" in store.files          # untouched
+    assert "excluded" in err.getvalue()
+
+
 def _scaffolded_store() -> FakeStore:
     store = FakeStore()
     _load_scaffold(store)
