@@ -286,6 +286,58 @@ def test_init_malformed_spec_returns_2(tmp_path):
     assert "/vault/meta.json" not in FakeStore().files
 
 
+def test_rename_moves_note_and_rewrites_inbound_links():
+    store = _scaffolded_store()
+    store.files["/vault/Project Beta.md"] = "# Beta\n\nSee [[Project Alpha]].\n"
+    source_body = store.files["/vault/Project Alpha.md"]
+    err = StringIO()
+
+    rc = run(["rename", "Project Alpha", "Project Gamma", "--agent", "agent-a",
+              "--force"], store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 0, err.getvalue()
+    assert "/vault/Project Alpha.md" not in store.files          # source gone
+    assert store.files["/vault/Project Gamma.md"] == source_body  # content moved
+    assert "[[Project Gamma]]" in store.files["/vault/Project Beta.md"]  # link rewritten
+    assert "rename Project Alpha.md -> Project Gamma.md" in store.files["/vault/LOG.md"]
+
+
+def test_rename_without_force_refuses():
+    store = _scaffolded_store()
+    err = StringIO()
+
+    rc = run(["rename", "Project Alpha", "Project Gamma", "--agent", "agent-a"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "/vault/Project Alpha.md" in store.files
+    assert "--force" in err.getvalue()
+
+
+def test_rename_missing_source_returns_2():
+    store = _scaffolded_store()
+    err = StringIO()
+
+    rc = run(["rename", "Nope", "Project Gamma", "--agent", "agent-a", "--force"],
+             store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "does not exist" in err.getvalue()
+
+
+def test_rename_refuses_when_destination_exists():
+    store = _scaffolded_store()
+    store.files["/vault/Project Beta.md"] = "# Beta\n"
+    err = StringIO()
+
+    rc = run(["rename", "Project Alpha", "Project Beta", "--agent", "agent-a",
+              "--force"], store=store, now=NOW, stdout=StringIO(), stderr=err)
+
+    assert rc == 2
+    assert "already exists" in err.getvalue()
+    assert "/vault/Project Alpha.md" in store.files          # untouched
+
+
 def _scaffolded_store() -> FakeStore:
     store = FakeStore()
     _load_scaffold(store)
