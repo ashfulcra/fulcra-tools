@@ -189,33 +189,47 @@ class TestEmitDigestAnnotation(unittest.TestCase):
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
     def test_writes_against_digest_definition(self):
-        calls = []
+        # Tags + the digest definition resolve via the fulcra CLI now (tag get /
+        # catalog / data-type create); only the ingest record stays over urllib.
+        cli_calls = []
+
+        def fake_cli(args, **k):
+            cli_calls.append(list(args))
+            if args[:2] == ["tag", "get"]:
+                return {"id": "tag-1"}
+            if args[:2] == ["data-type", "create"]:
+                return {"id": "digest-def-1"}
+            return None
+
+        def fake_cli_lines(args, **k):
+            cli_calls.append(list(args))
+            return []  # no existing defs -> create
+
+        urls = []
+
         def fake_urlopen(req, *a, **k):
             method, url = req.get_method(), req.full_url
-            calls.append((method, url, req.data))
-            if method == "GET" and "/tag/name/" in url:
-                raise urllib.error.HTTPError(url, 404, "nf", None, io.BytesIO(b""))
-            if method == "POST" and url.endswith("/user/v1alpha1/tag"):
-                return _FakeResp({"id": "tag-1"})
-            if method == "GET" and url.endswith("/user/v1alpha1/annotation"):
-                return _FakeResp([])           # no existing defs -> create
-            if method == "POST" and url.endswith("/user/v1alpha1/annotation"):
-                return _FakeResp({"id": "digest-def-1"})
+            urls.append((method, url, req.data))
             if method == "POST" and "/ingest/v1/record/batch" in url:
                 return _FakeResp(b"", status=202)
             raise AssertionError(f"unrouted: {method} {url}")
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli), \
+                patch.object(annotations, "_fulcra_cli_json_lines", side_effect=fake_cli_lines), \
+                patch("urllib.request.urlopen", side_effect=fake_urlopen):
             ok = annotations.emit_digest_annotation(
                 name="Agent digest — evening (1 on you, 0 upcoming)",
                 note="⛔ Blocked on you (1):\n  • thing",
                 window="evening", agent="claude-code:mb:repo")
         self.assertTrue(ok)
-        # The definition POST carried the DIGEST definition name, not "Agent Tasks".
-        def_posts = [c for c in calls
-                     if c[0] == "POST" and c[1].endswith("/user/v1alpha1/annotation")]
-        self.assertEqual(len(def_posts), 1)
-        self.assertIn(annotations.DIGEST_DEFINITION_NAME,
-                      def_posts[0][2].decode())
+        # The data-type create carried the DIGEST definition name, not "Agent Tasks".
+        def_creates = [c for c in cli_calls if c[:2] == ["data-type", "create"]]
+        self.assertEqual(len(def_creates), 1)
+        self.assertIn(annotations.DIGEST_DEFINITION_NAME, def_creates[0])
+        # The catalog lookup was for the digest name.
+        cat = [c for c in cli_calls if c[:1] == ["catalog"]]
+        self.assertEqual(len(cat), 1)
+        self.assertIn(annotations.DIGEST_DEFINITION_NAME, cat[0])
         # The digest definition id was cached separately from "Agent Tasks".
         self.assertEqual(annotations._cached_digest_definition_id(), "digest-def-1")
         cached = json.loads(annotations._digest_definition_cache_path().read_text())
@@ -226,7 +240,7 @@ class TestEmitDigestAnnotation(unittest.TestCase):
         # cache file.
         self.assertFalse(annotations._definition_cache_path().exists())
 
-        records = [c for c in calls
+        records = [c for c in urls
                    if c[0] == "POST" and "/ingest/v1/record/batch" in c[1]]
         self.assertEqual(len(records), 1)
         record = json.loads(records[0][2].decode().splitlines()[0])
@@ -238,6 +252,31 @@ class TestEmitDigestAnnotation(unittest.TestCase):
             ok = annotations.emit_digest_annotation(
                 name="n", note="b", window="morning", agent="claude-code:mb:repo")
         self.assertFalse(ok)
+
+    def test_definition_resolution_failure_returns_false_without_ingest(self):
+        def fake_cli(args, **k):
+            if args[:2] == ["tag", "get"]:
+                return {"id": "tag-1"}
+            if args[:2] == ["data-type", "create"]:
+                return None
+            return None
+
+        def fake_cli_lines(args, **k):
+            return []
+
+        urls = []
+
+        def fake_urlopen(req, *a, **k):
+            urls.append(req.full_url)
+            return _FakeResp(b"", status=202)
+
+        with patch.object(annotations, "_fulcra_cli_json", side_effect=fake_cli), \
+                patch.object(annotations, "_fulcra_cli_json_lines", side_effect=fake_cli_lines), \
+                patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok = annotations.emit_digest_annotation(
+                name="n", note="b", window="morning", agent="claude-code:mb:repo")
+        self.assertFalse(ok)
+        self.assertFalse([u for u in urls if "/ingest/v1/record/batch" in u])
 
     def test_digest_definition_cache_obeys_ttl(self):
         annotations._store_digest_definition_id("digest-def-fresh")
@@ -637,6 +676,6 @@ def test_digest_omits_loops_section_when_fold_raises(coord_backend, capsys):
 
 
 class TestVersion(unittest.TestCase):
-    def test_version_is_0_15_7(self):
+    def test_version_is_0_15_8(self):
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.7")
+        self.assertEqual(__version__, "0.15.8")

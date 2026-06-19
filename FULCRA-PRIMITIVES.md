@@ -97,12 +97,14 @@ record-write/delete lib method, only definition + tag management:
 - **No record-level delete/replace yet** — corrections are modeled as new
   records (e.g. a superseding signal), not edits. CLI record commands are the
   next thing expected to land; that arrival triggers this doc's full rewrite.
-- Because records are ingest-only (no CLI/lib record-write verb), the
-  **fulcra-coord** Agent-Tasks annotation writer posts its tags, definitions, AND
-  records over stdlib `urllib` BY DESIGN — coord is a dependency-light bus, and a
-  partial CLI migration (defs via CLI, records still over HTTP) would be a net
-  negative. The whole writer migrates to the `fulcra` CLI only once a first-class
-  record-write verb ships.
+- The **fulcra-coord** Agent-Tasks annotation writer resolves its **tags** and
+  annotation-**definitions** through the public `fulcra` CLI (`fulcra tag
+  get/create`, `fulcra catalog`, `fulcra data-type create`) — coord is a
+  dependency-light bus that shells out to the CLI rather than importing a client.
+  Its **records** remain ingest-only over stdlib `urllib`
+  (`POST /ingest/v1/record/batch`) because the platform exposes no record-write
+  CLI/lib verb yet. That record POST is the one remaining raw-REST path in the
+  writer; it migrates to the CLI once a first-class record-write verb ships.
 - **Reads:** tier 1 `fulcra get-records <DataType> "<range>"` (user-defined:
   `MomentAnnotation/<definition-uuid>`); tier 2 via
   `/data/v1alpha1/event/{data_type}`.

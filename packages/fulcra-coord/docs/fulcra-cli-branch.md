@@ -8,7 +8,10 @@
 > the repo root). The `file-management` branch workaround is no longer needed.
 
 `fulcra-coord` uses Fulcra Files as its transport, so the resolved Fulcra CLI
-must expose the `file` command group. The standard install satisfies this:
+must expose the `file` command group. The Agent-Tasks annotation writer
+additionally shells out to the `tag` and `data-type` (+ `catalog`) groups to
+resolve/create tags and annotation-definitions. The standard install satisfies
+all of these:
 
 ```bash
 uv tool install fulcra-api   # or: pip install fulcra-api
@@ -17,14 +20,19 @@ uv tool install fulcra-api   # or: pip install fulcra-api
 Verify:
 
 ```bash
-fulcra file --help    # or: fulcra-api file --help
-fulcra-coord doctor   # expect: "File commands: OK"
+fulcra file --help        # or: fulcra-api file --help
+fulcra tag --help
+fulcra data-type --help
+fulcra-coord doctor       # expect: "File commands: OK", "Tag commands: OK",
+                          #         "Data-type commands: OK"
 ```
 
-If `doctor` reports `File commands: FAIL`, the resolved CLI is not exposing
-`file` — usually a stale install (fix with
-`uv tool install --reinstall --force fulcra-api`) or a `FULCRA_CLI_COMMAND`
-pointing at a binary that lacks it.
+If `doctor` reports `File commands: FAIL` (or `Tag commands` / `Data-type
+commands: FAIL`), the resolved CLI is not exposing that group — usually a stale
+install (fix with `uv tool install --reinstall --force fulcra-api`) or a
+`FULCRA_CLI_COMMAND` pointing at a binary that lacks it. Without `file`, every
+bus op fails silently; without `tag` / `data-type`, annotation writes fail
+silently.
 
 ## `FULCRA_CLI_COMMAND` — pointing at an alternative CLI
 

@@ -89,20 +89,25 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
         _info("  -> Install Fulcra CLI: uv tool install fulcra-api")
         _info("  -> Or set FULCRA_CLI_COMMAND to your CLI invocation")
 
-    # File command group probe — the #1 fresh-agent onboarding failure.
+    # CLI command-group probes — the #1 fresh-agent onboarding failure class.
     #
-    # The coordination bus is driven by Fulcra Files (`fulcra file ...`). The
-    # standard CLI ships that group today, but a stale install or a mispointed
-    # FULCRA_CLI_COMMAND can still resolve to a binary without it, making bus
-    # ops fail silently. This probe targets the *resolved real CLI* (not the
-    # injected fake backend, which speaks the `file` subcommand protocol but has
-    # no top-level `file` group), so it answers "does the installed CLI have
-    # `file`?". Wrapped defensively: a hung or broken probe must degrade to FAIL,
-    # never crash doctor.
-    try:
-        file_ok, file_msg = remote.check_file_commands()
-    except Exception as e:  # defensive — check_file_commands shouldn't raise
-        file_ok, file_msg = False, f"file probe error: {e}"
+    # The coordination bus is driven by Fulcra Files (`fulcra file ...`), and the
+    # annotation writer additionally resolves tags via `fulcra tag get/create`
+    # and annotation-definitions via `fulcra data-type create` (+ `catalog`). The
+    # standard CLI ships all of these today, but a stale install or a mispointed
+    # FULCRA_CLI_COMMAND can still resolve to a binary lacking one, making the
+    # corresponding ops fail silently. Each probe targets the *resolved real CLI*
+    # (not the injected fake backend, which speaks the `file` subcommand protocol
+    # but has no top-level command groups), so it answers "does the installed CLI
+    # have `<group>`?". Wrapped defensively: a hung or broken probe must degrade
+    # to FAIL, never crash doctor.
+    def _probe_group(check, group):
+        try:
+            return check()
+        except Exception as e:  # defensive — checks shouldn't raise
+            return False, f"{group} probe error: {e}"
+
+    file_ok, file_msg = _probe_group(remote.check_file_commands, "file")
     file_status = "OK" if file_ok else "FAIL"
     _info(f"  File commands: {file_status}  ({file_msg})")
     if not file_ok:
@@ -113,6 +118,30 @@ def cmd_doctor(args: Any, backend: Optional[list[str]] = None) -> int:
               "--force fulcra-api`) or fix a mispointed FULCRA_CLI_COMMAND.")
         _info("  -> See docs/fulcra-cli-branch.md for verification and "
               "FULCRA_CLI_COMMAND examples.")
+
+    # `tag` + `data-type`: needed by the annotation writer to resolve/create
+    # tags and annotation-definitions through the public CLI. Best-effort.
+    tag_ok, tag_msg = _probe_group(remote.check_tag_commands, "tag")
+    tag_status = "OK" if tag_ok else "FAIL"
+    _info(f"  Tag commands: {tag_status}  ({tag_msg})")
+    if not tag_ok:
+        ok_all = False
+        _info("  -> The resolved Fulcra CLI lacks the `tag` command group the "
+              "annotation writer uses to resolve/create tags "
+              "(`fulcra tag get/create`).")
+        _info("  -> Reinstall the standard CLI (`uv tool install --reinstall "
+              "--force fulcra-api`) or fix a mispointed FULCRA_CLI_COMMAND.")
+
+    dtype_ok, dtype_msg = _probe_group(remote.check_data_type_commands, "data-type")
+    dtype_status = "OK" if dtype_ok else "FAIL"
+    _info(f"  Data-type commands: {dtype_status}  ({dtype_msg})")
+    if not dtype_ok:
+        ok_all = False
+        _info("  -> The resolved Fulcra CLI lacks the `data-type` command group "
+              "the annotation writer uses to resolve/create annotation-"
+              "definitions (`fulcra data-type create`, `fulcra catalog`).")
+        _info("  -> Reinstall the standard CLI (`uv tool install --reinstall "
+              "--force fulcra-api`) or fix a mispointed FULCRA_CLI_COMMAND.")
 
     # Remote access
     _info(f"\n[Remote]")

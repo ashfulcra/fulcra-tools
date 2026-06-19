@@ -740,6 +740,86 @@ Previous Versions: 1
         finally:
             del os.environ["FULCRA_CLI_COMMAND"]
 
+    # --- tag / data-type command-group probes --------------------------------
+    # The annotation writer resolves tags via `fulcra tag get/create` and
+    # annotation-definitions via `fulcra data-type create`, so doctor probes
+    # those groups the same way it probes `file`. Mirror the file-probe tests.
+
+    def test_check_tag_commands_ok_when_tag_help_succeeds(self):
+        """`<cli> tag --help` exits 0 → tag command group present."""
+        result = types.SimpleNamespace(
+            returncode=0, stdout="Usage: fulcra tag [OPTIONS]\n  get\n  create", stderr=""
+        )
+        with patch("fulcra_coord.remote.subprocess.run", return_value=result):
+            ok, msg = self.remote.check_tag_commands(["fulcra-api"])
+        self.assertTrue(ok)
+        self.assertIn("fulcra-api", msg)
+
+    def test_check_tag_commands_fail_when_no_tag_subcommand(self):
+        """Stale build lacking `tag` → non-zero exit → FAIL."""
+        result = types.SimpleNamespace(
+            returncode=2, stdout="", stderr="Error: No such command 'tag'."
+        )
+        with patch("fulcra_coord.remote.subprocess.run", return_value=result):
+            ok, msg = self.remote.check_tag_commands(["fulcra-api"])
+        self.assertFalse(ok)
+        self.assertIn("tag", msg)
+
+    def test_check_tag_commands_fail_on_timeout(self):
+        """A hung probe must degrade to FAIL, never propagate the timeout."""
+        with patch(
+            "fulcra_coord.remote.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="fulcra-api tag --help", timeout=5),
+        ):
+            ok, msg = self.remote.check_tag_commands(["fulcra-api"])
+        self.assertFalse(ok)
+
+    def test_check_data_type_commands_ok_when_help_succeeds(self):
+        """`<cli> data-type --help` exits 0 → data-type group present."""
+        result = types.SimpleNamespace(
+            returncode=0, stdout="Usage: fulcra data-type [OPTIONS]\n  create", stderr=""
+        )
+        with patch("fulcra_coord.remote.subprocess.run", return_value=result):
+            ok, msg = self.remote.check_data_type_commands(["fulcra-api"])
+        self.assertTrue(ok)
+        self.assertIn("fulcra-api", msg)
+
+    def test_check_data_type_commands_fail_when_missing(self):
+        """Stale build lacking `data-type` → non-zero exit → FAIL."""
+        result = types.SimpleNamespace(
+            returncode=2, stdout="", stderr="Error: No such command 'data-type'."
+        )
+        with patch("fulcra_coord.remote.subprocess.run", return_value=result):
+            ok, msg = self.remote.check_data_type_commands(["fulcra-api"])
+        self.assertFalse(ok)
+        self.assertIn("data-type", msg)
+
+    def test_check_data_type_commands_fail_when_cli_missing(self):
+        """CLI binary not installed → FileNotFoundError → FAIL, no crash."""
+        with patch(
+            "fulcra_coord.remote.subprocess.run", side_effect=FileNotFoundError()
+        ):
+            ok, msg = self.remote.check_data_type_commands(["nonexistent-cli"])
+        self.assertFalse(ok)
+
+    def test_check_command_group_probes_real_cli_base(self):
+        """The group probe targets the resolved real CLI base + `<group> --help`,
+        honoring FULCRA_CLI_COMMAND, never the file-ops fake backend."""
+        os.environ["FULCRA_CLI_COMMAND"] = "my-fulcra"
+        try:
+            captured = {}
+
+            def fake_run(cmd, *a, **kw):
+                captured["cmd"] = cmd
+                return types.SimpleNamespace(returncode=0, stdout="tag", stderr="")
+
+            with patch("fulcra_coord.remote.subprocess.run", side_effect=fake_run):
+                ok, _ = self.remote.check_tag_commands()
+            self.assertTrue(ok)
+            self.assertEqual(captured["cmd"][:3], ["my-fulcra", "tag", "--help"])
+        finally:
+            del os.environ["FULCRA_CLI_COMMAND"]
+
 
 # ---------------------------------------------------------------------------
 # CLI integration (dry-run via fake backend)
@@ -2025,6 +2105,75 @@ class TestDoctorFileCapabilityCheck(unittest.TestCase):
                 rc = cmd_doctor(types.SimpleNamespace(), backend=["false"])
             except Exception as e:  # pragma: no cover - this is the assertion
                 self.fail(f"cmd_doctor crashed on file-probe error: {e}")
+        self.assertEqual(rc, 1)
+
+
+class TestDoctorTagAndDataTypeCapabilityCheck(unittest.TestCase):
+    """Doctor must also probe the `tag` and `data-type` command groups.
+
+    The annotation writer now resolves tags via `fulcra tag get/create` and
+    annotation-definitions via `fulcra data-type create` (+ `catalog`), so the
+    annotations diagnostic surfaces all three groups (file, tag, data-type), not
+    just `file`. Each probe is best-effort and never crashes doctor.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["XDG_CACHE_HOME"] = self.tmp
+
+    def tearDown(self):
+        del os.environ["XDG_CACHE_HOME"]
+
+    def _run_doctor(self, *, tag=(True, "fulcra-api"), data_type=(True, "fulcra-api")):
+        from fulcra_coord.cli import cmd_doctor
+
+        lines = []
+        with patch("fulcra_coord.cli.remote.check_cli_available", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_file_commands", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_tag_commands", return_value=tag), \
+             patch("fulcra_coord.cli.remote.check_data_type_commands", return_value=data_type), \
+             patch("fulcra_coord.cli.remote.check_remote_access",
+                   return_value=(True, "Remote accessible")), \
+             patch("fulcra_coord.doctor._info",
+                   side_effect=lambda *a, **kw: lines.append(" ".join(str(x) for x in a))):
+            rc = cmd_doctor(types.SimpleNamespace(), backend=["false"])
+        return rc, "\n".join(lines)
+
+    def test_doctor_reports_tag_and_data_type_ok(self):
+        """Both probes succeed → OK lines printed for tag + data-type."""
+        rc, out = self._run_doctor()
+        self.assertIn("Tag commands: OK", out)
+        self.assertIn("Data-type commands: OK", out)
+        self.assertIn("File commands: OK", out)
+        self.assertEqual(rc, 0)
+
+    def test_doctor_reports_tag_commands_fail(self):
+        """Missing `tag` group → FAIL line, overall doctor not-ok."""
+        rc, out = self._run_doctor(tag=(False, "No such command 'tag'."))
+        self.assertIn("Tag commands: FAIL", out)
+        self.assertEqual(rc, 1)
+
+    def test_doctor_reports_data_type_commands_fail(self):
+        """Missing `data-type` group → FAIL line, overall doctor not-ok."""
+        rc, out = self._run_doctor(data_type=(False, "No such command 'data-type'."))
+        self.assertIn("Data-type commands: FAIL", out)
+        self.assertEqual(rc, 1)
+
+    def test_doctor_tag_probe_never_crashes(self):
+        """If a probe raises, doctor must still complete, never propagate."""
+        from fulcra_coord.cli import cmd_doctor
+
+        with patch("fulcra_coord.cli.remote.check_cli_available", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_file_commands", return_value=(True, "fulcra-api file")), \
+             patch("fulcra_coord.cli.remote.check_tag_commands",
+                   side_effect=RuntimeError("unexpected")), \
+             patch("fulcra_coord.cli.remote.check_data_type_commands", return_value=(True, "fulcra-api")), \
+             patch("fulcra_coord.cli.remote.check_remote_access",
+                   return_value=(True, "Remote accessible")):
+            try:
+                rc = cmd_doctor(types.SimpleNamespace(), backend=["false"])
+            except Exception as e:  # pragma: no cover - this is the assertion
+                self.fail(f"cmd_doctor crashed on tag-probe error: {e}")
         self.assertEqual(rc, 1)
 
 
@@ -8859,14 +9008,14 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_7(self):
-        # 0.15.7: annotation transport consolidation — the dead `_write_cli`
-        # shell-out path is removed and the cli/http/api mode duality collapses
-        # to a single stdlib-urllib writer with an on/off toggle (legacy values
-        # normalize to `on`); config/doctor report on/off; docs corrected
-        # (records are ingest-only) (#259).
+    def test_version_is_0_15_8(self):
+        # 0.15.8: CLI genericization — the annotation writer resolves tags +
+        # definitions through the public `fulcra` CLI (`tag`, `data-type`,
+        # `catalog`) instead of raw REST; records remain ingest-only over
+        # stdlib urllib (no record-write CLI verb yet); doctor checks tag +
+        # data-type capability; ClawHub-ready packaging docs.
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.7")
+        self.assertEqual(__version__, "0.15.8")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):

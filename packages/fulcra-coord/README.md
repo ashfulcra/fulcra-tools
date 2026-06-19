@@ -23,16 +23,34 @@ pip install fulcra-coord
 uv add fulcra-coord
 ```
 
-Requires: Python 3.10+, and the Fulcra CLI (`uv tool install fulcra-api`). The
-standard build ships the `file` command group the bus runs on
-(`fulcra file list|stat|download|upload|delete`) — no special branch or build
-needed.
+**The one external dependency is the public Fulcra CLI.** Install it with
+`uv tool install fulcra-api` (or `pip install fulcra-api`) — fulcra-coord is
+stdlib-only and **shells out** to that CLI. The released build provides every
+command group fulcra-coord needs — no special branch or build:
 
-> If `fulcra-coord doctor` reports `File commands: FAIL`, the *resolved* CLI is
-> not exposing `file` — usually a stale install (`uv tool install --reinstall
-> fulcra-api`) or a `FULCRA_CLI_COMMAND` pointing at a binary without it. See
+- **`file`** — `fulcra file list|stat|download|upload|delete`, the coordination
+  bus transport.
+- **`tag`** — `fulcra tag get|create`, used by the Agent-Tasks annotation writer
+  to resolve/create tags.
+- **`data-type`** + **`catalog`** — `fulcra data-type create`, `fulcra catalog`,
+  used by the annotation writer to resolve/create annotation-definitions.
+
+Also requires Python 3.10+. `fulcra-coord doctor` verifies all three CLI groups
+against the *resolved* CLI (`File commands` / `Tag commands` / `Data-type
+commands` — `OK`/`FAIL`).
+
+**One platform gap:** the annotation writer's final timeline-record write goes
+over the Fulcra **ingest REST endpoint** (`POST /ingest/v1/record/batch`, stdlib
+`urllib`) because the platform exposes no record-write CLI verb yet. It migrates
+to the CLI when that verb lands. Everything else fulcra-coord does is CLI-only.
+
+> If `fulcra-coord doctor` reports `File commands: FAIL` (or `Tag commands` /
+> `Data-type commands: FAIL`), the *resolved* CLI is not exposing that group —
+> usually a stale install (`uv tool install --reinstall fulcra-api`) or a
+> `FULCRA_CLI_COMMAND` pointing at a binary without it. See
 > [`docs/fulcra-cli-branch.md`](docs/fulcra-cli-branch.md) to verify and
-> repoint. Without `file`, every bus op fails silently.
+> repoint. Without `file`, every bus op fails silently; without `tag` /
+> `data-type`, annotation writes fail silently.
 
 ## Quick start
 
@@ -89,7 +107,7 @@ fulcra-coord done TASK-... \
 | `inbox` | List open directives addressed to you (`--agent`, `--format json`); `--ack <task-id>` marks one seen without claiming it. Stale informational broadcasts (older than `FULCRA_COORD_INBOX_AGE_DAYS`, default 3) are hidden by default and noted as a count; `--all` shows them too. Matching is prefix-aware: a directive addressed to a short id (`claude-code`) reaches the full-id agent (`claude-code:<host>:<repo>`) it prefixes |
 | `identity` | Show, set, clear, or migrate this host's declared agent id — the identity handshake reused by every bus op. `identity` shows the resolved id + its source (and hints if a stale legacy global exists); `identity set <agent-id>` persists it; `identity clear` removes it; `identity migrate` copies a legacy global identity into the current repo's entry (`--format json`). **Scoped per working directory** so sibling sessions in different repos don't clobber each other's identity |
 | `human` | Show, set, or clear the human operator's handle — the addressable identity tasks are "blocked on ME" against. Defaults to the neutral `human`; personalize with `human set <name>` (e.g. `human set ash`). `human clear` reverts (`--format json`). Global per machine |
-| `annotations` | Enable/disable/inspect the **Agent Tasks** timeline annotations writer. `annotations on` persists `on` to `<XDG_CONFIG_HOME>/fulcra-coord/annotations` so **every agent on the machine emits** without a per-shell `FULCRA_COORD_ANNOTATIONS` export; `annotations off` removes it; bare `annotations`/`annotations status` reports the resolved mode + its source (env/config/default) and whether a token resolves — the token value is never printed (`--format json`). `FULCRA_COORD_ANNOTATIONS` still overrides per shell (`on` enables the stdlib urllib writer; legacy `http`/`api`/`cli` values are accepted as aliases). Per-event notes now carry work substance — `[<workstream>/<kind>] <title> — <summary> · next: <action>` — so a single moment conveys what the task is and what's next |
+| `annotations` | Enable/disable/inspect the **Agent Tasks** timeline annotations writer. `annotations on` persists `on` to `<XDG_CONFIG_HOME>/fulcra-coord/annotations` so **every agent on the machine emits** without a per-shell `FULCRA_COORD_ANNOTATIONS` export; `annotations off` removes it; bare `annotations`/`annotations status` reports the resolved mode + its source (env/config/default) and whether a token resolves — the token value is never printed (`--format json`). `FULCRA_COORD_ANNOTATIONS` still overrides per shell (`on` enables the writer — tags and the moment-definition resolve through the `fulcra` CLI, the timeline record posts over stdlib `urllib`; legacy `http`/`api`/`cli` values are accepted as aliases). Per-event notes now carry work substance — `[<workstream>/<kind>] <title> — <summary> · next: <action>` — so a single moment conveys what the task is and what's next |
 | `needs-me` | **What's blocked on YOU** (the human): every open task assigned to / blocked on you across all agents, showing who's waiting, the ask, and how long it's been (`--human <handle>`, `--format json`). The "what's on my plate from my agents" glance. Asks with a future `not_before` (see `block`) are split off into a compact **Upcoming (next 7d)** section instead of the DUE-NOW plate, so a task you can't act on yet doesn't clutter it; `--all` lists each upcoming item inline. JSON returns `{human, count, items, upcoming}` — `count` reflects DUE-NOW only |
 | `digest` | Write the **operator digest** — a consolidated twice-daily situational-awareness summary — to the Fulcra timeline on its own **Agent Tasks — Digest** track. Four blocks: blocked-on-you, upcoming, per-agent activity, stale (`--window morning\|evening` sets the lookback + label, omit for on-demand; `--human <handle>`; `--format table\|json`; `--dry-run`). `--dry-run` renders + prints without writing; `--format json` emits the structured digest for tooling. An any-agent dedup guard means it's safe to run from multiple machines — only the first writer per window lands a moment |
 | `install-digest` | Install the twice-daily scheduled `digest` jobs (launchd 08:00 + 18:00 on macOS, fixed cron lines elsewhere) — the push side of the operator digest. Safe to install on **every** machine: the any-agent dedup guard collapses concurrent ticks to one digest per window. `--uninstall` to remove, `--dry-run` to print the plan |
@@ -162,7 +180,7 @@ All hook installers resolve a concretely-callable `fulcra-coord` invocation at i
 | `FULCRA_COORD_HUMAN` | `human` | The human operator's handle — who tasks are "blocked on ME" against (`needs-me`, `block --on-user`). Resolution order: `FULCRA_COORD_HUMAN` > persisted handle (`fulcra-coord human set`) > default `human`. Personalize with `fulcra-coord human set <name>` |
 | `FULCRA_COORD_CODEX_WAKE` | _(unset)_ | Internal Codex wake-exec marker. Presence-sensed, not boolean-parsed: any non-empty value, including `0`, tells `ensure-codex-watch` not to retarget the managed Codex heartbeat to the throwaway wake thread id |
 | `FULCRA_COORD_BACKEND` | — | Override backend (testing only) |
-| `FULCRA_COORD_ANNOTATIONS` | `off` | Emit lifecycle annotations to the Fulcra **Agent Tasks** timeline track: `off` (default, inert) or `on` (single stdlib `urllib` writer; tag resolve → moment-def resolve/create+cache → `POST /ingest/v1/record/batch`). Legacy enable tokens `http`, `api`, and `cli` normalize to `on` for back-compat; there is no separate CLI transport. Resolution order: this env var (when set) > the persisted config (`fulcra-coord annotations on`, at `<XDG_CONFIG_HOME>/fulcra-coord/annotations`) > `off`. **Persist it once with `fulcra-coord annotations on`** so every agent emits without exporting this in each shell; set the env var to override a single session. See [docs/annotations.md](docs/annotations.md). |
+| `FULCRA_COORD_ANNOTATIONS` | `off` | Emit lifecycle annotations to the Fulcra **Agent Tasks** timeline track: `off` (default, inert) or `on` (the writer resolves tags via `fulcra tag get/create` and the moment-definition via `fulcra catalog` / `fulcra data-type create`, caches the def id, then posts the record over stdlib `urllib` → `POST /ingest/v1/record/batch` — the one raw-REST path, since no record-write CLI verb exists yet). Legacy enable tokens `http`, `api`, and `cli` normalize to `on` for back-compat. Resolution order: this env var (when set) > the persisted config (`fulcra-coord annotations on`, at `<XDG_CONFIG_HOME>/fulcra-coord/annotations`) > `off`. **Persist it once with `fulcra-coord annotations on`** so every agent emits without exporting this in each shell; set the env var to override a single session. See [docs/annotations.md](docs/annotations.md). |
 | `FULCRA_API_BASE` | `https://api.fulcradynamics.com` | Fulcra HTTP API base for the annotation writer. |
 | `FULCRA_ACCESS_TOKEN` | _(unset)_ | Bearer token for the annotation writer; when unset the writer falls back to `fulcra auth print-access-token`. |
 | `FULCRA_COORD_ANNOTATION_CACHE_TTL_SECONDS` | `86400` | TTL on the locally cached annotation definition/tag ids. A fresh entry is a zero-HTTP hit; an expired one re-resolves (and re-stamps), so any drift heals within a day instead of being trusted forever |
