@@ -37,7 +37,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -90,15 +92,57 @@ def identity_path(cwd: Optional[str] = None) -> Path:
     return _identities_dir() / f"{_cwd_hash(cwd)}.json"
 
 
+#: Hostnames that are NOT a stable machine identity — the generic mDNS/DHCP
+#: fallbacks ``socket.gethostname()`` returns when the system name is unset.
+#: Deriving an agent id from one of these silently mints a DIFFERENT identity
+#: than the same machine produces under a real name, spawning phantom agents.
+_GENERIC_HOSTS = frozenset({"", "mac", "localhost", "local", "localdomain", "host"})
+
+
+def _stable_hostname() -> str:
+    """A best-effort STABLE short hostname for identity derivation.
+
+    ``socket.gethostname()`` is unreliable on macOS: when the system ``HostName``
+    is unset it returns the transient mDNS/DHCP fallback ``Mac.localdomain`` ->
+    the generic ``Mac``. Deriving an agent id from that diverges from the
+    identity the same machine produces when the network/HostName differs, so a
+    single session running ``fulcra-coord`` from several cwds mints multiple
+    phantom ``claude-code:Mac:<dir>`` agents — they then self-contend an
+    exclusive role's lease and split inbox/wake delivery (2026-06-19 incident).
+
+    When ``gethostname`` yields a generic value, fall back to a stable source
+    (macOS ``scutil --get LocalHostName``/``ComputerName``) so one machine
+    derives ONE consistent host. Best-effort: never raises; on non-macOS or any
+    failure it returns whatever ``gethostname`` gave (or ``"host"``)."""
+    try:
+        host = socket.gethostname().split(".")[0].strip()
+    except Exception:
+        host = ""
+    if host and host.lower() not in _GENERIC_HOSTS:
+        return host
+    for key in ("LocalHostName", "ComputerName"):
+        try:
+            out = subprocess.run(
+                ["scutil", "--get", key], capture_output=True, text=True, timeout=5)
+            if out.returncode != 0:
+                continue
+            # ComputerName may contain spaces/apostrophes ("Jane's MacBook Pro");
+            # normalize to the hostname-safe charset the rest of the id uses.
+            name = re.sub(r"[^A-Za-z0-9-]+", "-", out.stdout.strip().split(".")[0]).strip("-")
+            if name and name.lower() not in _GENERIC_HOSTS:
+                return name
+        except Exception:
+            continue
+    return host or "host"
+
+
 def derived_agent() -> str:
     """The fallback agent id when nothing is declared: the same
     ``claude-code:<host>:<cwd-basename>`` shape the SessionStart hook computes, so
-    the CLI and the hook agree on "who am I" without extra config. Environment
-    best-effort — never raises."""
-    try:
-        host = socket.gethostname().split(".")[0]
-    except Exception:
-        host = "host"
+    the CLI and the hook agree on "who am I" without extra config. Uses a STABLE
+    hostname (see ``_stable_hostname``) so a junk ``gethostname`` does not mint a
+    phantom ``Mac:<dir>`` identity. Environment best-effort — never raises."""
+    host = _stable_hostname()
     repo = os.path.basename(os.getcwd()) or "repo"
     return f"claude-code:{host}:{repo}"
 

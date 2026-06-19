@@ -6,6 +6,22 @@ INPUT="$(cat 2>/dev/null)"
 CWD="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("cwd",""))' 2>/dev/null)"
 [ -z "$CWD" ] && CWD="$PWD"
 HOST="$(hostname -s 2>/dev/null || echo host)"
+# macOS `hostname -s` returns the transient "Mac" when the system HostName is
+# unset, which would mint a phantom claude-code:Mac:<dir> identity that diverges
+# from the Python resolver (identity._stable_hostname). When HOST is generic,
+# fall back to the stable scutil names so this fail-safe id stays in agreement
+# with resolve_agent's derivation. (Only fires for a CLI too old to emit
+# `.agent` in `briefing`; the normal path uses the resolved id above.)
+case "$(printf '%s' "$HOST" | tr 'A-Z' 'a-z')" in
+  ''|mac|localhost|local|localdomain|host)
+    for __fc_k in LocalHostName ComputerName; do
+      __fc_n="$(scutil --get "$__fc_k" 2>/dev/null | sed -e 's/\..*$//' -e 's/[^A-Za-z0-9-][^A-Za-z0-9-]*/-/g' -e 's/^-*//' -e 's/-*$//')"
+      case "$(printf '%s' "$__fc_n" | tr 'A-Z' 'a-z')" in
+        ''|mac|localhost|local|localdomain|host) ;;
+        *) HOST="$__fc_n"; break ;;
+      esac
+    done ;;
+esac
 REPO="$(basename "$CWD")"
 STALE_HOURS="${FULCRA_COORD_STALE_HOURS:-2}"
 # Resolved at install time (Gap 1) so the hook works under uv-tool / source
