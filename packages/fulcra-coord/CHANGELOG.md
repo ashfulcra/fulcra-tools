@@ -12,6 +12,20 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.9] — 2026-06-19
+
+### Fix: review verdicts no longer silently orphan (#271)
+
+- `_resolve_review_request` now falls back to a **done/abandoned** review
+  request when resolving the verdict's author (preferring an open one if it
+  exists). A reviewer marks the request *done* as they finish and *then* posts
+  the verdict, so by `review-done` time the request is terminal — the old
+  done-skip returned `None`, the verdict was created with **`assignee=None`**,
+  landed in no inbox, and the wake never fired (live repro: PR#270 sat ~12h
+  unhandled). This was the core failure behind "the listener never wakes me on
+  a verdict." `_find_open_review_for_artifact` (routing *new* reviews) still
+  correctly skips terminal requests — unchanged.
+
 ## [0.15.8] — 2026-06-18
 
 ### Annotation writer → public CLI (ClawHub genericization)
