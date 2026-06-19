@@ -1857,6 +1857,46 @@ def test_review_resolves_after_assignee_claims(coord_backend):
     assert routing.is_review_directive(after)
 
 
+def test_review_resolves_author_from_done_request():
+    """Live repro (2026-06-18, PR#270): a reviewer marks the review request
+    DONE as they finish, THEN posts the verdict. _resolve_review_request must
+    still resolve the author from the DONE request — the original skipped
+    done/abandoned, so review-done reported '<unresolved — pass --to>' and
+    created an assignee=None verdict that landed in NOBODY's inbox (the wake
+    never fired; the #270 verdict sat ~12h unhandled)."""
+    from unittest.mock import patch
+    from fulcra_coord import routing, routing_ops
+
+    done_req = {
+        "id": "TASK-review-270", "title": "Review .../pull/270",
+        "status": "done", "owner_agent": "author:hostA:repo",
+        "pr": "270", "tags": [routing.REVIEW_TAG],
+        "updated_at": "2026-06-18T01:00:00Z",
+    }
+    with patch.object(routing_ops, "_load_all_tasks", return_value=[done_req]):
+        got = routing_ops._resolve_review_request("270", backend=None)
+    assert got is not None, (
+        "done review request must still resolve the author — else the verdict "
+        "is orphaned (assignee=None) and never reaches the author's inbox")
+    assert got["owner_agent"] == "author:hostA:repo"
+
+
+def test_review_prefers_open_over_done_request():
+    """When BOTH an open and a stale done review exist for one artifact, prefer
+    the OPEN one (a re-review supersedes the closed round)."""
+    from unittest.mock import patch
+    from fulcra_coord import routing, routing_ops
+    done_req = {"id": "old", "status": "done", "owner_agent": "stale:h:r",
+                "pr": "9", "tags": [routing.REVIEW_TAG],
+                "updated_at": "2026-06-01T00:00:00Z"}
+    open_req = {"id": "new", "status": "active", "owner_agent": "fresh:h:r",
+                "pr": "9", "tags": [routing.REVIEW_TAG],
+                "updated_at": "2026-06-18T00:00:00Z"}
+    with patch.object(routing_ops, "_load_all_tasks", return_value=[done_req, open_req]):
+        got = routing_ops._resolve_review_request("9", backend=None)
+    assert got["id"] == "new" and got["owner_agent"] == "fresh:h:r"
+
+
 # ---------------------------------------------------------------------------
 # Transition table completeness
 # ---------------------------------------------------------------------------

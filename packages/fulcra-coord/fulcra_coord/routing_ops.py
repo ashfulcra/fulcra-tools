@@ -547,7 +547,9 @@ REVIEW_VERDICT_TAG = "kind:review-verdict"
 
 
 def _resolve_review_request(artifact: str, *, backend=None) -> Optional[dict[str, Any]]:
-    """Find the open kind:review task for this artifact, or None.
+    """Resolve the kind:review request for this artifact (to recover its
+    author), preferring an OPEN one but FALLING BACK to a done/abandoned one;
+    or None.
 
     request-review records the author as ``owner_agent`` on the routed
     kind:review directive and stores the opaque artifact ref verbatim in
@@ -555,23 +557,45 @@ def _resolve_review_request(artifact: str, *, backend=None) -> Optional[dict[str
     ``str(t["pr"]) == str(artifact)`` — never on a substring of the directive
     title. Title-substring matching was a confident-misroute hazard: it sent
     `review-done 10`'s verdict to the author of a `Review #101 …` directive
-    (and `feat/x` to `feat/xyz`), which is worse than a clean error. Returns
-    None when no exact match exists — the caller then requires --to rather than
-    guess. Best-effort: a load failure resolves to None (caller falls back to
-    --to)."""
+    (and `feat/x` to `feat/xyz`), which is worse than a clean error.
+
+    The author is needed AFTER the review finishes (the reviewer posts the
+    verdict), and a reviewer marks the request DONE as they finish — so by
+    verdict time the request is typically terminal. Excluding done/abandoned
+    requests here orphaned the verdict (assignee=None), so it reached no inbox
+    and the wake never fired (PR#270, 2026-06-18 — sat ~12h). We therefore
+    prefer an open match (a re-review supersedes a closed round) but fall back
+    to the most-recent terminal one. Returns None only when no request matches
+    — the caller then requires --to. Best-effort: a load failure resolves to
+    None."""
     try:
         tasks = _load_all_tasks(backend=backend)
     except Exception:  # noqa: BLE001 — never crash the verdict path on a load error
         return None
     target = str(artifact)
+    open_match = None
+    terminal: list[dict[str, Any]] = []
     for t in tasks:
         if not routing.is_review_directive(t):
             continue
-        if t.get("status") in ("done", "abandoned"):
-            continue
         if str(t.get("pr")) != target:  # EXACT stored-ref match, no substrings
             continue
-        return t
+        if t.get("status") in ("done", "abandoned"):
+            terminal.append(t)
+        elif open_match is None:
+            open_match = t
+    # Prefer an OPEN request (a re-review supersedes a closed round). But FALL
+    # BACK to a done/abandoned one — the author (owner_agent) is recorded on the
+    # request regardless of status, and a reviewer marks the request DONE as
+    # they finish, so by the time `review-done` runs it is typically done.
+    # Excluding terminal requests orphaned the verdict (assignee=None) so it
+    # reached no inbox and the wake never fired (live repro: PR#270, 2026-06-18,
+    # the verdict sat ~12h). Most-recent terminal wins if several exist.
+    if open_match is not None:
+        return open_match
+    if terminal:
+        return max(terminal,
+                   key=lambda t: t.get("updated_at") or t.get("created_at") or "")
     return None
 
 
