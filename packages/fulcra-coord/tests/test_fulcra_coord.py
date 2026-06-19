@@ -9048,14 +9048,14 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_8(self):
-        # 0.15.8: CLI genericization — the annotation writer resolves tags +
-        # definitions through the public `fulcra` CLI (`tag`, `data-type`,
-        # `catalog`) instead of raw REST; records remain ingest-only over
-        # stdlib urllib (no record-write CLI verb yet); doctor checks tag +
-        # data-type capability; ClawHub-ready packaging docs.
+    def test_version_is_0_15_9(self):
+        # 0.15.9: fix review verdicts silently orphaning — _resolve_review_request
+        # now falls back to a DONE/abandoned review request for verdict author
+        # resolution (a reviewer marks the request done before posting), so the
+        # verdict gets an assignee, reaches the author's inbox, and the wake
+        # fires. Before this, verdicts with assignee=None vanished (#270).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.8")
+        self.assertEqual(__version__, "0.15.9")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
