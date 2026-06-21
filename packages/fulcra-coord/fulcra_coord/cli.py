@@ -106,6 +106,7 @@ from .routing_ops import (
     cmd_review_done,
     _reroute_minutes, _reroute_max, _accepted_stall_hours,
     _review_accepted_by_assignee, _classify_review, _sweep_review_routes,
+    _adopt_orphaned_verdicts,
 )
 # Coordination-loop return leg (spec 2026-06-09). Re-exported so the `respond`
 # command dispatch (entry.py) resolves through the same _cli.cmd_* convention as
@@ -2309,6 +2310,24 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         try:
             _sweep_review_routes(all_tasks, backend=backend, now=now,
                                  deadline=deadline, presence=presence_agents)
+        except Exception:
+            pass
+
+    # Author-side orphaned-verdict self-heal (best-effort; never fails a tick).
+    # Recovers review-verdict directives a stale reviewer CLI wrote with
+    # assignee=None — orphans that reach no inbox and that the undelivered-
+    # directive net skips (it needs a concrete assignee), so the wake never
+    # fires (live: PR#273, 2026-06-21). Unlike the liveness sweep above this is
+    # presence-INDEPENDENT — it re-resolves the author deterministically from
+    # the review request — so it runs even when the roster is unknowable.
+    if _deadline_spent("Verdict-adopt sweep", headroom=5.0):
+        pass
+    else:
+        try:
+            adopted = _adopt_orphaned_verdicts(all_tasks, backend=backend)
+            if adopted:
+                _info(f"  Adopted {adopted} orphaned review-verdict(s) to "
+                      f"their author's inbox.")
         except Exception:
             pass
 

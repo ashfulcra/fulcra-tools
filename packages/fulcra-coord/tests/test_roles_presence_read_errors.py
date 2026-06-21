@@ -343,6 +343,31 @@ def test_f5_reconcile_tick_skips_review_sweep_on_unknown_presence(
         "the review sweep ran on a tick whose presence roster is unknown"
 
 
+def test_reconcile_runs_verdict_adopt_even_on_unknown_presence(
+        coord_backend, monkeypatch, tmp_path):
+    """The orphaned-verdict self-heal is presence-INDEPENDENT: it re-resolves the
+    author deterministically from the review request, so it must run every tick —
+    INCLUDING one whose roster is unknowable, where the liveness sweep is skipped.
+    This is what lets a stale-reviewer orphan (assignee=None) get recovered even
+    when the bus is mid-incident."""
+    rec_a, _ = _seed_presence(coord_backend, "agent-a")
+    rec_b, path_b = _seed_presence(coord_backend, "agent-b")
+    view_path = remote.presence_view_path()
+    assert remote.upload_json(views.build_presence([rec_a, rec_b]), view_path,
+                              backend=coord_backend)
+    _patch_download_none_for(monkeypatch,
+                             lambda p: p in (path_b, view_path))
+
+    with mock.patch("fulcra_coord.cli._sweep_review_routes") as sweep, \
+         mock.patch("fulcra_coord.cli._adopt_orphaned_verdicts",
+                    return_value=0) as adopt:
+        rc = cli.cmd_reconcile(types.SimpleNamespace(), backend=coord_backend)
+    assert rc == 0
+    assert not sweep.called, "liveness sweep must skip on unknown presence"
+    assert adopt.called, \
+        "the orphaned-verdict self-heal must STILL run on unknown presence"
+
+
 def test_f5_reconcile_tick_threads_previous_aggregate_on_partial_read(
         coord_backend, monkeypatch, tmp_path):
     """Partial per-agent read but the previous aggregate IS readable: the

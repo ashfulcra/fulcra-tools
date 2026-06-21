@@ -925,3 +925,82 @@ def _sweep_review_routes(all_tasks, *, backend=None, now=None, deadline=None,
     if deferred:
         _info(f"  Review sweep deferred {deferred} directive(s) "
               f"(deadline budget spent — drains next tick).")
+
+
+def _adopt_orphaned_verdicts(all_tasks, *, backend=None) -> int:
+    """Author-side self-heal for review-verdict directives orphaned with an
+    unresolvable assignee. Returns the count adopted.
+
+    THE BUG THIS REPAIRS (live: PR#273, 2026-06-21): a reviewer whose CLI
+    predates the author-resolution / its terminal-request fallback runs
+    ``review-done`` and its ``_resolve_review_request`` returns None, so the
+    verdict is written with ``assignee=None``. That orphan reaches NO inbox, and
+    ``_undelivered_directive_check`` SKIPS it (that net requires a CONCRETE
+    assignee) — so it falls through every safety net and the author's wake never
+    fires. Fixing the resolver (#270/#271) only helps the reviewer that RAN the
+    fix; in a mixed-version fleet any stale reviewer re-orphans verdicts. The
+    durable fix is author-side: recover the orphan from the author's own
+    reconcile, which always runs current code.
+
+    For each ``kind:review-verdict`` task with no routable assignee (empty / a
+    bare ``*`` broadcast / a role audience — none of which is a concrete author
+    inbox) and not yet terminal, re-resolve the author from the original review
+    request (``pr -> owner_agent``, the same match ``_resolve_review_request``
+    uses) and adopt it: set ``assignee`` + append a routed event so it lands in
+    the true author's inbox and the next notify-inbox tick can wake them.
+
+    Deterministic + idempotent: the assignee is set to the REQUEST's recorded
+    author regardless of which host runs this, so concurrent fleet reconciles
+    converge on the same result (Files has no CAS); a re-read guards against
+    clobbering a meanwhile-delivered verdict, and once adopted the verdict has a
+    concrete assignee so the next pass skips it. NEVER guesses: an orphan whose
+    request can't be found is left untouched. Best-effort: a per-task failure is
+    skipped, never raised into the reconcile tick."""
+    from . import routing, views
+    adopted = 0
+    for task in all_tasks:
+        try:
+            if REVIEW_VERDICT_TAG not in (task.get("tags") or []):
+                continue
+            if task.get("status") in ("done", "abandoned"):
+                continue
+            # Already routable? A concrete agent inbox (not empty, not the '*'
+            # broadcast, not a role audience that resolves at read time) means it
+            # was delivered or adopted already — leave it alone (idempotent).
+            assignee = task.get("assignee")
+            if assignee and assignee != "*" and not views.is_role_audience(assignee):
+                continue
+            artifact = task.get("pr")
+            if artifact in (None, ""):
+                continue
+            request = _resolve_review_request(str(artifact), backend=backend)
+            author = (request or {}).get("owner_agent")
+            if not author or author == assignee:
+                continue  # never guess; nothing to do if it already points there
+            # Re-read to avoid clobbering a verdict another sweeper / a delivery
+            # just gave a concrete assignee (multi-sweeper convergence sans CAS).
+            fresh = _cache_remote_task(task["id"], backend=backend)
+            if fresh is None:
+                continue
+            fresh_assignee = fresh.get("assignee")
+            if (fresh_assignee and fresh_assignee != "*"
+                    and not views.is_role_audience(fresh_assignee)):
+                continue
+            updated = _append_route_event_and_assignee(
+                fresh, kind="routed", to=author, by="reconcile:verdict-adopt",
+                attempt=1, reason="orphaned-verdict author recovery",
+                candidate_snapshot=[{"agent": author}],
+                observed_updated_at=fresh.get("updated_at", ""))
+            try:
+                if _write_task_and_views(updated, backend=backend,
+                                         command="adopt-verdict"):
+                    _mirror_route_to_directive_sublog(updated, backend=backend)
+                    adopted += 1
+            except schema.NeedsReconcile:
+                _mirror_route_to_directive_sublog(updated, backend=backend)
+                adopted += 1
+            except schema.ConflictError:
+                pass  # optimistic write; reconverges next cycle
+        except Exception:
+            continue  # one bad task must never break the reconcile tick
+    return adopted
