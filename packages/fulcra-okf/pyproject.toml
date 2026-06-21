@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fulcra-okf"
+version = "0.1.0"
+description = "Canonical Python library for Google's Open Knowledge Format (OKF) v0.1: parse, validate, emit."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=6"]
+dev = ["pytest>=7.4,<8", "PyYAML>=6"]
+
+[project.scripts]
+fulcra-okf = "fulcra_okf.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fulcra_okf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
