@@ -1,4 +1,5 @@
 import pytest
+import fulcra_okf.frontmatter as fm
 from fulcra_okf.frontmatter import parse, dump, FrontmatterError
 
 
@@ -27,7 +28,8 @@ def test_parse_missing_close_raises():
         parse("---\ntype: X\nno closing fence\n")
 
 
-def test_flat_backend_rejects_nested_map():
+def test_flat_backend_rejects_nested_map(monkeypatch):
+    monkeypatch.setattr(fm, "BACKEND", "flat")
     with pytest.raises(FrontmatterError):
         parse("---\ntype: X\nmeta:\n  nested: 1\n---\nbody\n")
 

@@ -12,6 +12,13 @@ from typing import Any
 
 from . import OKFError
 
+try:  # full-fidelity backend when available
+    import yaml  # type: ignore
+    BACKEND = "pyyaml"
+except ImportError:  # stdlib-only fallback
+    yaml = None  # type: ignore
+    BACKEND = "flat"
+
 KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 SCALAR_TYPES = (str, int, float, bool)
 
@@ -21,7 +28,7 @@ class FrontmatterError(OKFError, ValueError):
 
 
 def parse(text: str) -> tuple[dict[str, Any], str]:
-    """Return ``(frontmatter, body)`` for markdown text. Flat backend (Task 2)."""
+    """Return ``(frontmatter, body)`` for markdown text, using the active BACKEND."""
     if not text.startswith("---\n"):
         return {}, text
     close = text.find("\n---\n", 4)
@@ -29,11 +36,15 @@ def parse(text: str) -> tuple[dict[str, Any], str]:
         raise FrontmatterError("frontmatter is missing closing ---")
     raw = text[4:close]
     body = text[close + len("\n---\n"):]
+    if BACKEND == "pyyaml":
+        return _yaml_parse(raw), body
     return _flat_parse(raw), body
 
 
 def dump(mapping: dict[str, Any]) -> str:
-    """Emit a frontmatter block body (without fences). Flat backend (Task 2)."""
+    """Emit a frontmatter block body (without fences), using the active BACKEND."""
+    if BACKEND == "pyyaml" and _has_nested(mapping):
+        return _yaml_dump(mapping)
     return _flat_dump(mapping)
 
 
@@ -160,3 +171,28 @@ def _validate_value(value: Any, *, key: str) -> None:
         return
     if not isinstance(value, SCALAR_TYPES) or value is None:
         raise FrontmatterError(f"{key} has unsupported frontmatter value")
+
+
+def _yaml_parse(raw: str) -> dict[str, Any]:
+    try:
+        loaded = yaml.safe_load(raw) if raw.strip() else {}
+    except yaml.YAMLError as e:  # type: ignore[union-attr]
+        raise FrontmatterError(f"invalid YAML frontmatter: {e}") from e
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise FrontmatterError("frontmatter must be a mapping")
+    return loaded
+
+
+def _yaml_dump(mapping: dict[str, Any]) -> str:
+    return yaml.safe_dump(mapping, sort_keys=False, default_flow_style=False)  # type: ignore[union-attr]
+
+
+def _has_nested(mapping: dict[str, Any]) -> bool:
+    for value in mapping.values():
+        if isinstance(value, dict):
+            return True
+        if isinstance(value, list) and any(isinstance(v, (dict, list)) for v in value):
+            return True
+    return False
