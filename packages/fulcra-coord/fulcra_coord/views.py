@@ -1372,6 +1372,11 @@ def build_search_index(tasks: list[dict[str, Any]], updated_at: Optional[str] = 
             "priority": t.get("priority", ""),
             "workstream": t.get("workstream", ""),
             "owner_agent": t.get("owner_agent", ""),
+            # assignee + pr were omitted, so `fulcra-coord search` reported both as
+            # None for every task — which misread properly-assigned review verdicts
+            # as orphaned (assignee=None). Carry them so search is diagnosable.
+            "assignee": t.get("assignee"),
+            "pr": t.get("pr"),
             "tags": t.get("tags", []),
             "summary": t.get("current_summary", ""),
             "task_file": task_file_path(t.get("id", "")),
