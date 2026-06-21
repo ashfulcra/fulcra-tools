@@ -3360,6 +3360,37 @@ class TestHookScriptsE2E(unittest.TestCase):
         self.assertIn("TASK-live", r.stdout)
         self.assertIn("additionalContext", r.stdout)
 
+    def test_session_start_fallback_host_prefers_stable_scutil_over_generic_mac(self):
+        # The shell fallback id (`claude-code:${HOST}:${REPO}`, used when an old
+        # CLI emits no `.agent`) must NOT derive HOST from a generic `hostname -s`
+        # ("Mac" on a macOS box with HostName unset) — that mints a phantom
+        # claude-code:Mac:<dir> identity diverging from the Python resolver
+        # (identity._stable_hostname). Inject a generic `hostname` and a stable
+        # `scutil`; a task owned by claude-code:<stable>:<repo> must read as MINE
+        # (surfaced as in-flight work), which only happens if HOST resolved to the
+        # scutil name rather than "Mac".
+        fake_hostname = os.path.join(self.bin, "hostname")
+        with open(fake_hostname, "w") as f:
+            f.write("#!/usr/bin/env bash\necho Mac\n")
+        os.chmod(fake_hostname, 0o755)
+        fake_scutil = os.path.join(self.bin, "scutil")
+        with open(fake_scutil, "w") as f:
+            f.write('#!/usr/bin/env bash\n'
+                    'if [ "$1" = "--get" ] && [ "$2" = "LocalHostName" ]; then '
+                    'echo "Stable-Box"; exit 0; fi\necho ""; exit 0\n')
+        os.chmod(fake_scutil, 0o755)
+        repo = os.path.basename(self.tmp)
+        sj = json.dumps({"active": [
+            {"id": "TASK-live", "title": "Deploy", "status": "active",
+             "owner_agent": "claude-code:Stable-Box:%s" % repo,
+             "updated_at": "2026-06-01T00:00:00Z", "next_action": "do X"}]})
+        r = self._run("session-start.sh", json.dumps({"cwd": self.tmp}), sj)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("TASK-live", r.stdout)
+        self.assertIn("additionalContext", r.stdout)
+        # The phantom-host id must never appear: HOST resolved to the stable name.
+        self.assertNotIn("claude-code:Mac:", r.stdout)
+
     def test_session_start_silent_on_clean_bus(self):
         r = self._run("session-start.sh", json.dumps({"cwd": self.tmp}),
                       json.dumps({"active": []}))
@@ -7694,6 +7725,45 @@ class TestResolveAgent(unittest.TestCase):
         me = identity.resolve_agent()
         self.assertTrue(me.startswith("claude-code:"))
         self.assertEqual(len(me.split(":")), 3)
+
+    def test_derived_agent_stable_host_when_gethostname_is_generic(self):
+        # macOS with HostName unset: gethostname() -> 'Mac.localdomain' -> 'Mac'.
+        # Deriving from that spawned phantom 'claude-code:Mac:<dir>' agents that
+        # self-contended the coord-maintainer lease (2026-06-19 incident).
+        # derived_agent must fall back to a stable source, not the generic 'Mac'.
+        import types
+        from unittest.mock import patch
+        from fulcra_coord import identity
+
+        def fake_scutil(args, **kw):
+            assert args[:2] == ["scutil", "--get"]
+            return types.SimpleNamespace(
+                returncode=0, stdout="Workbook-Pro\n", stderr="")
+
+        with patch.object(identity.socket, "gethostname", return_value="Mac.localdomain"), \
+             patch.object(identity.subprocess, "run", side_effect=fake_scutil), \
+             patch.object(identity.os, "getcwd", return_value="/x/proj"):
+            me = identity.derived_agent()
+        self.assertEqual(me, "claude-code:Workbook-Pro:proj")
+        self.assertNotIn(":Mac:", me)  # the phantom host is gone
+
+    def test_derived_agent_keeps_real_gethostname_without_scutil(self):
+        from unittest.mock import patch
+        from fulcra_coord import identity
+        with patch.object(identity.socket, "gethostname", return_value="realbox.local"), \
+             patch.object(identity.subprocess, "run",
+                          side_effect=AssertionError("scutil must not run for a real hostname")), \
+             patch.object(identity.os, "getcwd", return_value="/x/proj"):
+            self.assertEqual(identity.derived_agent(), "claude-code:realbox:proj")
+
+    def test_derived_agent_never_raises_when_all_host_sources_fail(self):
+        from unittest.mock import patch
+        from fulcra_coord import identity
+        with patch.object(identity.socket, "gethostname", side_effect=OSError), \
+             patch.object(identity.subprocess, "run", side_effect=OSError), \
+             patch.object(identity.os, "getcwd", return_value="/x/proj"):
+            me = identity.derived_agent()
+        self.assertTrue(me.startswith("claude-code:") and me.endswith(":proj"))
 
     def test_persisted_then_reused(self):
         from fulcra_coord import identity
