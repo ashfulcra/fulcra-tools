@@ -12,6 +12,32 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.10] — 2026-06-21
+
+### Fix: stable hostname stops phantom `claude-code:Mac:<dir>` identities (#273)
+
+- Both identity sources derived the agent host from a generic-hostname API. On
+  macOS with the system `HostName` unset, `socket.gethostname()` returns the
+  transient `Mac.localdomain` → `Mac`, and the SessionStart hook's shell
+  fallback used `hostname -s` → `Mac`. `derived_agent()` therefore minted
+  phantom `claude-code:Mac:<cwd>` agents that diverged from the machine's real
+  per-cwd identity, self-contended an exclusive role's lease, and split
+  inbox/wake delivery. `identity._stable_hostname()` now falls back to
+  `scutil --get LocalHostName`/`ComputerName` when `gethostname` is generic; the
+  hook shell fallback got the same guard. Best-effort, never raises.
+
+### Fix: author-side self-heal for orphaned review verdicts (#274)
+
+- Verdict author-resolution ran **only on the reviewer's host at write time**, so
+  a reviewer on a CLI predating the #271 fix re-orphaned verdicts with
+  `assignee=None` — invisible to every safety net (the undelivered-directive
+  check requires a concrete assignee). `reconcile` now runs
+  `_adopt_orphaned_verdicts`: it re-resolves the author from the original review
+  request (`pr → owner_agent`) and adopts the orphan into that inbox.
+  Deterministic + idempotent (fleet reconciles converge), presence-independent
+  (runs even when the roster is unknowable), never guesses. This makes verdict
+  delivery robust to mixed-version fleets, not just the host that ran the fix.
+
 ## [0.15.9] — 2026-06-19
 
 ### Fix: review verdicts no longer silently orphan (#271)
