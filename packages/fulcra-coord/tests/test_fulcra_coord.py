@@ -1905,9 +1905,10 @@ def test_orphaned_verdict_adopted_to_resolved_author():
     a concrete assignee), so it falls through every net and the wake never fires.
 
     The author's CURRENT reconcile must adopt it: re-resolve the author from the
-    original review request (pr -> owner_agent) and set assignee, so it lands in
-    the right inbox. Deterministic — assignee is the request's recorded author
-    regardless of which host runs this — so concurrent fleet reconciles converge."""
+    original review request (pr -> owner_agent) — IN-MEMORY from the task set it
+    already holds — and set assignee, so it lands in the right inbox.
+    Deterministic — assignee is the request's recorded author regardless of which
+    host runs this — so concurrent fleet reconciles converge."""
     from unittest.mock import patch
     from fulcra_coord import routing, routing_ops
 
@@ -1919,32 +1920,56 @@ def test_orphaned_verdict_adopted_to_resolved_author():
                "tags": [routing_ops.REVIEW_VERDICT_TAG, "kind:ops"],
                "updated_at": "2026-06-21T15:39:00Z"}
     written = []
-    with patch.object(routing_ops, "_resolve_review_request", return_value=request), \
-         patch.object(routing_ops, "_cache_remote_task",
+    with patch.object(routing_ops, "_cache_remote_task",
                       side_effect=lambda *a, **k: dict(verdict)), \
          patch.object(routing_ops, "_write_task_and_views",
                       side_effect=lambda t, **k: (written.append(t), True)[1]):
-        n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
+        # The request is present IN the passed task set — resolution is in-memory.
+        n = routing_ops._adopt_orphaned_verdicts([verdict, request], backend=None)
     assert n == 1, "the orphaned verdict must be adopted"
     assert written and written[0]["assignee"] == "author:hostA:repo", (
         "verdict assignee must be set to the review request's author so it "
         "lands in that inbox")
 
 
+def test_adopt_resolves_author_without_reloading_the_bus():
+    """The reserved-budget fix: the self-heal must resolve the author from the
+    IN-MEMORY task set it is handed, NOT a per-orphan _load_all_tasks reload —
+    that O(orphans x tasks) reload starved the pass at ~1000 tasks so it never
+    ran live (PR#275 verdict surfaced only via the audience fold). Here a bus
+    reload would RAISE; the adoption must still succeed."""
+    from unittest.mock import patch
+    from fulcra_coord import routing, routing_ops
+
+    request = {"id": "rq", "status": "done", "owner_agent": "author:hostA:repo",
+               "pr": "300", "tags": [routing.REVIEW_TAG],
+               "updated_at": "2026-06-21T00:00:00Z"}
+    verdict = {"id": "vd", "status": "proposed", "assignee": None, "pr": "300",
+               "tags": [routing_ops.REVIEW_VERDICT_TAG]}
+    written = []
+    with patch.object(routing_ops, "_load_all_tasks",
+                      side_effect=AssertionError("must not reload the bus")), \
+         patch.object(routing_ops, "_cache_remote_task",
+                      side_effect=lambda *a, **k: dict(verdict)), \
+         patch.object(routing_ops, "_write_task_and_views",
+                      side_effect=lambda t, **k: (written.append(t), True)[1]):
+        n = routing_ops._adopt_orphaned_verdicts([verdict, request], backend=None)
+    assert n == 1
+    assert written[0]["assignee"] == "author:hostA:repo"
+
+
 def test_verdict_with_concrete_assignee_is_not_touched():
     """Idempotence + no-clobber: a verdict that already has a concrete assignee
-    (already delivered, or adopted on a prior pass) is left alone — no re-resolve,
-    no write. This is what makes the pass safe to run every reconcile tick."""
+    (already delivered, or adopted on a prior pass) is left alone — no write. This
+    is what makes the pass safe to run every reconcile tick."""
     from unittest.mock import patch
     from fulcra_coord import routing_ops
     verdict = {"id": "v1", "status": "proposed", "assignee": "author:hostA:repo",
                "pr": "273", "tags": [routing_ops.REVIEW_VERDICT_TAG]}
-    with patch.object(routing_ops, "_write_task_and_views") as w, \
-         patch.object(routing_ops, "_resolve_review_request") as r:
+    with patch.object(routing_ops, "_write_task_and_views") as w:
         n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
     assert n == 0
     w.assert_not_called()
-    r.assert_not_called()
 
 
 def test_orphaned_verdict_with_no_matching_request_left_alone():
@@ -1954,8 +1979,8 @@ def test_orphaned_verdict_with_no_matching_request_left_alone():
     from fulcra_coord import routing_ops
     verdict = {"id": "v2", "status": "proposed", "assignee": None, "pr": "999",
                "tags": [routing_ops.REVIEW_VERDICT_TAG]}
-    with patch.object(routing_ops, "_resolve_review_request", return_value=None), \
-         patch.object(routing_ops, "_write_task_and_views") as w:
+    with patch.object(routing_ops, "_write_task_and_views") as w:
+        # No matching kind:review request in the task set -> no author -> no-op.
         n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
     assert n == 0
     w.assert_not_called()
@@ -1965,14 +1990,14 @@ def test_done_verdict_is_not_re_adopted():
     """A verdict already acted on (done/abandoned) is terminal — never re-home it
     even if its assignee field is empty."""
     from unittest.mock import patch
-    from fulcra_coord import routing_ops
+    from fulcra_coord import routing, routing_ops
+    request = {"id": "rq", "status": "done", "owner_agent": "author:hostA:repo",
+               "pr": "273", "tags": [routing.REVIEW_TAG]}
     verdict = {"id": "v3", "status": "done", "assignee": None, "pr": "273",
                "tags": [routing_ops.REVIEW_VERDICT_TAG]}
-    with patch.object(routing_ops, "_resolve_review_request") as r, \
-         patch.object(routing_ops, "_write_task_and_views") as w:
-        n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
+    with patch.object(routing_ops, "_write_task_and_views") as w:
+        n = routing_ops._adopt_orphaned_verdicts([verdict, request], backend=None)
     assert n == 0
-    r.assert_not_called()
     w.assert_not_called()
 
 
@@ -9197,14 +9222,15 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_9(self):
-        # 0.15.9: fix review verdicts silently orphaning — _resolve_review_request
-        # now falls back to a DONE/abandoned review request for verdict author
-        # resolution (a reviewer marks the request done before posting), so the
-        # verdict gets an assignee, reaches the author's inbox, and the wake
-        # fires. Before this, verdicts with assignee=None vanished (#270).
+    def test_version_is_0_15_11(self):
+        # 0.15.11: make the orphaned-verdict self-heal actually run at scale —
+        # _adopt_orphaned_verdicts now runs in reconcile's RESERVED (critical)
+        # budget and resolves the author IN-MEMORY, so it is not starved by the
+        # core view-refresh at ~1000 tasks (in 0.15.10 it was skipped every tick).
+        # 0.15.10: stable-hostname identity fix (#273) + the self-heal's first cut
+        # (#274). 0.15.9: the resolver fix itself (#271).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.9")
+        self.assertEqual(__version__, "0.15.11")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):

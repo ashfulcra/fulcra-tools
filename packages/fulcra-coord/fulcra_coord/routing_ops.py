@@ -572,6 +572,20 @@ def _resolve_review_request(artifact: str, *, backend=None) -> Optional[dict[str
         tasks = _load_all_tasks(backend=backend)
     except Exception:  # noqa: BLE001 — never crash the verdict path on a load error
         return None
+    return _pick_review_request(tasks, artifact)
+
+
+def _pick_review_request(tasks: list[dict[str, Any]],
+                         artifact: Any) -> Optional[dict[str, Any]]:
+    """Pure matcher: the kind:review request for ``artifact`` from an
+    already-loaded ``tasks`` list — preferring an OPEN one, else the most-recent
+    terminal one; None if none match. Match is on the EXACT stored ``pr`` ref,
+    never a title substring (see ``_resolve_review_request``).
+
+    Split out so callers that ALREADY hold the full task set (the reconcile
+    orphaned-verdict self-heal) resolve the author in-memory instead of paying a
+    fresh ``_load_all_tasks`` per lookup — at ~1000 tasks that per-orphan reload
+    is what starved the self-heal's reserved budget."""
     target = str(artifact)
     open_match = None
     terminal: list[dict[str, Any]] = []
@@ -584,13 +598,6 @@ def _resolve_review_request(artifact: str, *, backend=None) -> Optional[dict[str
             terminal.append(t)
         elif open_match is None:
             open_match = t
-    # Prefer an OPEN request (a re-review supersedes a closed round). But FALL
-    # BACK to a done/abandoned one — the author (owner_agent) is recorded on the
-    # request regardless of status, and a reviewer marks the request DONE as
-    # they finish, so by the time `review-done` runs it is typically done.
-    # Excluding terminal requests orphaned the verdict (assignee=None) so it
-    # reached no inbox and the wake never fired (live repro: PR#270, 2026-06-18,
-    # the verdict sat ~12h). Most-recent terminal wins if several exist.
     if open_match is not None:
         return open_match
     if terminal:
@@ -956,7 +963,7 @@ def _adopt_orphaned_verdicts(all_tasks, *, backend=None) -> int:
     concrete assignee so the next pass skips it. NEVER guesses: an orphan whose
     request can't be found is left untouched. Best-effort: a per-task failure is
     skipped, never raised into the reconcile tick."""
-    from . import routing, views
+    from . import views
     adopted = 0
     for task in all_tasks:
         try:
@@ -973,7 +980,10 @@ def _adopt_orphaned_verdicts(all_tasks, *, backend=None) -> int:
             artifact = task.get("pr")
             if artifact in (None, ""):
                 continue
-            request = _resolve_review_request(str(artifact), backend=backend)
+            # Resolve the author from the IN-MEMORY task set (no per-orphan
+            # _load_all_tasks reload — that O(orphans x tasks) cost starved this
+            # pass's reserved budget at ~1000 tasks and it never ran live).
+            request = _pick_review_request(all_tasks, artifact)
             author = (request or {}).get("owner_agent")
             if not author or author == assignee:
                 continue  # never guess; nothing to do if it already points there

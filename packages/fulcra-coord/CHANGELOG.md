@@ -12,6 +12,23 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.11] — 2026-06-21
+
+### Fix: orphaned-verdict self-heal now actually runs at scale
+
+- The #274 self-heal (`_adopt_orphaned_verdicts`) was gated on reconcile's
+  **core** deadline and placed after the view refresh, so at ~1000 tasks the
+  core budget was already spent and the pass was **skipped every tick** —
+  "Verdict-adopt sweep skipped (reconcile deadline budget spent)" — and it never
+  recovered an orphan live. It also called `_resolve_review_request` per orphan,
+  each a fresh `_load_all_tasks` (O(orphans × tasks)).
+- Now it runs in reconcile's **reserved (critical) budget** beside the
+  undelivered-directive check (both are delivery-correctness, both presence-
+  independent), and resolves the author **in-memory** from the task set reconcile
+  already holds (new pure `_pick_review_request`). It is placed just before the
+  undelivered check so a just-adopted verdict to an offline author is then
+  surfaced by it.
+
 ## [0.15.10] — 2026-06-21
 
 ### Fix: stable hostname stops phantom `claude-code:Mac:<dir>` identities (#273)

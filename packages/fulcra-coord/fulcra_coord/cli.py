@@ -2313,24 +2313,6 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
-    # Author-side orphaned-verdict self-heal (best-effort; never fails a tick).
-    # Recovers review-verdict directives a stale reviewer CLI wrote with
-    # assignee=None — orphans that reach no inbox and that the undelivered-
-    # directive net skips (it needs a concrete assignee), so the wake never
-    # fires (live: PR#273, 2026-06-21). Unlike the liveness sweep above this is
-    # presence-INDEPENDENT — it re-resolves the author deterministically from
-    # the review request — so it runs even when the roster is unknowable.
-    if _deadline_spent("Verdict-adopt sweep", headroom=5.0):
-        pass
-    else:
-        try:
-            adopted = _adopt_orphaned_verdicts(all_tasks, backend=backend)
-            if adopted:
-                _info(f"  Adopted {adopted} orphaned review-verdict(s) to "
-                      f"their author's inbox.")
-        except Exception:
-            pass
-
     # Retention pass (best-effort, throttled to ~once/day, bounded + time-budgeted
     # against THIS reconcile's deadline so it never double-counts the 90s ceiling).
     # Never raises into the tick; logs its tally.
@@ -2522,6 +2504,34 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         except Exception as _rhe:
             try:
                 _warn(f"  Role-health check skipped (error): {_rhe}")
+            except Exception:
+                pass
+        # Author-side orphaned-verdict self-heal. Recovers review-verdict
+        # directives a stale reviewer CLI wrote with assignee=None — orphans that
+        # reach no inbox and that the undelivered check below SKIPS (it needs a
+        # concrete assignee), so the wake never fires (live: PR#273, 2026-06-21).
+        # Runs on the RESERVED (critical) budget, NOT the core deadline: at ~1000
+        # tasks the core view-refresh exhausts its budget first, and gating this
+        # on it meant the pass was skipped every tick and never ran live. It is
+        # cheap (author resolved in-memory from all_tasks; a write only per actual
+        # orphan, which are rare) and presence-INDEPENDENT (deterministic author
+        # resolution), so it belongs here beside the other delivery-correctness
+        # checks. Placed BEFORE the undelivered check so a just-adopted verdict to
+        # an offline author is then surfaced by it. Best-effort; never raises.
+        try:
+            if _deadline_spent("Verdict-adopt self-heal", headroom=15.0,
+                               against=critical_deadline):
+                raise _SkipBestEffortCheck()
+            adopted = _adopt_orphaned_verdicts(all_tasks, backend=backend)
+            if adopted:
+                _info(f"  Adopted {adopted} orphaned review-verdict(s) to "
+                      f"their author's inbox.")
+                record["verdicts_adopted"] = adopted
+        except _SkipBestEffortCheck:
+            pass
+        except Exception as _ae:
+            try:
+                _warn(f"  Verdict-adopt self-heal skipped (error): {_ae}")
             except Exception:
                 pass
         # SAFETY NET: directives addressed to an OFFLINE/stale agent that were
