@@ -43,7 +43,7 @@ def parse(text: str) -> tuple[dict[str, Any], str]:
 
 def dump(mapping: dict[str, Any]) -> str:
     """Emit a frontmatter block body (without fences), using the active BACKEND."""
-    if BACKEND == "pyyaml" and _has_nested(mapping):
+    if BACKEND == "pyyaml":
         return _yaml_dump(mapping)
     return _flat_dump(mapping)
 
@@ -189,10 +189,3 @@ def _yaml_dump(mapping: dict[str, Any]) -> str:
     return yaml.safe_dump(mapping, sort_keys=False, default_flow_style=False)  # type: ignore[union-attr]
 
 
-def _has_nested(mapping: dict[str, Any]) -> bool:
-    for value in mapping.values():
-        if isinstance(value, dict):
-            return True
-        if isinstance(value, list) and any(isinstance(v, (dict, list)) for v in value):
-            return True
-    return False

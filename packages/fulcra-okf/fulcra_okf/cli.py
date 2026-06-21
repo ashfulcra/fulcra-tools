@@ -6,7 +6,9 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from .bundle import Bundle, RESERVED_NAMES
+import sys
+
+from .bundle import Bundle, RESERVED_NAMES, render_concept
 from .validate import validate
 
 
@@ -73,14 +75,22 @@ def _cmd_fmt(args) -> int:
     src = Path(args.dir)
     bundle = Bundle.load_dir(src, lenient=True)
     changed: list[str] = []
+    errors: list[str] = []
     for concept in bundle.concepts.values():
-        from .bundle import _render_concept
-        rendered = _render_concept(concept)
+        try:
+            rendered = render_concept(concept)
+        except Exception as exc:  # noqa: BLE001
+            rel = concept.id + ".md"
+            print(f"error: {rel}: {exc}", file=sys.stderr)
+            errors.append(rel)
+            continue
         target = src / (concept.id + ".md")
         if target.read_text() != rendered:
             changed.append(concept.id + ".md")
             if not args.check:
                 target.write_text(rendered)
+    if errors:
+        return 1
     if args.check:
         for rel in changed:
             print(f"would reformat: {rel}")

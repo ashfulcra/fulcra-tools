@@ -36,9 +36,7 @@ class Concept:
     def from_text(cls, text: str, concept_id: str) -> "Concept":
         fm, body = parse(text)
         tags = fm.get("tags", [])
-        if isinstance(tags, str):
-            tags = [tags]
-        elif not isinstance(tags, list):
+        if not isinstance(tags, list):
             tags = [tags]
         extra = {k: v for k, v in fm.items() if k not in _KNOWN}
         return cls(

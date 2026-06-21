@@ -30,7 +30,8 @@ class Bundle:
                 continue
             text = md.read_text()
             try:
-                bundle.concepts[concept_id_for(rel)] = Concept.from_text(text, concept_id_for(rel))
+                cid = concept_id_for(rel)
+                bundle.concepts[cid] = Concept.from_text(text, cid)
             except FrontmatterError as e:
                 if lenient:
                     bundle.parse_errors.append((rel, str(e)))
@@ -43,7 +44,7 @@ class Bundle:
         for concept in self.concepts.values():
             target = out / (concept.id + ".md")
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(_render_concept(concept))
+            target.write_text(render_concept(concept))
 
 
 def _read_okf_version(index_md: Path) -> str | None:
@@ -55,7 +56,7 @@ def _read_okf_version(index_md: Path) -> str | None:
     return str(value) if value is not None else None
 
 
-def _render_concept(concept: Concept) -> str:
+def render_concept(concept: Concept) -> str:
     fm: dict[str, Any] = {"type": concept.type}
     for name in ("title", "description", "resource", "timestamp"):
         value = getattr(concept, name)

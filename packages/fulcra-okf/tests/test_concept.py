@@ -42,3 +42,13 @@ def test_links_resolves_relative_and_absolute_targets():
     )
     c = Concept.from_text(text, "tables/orders")
     assert c.links() == ["tables/a", "tables/b"]
+
+
+def test_links_skips_anchors_and_mailto():
+    """M4: #anchor and mailto: targets must be excluded from links()."""
+    text = (
+        "---\ntype: T\n---\n"
+        "See [sec](#section), [mail](mailto:foo@example.com), and [real](other.md).\n"
+    )
+    c = Concept.from_text(text, "x")
+    assert c.links() == ["other"]
