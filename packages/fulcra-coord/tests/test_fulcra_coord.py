@@ -1897,6 +1897,85 @@ def test_review_prefers_open_over_done_request():
     assert got["id"] == "new" and got["owner_agent"] == "fresh:h:r"
 
 
+def test_orphaned_verdict_adopted_to_resolved_author():
+    """Author-side self-heal (2026-06-21, PR#273). A STALE reviewer CLI wrote a
+    review-verdict with assignee=None — its _resolve_review_request predated the
+    done-request fallback, so it couldn't recover the author. The orphan reaches
+    NO inbox AND the undelivered-directive safety net skips it (that net requires
+    a concrete assignee), so it falls through every net and the wake never fires.
+
+    The author's CURRENT reconcile must adopt it: re-resolve the author from the
+    original review request (pr -> owner_agent) and set assignee, so it lands in
+    the right inbox. Deterministic — assignee is the request's recorded author
+    regardless of which host runs this — so concurrent fleet reconciles converge."""
+    from unittest.mock import patch
+    from fulcra_coord import routing, routing_ops
+
+    request = {"id": "TASK-review-273", "status": "done",
+               "owner_agent": "author:hostA:repo", "pr": "273",
+               "tags": [routing.REVIEW_TAG], "updated_at": "2026-06-21T15:35:00Z"}
+    verdict = {"id": "TASK-verdict-273", "status": "proposed",
+               "owner_agent": "reviewer:hostB:repo", "assignee": None, "pr": "273",
+               "tags": [routing_ops.REVIEW_VERDICT_TAG, "kind:ops"],
+               "updated_at": "2026-06-21T15:39:00Z"}
+    written = []
+    with patch.object(routing_ops, "_resolve_review_request", return_value=request), \
+         patch.object(routing_ops, "_cache_remote_task",
+                      side_effect=lambda *a, **k: dict(verdict)), \
+         patch.object(routing_ops, "_write_task_and_views",
+                      side_effect=lambda t, **k: (written.append(t), True)[1]):
+        n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
+    assert n == 1, "the orphaned verdict must be adopted"
+    assert written and written[0]["assignee"] == "author:hostA:repo", (
+        "verdict assignee must be set to the review request's author so it "
+        "lands in that inbox")
+
+
+def test_verdict_with_concrete_assignee_is_not_touched():
+    """Idempotence + no-clobber: a verdict that already has a concrete assignee
+    (already delivered, or adopted on a prior pass) is left alone — no re-resolve,
+    no write. This is what makes the pass safe to run every reconcile tick."""
+    from unittest.mock import patch
+    from fulcra_coord import routing_ops
+    verdict = {"id": "v1", "status": "proposed", "assignee": "author:hostA:repo",
+               "pr": "273", "tags": [routing_ops.REVIEW_VERDICT_TAG]}
+    with patch.object(routing_ops, "_write_task_and_views") as w, \
+         patch.object(routing_ops, "_resolve_review_request") as r:
+        n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
+    assert n == 0
+    w.assert_not_called()
+    r.assert_not_called()
+
+
+def test_orphaned_verdict_with_no_matching_request_left_alone():
+    """Never guess: an orphaned verdict whose review request can't be found stays
+    orphaned (assignee untouched) rather than being mis-assigned to anyone."""
+    from unittest.mock import patch
+    from fulcra_coord import routing_ops
+    verdict = {"id": "v2", "status": "proposed", "assignee": None, "pr": "999",
+               "tags": [routing_ops.REVIEW_VERDICT_TAG]}
+    with patch.object(routing_ops, "_resolve_review_request", return_value=None), \
+         patch.object(routing_ops, "_write_task_and_views") as w:
+        n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
+    assert n == 0
+    w.assert_not_called()
+
+
+def test_done_verdict_is_not_re_adopted():
+    """A verdict already acted on (done/abandoned) is terminal — never re-home it
+    even if its assignee field is empty."""
+    from unittest.mock import patch
+    from fulcra_coord import routing_ops
+    verdict = {"id": "v3", "status": "done", "assignee": None, "pr": "273",
+               "tags": [routing_ops.REVIEW_VERDICT_TAG]}
+    with patch.object(routing_ops, "_resolve_review_request") as r, \
+         patch.object(routing_ops, "_write_task_and_views") as w:
+        n = routing_ops._adopt_orphaned_verdicts([verdict], backend=None)
+    assert n == 0
+    r.assert_not_called()
+    w.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Transition table completeness
 # ---------------------------------------------------------------------------
