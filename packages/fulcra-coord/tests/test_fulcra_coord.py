@@ -433,6 +433,27 @@ class TestBuildSearchIndex(unittest.TestCase):
             self.assertNotEqual(r.get("priority", ""), "",
                                 "priority must not be empty in search-index record")
 
+    def test_assignee_and_pr_preserved_in_search_index(self):
+        """Regression (2026-06-21): the search index MUST carry assignee and pr.
+        Omitting them made `fulcra-coord search` report assignee=None / pr=None
+        for EVERY task — which silently misdiagnosed properly-assigned review
+        verdicts as orphaned (sent a multi-PR self-heal hunt chasing a non-bug).
+        The fields are on the body; the projection dropped them."""
+        tasks = [{
+            "id": "TASK-20260621-rv-00000000",
+            "title": "Review verdict (approve) on PR#275", "status": "proposed",
+            "priority": "P1", "workstream": "ashfulcra/fulcra-tools",
+            "owner_agent": "codex-prefs",
+            "assignee": "claude-code:Ashs-MBP-Work:fulcra-tools", "pr": "PR#275",
+            "tags": ["kind:review-verdict"], "updated_at": "2026-06-21T16:00:00Z",
+        }]
+        rec = build_search_index(tasks)["records"][0]
+        self.assertEqual(rec.get("assignee"),
+                         "claude-code:Ashs-MBP-Work:fulcra-tools",
+                         "search index dropped assignee — search reports None")
+        self.assertEqual(rec.get("pr"), "PR#275",
+                         "search index dropped pr — search reports None")
+
     def test_task_file_uses_remote_root(self):
         tasks = _make_tasks_set()
         idx = build_search_index(tasks)
@@ -5919,6 +5940,18 @@ class TestAssigneeSchema(unittest.TestCase):
         t = make_task(title="Do a thing", workstream="devops", agent="a")
         self.assertIsNone(schema.task_summary(t).get("assignee"))
 
+    def test_task_summary_includes_pr(self):
+        """The review-loop artifact ref (task['pr']) must ride the summary so the
+        search/fallback paths (which read summaries, not bodies) can show it. It
+        was omitted, so `search` reported pr=None for every review task."""
+        t = make_task(title="Review verdict on PR#1", workstream="ws", agent="a")
+        t["pr"] = "PR#1"
+        self.assertEqual(schema.task_summary(t)["pr"], "PR#1")
+
+    def test_task_summary_pr_none_when_absent(self):
+        t = make_task(title="ordinary task", workstream="ws", agent="a")
+        self.assertIsNone(schema.task_summary(t).get("pr"))
+
 
 class TestInboxAckEvent(unittest.TestCase):
     def test_apply_event_appends_inbox_ack_without_status_change(self):
@@ -9222,15 +9255,14 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_11(self):
-        # 0.15.11: make the orphaned-verdict self-heal actually run at scale —
-        # _adopt_orphaned_verdicts now runs in reconcile's RESERVED (critical)
-        # budget and resolves the author IN-MEMORY, so it is not starved by the
-        # core view-refresh at ~1000 tasks (in 0.15.10 it was skipped every tick).
-        # 0.15.10: stable-hostname identity fix (#273) + the self-heal's first cut
-        # (#274). 0.15.9: the resolver fix itself (#271).
+    def test_version_is_0_15_12(self):
+        # 0.15.12: `search` projection now carries assignee + pr (build_search_index
+        # + task_summary). They were omitted, so `fulcra-coord search` reported both
+        # as None for every task — misreading properly-assigned review verdicts as
+        # orphaned. 0.15.11: self-heal runs at scale (reserved budget + in-memory).
+        # 0.15.10: stable-hostname identity fix (#273) + self-heal first cut (#274).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.11")
+        self.assertEqual(__version__, "0.15.12")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):

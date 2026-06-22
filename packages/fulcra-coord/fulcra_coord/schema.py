@@ -1278,6 +1278,12 @@ def task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "current_summary": task.get("current_summary", ""),
         "next_action": task.get("next_action", ""),
         "blocked_on": task.get("blocked_on"),
+        # Review-loop artifact ref. Carried on the summary so the search index
+        # (build_search_index) and the summaries-aggregate search fallback can
+        # surface it; omitting it made `search` report pr=None for review tasks,
+        # which (with assignee) misread assigned verdicts as orphaned. .get so a
+        # non-review/pre-field body summarizes to None, not KeyError.
+        "pr": task.get("pr"),
         # Scheduling fields, read with .get so a pre-feature body summarizes to
         # None rather than KeyError-crashing the view (symmetric with
         # assignee/priority above). These MUST be carried on the summary because

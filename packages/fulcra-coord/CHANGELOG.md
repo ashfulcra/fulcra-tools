@@ -12,6 +12,20 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.12] — 2026-06-21
+
+### Fix: `search` now reports `assignee` and `pr` (was silently always `None`)
+
+- `build_search_index` and `task_summary` omitted the `assignee` and `pr`
+  fields, so `fulcra-coord search` (which reads those projections, never task
+  bodies) reported **`assignee=None` and `pr=None` for every task**. This is a
+  diagnosis-corrupting bug: properly-assigned review verdicts read as orphaned
+  (`assignee=None`), and the review artifact (`pr`) looked absent. It drove a
+  multi-PR "verdict-orphan" investigation against a non-bug — the raw task
+  bodies had the correct assignees all along. Both projections now carry the two
+  fields (best-effort `.get`, so pre-field bodies summarize to `None`, not
+  `KeyError`).
+
 ## [0.15.11] — 2026-06-21
 
 ### Fix: orphaned-verdict self-heal now actually runs at scale
