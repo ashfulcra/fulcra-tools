@@ -287,6 +287,71 @@ class TestMaybeSelfUpdate(_CfgEnvBase):
             self.assertEqual(selfupdate.maybe_self_update(), "update-failed")
         self.assertIn("behind canonical", selfupdate.stale_summary_suffix())
 
+    def test_checkout_divergence_parses_ahead_behind(self):
+        """`git rev-list --left-right --count HEAD...@{u}` -> (ahead, behind)."""
+        with patch("fulcra_coord.selfupdate._run_proc",
+                   return_value=types.SimpleNamespace(returncode=0,
+                                                      stdout="879\t984\n")):
+            self.assertEqual(selfupdate._checkout_divergence("/x"), (879, 984))
+
+    def test_checkout_divergence_none_on_error(self):
+        """A non-zero/garbage probe is undeterminable -> None (never guess)."""
+        with patch("fulcra_coord.selfupdate._run_proc",
+                   return_value=types.SimpleNamespace(returncode=128, stdout="")):
+            self.assertIsNone(selfupdate._checkout_divergence("/x"))
+        with patch("fulcra_coord.selfupdate._run_proc",
+                   side_effect=OSError("git missing")):
+            self.assertIsNone(selfupdate._checkout_divergence("/x"))
+
+    def test_update_failure_on_diverged_checkout_reports_divergence(self):
+        """THE fleet-staleness incident (2026-06-21): a checkout 879 commits
+        ahead of upstream makes `git pull --ff-only` abort EVERY tick — a
+        permanent failure that the generic 'update-failed, see log' hid as
+        retry-able, so the host sat pinned for days minting phantom identities.
+        A failed ff-pull on a diverged checkout must report 'diverged-clone'
+        with a loud, actionable message, not the generic transient failure."""
+        import io, contextlib
+        checkout = self.cfg_tmp
+        self._write_cfg("update.json", {"checkout": checkout})
+
+        def run(argv, **kw):
+            if "rev-parse" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="main\n")
+            if "rev-list" in argv:  # the divergence probe
+                return types.SimpleNamespace(returncode=0, stdout="879\t984\n")
+            if "pull" in argv:      # ff-only aborts on the diverged clone
+                return types.SimpleNamespace(returncode=1)
+            return types.SimpleNamespace(returncode=0)
+
+        stderr = io.StringIO()
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc", side_effect=run), \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(selfupdate.maybe_self_update(), "diverged-clone")
+        msg = stderr.getvalue()
+        self.assertIn("DIVERGED", msg.upper())
+        self.assertIn("879", msg)
+
+    def test_update_failure_transient_not_diverged_stays_update_failed(self):
+        """A failed pull with NO local-ahead commits (e.g. a transient network
+        failure, behind-only) is NOT divergence — keep the generic update-failed
+        path so it's correctly read as retry-able."""
+        checkout = self.cfg_tmp
+        self._write_cfg("update.json", {"checkout": checkout})
+
+        def run(argv, **kw):
+            if "rev-parse" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="main\n")
+            if "rev-list" in argv:
+                return types.SimpleNamespace(returncode=0, stdout="0\t5\n")
+            if "pull" in argv:
+                return types.SimpleNamespace(returncode=1)
+            return types.SimpleNamespace(returncode=0)
+
+        with self._behind(), \
+             patch("fulcra_coord.selfupdate._run_proc", side_effect=run):
+            self.assertEqual(selfupdate.maybe_self_update(), "update-failed")
+
     def test_spawn_exception_never_raises(self):
         self._write_cfg("update-cmd.json", {"cmd": ["/nonexistent/updater"]})
         with self._behind(), \
