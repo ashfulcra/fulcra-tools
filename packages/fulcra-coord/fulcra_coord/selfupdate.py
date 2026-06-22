@@ -223,6 +223,32 @@ def _checkout_branch(checkout: str) -> Optional[str]:
     return None
 
 
+def _checkout_divergence(checkout: str) -> Optional[tuple[int, int]]:
+    """``(ahead, behind)`` of the checkout's HEAD vs its tracked upstream, or
+    None when undeterminable (no upstream, not a repo, probe error).
+
+    ``ahead > 0`` means the checkout has LOCAL-ONLY commits, so ``git pull
+    --ff-only`` can never fast-forward — a PERMANENT self-update failure that
+    recurs every tick until an operator resolves it, distinct from a transient
+    network failure. The caller uses this to surface the diverged case loudly
+    instead of as a retry-able 'update-failed' (2026-06-21 fleet-staleness
+    incident: a host sat 879 commits ahead, --ff-only aborting every tick,
+    pinned for days while it kept minting phantom identities)."""
+    try:
+        result = _run_proc(
+            ["git", "-C", checkout, "rev-list", "--left-right", "--count",
+             "HEAD...@{u}"],
+            capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return None
+        parts = (result.stdout or "").split()
+        if len(parts) != 2:
+            return None
+        return (int(parts[0]), int(parts[1]))
+    except Exception:
+        return None
+
+
 def _update_log_path() -> Path:
     """Append-target for update-command output, in the local cache dir — the
     breadcrumb when an unattended update misbehaves."""
@@ -473,7 +499,11 @@ def maybe_self_update(*, backend: Optional[list[str]] = None,
 
     Returns a status token (for logs/tests): disabled | throttled | current |
     updated | degraded-no-config | unparseable-manifest | wrong-branch |
-    attempt-throttled | locked | update-failed | error. A successful update does NOT re-exec — this process
+    attempt-throttled | locked | diverged-clone | update-failed | error.
+    ``diverged-clone`` is a PERMANENT failure (the checkout has local commits
+    ahead of upstream, so ff-pull can never succeed) surfaced distinctly from a
+    transient ``update-failed`` so an operator knows manual intervention is
+    needed. A successful update does NOT re-exec — this process
     logs 'takes effect next invocation' and continues on its already-imported
     code; the next wake/session runs new.
 
@@ -567,6 +597,26 @@ def maybe_self_update(*, backend: Optional[list[str]] = None,
             print(f"[fulcra-coord] self-update: updated to {canonical} — "
                   f"takes effect next invocation", file=sys.stderr)
             return "updated"
+        # A failed ff-pull on a DIVERGED checkout (local commits ahead of
+        # upstream) is PERMANENT — it recurs every tick until an operator
+        # resolves it, unlike a transient network failure. The generic
+        # "FAILED, see log" read as retry-able, so the diverged host stayed
+        # pinned for days (and kept minting phantom identities) with nobody
+        # aware it would never self-heal. Surface it distinctly + actionably.
+        if checkout is not None:
+            div = _checkout_divergence(checkout)
+            if div is not None and div[0] > 0:
+                _write_stale_marker(__version__, canonical)
+                print(f"[fulcra-coord] self-update to {canonical} BLOCKED: "
+                      f"checkout {checkout} has DIVERGED from upstream "
+                      f"({div[0]} local commits ahead, {div[1]} behind) — "
+                      f"'git pull --ff-only' cannot fast-forward and will FAIL "
+                      f"EVERY TICK until resolved. MANUAL FIX REQUIRED: preserve "
+                      f"the local commits (e.g. 'git -C {checkout} branch "
+                      f"backup/local-main main'), then reset to upstream. Host "
+                      f"stays pinned at {__version__}. See {_update_log_path()}.",
+                      file=sys.stderr)
+                return "diverged-clone"
         _write_stale_marker(__version__, canonical)
         print(f"[fulcra-coord] self-update to {canonical} FAILED — staying on "
               f"{__version__}; see {_update_log_path()}", file=sys.stderr)

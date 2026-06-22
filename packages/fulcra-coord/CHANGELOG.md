@@ -12,6 +12,21 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.13] — 2026-06-22
+
+### Fix: self-update detects a diverged checkout instead of failing forever silently
+
+- When the update checkout has **local commits ahead of upstream**, `git pull
+  --ff-only` can never fast-forward — a *permanent* failure that recurs every
+  tick. The generic `update-failed` ("FAILED, see log") read as retry-able, so a
+  diverged host stayed pinned for **days** (minting phantom `claude-code:Mac:*`
+  identities) with nobody aware it would never self-heal — the root cause of
+  fleet staleness. `maybe_self_update` now probes divergence on a failed pull
+  (new `_checkout_divergence`) and, when the checkout is ahead, returns the
+  distinct **`diverged-clone`** token with a loud, actionable message (preserve
+  local commits, then reset to upstream). A transient/behind-only failure stays
+  `update-failed` (correctly retry-able).
+
 ## [0.15.12] — 2026-06-21
 
 ### Fix: `search` now reports `assignee` and `pr` (was silently always `None`)
