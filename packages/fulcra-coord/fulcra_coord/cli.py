@@ -174,6 +174,22 @@ from . import annotations as lifecycle_annotations
 _UNSET: Any = object()
 
 
+class _PhaseTimer:
+    """Monotonic phase stopwatch for cmd_reconcile. mark(label) records the
+    elapsed ms since the previous mark under `label`. Never raises."""
+    def __init__(self) -> None:
+        self._last = time.monotonic()
+        self._timings: dict[str, float] = {}
+
+    def mark(self, label: str) -> None:
+        now = time.monotonic()
+        self._timings[label] = round((now - self._last) * 1000.0, 1)
+        self._last = now
+
+    def summary(self) -> dict[str, float]:
+        return dict(self._timings)
+
+
 def _derive_agent() -> str:
     """Resolve the caller's agent id when not given explicitly.
 
@@ -1679,6 +1695,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     import time
     _info("Reconciling coordination views...")
     t0 = time.monotonic()
+    pt = _PhaseTimer()
     timeout = env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
     deadline = t0 + timeout
     # Reserved budget for the cheap-but-critical maintenance checks (role-health
@@ -2025,6 +2042,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         load_degraded = True
 
     _info(f"  {len(all_tasks)} task(s) loaded.")
+    try:
+        pt.mark("load")
+    except Exception:
+        pass
 
     now = datetime.now(timezone.utc)
     stale_claims = _detect_stale_claims(all_tasks, now)
@@ -2260,6 +2281,11 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         ops_log.log_op("reconcile", status="timeout")
         return 1
 
+    try:
+        pt.mark("views")
+    except Exception:
+        pass
+
     # Rebuild the presence aggregate from the durable per-agent presence records,
     # mirroring how the task views self-heal here. Best-effort: a presence rebuild
     # failure must not fail a task-view reconcile, so it is reported but does not
@@ -2338,6 +2364,11 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
+    try:
+        pt.mark("subpasses")
+    except Exception:
+        pass
+
     if failures:
         retry_note = f" ({recovered} recovered on retry)" if recovered else ""
         _warn(f"  View upload failures: {failures}{retry_note}")
@@ -2387,6 +2418,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             listener_last_fire=listener_last_fire,
             bus_task_count=len(all_tasks),
         )
+        try:
+            record["phase_timings_ms"] = pt.summary()
+        except Exception:
+            pass
         # Event-parity sub-pass: fold each task's event log and compare
         # status to the mutable snapshot. Best-effort — any error is swallowed and
         # the result, whether present or absent, NEVER changes the reconcile exit
@@ -2615,6 +2650,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         cache.clear_op_marker(m["op_id"])
 
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
+    try:
+        _info(f"  Phase timings (ms): {pt.summary()}")
+    except Exception:
+        pass
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
 

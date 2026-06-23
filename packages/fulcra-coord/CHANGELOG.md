@@ -12,6 +12,21 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Added: reconcile phase-timing instrumentation (health record + log)
+
+- Adds `_PhaseTimer` helper (stdlib-only, never raises) to `fulcra_coord/cli.py`
+  near the top-of-module helpers. `.mark(label)` records elapsed ms since the
+  previous mark; `.summary()` returns a `dict[str, float]`.
+- `cmd_reconcile` instantiates `pt = _PhaseTimer()` immediately after `t0` and
+  calls `pt.mark("load")` / `pt.mark("views")` / `pt.mark("subpasses")` at the
+  end of each major phase.
+- The health record gains `phase_timings_ms: dict[str, float]` on every
+  successful reconcile tick.
+- A `Phase timings (ms): {...}` line is logged before the success return so
+  before/after numbers are visible in plain reconcile output.
+- New test: `tests/test_reconcile_timing.py::test_phase_timer_records_labelled_deltas`
+  (monkeypatches `time.monotonic`, verifies ms rounding).
+
 ## [0.15.13] — 2026-06-22
 
 ### Fix: self-update detects a diverged checkout instead of failing forever silently
