@@ -101,7 +101,7 @@ class _PhaseTimer:
 
 - [ ] **Step 4: Run it, verify it passes.**
 
-- [ ] **Step 5: Wire into `cmd_reconcile`** — instantiate `pt = _PhaseTimer()` after `t0`, call `pt.mark("load")` after the `all_tasks` load, `pt.mark("views")` after the upload loop, `pt.mark("subpasses")` after the retention pass, and add `record["phase_timings_ms"] = pt.summary()` where the health record is assembled (~2356). Add one `_info(f"  Phase timings (ms): {pt.summary()}")` line before the success return. All inside existing try/except — a timer failure must never affect the tick.
+- [ ] **Step 5: Wire into `cmd_reconcile`** — instantiate `pt = _PhaseTimer()` after `t0`, call `pt.mark("load")` after the `all_tasks` load, `pt.mark("views")` after the view upload + summaries verification block, and `pt.mark("subpasses")` only after the whole best-effort tail has run (presence rebuild, review-route sweep, retention, event parity, dual-write health, loop-record load, directive parity, loop health, role health, verdict adoption, and undelivered-directive check). Add `record["phase_timings_ms"] = pt.summary()` where the health record is assembled (~2356), after the final `subpasses` mark. Add one `_info(f"  Phase timings (ms): {pt.summary()}")` line before the success return. All inside existing try/except — a timer failure must never affect the tick.
 
 - [ ] **Step 6: Manual verification** — `fulcra-coord reconcile` prints a `Phase timings (ms): {...}` line; numbers roughly match the baseline table (load ≫ views).
 
@@ -116,7 +116,7 @@ git add -A && git commit -m "feat(coord): reconcile phase-timing instrumentation
 
 ## Task 2: Cut the body-load round-trips (no concurrency increase)
 
-**Hypothesis to verify, then fix:** the 295-body load takes 40s but a single fetch is 0.9s and the cap is 16 workers (ideal ~17–25s). The ~2× gap is most likely a **redundant per-body round-trip** — `_cache_remote_task` doing a remote stat/meta read *before* the download (an optimistic-concurrency check that the read-only reconcile load doesn't need). Removing the pre-stat on this path halves round-trips without touching `max_workers` (so no gateway-saturation risk).
+**Hypothesis to verify, then fix:** the 295-body load takes 40s but a single fetch is 0.9s and the cap is 16 workers (ideal ~17–25s). The ~2× gap is most likely a **redundant per-body remote round-trip** — `_cache_remote_task` doing a `remote.stat()` before the download when local cached metadata/body exist (an optimistic-concurrency check that the read-only reconcile load doesn't need). Removing the pre-stat on this path halves remote round-trips without touching `max_workers` (so no gateway-saturation risk). Note: `cache.read_meta()` is a local cache sidecar read, not a remote transport call.
 
 **Files:**
 - Modify: `fulcra_coord/io.py` (`_cache_remote_task` and/or `_load_all_tasks_by_listing` ~767)
@@ -126,29 +126,36 @@ git add -A && git commit -m "feat(coord): reconcile phase-timing instrumentation
 - Consumes: `_PhaseTimer` numbers from Task 1 (the `load` figure is the before/after metric).
 - Produces: a read-only fetch path used by the reconcile load that issues exactly ONE remote round-trip per task body (no pre-stat), preserving the cache-merge + per-body best-effort guards.
 
-- [ ] **Step 1: Investigate + record the round-trip count.** Read `_cache_remote_task` fully; count remote calls per body (stat/meta read + download?). Add a temporary counter in a scratch test that patches `remote.download_json`/`remote.read_meta` to tally calls for a 1-body load. WRITE THE FINDING into the task's PR description. If there is exactly one round-trip already, STOP — the gap is parallelism scheduling, not redundant I/O; escalate to re-scope (do NOT raise workers).
+- [ ] **Step 1: Investigate + record the round-trip count.** Read `_cache_remote_task` fully; count remote calls per body (`remote.stat` + `remote.download_json`). Add a temporary counter in a scratch test that patches `remote.download_json`/`remote.stat` to tally calls for a 1-body cached steady-state load. WRITE THE FINDING into the task's PR description. If there is exactly one remote round-trip already, STOP — the gap is parallelism scheduling, not redundant I/O; escalate to re-scope (do NOT raise workers).
 
 - [ ] **Step 2: Write the failing test** — the reconcile body-load path issues no pre-download stat per body.
 
 ```python
 # tests/test_io_load.py
 from unittest import mock
-from fulcra_coord import io, remote
+from fulcra_coord import cache, io, remote
 
 def test_listing_load_does_one_roundtrip_per_body(coord_backend):
-    # seed two task bodies via the fake backend, then count remote ops
+    # seed two task bodies via the fake backend, then seed cached bodies + meta
+    # so the current stat-gated path would try a remote.stat before download.
     ...  # create tasks/<id>.json x2 through the fixture
-    calls = {"download": 0, "meta": 0}
+    ...  # cache.write_cached_task(...) and cache.write_meta(...) for both paths
+    calls = {"download": 0, "stat": 0, "cache_meta": 0}
     real_dl = remote.download_json
+    real_stat = remote.stat
+    real_read_meta = cache.read_meta
     def dl(p, **k): calls["download"] += 1; return real_dl(p, **k)
+    def stat(p, **k): calls["stat"] += 1; return real_stat(p, **k)
+    def read_meta(p): calls["cache_meta"] += 1; return real_read_meta(p)
     with mock.patch.object(remote, "download_json", dl), \
-         mock.patch.object(remote, "read_meta", lambda *a, **k: calls.__setitem__("meta", calls["meta"]+1)):
+         mock.patch.object(remote, "stat", stat), \
+         mock.patch.object(cache, "read_meta", read_meta):
         io._load_all_tasks_by_listing(backend=coord_backend)
-    assert calls["meta"] == 0, "reconcile load must not stat bodies before downloading them"
+    assert calls["stat"] == 0, "reconcile load must not remote-stat bodies before downloading them"
     assert calls["download"] == 2
 ```
 
-- [ ] **Step 3: Run it, verify it fails** with the current pre-stat behavior (meta > 0), confirming the redundant round-trip.
+- [ ] **Step 3: Run it, verify it fails** with the current pre-stat behavior (`stat > 0`), confirming the redundant remote round-trip.
 
 - [ ] **Step 4: Implement** — give `_load_all_tasks_by_listing` a read-only fetch that calls `remote.download_json` directly (or a `_cache_remote_task(..., skip_meta=True)` flag), skipping the optimistic-concurrency stat. Keep the cache overlay + id-less-body guard (A2) + per-body try/except exactly as-is. Do not change `max_workers`.
 
