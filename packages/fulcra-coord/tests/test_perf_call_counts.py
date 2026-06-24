@@ -203,6 +203,105 @@ def test_parity_no_deadline_keeps_unbounded_behavior(coord_backend):
 
 
 # ---------------------------------------------------------------------------
+# E1e — directive-parity sampling: same rotating window as event-parity
+# ---------------------------------------------------------------------------
+#
+# The directive-parity check used to read an ack sub-log (one list_json — a
+# listing + per-shard downloads) for EVERY comparable directive record, every
+# tick (~160 remote ops at ~80 records). It now samples the SAME rotating
+# window as event-parity (FULCRA_COORD_PARITY_SAMPLE records/tick, persisted
+# cursor) so per-tick remote I/O is bounded and full coverage tiles over
+# ~ceil(N/S) ticks — report-only divergence detection amortized, not dropped.
+
+def _seed_comparable_directive(backend, i: int) -> dict:
+    """One directive-task plus its first-class mirror — a record the parity
+    check CAN compare (has a back-ref task), whose per-record cost is one ack
+    sub-log listing under directives/<id>/acks/."""
+    t = schema.make_task(
+        title=f"dp{i}", workstream="ws", agent="a",
+        owner_agent="a", assignee="b", task_id=f"TASK-DP-{i}",
+    )
+    t["status"] = "proposed"
+    remote.upload_json(t, remote.task_remote_path(t["id"]), backend=backend)
+    from fulcra_coord import directives
+    d = directives.directive_from_task(t)
+    remote.upload_json(d, remote.directive_remote_path(d["id"]), backend=backend)
+    return t, d
+
+
+def _ack_prefixes_listed(counter: "OpCounter", directives_records) -> list[str]:
+    """Which directives' ack sub-log prefixes were listed this tick."""
+    from fulcra_coord import directives as _d
+    return [d["id"] for d in directives_records
+            if counter.lists_of(remote.directive_acks_prefix(d["id"]))]
+
+
+def test_directive_parity_sample_honors_window_size(coord_backend):
+    """With 5 comparable records and a sample of 2, exactly 2 ack sub-logs are
+    read per tick (full coverage arrives via rotation, not one mega-tick)."""
+    seeded = [_seed_comparable_directive(coord_backend, i) for i in range(5)]
+    tasks = [t for t, _ in seeded]
+    recs = [d for _, d in seeded]
+    counter = OpCounter()
+    with mock.patch.dict(os.environ, {"FULCRA_COORD_PARITY_SAMPLE": "2"}):
+        with counter.patch():
+            report = cli._directive_parity_check(
+                records=recs, all_tasks=tasks, backend=coord_backend)
+    assert len(_ack_prefixes_listed(counter, recs)) == 2
+    assert report["sampled"] == 2
+    assert report["checked"] == 2
+    # The TRUE comparable population stays visible as the denominator.
+    assert report["records_total"] == 5
+
+
+def test_directive_parity_sample_rotates_to_full_coverage(coord_backend):
+    """Successive ticks advance a persisted cursor: with 5 comparable records
+    and sample=2, three ticks must collectively read every ack sub-log (the
+    property that makes amortized sampling safe to run forever)."""
+    seeded = [_seed_comparable_directive(coord_backend, i) for i in range(5)]
+    tasks = [t for t, _ in seeded]
+    recs = [d for _, d in seeded]
+    seen: set[str] = set()
+    with mock.patch.dict(os.environ, {"FULCRA_COORD_PARITY_SAMPLE": "2"}):
+        for _ in range(3):
+            counter = OpCounter()
+            with counter.patch():
+                cli._directive_parity_check(
+                    records=recs, all_tasks=tasks, backend=coord_backend)
+            seen |= set(_ack_prefixes_listed(counter, recs))
+    assert seen == {d["id"] for d in recs}
+
+
+def test_directive_parity_sample_disabled_checks_everything(coord_backend):
+    """A sample size >= population (or the small-bus default) checks all and
+    reports sampled == the full comparable population."""
+    seeded = [_seed_comparable_directive(coord_backend, i) for i in range(3)]
+    tasks = [t for t, _ in seeded]
+    recs = [d for _, d in seeded]
+    with mock.patch.dict(os.environ, {"FULCRA_COORD_PARITY_SAMPLE": "50"}):
+        report = cli._directive_parity_check(
+            records=recs, all_tasks=tasks, backend=coord_backend)
+    assert report["checked"] == 3
+    assert report["sampled"] == 3
+
+
+def test_directive_parity_sampled_record_still_detects_drift(coord_backend):
+    """A drifting record that lands IN the sampled window is reported exactly
+    as before — sampling changes HOW MANY records are read, never WHAT is
+    detected on a sampled one."""
+    seeded = [_seed_comparable_directive(coord_backend, i) for i in range(1)]
+    task, directive = seeded[0]
+    # Re-assign the task; the stored mirror never re-mirrored -> audience drift.
+    task["assignee"] = "carol"
+    with mock.patch.dict(os.environ, {"FULCRA_COORD_PARITY_SAMPLE": "1"}):
+        report = cli._directive_parity_check(
+            records=[directive], all_tasks=[task], backend=coord_backend)
+    assert report["sampled"] == 1
+    assert report["drift"] >= 1
+    assert task["id"] in report["drift_task_ids"]
+
+
+# ---------------------------------------------------------------------------
 # E2 — loop-record sweeps: filter paths BEFORE downloading
 # ---------------------------------------------------------------------------
 

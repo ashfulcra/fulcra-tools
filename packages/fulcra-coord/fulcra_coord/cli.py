@@ -769,24 +769,59 @@ def _parity_cursor_path():
     return cache.cache_root() / "parity-cursor"
 
 
-def _read_parity_cursor() -> int:
+def _directive_parity_cursor_path():
+    """Rotation cursor for the DIRECTIVE-parity sample — a SEPARATE file from
+    the event-parity cursor. The two checks rotate over DIFFERENT populations
+    (task bodies vs comparable directive records) of different sizes, so a
+    shared cursor would corrupt both rotations; only the sample-size knob
+    (``_parity_sample_size``) is shared. Same local-only, no-bus-coordination
+    discipline as the event cursor."""
+    return cache.cache_root() / "directive-parity-cursor"
+
+
+def _read_parity_cursor(path=None) -> int:
     """Best-effort cursor read; 0 on any miss/corruption (a reset cursor only
-    re-probes tasks sooner, never skips them forever)."""
+    re-probes records sooner, never skips them forever). ``path`` defaults to
+    the event-parity cursor; the directive check passes its own."""
     try:
-        return int(_parity_cursor_path().read_text().strip())
+        return int((path or _parity_cursor_path()).read_text().strip())
     except Exception:
         return 0
 
 
-def _write_parity_cursor(value: int) -> None:
+def _write_parity_cursor(value: int, path=None) -> None:
     """Best-effort cursor persist (a bare int — no schema worth versioning) —
     a failed write must never fail the pass (the next tick just re-probes the
-    same window)."""
+    same window). ``path`` defaults to the event-parity cursor."""
     try:
         cache.cache_root().mkdir(parents=True, exist_ok=True)
-        _parity_cursor_path().write_text(str(int(value)))
+        (path or _parity_cursor_path()).write_text(str(int(value)))
     except Exception:
         pass
+
+
+def _parity_sample_window(items, cursor_path):
+    """Shared rotating-window selector for BOTH parity checks (DRY).
+
+    ``items`` is the full comparable population (already the units each check
+    pays per-record remote I/O for). Returns ``(window, cursor, total)`` where
+    ``window`` is the ``_parity_sample_size()`` slice to probe THIS tick,
+    ``cursor`` is the resolved start offset (or None when sampling is inactive —
+    population <= sample, or the knob is disabled), and ``total`` is the true
+    population size (the denominator a reader divides coverage by).
+
+    Items are sorted by their ``id`` so the window is stable against listing
+    order and the persisted cursor actually advances across ticks. The CALLER
+    advances the cursor (by what it actually PROBED, so a deadline-shortened
+    window resumes where it stopped) via ``_write_parity_cursor``."""
+    items = sorted(items, key=lambda x: x["id"])
+    total = len(items)
+    sample = _parity_sample_size()
+    if sample > 0 and total > sample:
+        cursor = _read_parity_cursor(cursor_path) % total
+        window = [items[(cursor + i) % total] for i in range(sample)]
+        return window, cursor, total
+    return items, None, total
 
 
 def _event_parity_check(
@@ -955,17 +990,11 @@ def _event_parity_check(
     # events still counts toward the total — it just isn't compared.
     tasks_total = len(bodies)
 
-    # SAMPLING: a deterministic rotation over the id-sorted population. The
-    # cursor persists locally so consecutive ticks tile the bus; sorting makes
-    # the window stable against listing order so rotation actually advances.
-    bodies.sort(key=lambda t: t["id"])
-    sample = _parity_sample_size()
-    if sample > 0 and len(bodies) > sample:
-        cursor = _read_parity_cursor() % len(bodies)
-        window = [bodies[(cursor + i) % len(bodies)] for i in range(sample)]
-    else:
-        cursor = None  # sampling inactive — no cursor to advance
-        window = bodies
+    # SAMPLING: a deterministic rotation over the id-sorted population (the
+    # shared _parity_sample_window selector — same machinery the directive-parity
+    # check uses, over its own cursor file). The cursor persists locally so
+    # consecutive ticks tile the bus.
+    window, cursor, _ = _parity_sample_window(bodies, _parity_cursor_path())
 
     budget_floor = (deadline - _PARITY_DEADLINE_HEADROOM_SECONDS
                     if deadline is not None else None)
@@ -1182,7 +1211,23 @@ def _directive_parity_check(
             if isinstance(t, dict) and (tid := t.get("id"))
         }
 
-    for stored in stored_records:
+    # SAMPLING (mirrors _event_parity_check): the ack sub-log read each
+    # comparable record pays (one list_json — a listing + per-shard downloads)
+    # was the dominant reconcile-tail cost — ~160 remote ops at ~80 records,
+    # EVERY tick. Bound it to a rotating _parity_sample_size() window over the
+    # id-sorted population, persisting a SEPARATE cursor so successive ticks tile
+    # the rest. Report-only/best-effort is unchanged: a record in the window that
+    # diverges is reported EXACTLY as before; the rest simply drain on a later
+    # tick's window. records_total stays the TRUE population (the coverage
+    # denominator); sampled reports the window actually walked this tick.
+    # Only top-level records carry an ``id`` to sort/rotate by; the self-load and
+    # tick-shared paths both guarantee that, so the window is stable.
+    records_total = len(stored_records)
+    window, dir_cursor, rotation_total = _parity_sample_window(
+        [r for r in stored_records if r.get("id")],
+        _directive_parity_cursor_path())
+
+    for stored in window:
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining < 2.0:
@@ -1250,6 +1295,15 @@ def _directive_parity_check(
         if drifted:
             drift_set.add(task_id)
 
+    # Advance the rotation by what was actually WALKED this tick (window minus the
+    # deadline-deferred tail), so a shortened window resumes where it stopped
+    # instead of skipping the deferred records until the next full revolution —
+    # the exact discipline _event_parity_check applies to its cursor.
+    if dir_cursor is not None:
+        _write_parity_cursor(
+            (dir_cursor + (len(window) - deferred)) % rotation_total,
+            _directive_parity_cursor_path())
+
     drift_task_ids = sorted(drift_set)
     return {
         "checked": checked,
@@ -1257,6 +1311,11 @@ def _directive_parity_check(
         "drift_task_ids": drift_task_ids,
         "orphans": orphans,
         "deferred": deferred,
+        # SAMPLING telemetry (mirrors _event_parity_check): records_total is the
+        # TRUE comparable population; sampled is the window walked this tick.
+        # sampled < records_total means coverage tiles over ~ceil(N/sampled) ticks.
+        "records_total": records_total,
+        "sampled": len(window),
     }
 
 
