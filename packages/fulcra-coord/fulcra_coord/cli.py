@@ -176,7 +176,14 @@ _UNSET: Any = object()
 
 class _PhaseTimer:
     """Monotonic phase stopwatch for cmd_reconcile. mark(label) records the
-    elapsed ms since the previous mark under `label`. Never raises."""
+    elapsed ms since the previous mark under `label`. Never raises.
+
+    Coarse phases (load/views) and fine-grained per-pass phases (``pass_*``,
+    one per reconcile sub-pass) share the same timer. summary() SYNTHESIZES the
+    coarse ``subpasses`` total from the sum of the ``pass_*`` intervals, so the
+    historical three-phase view (load/views/subpasses) is preserved even though
+    the tail is now carved into per-pass slices. If a caller marks ``subpasses``
+    explicitly (legacy / no per-pass marks present) that value is kept as-is."""
     def __init__(self) -> None:
         self._last = time.monotonic()
         self._timings: dict[str, float] = {}
@@ -187,7 +194,19 @@ class _PhaseTimer:
         self._last = now
 
     def summary(self) -> dict[str, float]:
-        return dict(self._timings)
+        out = dict(self._timings)
+        # Preserve the coarse ``subpasses`` phase: when the tail is carved into
+        # per-pass ``pass_*`` slices, the sum of those slices IS the subpasses
+        # phase. Synthesize it so phase_timings_ms always carries load/views/
+        # subpasses plus the per-pass breakdown. Gated on the PRESENCE of any
+        # per-pass slice (not on a nonzero total — a genuinely instant tail is
+        # still a real subpasses=0.0). A timer with no per-pass marks (legacy /
+        # the unit-timer test) is left untouched, including any explicit
+        # ``subpasses`` mark.
+        pass_keys = [k for k in out if k.startswith("pass_")]
+        if pass_keys:
+            out["subpasses"] = round(sum(out[k] for k in pass_keys), 1)
+        return out
 
 
 def _derive_agent() -> str:
@@ -2309,6 +2328,17 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         [a for a in presence_view.get("agents", []) if isinstance(a, dict)]
         if presence_view else None
     )
+    # Fine-grained per-pass timing (permanent diagnostics): each sub-pass below
+    # gets its own pt.mark() so phase_timings_ms carries a per-pass breakdown in
+    # addition to the coarse load/views/subpasses phases. The marks reuse the
+    # SAME never-raising _PhaseTimer; "subpasses" still closes the whole tail
+    # interval at the end so the coarse three-phase view is preserved. Each
+    # mark() is best-effort (the timer never raises), so the never-raise-into-
+    # the-tick contract holds. Labels are pass_<name> to namespace them.
+    try:
+        pt.mark("pass_presence_rebuild")
+    except Exception:
+        pass
 
     # Liveness-aware reroute sweep (best-effort; never fails a reconcile tick).
     # Runs AFTER the presence rebuild so it reads the freshly-reconciled
@@ -2338,6 +2368,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                                  deadline=deadline, presence=presence_agents)
         except Exception:
             pass
+    try:
+        pt.mark("pass_review_sweep")
+    except Exception:
+        pass
 
     # Retention pass (best-effort, throttled to ~once/day, bounded + time-budgeted
     # against THIS reconcile's deadline so it never double-counts the 90s ceiling).
@@ -2363,6 +2397,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         pass
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
+    try:
+        pt.mark("pass_retention")
+    except Exception:
+        pass
 
     if failures:
         retry_note = f" ({recovered} recovered on retry)" if recovered else ""
@@ -2440,6 +2478,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Event-parity check skipped (error): {_pe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_event_parity")
+        except Exception:
+            pass
         # SIGNAL C: surface recent dual-write append failures so a host whose
         # event-append is silently failing is no longer invisible. Best-effort and
         # self-guarding (the helper never raises); wrapped here too so a future
@@ -2455,6 +2497,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Dual-write health skipped (error): {_de}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_dual_write_health")
+        except Exception:
+            pass
         # E4: ONE directives-prefix sweep serves both the directive-parity and
         # loop-health sub-passes below (each used to pay its own listing +
         # per-record downloads). None on failure -> both fall back to their
@@ -2468,6 +2514,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             loop_records = None
         except Exception:
             loop_records = None
+        try:
+            pt.mark("pass_loop_record_load")
+        except Exception:
+            pass
         # Directive-parity sub-pass: fold each first-class directive record
         # against its back-ref task and surface divergence as health debt.
         # REPORT-ONLY and best-effort — the task record stays authoritative for
@@ -2490,6 +2540,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Directive-parity check skipped (error): {_dpe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_directive_parity")
+        except Exception:
+            pass
         # Coordination-loop health sub-pass (spec 2026-06-09 Task 5): open /
         # overdue / awaiting-me counts from the pure board fold — the
         # never-ANSWERED counterpart to the undelivered (never-ARRIVED) check
@@ -2508,6 +2562,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Loop-health check skipped (error): {_lhe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_loop_health")
+        except Exception:
+            pass
         # Role-health sub-pass (spec 2026-06-10): registry status per role —
         # HELD / VACANT / CONTESTED — with the SLA-vacancy escalation riding
         # inside it (idempotent via the daily marker). Vacancy is the
@@ -2532,6 +2590,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Role-health check skipped (error): {_rhe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_role_health")
+        except Exception:
+            pass
         # Author-side orphaned-verdict self-heal. Recovers review-verdict
         # directives a stale reviewer CLI wrote with assignee=None — orphans that
         # reach no inbox and that the undelivered check below SKIPS (it needs a
@@ -2560,6 +2622,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Verdict-adopt self-heal skipped (error): {_ae}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_verdict_adopt")
+        except Exception:
+            pass
         # SAFETY NET: directives addressed to an OFFLINE/stale agent that were
         # never picked up — the dead-inbox bug. Report-only and best-effort: it
         # never mutates or reroutes, and the wrapping guarantees a failure can
@@ -2610,6 +2676,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Undelivered-directive check skipped (error): {_ue}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_undelivered")
+        except Exception:
+            pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:
         # the health surface is per-host ("is this machine reconciling?"), and every
         # worktree/clone on a machine runs the same reconcile against the same bus.
@@ -2621,14 +2691,15 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # agent id only if host is somehow absent.
         if skipped_checks:
             record["skipped_checks"] = list(skipped_checks)
-        # Mark end of all sub-passes (retention + health-record sub-pass block).
-        # Placed HERE — after all 8 sub-passes complete and skipped_checks is
-        # final — so "subpasses" captures the full interval from after "views".
-        # The assignment of phase_timings_ms is also deferred to here so the
-        # uploaded health record contains the complete, correct three-phase
-        # timings rather than a premature snapshot taken before most passes ran.
+        # Close the final sub-pass slice: the residual between the last sub-pass
+        # (undelivered) and here is the health-record assembly tail. Captured as
+        # its own ``pass_*`` so it folds into the synthesized ``subpasses`` total
+        # (see _PhaseTimer.summary) — the coarse load/views/subpasses view is
+        # preserved while the per-pass breakdown carries the detail. The
+        # phase_timings_ms assignment is deferred to here so the uploaded health
+        # record contains the complete timings rather than a premature snapshot.
         try:
-            pt.mark("subpasses")
+            pt.mark("pass_health_assembly")
         except Exception:
             pass
         try:

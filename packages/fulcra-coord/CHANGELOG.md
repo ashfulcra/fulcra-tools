@@ -12,6 +12,28 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Diagnostics: per-pass timing for the reconcile sub-pass tail
+
+- `cmd_reconcile` now marks each sub-pass in the tail with its own
+  `pass_<name>` entry in `phase_timings_ms` (presence rebuild, review sweep,
+  retention, event parity, dual-write health, loop-record load, directive
+  parity, loop health, role health, verdict adopt, undelivered, health
+  assembly). The coarse `load`/`views`/`subpasses` phases are preserved:
+  `_PhaseTimer.summary()` synthesizes `subpasses` as the sum of the `pass_*`
+  slices, so the historical three-phase view is unchanged while the per-pass
+  breakdown is added. Every mark stays best-effort (the timer never raises),
+  preserving the never-raise-into-the-tick contract.
+- Motivation: a profiling-first pass (the new `profile_reconcile.py` harness,
+  not shipped in the wheel) showed the dominant recurring sub-pass cost is
+  GENUINE per-item sub-log I/O — directive-parity's per-record
+  `read_directive_acks` (1 list + K downloads/record), `load_loop_records`'
+  per-record download, and event-parity's per-sampled-task event read — not
+  redundant snapshot I/O the tick already holds. The E4/E5 tick-scoped
+  snapshot sharing already eliminated the latter (summaries read ≤2×, presence
+  aggregate 0×, each loop record 1×), so widening it further would not move the
+  tail. `tests/test_reconcile_snapshot_sharing.py` pins both the sharing
+  invariant and the per-pass timing keys so a regression in either fails loudly.
+
 ### Perf: cut reconcile body-load round-trips from 2 to 1 per task body
 
 - `_cache_remote_task` gains a keyword-only `_skip_post_stat` parameter
