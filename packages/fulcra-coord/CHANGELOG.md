@@ -12,7 +12,7 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
-## [0.15.14] — 2026-06-24
+## [0.15.14] — 2026-06-23
 
 Reconcile-performance build (instrumentation-first; PR #280). Brought reconcile
 from ~103s toward the 90s default deadline at steady-state by measuring first,
