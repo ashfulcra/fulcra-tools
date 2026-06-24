@@ -174,6 +174,41 @@ from . import annotations as lifecycle_annotations
 _UNSET: Any = object()
 
 
+class _PhaseTimer:
+    """Monotonic phase stopwatch for cmd_reconcile. mark(label) records the
+    elapsed ms since the previous mark under `label`. Never raises.
+
+    Coarse phases (load/views) and fine-grained per-pass phases (``pass_*``,
+    one per reconcile sub-pass) share the same timer. summary() SYNTHESIZES the
+    coarse ``subpasses`` total from the sum of the ``pass_*`` intervals, so the
+    historical three-phase view (load/views/subpasses) is preserved even though
+    the tail is now carved into per-pass slices. If a caller marks ``subpasses``
+    explicitly (legacy / no per-pass marks present) that value is kept as-is."""
+    def __init__(self) -> None:
+        self._last = time.monotonic()
+        self._timings: dict[str, float] = {}
+
+    def mark(self, label: str) -> None:
+        now = time.monotonic()
+        self._timings[label] = round((now - self._last) * 1000.0, 1)
+        self._last = now
+
+    def summary(self) -> dict[str, float]:
+        out = dict(self._timings)
+        # Preserve the coarse ``subpasses`` phase: when the tail is carved into
+        # per-pass ``pass_*`` slices, the sum of those slices IS the subpasses
+        # phase. Synthesize it so phase_timings_ms always carries load/views/
+        # subpasses plus the per-pass breakdown. Gated on the PRESENCE of any
+        # per-pass slice (not on a nonzero total — a genuinely instant tail is
+        # still a real subpasses=0.0). A timer with no per-pass marks (legacy /
+        # the unit-timer test) is left untouched, including any explicit
+        # ``subpasses`` mark.
+        pass_keys = [k for k in out if k.startswith("pass_")]
+        if pass_keys:
+            out["subpasses"] = round(sum(out[k] for k in pass_keys), 1)
+        return out
+
+
 def _derive_agent() -> str:
     """Resolve the caller's agent id when not given explicitly.
 
@@ -734,24 +769,63 @@ def _parity_cursor_path():
     return cache.cache_root() / "parity-cursor"
 
 
-def _read_parity_cursor() -> int:
+def _directive_parity_cursor_path():
+    """Rotation cursor for the DIRECTIVE-parity sample — a SEPARATE file from
+    the event-parity cursor. The two checks rotate over DIFFERENT populations
+    (task bodies vs comparable directive records) of different sizes, so a
+    shared cursor would corrupt both rotations; only the sample-size knob
+    (``_parity_sample_size``) is shared. Same local-only, no-bus-coordination
+    discipline as the event cursor."""
+    return cache.cache_root() / "directive-parity-cursor"
+
+
+def _read_parity_cursor(path=None) -> int:
     """Best-effort cursor read; 0 on any miss/corruption (a reset cursor only
-    re-probes tasks sooner, never skips them forever)."""
+    re-probes records sooner, never skips them forever). ``path`` defaults to
+    the event-parity cursor; the directive check passes its own."""
     try:
-        return int(_parity_cursor_path().read_text().strip())
+        return int((path or _parity_cursor_path()).read_text().strip())
     except Exception:
         return 0
 
 
-def _write_parity_cursor(value: int) -> None:
+def _write_parity_cursor(value: int, path=None) -> None:
     """Best-effort cursor persist (a bare int — no schema worth versioning) —
     a failed write must never fail the pass (the next tick just re-probes the
-    same window)."""
+    same window). ``path`` defaults to the event-parity cursor."""
     try:
         cache.cache_root().mkdir(parents=True, exist_ok=True)
-        _parity_cursor_path().write_text(str(int(value)))
+        (path or _parity_cursor_path()).write_text(str(int(value)))
     except Exception:
         pass
+
+
+def _parity_sample_window(items, cursor_path):
+    """Shared rotating-window selector for BOTH parity checks (DRY).
+
+    ``items`` is the full comparable population (already the units each check
+    pays per-record remote I/O for). Returns ``(window, cursor, total)`` where
+    ``window`` is the ``_parity_sample_size()`` slice to probe THIS tick,
+    ``cursor`` is the resolved start offset (or None when sampling is inactive —
+    population <= sample, or the knob is disabled), and ``total`` is the true
+    population size (the denominator a reader divides coverage by).
+
+    Items are sorted by their ``id`` so the window is stable against listing
+    order and the persisted cursor actually advances across ticks. The CALLER
+    advances the cursor (by what it actually PROBED, so a deadline-shortened
+    window resumes where it stopped) via ``_write_parity_cursor``.
+
+    Callers are expected to pre-filter items so all carry an ``id``; the sort
+    key is defensive (``x.get("id") or ""``) so any that don't are grouped
+    stably at the front without raising."""
+    items = sorted(items, key=lambda x: x.get("id") or "")
+    total = len(items)
+    sample = _parity_sample_size()
+    if sample > 0 and total > sample:
+        cursor = _read_parity_cursor(cursor_path) % total
+        window = [items[(cursor + i) % total] for i in range(sample)]
+        return window, cursor, total
+    return items, None, total
 
 
 def _event_parity_check(
@@ -920,17 +994,11 @@ def _event_parity_check(
     # events still counts toward the total — it just isn't compared.
     tasks_total = len(bodies)
 
-    # SAMPLING: a deterministic rotation over the id-sorted population. The
-    # cursor persists locally so consecutive ticks tile the bus; sorting makes
-    # the window stable against listing order so rotation actually advances.
-    bodies.sort(key=lambda t: t["id"])
-    sample = _parity_sample_size()
-    if sample > 0 and len(bodies) > sample:
-        cursor = _read_parity_cursor() % len(bodies)
-        window = [bodies[(cursor + i) % len(bodies)] for i in range(sample)]
-    else:
-        cursor = None  # sampling inactive — no cursor to advance
-        window = bodies
+    # SAMPLING: a deterministic rotation over the id-sorted population (the
+    # shared _parity_sample_window selector — same machinery the directive-parity
+    # check uses, over its own cursor file). The cursor persists locally so
+    # consecutive ticks tile the bus.
+    window, cursor, _ = _parity_sample_window(bodies, _parity_cursor_path())
 
     budget_floor = (deadline - _PARITY_DEADLINE_HEADROOM_SECONDS
                     if deadline is not None else None)
@@ -1147,7 +1215,24 @@ def _directive_parity_check(
             if isinstance(t, dict) and (tid := t.get("id"))
         }
 
-    for stored in stored_records:
+    # SAMPLING (mirrors _event_parity_check): the ack sub-log read each
+    # comparable record pays (one list_json — a listing + per-shard downloads)
+    # was the dominant reconcile-tail cost — ~160 remote ops at ~80 records,
+    # EVERY tick. Bound it to a rotating _parity_sample_size() window over the
+    # id-sorted population, persisting a SEPARATE cursor so successive ticks tile
+    # the rest. Report-only/best-effort is unchanged: a record in the window that
+    # diverges is reported EXACTLY as before; the rest simply drain on a later
+    # tick's window. records_total is the id-filtered population — the subset
+    # _parity_sample_window actually rotates over — so the telemetry denominator
+    # equals what the cursor tiles across.  Records without an ``id`` can't be
+    # sorted or rotated, so they are excluded from both the window and the count.
+    comparable_records = [r for r in stored_records if r.get("task_id")]
+    records_total = len(comparable_records)
+    window, dir_cursor, rotation_total = _parity_sample_window(
+        comparable_records,
+        _directive_parity_cursor_path())
+
+    for stored in window:
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining < 2.0:
@@ -1215,6 +1300,15 @@ def _directive_parity_check(
         if drifted:
             drift_set.add(task_id)
 
+    # Advance the rotation by what was actually WALKED this tick (window minus the
+    # deadline-deferred tail), so a shortened window resumes where it stopped
+    # instead of skipping the deferred records until the next full revolution —
+    # the exact discipline _event_parity_check applies to its cursor.
+    if dir_cursor is not None:
+        _write_parity_cursor(
+            (dir_cursor + (len(window) - deferred)) % rotation_total,
+            _directive_parity_cursor_path())
+
     drift_task_ids = sorted(drift_set)
     return {
         "checked": checked,
@@ -1222,6 +1316,11 @@ def _directive_parity_check(
         "drift_task_ids": drift_task_ids,
         "orphans": orphans,
         "deferred": deferred,
+        # SAMPLING telemetry (mirrors _event_parity_check): records_total is the
+        # TRUE comparable population; sampled is the window walked this tick.
+        # sampled < records_total means coverage tiles over ~ceil(N/sampled) ticks.
+        "records_total": records_total,
+        "sampled": len(window),
     }
 
 
@@ -1679,6 +1778,7 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     import time
     _info("Reconciling coordination views...")
     t0 = time.monotonic()
+    pt = _PhaseTimer()
     timeout = env_int("FULCRA_COORD_RECONCILE_TIMEOUT_SECONDS", 90)
     deadline = t0 + timeout
     # Reserved budget for the cheap-but-critical maintenance checks (role-health
@@ -2025,6 +2125,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         load_degraded = True
 
     _info(f"  {len(all_tasks)} task(s) loaded.")
+    try:
+        pt.mark("load")
+    except Exception:
+        pass
 
     now = datetime.now(timezone.utc)
     stale_claims = _detect_stale_claims(all_tasks, now)
@@ -2260,6 +2364,11 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         ops_log.log_op("reconcile", status="timeout")
         return 1
 
+    try:
+        pt.mark("views")
+    except Exception:
+        pass
+
     # Rebuild the presence aggregate from the durable per-agent presence records,
     # mirroring how the task views self-heal here. Best-effort: a presence rebuild
     # failure must not fail a task-view reconcile, so it is reported but does not
@@ -2283,6 +2392,17 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         [a for a in presence_view.get("agents", []) if isinstance(a, dict)]
         if presence_view else None
     )
+    # Fine-grained per-pass timing (permanent diagnostics): each sub-pass below
+    # gets its own pt.mark() so phase_timings_ms carries a per-pass breakdown in
+    # addition to the coarse load/views/subpasses phases. The marks reuse the
+    # SAME never-raising _PhaseTimer; "subpasses" still closes the whole tail
+    # interval at the end so the coarse three-phase view is preserved. Each
+    # mark() is best-effort (the timer never raises), so the never-raise-into-
+    # the-tick contract holds. Labels are pass_<name> to namespace them.
+    try:
+        pt.mark("pass_presence_rebuild")
+    except Exception:
+        pass
 
     # Liveness-aware reroute sweep (best-effort; never fails a reconcile tick).
     # Runs AFTER the presence rebuild so it reads the freshly-reconciled
@@ -2312,6 +2432,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                                  deadline=deadline, presence=presence_agents)
         except Exception:
             pass
+    try:
+        pt.mark("pass_review_sweep")
+    except Exception:
+        pass
 
     # Retention pass (best-effort, throttled to ~once/day, bounded + time-budgeted
     # against THIS reconcile's deadline so it never double-counts the 90s ceiling).
@@ -2337,6 +2461,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         pass
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
+    try:
+        pt.mark("pass_retention")
+    except Exception:
+        pass
 
     if failures:
         retry_note = f" ({recovered} recovered on retry)" if recovered else ""
@@ -2414,6 +2542,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Event-parity check skipped (error): {_pe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_event_parity")
+        except Exception:
+            pass
         # SIGNAL C: surface recent dual-write append failures so a host whose
         # event-append is silently failing is no longer invisible. Best-effort and
         # self-guarding (the helper never raises); wrapped here too so a future
@@ -2429,6 +2561,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Dual-write health skipped (error): {_de}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_dual_write_health")
+        except Exception:
+            pass
         # E4: ONE directives-prefix sweep serves both the directive-parity and
         # loop-health sub-passes below (each used to pay its own listing +
         # per-record downloads). None on failure -> both fall back to their
@@ -2442,6 +2578,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             loop_records = None
         except Exception:
             loop_records = None
+        try:
+            pt.mark("pass_loop_record_load")
+        except Exception:
+            pass
         # Directive-parity sub-pass: fold each first-class directive record
         # against its back-ref task and surface divergence as health debt.
         # REPORT-ONLY and best-effort — the task record stays authoritative for
@@ -2464,6 +2604,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Directive-parity check skipped (error): {_dpe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_directive_parity")
+        except Exception:
+            pass
         # Coordination-loop health sub-pass (spec 2026-06-09 Task 5): open /
         # overdue / awaiting-me counts from the pure board fold — the
         # never-ANSWERED counterpart to the undelivered (never-ARRIVED) check
@@ -2482,6 +2626,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Loop-health check skipped (error): {_lhe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_loop_health")
+        except Exception:
+            pass
         # Role-health sub-pass (spec 2026-06-10): registry status per role —
         # HELD / VACANT / CONTESTED — with the SLA-vacancy escalation riding
         # inside it (idempotent via the daily marker). Vacancy is the
@@ -2506,6 +2654,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Role-health check skipped (error): {_rhe}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_role_health")
+        except Exception:
+            pass
         # Author-side orphaned-verdict self-heal. Recovers review-verdict
         # directives a stale reviewer CLI wrote with assignee=None — orphans that
         # reach no inbox and that the undelivered check below SKIPS (it needs a
@@ -2534,6 +2686,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Verdict-adopt self-heal skipped (error): {_ae}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_verdict_adopt")
+        except Exception:
+            pass
         # SAFETY NET: directives addressed to an OFFLINE/stale agent that were
         # never picked up — the dead-inbox bug. Report-only and best-effort: it
         # never mutates or reroutes, and the wrapping guarantees a failure can
@@ -2584,6 +2740,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
                 _warn(f"  Undelivered-directive check skipped (error): {_ue}")
             except Exception:
                 pass
+        try:
+            pt.mark("pass_undelivered")
+        except Exception:
+            pass
         # Key the health record by the stable MACHINE host, not the per-cwd agent:
         # the health surface is per-host ("is this machine reconciling?"), and every
         # worktree/clone on a machine runs the same reconcile against the same bus.
@@ -2595,6 +2755,21 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # agent id only if host is somehow absent.
         if skipped_checks:
             record["skipped_checks"] = list(skipped_checks)
+        # Close the final sub-pass slice: the residual between the last sub-pass
+        # (undelivered) and here is the health-record assembly tail. Captured as
+        # its own ``pass_*`` so it folds into the synthesized ``subpasses`` total
+        # (see _PhaseTimer.summary) — the coarse load/views/subpasses view is
+        # preserved while the per-pass breakdown carries the detail. The
+        # phase_timings_ms assignment is deferred to here so the uploaded health
+        # record contains the complete timings rather than a premature snapshot.
+        try:
+            pt.mark("pass_health_assembly")
+        except Exception:
+            pass
+        try:
+            record["phase_timings_ms"] = pt.summary()
+        except Exception:
+            pass
         slug = views.agent_slug(record.get("host") or identity.resolve_agent())
         if not remote.upload_json(record, remote.health_remote_path(slug), backend=backend):
             _warn("  Health record upload failed (best-effort; tick unaffected).")
@@ -2615,6 +2790,10 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         cache.clear_op_marker(m["op_id"])
 
     ops_log.log_op("reconcile", status="ok", detail=f"{len(all_tasks)} tasks, {len(all_views)} views")
+    try:
+        _info(f"  Phase timings (ms): {pt.summary()}")
+    except Exception:
+        pass
     _info(f"  Reconcile complete. {len(all_views)} views refreshed.")
     return 0
 

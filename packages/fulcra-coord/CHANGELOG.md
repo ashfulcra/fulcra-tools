@@ -12,6 +12,117 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.14] — 2026-06-23
+
+Reconcile-performance build (instrumentation-first; PR #280). Brought reconcile
+from ~103s toward the 90s default deadline at steady-state by measuring first,
+then cutting the data-identified costs (body-load round-trips; directive-parity
+per-record sub-log I/O). Hard constraint honored throughout: no transport
+concurrency increase (the gateway-saturation ceiling).
+
+### Fix: directive comparable-set detection regression (feat/reconcile-perf)
+
+- The parity-sampling change filtered `comparable_records` by `r.get("id")`,
+  but the comparison loop actually keys off `r.get("task_id")`. A stored
+  directive record with a valid `task_id` back-ref but a missing/empty `id`
+  — malformed or legacy body — was silently excluded from `comparable_records`
+  and from the sampling rotation, so a real divergence on such a record would
+  never be detected on any tick. Filter changed to `r.get("task_id")` — the
+  field the comparison actually needs — at `cli.py` line 1229. Records with
+  `task_id` but no `id` are now included and sampled like everything else.
+  `_parity_sample_window`'s defensive sort key (`x.get("id") or ""`) already
+  handles no-id records stably (grouped at the front, no `KeyError`), so no
+  change to the sort/rotation logic was needed. `records_total` stays
+  consistent with the new `comparable_records` definition. Well-formed records
+  (produced by `schema.make_directive` which always sets `DIR-T-<task_id>`)
+  are unaffected; this only restores detection on malformed/legacy bodies.
+
+### Perf: directive-parity check now samples like event-parity
+
+- `_directive_parity_check` previously read an ack sub-log
+  (`read_directive_acks` — one listing plus per-shard downloads) for EVERY
+  comparable directive record on EVERY reconcile tick. Measured live on the
+  production bus that was 182 `read_directive_acks` (404 total remote ops:
+  182 listings + 40 ack-shard downloads + the orphan resolutions) per tick —
+  the dominant cost in the reconcile sub-pass tail the per-pass profiling
+  identified.
+- It now applies the SAME rotating-window sampling its sibling
+  `_event_parity_check` already used: a bounded `FULCRA_COORD_PARITY_SAMPLE`
+  (default 50) records per tick, sorted by id, with a persisted cursor
+  (`directive-parity-cursor`, a SEPARATE file from the event cursor since the
+  two checks rotate over different populations) advanced by what was actually
+  walked so successive ticks tile the rest. Full coverage tiles over
+  ~ceil(N/sample) ticks (~10 at 477 records). The shared windowing logic lives
+  in one helper, `_parity_sample_window`, used by both checks (DRY).
+- Report-only / best-effort contract is unchanged: a record in the sampled
+  window that diverges is reported EXACTLY as before (verified call-for-call
+  identical against the pre-change code — `checked=182, drift=141` at
+  `FULCRA_COORD_PARITY_SAMPLE=0`), the INDETERMINATE/orphan/gate handling and
+  never-raise posture are untouched, and divergence is amortized across ticks
+  rather than dropped. The report gains `records_total` (true comparable
+  population) and `sampled` (window walked this tick) telemetry, mirroring
+  event-parity's `tasks_total`/`sampled`. No transport concurrency change.
+- Live before/after (same tick shape, directive-parity pass executed in both):
+  `pass_directive_parity` 19941ms → 8787ms (−56%); `subpasses` 68340ms →
+  59654ms. Per-tick `read_directive_acks` 182 → 6.
+
+### Diagnostics: per-pass timing for the reconcile sub-pass tail
+
+- `cmd_reconcile` now marks each sub-pass in the tail with its own
+  `pass_<name>` entry in `phase_timings_ms` (presence rebuild, review sweep,
+  retention, event parity, dual-write health, loop-record load, directive
+  parity, loop health, role health, verdict adopt, undelivered, health
+  assembly). The coarse `load`/`views`/`subpasses` phases are preserved:
+  `_PhaseTimer.summary()` synthesizes `subpasses` as the sum of the `pass_*`
+  slices, so the historical three-phase view is unchanged while the per-pass
+  breakdown is added. Every mark stays best-effort (the timer never raises),
+  preserving the never-raise-into-the-tick contract.
+- Motivation: a profiling-first pass (the new `profile_reconcile.py` harness,
+  not shipped in the wheel) showed the dominant recurring sub-pass cost is
+  GENUINE per-item sub-log I/O — directive-parity's per-record
+  `read_directive_acks` (1 list + K downloads/record), `load_loop_records`'
+  per-record download, and event-parity's per-sampled-task event read — not
+  redundant snapshot I/O the tick already holds. The E4/E5 tick-scoped
+  snapshot sharing already eliminated the latter (summaries read ≤2×, presence
+  aggregate 0×, each loop record 1×), so widening it further would not move the
+  tail. `tests/test_reconcile_snapshot_sharing.py` pins both the sharing
+  invariant and the per-pass timing keys so a regression in either fails loudly.
+
+### Perf: cut reconcile body-load round-trips from 2 to 1 per task body
+
+- `_cache_remote_task` gains a keyword-only `_skip_post_stat` parameter
+  (default `False`). When `True`, the post-download `remote.stat` call that
+  records the write-path optimistic-concurrency baseline is suppressed.
+- `_load_all_tasks_by_listing` (the reconcile stale-view fallback load) passes
+  `_skip_post_stat=True` for every body fetch in its thread pool. The listing
+  load is read-only — it never performs a subsequent write using the recorded
+  stat — so the extra spawn is pure overhead.
+- The stat gate (pre-download `remote.stat` for unchanged-body detection)
+  remains untouched and fires normally when a prior stat meta exists on disk.
+- The write path is unaffected: all callers other than `_load_all_tasks_by_listing`
+  keep `_skip_post_stat=False` and continue recording the post-download stat.
+- Expected impact: 303-body listing load drops from ~31s (2 spawns × 303 bodies
+  at 16 workers) toward ~18s (1 spawn × 303 bodies); exact savings depend on
+  scheduler headroom freed by halving total concurrency demand.
+- New tests: `tests/test_io_load.py` — pins 0 stat calls + 2 downloads for a
+  2-body cold listing load; confirms stat gate still suppresses downloads when
+  prior meta exists.
+
+### Added: reconcile phase-timing instrumentation (health record + log)
+
+- Adds `_PhaseTimer` helper (stdlib-only, never raises) to `fulcra_coord/cli.py`
+  near the top-of-module helpers. `.mark(label)` records elapsed ms since the
+  previous mark; `.summary()` returns a `dict[str, float]`.
+- `cmd_reconcile` instantiates `pt = _PhaseTimer()` immediately after `t0` and
+  calls `pt.mark("load")` / `pt.mark("views")` / `pt.mark("subpasses")` at the
+  end of each major phase.
+- The health record gains `phase_timings_ms: dict[str, float]` on every
+  successful reconcile tick.
+- A `Phase timings (ms): {...}` line is logged before the success return so
+  before/after numbers are visible in plain reconcile output.
+- New test: `tests/test_reconcile_timing.py::test_phase_timer_records_labelled_deltas`
+  (monkeypatches `time.monotonic`, verifies ms rounding).
+
 ## [0.15.13] — 2026-06-22
 
 ### Fix: self-update detects a diverged checkout instead of failing forever silently

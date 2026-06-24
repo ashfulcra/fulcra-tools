@@ -9255,14 +9255,14 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_13(self):
-        # 0.15.13: self-update detects a DIVERGED checkout (local commits ahead of
-        # upstream -> ff-pull can never succeed) and surfaces it as the distinct,
-        # actionable 'diverged-clone' instead of a retry-able 'update-failed' — the
-        # fleet-staleness root cause. 0.15.12: `search` carries assignee + pr.
-        # 0.15.11: self-heal at scale. 0.15.10: stable-hostname identity fix (#273).
+    def test_version_is_0_15_14(self):
+        # 0.15.14: reconcile-performance build — phase-timing instrumentation,
+        # body-load 2->1 round-trip, directive-parity sampling (per-record sub-log
+        # I/O was the dominant sub-pass cost). 0.15.13: self-update diverged-clone
+        # detection. 0.15.12: `search` carries assignee + pr. 0.15.11: self-heal at
+        # scale. 0.15.10: stable-hostname identity fix (#273).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.13")
+        self.assertEqual(__version__, "0.15.14")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
