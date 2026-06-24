@@ -2364,11 +2364,6 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
     except Exception as e:
         _warn(f"  Retention pass error (skipped): {e}")
 
-    try:
-        pt.mark("subpasses")
-    except Exception:
-        pass
-
     if failures:
         retry_note = f" ({recovered} recovered on retry)" if recovered else ""
         _warn(f"  View upload failures: {failures}{retry_note}")
@@ -2418,10 +2413,6 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
             listener_last_fire=listener_last_fire,
             bus_task_count=len(all_tasks),
         )
-        try:
-            record["phase_timings_ms"] = pt.summary()
-        except Exception:
-            pass
         # Event-parity sub-pass: fold each task's event log and compare
         # status to the mutable snapshot. Best-effort — any error is swallowed and
         # the result, whether present or absent, NEVER changes the reconcile exit
@@ -2630,6 +2621,20 @@ def cmd_reconcile(args: Any, backend: Optional[list[str]] = None) -> int:
         # agent id only if host is somehow absent.
         if skipped_checks:
             record["skipped_checks"] = list(skipped_checks)
+        # Mark end of all sub-passes (retention + health-record sub-pass block).
+        # Placed HERE — after all 8 sub-passes complete and skipped_checks is
+        # final — so "subpasses" captures the full interval from after "views".
+        # The assignment of phase_timings_ms is also deferred to here so the
+        # uploaded health record contains the complete, correct three-phase
+        # timings rather than a premature snapshot taken before most passes ran.
+        try:
+            pt.mark("subpasses")
+        except Exception:
+            pass
+        try:
+            record["phase_timings_ms"] = pt.summary()
+        except Exception:
+            pass
         slug = views.agent_slug(record.get("host") or identity.resolve_agent())
         if not remote.upload_json(record, remote.health_remote_path(slug), backend=backend):
             _warn("  Health record upload failed (best-effort; tick unaffected).")
