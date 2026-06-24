@@ -42,3 +42,41 @@ def test_write_dir_round_trips_concept(tmp_path):
     b2 = Bundle.load_dir(out)
     assert b2.concepts["tables/orders"].type == "Table"
     assert b2.concepts["tables/orders"].title == "Orders"
+
+
+# --- Finding 2: reserved_files field populated by load_dir ---
+
+def test_load_dir_populates_reserved_files_for_root_log(tmp_path):
+    """load_dir must collect log.md text into reserved_files."""
+    log_text = "# Log\n\n## 2026-06-20\n* Update\n"
+    _write(tmp_path, "log.md", log_text)
+    _write(tmp_path, "a.md", "---\ntype: T\n---\nbody\n")
+    b = Bundle.load_dir(tmp_path)
+    assert "log.md" in b.reserved_files
+    assert b.reserved_files["log.md"] == log_text
+
+
+def test_load_dir_populates_reserved_files_for_nested_log(tmp_path):
+    """load_dir must collect subdirectory log.md files too."""
+    log_text = "# Log\n\n## 2026-06-19\n* Init\n"
+    _write(tmp_path, "sub/log.md", log_text)
+    _write(tmp_path, "a.md", "---\ntype: T\n---\nbody\n")
+    b = Bundle.load_dir(tmp_path)
+    assert "sub/log.md" in b.reserved_files
+    assert b.reserved_files["sub/log.md"] == log_text
+
+
+def test_load_dir_reserved_files_includes_index(tmp_path):
+    """index.md files should also appear in reserved_files."""
+    idx_text = "---\nokf_version: \"0.1\"\n---\n# Root\n"
+    _write(tmp_path, "index.md", idx_text)
+    _write(tmp_path, "a.md", "---\ntype: T\n---\nbody\n")
+    b = Bundle.load_dir(tmp_path)
+    assert "index.md" in b.reserved_files
+
+
+def test_load_dir_reserved_files_empty_when_no_reserved(tmp_path):
+    """When there are no reserved files, reserved_files should be empty."""
+    _write(tmp_path, "a.md", "---\ntype: T\n---\nbody\n")
+    b = Bundle.load_dir(tmp_path)
+    assert b.reserved_files == {}

@@ -17,6 +17,7 @@ class Bundle:
     concepts: dict[str, Concept] = field(default_factory=dict)
     okf_version: str | None = None
     parse_errors: list[tuple[str, str]] = field(default_factory=list)
+    reserved_files: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load_dir(cls, path: str | Path, *, lenient: bool = False) -> "Bundle":
@@ -25,6 +26,8 @@ class Bundle:
         for md in sorted(root.rglob("*.md")):
             rel = md.relative_to(root).as_posix()
             if md.name in RESERVED_NAMES:
+                text = md.read_text()
+                bundle.reserved_files[rel] = text
                 if rel == "index.md":
                     bundle.okf_version = _read_okf_version(md)
                 continue
