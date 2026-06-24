@@ -12,6 +12,26 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Perf: cut reconcile body-load round-trips from 2 to 1 per task body
+
+- `_cache_remote_task` gains a keyword-only `_skip_post_stat` parameter
+  (default `False`). When `True`, the post-download `remote.stat` call that
+  records the write-path optimistic-concurrency baseline is suppressed.
+- `_load_all_tasks_by_listing` (the reconcile stale-view fallback load) passes
+  `_skip_post_stat=True` for every body fetch in its thread pool. The listing
+  load is read-only — it never performs a subsequent write using the recorded
+  stat — so the extra spawn is pure overhead.
+- The stat gate (pre-download `remote.stat` for unchanged-body detection)
+  remains untouched and fires normally when a prior stat meta exists on disk.
+- The write path is unaffected: all callers other than `_load_all_tasks_by_listing`
+  keep `_skip_post_stat=False` and continue recording the post-download stat.
+- Expected impact: 303-body listing load drops from ~31s (2 spawns × 303 bodies
+  at 16 workers) toward ~18s (1 spawn × 303 bodies); exact savings depend on
+  scheduler headroom freed by halving total concurrency demand.
+- New tests: `tests/test_io_load.py` — pins 0 stat calls + 2 downloads for a
+  2-body cold listing load; confirms stat gate still suppresses downloads when
+  prior meta exists.
+
 ### Added: reconcile phase-timing instrumentation (health record + log)
 
 - Adds `_PhaseTimer` helper (stdlib-only, never raises) to `fulcra_coord/cli.py`

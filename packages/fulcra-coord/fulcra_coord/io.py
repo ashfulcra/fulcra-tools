@@ -143,12 +143,24 @@ def _stat_strong_match(before: dict[str, Any], after: dict[str, Any]) -> bool:
     return False
 
 
-def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Optional[dict[str, Any]]:
+def _cache_remote_task(
+    task_id: str,
+    backend: Optional[list[str]] = None,
+    *,
+    _skip_post_stat: bool = False,
+) -> Optional[dict[str, Any]]:
     """Reconstruct a remote task body, cache it, and cache the FILE's stat meta.
 
     The single funnel every task-BODY read passes through (both ``_load_task``
     and the bulk ``_load_all_tasks``). It resolves the body from one of two
     sources, governed by the per-host ``read_source()`` knob (the events read cutover):
+
+    ``_skip_post_stat`` (keyword-only, default False) — when True, the
+    post-download ``remote.stat`` that records the write-path optimistic-
+    concurrency baseline is suppressed.  Use ONLY from the reconcile listing
+    load (``_load_all_tasks_by_listing``), which is read-only and never uses
+    the meta for a subsequent write.  All write-path callers must leave this
+    at the default False so the optimistic-concurrency discipline is preserved.
 
     * ``'file'`` (DEFAULT) — download the mutable ``tasks/<id>.json``. This is
       the pre-cutover behaviour, byte-identical and default-on so an operator
@@ -267,8 +279,10 @@ def _cache_remote_task(task_id: str, backend: Optional[list[str]] = None) -> Opt
     cache.write_cached_task(task)
     # Always stat the FILE (not the fold) so the write-path concurrency baseline
     # stays correct regardless of where the body was sourced from. Skipped only
-    # when the stat gate above already holds THIS read's fresh file stat.
-    if task_stat is None and task_stat_confirmed:
+    # when the stat gate above already holds THIS read's fresh file stat, OR
+    # when the caller is a read-only path that never uses the meta for a write
+    # (``_skip_post_stat=True``; set only by ``_load_all_tasks_by_listing``).
+    if task_stat is None and task_stat_confirmed and not _skip_post_stat:
         task_stat = remote.stat(task_path, backend=backend)
     if task_stat and task_stat_confirmed:
         cache.write_meta(task_path, task_stat)
@@ -813,7 +827,11 @@ def _load_all_tasks_by_listing(
     max_workers = min(16, max(4, len(task_ids)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_cache_remote_task, tid, backend=backend): tid
+            pool.submit(
+                _cache_remote_task, tid,
+                backend=backend,
+                _skip_post_stat=True,
+            ): tid
             for tid in task_ids
         }
         for fut in concurrent.futures.as_completed(futures):
