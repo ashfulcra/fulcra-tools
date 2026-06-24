@@ -58,9 +58,17 @@ class Concept:
         for target in _LINK_RE.findall(self.body):
             if "://" in target or target.startswith("#") or target.startswith("mailto:"):
                 continue
-            if target.startswith("/"):
-                resolved = target.lstrip("/")
+            # Strip query string and fragment from local targets before resolving.
+            # Order matters: strip fragment first (after ?), then query (after ?).
+            # Simplest: split on ? then on # — fragment can follow query or appear alone.
+            path_part = target.split("?")[0].split("#")[0]
+            # If stripping left an empty string (was a pure fragment — already caught
+            # above — or edge case), skip rather than resolving to ".".
+            if not path_part:
+                continue
+            if path_part.startswith("/"):
+                resolved = path_part.lstrip("/")
             else:
-                resolved = posixpath.normpath(posixpath.join(base_dir, target))
+                resolved = posixpath.normpath(posixpath.join(base_dir, path_part))
             out.append(concept_id_for(resolved))
         return out

@@ -52,3 +52,40 @@ def test_links_skips_anchors_and_mailto():
     )
     c = Concept.from_text(text, "x")
     assert c.links() == ["other"]
+
+
+# --- Finding 1: links() must strip URL fragments and query strings ---
+
+def test_links_strips_fragment_from_absolute_link():
+    """Absolute link /a.md#schema should resolve to concept id 'a', not 'a#schema'."""
+    text = "---\ntype: T\n---\nSee [schema](/a.md#schema).\n"
+    c = Concept.from_text(text, "tables/orders")
+    assert c.links() == ["a"]
+
+
+def test_links_strips_fragment_from_relative_link_in_subdir():
+    """Relative link b.md#x from a subdir concept should resolve correctly."""
+    text = "---\ntype: T\n---\nSee [b](b.md#x).\n"
+    c = Concept.from_text(text, "subdir/orders")
+    assert c.links() == ["subdir/b"]
+
+
+def test_links_strips_query_string():
+    """a.md?v=1 should resolve to concept id 'a'."""
+    text = "---\ntype: T\n---\nSee [versioned](a.md?v=1).\n"
+    c = Concept.from_text(text, "x")
+    assert c.links() == ["a"]
+
+
+def test_links_strips_query_and_fragment():
+    """a.md?v=1#x should resolve to concept id 'a'."""
+    text = "---\ntype: T\n---\nSee [both](a.md?v=1#x).\n"
+    c = Concept.from_text(text, "x")
+    assert c.links() == ["a"]
+
+
+def test_links_pure_anchor_still_skipped():
+    """A pure #section link (same-concept anchor) must still be excluded from links()."""
+    text = "---\ntype: T\n---\nSee [top](#top).\n"
+    c = Concept.from_text(text, "x")
+    assert c.links() == []
