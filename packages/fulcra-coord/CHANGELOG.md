@@ -12,6 +12,23 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Fix: directive comparable-set detection regression (feat/reconcile-perf)
+
+- The parity-sampling change filtered `comparable_records` by `r.get("id")`,
+  but the comparison loop actually keys off `r.get("task_id")`. A stored
+  directive record with a valid `task_id` back-ref but a missing/empty `id`
+  — malformed or legacy body — was silently excluded from `comparable_records`
+  and from the sampling rotation, so a real divergence on such a record would
+  never be detected on any tick. Filter changed to `r.get("task_id")` — the
+  field the comparison actually needs — at `cli.py` line 1229. Records with
+  `task_id` but no `id` are now included and sampled like everything else.
+  `_parity_sample_window`'s defensive sort key (`x.get("id") or ""`) already
+  handles no-id records stably (grouped at the front, no `KeyError`), so no
+  change to the sort/rotation logic was needed. `records_total` stays
+  consistent with the new `comparable_records` definition. Well-formed records
+  (produced by `schema.make_directive` which always sets `DIR-T-<task_id>`)
+  are unaffected; this only restores detection on malformed/legacy bodies.
+
 ### Perf: directive-parity check now samples like event-parity
 
 - `_directive_parity_check` previously read an ack sub-log

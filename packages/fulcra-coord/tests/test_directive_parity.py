@@ -351,3 +351,46 @@ def test_reconcile_exit_code_unaffected_by_directive_parity_exception(coord_back
     ):
         rc = cli.cmd_reconcile(mock.Mock(), backend=coord_backend)
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# 7. Detection-equivalence regression (feat/reconcile-perf): a record with a
+#    valid task_id but no id must still be detected as drift.
+# ---------------------------------------------------------------------------
+
+def test_directive_parity_detects_drift_on_record_without_id(coord_backend):
+    """A stored directive record that has a valid task_id back-ref but is
+    missing an ``id`` field must still be included in the comparable population
+    and must be reported as drift when its fields diverge from the task.
+
+    Regression guard for the parity-sampling change introduced in
+    feat/reconcile-perf: the original filter ``r.get("id")`` silently excluded
+    such records from ``comparable_records``, so a real divergence on a
+    malformed/legacy body would never be detected on any tick.  The fix changes
+    the filter to ``r.get("task_id")`` — the field the comparison actually
+    needs — so records with task_id but no id are sampled and compared like
+    everything else.
+
+    The _parity_sample_window sort key is already defensive
+    (``x.get("id") or ""``), so records without id sort to the front stably
+    without raising — no additional change needed there.
+    """
+    task, directive = _seed_directive_task(
+        coord_backend, task_id="TASK-NOID", assignee="bob", status="proposed",
+    )
+    # Construct a stored directive that has task_id but NO id — simulating a
+    # malformed/legacy body — and whose audience diverges from the task.
+    stored_no_id = {k: v for k, v in directive.items() if k != "id"}
+    assert stored_no_id.get("task_id") == "TASK-NOID"
+    assert "id" not in stored_no_id
+    # Introduce deliberate drift: wrong audience.
+    stored_no_id["audience"] = "wrong-agent"
+
+    # Pass records directly (bypass listing) to keep the test hermetic.
+    report = cli._directive_parity_check(
+        records=[stored_no_id], all_tasks=[task],
+    )
+    assert "TASK-NOID" in report["drift_task_ids"], (
+        "record with task_id but no id was silently excluded from "
+        "comparable_records — detection regression"
+    )

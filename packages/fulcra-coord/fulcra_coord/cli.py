@@ -1226,7 +1226,7 @@ def _directive_parity_check(
     # _parity_sample_window actually rotates over — so the telemetry denominator
     # equals what the cursor tiles across.  Records without an ``id`` can't be
     # sorted or rotated, so they are excluded from both the window and the count.
-    comparable_records = [r for r in stored_records if r.get("id")]
+    comparable_records = [r for r in stored_records if r.get("task_id")]
     records_total = len(comparable_records)
     window, dir_cursor, rotation_total = _parity_sample_window(
         comparable_records,
