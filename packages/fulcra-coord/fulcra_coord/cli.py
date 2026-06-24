@@ -813,8 +813,12 @@ def _parity_sample_window(items, cursor_path):
     Items are sorted by their ``id`` so the window is stable against listing
     order and the persisted cursor actually advances across ticks. The CALLER
     advances the cursor (by what it actually PROBED, so a deadline-shortened
-    window resumes where it stopped) via ``_write_parity_cursor``."""
-    items = sorted(items, key=lambda x: x["id"])
+    window resumes where it stopped) via ``_write_parity_cursor``.
+
+    Callers are expected to pre-filter items so all carry an ``id``; the sort
+    key is defensive (``x.get("id") or ""``) so any that don't are grouped
+    stably at the front without raising."""
+    items = sorted(items, key=lambda x: x.get("id") or "")
     total = len(items)
     sample = _parity_sample_size()
     if sample > 0 and total > sample:
@@ -1218,13 +1222,14 @@ def _directive_parity_check(
     # id-sorted population, persisting a SEPARATE cursor so successive ticks tile
     # the rest. Report-only/best-effort is unchanged: a record in the window that
     # diverges is reported EXACTLY as before; the rest simply drain on a later
-    # tick's window. records_total stays the TRUE population (the coverage
-    # denominator); sampled reports the window actually walked this tick.
-    # Only top-level records carry an ``id`` to sort/rotate by; the self-load and
-    # tick-shared paths both guarantee that, so the window is stable.
-    records_total = len(stored_records)
+    # tick's window. records_total is the id-filtered population — the subset
+    # _parity_sample_window actually rotates over — so the telemetry denominator
+    # equals what the cursor tiles across.  Records without an ``id`` can't be
+    # sorted or rotated, so they are excluded from both the window and the count.
+    comparable_records = [r for r in stored_records if r.get("id")]
+    records_total = len(comparable_records)
     window, dir_cursor, rotation_total = _parity_sample_window(
-        [r for r in stored_records if r.get("id")],
+        comparable_records,
         _directive_parity_cursor_path())
 
     for stored in window:
