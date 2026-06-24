@@ -12,6 +12,14 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.14] — 2026-06-24
+
+Reconcile-performance build (instrumentation-first; PR #280). Brought reconcile
+from ~103s toward the 90s default deadline at steady-state by measuring first,
+then cutting the data-identified costs (body-load round-trips; directive-parity
+per-record sub-log I/O). Hard constraint honored throughout: no transport
+concurrency increase (the gateway-saturation ceiling).
+
 ### Fix: directive comparable-set detection regression (feat/reconcile-perf)
 
 - The parity-sampling change filtered `comparable_records` by `r.get("id")`,
