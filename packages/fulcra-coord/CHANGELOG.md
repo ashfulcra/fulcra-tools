@@ -12,6 +12,8 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.15] — 2026-06-25
+
 ### Perf: event-parity gets its own (smaller) sample cap
 
 - After 0.15.14 sampled the directive-parity check, the **event-parity** check
