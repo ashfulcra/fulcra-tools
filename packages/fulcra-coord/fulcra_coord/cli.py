@@ -761,6 +761,25 @@ def _parity_sample_size() -> int:
     return env_int("FULCRA_COORD_PARITY_SAMPLE", 50)
 
 
+def _event_parity_sample_size() -> int:
+    """Tasks probed per tick by the EVENT-parity pass specifically.
+
+    Decoupled from the shared ``_parity_sample_size`` (which directive-parity
+    uses) because event-parity is the EXPENSIVE parity pass: each probed task
+    costs one event-shard listing PLUS one download per shard (measured live:
+    ~3.4 remote ops/task, downloads dominant), where directive-parity is far
+    cheaper per record. So event-parity gets its own, smaller cap.
+
+    Explicit ``FULCRA_COORD_EVENT_PARITY_SAMPLE`` wins. Otherwise default to
+    ``min(30, _parity_sample_size())`` — capped at 30 to bound the dominant
+    sub-pass cost, AND never larger than the general parity knob, so an operator
+    who lowered the shared knob to cut reconcile cost still gets an event-parity
+    sample at least that small. ``<= 0`` disables sampling (probe everything),
+    same contract as the shared knob."""
+    return env_int("FULCRA_COORD_EVENT_PARITY_SAMPLE",
+                   min(30, _parity_sample_size()))
+
+
 def _parity_cursor_path():
     """The rotation cursor's local path — in the cache dir beside the other
     per-host bookkeeping (notified-state, op markers). Local-only: each host
@@ -800,12 +819,15 @@ def _write_parity_cursor(value: int, path=None) -> None:
         pass
 
 
-def _parity_sample_window(items, cursor_path):
+def _parity_sample_window(items, cursor_path, sample=None):
     """Shared rotating-window selector for BOTH parity checks (DRY).
 
     ``items`` is the full comparable population (already the units each check
-    pays per-record remote I/O for). Returns ``(window, cursor, total)`` where
-    ``window`` is the ``_parity_sample_size()`` slice to probe THIS tick,
+    pays per-record remote I/O for). ``sample`` is the per-tick window size; when
+    None it defaults to the shared ``_parity_sample_size()`` (directive-parity's
+    knob). event-parity passes its own ``_event_parity_sample_size()`` because it
+    is the more expensive pass. Returns ``(window, cursor, total)`` where
+    ``window`` is the ``sample`` slice to probe THIS tick,
     ``cursor`` is the resolved start offset (or None when sampling is inactive —
     population <= sample, or the knob is disabled), and ``total`` is the true
     population size (the denominator a reader divides coverage by).
@@ -820,7 +842,8 @@ def _parity_sample_window(items, cursor_path):
     stably at the front without raising."""
     items = sorted(items, key=lambda x: x.get("id") or "")
     total = len(items)
-    sample = _parity_sample_size()
+    if sample is None:
+        sample = _parity_sample_size()
     if sample > 0 and total > sample:
         cursor = _read_parity_cursor(cursor_path) % total
         window = [items[(cursor + i) % total] for i in range(sample)]
@@ -998,7 +1021,8 @@ def _event_parity_check(
     # shared _parity_sample_window selector — same machinery the directive-parity
     # check uses, over its own cursor file). The cursor persists locally so
     # consecutive ticks tile the bus.
-    window, cursor, _ = _parity_sample_window(bodies, _parity_cursor_path())
+    window, cursor, _ = _parity_sample_window(
+        bodies, _parity_cursor_path(), sample=_event_parity_sample_size())
 
     budget_floor = (deadline - _PARITY_DEADLINE_HEADROOM_SECONDS
                     if deadline is not None else None)

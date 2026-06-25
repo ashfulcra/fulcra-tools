@@ -12,6 +12,27 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+## [0.15.15] — 2026-06-25
+
+### Perf: event-parity gets its own (smaller) sample cap
+
+- After 0.15.14 sampled the directive-parity check, the **event-parity** check
+  became the dominant reconcile sub-pass — measured live at ~18s (sample 50:
+  50 event-shard listings + 122 shard downloads; downloads dominate and scale
+  1:1 with the sample). It is the EXPENSIVE parity pass (~3.4 remote ops/task
+  vs directive-parity's far cheaper per-record cost), so sharing
+  directive-parity's `FULCRA_COORD_PARITY_SAMPLE` (50) over-probed it.
+- New `_event_parity_sample_size()` / `FULCRA_COORD_EVENT_PARITY_SAMPLE` knob,
+  default `min(30, FULCRA_COORD_PARITY_SAMPLE)` — capped at 30 to bound the
+  dominant sub-pass, and never larger than the shared knob (so lowering the
+  shared knob still bounds event-parity). The shared `_parity_sample_window`
+  gained an optional `sample` param (DRY); directive-parity is unchanged
+  (still 50). Report-only/best-effort contract, rotating-cursor coverage, and
+  the deadline gate are all unchanged — only the per-tick window shrinks; full
+  coverage tiles over ~ceil(N/30) ticks instead of ~ceil(N/50).
+- Live: event-parity ~18.4s → ~11.1s (−40%) at ~340 tasks; no transport
+  concurrency change.
+
 ## [0.15.14] — 2026-06-23
 
 Reconcile-performance build (instrumentation-first; PR #280). Brought reconcile

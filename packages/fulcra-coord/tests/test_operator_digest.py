@@ -676,6 +676,6 @@ def test_digest_omits_loops_section_when_fold_raises(coord_backend, capsys):
 
 
 class TestVersion(unittest.TestCase):
-    def test_version_is_0_15_14(self):
+    def test_version_is_0_15_15(self):
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.14")
+        self.assertEqual(__version__, "0.15.15")

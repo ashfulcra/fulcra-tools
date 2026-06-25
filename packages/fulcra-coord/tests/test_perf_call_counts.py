@@ -176,6 +176,45 @@ def test_parity_sample_disabled_checks_everything(coord_backend):
     assert report["sampled"] == 3
 
 
+def test_event_parity_sample_size_caps_at_30_and_tracks_lower_shared():
+    """event-parity is the EXPENSIVE parity pass (~3.4 remote ops/task: one event
+    listing + ~K shard downloads), so it gets its OWN smaller cap, decoupled from
+    the shared FULCRA_COORD_PARITY_SAMPLE that directive-parity uses. Default is
+    min(30, shared) — capped at 30 AND never larger than the general knob (so an
+    operator who lowered the shared knob to cut reconcile cost still gets an
+    event-parity sample at least that small). An explicit event knob overrides."""
+    # default, no knobs: min(30, 50) = 30
+    with mock.patch.dict(os.environ, clear=False):
+        os.environ.pop("FULCRA_COORD_EVENT_PARITY_SAMPLE", None)
+        os.environ.pop("FULCRA_COORD_PARITY_SAMPLE", None)
+        assert cli._event_parity_sample_size() == 30
+    # shared lowered below 30 -> event tracks it (never more expensive than general)
+    with mock.patch.dict(os.environ, {"FULCRA_COORD_PARITY_SAMPLE": "10"}):
+        os.environ.pop("FULCRA_COORD_EVENT_PARITY_SAMPLE", None)
+        assert cli._event_parity_sample_size() == 10
+    # explicit event knob wins outright
+    with mock.patch.dict(os.environ, {"FULCRA_COORD_EVENT_PARITY_SAMPLE": "7",
+                                      "FULCRA_COORD_PARITY_SAMPLE": "50"}):
+        assert cli._event_parity_sample_size() == 7
+
+
+def test_event_parity_uses_its_own_sample_knob_not_the_shared(coord_backend):
+    """event-parity probes FULCRA_COORD_EVENT_PARITY_SAMPLE tasks/tick, INDEPENDENT
+    of the shared FULCRA_COORD_PARITY_SAMPLE (which only directive-parity reads).
+    Here the event knob (2) governs, not the shared knob (5)."""
+    tasks = [_seed_task_with_events(coord_backend, i) for i in range(5)]
+    counter = OpCounter()
+    with mock.patch.dict(os.environ, {"FULCRA_COORD_EVENT_PARITY_SAMPLE": "2",
+                                      "FULCRA_COORD_PARITY_SAMPLE": "5"}):
+        with counter.patch():
+            report = cli._event_parity_check(tasks, backend=coord_backend)
+    probed = [t for t in tasks
+              if counter.lists_of(remote.events_prefix(t["id"]))]
+    assert len(probed) == 2  # the EVENT knob (2), not the shared knob (5)
+    assert report["sampled"] == 2
+    assert report["tasks_total"] == 5
+
+
 # ---------------------------------------------------------------------------
 # E1d — deadline gate: a spent reconcile budget stops the pass
 # ---------------------------------------------------------------------------
