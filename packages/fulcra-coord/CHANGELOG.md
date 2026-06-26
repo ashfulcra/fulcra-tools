@@ -10,7 +10,7 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
-## [Unreleased]
+## [0.15.16] — 2026-06-26
 
 ### Fix: prune leaked orphan summaries instead of unioning them forever
 
