@@ -12,6 +12,24 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ## [Unreleased]
 
+### Fix: prune leaked orphan summaries instead of unioning them forever
+
+- The `views/summaries.json` aggregate leaked: a current-aggregate row whose task
+  body no longer exists (archived/deleted) but whose non-terminal summary row was
+  never pruned would be unioned back into every upload **forever** by
+  `_merge_summaries_for_upload`, and the matching `_summaries_upload_would_clobber`
+  guard would *reject* an orphan-free upload as "would drop open task". Live this
+  bloated the aggregate to **1486 entries for 344 real task files** (1142 orphans),
+  so every `status`/`agents`/`inbox` read and every reconcile processed a 4.3×
+  aggregate → fleet-wide slowness and heartbeat budget-timeouts.
+- Both functions now share an **age discriminator**: a body-less non-terminal row
+  is dropped (merge) / allowed to drop (guard) only when its `updated_at` parses
+  AND is older than a grace window. A row within grace is still treated as a
+  multi-host eventual-consistency RACE — unioned by the merge and still blocking
+  the clobber guard, exactly as before. An undatable row is always KEPT (never
+  drop what we can't date, mirroring `is_archivable_task`).
+- New knob `FULCRA_COORD_SUMMARY_ORPHAN_GRACE_HOURS` (default `2.0`).
+
 ## [0.15.15] — 2026-06-25
 
 ### Perf: event-parity gets its own (smaller) sample cap

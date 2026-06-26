@@ -1,5 +1,6 @@
 """Reconcile must repair views from task files, not stale view-derived ids."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -166,8 +167,11 @@ def test_summaries_upload_guard_rejects_open_task_drop_and_rewind():
     candidate = views.build_summaries(
         [done_task], updated_at="2026-06-13T09:20:00.000000Z")
 
+    # `now` close to the fixed dates so TASK-OPEN is RECENT (within grace) — the
+    # multi-host race protection must still reject dropping a recent open task.
+    now = datetime(2026, 6, 13, 9, 30, tzinfo=timezone.utc)
     assert "would drop open task TASK-OPEN" in (
-        cli._summaries_upload_would_clobber(candidate, current) or ""
+        cli._summaries_upload_would_clobber(candidate, current, now) or ""
     )
 
     older_open = dict(open_task)
@@ -176,7 +180,7 @@ def test_summaries_upload_guard_rejects_open_task_drop_and_rewind():
         [older_open, done_task], updated_at="2026-06-13T09:20:00.000000Z")
 
     assert "would rewind task TASK-OPEN" in (
-        cli._summaries_upload_would_clobber(candidate, current) or ""
+        cli._summaries_upload_would_clobber(candidate, current, now) or ""
     )
 
 
@@ -201,10 +205,13 @@ def test_summaries_upload_merge_preserves_remote_only_open_task():
     current = views.build_summaries(
         [remote_task], updated_at="2026-06-13T10:38:00.000000Z")
 
-    merged = cli._merge_summaries_for_upload(candidate, current)
+    # `now` close to the fixed dates so TASK-REMOTE is RECENT (within grace) — a
+    # recent remote-only open task is a multi-host race and must be preserved.
+    now = datetime(2026, 6, 13, 10, 40, tzinfo=timezone.utc)
+    merged = cli._merge_summaries_for_upload(candidate, current, now)
     ids = {s["id"] for s in merged["summaries"]}
     assert ids == {"TASK-LOCAL", "TASK-REMOTE"}
-    assert cli._summaries_upload_would_clobber(merged, current) is None
+    assert cli._summaries_upload_would_clobber(merged, current, now) is None
 
 
 def test_summaries_upload_guard_rejects_newer_candidate_that_drops_open_task():
@@ -221,6 +228,91 @@ def test_summaries_upload_guard_rejects_newer_candidate_that_drops_open_task():
     candidate = views.build_summaries(
         [], updated_at="2026-06-13T09:20:00.000000Z")
 
+    # `now` close to the fixed dates so TASK-OPEN is RECENT — a newer candidate
+    # that drops a recent open task is still a clobber and must be rejected.
+    now = datetime(2026, 6, 13, 9, 30, tzinfo=timezone.utc)
     assert "would drop open task TASK-OPEN" in (
-        cli._summaries_upload_would_clobber(candidate, current) or ""
+        cli._summaries_upload_would_clobber(candidate, current, now) or ""
+    )
+
+
+def _open_summary(task_id, updated_at):
+    task = schema.make_task(
+        title="open task",
+        workstream="fulcra-coord",
+        agent="agent-a",
+    )
+    task["id"] = task_id
+    task["updated_at"] = updated_at
+    return task
+
+
+def test_summaries_merge_drops_stale_orphan_but_keeps_recent_race():
+    """A current-only open row OLDER than grace is an orphan (body gone) → dropped;
+    a current-only open row WITHIN grace is a multi-host race → kept."""
+    local = _open_summary("TASK-LOCAL", "2026-06-13T12:00:00.000000Z")
+    stale_orphan = _open_summary("TASK-STALE", "2026-06-13T00:00:00.000000Z")
+    recent_race = _open_summary("TASK-RECENT", "2026-06-13T11:55:00.000000Z")
+
+    candidate = views.build_summaries(
+        [local], updated_at="2026-06-13T12:00:00.000000Z")
+    current = views.build_summaries(
+        [stale_orphan, recent_race], updated_at="2026-06-13T11:55:00.000000Z")
+
+    # grace default 2.0h; relative to now, TASK-STALE is 12h old (orphan),
+    # TASK-RECENT is 5min old (race).
+    now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+    merged = cli._merge_summaries_for_upload(candidate, current, now)
+    ids = {s["id"] for s in merged["summaries"]}
+    assert ids == {"TASK-LOCAL", "TASK-RECENT"}
+    assert "TASK-STALE" not in ids
+
+
+def test_summaries_guard_allows_stale_orphan_drop_rejects_recent_drop():
+    """The clobber guard allows dropping a STALE current-only open row (orphan
+    prune) but still rejects dropping a RECENT one (race protection)."""
+    stale_orphan = _open_summary("TASK-STALE", "2026-06-13T00:00:00.000000Z")
+    recent_race = _open_summary("TASK-RECENT", "2026-06-13T11:55:00.000000Z")
+    now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+
+    current_stale = views.build_summaries(
+        [stale_orphan], updated_at="2026-06-13T11:55:00.000000Z")
+    candidate = views.build_summaries(
+        [], updated_at="2026-06-13T12:00:00.000000Z")
+    assert cli._summaries_upload_would_clobber(
+        candidate, current_stale, now) is None
+
+    current_recent = views.build_summaries(
+        [recent_race], updated_at="2026-06-13T11:55:00.000000Z")
+    assert "would drop open task TASK-RECENT" in (
+        cli._summaries_upload_would_clobber(candidate, current_recent, now) or ""
+    )
+
+
+def test_summary_orphan_grace_hours_knob_default_and_override(monkeypatch):
+    monkeypatch.delenv("FULCRA_COORD_SUMMARY_ORPHAN_GRACE_HOURS", raising=False)
+    assert cli._summary_orphan_grace_hours() == 2.0
+    monkeypatch.setenv("FULCRA_COORD_SUMMARY_ORPHAN_GRACE_HOURS", "6.5")
+    assert cli._summary_orphan_grace_hours() == 6.5
+
+
+def test_summaries_undatable_current_only_row_is_kept_by_both():
+    """Never drop what we can't date — an undatable current-only open row is
+    KEPT by the merge (unioned) and still triggers the clobber guard."""
+    local = _open_summary("TASK-LOCAL", "2026-06-13T12:00:00.000000Z")
+    undatable = _open_summary("TASK-UNDATED", "not-a-timestamp")
+
+    candidate = views.build_summaries(
+        [local], updated_at="2026-06-13T12:00:00.000000Z")
+    current = views.build_summaries(
+        [undatable], updated_at="2026-06-13T12:00:00.000000Z")
+    now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+
+    merged = cli._merge_summaries_for_upload(candidate, current, now)
+    assert "TASK-UNDATED" in {s["id"] for s in merged["summaries"]}
+
+    drop_candidate = views.build_summaries(
+        [], updated_at="2026-06-13T12:00:00.000000Z")
+    assert "would drop open task TASK-UNDATED" in (
+        cli._summaries_upload_would_clobber(drop_candidate, current, now) or ""
     )
