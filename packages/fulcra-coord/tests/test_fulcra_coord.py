@@ -9255,7 +9255,13 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_15(self):
+    def test_version_is_0_15_16(self):
+        # 0.15.16: prune leaked orphan summaries via an age discriminator —
+        # `_merge_summaries_for_upload`/`_summaries_upload_would_clobber` drop
+        # STALE non-terminal current-only rows (orphans) on the authoritative
+        # merge while keeping recent rows (multi-host race) + undatable rows.
+        # Fixes a 4.3x summaries-aggregate bloat (1142 orphans) that was the
+        # root cause of fleet reconcile slowness / heartbeat timeouts.
         # 0.15.15: event-parity gets its own smaller sample cap (it became the
         # dominant reconcile sub-pass after 0.15.14 sampled directive-parity).
         # 0.15.14: reconcile-performance build — phase-timing instrumentation,
@@ -9264,7 +9270,7 @@ class TestVersionFlag(unittest.TestCase):
         # detection. 0.15.12: `search` carries assignee + pr. 0.15.11: self-heal at
         # scale. 0.15.10: stable-hostname identity fix (#273).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.15")
+        self.assertEqual(__version__, "0.15.16")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):

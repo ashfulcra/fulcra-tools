@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import cache, remote, schema, views, log as ops_log, identity
-from . import env_int
+from . import env_int, env_float
 # Direct store-module import for ONE read-only diagnostic: the transport's
 # ``last_upload_error`` failure observable (see its comment in the store).
 # It must be read as a LIVE module attribute — ``remote``'s function re-exports
@@ -603,14 +603,61 @@ def _reconcile_rebuild_source_preserving_acks(
     return rebuild_source
 
 
+#: Default grace window (hours) before a current-aggregate summary row with no
+#: matching task body is treated as a prunable ORPHAN (body archived/deleted, the
+#: summary row leaked). A row updated MORE recently than this is instead assumed
+#: to be a multi-host eventual-consistency RACE (another host created a task this
+#: host's tasks/ listing just missed) and is preserved. 2h comfortably exceeds the
+#: bus's propagation/reconcile-tick window while still pruning the long-leaked
+#: orphans (the 1142-row leak that 4.3x-bloated the aggregate).
+_SUMMARY_ORPHAN_GRACE_HOURS_DEFAULT = 2.0
+
+
+def _summary_orphan_grace_hours(grace_hours: Optional[float] = None) -> float:
+    """Grace window (hours) for treating a body-less open summary row as an
+    orphan. Mirrors the other reconcile knobs: a non-numeric env value falls back
+    to the default (env_float's contract)."""
+    return env_float("FULCRA_COORD_SUMMARY_ORPHAN_GRACE_HOURS",
+                     _SUMMARY_ORPHAN_GRACE_HOURS_DEFAULT, override=grace_hours)
+
+
+def _is_prunable_summary_orphan(cur: dict[str, Any], now: datetime,
+                                grace_hours: float) -> bool:
+    """True iff ``cur`` is a STALE orphan safe to drop from the aggregate.
+
+    The candidate (real task set) lacks this row, so it is either a genuine
+    orphan (body gone, summary leaked) or a recent multi-host race. We discriminate
+    by age: only a row whose ``updated_at`` PARSES and is OLDER than ``grace_hours``
+    is a prunable orphan. An undatable row ages to +inf via ``views._age_hours``,
+    but we must NEVER drop what we can't date (mirroring ``is_archivable_task``'s
+    discipline) — so an undatable row returns False (KEEP). A row within the grace
+    window is a race and returns False (KEEP). Best-effort/never-raise: any
+    unexpected failure is swallowed to False (KEEP) so the reconcile tick never
+    drops a row it could not positively classify as a stale orphan."""
+    try:
+        age = views._age_hours(cur.get("updated_at", ""), now)
+        if age == float("inf"):
+            # Undatable: keep — never drop what we can't date.
+            return False
+        return age > grace_hours
+    except Exception:
+        return False
+
+
 def _summaries_upload_would_clobber(candidate: dict[str, Any],
-                                    current: Any) -> Optional[str]:
+                                    current: Any,
+                                    now: Optional[datetime] = None) -> Optional[str]:
     """Return a reason when uploading ``candidate`` would rewind summaries.
 
     Reconcile can run concurrently on stale hosts. The task files are the truth,
     but views/summaries.json is a shared last-writer-wins file; an older host
     must not replace a newer aggregate with one that drops open tasks or rolls
     back per-task updates already visible on the bus.
+
+    INVARIANT: callers MUST pass a ``candidate`` built from the AUTHORITATIVE
+    complete task set (the ``if load_degraded: return`` early-return upstream
+    guarantees this) — on a partial/degraded candidate the orphan age guard would
+    over-prune real open tasks (silent data loss).
     """
     if not isinstance(current, dict):
         return None
@@ -619,6 +666,9 @@ def _summaries_upload_would_clobber(candidate: dict[str, Any],
     if (not isinstance(current_summaries, list)
             or not isinstance(candidate_summaries, list)):
         return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    grace = _summary_orphan_grace_hours()
     candidate_by_id = {
         s.get("id"): s for s in candidate_summaries
         if isinstance(s, dict) and s.get("id")
@@ -630,7 +680,11 @@ def _summaries_upload_would_clobber(candidate: dict[str, Any],
         nxt = candidate_by_id.get(cid)
         if nxt is None:
             if cur.get("status") not in schema.TERMINAL_STATUSES:
-                return f"would drop open task {cid}"
+                # A STALE orphan being dropped is the intended prune (its body is
+                # gone) — not a clobber. Only a RECENT open row (multi-host race)
+                # must still block the upload.
+                if not _is_prunable_summary_orphan(cur, now, grace):
+                    return f"would drop open task {cid}"
             continue
         if _updated_at_key(cur) > _updated_at_key(nxt):
             return f"would rewind task {cid} from {cur.get('updated_at')}"
@@ -638,7 +692,8 @@ def _summaries_upload_would_clobber(candidate: dict[str, Any],
 
 
 def _merge_summaries_for_upload(candidate: dict[str, Any],
-                                current: Any) -> dict[str, Any]:
+                                current: Any,
+                                now: Optional[datetime] = None) -> dict[str, Any]:
     """Merge remote open/newer summaries into a rebuilt summaries candidate.
 
     A patched host may see 715 task bodies while an unpatched stale host just
@@ -647,6 +702,11 @@ def _merge_summaries_for_upload(candidate: dict[str, Any],
     aggregate contains one open task this host failed to see. For summaries,
     unioning open missing rows and taking the newer per-task row is safer than
     either last-writer-wins or refusing to upload forever.
+
+    INVARIANT: callers MUST pass a ``candidate`` built from the AUTHORITATIVE
+    complete task set (the ``if load_degraded: return`` early-return upstream
+    guarantees this) — on a partial/degraded candidate the orphan age guard would
+    over-prune real open tasks (silent data loss).
     """
     if not isinstance(current, dict):
         return candidate
@@ -655,6 +715,9 @@ def _merge_summaries_for_upload(candidate: dict[str, Any],
     if (not isinstance(current_summaries, list)
             or not isinstance(candidate_summaries, list)):
         return candidate
+    if now is None:
+        now = datetime.now(timezone.utc)
+    grace = _summary_orphan_grace_hours()
 
     by_id: dict[str, dict[str, Any]] = {
         s.get("id"): s for s in candidate_summaries
@@ -668,8 +731,14 @@ def _merge_summaries_for_upload(candidate: dict[str, Any],
         nxt = by_id.get(cid)
         if nxt is None:
             if cur.get("status") not in schema.TERMINAL_STATUSES:
-                by_id[cid] = cur
-                changed = True
+                # Body-less open row. If it's a STALE orphan, DROP it (do not add
+                # to by_id, do not set changed): the merged result then matches the
+                # candidate's absence, so the orphan-free candidate is what uploads
+                # — pruning the leak. If it's RECENT (multi-host race), union it
+                # back exactly as before so the just-missed task stays visible.
+                if not _is_prunable_summary_orphan(cur, now, grace):
+                    by_id[cid] = cur
+                    changed = True
             continue
         if _updated_at_key(cur) > _updated_at_key(nxt):
             by_id[cid] = cur
