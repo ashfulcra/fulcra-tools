@@ -653,6 +653,11 @@ def _summaries_upload_would_clobber(candidate: dict[str, Any],
     but views/summaries.json is a shared last-writer-wins file; an older host
     must not replace a newer aggregate with one that drops open tasks or rolls
     back per-task updates already visible on the bus.
+
+    INVARIANT: callers MUST pass a ``candidate`` built from the AUTHORITATIVE
+    complete task set (the ``if load_degraded: return`` early-return upstream
+    guarantees this) — on a partial/degraded candidate the orphan age guard would
+    over-prune real open tasks (silent data loss).
     """
     if not isinstance(current, dict):
         return None
@@ -697,6 +702,11 @@ def _merge_summaries_for_upload(candidate: dict[str, Any],
     aggregate contains one open task this host failed to see. For summaries,
     unioning open missing rows and taking the newer per-task row is safer than
     either last-writer-wins or refusing to upload forever.
+
+    INVARIANT: callers MUST pass a ``candidate`` built from the AUTHORITATIVE
+    complete task set (the ``if load_degraded: return`` early-return upstream
+    guarantees this) — on a partial/degraded candidate the orphan age guard would
+    over-prune real open tasks (silent data loss).
     """
     if not isinstance(current, dict):
         return candidate

@@ -1,6 +1,6 @@
 """Reconcile must repair views from task files, not stale view-derived ids."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -316,3 +316,46 @@ def test_summaries_undatable_current_only_row_is_kept_by_both():
     assert "would drop open task TASK-UNDATED" in (
         cli._summaries_upload_would_clobber(drop_candidate, current, now) or ""
     )
+
+
+def test_summaries_row_aged_exactly_grace_is_kept_by_both():
+    """Boundary: `age == grace` is KEPT (strict `age > grace`). Pins the
+    boundary so a future `>`->`>=` flip is caught — an exactly-grace current-only
+    open row must still be protected by both functions."""
+    grace = cli._summary_orphan_grace_hours()  # default 2.0h
+    now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+    # updated_at == now - grace, to the microsecond.
+    edge = now - timedelta(hours=grace)
+    edge_iso = edge.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    boundary = _open_summary("TASK-EDGE", edge_iso)
+
+    current = views.build_summaries(
+        [boundary], updated_at="2026-06-13T12:00:00.000000Z")
+    candidate = views.build_summaries(
+        [], updated_at="2026-06-13T12:00:00.000000Z")
+
+    merged = cli._merge_summaries_for_upload(candidate, current, now)
+    assert "TASK-EDGE" in {s["id"] for s in merged["summaries"]}
+    assert "would drop open task TASK-EDGE" in (
+        cli._summaries_upload_would_clobber(candidate, current, now) or ""
+    )
+
+
+def test_summaries_merge_output_passes_its_own_guard_same_tick():
+    """End-to-end: run the real merge->guard sequence on one input. A stale
+    orphan pruned by the merge must NOT then be vetoed by the guard on the
+    merged output — pins the merge<->guard agreement production relies on (they
+    sample `now` independently; age-only-grows makes it safe, untested before)."""
+    real = _open_summary("TASK-REAL", "2026-06-13T11:59:00.000000Z")
+    stale_orphan = _open_summary("TASK-ORPHAN", "2026-06-13T00:00:00.000000Z")
+    now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+
+    candidate = views.build_summaries(
+        [real], updated_at="2026-06-13T12:00:00.000000Z")
+    current = views.build_summaries(
+        [stale_orphan, real], updated_at="2026-06-13T11:59:00.000000Z")
+
+    merged = cli._merge_summaries_for_upload(candidate, current, now)
+    assert "TASK-ORPHAN" not in {s["id"] for s in merged["summaries"]}
+    # The merged (orphan-free) output must pass its own clobber guard.
+    assert cli._summaries_upload_would_clobber(merged, current, now) is None
