@@ -2,10 +2,11 @@
 
 What the Fulcra platform actually provides and how to use it, **by agent
 capability tier**. Written so you don't have to re-research the platform
-surface. Verified against live services on 2026-06-14 (`fulcra-api` CLI/lib
+surface. Verified against live services on 2026-06-26 (`fulcra-api` CLI/lib
 **0.1.34** from PyPI, fulcra-api-python main @ `7e470a4`,
-api.fulcradynamics.com OpenAPI, docs.fulcradynamics.com, mcp.fulcradynamics.com
-discovery docs).
+api.fulcradynamics.com OpenAPI — now **48 paths**; the file API + a v1 catalog +
+an insights endpoint are newly published in the spec — docs.fulcradynamics.com,
+mcp.fulcradynamics.com discovery docs).
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
@@ -59,15 +60,19 @@ runs on, so it is battle-tested at load.
 - **Tier 1:** `fulcra file list|stat|download|upload|delete <path>`
   (`stat` shows version history; deleted files restorable via lib
   `restore_file`).
-- **Tier 2 (REST, all on `https://api.fulcradynamics.com`):**
-  - List: `GET /input/v1/file_upload?path=<dir>&state=uploaded`
-  - Stat/versions: `GET /input/v1/file_upload/{version_id}`
-  - Download: `GET /input/v1/file_upload/{id}/download`
-  - **Upload (two-step):** `POST /input/v1/file_upload` with JSON
+- **Tier 2 (REST, all on `https://api.fulcradynamics.com`):** the file API is
+  now **published in the OpenAPI spec** (it wasn't before — don't be surprised
+  it's there). Two identical path prefixes exist: **`/input/v1/file`** (the
+  newer name) and **`/input/v1/file_upload`** (its alias; what the shipped CLI
+  still calls). Either works; prefer `/input/v1/file`.
+  - List: `GET /input/v1/file?path=<dir>&state=uploaded`
+  - Stat/versions: `GET /input/v1/file/{input_id}`
+  - Download: `GET /input/v1/file/{input_id}/download`
+  - **Upload (two-step):** `POST /input/v1/file` with JSON
     `{name, path, content_type, content_length}` → response contains signed
     `url` → `POST` the raw bytes to that URL with matching headers.
-  - Delete: `DELETE /input/v1/file_upload/{id}`; restore:
-    `POST /input/v1/file_upload/{id}/restore`
+  - Delete: `DELETE /input/v1/file/{input_id}`; restore:
+    `POST /input/v1/file/{input_id}/restore`
 
 ## Annotations (definitions vs records — they differ!)
 
@@ -119,11 +124,16 @@ Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list
 ## Data queries (read-side, tiers 1 & 2)
 
 - Catalog of everything queryable: `fulcra catalog [--category <c>]` /
-  `GET /data/v1alpha1/data_types`; metrics catalog at
-  `/data/v0/metrics_catalog`.
+  `GET /data/v1/catalog` (stable) or `GET /data/v1alpha1/data_types`; metrics
+  catalog at `/data/v0/metrics_catalog`.
+- Discovery: `GET /data/v1alpha1/data_available` (what data exists for a time
+  range) and `/data/v1alpha1/data_sources` (which sources are connected).
 - Time series: `/data/v0/time_series_grouped` (arbitrary metrics × time,
   `samprate` resolution); per-metric `/data/v1alpha1/metric/{type}` and
-  events `/data/v1alpha1/event/{type}`.
+  events `/data/v1alpha1/event/{type}` (both with `/agg/{resolution}` variants).
+- Insights: `GET /data/v1alpha1/insight` — derived/insights data (new surface;
+  shape still alpha — inspect the OpenAPI response schema before relying on it).
+- Schemas: `GET /user/v1alpha1/schema/annotation` and `…/schema/measurement`.
 - Domain helpers in lib/CLI: sleep cycles/stages, calendars + events,
   workouts, location time series / at-time / visits.
 
