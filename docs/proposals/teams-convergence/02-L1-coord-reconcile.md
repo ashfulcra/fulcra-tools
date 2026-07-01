@@ -136,12 +136,38 @@ All read `_coord/summaries.json` only. If absent/stale (older than a TTL), run �
 - Listing fails (transport) → abort the pass, leave prior derived artifacts intact (never write a
   truncated index — mirrors coord's degraded-load early-return).
 
-## 9. Open questions to close before coding
-- **`fulcra-api file` guarantees:** atomic-ish upload + reliable `stat`-after-write + a usable `mtime`
-  (or version id) in `file list` output — the §3 incremental + §6 LWW assume last-writer-wins with no
-  partial reads. Verify.
-- **Reconcile trigger:** L7 launchd heartbeat vs a designated host; how to prevent two hosts both owning
-  the index (or confirm convergence is enough).
-- **Archival policy:** do we move terminal tasks to `task/archive/` on a window (coord retention), or
-  leave them (index just grows a "Recently Done" tail)? Recommend optional archival add-on.
-- Exact `_coord/` naming + whether to hide it from bare-teams `index.md` entirely.
+## 9. `fulcra-api file` guarantees — RESOLVED (empirical probe 2026-07-01, fulcra-api v0.1.34)
+
+The gate assumption is **confirmed**, and richer than assumed. `file` subcommands: `upload`, `download`,
+`list`, `stat`, `delete`, `restore`. Findings:
+
+- **Last-writer-wins: CONFIRMED.** Re-uploading to the same path serves the latest content on `download`,
+  with no conflict error. A lost race is non-destructive — the loser becomes recoverable version history.
+- **Every upload is versioned.** `stat` returns microsecond `Uploaded:` time, a `Version:` UUID, and the
+  full `Previous Versions:` list (UUID + time + size each). `restore <VERSION_ID>` rolls a **live** file
+  back to a prior version. → coord2 does **not** need its own append-only history/audit log — the File
+  Store versions every write (this is what teams' "audit via versioning" relies on, and it subsumes
+  coord's NO-CAS append-only shard model).
+- **The reliable change-detector is the `stat` `Version:` UUID (or microsecond upload time).**
+- **`list` metadata = size + MINUTE-granular timestamp + name** (e.g. `93B  2026-07-01 04:12PM UTC  probe.md`).
+  Cheap (one call) but **minute-resolution** — two writes in the same minute are indistinguishable by
+  `list` alone. → §3 incremental uses a **conservative `>=` compare** on the list minute (re-download a
+  file whose list-minute ≥ the aggregate's last-reconcile minute); sub-minute double-edits are re-scanned
+  next pass. For exactness, `stat` the candidate (version UUID) — but that's per-file, so reserve it.
+- **`file` output is human-formatted TEXT, not JSON** (unlike the rest of the CLI). L1 must line-parse
+  `list`/`stat` output. (Watch for a future `--json`/`--format` flag; none in v0.1.34.)
+- **`delete` is a removal**, not a CLI-recoverable soft-delete: after `delete`, `list` omits it and `stat`
+  → "File not found"; `restore <uuid>` of a deleted file **errors** (restore is version-rollback of a
+  *live* file). → **Recoverable archival = move-not-delete** (upload to `task/archive/<…>` then delete the
+  hot copy), matching coord's crash-safe hot/cold move. Do not rely on `delete` being undoable.
+
+### Remaining design decisions (not blockers)
+- **Reconcile trigger/ownership:** L7 heartbeat on a designated host vs. accept convergence (index is
+  deterministic from the listing, so concurrent reconciles converge; last write wins harmlessly).
+- **Archival policy:** move terminal tasks to `task/archive/` on a window (coord retention) vs. leave a
+  "Recently Done" tail. Recommend an optional archival add-on (move-not-delete, per above).
+- **`_coord/` naming** + whether to hide it from bare-teams `index.md`.
+
+**Verdict: L1 is unblocked.** LWW + versioning + stat/list metadata all support the design; the only
+adjustments are (a) minute-resolution incremental via `list` with a conservative compare, (b) text-parse
+`file` output, (c) archive-by-move not delete.

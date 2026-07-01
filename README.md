@@ -34,12 +34,15 @@ the layers they want. OKF v0.1 explicitly permits the typed frontmatter and synt
 L1 is the linchpin (queryability + self-healing). L4–L7 are additive/independent.
 
 ## Status
-**Design + scaffold.** See [`docs/proposals/teams-convergence/`](docs/proposals/teams-convergence/) for the
-full analysis, architecture, and the implementable L1 spec. No layer is implemented yet.
+**Design + scaffold; L1 unblocked.** See [`docs/proposals/teams-convergence/`](docs/proposals/teams-convergence/)
+for the full analysis, architecture, and the implementable L1 spec. No layer is implemented yet.
 
-**Before coding L1**, one assumption must be verified empirically (see doc `02` §9): does `fulcra-api file`
-give last-writer-wins semantics + a reliable `stat`/`mtime` in `list` output? The incremental reconcile
-and single-writer index ownership depend on it.
+**L1 gate cleared (probe 2026-07-01, fulcra-api v0.1.34):** `fulcra-api file` confirms last-writer-wins
+**and** versions every upload (`stat` exposes a version UUID + full history; `restore` rolls back live
+files) — richer than assumed, so the store's own versioning subsumes coord's append-only audit shards.
+Caveats folded into the L1 design (doc `02` §9): `list` timestamps are **minute-granular** (incremental
+uses a conservative compare), `file` output is **text not JSON** (line-parse), and `delete` is not
+CLI-undoable so **archival = move-not-delete**.
 
 ## Layout
 - `docs/proposals/teams-convergence/` — the design set (start at its `README.md`).
