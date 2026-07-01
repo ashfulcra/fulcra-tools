@@ -23,7 +23,7 @@ the layers they want. OKF v0.1 explicitly permits the typed frontmatter and synt
 | Layer | Package | Adds |
 |---|---|---|
 | L0 | `fulcra-agent-teams` (external, base) | OKF-markdown team spaces, inboxes, continuity files |
-| **L1** | **`coord-reconcile`** | scan the team namespace → heal `task/index.md`/`log.md` → emit `_coord/summaries.json` aggregate → query verbs (`status`/`board`/`needs-me`/`search`) |
+| **L1 ✅** | **`coord-reconcile`** (implemented) | scan the team namespace → heal `task/index.md`/`log.md` → emit `_coord/summaries.json` aggregate → query verbs (`status`/`board`/`needs-me`/`search`) |
 | L2 | `coord-tasks` | typed status/priority/assignee lifecycle in frontmatter |
 | L3 | `coord-directives` | priority + ack + re-notify on the inbox |
 | L4 | `coord-roles` | roles + leases + SLA vacancy escalation |
@@ -34,7 +34,7 @@ the layers they want. OKF v0.1 explicitly permits the typed frontmatter and synt
 L1 is the linchpin (queryability + self-healing). L4–L7 are additive/independent.
 
 ## Status
-**Design + scaffold; L1 unblocked.** See [`docs/proposals/teams-convergence/`](docs/proposals/teams-convergence/)
+**L1 implemented** (`coord-reconcile` v0.1.0 — 59 tests + live-verified). See [`docs/proposals/teams-convergence/`](docs/proposals/teams-convergence/)
 for the full analysis, architecture, and the implementable L1 spec. No layer is implemented yet.
 
 **L1 gate cleared (probe 2026-07-01, fulcra-api v0.1.34):** `fulcra-api file` confirms last-writer-wins

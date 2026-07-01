@@ -10,8 +10,21 @@ by scanning the OKF markdown and regenerating its indexes + a fast-path aggregat
 
 Full design: [`../../docs/proposals/teams-convergence/02-L1-coord-reconcile.md`](../../docs/proposals/teams-convergence/02-L1-coord-reconcile.md).
 
-**Status:** skeleton. Implementation gated on verifying `fulcra-api file` last-writer-wins + `stat`/`mtime`
-guarantees (design §9).
+**Status:** **implemented** (L1 v0.1.0) — OKF parser, model, aggregate, query verbs, transport, reconcile
+orchestration, CLI. 59 unit tests + a live end-to-end run against the real Fulcra File Store (reconcile →
+`index.md`/`log.md`/`_coord/summaries.json` → `status`/`board`/`needs-me`/`search`, incremental reuse
+confirmed).
+
+## Usage
+```
+coord-reconcile reconcile <team>              # scan + heal task/index.md, log.md, _coord/summaries.json
+coord-reconcile status    <team> [--json]
+coord-reconcile board     <team> [--json]
+coord-reconcile needs-me  <team> --agent <id> [--json]
+coord-reconcile search    <team> <query> [--json]
+```
+Transport is the `fulcra-api file` CLI (override via `$FULCRA_CLI_COMMAND`). Structured JSON logs to
+stderr (`$COORD_LOG_LEVEL`).
 
 ## Dev
 ```
