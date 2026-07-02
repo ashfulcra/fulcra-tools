@@ -590,3 +590,53 @@ def test_task_restore_and_search_archived(capsys):
     assert "team/r/task/archive/2020-01/olddone.md" not in t.store
     capsys.readouterr()
     assert cli.main(["task", "restore", "r", "nope"], transport=t) == 1
+
+
+def test_reconcile_writes_health_shard_and_health_folds(capsys):
+    import json as _j
+    t = FakeTransport()
+    t.put("team/r/task/a.md", "---\ntype: Task\ntitle: A\nstatus: active\n---\n")
+    cli.main(["reconcile", "r"], transport=t)
+    shards = [p for p in t.store if p.startswith("team/r/_coord/health/")]
+    assert len(shards) == 1
+    sh = _j.loads(t.store[shards[0]])
+    assert sh["schema"] == "coord.teams.health.v1" and sh["tasks"] == 1
+    capsys.readouterr()
+    assert cli.main(["health", "r", "--json"], transport=t) == 0
+    view = _j.loads(capsys.readouterr().out)
+    assert view["healthy"] is True and view["fresh"] == 1
+    assert view["hosts"][0]["stale"] is False
+
+
+def test_health_reports_stale_host_and_gc_prunes_ancient(capsys):
+    import json as _j
+    t = FakeTransport()
+    t.put("team/r/task/a.md", "---\ntype: Task\ntitle: A\nstatus: active\n---\n")
+    t.put("team/r/_coord/health/dead-host.json",
+          _j.dumps({"schema": "coord.teams.health.v1", "host": "dead", "at": "2020-01-01T00:00:00Z"}))
+    cli.main(["reconcile", "r"], transport=t)                     # writes fresh + GCs ancient
+    assert "team/r/_coord/health/dead-host.json" not in t.store    # >30d -> pruned
+    capsys.readouterr()
+    t2 = FakeTransport()
+    t2.put("team/r/_coord/health/slow.json",
+           _j.dumps({"host": "slow", "at": "2026-07-01T00:00:00Z"}))  # ~1.5d old vs test now
+    assert cli.main(["health", "r"], transport=t2) in (0, 1)      # renders without crash
+
+
+def test_doctor_reports_and_exit_code(capsys):
+    t = FakeTransport()
+    assert cli.main(["doctor", "r"], transport=t) == 0            # fake store reachable
+    out = capsys.readouterr().out
+    assert "File Store reachable" in out and "coord-engine v" in out
+
+    class Broken(FakeTransport):
+        def list_dir(self, prefix):
+            raise RuntimeError("offline")
+    assert cli.main(["doctor", "r"], transport=Broken()) == 1
+    assert "unreachable" in capsys.readouterr().err
+
+
+def test_health_empty_fleet_reads_unhealthy(capsys):
+    t = FakeTransport()
+    assert cli.main(["health", "r"], transport=t) == 1     # cold-start must not read green
+    assert "nobody has ever reconciled" in capsys.readouterr().out

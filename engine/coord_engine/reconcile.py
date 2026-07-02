@@ -15,7 +15,7 @@ import json
 import os
 from typing import Any, Optional
 
-from . import aggregate, model, okf
+from . import aggregate, health as health_mod, model, okf
 from .roles import age_hours
 from .tasks import agent_key
 from .log import get_logger
@@ -303,6 +303,25 @@ def reconcile(
     )
     if not transport.write(summaries_path(team), json.dumps(agg, indent=2)):
         warnings.append("summaries.json write failed")
+
+    # --- fleet health shard (best-effort; never fails the pass) ---
+    try:
+        from . import __version__ as _v
+        shard = health_mod.build_shard(host=host, now=now, engine_version=_v,
+                                       result={"tasks": len(rows), "parsed": parsed,
+                                               "reused": reused, "warnings": warnings})
+        transport.write(f"{health_mod.health_prefix(team)}{agent_key(host)}.json",
+                        json.dumps(shard, indent=1))
+        for e in transport.list_dir(health_mod.health_prefix(team)):
+            n = e.get("name") or ""
+            if e.get("is_dir") or not n.endswith(".json"):
+                continue
+            sh = health_mod.parse_shard(transport.read(health_mod.health_prefix(team) + n))
+            ts = (sh or {}).get("at")
+            if ts and age_hours(ts, now) > health_mod.SHARD_RETENTION_HOURS                     and hasattr(transport, "delete"):
+                transport.delete(health_mod.health_prefix(team) + n)
+    except Exception as e:  # never fail the pass, but never go silently dark either
+        log.warn("health shard write/gc failed (host will look dark)", error=str(e))
 
     log.info(
         "reconciled", team=team, tasks=len(rows), reused=reused, parsed=parsed,
