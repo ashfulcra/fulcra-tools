@@ -327,3 +327,113 @@ def test_cli_presence_colliding_ids_both_survive(capsys):
     cli.main(["presence", "show", "r", "--json"], transport=t)
     ros = _j.loads(capsys.readouterr().out)
     assert len(ros) == 2                                  # no silent clobber
+
+
+def test_cli_tell_inbox_ack_flow(capsys):
+    import json as _j
+    t = FakeTransport()
+    assert cli.main(["tell", "r", "amy", "Do the thing", "-p", "P1", "--from", "boss"], transport=t) == 0
+    cli.main(["broadcast", "r", "All hands"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    got = {r["name"] for r in _j.loads(capsys.readouterr().out)}
+    assert got == {"do-the-thing", "all-hands"}
+    # ack the direct one -> disappears for amy, broadcast still there
+    cli.main(["inbox", "r", "-a", "amy", "--ack", "do-the-thing"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    assert {r["name"] for r in _j.loads(capsys.readouterr().out)} == {"all-hands"}
+    # bob sees only the broadcast (do-the-thing is amy's)
+    cli.main(["inbox", "r", "-a", "bob", "--json"], transport=t)
+    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == ["all-hands"]
+
+
+def test_cli_inbox_ack_hides_before_reconcile(capsys):
+    import json as _j
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Immediate hide"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+
+    cli.main(["inbox", "r", "-a", "amy", "--ack", "immediate-hide"], transport=t)
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    assert _j.loads(capsys.readouterr().out) == []
+
+
+def test_cli_remind_hidden_until_when(capsys):
+    import json as _j
+    t = FakeTransport()
+    cli.main(["remind", "r", "amy", "2026-12-01T00:00:00Z", "Future chore"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
+    assert _j.loads(capsys.readouterr().out) == []          # gated by not_before
+    assert cli.main(["remind", "r", "amy", "bogus", "X"], transport=t) == 1
+
+
+def test_cli_later_backlog_only_with_all(capsys):
+    import json as _j
+    t = FakeTransport()
+    cli.main(["later", "r", "Someday idea"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    cli.main(["inbox", "r", "-a", "@backlog", "--json"], transport=t)
+    assert _j.loads(capsys.readouterr().out) == []
+    cli.main(["inbox", "r", "-a", "@backlog", "--all", "--json"], transport=t)
+    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == ["someday-idea"]
+
+
+def test_cli_handoff_atomic_single_write(capsys):
+    from coord_engine import okf
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "H", "--status", "active"], transport=t)
+    writes = []
+    orig = t.write
+    t.write = lambda p, c: (writes.append(p), orig(p, c))[1]
+    assert cli.main(["handoff", "r", "h", "--to", "bob", "--checkpoint", "CHK-1", "-n", "resume"], transport=t) == 0
+    assert writes == ["team/r/task/h.md"]                    # ONE write: atomic
+    fm = okf.parse_frontmatter(t.store["team/r/task/h.md"])
+    assert fm["assignee"] == "bob" and fm["checkpoint_ref"] == "CHK-1"
+
+
+def test_cli_respond_closes_and_records(capsys):
+    from coord_engine import okf
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Question"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["respond", "r", "question", "-o", "answered", "-a", "amy"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "closed" in out
+    assert okf.parse_frontmatter(t.store["team/r/task/question.md"])["status"] == "done"
+    assert any(p.startswith("team/r/_coord/responses/question/") for p in t.store)
+
+
+def test_cli_respond_response_paths_do_not_collide(monkeypatch, capsys):
+    from datetime import datetime, timezone
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "Waiting", "--status", "waiting"], transport=t)
+    fixed = datetime(2026, 7, 2, 13, 30, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(cli, "_now", lambda: fixed)
+
+    assert cli.main(["respond", "r", "waiting", "-o", "noted", "-a", "amy"], transport=t) == 0
+    assert cli.main(["respond", "r", "waiting", "-o", "noted", "-a", "bob"], transport=t) == 0
+    capsys.readouterr()
+    paths = [p for p in t.store if p.startswith("team/r/_coord/responses/waiting/")]
+    assert len(paths) == 2
+
+
+def test_reconcile_gcs_orphaned_ack_shards(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/live.md", "---\ntype: Task\ntitle: L\nstatus: active\nassignee: amy\n---\n")
+    t.put("team/r/_coord/acks/live/amy.md", "---\ntype: Ack\nagent: amy\n---\n")
+    t.put("team/r/_coord/acks/ghost/amy.md", "---\ntype: Ack\nagent: amy\n---\n")
+    cli.main(["reconcile", "r"], transport=t)
+    assert "team/r/_coord/acks/ghost/amy.md" not in t.store   # GC'd
+    assert "team/r/_coord/acks/live/amy.md" in t.store        # kept
+    import json as _j
+    agg = _j.loads(t.store["team/r/_coord/summaries.json"])
+    row = next(r for r in agg["rows"] if r["name"] == "live")
+    assert row["acked_by"] == ["amy"]

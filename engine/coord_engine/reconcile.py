@@ -35,6 +35,49 @@ def summaries_path(team: str) -> str:
     return f"team/{team}/_coord/summaries.json"
 
 
+def _acks_prefix(team: str) -> str:
+    return f"team/{team}/_coord/acks/"
+
+
+def _fold_and_gc_acks(transport: Any, team: str, live_slugs: set) -> tuple[dict, int]:
+    """Fold per-agent ack shards (_coord/acks/<slug>/<agent>.md) into
+    {slug: [agent, ...]}, and GC shards whose parent task no longer exists —
+    the shard-GC sub-pass the plan review required (orphaned shards are the one
+    drift class the wholesale rebuild can't fix by itself)."""
+    prefix = _acks_prefix(team)
+    acks: dict[str, list] = {}
+    gc = 0
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError:
+        return acks, gc
+    for e in entries:
+        n = (e.get("name") or "").rstrip("/")
+        if not e.get("is_dir") or not n:
+            continue
+        try:
+            shard_files = [f for f in transport.list_dir(prefix + n + "/")
+                           if not f.get("is_dir") and (f.get("name") or "").endswith(".md")]
+        except TransportError:
+            continue
+        if n in live_slugs:
+            agents = []
+            for f in shard_files:
+                stem = f["name"][:-3]
+                fm = okf.parse_frontmatter(transport.read(prefix + n + "/" + f["name"])) or {}
+                claimed = str(fm.get("agent") or "")
+                # trust frontmatter identity only when it matches the ACL-controlled
+                # filename stem (review-layer precedent); else the filename wins.
+                from .tasks import agent_key
+                agents.append(claimed if claimed and agent_key(claimed) == stem else stem)
+            acks[n] = sorted(set(agents))
+        elif hasattr(transport, "delete"):
+            for f in shard_files:
+                if transport.delete(prefix + n + "/" + f["name"]):
+                    gc += 1
+    return acks, gc
+
+
 def _load_prior_aggregate(transport: Any, team: str) -> Optional[dict[str, Any]]:
     raw = transport.read(summaries_path(team))
     if not raw:
@@ -106,6 +149,13 @@ def reconcile(
             )
         )
         parsed += 1
+
+    # --- ack fold + shard-GC sub-pass ---
+    acks, gc_count = _fold_and_gc_acks(transport, team, {r.get("name") for r in rows})
+    for r in rows:
+        r["acked_by"] = acks.get(r.get("name"), [])
+    if gc_count:
+        warnings.append(f"shard-GC: pruned {gc_count} orphaned ack shard(s)")
 
     # --- heal engine-owned derived artifacts ---
     if not transport.write(index_path(team), okf.render_index(rows)):

@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, continuity, okf, presence, query, review, roles, tasks
+from . import aggregate, continuity, directives, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -383,6 +383,125 @@ def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# --- directives (fulcra-agent-directives) ---
+
+def _ack_path(team: str, slug: str, agent: str) -> str:
+    return f"team/{team}/_coord/acks/{slug}/{tasks.agent_key(agent)}.md"
+
+
+def _response_path(team: str, slug: str, stamp: str) -> str:
+    return f"team/{team}/_coord/responses/{slug}/{stamp}.md"
+
+
+def _stamp_for_path(now: str, agent: str) -> str:
+    safe_time = now.replace(":", "").replace("-", "").replace(".", "")
+    return f"{safe_time}-{tasks.agent_key(agent)}"
+
+
+def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str,
+                      not_before: Optional[str] = None) -> int:
+    try:
+        slug, content = tasks.new_task_doc(
+            args.title, now=_iso(_now()), workstream=args.workstream,
+            status="proposed", priority=args.priority,
+            owner=getattr(args, "sender", None) or _host(), assignee=assignee,
+            summary=args.summary or "", next_action=args.next, kind="directive",
+            not_before=not_before,
+        )
+    except tasks.TaskError as e:
+        print(f"directive failed: {e}", file=sys.stderr)
+        return 1
+    path = _task_path(args.team, slug)
+    if transport.read(path) is not None:
+        print(f"directive {slug} already exists", file=sys.stderr)
+        return 1
+    transport.write(path, content)
+    print(f"directive {slug} -> {assignee}" + (f" (visible {not_before})" if not_before else ""))
+    return 0
+
+
+def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
+    return _create_directive(args, transport, assignee=args.assignee)
+
+
+def cmd_broadcast(args: argparse.Namespace, transport: Any) -> int:
+    return _create_directive(args, transport, assignee="*")
+
+
+def cmd_remind(args: argparse.Namespace, transport: Any) -> int:
+    when = directives.parse_when(args.when, now=_iso(_now()))
+    if when is None:
+        print(f"remind failed: cannot parse WHEN {args.when!r} (ISO or 5d/36h/10m)", file=sys.stderr)
+        return 1
+    return _create_directive(args, transport, assignee=args.assignee, not_before=when)
+
+
+def cmd_later(args: argparse.Namespace, transport: Any) -> int:
+    return _create_directive(args, transport, assignee=directives.BACKLOG)
+
+
+def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
+    """Atomic handoff: checkpoint ref + assignee land in ONE task write."""
+    path = _task_path(args.team, args.name)
+    try:
+        out = tasks.apply_update(
+            transport.read(path), now=_iso(_now()), assignee=args.to,
+            checkpoint_ref=args.checkpoint, next_action=args.next,
+        )
+    except tasks.TaskError as e:
+        print(f"handoff failed: {e}", file=sys.stderr)
+        return 1
+    transport.write(path, out)
+    print(f"handed off {args.name} -> {args.to}"
+          + (f" (checkpoint {args.checkpoint})" if args.checkpoint else ""))
+    return 0
+
+
+def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    if args.ack:
+        fm = {"type": "Ack", "agent": agent, "timestamp": _iso(_now())}
+        transport.write(_ack_path(args.team, args.ack, agent),
+                        okf.render_frontmatter(fm) + "\nacked\n")
+        print(f"acked {args.ack}")
+        return 0
+    rows = _load_rows(transport, args.team)
+    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
+    stale_visible = directives.inbox(rows, acks, agent, now=_iso(_now()),
+                                     include_backlog=args.all)
+    for r in stale_visible:
+        slug = str(r.get("name") or "")
+        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(args.team, slug, agent)):
+            acks.setdefault(slug, []).append(agent)
+    got = directives.inbox(rows, acks, agent, now=_iso(_now()),
+                           include_backlog=args.all)
+    if args.json:
+        print(json.dumps(got, indent=2))
+        return 0
+    print(f"inbox — {agent}: {len(got)} item(s)")
+    for r in got:
+        print(_line(r))
+    return 0
+
+
+def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    now = _iso(_now())
+    stamp = _stamp_for_path(now, agent)
+    fm = {"type": "Response", "agent": agent, "outcome": args.outcome, "timestamp": now}
+    transport.write(_response_path(args.team, args.name, stamp),
+                    okf.render_frontmatter(fm) + f"\n{args.evidence or args.outcome}\n")
+    path = _task_path(args.team, args.name)
+    try:
+        out = tasks.apply_update(transport.read(path), now=now, status="done",
+                                 evidence=f"{args.outcome} (respond by {agent})")
+        transport.write(path, out)
+        print(f"responded {args.name}: {args.outcome} (closed)")
+    except tasks.TaskError as e:
+        print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
+    return 0
+
+
 # --- presence (fulcra-agent-presence) ---
 
 def _presence_prefix(team: str) -> str:
@@ -519,6 +638,36 @@ def build_parser() -> argparse.ArgumentParser:
     ag = sub.add_parser("agents", help="cross-agent digest (open work by agent + liveness)")
     ag.add_argument("team"); add_json(ag)
     ag.set_defaults(func=cmd_agents)
+
+    def add_directive_flags(sp):
+        sp.add_argument("--priority", "-p", default="P2"); sp.add_argument("--workstream", "-w")
+        sp.add_argument("--summary", "-s"); sp.add_argument("--next", "-n")
+        sp.add_argument("--from", dest="sender")
+
+    tl = sub.add_parser("tell", help="direct work at an agent (directive = task w/ assignee)")
+    tl.add_argument("team"); tl.add_argument("assignee"); tl.add_argument("title")
+    add_directive_flags(tl); tl.set_defaults(func=cmd_tell)
+    bc = sub.add_parser("broadcast", help="direct work at every agent (*)")
+    bc.add_argument("team"); bc.add_argument("title")
+    add_directive_flags(bc); bc.set_defaults(func=cmd_broadcast)
+    rm = sub.add_parser("remind", help="scheduled directive, hidden until WHEN (ISO or 5d/36h/10m)")
+    rm.add_argument("team"); rm.add_argument("assignee"); rm.add_argument("when"); rm.add_argument("title")
+    add_directive_flags(rm); rm.set_defaults(func=cmd_remind)
+    lt = sub.add_parser("later", help="capture a backlog idea (@backlog)")
+    lt.add_argument("team"); lt.add_argument("title")
+    add_directive_flags(lt); lt.set_defaults(func=cmd_later)
+    ho = sub.add_parser("handoff", help="atomic handoff: assignee + checkpoint ref in one write")
+    ho.add_argument("team"); ho.add_argument("name"); ho.add_argument("--to", required=True)
+    ho.add_argument("--checkpoint"); ho.add_argument("--next", "-n")
+    ho.set_defaults(func=cmd_handoff)
+    ib = sub.add_parser("inbox", help="open directives for an agent (--ack <slug> to ack)")
+    ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
+    ib.add_argument("--all", action="store_true", help="include @backlog"); add_json(ib)
+    ib.set_defaults(func=cmd_inbox)
+    rp = sub.add_parser("respond", help="answer + close a directive with an outcome")
+    rp.add_argument("team"); rp.add_argument("name"); rp.add_argument("--outcome", "-o", required=True)
+    rp.add_argument("--evidence", "-e"); rp.add_argument("--agent", "-a")
+    rp.set_defaults(func=cmd_respond)
 
     tk = sub.add_parser("task", help="typed task lifecycle (fulcra-agent-tasks)")
     tksub = tk.add_subparsers(dest="task_command", required=True)

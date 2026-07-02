@@ -78,6 +78,8 @@ def row_from_frontmatter(
         "blocked_on": fm.get("blocked_on"),
         "due": fm.get("due"),
         "not_before": fm.get("not_before"),
+        "checkpoint_ref": fm.get("checkpoint_ref"),
+        "acked_by": [],  # folded from _coord/acks/ by reconcile
         "next_action": fm.get("next_action"),
     }
 

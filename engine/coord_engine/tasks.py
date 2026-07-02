@@ -52,6 +52,7 @@ def new_task_doc(
     summary: str = "",
     next_action: Optional[str] = None,
     kind: Optional[str] = None,
+    not_before: Optional[str] = None,
 ) -> tuple[str, str]:
     """Return ``(slug, content)`` for a new OKF Task doc. Raises on bad enums."""
     if status not in VALID_STATUSES:
@@ -68,6 +69,7 @@ def new_task_doc(
         "type": "Task", "title": title, "description": summary or "", "timestamp": now,
         "tags": tags, "id": slug, "status": status, "priority": priority,
         "owner": owner, "assignee": assignee, "next_action": next_action,
+        "not_before": not_before,
     }
     return slug, okf.render_frontmatter(fm) + f"\n\n# {title}\n"
 
@@ -84,6 +86,7 @@ def apply_update(
     priority: Optional[str] = None,
     evidence: Optional[str] = None,
     add_tags: Optional[list[str]] = None,
+    checkpoint_ref: Optional[str] = None,
     remove_tags: Optional[list[str]] = None,
 ) -> str:
     """Read-modify-write a task doc, enforcing the status machine. Raises
@@ -116,6 +119,8 @@ def apply_update(
         fm["assignee"] = assignee
     if blocked_on is not None:
         fm["blocked_on"] = blocked_on
+    if checkpoint_ref is not None:
+        fm["checkpoint_ref"] = checkpoint_ref
     if add_tags:
         cur = fm.get("tags") or []
         if not isinstance(cur, list):
