@@ -75,9 +75,16 @@ def map_task(t: dict[str, Any], *, now: str) -> tuple[str, dict[str, Any], str]:
         "checkpoint_ref": t.get("checkpoint_ref"),
         "migrated_from": t.get("id"),
     }
-    body = (f"\n# {title}\n\n"
-            f"- Migrated from fulcra-coord task `{t.get('id')}` on {now}.\n")
-    return slug, fm, body
+    body_lines = [f"\n# {title}", "",
+                  f"- Migrated from fulcra-coord task `{t.get('id')}` on {now}."]
+    links = t.get("links") or {}
+    for pr in (links.get("prs") or []):
+        body_lines.append(f"- PR: {pr}")
+    if links.get("local_ticket"):
+        body_lines.append(f"- Ticket: {links['local_ticket']}")
+    for item in (t.get("checklist") or []):
+        body_lines.append(f"- [ ] {item}")
+    return slug, fm, "\n".join(body_lines) + "\n"
 
 
 def migrate(
@@ -91,7 +98,14 @@ def migrate(
     include_terminal: bool = False,
     limit: Optional[int] = None,
 ) -> dict[str, Any]:
-    """One pass. Returns {planned:[…], migrated, skipped, marked, errors:[…]}."""
+    """One pass. Returns {planned, migrated, skipped, marked, repaired,
+    skipped_review, errors}.
+
+    Note: ``--limit`` counts PLANNED items in dry-run but SUCCESSFUL writes live,
+    so a limited live run may scan further than its dry-run preview.
+    PREFLIGHT (runbook): confirm no fleet host runs FULCRA_COORD_READ_SOURCE=events
+    — such a host folds status from the event store this exporter never writes,
+    so migrated tasks would stay live there."""
     planned: list[str] = []
     errors: list[str] = []
     migrated = skipped = marked = repaired = skipped_review = 0
@@ -128,10 +142,18 @@ def migrate(
         already_terminal = t.get("status") in ("done", "abandoned")
         twin = existing_from.get(str(t.get("id")))
         if twin is not None:
-            # REPAIR PASS: twin exists but the incumbent transition never landed
+            # REPAIR PASS: twin exists but the incumbent transition never landed.
+            # If OUR abandoned event is already there and the task is open again,
+            # a human deliberately REOPENED it — never re-terminalize (review finding).
+            reopened = any(e.get("by") == "coord2-migrate" and e.get("type") == "abandoned"
+                           for e in (t.get("events") or []))
+            if reopened and not already_terminal:
+                errors.append(f"{t['id']}: reopened by operator after migration — left open "
+                              f"(coord2 twin task/{twin}.md also exists; resolve manually)")
+                continue
             if not already_terminal and mark and not dry_run:
                 if transport.write(f"{source}/tasks/{n}",
-                                   json.dumps(_terminalize(t, now=now, team=team, slug=twin), indent=1)):
+                                   json.dumps(_terminalize(t, now=now, team=team, slug=twin), indent=2)):
                     repaired += 1
                 else:
                     errors.append(f"{t['id']}: repair transition failed (still open on incumbent)")
@@ -169,7 +191,7 @@ def migrate(
         existing_slugs.add(slug)
         if mark:
             if transport.write(f"{source}/tasks/{n}",
-                               json.dumps(_terminalize(t, now=now, team=team, slug=slug), indent=1)):
+                               json.dumps(_terminalize(t, now=now, team=team, slug=slug), indent=2)):
                 marked += 1
             else:
                 errors.append(f"{t['id']}: migrated but incumbent transition FAILED — "

@@ -88,8 +88,11 @@ rehearsal: `--dry-run` + `--no-mark` first on a scratch team.
 4. **Identity policy: ids are IDENTICAL across systems** (nothing in coord2 forces different agent ids —
    keep `claude-code:<Host>:<ws>` verbatim), so inbox/assignee folds match without translation. An
    optional `--map old=new` handles exceptions.
-5. **Role registry seeds via `--roles`** (registry docs only — name/policy/sla/maintainer; leases NEVER
-   migrate, they re-establish). `checkpoint_ref` migrates verbatim (opaque pointer, shared store).
+5. **Role registry is seeded MANUALLY during phase-1 acceptance** (registry docs only — leases NEVER
+   migrate, they re-establish); `--roles`/`--map` flags deferred (ids are identical, so no map needed).
+   `checkpoint_ref` migrates verbatim (opaque pointer, shared store). PREFLIGHT: assert no fleet host
+   runs `FULCRA_COORD_READ_SOURCE=events` (such a host would keep migrated tasks live — the exporter
+   writes only the file store, not the event store).
 6. **Acceptance additions:** identity-inbox assertion; dual-listing NEGATIVE test on the incumbent board;
    partial-failure recovery (kill between write and mark → re-run → no dual-truth); shard-GC clean at
    ~140 docs; exporter is sequential (no concurrency-ceiling collision).

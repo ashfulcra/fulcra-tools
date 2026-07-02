@@ -141,3 +141,26 @@ def test_migrate_repair_pass_finishes_incumbent_transition():
     assert res["repaired"] == 1 and res["migrated"] == 0      # no duplicate doc
     inc = json.loads(t.store["/coordination/tasks/TASK-X-1.json"])
     assert inc["status"] == "abandoned"                       # dual-listing healed
+
+
+def test_repair_pass_never_clobbers_operator_reopen():
+    t = FakeTransport()
+    t.put("team/fulcra/task/fix-it.md",
+          "---\ntype: Task\ntitle: Fix it\nstatus: active\nmigrated_from: TASK-X-1\n---\n")
+    reopened = _incumbent("TASK-X-1", "Fix it", status="active",
+                          events=[{"at": "x", "type": "abandoned", "by": "coord2-migrate",
+                                   "summary": "migrated"}])
+    t.put("/coordination/tasks/TASK-X-1.json", json.dumps(reopened))
+    res = migrate.migrate(t, "fulcra", now=NOW)
+    assert res["repaired"] == 0
+    assert any("reopened by operator" in e for e in res["errors"])
+    assert json.loads(t.store["/coordination/tasks/TASK-X-1.json"])["status"] == "active"
+
+
+def test_map_task_preserves_links_and_checklist_in_body():
+    t = _incumbent("T-L", "Linky", links={"prs": ["https://github.com/o/r/pull/7"],
+                                          "local_ticket": "JIRA-9"},
+                   checklist=["step one", "step two"])
+    _, _, body = migrate.map_task(t, now=NOW)
+    assert "PR: https://github.com/o/r/pull/7" in body
+    assert "Ticket: JIRA-9" in body and "- [ ] step one" in body
