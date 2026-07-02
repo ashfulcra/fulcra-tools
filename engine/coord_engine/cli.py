@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, continuity, digest as digest_mod, directives, forge as forge_mod, health as health_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, continuity, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -955,6 +955,30 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# --- migrate (incumbent fulcra-coord -> coord2, docs 06 approach C) ---
+
+def cmd_migrate(args: argparse.Namespace, transport: Any) -> int:
+    res = migrate_mod.migrate(
+        transport, args.team, now=_iso(_now()), source=args.source,
+        dry_run=args.dry_run, mark=not args.no_mark,
+        include_terminal=args.include_terminal, limit=args.limit,
+    )
+    if args.dry_run:
+        print(f"DRY RUN — {len(res['planned'])} task(s) would migrate "
+              f"({res['skipped']} already migrated/skipped):")
+        for line in res["planned"]:
+            print(f"  {line}")
+    else:
+        print(f"migrated {res['migrated']} task(s) to team/{args.team} "
+              f"({res['skipped']} skipped as already-migrated, {res['marked']} marked on the incumbent)")
+    for err in res["errors"]:
+        print(f"  ERROR: {err}", file=sys.stderr)
+    if res["errors"]:
+        return 1
+    print("(run `coord-engine reconcile` on the team to index the migrated tasks)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coord-engine", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -1061,6 +1085,16 @@ def build_parser() -> argparse.ArgumentParser:
     fgm.add_argument("team")
     fgm.add_argument("--repo", help="owner/name allowlist: mirror ONLY PR urls of this repo")
     fgm.set_defaults(func=cmd_forge_mirror, runner=None)
+
+    mg = sub.add_parser("migrate", help="one-shot exporter: incumbent fulcra-coord tasks -> this team (docs 06)")
+    mg.add_argument("team")
+    mg.add_argument("--source", default="/coordination")
+    mg.add_argument("--dry-run", action="store_true")
+    mg.add_argument("--no-mark", dest="no_mark", action="store_true",
+                    help="rehearsal: don't tag incumbent tasks migrated:coord2")
+    mg.add_argument("--include-terminal", action="store_true")
+    mg.add_argument("--limit", type=int)
+    mg.set_defaults(func=cmd_migrate)
 
     rp = sub.add_parser("respond", help="answer + close a directive with an outcome")
     rp.add_argument("team"); rp.add_argument("name"); rp.add_argument("--outcome", "-o", required=True)

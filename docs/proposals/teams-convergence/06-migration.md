@@ -68,3 +68,30 @@ first full reconcile ~2-3 min at ~1s/op, then incremental); board/needs-me/diges
 view for the migrated set (spot-check N=10); directives round-trip (tell→inbox→ack→respond); briefing +
 park/checkpoint; health fresh; heartbeat + listener installed and self-tested on this host. Rollback
 rehearsal: `--dry-run` + `--no-mark` first on a scratch team.
+
+---
+
+## Resolution (opus plan review, ENDORSE-WITH-CHANGES — 2026-07-02)
+
+1. **The tag was decorative — the invariant is a TERMINAL TRANSITION.** The incumbent has no tag-based
+   board exclusion (verified in its query.py), so a tagged-but-open task stays live on every incumbent
+   host (dual execution). The exporter now, on verified coord2 write: sets the incumbent task
+   `status: abandoned`, appends an `abandoned` event (`by: coord2-migrate`, summary pointing at the
+   coord2 doc), bumps `updated_at`, AND adds the `migrated:coord2` tag (metadata). Incumbent
+   OPEN_STATUSES then naturally hides it fleet-wide with zero incumbent code changes.
+2. **Repair pass built in:** a task already migrated (coord2 twin exists via `migrated_from`) but still
+   open on the incumbent gets its terminal transition finished on the next run — partial failures
+   (write-ok, mark-fail) self-heal instead of silently double-listing.
+3. **Open review loops are NOT migration-eligible.** Tasks carrying a `pr` field or review-verdict kinds
+   stay on the incumbent until their loop closes (the Codex workbook produces/consumes verdicts there);
+   this confines each verdict flow to one system with no bridge. Reported as `skipped_review`.
+4. **Identity policy: ids are IDENTICAL across systems** (nothing in coord2 forces different agent ids —
+   keep `claude-code:<Host>:<ws>` verbatim), so inbox/assignee folds match without translation. An
+   optional `--map old=new` handles exceptions.
+5. **Role registry seeds via `--roles`** (registry docs only — name/policy/sla/maintainer; leases NEVER
+   migrate, they re-establish). `checkpoint_ref` migrates verbatim (opaque pointer, shared store).
+6. **Acceptance additions:** identity-inbox assertion; dual-listing NEGATIVE test on the incumbent board;
+   partial-failure recovery (kill between write and mark → re-run → no dual-truth); shard-GC clean at
+   ~140 docs; exporter is sequential (no concurrency-ceiling collision).
+7. **Phase-3 gate additions:** no open review loop on the incumbent; forge/verdict pollers stopped;
+   "active host" freshness window > slowest machine-gated host cadence.
