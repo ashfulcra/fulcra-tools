@@ -169,3 +169,103 @@ def test_cli_continuity_slugifies_task(capsys):
     assert "team/r/member/ash/continuity/feat-sub-task/latest.json" in t.store
     cli.main(["continuity", "resume", "r", "ash"], transport=t)
     assert "objective: x" in capsys.readouterr().out
+
+
+def test_cli_task_block_pause_abandon_assign(capsys):
+    from coord_engine import okf
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "T", "--status", "active"], transport=t)
+    assert cli.main(["task", "block", "r", "t", "--on-user", "review"], transport=t) == 0
+    fm = okf.parse_frontmatter(t.store["team/r/task/t.md"])
+    assert fm["status"] == "blocked" and fm["blocked_on"] == "review"
+    assert fm["assignee"] == "human" and "needs:human" in fm["tags"]
+    # blocked -> waiting is a legal transition
+    assert cli.main(["task", "pause", "r", "t", "-n", "resume after review"], transport=t) == 0
+    assert okf.parse_frontmatter(t.store["team/r/task/t.md"])["status"] == "waiting"
+
+
+def test_cli_task_block_on_user_honors_env_human(monkeypatch):
+    from coord_engine import okf
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "Human", "--status", "active"], transport=t)
+    assert cli.main(["task", "block", "r", "human", "--on-user", "approve"], transport=t) == 0
+    fm = okf.parse_frontmatter(t.store["team/r/task/human.md"])
+    assert fm["blocked_on"] == "approve"
+    assert fm["assignee"] == "ash"
+    assert "needs:human" in fm["tags"]
+
+
+def test_cli_task_block_requires_a_reason(capsys):
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "B", "--status", "active"], transport=t)
+    assert cli.main(["task", "block", "r", "b"], transport=t) == 1
+    assert "requires --blocked-on or --on-user" in capsys.readouterr().err
+
+
+def test_cli_task_pause_and_abandon(capsys):
+    from coord_engine import okf
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "P", "--status", "active"], transport=t)
+    assert cli.main(["task", "pause", "r", "p", "-n", "wait for CI"], transport=t) == 0
+    fm = okf.parse_frontmatter(t.store["team/r/task/p.md"])
+    assert fm["status"] == "waiting" and fm["next_action"] == "wait for CI"
+    assert cli.main(["task", "abandon", "r", "p", "-r", "superseded"], transport=t) == 0
+    out = t.store["team/r/task/p.md"]
+    assert okf.parse_frontmatter(out)["status"] == "abandoned" and "superseded" in out
+
+
+def test_cli_task_assign(capsys):
+    from coord_engine import okf
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "A"], transport=t)
+    assert cli.main(["task", "assign", "r", "a", "codex:h:r"], transport=t) == 0
+    assert okf.parse_frontmatter(t.store["team/r/task/a.md"])["assignee"] == "codex:h:r"
+
+
+def test_cli_task_assign_clears_needs_human_when_reassigned_away(monkeypatch):
+    from coord_engine import okf
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "H", "--status", "active"], transport=t)
+    cli.main(["task", "block", "r", "h", "--on-user", "decide"], transport=t)
+    assert cli.main(["task", "assign", "r", "h", "agent-b"], transport=t) == 0
+    fm = okf.parse_frontmatter(t.store["team/r/task/h.md"])
+    assert fm["assignee"] == "agent-b"
+    assert "needs:human" not in fm["tags"]
+
+
+def test_cli_task_assign_keeps_needs_human_when_reassigned_to_human(monkeypatch):
+    from coord_engine import okf
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "Keep", "--status", "active"], transport=t)
+    cli.main(["task", "block", "r", "keep", "--on-user", "decide"], transport=t)
+    assert cli.main(["task", "assign", "r", "keep", "ash"], transport=t) == 0
+    fm = okf.parse_frontmatter(t.store["team/r/task/keep.md"])
+    assert fm["assignee"] == "ash"
+    assert "needs:human" in fm["tags"]
+
+
+def test_cli_task_abandon_terminal_blocks_further(capsys):
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "Z"], transport=t)
+    cli.main(["task", "abandon", "r", "z", "-r", "nope"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["task", "assign", "r", "z", "x"], transport=t) == 0  # assign w/o status change ok on terminal
+    assert cli.main(["task", "pause", "r", "z", "-n", "x"], transport=t) == 1  # no transition out of terminal
+
+
+def test_cli_task_abandon_note_says_reason(capsys):
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "R"], transport=t)
+    cli.main(["task", "abandon", "r", "r", "-r", "superseded"], transport=t)
+    assert "(reason: superseded)" in t.store["team/r/task/r.md"]
+
+
+def test_cli_task_block_rejects_both_flags(capsys):
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "B", "--status", "active"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["task", "block", "r", "b", "--blocked-on", "x", "--on-user", "y"], transport=t) == 1
+    assert "not both" in capsys.readouterr().err

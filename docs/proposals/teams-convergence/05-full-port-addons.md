@@ -86,3 +86,34 @@ NO-CAS sub-log transport layer (the File Store's native versioning + ack/evidenc
 A1 → A2 → A3 → A4 → A5 → A6 → A7 → A8. A2 is the critical path (directives/ack is the biggest functional
 gap); A1 first because it's trivial and A2 builds on task semantics. Each add-on: TDD → PR → opus review +
 Codex bus request → fix → merge → live-verify. Bus task per add-on; tight loop to catch reviews.
+
+---
+
+## Resolution (opus plan review, ENDORSE-WITH-CHANGES — 2026-07-02)
+
+Design corrections adopted before building:
+
+1. **Ack/evidence shard namespace — layout collision fixed.** Shards CANNOT live under
+   `task/<slug>/…` (tasks are flat `task/<slug>.md` files; reconcile keys on that). All coordination
+   shards live in the operational sidecar: **`_coord/acks/<slug>/<agent>.md`**,
+   `_coord/responses/<slug>/<id>.md`, `_coord/evidence/<slug>/<id>.md`, `_coord/health/<host>.json`,
+   plus `presence/<agent>.md`. Reconcile's task scan is untouched.
+2. **Shard-GC reconcile sub-pass (REQUIRED — the "can't accrue drift" claim was false for shards).**
+   The wholesale rebuild is orphan-proof only for index/aggregate. Every shard dir CAN orphan (acks for
+   archived/deleted tasks, presence of departed agents, health of retired hosts). Reconcile grows a GC
+   sub-pass: prune/archive any shard whose parent id is absent from the freshly-rebuilt row set, or older
+   than a window (age-discriminator, grace-protected — the incumbent 0.15.16 lesson). A4 retention moves a
+   task's shards WITH it.
+3. **Reorder: A1 → A3 → A2 → A4 → A5a → A5b → A6 → A7 → A8.** A3 (presence/roster/roles-leases) is
+   foundational: broadcast-`*` ack-completion needs a roster; digest/briefing/escalate need presence.
+4. **A5 split:** A5a `doctor` + fleet `health` fold (no deps, ships early); A5b `digest` + `escalate`
+   (needs A2+A3); timeline-annotate is a flag on digest (with deterministic-oldest data-type resolution —
+   the incumbent's duplicate-type bug, TASK-...413fc6b6, must not recur).
+5. **Broadcast semantics:** `*` inbox-completion is defined against the A3 presence roster; without A3
+   installed, `*` degrades to "acked-by-me hides it for me" (documented).
+6. **`handoff` is one atomic A2 verb** (checkpoint ref written BEFORE assignee flips; A6 only adds the
+   richer checkpoint producers). **Undelivered-directive detection** assigned to A5a health.
+7. **`briefing` (A6)** is an aggregator that MUST tolerate absent add-ons (omit sections gracefully).
+8. **Aggregate row schema** gains `acked_by` (folded from `_coord/acks/` at reconcile time) so inbox
+   stays O(1); bounded staleness accepted + documented (live ack-write hides an item immediately for the
+   acking agent via read-your-write on the shard).

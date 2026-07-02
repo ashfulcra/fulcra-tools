@@ -16,6 +16,10 @@ coord-engine task start  <team> <title> [--workstream W] [--status S] [--priorit
 coord-engine task update <team> <name>  [--status S] [--priority P] [--assignee A]
                                         [--summary TEXT] [--next TEXT] [--blocked-on TEXT]
 coord-engine task done   <team> <name>  --evidence TEXT      # evidence required
+coord-engine task block  <team> <name>  [--blocked-on TEXT | --on-user ASK]  # --on-user assigns to FULCRA_COORD_HUMAN/human + tags needs:human
+coord-engine task pause  <team> <name>  --next TEXT          # waiting; next action required
+coord-engine task abandon <team> <name> --reason TEXT        # terminal; reason required
+coord-engine task assign <team> <name>  <assignee>           # set/redirect assignee
 ```
 - `<name>` is the slug of the task file (e.g. `fix-the-widget` for `task/fix-the-widget.md`).
 - `start` refuses to overwrite an existing task unless `--force`.
