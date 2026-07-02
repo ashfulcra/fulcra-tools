@@ -22,3 +22,8 @@ credentials.json
 *.swp
 .idea/
 .vscode/
+
+# skills carry no code — no build artifacts under skills/
+skills/**/uv.lock
+skills/**/pyproject.toml
+skills/**/*.egg-info/
