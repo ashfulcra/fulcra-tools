@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, continuity, digest as digest_mod, directives, health as health_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, continuity, digest as digest_mod, directives, forge as forge_mod, health as health_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -926,6 +926,25 @@ def cmd_escalate(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# --- forge (fulcra-agent-forge) ---
+
+def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
+    import shutil as _sh
+    if not _sh.which("gh") and args.runner is None:
+        print("forge mirror: gh CLI not found — nothing mirrored (install GitHub CLI to enable)",
+              file=sys.stderr)
+        return 0  # degradation, not an error
+    res = forge_mod.mirror(transport, args.team, now=_iso(_now()),
+                           runner=args.runner or forge_mod.default_runner,
+                           repo=args.repo)
+    if res.get("error"):
+        print(f"forge mirror: {res['error']}", file=sys.stderr)
+        return 1
+    print(f"forge mirror: {res['checked']} PR review(s) checked, "
+          f"{res['mirrored']} evidence shard(s) written, {res['verdicts']} auto-verdict(s)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coord-engine", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -1025,6 +1044,13 @@ def build_parser() -> argparse.ArgumentParser:
     es = sub.add_parser("escalate", help="role-vacancy sweep -> daily marker + P1 directive to maintainer")
     es.add_argument("team")
     es.set_defaults(func=cmd_escalate)
+
+    fg = sub.add_parser("forge", help="mirror GitHub PR signals into review evidence (fulcra-agent-forge)")
+    fgsub = fg.add_subparsers(dest="forge_command", required=True)
+    fgm = fgsub.add_parser("mirror", help="one pass: PR state -> evidence shards + auto-verdict on merge")
+    fgm.add_argument("team")
+    fgm.add_argument("--repo", help="owner/name allowlist: mirror ONLY PR urls of this repo")
+    fgm.set_defaults(func=cmd_forge_mirror, runner=None)
 
     rp = sub.add_parser("respond", help="answer + close a directive with an outcome")
     rp.add_argument("team"); rp.add_argument("name"); rp.add_argument("--outcome", "-o", required=True)
