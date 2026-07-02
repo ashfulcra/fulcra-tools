@@ -25,6 +25,15 @@ STALE_TASK_HOURS = 48.0
 UPCOMING_DAYS = 7.0
 
 
+def _blocked_on_human(value: Any, human: str) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, list):
+        return any(str(v).strip() == human for v in value)
+    tokens = str(value).replace(",", " ").split()
+    return human in tokens
+
+
 def _plus_days(now: str, days: float) -> str:
     try:
         base = datetime.fromisoformat(now.replace("Z", "+00:00"))
@@ -53,7 +62,7 @@ def build(
     blocked_on_you = sort_rows([
         r for r in open_rows
         if "needs:human" in (r.get("tags") or []) or r.get("assignee") == human
-        or human in str(r.get("blocked_on") or "")
+        or _blocked_on_human(r.get("blocked_on"), human)
     ])
     upcoming = sort_rows([
         r for r in open_rows

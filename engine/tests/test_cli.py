@@ -664,6 +664,22 @@ def test_cli_digest_sections_and_store_dedupe(capsys):
     assert "already stored" in capsys.readouterr().err
 
 
+def test_cli_digest_blocked_on_human_uses_token_match(capsys):
+    import json as _j
+    t = FakeTransport()
+    t.put("team/r/task/exact.md",
+          "---\ntype: Task\ntitle: Exact\nstatus: blocked\nblocked_on: ash\n---\n")
+    t.put("team/r/task/list.md",
+          "---\ntype: Task\ntitle: List\nstatus: blocked\nblocked_on: amy, ash\n---\n")
+    t.put("team/r/task/substring.md",
+          "---\ntype: Task\ntitle: Substring\nstatus: blocked\nblocked_on: trash\n---\n")
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["digest", "r", "--human", "ash", "--json"], transport=t) == 0
+    d = _j.loads(capsys.readouterr().out)
+    assert [r["name"] for r in d["blocked_on_you"]] == ["exact", "list"]
+
+
 def test_cli_escalate_vacant_role_once_per_day(capsys):
     from coord_engine import okf
     t = FakeTransport()
