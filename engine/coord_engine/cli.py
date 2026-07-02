@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, okf, query, roles
+from . import aggregate, okf, query, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -184,6 +184,59 @@ def cmd_roles_status(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# --- tasks (fulcra-agent-tasks lifecycle) ---
+
+def _task_path(team: str, name: str) -> str:
+    return f"team/{team}/task/{name}.md"
+
+
+def cmd_task_start(args: argparse.Namespace, transport: Any) -> int:
+    try:
+        slug, content = tasks.new_task_doc(
+            args.title, now=_iso(_now()), workstream=args.workstream, status=args.status,
+            priority=args.priority, owner=_host(), assignee=args.assignee,
+            summary=args.summary or "", next_action=args.next, kind=args.kind,
+        )
+    except tasks.TaskError as e:
+        print(f"task start failed: {e}", file=sys.stderr)
+        return 1
+    path = _task_path(args.team, slug)
+    if not args.force and transport.read(path) is not None:
+        print(f"task {slug} already exists (use --force)", file=sys.stderr)
+        return 1
+    transport.write(path, content)
+    print(f"created team/{args.team}/task/{slug}.md ({args.status})")
+    return 0
+
+
+def cmd_task_update(args: argparse.Namespace, transport: Any) -> int:
+    path = _task_path(args.team, args.name)
+    try:
+        out = tasks.apply_update(
+            transport.read(path), now=_iso(_now()), status=args.status, summary=args.summary,
+            next_action=args.next, assignee=args.assignee, blocked_on=args.blocked_on,
+            priority=args.priority,
+        )
+    except tasks.TaskError as e:
+        print(f"task update failed: {e}", file=sys.stderr)
+        return 1
+    transport.write(path, out)
+    print(f"updated {args.name}" + (f" → {args.status}" if args.status else ""))
+    return 0
+
+
+def cmd_task_done(args: argparse.Namespace, transport: Any) -> int:
+    path = _task_path(args.team, args.name)
+    try:
+        out = tasks.mark_done(transport.read(path), now=_iso(_now()), evidence=args.evidence)
+    except tasks.TaskError as e:
+        print(f"task done failed: {e}", file=sys.stderr)
+        return 1
+    transport.write(path, out)
+    print(f"done {args.name}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coord-engine", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -214,6 +267,25 @@ def build_parser() -> argparse.ArgumentParser:
     rst = rlsub.add_parser("status", help="HELD/VACANT/CONTESTED + escalation-due")
     rst.add_argument("team"); rst.add_argument("role"); add_json(rst)
     rst.set_defaults(func=cmd_roles_status)
+
+    tk = sub.add_parser("task", help="typed task lifecycle (fulcra-agent-tasks)")
+    tksub = tk.add_subparsers(dest="task_command", required=True)
+    tst = tksub.add_parser("start", help="create a task doc")
+    tst.add_argument("team"); tst.add_argument("title")
+    tst.add_argument("--workstream", "-w"); tst.add_argument("--status", default="proposed")
+    tst.add_argument("--priority", "-p", default="P2"); tst.add_argument("--assignee")
+    tst.add_argument("--summary", "-s"); tst.add_argument("--next", "-n")
+    tst.add_argument("--kind", "-k"); tst.add_argument("--force", action="store_true")
+    tst.set_defaults(func=cmd_task_start)
+    tup = tksub.add_parser("update", help="update a task (enforces the status machine)")
+    tup.add_argument("team"); tup.add_argument("name")
+    tup.add_argument("--status"); tup.add_argument("--priority", "-p"); tup.add_argument("--assignee")
+    tup.add_argument("--summary", "-s"); tup.add_argument("--next", "-n")
+    tup.add_argument("--blocked-on", dest="blocked_on")
+    tup.set_defaults(func=cmd_task_update)
+    tdn = tksub.add_parser("done", help="mark done (requires evidence)")
+    tdn.add_argument("team"); tdn.add_argument("name"); tdn.add_argument("--evidence", "-e", required=True)
+    tdn.set_defaults(func=cmd_task_done)
     return p
 
 

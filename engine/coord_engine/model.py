@@ -17,6 +17,25 @@ VALID_PRIORITIES = ("P0", "P1", "P2", "P3")
 DEFAULT_STATUS = "proposed"
 DEFAULT_PRIORITY = "P2"
 
+#: Legal status transitions (mirrors fulcra-coord's machine). Terminal states have
+#: no outbound edges. A same-status "transition" is always allowed (idempotent edit).
+STATUS_TRANSITIONS = {
+    "proposed": {"active", "waiting", "abandoned", "done"},
+    "active": {"waiting", "blocked", "done", "abandoned"},
+    "waiting": {"active", "blocked", "abandoned"},
+    "blocked": {"active", "waiting", "abandoned"},
+    "done": set(),
+    "abandoned": set(),
+}
+
+
+def is_valid_transition(old: str, new: str) -> bool:
+    """True iff ``old -> new`` is a legal status change (or a no-op same-status)."""
+    if old == new:
+        return True
+    return new in STATUS_TRANSITIONS.get(old, set())
+
+
 #: Priority sort key — P0 is most urgent. Unknown priorities sort last.
 _PRIORITY_ORDER = {p: i for i, p in enumerate(VALID_PRIORITIES)}
 

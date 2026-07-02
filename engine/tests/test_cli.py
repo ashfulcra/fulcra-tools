@@ -70,3 +70,32 @@ def test_cli_roles_status_vacant_escalation_due(capsys):
     res = _json.loads(capsys.readouterr().out)
     assert res["status"] == "VACANT"
     assert res["escalation_due"] is True
+
+
+def test_cli_task_start_then_reconcile_shows_it(capsys):
+    from coord_engine import okf
+    t = FakeTransport()
+    assert cli.main(["task", "start", "r", "Build the thing", "-w", "coord2",
+                     "--status", "active", "-p", "P1"], transport=t) == 0
+    assert "created" in capsys.readouterr().out
+    fm = okf.parse_frontmatter(t.store["team/r/task/build-the-thing.md"])
+    assert fm["type"] == "Task" and fm["status"] == "active" and fm["priority"] == "P1"
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    cli.main(["board", "r"], transport=t)
+    assert "Build the thing" in capsys.readouterr().out
+
+
+def test_cli_task_start_refuses_duplicate(capsys):
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "Dup"], transport=t); capsys.readouterr()
+    assert cli.main(["task", "start", "r", "Dup"], transport=t) == 1
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_cli_task_illegal_transition_fails(capsys):
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "T", "--status", "active"], transport=t)
+    cli.main(["task", "done", "r", "t", "-e", "shipped"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["task", "update", "r", "t", "--status", "active"], transport=t) == 1
+    assert "illegal transition" in capsys.readouterr().err

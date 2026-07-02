@@ -87,6 +87,24 @@ def _parse_yaml_subset(fm_text: str) -> dict[str, Any]:
             i += 1
             continue
         val_raw = rest.strip()
+        if val_raw in ("|", "|-", "|+"):
+            block: list[str] = []
+            j = i + 1
+            while j < n:
+                lj = lines[j]
+                sj = lj.strip()
+                if sj == "":
+                    block.append("")
+                    j += 1
+                    continue
+                if lj[:1].isspace():
+                    block.append(lj[2:] if lj.startswith("  ") else lj.lstrip())
+                    j += 1
+                    continue
+                break
+            out[key] = "\n".join(block)
+            i = j
+            continue
         if val_raw == "":
             # possible block list: indented "- item" lines follow
             items: list[str] = []
@@ -108,6 +126,45 @@ def _parse_yaml_subset(fm_text: str) -> dict[str, Any]:
         out[key] = _parse_scalar(val_raw)
         i += 1
     return out
+
+
+def _needs_quote(s: str) -> bool:
+    if s == "" or s != s.strip():
+        return True
+    return s[0] in "[{!&*#?|>%@`\"'" or ": " in s or s.lower() in ("null", "true", "false", "~")
+
+
+def _render_scalar(s: str) -> str:
+    return f"{chr(34)}{s}{chr(34)}" if _needs_quote(s) else s
+
+
+def render_frontmatter(fields: dict[str, Any]) -> str:
+    """Serialize a frontmatter dict to an OKF ``---`` block (inverse of
+    ``parse_frontmatter`` for the subset we use). ``None`` values are omitted.
+    Round-trips with ``parse_frontmatter`` for scalars and lists.
+    """
+    lines = ["---"]
+    for key, val in fields.items():
+        if val is None:
+            continue
+        if isinstance(val, bool):
+            lines.append(f"{key}: {'true' if val else 'false'}")
+        elif isinstance(val, list):
+            if not val:
+                lines.append(f"{key}: []")
+            else:
+                lines.append(f"{key}:")
+                for item in val:
+                    lines.append(f"  - {_render_scalar(str(item))}")
+        else:
+            s = str(val)
+            if "\n" in s:
+                lines.append(f"{key}: |")
+                lines.extend(f"  {part}" for part in s.split("\n"))
+            else:
+                lines.append(f"{key}: {_render_scalar(s)}")
+    lines.append("---")
+    return "\n".join(lines)
 
 
 # --- rendering (OKF §6 index, §7 log) ---------------------------------------
