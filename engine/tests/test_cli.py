@@ -776,6 +776,18 @@ def test_cli_briefing_full_and_empty_store(capsys):
     assert cli.main(["briefing", "empty-team", "-a", "ghost"], transport=FakeTransport()) == 0
 
 
+def test_cli_briefing_respects_live_ack_shards(capsys):
+    import json as _j
+    t = FakeTransport()
+    cli.main(["tell", "r", "amy", "Do it", "-p", "P1"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
+    cli.main(["inbox", "r", "-a", "amy", "--ack", "do-it"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["briefing", "r", "-a", "amy", "--json"], transport=t) == 0
+    b = _j.loads(capsys.readouterr().out)
+    assert b["inbox"] == []
+
+
 def test_park_respects_per_role_sla(capsys):
     t = FakeTransport()
     t.put("team/r/roles/tight.md", "---\ntype: Role\nsla_hours: 0.001\n---\n")  # ~4s SLA

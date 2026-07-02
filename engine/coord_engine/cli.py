@@ -663,8 +663,17 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(f"briefing: board section unavailable ({type(e).__name__})", file=sys.stderr)
         out["board"] = {}
     try:
-        acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
+        acks = {str(r.get("name")): list(r.get("acked_by") or []) for r in rows}
+        stale_visible = directives.inbox(rows, acks, agent, now=now)
+        for r in stale_visible:
+            slug = str(r.get("name") or "")
+            if agent not in (acks.get(slug) or []) and transport.read(_ack_path(args.team, slug, agent)):
+                acks.setdefault(slug, []).append(agent)
         out["inbox"] = directives.inbox(rows, acks, agent, now=now)
+        out["inbox"] = [
+            r for r in out["inbox"]
+            if transport.read(_ack_path(args.team, str(r.get("name")), agent)) is None
+        ]
     except Exception as e:
         print(f"briefing: inbox section unavailable ({type(e).__name__})", file=sys.stderr)
         out["inbox"] = []
