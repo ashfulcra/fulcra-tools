@@ -8,6 +8,7 @@ snapshots to the latest is code; the prose is when/whether to snapshot.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Optional
 
 SCHEMA = "coord.teams.continuity.v1"
