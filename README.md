@@ -35,16 +35,16 @@ consistency-critical folds live in the shared **`coord-engine`** tool the skills
 | **L2 ✅** | **`fulcra-agent-tasks`** | `task start/update/done` | typed status/priority/assignee lifecycle + validated state machine |
 | **L5 ✅** | **`fulcra-agent-review`** | `review status` | review handshake + APPROVED/CHANGES/PENDING verdict tally |
 | **L6 ✅** | **`fulcra-agent-continuity`** | `continuity snapshot/resume` | structured resumable snapshots + deterministic resume brief |
-| L7 | `fulcra-agent-automation` | — | heartbeat / listener / wake installers |
+| **L7 ✅** | **`fulcra-agent-automation`** | (schedules `reconcile`) | heartbeat scheduler + resume-on-wake loop |
 
 Reconcile is the linchpin (queryability + self-healing). The roles fold and reconcile share the engine's
 OKF parser + transport — one implementation, no drift.
 
 ## Status
-**`coord-engine` v0.4.0 + five skills built** — reconcile, roles, tasks, review, continuity. **103 engine tests** + a live end-to-end run of reconcile/queries against the real
+**`coord-engine` v0.4.0 + **all six skills built** — reconcile, roles, tasks, review, continuity, automation. **105 engine tests** + a live end-to-end run of reconcile/queries against the real
 Fulcra File Store. Packaging decided (approach C) after independent + bus (Codex) review — both reviewers
 independently flagged the roles-fold-as-prose defect, now fixed; open decisions resolved in doc `03`.
-L7 (automation) not yet built.
+The full stack is in place.
 
 **Foundations validated (2026-07-01):** `fulcra-api file` is last-writer-wins + versions every upload
 (`stat` → version UUID + history; `restore` rolls back live files), `list` timestamps are minute-granular
