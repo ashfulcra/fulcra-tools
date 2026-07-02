@@ -58,6 +58,21 @@ the setup self-test checks for both. Engine-only, no checkout:
 Publishing to PyPI / a plugin registry is deferred to the upstream phase (see
 `docs/proposals/teams-convergence/04-standalone-packaging.md`).
 
+## Full port (A1–A8) — complete
+All remaining `fulcra-coord` + `fulcra-continuity` functionality is ported as **optional add-ons**
+(engine v1.0.0, 172 tests, every add-on independently reviewed and live-verified on the real store):
+
+| Add-on | Verbs | PRs |
+|---|---|---|
+| A1 tasks-completion | `task block/pause/abandon/assign/restore` | #10 |
+| A2 directives | `tell broadcast remind later handoff inbox respond` (+acks, shard-GC) | #13,#14 |
+| A3 presence | `presence beat/show`, `agents`, `roles claim/release` | #11,#12 |
+| A4 retention | `reconcile --retention-days`, `search --archived`, verified-move archive | #15,#16 |
+| A5 health | `doctor health digest escalate` (+per-host shards) | #17,#18 |
+| A6 continuity | `continuity checkpoint/park`, `briefing` | #20 |
+| A7 forge | `forge mirror` (PR evidence + auto-verdict, `--repo` allowlist) | #22 |
+| A8 listener | `install-listener.sh` + `listener-tick.sh` (notify + consent-gated wake) | #25 |
+
 ## Status
 **`coord-engine` v0.4.0 + **all six skills built** — reconcile, roles, tasks, review, continuity, automation. **105 engine tests** + a live end-to-end run of reconcile/queries against the real
 Fulcra File Store. Packaging decided (approach C) after independent + bus (Codex) review — both reviewers
