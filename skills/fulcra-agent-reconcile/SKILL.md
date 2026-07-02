@@ -58,6 +58,13 @@ Once you use this skill, `task/index.md` and `task/log.md` are **engine-owned** 
 them; edit task *content* docs, not the indexes. `_coord/summaries.json` is a cache (delete + re-run
 reproduces it). Recoverable archival is **move-not-delete** (Fulcra `file delete` isn't CLI-undoable).
 
+## Retention (optional add-on)
+With `--retention-days N` (or env `COORD_RETENTION_DAYS`), reconcile archives terminal tasks older than N
+days to `task/archive/<YYYY-MM>/` — a **verified move** (copy → read-back → delete), never a bare delete —
+and moves the task's ack/response shards with it. Once per day, capped per pass. `coord-engine task
+restore <team> <slug>` brings one back; `coord-engine search <team> <q> --archived` searches the cold
+archive. Off by default.
+
 ## Usage
 This skill drives the shared **`coord-engine`** tool — invoked the same way this ecosystem already
 invokes `fulcra-api` (`uv tool run …`), so the skill itself stays pure prose + references (no bundled

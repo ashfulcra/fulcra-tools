@@ -65,7 +65,8 @@ def _line(row: dict[str, Any]) -> str:
 def cmd_reconcile(args: argparse.Namespace, transport: Any) -> int:
     dt = _now()
     res = rec.reconcile(
-        transport, args.team, now=_iso(dt), today=dt.strftime("%Y-%m-%d"), host=_host()
+        transport, args.team, now=_iso(dt), today=dt.strftime("%Y-%m-%d"), host=_host(),
+        retention_days=getattr(args, "retention_days", None),
     )
     if res.get("degraded"):
         print(f"reconcile degraded (no writes): {res.get('reason')}", file=sys.stderr)
@@ -122,6 +123,24 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_search(args: argparse.Namespace, transport: Any) -> int:
     rows = _load_rows(transport, args.team)
+    if getattr(args, "archived", False):
+        # cold path: read archived task docs directly (archives are small + rare)
+        from . import model as _model
+        for month in _archive_months(transport, args.team):
+            pfx = f"{rec.archive_prefix(args.team)}{month}/"
+            try:
+                for e in transport.list_dir(pfx):
+                    n = e.get("name") or ""
+                    if e.get("is_dir") or not n.endswith(".md"):
+                        continue
+                    fm = okf.parse_frontmatter(transport.read(pfx + n))
+                    if fm is not None and _model.is_task(fm):
+                        row = _model.row_from_frontmatter(fm, name=n[:-3],
+                                                          path=f"task/archive/{month}/{n}")
+                        row["archived"] = month
+                        rows.append(row)
+            except TransportError:
+                pass
     got = query.search(rows, args.query)
     if args.json:
         print(json.dumps(got, indent=2))
@@ -270,6 +289,33 @@ def cmd_task_assign(args: argparse.Namespace, transport: Any) -> int:
     if args.assignee != _human():
         kw["remove_tags"] = ["needs:human"]
     return _task_apply(args, transport, **kw)
+
+
+def _archive_months(transport: Any, team: str) -> list[str]:
+    try:
+        return [e["name"].rstrip("/") for e in transport.list_dir(rec.archive_prefix(team))
+                if e.get("is_dir")]
+    except TransportError:
+        return []
+
+
+def cmd_task_restore(args: argparse.Namespace, transport: Any) -> int:
+    """Move an archived task back into the hot path (verified move)."""
+    for month in sorted(_archive_months(transport, args.team), reverse=True):
+        src = f"{rec.archive_prefix(args.team)}{month}/{args.name}.md"
+        if transport.read(src) is None:
+            continue
+        dst = _task_path(args.team, args.name)
+        if transport.read(dst) is not None:
+            print(f"restore failed: {args.name} already exists in the hot path", file=sys.stderr)
+            return 1
+        if rec._crash_safe_move(transport, src, dst):
+            print(f"restored {args.name} from archive/{month}/ (run reconcile to reindex)")
+            return 0
+        print(f"restore failed: verified move from archive/{month}/ failed", file=sys.stderr)
+        return 1
+    print(f"restore failed: {args.name} not found in the archive", file=sys.stderr)
+    return 1
 
 
 def cmd_task_done(args: argparse.Namespace, transport: Any) -> int:
@@ -600,6 +646,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("reconcile", help="scan + heal a team's task views")
     r.add_argument("team")
+    r.add_argument("--retention-days", dest="retention_days",
+                   help="archive terminal tasks older than N days (or env COORD_RETENTION_DAYS)")
     r.set_defaults(func=cmd_reconcile)
 
     s = sub.add_parser("status", help="counts by status")
@@ -614,6 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sc = sub.add_parser("search", help="substring search over tasks")
     sc.add_argument("team"); sc.add_argument("query"); add_json(sc)
+    sc.add_argument("--archived", action="store_true", help="also search the cold archive")
     sc.set_defaults(func=cmd_search)
 
     rl = sub.add_parser("roles", help="role status fold (fulcra-agent-roles)")
@@ -702,6 +751,9 @@ def build_parser() -> argparse.ArgumentParser:
     tab = tksub.add_parser("abandon", help="abandon (requires --reason)")
     tab.add_argument("team"); tab.add_argument("name"); tab.add_argument("--reason", "-r", required=True)
     tab.set_defaults(func=cmd_task_abandon, verb="abandon")
+    trs = tksub.add_parser("restore", help="move an archived task back to the hot path")
+    trs.add_argument("team"); trs.add_argument("name")
+    trs.set_defaults(func=cmd_task_restore, verb="restore")
     tas = tksub.add_parser("assign", help="set/redirect assignee")
     tas.add_argument("team"); tas.add_argument("name"); tas.add_argument("assignee")
     tas.set_defaults(func=cmd_task_assign, verb="assign")
