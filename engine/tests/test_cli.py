@@ -309,3 +309,21 @@ def test_cli_roles_release_without_lease_errors(capsys):
     t = FakeTransport()
     assert cli.main(["roles", "release", "r", "reviewer", "-a", "ghost"], transport=t) == 1
     assert "no lease" in capsys.readouterr().err
+
+
+def test_agent_key_collision_safe():
+    from coord_engine import tasks
+    a, b = "claude-code:host:repo", "claude_code/host/repo"
+    assert tasks.slugify(a) == tasks.slugify(b)          # the lossy collision
+    assert tasks.agent_key(a) != tasks.agent_key(b)      # keys stay distinct
+
+
+def test_cli_presence_colliding_ids_both_survive(capsys):
+    import json as _j
+    t = FakeTransport()
+    cli.main(["presence", "beat", "r", "-a", "claude-code:host:repo"], transport=t)
+    cli.main(["presence", "beat", "r", "-a", "claude_code/host/repo"], transport=t)
+    capsys.readouterr()
+    cli.main(["presence", "show", "r", "--json"], transport=t)
+    ros = _j.loads(capsys.readouterr().out)
+    assert len(ros) == 2                                  # no silent clobber

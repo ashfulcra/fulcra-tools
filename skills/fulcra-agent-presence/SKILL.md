@@ -17,7 +17,7 @@ broadcasts just degrade to "acked-by-me hides it for me".
 
 ## How it works
 - **Beat** (single-file write, safe as a command): `presence beat` writes/refreshes your shard
-  `team/<team>/presence/<agent>.md` (OKF `type: Presence`: agent, workstreams, summary, timestamp).
+  `team/<team>/presence/<agent-key>.md` (collision-safe key) (OKF `type: Presence`: agent, workstreams, summary, timestamp).
   Beat whenever you start work, on heartbeat/cron ticks, and when your focus changes.
 - **Folds** (deterministic, engine-side — never eyeball timestamps):
   - `presence show` — roster with `live` (<1h) / `idle` (<24h) / `stale` per agent.

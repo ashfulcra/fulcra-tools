@@ -7,6 +7,7 @@ body note is prose. Pure functions here; the I/O wrapper + CLI live in ``cli.py`
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Optional
 
@@ -28,6 +29,15 @@ class TaskError(ValueError):
 
 def slugify(title: str) -> str:
     return _SLUG_RE.sub("-", (title or "").lower()).strip("-") or "task"
+
+
+def agent_key(agent: str) -> str:
+    """Collision-safe filename key for an agent id. ``slugify`` is lossy
+    (``a:b`` and ``a/b`` collide), so distinct ids sharing a shard file would
+    silently clobber each other (presence loss, lease merge -> CONTESTED
+    blindness). Suffix a short hash of the raw id to make the key injective."""
+    a = agent or "agent"
+    return f"{slugify(a)[:48]}-{hashlib.sha1(a.encode()).hexdigest()[:6]}"
 
 
 def new_task_doc(

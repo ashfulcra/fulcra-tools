@@ -412,7 +412,7 @@ def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
         "timestamp": _iso(_now()),
     }
     body = f"\n# Presence: {agent}\n"
-    slug = tasks.slugify(agent)
+    slug = tasks.agent_key(agent)
     transport.write(f"{_presence_prefix(args.team)}{slug}.md", okf.render_frontmatter(fm) + body)
     print(f"beat {agent} ({slug}.md)")
     return 0
@@ -446,7 +446,7 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
-    slug = tasks.slugify(agent)
+    slug = tasks.agent_key(agent)
     fm = {"type": "Lease", "title": f"{args.role} lease — {agent}", "agent": agent,
           "timestamp": _iso(_now())}
     transport.write(f"{_leases_prefix(args.team, args.role)}{slug}.md",
@@ -457,7 +457,7 @@ def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_roles_release(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
-    slug = tasks.slugify(agent)
+    slug = tasks.agent_key(agent)
     path = f"{_leases_prefix(args.team, args.role)}{slug}.md"
     if transport.read(path) is None:
         print(f"no lease for {agent} on {args.role}", file=sys.stderr)

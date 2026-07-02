@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from .model import OPEN_STATUSES
 from .roles import age_hours
 
 LIVE_HOURS = 1.0
@@ -69,8 +70,6 @@ def agents_digest(
     """Cross-agent digest: per agent (from presence ∪ task owners/assignees),
     their liveness + open-task counts by status. Pure fold over aggregate rows +
     presence shards."""
-    from .model import OPEN_STATUSES
-
     ros = {r["agent"]: r for r in roster(shards, now=now)}
     names = set(ros)
     open_rows = [r for r in rows if r.get("status") in OPEN_STATUSES]
