@@ -843,6 +843,11 @@ def build_parser() -> argparse.ArgumentParser:
     asp_off.add_argument("--format", choices=["table", "json"], default="table")
     asp_status = asub.add_parser("status", help="Show resolved mode, source, and token state")
     asp_status.add_argument("--format", choices=["table", "json"], default="table")
+    asp_pin = asub.add_parser("pin", help="Pin the timeline definition id this host writes to "
+                                          "(never TTL-expires; survives catalog duplicates)")
+    asp_pin.add_argument("def_id", help="definition UUID (from fulcra catalog)")
+    asp_pin.add_argument("--digest", action="store_true", help="pin the Digest track instead")
+    asp_pin.add_argument("--format", choices=["table", "json"], default="table")
 
     # ---- __session-task (hidden, used by hooks) ----
     sp = sub.add_parser("__session-task", help=argparse.SUPPRESS)

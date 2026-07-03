@@ -43,19 +43,28 @@ def test_creates_only_when_no_exact_match():
     assert created and got == "NEW-MINTED"
 
 
-def test_pinned_canonical_wins_over_catalog(monkeypatch):
-    # archived dupes still list in the catalog; the pin must short-circuit
-    with mock.patch.object(annotations, "_fulcra_cli_json_lines") as cat, \
-         mock.patch.object(annotations, "_fulcra_cli_json") as create:
-        got = annotations._resolve_def_via_cli("Agent Tasks", "d", [])
-        assert got == "56405cba-02a5-4e75-b93e-37a0e5964a86"
-        assert not cat.called and not create.called
+def test_pinned_cache_entry_never_expires(tmp_path, monkeypatch):
+    # operator pin (annotations pin <uuid>) must survive TTL expiry — duplicates
+    # are archived but still listed, so resolution alone can pick a wrong one
+    monkeypatch.setattr(annotations.cache, "annotations_dir", lambda: tmp_path)
+    path = annotations.pin_definition_id("pinned-uuid-1")
+    data = json.loads(open(path).read())
+    assert data["pinned"] is True
+    # even with an ancient written_at the pinned id is honored
+    data["written_at"] = "2020-01-01T00:00:00Z"
+    open(path, "w").write(json.dumps(data))
+    assert annotations._cached_definition_id() == "pinned-uuid-1"
 
 
-def test_unpinned_name_still_resolves_via_catalog():
-    with mock.patch.object(annotations, "_fulcra_cli_json_lines",
-                           return_value=[{"id": "MomentAnnotation/x-1", "name": "Other Track",
-                                          "column_name": "moment"}]), \
-         mock.patch.object(annotations, "_fulcra_cli_json") as create:
-        assert annotations._resolve_def_via_cli("Other Track", "d", []) == "x-1"
-        assert not create.called
+def test_pinned_digest_cache_is_separate(tmp_path, monkeypatch):
+    monkeypatch.setattr(annotations.cache, "annotations_dir", lambda: tmp_path)
+    annotations.pin_definition_id("digest-uuid-9", digest=True)
+    assert annotations._cached_digest_definition_id() == "digest-uuid-9"
+    assert annotations._cached_definition_id() is None   # non-digest untouched
+
+
+def test_unpinned_cache_still_ttl_expires(tmp_path, monkeypatch):
+    monkeypatch.setattr(annotations.cache, "annotations_dir", lambda: tmp_path)
+    (tmp_path / "definition.json").write_text(json.dumps(
+        {"id": "old-uuid", "written_at": "2020-01-01T00:00:00Z"}))   # no pin flag
+    assert annotations._cached_definition_id() is None
