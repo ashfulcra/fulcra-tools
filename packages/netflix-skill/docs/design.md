@@ -1,8 +1,8 @@
 # fulcra-netflix skill — design
 
 **Date:** 2026-07-03
-**Status:** approved-pending-review
-**Location:** `skills/fulcra-netflix/` (this repo, top level — agent-skills layout so it can be PR'd upstream to `fulcradynamics/agent-skills` later)
+**Status:** in review (coord2 team fulcra, review slug `netflix-skill-design`)
+**Location:** `packages/netflix-skill/` in ashfulcra/fulcra-tools — the shippable skill lives at `packages/netflix-skill/skills/fulcra-netflix/` (same package-wraps-skill convention as `media-helpers`/`fulcra-media`), agent-skills folder layout inside so it can be PR'd upstream to `fulcradynamics/agent-skills` later
 
 ## What this is
 
@@ -76,18 +76,28 @@ Immediately after import verification, walk the user through the manual share (s
 ## Repo layout
 
 ```
-skills/fulcra-netflix/
-    SKILL.md                       # the state machine, runtime-agnostic (shell-only contract)
-    references/
-        auth.md                    # device-code flow details (adapted from fulcra-onboarding)
-        netflix-export.md          # slim + GDPR walkthroughs (adapted from the fulcra-media wizard)
-        record-schema.md           # exact def + record wire shapes, fingerprint rules
-    scripts/
-        netflix_import.py          # vendored importer (PEP 723; stdlib + httpx)
+packages/netflix-skill/
+    pyproject.toml                 # dep-free; dev extra for pytest (package = test harness only)
+    README.md
+    docs/design.md                 # this spec
+    fulcra_netflix/                # test-support shims for the vendored script
+    skills/fulcra-netflix/         # THE SHIPPABLE ARTIFACT — what users message to their bot
+        SKILL.md                   # the state machine, runtime-agnostic (shell-only contract)
+        references/
+            auth.md                # device-code flow details (adapted from fulcra-onboarding)
+            netflix-export.md      # slim + GDPR walkthroughs (adapted from the fulcra-media wizard)
+            record-schema.md       # exact def + record wire shapes, fingerprint rules
+        scripts/
+            netflix_import.py      # vendored importer (PEP 723; stdlib + httpx)
     tests/
         test_netflix_import.py     # parser/UUID/envelope tests over fixture CSVs
         fixtures/                  # synthetic slim + GDPR CSVs
 ```
+
+The import script stays PEP 723 self-contained (runnable straight from a
+skill checkout with `uv run`, no package install) — the package wrapper is
+for monorepo test coverage, mirroring how `media-helpers` wraps
+`skills/fulcra-media`.
 
 SKILL.md follows the agent-skills conventions (frontmatter with name/description/license, user-invocable) and the fulcra-media skill's runtime-agnostic stance: works in Claude Code, OpenClaw, Hermes, Codex — anything that can run a subprocess and relay chat messages.
 
