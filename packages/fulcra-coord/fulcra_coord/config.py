@@ -197,6 +197,21 @@ def cmd_annotations(args: Any, backend: Optional[list[str]] = None) -> int:
                   "timeline annotations.")
         return 0
 
+    if action == "pin":
+        def_id = (getattr(args, "def_id", "") or "").strip()
+        if not def_id:
+            _info("annotations pin: a definition UUID is required")
+            return 1
+        path = lifecycle_annotations.pin_definition_id(
+            def_id, digest=bool(getattr(args, "digest", False)))
+        which = "Agent Tasks — Digest" if getattr(args, "digest", False) else "Agent Tasks"
+        if out_format == "json":
+            _print_json({"action": "pin", "definition": which, "id": def_id, "path": path})
+        else:
+            _info(f"Pinned {which} definition id: {def_id}")
+            _info(f"  Cache: {path} (never TTL-expires; re-pin or delete to change)")
+        return 0
+
     if action == "off":
         removed = lifecycle_annotations.clear_persisted_mode()
         mode, source = lifecycle_annotations.resolve_mode_source()

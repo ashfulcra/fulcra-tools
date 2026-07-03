@@ -822,7 +822,11 @@ def _cached_definition_id() -> Optional[str]:
         if path.exists():
             data = json.loads(path.read_text())
             did = data.get("id")
-            if did and _is_fresh(data.get("written_at")):
+            # a PINNED entry (operator-set via `annotations pin`) never TTL-expires:
+            # duplicates minted by the catalog-shape bug are archived but still
+            # LISTED by `catalog`, so name resolution alone can land on the wrong
+            # (empty/archived) definition; the pin makes the choice explicit.
+            if did and (data.get("pinned") or _is_fresh(data.get("written_at"))):
                 return did
     except (OSError, json.JSONDecodeError):
         pass
@@ -839,6 +843,16 @@ def _store_definition_id(def_id: str) -> None:
             json.dumps({"id": def_id, "written_at": _cache_now_iso()}))
     except OSError:
         pass
+
+
+def pin_definition_id(def_id: str, *, digest: bool = False) -> str:
+    """Operator-explicit pin: write a never-expiring cache entry for the
+    (Agent Tasks | Digest) definition id. Returns the cache path written."""
+    cache.annotations_dir().mkdir(parents=True, exist_ok=True)
+    path = _digest_definition_cache_path() if digest else _definition_cache_path()
+    path.write_text(json.dumps(
+        {"id": def_id, "written_at": _cache_now_iso(), "pinned": True}))
+    return str(path)
 
 
 def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) -> str:
@@ -945,7 +959,7 @@ def _cached_digest_definition_id() -> Optional[str]:
         if path.exists():
             data = json.loads(path.read_text())
             did = data.get("id")
-            if did and _is_fresh(data.get("written_at")):
+            if did and (data.get("pinned") or _is_fresh(data.get("written_at"))):
                 return did
     except (OSError, json.JSONDecodeError):
         pass
