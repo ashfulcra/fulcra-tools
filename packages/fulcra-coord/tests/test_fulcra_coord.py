@@ -9255,7 +9255,7 @@ class TestVersionFlag(unittest.TestCase):
         from fulcra_coord import __version__
         self.assertNotEqual(__version__, "0.1.0")
 
-    def test_version_is_0_15_16(self):
+    def test_version_is_0_15_17(self):
         # 0.15.16: prune leaked orphan summaries via an age discriminator —
         # `_merge_summaries_for_upload`/`_summaries_upload_would_clobber` drop
         # STALE non-terminal current-only rows (orphans) on the authoritative
@@ -9270,7 +9270,7 @@ class TestVersionFlag(unittest.TestCase):
         # detection. 0.15.12: `search` carries assignee + pr. 0.15.11: self-heal at
         # scale. 0.15.10: stable-hostname identity fix (#273).
         from fulcra_coord import __version__
-        self.assertEqual(__version__, "0.15.16")
+        self.assertEqual(__version__, "0.15.17")
 
 
 class TestCapabilitiesProbe(unittest.TestCase):
