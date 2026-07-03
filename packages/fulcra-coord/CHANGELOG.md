@@ -10,6 +10,21 @@ versions are sourced from `fulcra_coord/__init__.py::__version__`.
 
 ---
 
+## [0.15.17] — 2026-07-03
+
+### Fix: duplicate "Agent Tasks"/"Agent Tasks — Digest" timeline definitions minted daily
+
+- fulcra-api >=0.1.35 changed the catalog output shape (top-level `id`
+  `MomentAnnotation/<uuid>` + `column_name: moment`; no `metadata` object). The
+  annotation writer's exact-name matcher only understood the legacy
+  `metadata.{annotation_type,id}` shape, so every TTL-expired resolve found "no
+  match" and `data-type create`d a NEW duplicate definition — one per day per
+  track (operator-reported: 9x "Agent Tasks", 4x Digest).
+- `_resolve_def_via_cli` now matches BOTH shapes, and with multiple exact-name
+  duplicates present picks the DETERMINISTIC-OLDEST id (min uuid) so every host
+  converges on one canonical definition — and never creates while any exact
+  match exists.
+
 ## [0.15.16] — 2026-06-26
 
 ### Fix: prune leaked orphan summaries instead of unioning them forever

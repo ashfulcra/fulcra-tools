@@ -854,13 +854,30 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
     exact match we ``data-type create MomentAnnotation <def_name>
     --add-to-timeline`` with the tag NAMES (``--tag`` auto-creates them); its
     single-line stdout carries the new def's ``id``."""
+    matches: list[str] = []
     for e in _fulcra_cli_json_lines(["catalog", "--name", def_name]):
-        if not isinstance(e, dict):
+        if not isinstance(e, dict) or e.get("name") != def_name:
             continue
         meta = e.get("metadata") or {}
-        if (e.get("name") == def_name and meta.get("annotation_type") == "moment"
-                and not meta.get("deleted_at") and meta.get("id")):
-            return meta["id"]
+        # legacy catalog shape: metadata.{annotation_type,id,deleted_at}
+        if (meta.get("annotation_type") == "moment" and meta.get("id")
+                and not meta.get("deleted_at")):
+            matches.append(str(meta["id"]))
+            continue
+        # current fulcra-api shape (>=0.1.35): TOP-LEVEL id "MomentAnnotation/<uuid>",
+        # column_name "moment", no metadata at all. The old matcher saw {} here and
+        # fell through to data-type create on EVERY TTL-expired resolve — minting a
+        # duplicate "Agent Tasks" definition per day (operator-reported).
+        top_id = e.get("id")
+        if (e.get("column_name") == "moment" and isinstance(top_id, str)
+                and top_id.startswith("MomentAnnotation/") and not e.get("deprecated")):
+            matches.append(top_id.split("/", 1)[1])
+    if matches:
+        # DETERMINISTIC-OLDEST convergence (TASK-...413fc6b6): with duplicates
+        # already in the catalog, every host must pick the SAME canonical id —
+        # min() over the uuid strings is stable everywhere — and must NEVER
+        # create while any exact-name match exists.
+        return min(matches)
     cmd = ["data-type", "create", "MomentAnnotation", def_name,
            "--description", description, "--add-to-timeline"]
     for t in tag_names:
