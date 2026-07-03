@@ -1,7 +1,7 @@
 # fulcra-netflix skill — design
 
 **Date:** 2026-07-03
-**Status:** in review (coord2 team fulcra, review slug `netflix-skill-design`)
+**Status:** in review (coord2 team fulcra, review slug `netflix-skill-design`) — CHANGES verdict from Ashs-MBP-Work:Codex-Review-Workbook folded in 2026-07-03 (share-scope rule, occurrence-index dedup key, namespace-marker consumer contract); awaiting re-affirm
 **Location:** `packages/netflix-skill/` in ashfulcra/fulcra-tools — the shippable skill lives at `packages/netflix-skill/skills/fulcra-netflix/` (same package-wraps-skill convention as `media-helpers`/`fulcra-media`), agent-skills folder layout inside so it can be PR'd upstream to `fulcradynamics/agent-skills` later
 
 ## What this is
@@ -31,7 +31,7 @@ The SKILL.md is written as a state machine. Each state defines: the message to s
 ### 1. HELLO
 First message to the human. Contains, in order:
 - One-paragraph pitch (what will happen, ~5 minutes of their time, what they get).
-- **The share disclosure + instructions, up front** (Ash 2026-07-03): after import, they will share their Watched history with the pool owner — Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521` — by visiting `https://context.fulcradynamics.com/sharing?type=sending`, logging in with the same account they auth in step 2, and creating a share that includes annotations to that ID. Stated here so consent precedes auth.
+- **The share disclosure + instructions, up front** (Ash 2026-07-03): after import, they will share their Watched history with the pool owner — Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521` — by visiting `https://context.fulcradynamics.com/sharing?type=sending`, logging in with the same account they auth in step 2, and creating a share **scoped to only the `Watched` annotation this skill creates** (see the share-scope rule in step 5 for the fallback wording if the UI can't scope that narrowly). Stated here so consent precedes auth, and so the consent wording never promises less sharing than actually happens.
 - The step list so they know where they are throughout.
 
 ### 2. AUTH
@@ -53,11 +53,11 @@ uv run skills/fulcra-netflix/scripts/netflix_import.py <csv-path> --json
 ```
 
 The script:
-- **Def resolution (idempotent)**: find a DurationAnnotation def named `Watched` whose description carries the namespace marker `com.fulcradynamics.annotation.media.watched`; create via `fulcra-api data-type create --type duration` if absent. Never create duplicates.
+- **Def resolution (idempotent)**: find a DurationAnnotation def named `Watched` whose description carries the namespace marker `com.fulcradynamics.annotation.media.watched`; create via `fulcra-api data-type create --type duration` if absent. Never create duplicates. The namespace marker — not the def's user-local UUID — is also the contract for downstream consumers: the future group-recommendation agent must locate each pool member's Watched data by this marker, since definition UUIDs differ per account (review note).
 - **Parse, auto-detecting variant**:
   - Slim (2 cols `Title,Date`, M/D/YY): each row → start = end = 12:00 UTC on the date, `timestamp_confidence: "low"`, `point_in_time: true` — mirroring the fulcra-media slim importer exactly.
   - GDPR 10-col (`ViewingActivity.csv`): real UTC start + duration, trailers/previews filtered, `timestamp_confidence: "high"`.
-- **Record shape**: deterministic UUID per row (hash of raw row + namespace + ingest version); `metadata.source` chain `["com.netflix", "<file basename>", "agent.<runtime>", "com.fulcradynamics.annotation.<def-id>"]`; `data` JSON carrying `title`, `note`, and a `com.fulcra.content.*` fingerprint source-id compatible with `fulcra_common.cross_source_fingerprint`, so a user who later runs fulcra-media twins-dedups cleanly.
+- **Record shape**: deterministic UUID per row — hash of (namespace, ingest version, normalized row, **occurrence index among byte-identical rows in the file**). The occurrence index matters for the slim variant: two identical `Title,Date` rows are a real same-day rewatch, not a duplicate, and hashing the row alone would silently collapse them (review finding #2; fulcra-media's slim importer already disambiguates with an occurrence `Counter` keyed on `(title, date)` — we mirror it). GDPR rows carry real timestamps, so the timestamp-bearing row is already unique; the same formula degenerates safely (occurrence index ~always 0). Re-imports of the same or overlapping CSVs stay idempotent because the index is computed per identical-row group, not file position. `metadata.source` chain `["com.netflix", "<file basename>", "agent.<runtime>", "com.fulcradynamics.annotation.<def-id>"]`; `data` JSON carrying `title`, `note`, and a `com.fulcra.content.*` fingerprint source-id compatible with `fulcra_common.cross_source_fingerprint`, so a user who later runs fulcra-media twins-dedups cleanly.
 - **POST** via `/ingest/v1/record/batch` (JSONL), bearer from `$(uv tool run fulcra-api auth print-access-token)` — token never written to disk or chat.
 - **Verify**: readback sample via `fulcra-api get-records`; tolerate indexing lag (report posted vs verified separately, as fulcra-media does).
 - **Output**: one-line JSON envelope `{ok, total, posted, skipped_existing, verified, errors:[{stage,message}]}` (stages: `setup|auth|args|parse|post`). Exit 0/2. The agent narrates this conversationally ("Imported 412 titles, 0 duplicates").
@@ -68,8 +68,10 @@ Re-runs are safe: deterministic IDs make re-imports no-ops server-side.
 Immediately after import verification, walk the user through the manual share (same instructions as HELLO, now actionable):
 1. Open `https://context.fulcradynamics.com/sharing?type=sending`.
 2. Log in with the same account used in step 2.
-3. Create a share that includes annotations, recipient Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521`.
+3. Create a share to recipient Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521`, **scoped to only the `Watched` annotation definition this skill created** — the user should deselect/exclude any other annotation types the share UI offers.
 4. Confirm back to the agent; agent congratulates and points at Context Web to browse their data.
+
+**Share-scope rule (review finding #1)**: the consent story is "share your Netflix watch history," so the share must not quietly include unrelated annotations. If the Context Web sharing UI cannot scope a share to a single annotation definition, the skill MUST NOT describe the share as Netflix-only — HELLO and SHARE must instead state plainly that the share includes the user's other annotation data too, and get explicit consent on that basis (or offer to skip sharing). The SKILL.md carries both wordings; which one is live depends on the UI's actual granularity — **open question for Ash to confirm before implementation**. Same rule applies to the future `fulcra-api share create` call: scope to the Watched def if the API supports it.
 
 `TODO(share-cli)`: when fulcra-api-python PR #47 (`share create/list-outgoing/…`) merges, replace the manual steps with the agent running `fulcra-api share create` itself and verifying via `share list-outgoing`. The skill carries this marked block so the swap is a one-file edit.
 
