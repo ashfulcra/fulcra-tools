@@ -2,11 +2,12 @@
 
 What the Fulcra platform actually provides and how to use it, **by agent
 capability tier**. Written so you don't have to re-research the platform
-surface. Verified against live services on 2026-06-26 (`fulcra-api` CLI/lib
-**0.1.34** from PyPI, fulcra-api-python main @ `7e470a4`,
-api.fulcradynamics.com OpenAPI — now **48 paths**; the file API + a v1 catalog +
-an insights endpoint are newly published in the spec — docs.fulcradynamics.com,
-mcp.fulcradynamics.com discovery docs).
+surface. Verified against live services on 2026-07-03 (`fulcra-api` CLI/lib
+**0.1.35** from PyPI, fulcra-api-python main @ `62f580b`,
+api.fulcradynamics.com OpenAPI — **48 paths**; the file API + a v1 catalog +
+an insights endpoint are published in the spec — docs.fulcradynamics.com,
+mcp.fulcradynamics.com discovery docs). 0.1.35 added the `data-updates`
+command and refined `auth login` (see below); still no record-level commands.
 
 > **Staleness warning:** the platform moves fast, and the CLI ships ahead of its
 > git main on PyPI — **check the installed `fulcra-api` version, not just the
@@ -39,7 +40,11 @@ open-source CLI; not a secret).
   `~/.config/fulcra/credentials.json`, auto-refreshed. Token on demand:
   `fulcra auth print-access-token` (treat output as a credential — never log
   it). New-user onboarding = exactly this command; account auto-creates on
-  first login via Portal/Context.
+  first login via Portal/Context. **0.1.35:** the three prior login commands
+  collapsed into one `auth login`; add `--get-auth-url` to run
+  non-interactively (it prints the web-auth URL instead of opening a browser —
+  useful for headless/remote hosts), with `--poll-timeout`/`--poll-interval`
+  tuning the token wait.
 - **Tier 2 (no shell):** the device flow is three plain HTTP calls:
   1. `POST https://fulcra.us.auth0.com/oauth/device/code`
      (form-encoded: `client_id`, `audience`, `scope=openid profile email offline_access`)
@@ -128,6 +133,11 @@ Group/label annotations. Tier 1 (CLI 0.1.34): `fulcra tag create|delete|get|list
   catalog at `/data/v0/metrics_catalog`.
 - Discovery: `GET /data/v1alpha1/data_available` (what data exists for a time
   range) and `/data/v1alpha1/data_sources` (which sources are connected).
+- What-changed: `fulcra data-updates "<range>"` (0.1.35) — summary of which
+  data types had records processed (with counts) and which uploaded files
+  changed over a time range; good for incremental "what's new since I last
+  looked" syncs. Backed by `/data/v1/updates` (CLI-exposed; not yet in the
+  public OpenAPI).
 - Time series: `/data/v0/time_series_grouped` (arbitrary metrics × time,
   `samprate` resolution); per-metric `/data/v1alpha1/metric/{type}` and
   events `/data/v1alpha1/event/{type}` (both with `/agg/{resolution}` variants).
