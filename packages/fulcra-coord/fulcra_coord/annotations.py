@@ -841,6 +841,18 @@ def _store_definition_id(def_id: str) -> None:
         pass
 
 
+#: Canonical definition ids for the operator's account — the tracks that hold
+#: the real history (Agent Tasks: created 2026-06-03, 7.6k records). Duplicates
+#: minted by the catalog-shape bug are archived but still LISTED by `catalog`,
+#: so name-resolution alone cannot avoid them. Override via env for other accounts.
+CANONICAL_DEFINITION_IDS = {
+    "Agent Tasks": os.environ.get(
+        "FULCRA_COORD_AGENT_TASKS_DEF_ID", "56405cba-02a5-4e75-b93e-37a0e5964a86"),
+    "Agent Tasks — Digest": os.environ.get(
+        "FULCRA_COORD_DIGEST_DEF_ID", "1fd4df6f-6391-4e18-98e2-4651f3e834c7"),
+}
+
+
 def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) -> str:
     """Resolve-or-create the moment definition named `def_name`, returning its
     UUID (or "" on total failure). Resolve by EXACT name via `fulcra catalog`
@@ -854,6 +866,15 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
     exact match we ``data-type create MomentAnnotation <def_name>
     --add-to-timeline`` with the tag NAMES (``--tag`` auto-creates them); its
     single-line stdout carries the new def's ``id``."""
+    # PINNED canonicals (0.15.18): min-uuid convergence (0.15.17) is deterministic
+    # but uuid order is random — it picked an EMPTY duplicate over the June-3rd
+    # history track, and `data-type archive` doesn't remove entries from the
+    # catalog listing, so archived dupes still match. Pin the known-canonical ids
+    # for this account's two tracks; fall through to catalog resolution for any
+    # other definition name (fresh accounts unaffected).
+    pinned = CANONICAL_DEFINITION_IDS.get(def_name)
+    if pinned:
+        return pinned
     matches: list[str] = []
     for e in _fulcra_cli_json_lines(["catalog", "--name", def_name]):
         if not isinstance(e, dict) or e.get("name") != def_name:

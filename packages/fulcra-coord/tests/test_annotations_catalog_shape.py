@@ -5,13 +5,13 @@ from unittest import mock
 from fulcra_coord import annotations
 
 
-NEW_SHAPE = {"id": "MomentAnnotation/aaa-111", "name": "Agent Tasks",
+NEW_SHAPE = {"id": "MomentAnnotation/aaa-111", "name": "Test Track",
              "column_name": "moment", "deprecated": False}
-NEW_SHAPE_2 = {"id": "MomentAnnotation/bbb-222", "name": "Agent Tasks",
+NEW_SHAPE_2 = {"id": "MomentAnnotation/bbb-222", "name": "Test Track",
                "column_name": "moment", "deprecated": False}
-OLD_SHAPE = {"name": "Agent Tasks",
+OLD_SHAPE = {"name": "Test Track",
              "metadata": {"annotation_type": "moment", "id": "ccc-333"}}
-WRONG_NAME = {"id": "MomentAnnotation/zzz", "name": "Agent Tasks SMOKE",
+WRONG_NAME = {"id": "MomentAnnotation/zzz", "name": "Test Track SMOKE",
               "column_name": "moment"}
 
 
@@ -19,7 +19,7 @@ def _resolve(entries):
     with mock.patch.object(annotations, "_fulcra_cli_json_lines", return_value=entries), \
          mock.patch.object(annotations, "_fulcra_cli_json") as create:
         create.return_value = {"id": "NEW-MINTED"}
-        got = annotations._resolve_def_via_cli("Agent Tasks", "d", [])
+        got = annotations._resolve_def_via_cli("Test Track", "d", [])
         return got, create.called
 
 
@@ -41,3 +41,21 @@ def test_legacy_metadata_shape_still_matches():
 def test_creates_only_when_no_exact_match():
     got, created = _resolve([WRONG_NAME])
     assert created and got == "NEW-MINTED"
+
+
+def test_pinned_canonical_wins_over_catalog(monkeypatch):
+    # archived dupes still list in the catalog; the pin must short-circuit
+    with mock.patch.object(annotations, "_fulcra_cli_json_lines") as cat, \
+         mock.patch.object(annotations, "_fulcra_cli_json") as create:
+        got = annotations._resolve_def_via_cli("Agent Tasks", "d", [])
+        assert got == "56405cba-02a5-4e75-b93e-37a0e5964a86"
+        assert not cat.called and not create.called
+
+
+def test_unpinned_name_still_resolves_via_catalog():
+    with mock.patch.object(annotations, "_fulcra_cli_json_lines",
+                           return_value=[{"id": "MomentAnnotation/x-1", "name": "Other Track",
+                                          "column_name": "moment"}]), \
+         mock.patch.object(annotations, "_fulcra_cli_json") as create:
+        assert annotations._resolve_def_via_cli("Other Track", "d", []) == "x-1"
+        assert not create.called
