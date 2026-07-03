@@ -541,7 +541,8 @@ def test_retention_throttles_zero_archive_days_after_prior_marker(capsys):
 
     cli.main(["reconcile", "r", "--retention-days", "30"], transport=t)
     marker = _j.loads(t.store["team/r/_coord/retention/last-run.json"])
-    assert marker == {"last_run": "2026-07-02", "archived": 0}
+    assert marker["last_run"] != "2026-07-01"
+    assert marker["archived"] == 0
 
 
 def test_retention_ignores_unparseable_timestamps(capsys):

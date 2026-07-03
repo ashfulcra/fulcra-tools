@@ -8,7 +8,7 @@ snapshots to the latest is code; the prose is when/whether to snapshot.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 SCHEMA = "coord.teams.continuity.v1"
@@ -52,25 +52,34 @@ def build_snapshot(
     }
 
 
-def _parseable_ts(ts: Any) -> bool:
+def _parse_created_at(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
     try:
-        datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        return True
-    except (ValueError, TypeError):
-        return False
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def latest(snapshots: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Fold many snapshots to the newest by ``created_at`` (ISO sorts lexically).
+    """Fold many snapshots to the newest by valid ISO ``created_at``.
 
-    Malformed ``created_at`` values are IGNORED — lexical compare would otherwise
-    let a corrupt snapshot (``not-a-date`` > ``2026-…``) shadow every valid one
-    (Codex review finding). Ties break on ``checkpoint_id``."""
-    valid = [s for s in snapshots
-             if isinstance(s, dict) and _parseable_ts(s.get("created_at"))]
+    Corrupt hand-written snapshots are ignored so one bad timestamp cannot shadow
+    resumable state. Equal timestamps break ties deterministically by task/id.
+    """
+    valid = [
+        (dt, str(s.get("task") or ""), str(s.get("checkpoint_id") or ""), s)
+        for s in snapshots
+        if isinstance(s, dict)
+        for dt in [_parse_created_at(s.get("created_at"))]
+        if dt is not None
+    ]
     if not valid:
         return None
-    return max(valid, key=lambda s: (str(s.get("created_at")), str(s.get("checkpoint_id") or "")))
+    return max(valid, key=lambda item: item[:3])[3]
 
 
 def render_resume(snapshot: Optional[dict[str, Any]]) -> str:
