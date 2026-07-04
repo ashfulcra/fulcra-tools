@@ -12,7 +12,7 @@ for all storage I/O, so `fulcra-api` must be authenticated (`fulcra-api auth log
 
 Install once (like `fulcra-api`), then invoke via `uv tool run`:
 ```bash
-uv tool install coord-engine            # or, from source: uv tool install <coord2>/engine
+uv tool install coord-engine            # or, from source: uv tool install <fulcra-tools>/packages/coord-engine
 uv tool run coord-engine reconcile <team>
 ```
 

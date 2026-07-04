@@ -1,7 +1,7 @@
 import json
 
 from coord_engine import cli
-from tests.test_reconcile import FakeTransport, _task
+from coord_engine_test_helpers import FakeTransport, _task
 
 
 def test_cli_reconcile_then_status_and_board(capsys):

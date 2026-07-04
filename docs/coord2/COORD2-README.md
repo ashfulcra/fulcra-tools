@@ -1,3 +1,7 @@
+> **Historical document** — this is the README of the original `ashfulcra/coord2` repo,
+> preserved for provenance. Its install instructions are superseded: the canonical home is
+> THIS repo (`packages/coord-engine` + `skills/`); see `docs/coord2-DESIGN.md`.
+
 # coord2
 
 **Agent coordination as optional layers on top of [`fulcra-agent-teams`](https://github.com/fulcradynamics/agent-skills).**

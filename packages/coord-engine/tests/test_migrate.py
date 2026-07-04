@@ -1,7 +1,7 @@
 import json
 
 from coord_engine import cli, migrate, okf
-from tests.test_reconcile import FakeTransport
+from coord_engine_test_helpers import FakeTransport
 
 NOW = "2026-07-02T16:00:00Z"
 

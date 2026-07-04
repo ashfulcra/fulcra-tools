@@ -69,7 +69,7 @@ archive. Off by default.
 This skill drives the shared **`coord-engine`** tool — invoked the same way this ecosystem already
 invokes `fulcra-api` (`uv tool run …`), so the skill itself stays pure prose + references (no bundled
 code). Needs `fulcra-api` authenticated and `coord-engine` installed (`uv tool install coord-engine`, or
-from source: `uv tool install <coord2>/engine`). See [`references/reconcile-cli.md`](references/reconcile-cli.md).
+from source: `uv tool install <fulcra-tools>/packages/coord-engine`). See [`references/reconcile-cli.md`](references/reconcile-cli.md).
 ```bash
 uv tool run coord-engine reconcile <team>            # scan + heal index/log + write the aggregate
 uv tool run coord-engine board    <team>

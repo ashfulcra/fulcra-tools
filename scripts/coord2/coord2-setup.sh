@@ -16,9 +16,9 @@
 # For another agent, pass --skills-dir (e.g. an OpenClaw skills dir).
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SKILLS_SRC="$REPO/skills"
-ENGINE_SRC="$REPO/engine"
+ENGINE_SRC="$REPO/packages/coord-engine"
 
 MODE="copy"; SKILLS_DIR="$HOME/.claude/skills"; YES=0; UNINSTALL=0; DO_ENGINE=1; DO_SKILLS=1
 while [[ "${1:-}" == --* ]]; do
