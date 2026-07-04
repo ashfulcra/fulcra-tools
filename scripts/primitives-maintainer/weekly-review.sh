@@ -14,7 +14,9 @@ STATE="$ROOT/.primitives-state"        # local runtime state (gitignored)
 WBASE="$STATE/weekly-baseline.json"
 WFLAG="$STATE/WEEKLY-REVIEW-DUE.txt"
 LOG="$STATE/weekly-review.log"
-COORD="$(command -v fulcra-coord || echo "$HOME/.local/bin/fulcra-coord")"
+CE="$(command -v coord-engine || echo "$HOME/.local/bin/coord-engine")"
+TEAM="fulcra"
+AGENT="claude-code:Mac:fulcra-primitives-maintainer"
 mkdir -p "$STATE"
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 log() { echo "$(ts)  $*" >> "$LOG"; }
@@ -63,7 +65,7 @@ echo "$CUR" > "$WBASE"
 
 if [ -n "$CHANGED" ]; then
   log "WIDE DRIFT: $CUR (prev differed)"
-  "$COORD" tell claude-code:Mac:fulcra-tools "WEEKLY WIDE-DRIFT (fulcra-primitives-maintainer): broad fingerprint changed — could be new endpoints/schemas, docs prose, or MCP surface the daily narrow check misses. Doing a full human-eyes re-read of FULCRA-PRIMITIVES.md vs reality. NOW=$CUR. — claude-code:Mac:fulcra-primitives-maintainer" >> "$LOG" 2>&1
+  "$CE" tell "$TEAM" "$AGENT" "WEEKLY WIDE-DRIFT: full human-eyes re-read of FULCRA-PRIMITIVES.md needed" --from "$AGENT" --workstream fulcra-primitives --priority P2 --summary "Broad fingerprint changed — could be new endpoints/schemas, docs prose, or MCP surface the daily narrow check misses. NOW=$CUR." >> "$LOG" 2>&1
 else
   log "weekly review flag dropped; no wide drift vs last week ($CUR)"
 fi
