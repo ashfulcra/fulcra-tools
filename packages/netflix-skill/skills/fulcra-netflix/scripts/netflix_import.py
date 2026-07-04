@@ -24,11 +24,15 @@ from pathlib import Path
 
 import httpx
 
+# --- constants ---
+
 API_BASE = "https://api.fulcradynamics.com"
 DEF_NAME = "Watched"
 DEF_MARKER = "com.fulcradynamics.annotation.media.watched"
 INGEST_VERSION = 2  # bump ONLY with a coordinated det-id prefix change
 
+
+# --- ported parsing helpers ---
 
 # Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
 _NETFLIX_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2})$")
@@ -229,6 +233,8 @@ def _parse_hmmss(value: str) -> timedelta:
     return timedelta(hours=h, minutes=m, seconds=s)
 
 
+# --- slim variant ---
+
 def parse_slim(csv_path: Path):
     occurrence: Counter = Counter()
     with Path(csv_path).open(newline="", encoding="utf-8-sig") as f:
@@ -240,7 +246,12 @@ def parse_slim(csv_path: Path):
             )
         for row in reader:
             raw_title, date_str = row["Title"], row["Date"]
-            d = parse_netflix_date(date_str)
+            try:
+                d = parse_netflix_date(date_str)
+            except ValueError as e:
+                # Row context (line number + title) turns a bare parse error
+                # into something a user can act on without opening a debugger.
+                raise ValueError(f"row {reader.line_num} ({raw_title!r}): {e}") from e
             idx = occurrence[(date_str, raw_title)]
             occurrence[(date_str, raw_title)] += 1
             note, title = make_note_and_title(raw_title)
@@ -261,6 +272,8 @@ def parse_slim(csv_path: Path):
                 },
             )
 
+
+# --- rich variant ---
 
 def parse_rich(csv_path: Path):
     """Parse a Netflix rich (GDPR) CSV into Events.
@@ -283,9 +296,14 @@ def parse_rich(csv_path: Path):
                 continue                      # trailers/hooks/previews
             raw_title = row["Title"]
             start_str = row["Start Time"]
-            start = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=timezone.utc)
-            dur = _parse_hmmss(row["Duration"])
+            try:
+                start = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc)
+                dur = _parse_hmmss(row["Duration"])
+            except ValueError as e:
+                # Row context (line number + title) turns a bare parse error
+                # into something a user can act on without opening a debugger.
+                raise ValueError(f"row {reader.line_num} ({raw_title!r}): {e}") from e
             note, title = _extract_title_rich(raw_title)
             # Ported from fulcra-media's rich parser verbatim: is_episode is a
             # plain bool here (never None) — _extract_title_rich already sets
@@ -309,6 +327,8 @@ def parse_rich(csv_path: Path):
             )
 
 
+# --- variant detect ---
+
 def detect_variant(csv_path: Path) -> str:
     """Sniff a Netflix export's CSV header to pick slim vs. rich parsing."""
     with Path(csv_path).open(newline="", encoding="utf-8-sig") as f:
@@ -319,6 +339,8 @@ def detect_variant(csv_path: Path) -> str:
         return "rich"
     raise ValueError(f"unrecognized Netflix CSV header: {header!r}")
 
+
+# --- wire format ---
 
 # Mirrors packages/fulcra-common/fulcra_common/wire.py — keep in sync
 def iso_z(dt: datetime) -> str:
@@ -340,8 +362,15 @@ def build_record(ev: Event, *, def_id: str) -> dict:
     payload = {
         "title": ev.title,
         "note": ev.note,
+        # int() truncation is inert here: both the slim variant (whole-second
+        # synthetic 1s duration) and the rich variant (H:MM:SS source data)
+        # always produce whole-second spans, so no sub-second precision is lost.
         "duration_seconds": int((ev.end - ev.start).total_seconds()),
         "external_ids": {
+            # ev.external merges first so the injected keys below always win —
+            # ev.external must never itself define content_fingerprint or
+            # timestamp_confidence, since a silent override here would corrupt
+            # the dedup/confidence contract without any visible error.
             **ev.external,
             "content_fingerprint": ev.fingerprint,
             "timestamp_confidence": ev.confidence,
@@ -364,6 +393,8 @@ def build_record(ev: Event, *, def_id: str) -> dict:
 def encode_batch(records: list[dict]) -> bytes:
     return b"\n".join(json.dumps(r, sort_keys=True).encode() for r in records)
 
+
+# --- fulcra api ---
 
 def ensure_watched_def(client: httpx.Client) -> str:
     """Resolve the Watched def by namespace marker; create once if absent.

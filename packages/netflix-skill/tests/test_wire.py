@@ -31,3 +31,18 @@ def test_encode_batch_jsonl(ni, fixtures_dir):
     assert len(lines) == 2
     for line in lines:
         json.loads(line)  # every line standalone JSON
+
+
+def test_build_record_wire_shape_rich_variant(ni, fixtures_dir):
+    ev = [e for e in ni.parse_rich(fixtures_dir / "gdpr.csv") if "Dune" in e.note][0]
+    rec = ni.build_record(ev, def_id="abc-123")
+    md = rec["metadata"]
+    assert md["recorded_at"]["start_time"] == ni.iso_z(ev.start)
+    assert md["recorded_at"]["end_time"] == ni.iso_z(ev.end)
+    # recorded_at consistency: end - start round-trips through the wire strings
+    assert md["recorded_at"]["start_time"] < md["recorded_at"]["end_time"]
+    payload = json.loads(rec["data"])
+    assert payload["external_ids"]["profile"] == "Ash"
+    assert payload["external_ids"]["device_type"] == "TV"
+    assert payload["external_ids"]["timestamp_confidence"] == "high"
+    assert payload["duration_seconds"] == 9312

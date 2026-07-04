@@ -112,3 +112,27 @@ def test_detect_variant(ni, fixtures_dir, tmp_path):
     p.write_text("a,b,c\n1,2,3\n")
     with pytest.raises(ValueError):
         ni.detect_variant(p)
+
+
+def test_parse_rich_bad_start_time_raises_with_row_context(ni, tmp_path):
+    header = ("Profile Name,Start Time,Duration,Attributes,Title,"
+              "Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n")
+    p = tmp_path / "bad_start.csv"
+    p.write_text(
+        header +
+        "Ash,NOT-A-TIME,0:41:30,,BEEF: Season 1: Episode 1,,Apple TV,0:41:30,0:41:30,US (United States)\n"
+    )
+    with pytest.raises(ValueError, match=r"row 2 \('BEEF: Season 1: Episode 1'\)"):
+        list(ni.parse_rich(p))
+
+
+def test_parse_rich_bad_duration_raises_with_row_context(ni, tmp_path):
+    header = ("Profile Name,Start Time,Duration,Attributes,Title,"
+              "Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n")
+    p = tmp_path / "bad_duration.csv"
+    p.write_text(
+        header +
+        "Ash,2023-04-12 20:15:57,bogus,,BEEF: Season 1: Episode 1,,Apple TV,0:41:30,0:41:30,US (United States)\n"
+    )
+    with pytest.raises(ValueError, match=r"row 2 \('BEEF: Season 1: Episode 1'\)"):
+        list(ni.parse_rich(p))
