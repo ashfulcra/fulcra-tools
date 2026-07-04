@@ -2,7 +2,7 @@
 # fulcra-primitives-maintainer — daily drift detector.
 # Fingerprints the live Fulcra surface (OpenAPI spec, CLI HEAD, annotation
 # commands, MCP discovery) and compares to a stored baseline. On drift it
-# posts to the fulcra-coord bus as fulcra-primitives-maintainer and writes an
+# posts to the coord2 team bus (team fulcra) as fulcra-primitives-maintainer and writes an
 # ALERT file so a Claude session does the actual FULCRA-PRIMITIVES.md rewrite.
 # Detection is unattended; the rewrite (model judgment) is not.
 #
@@ -15,7 +15,9 @@ STATE="$ROOT/.primitives-state"        # local runtime state (gitignored)
 BASELINE="$STATE/baseline.json"
 ALERT="$STATE/DRIFT-ALERT.txt"
 LOG="$STATE/drift-check.log"
-COORD="$(command -v fulcra-coord || echo "$HOME/.local/bin/fulcra-coord")"
+CE="$(command -v coord-engine || echo "$HOME/.local/bin/coord-engine")"
+TEAM="fulcra"
+AGENT="claude-code:Mac:fulcra-primitives-maintainer"
 mkdir -p "$STATE"
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 log() { echo "$(ts)  $*" >> "$LOG"; }
@@ -81,7 +83,7 @@ fi
   echo "spec_sig: $SPEC_SIG"
 } > "$ALERT"
 log "DRIFT: prev=$PREV now=$CUR"
-"$COORD" tell claude-code:Mac:fulcra-tools "DRIFT ALERT (fulcra-primitives-maintainer): the live Fulcra surface changed vs FULCRA-PRIMITIVES.md baseline. PREV=$PREV NOW=$CUR. Triggering a full re-verification + doc rewrite. If ann_cmd_count rose, annotation RECORD commands may have landed in the CLI = the documented full-rewrite trigger (tier-2 API-direct guidance shifts too). Alert at $ALERT. — claude-code:Mac:fulcra-primitives-maintainer" >> "$LOG" 2>&1
+"$CE" tell "$TEAM" "$AGENT" "DRIFT: Fulcra primitives surface changed — re-verify + rewrite FULCRA-PRIMITIVES.md" --from "$AGENT" --workstream fulcra-primitives --priority P2 --summary "Narrow drift vs baseline. PREV=$PREV NOW=$CUR. If ann_cmd_count rose or a record verb appeared, annotation RECORD commands may have landed = the documented full-rewrite trigger (tier-2 API-direct guidance shifts too). Alert file: $ALERT." >> "$LOG" 2>&1
 # advance baseline so we alert once per change, not every day
 cp "$TMP" "$BASELINE"
 rm -f "$SPEC" "$TMP"
