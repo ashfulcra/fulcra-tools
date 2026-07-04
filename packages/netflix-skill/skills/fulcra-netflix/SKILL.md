@@ -41,8 +41,8 @@ The first message the user sees. It must contain the pitch, the **full share dis
 > Hi! I can import your Netflix viewing history into your own Fulcra account — a personal data store that you control — and, if you want, share it into the movie-night pool so group-recommendation agents can find things everyone would enjoy. The whole thing takes about 5 minutes of your time, and at the end your complete watch history is queryable data you own.
 >
 > One thing to know up front, so you can decide with eyes open: at the end I'll invite you to share your data with the pool owner (Fulcra ID `a24a9667-c2c6-4bbf-9a0f-36ea0afcb521`). Fulcra's sharing page currently shares **all of your annotation data, not just the Netflix history** — it has no way to share only one kind of annotation yet.
-
-<!-- The bolded all-annotations sentence above must survive verbatim or near-verbatim in whatever adaptation you send — it is the load-bearing consent line. Paraphrase the pitch freely; never soften this sentence. --> If that's more than you're comfortable with, you can simply skip the share and still keep your imported history for yourself. Nothing gets shared unless you do it yourself, in your own browser, at `https://context.fulcradynamics.com/sharing?type=sending` at the end.
+> <!-- The bolded all-annotations sentence above must survive verbatim or near-verbatim in whatever adaptation you send — it is the load-bearing consent line. Paraphrase the pitch freely; never soften this sentence. -->
+> If that's more than you're comfortable with, you can simply skip the share and still keep your imported history for yourself. Nothing gets shared unless you do it yourself, in your own browser, at `https://context.fulcradynamics.com/sharing?type=sending` at the end.
 >
 > Here's the plan:
 > 1. **Sign in** to Fulcra (or create a free account) — I'll send you a link.

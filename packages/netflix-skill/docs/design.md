@@ -94,7 +94,10 @@ packages/netflix-skill/
         scripts/
             netflix_import.py      # vendored importer (PEP 723; stdlib + httpx)
     tests/
-        test_netflix_import.py     # parser/UUID/envelope tests over fixture CSVs
+        test_parsing.py            # both variants, det-ids, fingerprints, row-context errors
+        test_wire.py               # record/batch encoding (fulcra-common parity)
+        test_api.py                # def resolution + chunked POST (MockTransport)
+        test_cli.py                # envelope contract, exit codes, failure stages
         fixtures/                  # synthetic slim + GDPR CSVs
 ```
 
