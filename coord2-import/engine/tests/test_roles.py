@@ -1,0 +1,58 @@
+from coord_engine import roles
+
+NOW = "2026-07-01T18:00:00Z"
+
+
+def _lease(agent, hours_ago):
+    # timestamp = NOW - hours_ago
+    from datetime import datetime, timedelta, timezone
+    n = datetime(2026, 7, 1, 18, 0, 0, tzinfo=timezone.utc)
+    ts = (n - timedelta(hours=hours_ago)).isoformat().replace("+00:00", "Z")
+    return {"agent": agent, "timestamp": ts}
+
+
+def test_age_hours():
+    assert roles.age_hours("2026-07-01T12:00:00Z", NOW) == 6.0
+    assert roles.age_hours(None, NOW) == float("inf")
+    assert roles.age_hours("garbage", NOW) == float("inf")
+
+
+def test_held_when_fresh_lease():
+    assert roles.classify([_lease("a", 1)], now=NOW, sla_hours=24) == roles.HELD
+
+
+def test_vacant_when_all_stale():
+    assert roles.classify([_lease("a", 30)], now=NOW, sla_hours=24) == roles.VACANT
+
+
+def test_vacant_when_no_leases():
+    assert roles.classify([], now=NOW, sla_hours=24) == roles.VACANT
+
+
+def test_unknown_when_unreadable():
+    assert roles.classify(None, now=NOW, sla_hours=24) == roles.UNKNOWN
+
+
+def test_contested_only_when_exclusive_and_multiple_fresh():
+    two_fresh = [_lease("a", 1), _lease("b", 2)]
+    assert roles.classify(two_fresh, now=NOW, sla_hours=24, policy="exclusive") == roles.CONTESTED
+    # shared policy tolerates multiple holders
+    assert roles.classify(two_fresh, now=NOW, sla_hours=24, policy="shared") == roles.HELD
+
+
+def test_contested_ignores_stale_second_holder():
+    leases = [_lease("a", 1), _lease("b", 40)]  # b stale
+    assert roles.classify(leases, now=NOW, sla_hours=24, policy="exclusive") == roles.HELD
+
+
+def test_escalation_due_when_vacant_and_no_marker():
+    assert roles.escalation_due([_lease("a", 30)], now=NOW, sla_hours=24) is True
+
+
+def test_escalation_not_due_when_marker_exists():
+    assert roles.escalation_due([_lease("a", 30)], now=NOW, sla_hours=24,
+                                marker_exists_today=True) is False
+
+
+def test_escalation_not_due_when_held():
+    assert roles.escalation_due([_lease("a", 1)], now=NOW, sla_hours=24) is False

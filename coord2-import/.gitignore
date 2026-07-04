@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets — never commit credentials
+.env
+.env.*
+*.credentials.json
+credentials.json
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# skills carry no code — no build artifacts under skills/
+skills/**/uv.lock
+skills/**/pyproject.toml
+skills/**/*.egg-info/
