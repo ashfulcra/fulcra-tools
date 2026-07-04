@@ -55,7 +55,7 @@ uv run skills/fulcra-netflix/scripts/netflix_import.py <csv-path> --json
 The script:
 - **Def resolution (idempotent)**: find a DurationAnnotation def named `Watched` whose description carries the namespace marker `com.fulcradynamics.annotation.media.watched`; create via `fulcra-api data-type create --type duration` if absent. Never create duplicates. The namespace marker — not the def's user-local UUID — is also the contract for downstream consumers: the future group-recommendation agent must locate each pool member's Watched data by this marker, since definition UUIDs differ per account (review note).
 - **Parse, auto-detecting variant**:
-  - Slim (2 cols `Title,Date`, M/D/YY): each row → start = end = 12:00 UTC on the date, `timestamp_confidence: "low"`, `point_in_time: true` — mirroring the fulcra-media slim importer exactly.
+  - Slim (2 cols `Title,Date`, M/D/YY): each row → start = 12:00 UTC, end = start + 1s (Fulcra silently drops zero-length durations — fulcra-media v2 behavior), `timestamp_confidence: "low"`, `point_in_time: true` — mirroring the fulcra-media slim importer exactly.
   - GDPR 10-col (`ViewingActivity.csv`): real UTC start + duration, trailers/previews filtered, `timestamp_confidence: "high"`.
 - **Record shape**: deterministic UUID per row — hash of (namespace, ingest version, normalized row, **occurrence index among byte-identical rows in the file**). The occurrence index matters for the slim variant: two identical `Title,Date` rows are a real same-day rewatch, not a duplicate, and hashing the row alone would silently collapse them (review finding #2; fulcra-media's slim importer already disambiguates with an occurrence `Counter` keyed on `(title, date)` — we mirror it). GDPR rows carry real timestamps, so the timestamp-bearing row is already unique; the same formula degenerates safely (occurrence index ~always 0). Re-imports of the same or overlapping CSVs stay idempotent because the index is computed per identical-row group, not file position. `metadata.source` chain `["com.netflix", "<file basename>", "agent.<runtime>", "com.fulcradynamics.annotation.<def-id>"]`; `data` JSON carrying `title`, `note`, and a `com.fulcra.content.*` fingerprint source-id compatible with `fulcra_common.cross_source_fingerprint`, so a user who later runs fulcra-media twins-dedups cleanly.
 - **POST** via `/ingest/v1/record/batch` (JSONL), bearer from `$(uv tool run fulcra-api auth print-access-token)` — token never written to disk or chat.
@@ -63,6 +63,8 @@ The script:
 - **Output**: one-line JSON envelope `{ok, total, posted, skipped_existing, verified, errors:[{stage,message}]}` (stages: `setup|auth|args|parse|post`). Exit 0/2. The agent narrates this conversationally ("Imported 412 titles, 0 duplicates").
 
 Re-runs are safe: deterministic IDs make re-imports no-ops server-side.
+
+**Known limitation — concurrent first-runs**: two imports racing on a brand-new account can both pass the "no def with the marker exists" check and each create a Watched def, leaving duplicate defs sharing the namespace marker. No data corruption follows — record dedup is det-id based, not def-scoped — but it's user-visible untidiness (two defs in the picker). Acceptable for an interactively-invoked CLI, where concurrent first-runs require deliberately racing yourself; not worth a locking scheme.
 
 ### 5. SHARE
 Immediately after import verification, walk the user through the manual share (same instructions as HELLO, now actionable):
