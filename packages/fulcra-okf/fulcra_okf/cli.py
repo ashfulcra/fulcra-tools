@@ -76,6 +76,9 @@ def _cmd_fmt(args) -> int:
     bundle = Bundle.load_dir(src, lenient=True)
     changed: list[str] = []
     errors: list[str] = []
+    for rel, message in bundle.parse_errors:
+        print(f"error: {rel}: {message}", file=sys.stderr)
+        errors.append(rel)
     for concept in bundle.concepts.values():
         try:
             rendered = render_concept(concept)

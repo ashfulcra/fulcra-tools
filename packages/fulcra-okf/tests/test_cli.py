@@ -39,6 +39,13 @@ def test_fmt_check_detects_no_change_needed(tmp_path):
     assert main(["fmt", str(tmp_path), "--check"]) == 0
 
 
+def test_fmt_check_reports_parse_errors(tmp_path, capsys):
+    _write(tmp_path, "bad.md", "---\ntype: T\n")
+    assert main(["fmt", str(tmp_path), "--check"]) == 1
+    err = capsys.readouterr().err
+    assert "error: bad.md:" in err
+
+
 # ---------------------------------------------------------------------------
 # I2 — fmt WRITE path + public render_concept + C1 timestamp end-to-end
 # ---------------------------------------------------------------------------
