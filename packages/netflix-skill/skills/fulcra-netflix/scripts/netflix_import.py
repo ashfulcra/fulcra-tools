@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -315,3 +316,48 @@ def detect_variant(csv_path: Path) -> str:
     if header == _RICH_EXPECTED_COLS:
         return "rich"
     raise ValueError(f"unrecognized Netflix CSV header: {header!r}")
+
+
+# Mirrors packages/fulcra-common/fulcra_common/wire.py — keep in sync
+def iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Mirrors packages/fulcra-common/fulcra_common/wire.py — keep in sync
+#
+# WHY: Fulcra dedups on source-id, not content — so metadata.source[0]
+# (the deterministic det_id from det_id_slim/det_id_rich) IS the
+# idempotency key for a re-run of this importer. The content_fingerprint
+# deliberately lives in data.external_ids instead of the source array:
+# fulcra-media's slim importer puts it there too, so any twin-dedup
+# tooling that cross-references fingerprints between this script and
+# fulcra-media sees the same shape in the same place, even though the
+# two tools' det_ids differ and won't dedup against each other on
+# source-id alone.
+def build_record(ev: Event, *, def_id: str) -> dict:
+    payload = {
+        "title": ev.title,
+        "note": ev.note,
+        "duration_seconds": int((ev.end - ev.start).total_seconds()),
+        "external_ids": {
+            **ev.external,
+            "content_fingerprint": ev.fingerprint,
+            "timestamp_confidence": ev.confidence,
+        },
+    }
+    return {
+        "specversion": 1,
+        "data": json.dumps(payload, sort_keys=True),
+        "metadata": {
+            "data_type": "DurationAnnotation",
+            "recorded_at": {"start_time": iso_z(ev.start), "end_time": iso_z(ev.end)},
+            "tags": [],
+            "source": [ev.det_id, f"com.fulcradynamics.annotation.{def_id}"],
+            "content_type": "application/json",
+        },
+    }
+
+
+# Mirrors packages/fulcra-common/fulcra_common/wire.py — keep in sync
+def encode_batch(records: list[dict]) -> bytes:
+    return b"\n".join(json.dumps(r, sort_keys=True).encode() for r in records)
