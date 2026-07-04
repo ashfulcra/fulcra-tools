@@ -80,6 +80,32 @@ It reads the role's `policy`/`sla_hours`, folds the leases, and returns:
 
 For **CONTESTED**, resolve by having all but one holder release.
 
+### Role-as-identity (recommended)
+When a session exists to serve one role, use the role name AS its agent identity
+(`FULCRA_COORD_AGENT=coord-maintainer`) — see fulcra-agent-presence's "Pick your identity by ROLE"
+section. Claim the role's lease while you act as it. Know what each guard does and does not catch:
+
+- **Different ids claiming an exclusive role** (e.g. `coord-maintainer` and a stray
+  `claude-code:host:repo`): two FRESH lease shards (within `sla_hours`) → `roles status` reports
+  **CONTESTED**. A stale stray shard yields HELD, not CONTESTED. Detected.
+- **Two sessions under the SAME id string**: they write the SAME lease shard (shard names derive from
+  the id), so leases alone CANNOT see this — last write silently wins. Until the engine grows a
+  session-nonce verify (task filed on the bus), the guard is procedural, in this order at the start
+  of every work burst: (1) `roles status <team> <role> --json` — proceed only if VACANT or the sole
+  holder is your id; (2) read your lease shard raw (`fulcra-api file download
+  team/<team>/roles/<role>/leases/<agent-key>.md` — learn your `<agent-key>` by listing the leases
+  dir, or from `presence beat` output, which prints the same key) and compare its `timestamp` to when YOU last
+  claimed — a fresher timestamp you did not write means another session is acting under your id;
+  (3) only then re-claim to refresh. Re-claiming FIRST destroys that evidence.
+
+Multi-host variants (`coord-maintainer@host1`, `@host2`) are acceptable when one role legitimately
+runs in several places — each host claims the SAME role (`roles claim <team> coord-maintainer --agent
+coord-maintainer@host1`), never a role named after the variant. Such a role needs `policy: shared`:
+on `exclusive` it would sit in permanent CONTESTED by construction — and note `shared` trades away
+the CONTESTED collision guard for that role. Keep the role doc's `maintainer:` field
+a distinct SUPERVISING identity (e.g. `maintainer: ash`): vacancy escalations are assigned to that
+field, so pointing it at the role itself mails the alert to the very inbox that just went dark.
+
 ### Escalate a vacancy — engine decides, you act
 The engine already computed `escalation_due` above. When it is **true**, perform the single-file actions
 (these are reliable as prose):
