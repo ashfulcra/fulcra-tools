@@ -127,13 +127,29 @@ With `--json`, the script prints one line of JSON with this shape:
 ```
 
 - `variant` — `"slim"` or `"rich"`, whichever was auto-detected.
+- `posted` — count of records included in successful (or partially
+  successful) batch POST requests, **not** a count of novel/new records.
+  The ingest endpoint returns no dedup feedback, so a full re-run of the
+  same CSV reports `posted` equal to the full record count again — the
+  server silently no-ops the duplicate POSTs, but this script has no way
+  to see that, so `posted` is honest about "attempted and accepted the
+  request" rather than "created a new record." On a partial batch failure
+  (some chunks succeed before one fails), `posted` reflects only the
+  chunks that actually landed before the failure, not the full batch.
+- `skipped_existing` — currently **always `null`**. It's reserved for a
+  future dedup-aware count but the ingest endpoint doesn't expose which
+  records were skipped as duplicates vs. newly created, so this script
+  cannot populate it today. The key is kept in the envelope (append-only
+  contract) for forward compatibility.
 - `would_post` — populated only for `--check-only` runs (parsed count,
   nothing posted); `null` otherwise.
 - `verified` — count of sampled events confirmed present after import, or
   `null` when verification was skipped/unavailable.
 - `errors` — list of `{"stage": ..., "message": ...}` dicts. `stage` is one
-  of `args` (bad path), `parse` (malformed CSV/row), `auth` (couldn't mint
-  or the server rejected the token), or `post` (any other HTTP failure).
+  of `args` (bad path — including unreadable/directory paths), `parse`
+  (malformed CSV/row), `auth` (couldn't mint or the server rejected the
+  token), or `post` (any other HTTP failure, including a batch that failed
+  partway through — see `posted` above).
 
 This is a **stable, append-only contract**: existing keys are never removed
 or repurposed, so other tooling can depend on specific keys without

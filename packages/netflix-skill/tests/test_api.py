@@ -70,3 +70,25 @@ def test_post_batch_chunks_and_content_type(ni):
         posted = ni.post_batch(c, recs, chunk_size=500)
     assert posted == 1201
     assert seen == [500, 500, 201]
+
+
+def test_post_batch_raises_partial_post_error_with_posted_so_far(ni):
+    # 3 chunks (500, 500, 201); the SECOND chunk's request 500s. The first
+    # chunk's 500 records already landed server-side by that point, so the
+    # raised error must carry posted_so_far == 500 — not 0 — or the caller
+    # has no way to report a truthful envelope for the records that did post.
+    calls = []
+    def handler(req):
+        calls.append(1)
+        if len(calls) == 2:
+            return httpx.Response(500)
+        return httpx.Response(200)
+    recs = [{"i": i} for i in range(1201)]
+    with make_client(handler) as c:
+        try:
+            ni.post_batch(c, recs, chunk_size=500)
+            assert False, "expected PartialPostError"
+        except ni.PartialPostError as e:
+            assert e.posted_so_far == 500
+            assert isinstance(e.cause, httpx.HTTPStatusError)
+            assert e.__cause__ is e.cause

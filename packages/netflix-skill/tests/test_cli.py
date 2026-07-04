@@ -57,6 +57,18 @@ def test_main_parse_error_envelope(ni, tmp_path, monkeypatch, capsys):
     assert env["errors"][0]["stage"] == "parse"
 
 
+def test_main_unreadable_path_envelope(ni, tmp_path, monkeypatch, capsys):
+    # A directory path raises IsADirectoryError (an OSError subclass) when
+    # opened for reading — this must produce the JSON envelope with stage
+    # "args" and exit 2, not an uncaught traceback. Using a directory here
+    # (rather than a chmod-0o000 file) keeps the test portable and safe to
+    # run as root, where permission bits are ignored.
+    code, env = run_main(ni, [str(tmp_path), "--json"], _happy_handler, monkeypatch, capsys)
+    assert code == 2
+    assert env["ok"] is False
+    assert env["errors"][0]["stage"] == "args"
+
+
 def test_main_auth_failure_envelope(ni, fixtures_dir, monkeypatch, capsys):
     def handler(req):
         return httpx.Response(401, json={"detail": "bad token"})
@@ -64,3 +76,32 @@ def test_main_auth_failure_envelope(ni, fixtures_dir, monkeypatch, capsys):
                          handler, monkeypatch, capsys)
     assert code == 2
     assert env["errors"][0]["stage"] == "auth"
+
+
+def test_main_partial_batch_failure_reports_truthful_posted_count(
+        ni, fixtures_dir, monkeypatch, capsys):
+    # slim.csv has 5 records. Force a tiny chunk size (2) so the run splits
+    # into 3 batch POSTs ([2, 2, 1]); the SECOND POST 500s. The first chunk
+    # (2 records) already landed, so the envelope must report posted == 2,
+    # not 0 — a partial-failure run must not lie about what made it to the
+    # server.
+    monkeypatch.setattr(ni, "CHUNK_SIZE", 2)
+    posts = []
+    def handler(req):
+        if req.url.path == "/user/v1alpha1/annotation" and req.method == "GET":
+            return httpx.Response(200, json=[{
+                "id": "def-1", "name": "Watched",
+                "description": "com.fulcradynamics.annotation.media.watched",
+                "annotation_type": "duration"}])
+        if req.url.path == "/ingest/v1/record/batch":
+            posts.append(1)
+            if len(posts) == 2:
+                return httpx.Response(500)
+            return httpx.Response(200)
+        return httpx.Response(404)
+    code, env = run_main(ni, [str(fixtures_dir / "slim.csv"), "--json"],
+                         handler, monkeypatch, capsys)
+    assert code == 2
+    assert env["ok"] is False
+    assert env["posted"] == 2
+    assert env["errors"][0]["stage"] == "post"

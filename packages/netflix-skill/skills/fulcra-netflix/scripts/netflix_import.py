@@ -34,6 +34,7 @@ API_BASE = "https://api.fulcradynamics.com"
 DEF_NAME = "Watched"
 DEF_MARKER = "com.fulcradynamics.annotation.media.watched"
 INGEST_VERSION = 2  # bump ONLY with a coordinated det-id prefix change
+CHUNK_SIZE = 500  # records per batch POST; module-level so tests can shrink it
 
 
 # --- ported parsing helpers ---
@@ -455,16 +456,39 @@ def make_api_client(token: str) -> httpx.Client:
     )
 
 
+class PartialPostError(RuntimeError):
+    """A batch POST failed partway; carries how many records DID land.
+
+    Batches are POSTed sequentially, and each one that succeeds is durably
+    committed server-side before the next is attempted. If a later chunk
+    fails, the earlier ones aren't rolled back — so a plain re-raise of the
+    underlying httpx error would leave the caller with no way to know that
+    `posted_so_far` records already made it to the server. Wrapping the
+    failure in this exception lets main() report a truthful `posted` count
+    in the JSON envelope instead of the default 0.
+    """
+    def __init__(self, posted_so_far: int, cause: httpx.HTTPError):
+        super().__init__(str(cause))
+        self.posted_so_far = posted_so_far
+        self.cause = cause
+
+
 def post_batch(client: httpx.Client, records: list[dict], *, chunk_size: int = 500) -> int:
     posted = 0
     for i in range(0, len(records), chunk_size):
         chunk = records[i:i + chunk_size]
-        resp = client.post(
-            "/ingest/v1/record/batch",
-            content=encode_batch(chunk),
-            headers={"content-type": "application/x-jsonl"},
-        )
-        resp.raise_for_status()
+        try:
+            resp = client.post(
+                "/ingest/v1/record/batch",
+                content=encode_batch(chunk),
+                headers={"content-type": "application/x-jsonl"},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            # `posted` already reflects every prior chunk that succeeded;
+            # a FIRST-chunk failure means posted_so_far == 0, which flows
+            # through the same PartialPostError path as any later chunk.
+            raise PartialPostError(posted, e) from e
         posted += len(chunk)
     return posted
 
@@ -529,7 +553,13 @@ def main(argv: list[str] | None = None) -> int:
         # so partial imports can't happen mid-file.
         events = list(parser(Path(args.csv_path)))
         env["total"] = len(events)
-    except FileNotFoundError as e:
+    except OSError as e:
+        # Covers FileNotFoundError, PermissionError, IsADirectoryError, etc.
+        # ValueError is caught separately below for parse failures; the two
+        # hierarchies are disjoint, so branch order between them doesn't
+        # matter. One exception: UnicodeDecodeError is a ValueError subclass
+        # (a bad-encoding CSV surfaces via csv/str decoding, not open()), so
+        # it's intentionally routed to the "parse" stage below, not here.
         env["errors"].append({"stage": "args", "message": str(e)})
         return finish(2)
     except ValueError as e:
@@ -551,7 +581,22 @@ def main(argv: list[str] | None = None) -> int:
         with make_api_client(token) as client:
             def_id = ensure_watched_def(client)
             records = [build_record(ev, def_id=def_id) for ev in events]
-            env["posted"] = post_batch(client, records)
+            env["posted"] = post_batch(client, records, chunk_size=CHUNK_SIZE)
+    except PartialPostError as e:
+        # A batch mid-run failed, but earlier chunks already landed
+        # server-side — report that truthfully instead of the default 0.
+        # Classification of `e.cause` mirrors the httpx.HTTPStatusError/
+        # HTTPError handling below exactly, since e.cause IS one of those.
+        env["posted"] = e.posted_so_far
+        cause = e.cause
+        if isinstance(cause, httpx.HTTPStatusError):
+            stage = "auth" if cause.response.status_code in (401, 403) else "post"
+            message = f"HTTP {cause.response.status_code} on {cause.request.url.path}"
+        else:
+            stage = "post"
+            message = str(cause)
+        env["errors"].append({"stage": stage, "message": message})
+        return finish(2)
     except httpx.HTTPStatusError as e:
         # Stage discriminator by status: 401/403 means the token was bad
         # (an auth-stage problem, even though it surfaces mid-POST), anything
@@ -580,8 +625,17 @@ def _human_summary(env: dict) -> str:
     if env["would_post"] is not None:
         return f"would post {env['would_post']} of {env['total']} events ({env['variant']})"
     v = env["verified"]
+    if v is None:
+        verified_note = "skipped"
+    elif v == 0:
+        # 0 verified is a real (if soft) signal distinct from "didn't check" —
+        # most often indexing hasn't caught up yet, not that the import
+        # failed, so say so rather than printing a bare, alarming "0".
+        verified_note = "0 (indexing may be lagging)"
+    else:
+        verified_note = str(v)
     return (f"imported {env['posted']}/{env['total']} ({env['variant']}); "
-            f"verified sample: {'skipped' if v is None else v}")
+            f"verified sample: {verified_note}")
 
 
 if __name__ == "__main__":
