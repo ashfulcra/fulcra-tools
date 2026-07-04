@@ -42,6 +42,22 @@ def test_ensure_def_creates_when_absent(ni):
         assert ni.ensure_watched_def(c) == "new-def"
 
 
+def test_ensure_def_ignores_marker_on_wrong_type(ni):
+    # A moment-type def carrying the marker must NOT satisfy resolution —
+    # the annotation_type guard is load-bearing, not decorative.
+    defs = [
+        {"id": "wrong-type", "name": "Watched",
+         "description": ni.DEF_MARKER, "annotation_type": "moment"},
+    ]
+    def handler(req):
+        if req.method == "GET":
+            return httpx.Response(200, json=defs)
+        assert req.method == "POST"
+        return httpx.Response(200, json={"id": "created"})
+    with make_client(handler) as c:
+        assert ni.ensure_watched_def(c) == "created"
+
+
 def test_post_batch_chunks_and_content_type(ni):
     seen = []
     def handler(req):
