@@ -31,7 +31,7 @@ atomic unblock.
    one auth, one install — and the fold *removes* a subprocess layer, making every fold faster).
    Honest sizing: this is NOT mechanical; it replaces the text transport with internal API calls
    and should be estimated with your API team. Acceptable: a Fulcra-owned repo + PyPI. Interim
-   only: stays in ashfulcra/coord2, installed by git tag (proven mechanism).
+   only: stays in ashfulcra/fulcra-tools (packages/coord-engine), installed by git tag (proven mechanism).
 3. **Take five platform issues**, each with incident evidence attached — they extend the new
    `fulcra` binary's JSON-default direction to `file` ops: structured output, per-file
    version-ids, batch read, record-write verbs, archived-type flags in catalog.

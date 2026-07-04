@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-roles
 description: "Add durable roles to a fulcra-agent-teams space: agents claim leases on named roles (reviewer, maintainer, on-call), liveness is tracked, and a role left vacant past its SLA escalates to its maintainer."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🎓" } }

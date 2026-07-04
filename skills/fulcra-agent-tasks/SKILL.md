@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-tasks
 description: "Give a fulcra-agent-teams space a typed task lifecycle: create tasks with structured status/priority/assignee, and move them through a validated state machine (proposed→active→done) instead of freeform markdown."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "✅" } }
@@ -34,7 +34,7 @@ done, abandoned → (terminal)
 
 ## Usage
 Needs `fulcra-api` authenticated and `coord-engine` installed — standalone:
-`uv tool install "git+https://github.com/ashfulcra/coord2.git@<latest-tag>#subdirectory=engine"` (any
+`uv tool install "git+https://github.com/ashfulcra/fulcra-tools.git@<latest-coord-engine-tag>#subdirectory=packages/coord-engine"` (any
 coord2 skill brings the same engine; installing once serves all).
 ```bash
 # create a task doc at team/<team>/task/<slug>.md

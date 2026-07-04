@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-continuity
 description: "Give agents structured, resumable continuity in a fulcra-agent-teams space: snapshot objective / decisions / next-actions / open-questions to a schema, and get a deterministic resume brief when a fresh session or cron run wakes up."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🧭" } }

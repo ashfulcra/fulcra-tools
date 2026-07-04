@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-review
 description: "Add a review handshake to a fulcra-agent-teams space: request review of an artifact (PR, doc, plan), reviewers leave verdicts, and the overall APPROVED/CHANGES/PENDING state is computed deterministically — including required-reviewer gating."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🔎" } }

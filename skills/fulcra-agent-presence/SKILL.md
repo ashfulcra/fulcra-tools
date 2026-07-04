@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-presence
 description: "Add presence + liveness to a fulcra-agent-teams space: agents heartbeat a presence shard, and deterministic folds answer who's live/idle/stale, what each agent is working on, and who a broadcast must reach."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "📡" } }

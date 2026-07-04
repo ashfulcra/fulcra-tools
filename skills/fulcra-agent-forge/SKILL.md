@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-forge
 description: "Bridge GitHub into a fulcra-agent-teams review flow: mirror PR state onto the team store as evidence, and auto-approve a review when its PR merges — so review status reflects the forge even when no human files a verdict."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🔗" } }

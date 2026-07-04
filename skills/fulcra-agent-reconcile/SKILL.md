@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-reconcile
 description: "Give a fulcra-agent-teams space self-healing, queryable task views: scan the team's OKF task docs, regenerate task/index.md and log.md, and answer status/board/needs-me/search in one read."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🩺" } }

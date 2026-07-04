@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-directives
 description: "Directed work for a fulcra-agent-teams space: tell an agent (or broadcast to all), schedule reminders, capture backlog, hand off with a checkpoint, and track a per-agent inbox with acks and re-notify — all deterministic."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "📨" } }

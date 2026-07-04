@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-health
 description: "Operational visibility for a fulcra-agent-teams space: doctor preflight (tooling + store reachability), and a fleet health fold showing which hosts are keeping the team healed and who went dark."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🩹" } }

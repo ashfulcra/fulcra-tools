@@ -1,7 +1,7 @@
 ---
 name: fulcra-agent-operator
 description: "The operator loop for a fulcra-agent-teams space: agents surface waiting-for-operator asks with full context, an orchestrating agent pulls and re-surfaces them on its heartbeat so nothing is forgotten, and the operator's answer flows back as one atomic unblock."
-homepage: "https://github.com/ashfulcra/coord2"
+homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
 metadata: { "openclaw": { "emoji": "🙋" } }
