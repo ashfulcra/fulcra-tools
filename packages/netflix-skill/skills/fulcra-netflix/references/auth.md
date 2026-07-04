@@ -71,7 +71,7 @@ Roughly every 15 seconds, run:
 uv tool run fulcra-api auth login --device-code <DEVICE_CODE> --poll-timeout=5
 ```
 
-Each invocation polls for up to 5 seconds and returns. Three outcomes:
+Each invocation polls for up to 5 seconds and returns. The CLI enforces that bound itself (`--poll-timeout=5`), so a single poll cannot hang your shell even on a wedged network — if an invocation somehow exceeds ~60s, kill it and treat the tick as pending. Three outcomes:
 
 1. **Pending** — the user hasn't finished the browser flow yet. Not an error;
    wait ~15 seconds and poll again. Don't nag the user on every tick.
@@ -89,6 +89,11 @@ Each invocation polls for up to 5 seconds and returns. Three outcomes:
 Do **not** start a second `--get-auth-url` while a live code is still pending —
 each mint invalidates nothing server-side, but messaging the user two different
 codes guarantees confusion about which page to trust. One live code at a time.
+
+And don't re-loop silently: if you have re-minted more than once, or a full
+~10-minute code lifetime has elapsed with the user never completing the flow,
+stop polling and check in with them in chat ("still want to do this? here's a
+fresh link when you're ready") instead of grinding through mint cycles.
 
 ## Failure modes
 

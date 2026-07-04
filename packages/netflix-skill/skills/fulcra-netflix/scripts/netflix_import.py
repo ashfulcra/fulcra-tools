@@ -516,7 +516,7 @@ class PartialPostError(RuntimeError):
         self.cause = cause
 
 
-def post_batch(client: httpx.Client, records: list[dict], *, chunk_size: int = 500) -> int:
+def post_batch(client: httpx.Client, records: list[dict], *, chunk_size: int = CHUNK_SIZE) -> int:
     """POST records in fixed-size sequential chunks; return count posted.
 
     Chunking bounds request size for large histories. Chunks are sent
