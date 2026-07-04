@@ -27,6 +27,7 @@ addopts = "--import-mode=importlib"
 # shadowing between packages.  Only packages that have helper modules listed.
 pythonpath = [
     "packages/collect/tests",
+    "packages/coord-engine/tests",
     "packages/dayone/tests",
     "packages/media-helpers/tests",
 ]
