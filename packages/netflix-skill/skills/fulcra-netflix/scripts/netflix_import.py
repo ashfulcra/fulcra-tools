@@ -178,6 +178,54 @@ def fingerprint_from_joined_title(raw_title: str, *, is_episode: bool | None = N
     return f"tv:{_slugify(show)}:{_slugify(rest[0])}"
 
 
+# Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
+_RICH_EXPECTED_COLS = [
+    "Profile Name", "Start Time", "Duration", "Attributes", "Title",
+    "Supplemental Video Type", "Device Type", "Bookmark", "Latest Bookmark", "Country",
+]
+
+
+# Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
+_EPISODE_MARKERS = ("Season ", "Episode ", "Limited Series", "Chapter ", "Volume ")
+
+
+# Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
+def _extract_title_rich(raw_title: str) -> tuple[str, str]:
+    """For rich-variant titles, distinguish movies from episodes.
+
+    Returns (note, title). Movies (no episode-shape marker in the string)
+    keep their full title intact even if they have colon subtitles
+    (e.g. "Dune: Part Two"). Episodes (with Season/Episode/Limited Series
+    markers) get title set to the show name (first colon-separated segment).
+    """
+    if ":" not in raw_title:
+        return raw_title, raw_title
+    if not any(marker in raw_title for marker in _EPISODE_MARKERS):
+        # Movie with colon subtitle
+        return raw_title, raw_title
+    # Episode — first colon-separated part is the show
+    parts = [p.strip() for p in raw_title.split(":")]
+    return raw_title, parts[0]
+
+
+# Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
+# (that file's `_det_id_rich`, renamed here to `det_id_rich` for the same
+# no-private-boundary reason as `det_id_slim`.)
+def det_id_rich(profile: str, start_time_str: str, raw_title: str) -> str:
+    h = hashlib.sha256(f"{profile}|{start_time_str}|{raw_title}".encode()).hexdigest()
+    return f"com.fulcra.media.netflix-rich.{h[:16]}"
+
+
+# Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
+def _parse_hmmss(value: str) -> timedelta:
+    """Parse H:MM:SS into a timedelta."""
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"not a H:MM:SS duration: {value!r}")
+    h, m, s = (int(p) for p in parts)
+    return timedelta(hours=h, minutes=m, seconds=s)
+
+
 def parse_slim(csv_path: Path):
     occurrence: Counter = Counter()
     with Path(csv_path).open(newline="", encoding="utf-8-sig") as f:
@@ -209,3 +257,61 @@ def parse_slim(csv_path: Path):
                     "occurrence_index": idx, "raw_date": date_str,
                 },
             )
+
+
+def parse_rich(csv_path: Path):
+    """Parse a Netflix rich (GDPR) CSV into Events.
+
+    The rich variant has 10 columns including a real UTC Start Time and a
+    Duration in H:MM:SS, so timestamps here carry "high" confidence unlike
+    the estimated-noon timestamps parse_slim produces. Rows with a non-empty
+    Supplemental Video Type (TRAILER, HOOK, PROMOTIONAL, etc.) are dropped —
+    they're not real viewing sessions, just autoplay previews Netflix logs
+    alongside the real ones.
+    """
+    with Path(csv_path).open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != _RICH_EXPECTED_COLS:
+            raise ValueError(
+                f"not a Netflix GDPR ViewingActivity.csv (header {reader.fieldnames!r})"
+            )
+        for row in reader:
+            if (row.get("Supplemental Video Type") or "").strip():
+                continue                      # trailers/hooks/previews
+            raw_title = row["Title"]
+            start_str = row["Start Time"]
+            start = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc)
+            dur = _parse_hmmss(row["Duration"])
+            note, title = _extract_title_rich(raw_title)
+            # Ported from fulcra-media's rich parser verbatim: is_episode is a
+            # plain bool here (never None) — _extract_title_rich already sets
+            # note == title for movies, so `note != title` alone would miss
+            # single-colon-marker edge cases; OR-ing in the marker check
+            # matches fulcra-media's exact condition so fingerprints agree
+            # byte-for-byte between the two tools.
+            is_episode = note != title or any(
+                marker in raw_title for marker in _EPISODE_MARKERS)
+            yield Event(
+                title=title, note=note,
+                start=start, end=start + dur,
+                det_id=det_id_rich(row["Profile Name"], start_str, raw_title),
+                fingerprint=fingerprint_from_joined_title(
+                    raw_title, is_episode=is_episode),
+                confidence="high",
+                external={
+                    "profile": row["Profile Name"],
+                    "device_type": row.get("Device Type", ""),
+                },
+            )
+
+
+def detect_variant(csv_path: Path) -> str:
+    """Sniff a Netflix export's CSV header to pick slim vs. rich parsing."""
+    with Path(csv_path).open(newline="", encoding="utf-8-sig") as f:
+        header = next(csv.reader(f), None)
+    if header == ["Title", "Date"]:
+        return "slim"
+    if header == _RICH_EXPECTED_COLS:
+        return "rich"
+    raise ValueError(f"unrecognized Netflix CSV header: {header!r}")

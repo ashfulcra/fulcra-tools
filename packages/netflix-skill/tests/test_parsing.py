@@ -1,11 +1,13 @@
+import hashlib
+from datetime import datetime, timezone
+
+import pytest
+
+
 def test_script_loads_and_declares_contract(ni):
     assert ni.DEF_NAME == "Watched"
     assert ni.DEF_MARKER == "com.fulcradynamics.annotation.media.watched"
     assert ni.API_BASE.startswith("https://")
-
-
-import hashlib
-from datetime import datetime, timezone
 
 
 def test_parse_netflix_date(ni):
@@ -14,7 +16,6 @@ def test_parse_netflix_date(ni):
 
 
 def test_parse_netflix_date_rejects_iso(ni):
-    import pytest
     with pytest.raises(ValueError):
         ni.parse_netflix_date("2023-04-12")
 
@@ -54,7 +55,6 @@ def test_parse_slim_event_shape(ni, fixtures_dir):
 
 
 def test_parse_slim_rejects_wrong_header(ni, tmp_path):
-    import pytest
     p = tmp_path / "bad.csv"
     p.write_text("Name,When\nx,4/1/23\n")
     with pytest.raises(ValueError):
@@ -76,3 +76,39 @@ def test_fingerprint_in_slim_events(ni, fixtures_dir):
     events = list(ni.parse_slim(fixtures_dir / "slim.csv"))
     assert events[2].fingerprint == "tv:dune:part-two"   # "Dune: Part Two" via slim path (is_episode=None)
     assert events[3].fingerprint == "tv:the-crown:s04e07"
+
+
+def test_make_note_and_title_malformed_blank_show(ni):
+    # Documented contract: " : Episode 10" → empty title, note ": Episode 10"
+    note, title = ni.make_note_and_title(" : Episode 10")
+    assert title == ""
+    assert note == ": Episode 10"
+
+
+def test_parse_rich_filters_supplemental_and_keeps_real_rows(ni, fixtures_dir):
+    events = list(ni.parse_rich(fixtures_dir / "gdpr.csv"))
+    titles = [e.note for e in events]
+    assert len(events) == 3                      # trailer dropped
+    assert not any("Trailer" in t for t in titles)
+
+
+def test_parse_rich_real_times_and_duration(ni, fixtures_dir):
+    ev = [e for e in ni.parse_rich(fixtures_dir / "gdpr.csv") if "Dune" in e.note][0]
+    assert ev.start == datetime(2024, 3, 1, 21, 0, 0, tzinfo=timezone.utc)
+    assert (ev.end - ev.start).total_seconds() == 2 * 3600 + 35 * 60 + 12
+    assert ev.confidence == "high"
+
+
+def test_rich_det_id_matches_fulcra_media_scheme(ni):
+    h = hashlib.sha256("Ash|2024-03-01 21:00:00|Dune: Part Two".encode()).hexdigest()
+    assert ni.det_id_rich("Ash", "2024-03-01 21:00:00", "Dune: Part Two") == \
+        f"com.fulcra.media.netflix-rich.{h[:16]}"
+
+
+def test_detect_variant(ni, fixtures_dir, tmp_path):
+    assert ni.detect_variant(fixtures_dir / "slim.csv") == "slim"
+    assert ni.detect_variant(fixtures_dir / "gdpr.csv") == "rich"
+    p = tmp_path / "junk.csv"
+    p.write_text("a,b,c\n1,2,3\n")
+    with pytest.raises(ValueError):
+        ni.detect_variant(p)
