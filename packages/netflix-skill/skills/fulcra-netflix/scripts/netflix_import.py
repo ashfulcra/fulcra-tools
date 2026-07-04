@@ -466,8 +466,27 @@ def ensure_watched_def(client: httpx.Client) -> str:
         "spec": None,
     }
     resp = client.post("/user/v1alpha1/annotation", json=body)
+    # The API answers this create with 303 See Other (redirect to the created
+    # resource). We deliberately don't follow redirects (token-leak posture,
+    # same as fulcra-common), and httpx's raise_for_status treats an
+    # unfollowed redirect as an error — so accept any 3xx as "created" and
+    # resolve the new id by re-listing on the marker instead of trusting a
+    # Location header shape. Found live in the 2026-07-04 smoke test.
+    if not (resp.is_success or resp.is_redirect):
+        resp.raise_for_status()
+    if resp.is_success:
+        try:
+            return resp.json()["id"]
+        except (ValueError, KeyError):
+            pass  # fall through to marker re-list
+    resp = client.get("/user/v1alpha1/annotation")
     resp.raise_for_status()
-    return resp.json()["id"]
+    for d in resp.json():
+        if d.get("description") == DEF_MARKER and d.get("annotation_type") == "duration":
+            return d["id"]
+    raise RuntimeError(
+        "created the Watched definition but could not resolve it by marker on re-list"
+    )
 
 
 def get_token() -> str:

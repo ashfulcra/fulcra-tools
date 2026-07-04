@@ -42,6 +42,24 @@ def test_ensure_def_creates_when_absent(ni):
         assert ni.ensure_watched_def(c) == "new-def"
 
 
+def test_ensure_def_create_answers_303_redirect(ni):
+    # The real API answers the create POST with 303 See Other (observed live,
+    # 2026-07-04 smoke test). With redirects unfollowed, that must read as
+    # "created": resolve the id by re-listing on the marker.
+    state = {"created": False}
+    def handler(req):
+        if req.method == "GET":
+            defs = ([{"id": "via-303", "name": "Watched",
+                      "description": ni.DEF_MARKER, "annotation_type": "duration"}]
+                    if state["created"] else [])
+            return httpx.Response(200, json=defs)
+        assert req.method == "POST"
+        state["created"] = True
+        return httpx.Response(303, headers={"location": "/user/v1alpha1/annotation/via-303"})
+    with make_client(handler) as c:
+        assert ni.ensure_watched_def(c) == "via-303"
+
+
 def test_ensure_def_ignores_marker_on_wrong_type(ni):
     # A moment-type def carrying the marker must NOT satisfy resolution —
     # the annotation_type guard is load-bearing, not decorative.
