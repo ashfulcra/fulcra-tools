@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+import httpx
+
 API_BASE = "https://api.fulcradynamics.com"
 DEF_NAME = "Watched"
 DEF_MARKER = "com.fulcradynamics.annotation.media.watched"
@@ -361,3 +363,29 @@ def build_record(ev: Event, *, def_id: str) -> dict:
 # Mirrors packages/fulcra-common/fulcra_common/wire.py — keep in sync
 def encode_batch(records: list[dict]) -> bytes:
     return b"\n".join(json.dumps(r, sort_keys=True).encode() for r in records)
+
+
+def ensure_watched_def(client: httpx.Client) -> str:
+    """Resolve the Watched def by namespace marker; create once if absent.
+
+    The marker in `description` (not the name, not a cached UUID) is the
+    identity — it's also how downstream pool consumers find this data.
+    """
+    resp = client.get("/user/v1alpha1/annotation")
+    resp.raise_for_status()
+    for d in resp.json():
+        if d.get("description") == DEF_MARKER and d.get("annotation_type") == "duration":
+            return d["id"]
+    body = {
+        "name": DEF_NAME,
+        "description": DEF_MARKER,
+        "annotation_type": "duration",
+        "measurement_spec": {
+            "measurement_type": "duration", "value_type": "duration", "unit": None,
+        },
+        "tags": [],       # API 422s without it, even on duration defs
+        "spec": None,
+    }
+    resp = client.post("/user/v1alpha1/annotation", json=body)
+    resp.raise_for_status()
+    return resp.json()["id"]
