@@ -88,6 +88,30 @@ def det_id_slim(date_str: str, raw_title: str, occurrence: int) -> str:
 
 @dataclass
 class Event:
+    """One parsed viewing session, variant-agnostic.
+
+    `det_id` is the dedup key Fulcra actually enforces (source-id based, not
+    content-based) — it must be deterministic across re-runs of the same CSV
+    so re-imports no-op server-side instead of duplicating. `fingerprint` is
+    a separate, human-legible cross-source identifier (see
+    `content_fingerprint`) used for content-level matching (e.g. against
+    fulcra-media imports), not for dedup itself.
+
+    `confidence` is `"low"` for the slim variant (Netflix gives only a date,
+    so the time-of-day is synthesized) and `"high"` for the rich/GDPR variant
+    (a real UTC timestamp and duration). Downstream consumers use this to
+    decide whether to trust the exact time or just the fact that the title
+    was watched that day.
+
+    `external` seeds `external_ids` in the wire record (see `build_record`)
+    with variant-specific context (e.g. `occurrence_index` for slim,
+    `profile`/`device_type` for rich). It must never itself set
+    `content_fingerprint` or `timestamp_confidence` — those keys are injected
+    from `fingerprint`/`confidence` at wire-build time, and a collision here
+    would silently override them with variant-specific data instead of
+    raising.
+    """
+
     title: str
     note: str
     start: datetime
@@ -241,6 +265,17 @@ def _parse_hmmss(value: str) -> timedelta:
 # --- slim variant ---
 
 def parse_slim(csv_path: Path):
+    """Parse a Netflix slim (in-app) `Title,Date` export into Events.
+
+    A generator by design, like `parse_rich`: iterating row-by-row keeps
+    memory flat for very long histories and lets a malformed row raise as
+    soon as it's reached, with row-context attached, rather than after
+    building a big intermediate list. `main()` still materializes the whole
+    thing with `list(...)` deliberately — the CLI's contract is all-or-
+    nothing (see the comment at that call site), so the laziness here is
+    about efficient, early-failing iteration, not about avoiding full
+    materialization altogether.
+    """
     occurrence: Counter = Counter()
     with Path(csv_path).open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -289,6 +324,12 @@ def parse_rich(csv_path: Path):
     Supplemental Video Type (TRAILER, HOOK, PROMOTIONAL, etc.) are dropped —
     they're not real viewing sessions, just autoplay previews Netflix logs
     alongside the real ones.
+
+    A generator by design, same rationale as `parse_slim`: flat memory on
+    long histories, and a malformed row raises with row-context as soon as
+    it's reached rather than after building a full intermediate list.
+    `main()` still materializes eagerly via `list(...)` — see that call
+    site's comment for why the all-or-nothing contract requires it.
     """
     with Path(csv_path).open(newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -353,17 +394,19 @@ def iso_z(dt: datetime) -> str:
 
 
 # Mirrors packages/fulcra-common/fulcra_common/wire.py — keep in sync
-#
-# WHY: Fulcra dedups on source-id, not content — so metadata.source[0]
-# (the deterministic det_id from det_id_slim/det_id_rich) IS the
-# idempotency key for a re-run of this importer. The content_fingerprint
-# deliberately lives in data.external_ids instead of the source array:
-# fulcra-media's slim importer puts it there too, so any twin-dedup
-# tooling that cross-references fingerprints between this script and
-# fulcra-media sees the same shape in the same place, even though the
-# two tools' det_ids differ and won't dedup against each other on
-# source-id alone.
 def build_record(ev: Event, *, def_id: str) -> dict:
+    """Build the wire-format ingest record for one Event.
+
+    WHY source[0] carries det_id: Fulcra dedups on source-id, not content —
+    so metadata.source[0] (the deterministic det_id from
+    det_id_slim/det_id_rich) IS the idempotency key for a re-run of this
+    importer. content_fingerprint deliberately lives in data.external_ids
+    instead of the source array: fulcra-media's slim importer puts it there
+    too, so any twin-dedup tooling that cross-references fingerprints
+    between this script and fulcra-media sees the same shape in the same
+    place — even though the two tools' det_ids differ and won't dedup
+    against each other on source-id alone.
+    """
     payload = {
         "title": ev.title,
         "note": ev.note,
@@ -474,6 +517,17 @@ class PartialPostError(RuntimeError):
 
 
 def post_batch(client: httpx.Client, records: list[dict], *, chunk_size: int = 500) -> int:
+    """POST records in fixed-size sequential chunks; return count posted.
+
+    Chunking bounds request size for large histories. Chunks are sent
+    sequentially, not concurrently, and deliberately so: each chunk that
+    succeeds is durably committed server-side before the next is attempted,
+    so a later chunk's failure raises `PartialPostError` carrying an exact
+    `posted_so_far` — the caller can trust that count because nothing was
+    in flight when the failure happened. Concurrent posting would make that
+    guarantee unprovable (an in-flight chunk's outcome would be unknown at
+    failure time).
+    """
     posted = 0
     for i in range(0, len(records), chunk_size):
         chunk = records[i:i + chunk_size]
@@ -491,6 +545,31 @@ def post_batch(client: httpx.Client, records: list[dict], *, chunk_size: int = 5
             raise PartialPostError(posted, e) from e
         posted += len(chunk)
     return posted
+
+
+def _classify_http_error(exc: httpx.HTTPError) -> tuple[str, str]:
+    """Map an httpx error to (stage, message) for the JSON error envelope.
+
+    Shared by main()'s PartialPostError branch and its bare
+    httpx.HTTPStatusError/HTTPError branches — both need the identical
+    401/403-means-auth discriminator and the identical message format, so
+    this lives in one place instead of two copies drifting apart.
+
+    401/403 means the token was bad (an auth-stage problem, even though it
+    surfaces mid-POST); any other HTTPStatusError is a genuine post-stage
+    failure. A transport-level HTTPError (no response, e.g. connection
+    reset) has no status code to discriminate on, so it's always "post".
+    The message is deliberately just "HTTP <code> on <path>" for the
+    status-code case — never the token, never the response body, which
+    could echo back request contents or leak server internals.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        stage = "auth" if exc.response.status_code in (401, 403) else "post"
+        message = f"HTTP {exc.response.status_code} on {exc.request.url.path}"
+    else:
+        stage = "post"
+        message = str(exc)
+    return stage, message
 
 
 def readback_verify(def_id: str, events: list, *, sample: int = 3) -> int | None:
@@ -585,30 +664,19 @@ def main(argv: list[str] | None = None) -> int:
     except PartialPostError as e:
         # A batch mid-run failed, but earlier chunks already landed
         # server-side — report that truthfully instead of the default 0.
-        # Classification of `e.cause` mirrors the httpx.HTTPStatusError/
-        # HTTPError handling below exactly, since e.cause IS one of those.
+        # Classification of `e.cause` uses the same helper as the bare
+        # httpx error branches below, since e.cause IS one of those errors.
         env["posted"] = e.posted_so_far
-        cause = e.cause
-        if isinstance(cause, httpx.HTTPStatusError):
-            stage = "auth" if cause.response.status_code in (401, 403) else "post"
-            message = f"HTTP {cause.response.status_code} on {cause.request.url.path}"
-        else:
-            stage = "post"
-            message = str(cause)
+        stage, message = _classify_http_error(e.cause)
         env["errors"].append({"stage": stage, "message": message})
         return finish(2)
     except httpx.HTTPStatusError as e:
-        # Stage discriminator by status: 401/403 means the token was bad
-        # (an auth-stage problem, even though it surfaces mid-POST), anything
-        # else is a genuine post-stage failure. Message is deliberately just
-        # "HTTP <code> on <path>" — never the token, never the response body,
-        # which could echo back request contents or leak server internals.
-        stage = "auth" if e.response.status_code in (401, 403) else "post"
-        env["errors"].append({"stage": stage,
-                              "message": f"HTTP {e.response.status_code} on {e.request.url.path}"})
+        stage, message = _classify_http_error(e)
+        env["errors"].append({"stage": stage, "message": message})
         return finish(2)
     except httpx.HTTPError as e:
-        env["errors"].append({"stage": "post", "message": str(e)})
+        stage, message = _classify_http_error(e)
+        env["errors"].append({"stage": stage, "message": message})
         return finish(2)
 
     if not args.no_verify:

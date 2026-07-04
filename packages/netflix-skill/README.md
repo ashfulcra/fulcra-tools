@@ -11,8 +11,13 @@ import script that any agent runs with `uv run`. The Python package wrapper
 exists so the monorepo's pytest tooling covers the script; end users never
 install it.
 
-Status: **importer CLI built and tested**; the conversational SKILL.md
-wrapper (onboard → export → import → share) has not landed yet. See
+Status: **both halves are built and tested** — the importer CLI and the
+conversational `SKILL.md` (onboard → export → import → share) have landed.
+The one remaining gap is cosmetic: the SHARE state still walks the user
+through Context Web's manual sharing UI by hand, because `fulcra-api-python`
+has no share-create command yet. When upstream PR #47 lands, that manual
+walkthrough swaps for a CLI call — see the `TODO(share-cli)` marker in
+[skills/fulcra-netflix/SKILL.md](skills/fulcra-netflix/SKILL.md). See
 [docs/design.md](docs/design.md) for the full spec (flow, record schema,
 error handling, what's deferred).
 
@@ -30,17 +35,18 @@ walkthrough, fingerprint conventions).
 
 ```
 docs/design.md                              the approved design spec
-skills/fulcra-netflix/scripts/netflix_import.py   the vendored, self-contained importer  [built]
+skills/fulcra-netflix/SKILL.md              the conversational state machine (HELLO→AUTH→EXPORT→IMPORT→SHARE)
+skills/fulcra-netflix/references/           auth, export-walkthrough, and record-schema detail docs
+skills/fulcra-netflix/scripts/netflix_import.py   the vendored, self-contained importer
 fulcra_netflix/                             test-support shims for the vendored script
 tests/                                      parser/wire/API/CLI tests over synthetic fixtures
 ```
 
-The importer script is functionally complete (parsing, wire encoding, auth,
-batch POST, readback verification, and the CLI entry point below). What's
-still `[pending]` is the conversational `SKILL.md` itself — the
-onboard → export → import → share state machine that walks a brand-new user
-through getting a CSV and invoking this script. Today the script is run
-directly.
+Both the importer script (parsing, wire encoding, auth, batch POST, readback
+verification, the CLI entry point below) and the conversational `SKILL.md`
+(the onboard → export → import → share state machine that walks a
+brand-new user through getting a CSV and invoking this script) are built.
+The only deferred piece is the CLI-share swap noted above.
 
 ## Running the importer
 
