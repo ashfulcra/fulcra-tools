@@ -40,3 +40,17 @@ def test_ensure_def_creates_when_absent(ni):
         return httpx.Response(200, json={"id": "new-def"})
     with make_client(handler) as c:
         assert ni.ensure_watched_def(c) == "new-def"
+
+
+def test_post_batch_chunks_and_content_type(ni):
+    seen = []
+    def handler(req):
+        assert req.url.path == "/ingest/v1/record/batch"
+        assert req.headers["content-type"] == "application/x-jsonl"
+        seen.append(len(req.content.split(b"\n")))
+        return httpx.Response(200)
+    recs = [{"i": i} for i in range(1201)]
+    with make_client(handler) as c:
+        posted = ni.post_batch(c, recs, chunk_size=500)
+    assert posted == 1201
+    assert seen == [500, 500, 201]

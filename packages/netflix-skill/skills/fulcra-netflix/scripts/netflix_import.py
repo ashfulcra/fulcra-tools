@@ -13,10 +13,14 @@ Wire format mirrors fulcra-common wire.py; dedup is source-id based.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import json
 import re
+import shutil
+import subprocess
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -420,3 +424,165 @@ def ensure_watched_def(client: httpx.Client) -> str:
     resp = client.post("/user/v1alpha1/annotation", json=body)
     resp.raise_for_status()
     return resp.json()["id"]
+
+
+def get_token() -> str:
+    """Mint a bearer via the fulcra-api CLI. Never persisted, never printed."""
+    candidates = []
+    if shutil.which("fulcra-api"):
+        candidates.append(["fulcra-api", "auth", "print-access-token"])
+    if shutil.which("uv"):
+        candidates.append(["uv", "tool", "run", "fulcra-api",
+                           "auth", "print-access-token"])
+    last_err = "fulcra-api CLI not found (install: uv tool install fulcra-api)"
+    for cmd in candidates:
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=60, check=True).stdout.strip()
+            if out:
+                return out
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            last_err = f"{cmd[0]}: {getattr(e, 'stderr', '') or e}"
+    raise RuntimeError(f"could not mint Fulcra token — {last_err}")
+
+
+def make_api_client(token: str) -> httpx.Client:
+    return httpx.Client(
+        base_url=API_BASE,
+        headers={"authorization": f"Bearer {token}"},
+        timeout=60.0,
+        follow_redirects=False,   # same 3xx-token-leak posture as fulcra-common
+    )
+
+
+def post_batch(client: httpx.Client, records: list[dict], *, chunk_size: int = 500) -> int:
+    posted = 0
+    for i in range(0, len(records), chunk_size):
+        chunk = records[i:i + chunk_size]
+        resp = client.post(
+            "/ingest/v1/record/batch",
+            content=encode_batch(chunk),
+            headers={"content-type": "application/x-jsonl"},
+        )
+        resp.raise_for_status()
+        posted += len(chunk)
+    return posted
+
+
+def readback_verify(def_id: str, events: list, *, sample: int = 3) -> int | None:
+    """Best-effort: for a few events, ask the CLI whether a record with our
+    det_id landed. Returns count verified, or None when the CLI is absent.
+    Indexing lag makes 0 a soft signal, not a failure (envelope reports both).
+    """
+    cli = (["fulcra-api"] if shutil.which("fulcra-api")
+           else ["uv", "tool", "run", "fulcra-api"] if shutil.which("uv") else None)
+    if not cli:
+        return None
+    verified = 0
+    for ev in events[:sample]:
+        window_start = iso_z(ev.start - timedelta(hours=1))
+        window_end = iso_z(ev.end + timedelta(hours=1))
+        try:
+            out = subprocess.run(
+                cli + ["get-records", f"DurationAnnotation/{def_id}",
+                       window_start, window_end],
+                capture_output=True, text=True, timeout=60, check=True).stdout
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            continue
+        if ev.det_id in out:
+            verified += 1
+    return verified
+
+
+# --- cli ---
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Import a Netflix viewing-history CSV into Fulcra as Watched annotations.")
+    ap.add_argument("csv_path")
+    ap.add_argument("--json", action="store_true", dest="json_out",
+                    help="emit one-line JSON envelope (stable contract)")
+    ap.add_argument("--check-only", action="store_true",
+                    help="parse + count only; no POST")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip post-import readback sampling")
+    args = ap.parse_args(argv)
+
+    # Envelope keys are a stable, append-only contract: scripts/CI consuming
+    # --json output can rely on every key always being present (None when
+    # not applicable to the run), and on old keys never being removed or
+    # repurposed. Add new keys; never delete or rename existing ones.
+    env = {"importer": "netflix", "variant": None, "ok": False, "total": 0,
+           "posted": 0, "skipped_existing": None, "verified": None,
+           "would_post": None, "errors": []}
+
+    def finish(code: int) -> int:
+        print(json.dumps(env, sort_keys=True) if args.json_out
+              else _human_summary(env))
+        return code
+
+    try:
+        variant = detect_variant(Path(args.csv_path))
+        env["variant"] = variant
+        parser = parse_slim if variant == "slim" else parse_rich
+        # Materialize fully BEFORE any POST: a bad row aborts pre-post,
+        # so partial imports can't happen mid-file.
+        events = list(parser(Path(args.csv_path)))
+        env["total"] = len(events)
+    except FileNotFoundError as e:
+        env["errors"].append({"stage": "args", "message": str(e)})
+        return finish(2)
+    except ValueError as e:
+        env["errors"].append({"stage": "parse", "message": str(e)})
+        return finish(2)
+
+    if args.check_only:
+        env["would_post"] = len(events)
+        env["ok"] = True
+        return finish(0)
+
+    try:
+        token = get_token()
+    except RuntimeError as e:
+        env["errors"].append({"stage": "auth", "message": str(e)})
+        return finish(2)
+
+    try:
+        with make_api_client(token) as client:
+            def_id = ensure_watched_def(client)
+            records = [build_record(ev, def_id=def_id) for ev in events]
+            env["posted"] = post_batch(client, records)
+    except httpx.HTTPStatusError as e:
+        # Stage discriminator by status: 401/403 means the token was bad
+        # (an auth-stage problem, even though it surfaces mid-POST), anything
+        # else is a genuine post-stage failure. Message is deliberately just
+        # "HTTP <code> on <path>" — never the token, never the response body,
+        # which could echo back request contents or leak server internals.
+        stage = "auth" if e.response.status_code in (401, 403) else "post"
+        env["errors"].append({"stage": stage,
+                              "message": f"HTTP {e.response.status_code} on {e.request.url.path}"})
+        return finish(2)
+    except httpx.HTTPError as e:
+        env["errors"].append({"stage": "post", "message": str(e)})
+        return finish(2)
+
+    if not args.no_verify:
+        env["verified"] = readback_verify(def_id, events)
+
+    env["ok"] = True
+    return finish(0)
+
+
+def _human_summary(env: dict) -> str:
+    if not env["ok"]:
+        e = env["errors"][0] if env["errors"] else {}
+        return f"FAILED at {e.get('stage', '?')}: {e.get('message', '')}"
+    if env["would_post"] is not None:
+        return f"would post {env['would_post']} of {env['total']} events ({env['variant']})"
+    v = env["verified"]
+    return (f"imported {env['posted']}/{env['total']} ({env['variant']}); "
+            f"verified sample: {'skipped' if v is None else v}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
