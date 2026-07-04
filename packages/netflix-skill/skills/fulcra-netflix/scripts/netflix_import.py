@@ -29,6 +29,9 @@ INGEST_VERSION = 2  # bump ONLY with a coordinated det-id prefix change
 
 # Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
 _NETFLIX_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2})$")
+_SEASON_NUM_RE = re.compile(r"Season\s+(\d+)")
+_EPISODE_NUM_RE = re.compile(r"Episode\s+(\d+)")
+_YEAR_ONLY_RE = re.compile(r"^\d{4}$")
 
 
 # Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
@@ -83,8 +86,96 @@ class Event:
     external: dict = field(default_factory=dict)
 
 
-def fingerprint_from_joined_title(raw_title, *, is_episode=None):
-    return ""   # TEMPORARY stub — Task 3 ports the real fingerprint logic
+# Ported from packages/media-helpers/fulcra_media/importers/base.py — keep in sync
+_SLUG_KEEP_RE = re.compile(r"[^a-z0-9\- ]+")
+
+
+# Ported from packages/media-helpers/fulcra_media/importers/base.py — keep in sync
+def _slugify(value: str) -> str:
+    """Lowercase, strip non-alphanumeric (except spaces and hyphens), collapse runs to hyphens."""
+    s = _SLUG_KEEP_RE.sub("", (value or "").lower())
+    # Treat existing hyphens as word boundaries equivalent to spaces, then collapse.
+    parts = [p for p in re.split(r"[\s-]+", s) if p]
+    return "-".join(parts)
+
+
+# Ported from packages/media-helpers/fulcra_media/importers/base.py — keep in sync
+# (only the "tv" and "movie" branches; music/podcast/workout/book dropped — YAGNI
+# for the Netflix-only skill.)
+def content_fingerprint(kind: str, **fields) -> str:
+    """Build a stable cross-source content identifier.
+
+    kind="tv":       requires show, season:int, episode:int
+    kind="movie":    requires title; optional year
+    """
+    if kind == "tv":
+        return f"tv:{_slugify(fields['show'])}:s{fields['season']:02d}e{fields['episode']:02d}"
+    if kind == "movie":
+        base = f"movie:{_slugify(fields['title'])}"
+        year = fields.get("year")
+        return f"{base}:y{year}" if year else base
+    raise ValueError(f"unknown fingerprint kind: {kind!r}")
+
+
+# Ported from packages/media-helpers/fulcra_media/importers/netflix.py — keep in sync
+# (that file's `_fingerprint_from_joined_title`, renamed here to the public
+# `fingerprint_from_joined_title` since this script has no private/public
+# module boundary of its own.)
+def fingerprint_from_joined_title(raw_title: str, *, is_episode: bool | None = None) -> str:
+    """Cross-source fingerprint from a Netflix-style joined title.
+
+    Patterns recognized:
+      "Movie Name"                      -> movie:movie-name
+      "Show: Season 1: Episode 5"       -> tv:show:s01e05
+      "BEEF: Season 2: Episode Title"   -> tv:beef:s02:episode-title
+      "Anthology: 2026: Episode Title"  -> tv:anthology:s2026:episode-title
+      "Show: Limited Series: Episode 1" -> tv:show:limited-series:e01
+      "Show: Some Season: Ep Title"     -> tv:show:some-season:ep-title
+      "Show: Episode Title"             -> tv:show:episode-title (2-part TV)
+      "Dune: Part Two"                  -> movie:dune-part-two   (2-part movie, when is_episode=False)
+
+    `is_episode`: caller's signal about whether this is a TV episode. When
+    None (e.g. the slim importer, which has no extra context), we infer:
+    3+ colon segments → TV; 2 segments without Season/Episode markers
+    defaults to TV (most Netflix joined titles are episodic).
+    """
+    parts = [p.strip() for p in raw_title.split(":")]
+    show = parts[0]
+    season_match = _SEASON_NUM_RE.search(raw_title)
+    episode_match = _EPISODE_NUM_RE.search(raw_title)
+
+    # Most-specific signal first.
+    if season_match and episode_match:
+        return content_fingerprint(
+            "tv",
+            show=show,
+            season=int(season_match.group(1)),
+            episode=int(episode_match.group(1)),
+        )
+
+    if is_episode is False or len(parts) == 1:
+        return content_fingerprint("movie", title=raw_title)
+
+    rest = parts[1:]
+    if len(parts) >= 3:
+        season_part = rest[0]
+        if season_match and season_match.group(0) in season_part:
+            season_seg = f"s{int(season_match.group(1)):02d}"
+        elif _YEAR_ONLY_RE.match(season_part):
+            season_seg = f"s{season_part}"
+        else:
+            season_seg = _slugify(season_part)
+
+        episode_remainder = ": ".join(rest[1:])
+        if episode_match and episode_match.group(0) in episode_remainder:
+            episode_seg = f"e{int(episode_match.group(1)):02d}"
+        else:
+            episode_seg = _slugify(episode_remainder)
+
+        return f"tv:{_slugify(show)}:{season_seg}:{episode_seg}"
+
+    # 2 parts: default TV unless is_episode explicitly False (handled above).
+    return f"tv:{_slugify(show)}:{_slugify(rest[0])}"
 
 
 def parse_slim(csv_path: Path):

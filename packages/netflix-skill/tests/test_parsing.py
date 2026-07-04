@@ -59,3 +59,20 @@ def test_parse_slim_rejects_wrong_header(ni, tmp_path):
     p.write_text("Name,When\nx,4/1/23\n")
     with pytest.raises(ValueError):
         list(ni.parse_slim(p))
+
+
+def test_fingerprints_match_fulcra_media_cases(ni):
+    fp = ni.fingerprint_from_joined_title
+    assert fp("Dune") == "movie:dune"
+    assert fp("Dune: Part Two", is_episode=False) == "movie:dune-part-two"
+    assert fp("The Crown: Season 4: Episode 7") == "tv:the-crown:s04e07"
+    assert fp("BEEF: Season 2: Episode Title") == "tv:beef:s02:episode-title"
+    assert fp("Anthology: 2021: Episode Title") == "tv:anthology:s2021:episode-title"
+    assert fp("Show: Limited Series: Episode 1") == "tv:show:limited-series:e01"
+    assert fp("Show: Episode Title") == "tv:show:episode-title"
+
+
+def test_fingerprint_in_slim_events(ni, fixtures_dir):
+    events = list(ni.parse_slim(fixtures_dir / "slim.csv"))
+    assert events[2].fingerprint == "tv:dune:part-two"   # "Dune: Part Two" via slim path (is_episode=None)
+    assert events[3].fingerprint == "tv:the-crown:s04e07"
