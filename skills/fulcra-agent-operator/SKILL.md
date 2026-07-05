@@ -47,7 +47,7 @@ uv tool run coord-engine answer <team> <slug> --with "<the answer>"
 ```
 In ONE write: records the answer (`next_action: OPERATOR ANSWER: …` + body note), unblocks
 (`blocked → active`), hands the task back to its **owner** (their inbox + listener fire), and strips
-`needs:human`. Refuses non-asks (a task that isn't blocked/needs:human) and asks with no owner —
+`needs:human`. Refuses non-asks (a task that isn't needs:human-tagged or blocked ON THE OPERATOR — a task blocked on CI or another agent is not an ask) and asks with no owner —
 an answer can never land somewhere nobody is listening.
 
 ## Why this shape

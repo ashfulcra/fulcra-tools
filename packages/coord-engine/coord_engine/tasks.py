@@ -150,7 +150,7 @@ def apply_update(
 
 
 def apply_answer(existing: Optional[str], *, now: str, answer: str,
-                 relayer: Optional[str] = None) -> tuple[str, str]:
+                 relayer: Optional[str] = None, human: str = "human") -> tuple[str, str]:
     """The operator return-leg (fulcra-agent-operator): validate the task is a
     waiting-for-operator ask, then in ONE write: record the answer, unblock
     (blocked -> active), hand the task back to its OWNER (so it lands in their
@@ -164,8 +164,17 @@ def apply_answer(existing: Optional[str], *, now: str, answer: str,
     tags = fm.get("tags") or []
     if not isinstance(tags, list):
         tags = [tags]
-    if fm.get("status") != "blocked" and "needs:human" not in tags:
-        raise TaskError("not a waiting-for-operator ask (not blocked and no needs:human tag)")
+    from .model import OPEN_STATUSES  # local: avoid touching module import surface
+    blocked_on = str(fm.get("blocked_on") or "").replace(",", " ").split()
+    is_operator_ask = (
+        (fm.get("status") or DEFAULT_STATUS) in OPEN_STATUSES  # parity w/ asks fold:
+        # a terminal task with a stale needs:human tag is not answerable
+        and ("needs:human" in tags
+             or (fm.get("status") == "blocked"
+                 and (fm.get("assignee") == human or human in blocked_on)))
+    )
+    if not is_operator_ask:
+        raise TaskError(f"not a waiting-for-operator ask (for operator {human!r})")
     owner = str(fm.get("owner") or "").strip()
     if not owner:
         raise TaskError("ask has no owner to hand the answer back to")
