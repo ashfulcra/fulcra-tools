@@ -26,7 +26,7 @@ supersedes it), so re-entry never corrupts the tally:
 |---|---|---|---|
 | Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT tally against a broken engine |
 | Review awaiting MY verdict? | `uv tool run coord-engine needs-me <team> --agent <id>` | NO `[REVIEW] pending verdict:` row is printed for you — nothing is blocked on your verdict (NON-mutating read) | **Leave a verdict** — a printed `  [REVIEW] pending verdict:` row names the slug awaiting you; write your verdict shard for it per [Lifecycle](#lifecycle) step 2 |
-| Known artifact's handshake state? | `uv tool run coord-engine review status <team> <slug>` | prints a line beginning `review <slug> in team/<team>:` ending in one of `APPROVED` / `CHANGES` / `PENDING` (deterministic fold — never tally by hand) | if it prints `PENDING`, the review is not settled — chase the `awaiting required:` reviewers per [Lifecycle](#lifecycle) step 3 |
+| Known artifact's handshake state settled? | `uv tool run coord-engine review status <team> <slug>` | prints a line beginning `review <slug> in team/<team>:` ending in `APPROVED` or `CHANGES` (deterministic fold — never tally by hand) | if it prints `PENDING`, the review is not settled — chase the `awaiting required:` reviewers per [Lifecycle](#lifecycle) step 3 |
 
 All probes clean → nothing is blocked on your verdict and any artifact you name is at its folded state;
 proceed to request a new review or advance an existing one below.
