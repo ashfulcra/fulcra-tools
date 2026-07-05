@@ -242,3 +242,23 @@ def test_fast_path_ignores_own_derived_artifacts_in_feed():
                       {"full_name": "/team/r/task/log.md"}])
     res = _reconciled(t, now="2026-07-01T12:30:00Z")
     assert res.get("fast_path") is True
+
+
+def test_fast_path_normalizes_missing_leading_slash():
+    # a relevant change WITHOUT the leading slash must still decline (fail-closed)
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "team/r/task/b.md"}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")
+
+
+def test_fast_path_declines_on_unparseable_feed_entries():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    for bad in (["just-a-string"], [{"full_name": 7}], [{"no_name": "x"}], [None]):
+        _with_updates(t, bad)
+        res = _reconciled(t, now="2026-07-01T12:30:00Z")
+        assert not res.get("fast_path"), f"feed {bad!r} must be doubt -> full pass"

@@ -93,14 +93,9 @@ class FulcraFileTransport:
         path's evidence source. Never raises: any failure returns None, which
         callers treat as "no evidence, do the full pass"."""
         import json as _json
-        # data-updates ships on the newer `fulcra` binary, not `fulcra-api` —
-        # swap the trailing binary name; same package installs both.
-        base = list(self.command)
-        if base and base[-1] == "fulcra-api":
-            base[-1] = "fulcra"
         try:
             proc = subprocess.run(
-                [*base, "data-updates", period],
+                [*self.command, "data-updates", period],
                 capture_output=True, text=True, timeout=self.timeout,
             )
             if proc.returncode != 0:

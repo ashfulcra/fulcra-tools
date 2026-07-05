@@ -44,7 +44,15 @@ def _acks_prefix(team: str) -> str:
 
 #: Fast path is only trusted while the prior aggregate is this fresh — a
 #: periodic full pass bounds the blast radius of a missed/undelivered update.
+#: The full pass also carries time-driven maintenance (retention archival,
+#: orphan-ack GC), so the fast path defers those by at most this long too.
 MAX_FAST_PATH_HOURS = 6.0
+
+#: Overlap added to the probe window to absorb clock skew between the host that
+#: wrote generated_at, the probing host (dateparser resolves the period on the
+#: client clock), and the store's server-side uploaded_at. Hosts are assumed
+#: NTP-synced to well under this margin.
+FAST_PATH_SKEW_MARGIN_SECONDS = 900
 
 
 def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: str, log: Any) -> bool:
@@ -60,27 +68,32 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
     age = age_hours(gen, now)
     if age is None or age < 0 or age > MAX_FAST_PATH_HOURS:
         return False
-    # overlap margin: ask for a slightly wider window than the true gap
-    period = f"{int(age * 3600) + 300} seconds"
+    period = f"{int(age * 3600) + FAST_PATH_SKEW_MARGIN_SECONDS} seconds"
+    relevant = (f"/team/{team}/task/", f"/team/{team}/_coord/acks/")
+    # Derived artifacts are OUTPUTS of reconcile, not inputs — a prior pass's own
+    # index/log writes must not poison the next pass's no-change evidence. (Cost:
+    # hand-corruption of index/log self-heals within MAX_FAST_PATH_HOURS instead
+    # of one beat — accepted, the engine owns those files.)
+    derived = (f"/team/{team}/task/index.md", f"/team/{team}/task/log.md")
     try:
         changes = updates_fn(period)
+        if changes is None:
+            return False
+        for c in changes:
+            # Shape guard, fail-CLOSED: any entry we cannot positively parse is
+            # doubt, and doubt means full pass — feed-shape drift must degrade
+            # to full passes, never to false no-change evidence.
+            if not isinstance(c, dict) or not isinstance(c.get("full_name"), str):
+                return False
+            name = c["full_name"]
+            if not name.strip():
+                return False
+            name = "/" + name.lstrip("/")   # feed shape pins nothing; normalize
+            if name.startswith(relevant) and name not in derived:
+                return False
     except Exception as e:
         log.warn("data-updates probe failed; full pass", error=str(e))
         return False
-    if changes is None:
-        return False
-    relevant = (f"/team/{team}/task/", f"/team/{team}/_coord/acks/")
-    # derived artifacts are OUTPUTS of reconcile, not inputs — a prior pass's own
-    # index/log writes must not poison the next pass's no-change evidence
-    derived = (f"/team/{team}/task/index.md", f"/team/{team}/task/log.md")
-    for c in changes:
-        if not isinstance(c, dict) or not isinstance(c.get("full_name"), str):
-            return False
-        name = c["full_name"]
-        if not name:
-            return False
-        if name.startswith(relevant) and name not in derived:
-            return False
     log.info("fast path: no fold-relevant changes in feed", team=team, window=period,
              feed_entries=len(changes))
     return True
@@ -379,23 +392,9 @@ def reconcile(
         warnings.append("summaries.json write failed")
 
     # --- fleet health shard (best-effort; never fails the pass) ---
-    try:
-        from . import __version__ as _v
-        shard = health_mod.build_shard(host=host, now=now, engine_version=_v,
-                                       result={"tasks": len(rows), "parsed": parsed,
-                                               "reused": reused, "warnings": warnings})
-        transport.write(f"{health_mod.health_prefix(team)}{agent_key(host)}.json",
-                        json.dumps(shard, indent=1))
-        for e in transport.list_dir(health_mod.health_prefix(team)):
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".json"):
-                continue
-            sh = health_mod.parse_shard(transport.read(health_mod.health_prefix(team) + n))
-            ts = (sh or {}).get("at")
-            if ts and age_hours(ts, now) > health_mod.SHARD_RETENTION_HOURS                     and hasattr(transport, "delete"):
-                transport.delete(health_mod.health_prefix(team) + n)
-    except Exception as e:  # never fail the pass, but never go silently dark either
-        log.warn("health shard write/gc failed (host will look dark)", error=str(e))
+    _write_health_shard(transport, team, host=host, now=now,
+                        result={"tasks": len(rows), "parsed": parsed,
+                                "reused": reused, "warnings": warnings}, log=log)
 
     log.info(
         "reconciled", team=team, tasks=len(rows), reused=reused, parsed=parsed,
