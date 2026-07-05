@@ -49,8 +49,8 @@ def cli() -> None:
         "  (2) Built-in Fulcra type (BodyMass, HeartRate, ...): pass\n"
         "      --data-type <Name> alone. The importer skips the\n"
         "      annotation-def source entry; dedup is purely source_id-based.\n"
-        "  (3) Generic annotation: omit both, defaults to DurationAnnotation /\n"
-        "      InstantAnnotation per --annotation-type."
+        "  (3) Generic annotation: create one with bootstrap and pass\n"
+        "      --definition-id <uuid>."
     ),
 )
 @click.argument("csv_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))

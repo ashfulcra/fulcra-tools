@@ -11,6 +11,35 @@ This skill teaches you (the AI agent) how to import a CSV into the right Fulcra 
 
 ---
 
+## Where to start — the re-entrancy probes
+
+Before running an import, probe how far this user already got. The states are a prefix of
+the import flow — **authed? → target def exists? → anything-to-import? → already landed?** — so
+enter at the **first probe that fails** (per the repo's skill-quality pattern,
+`docs/skill-quality-pattern.md`). Every state is safely re-enterable: re-running an import produces
+the same deterministic source_ids, and the importer dedups against a readback of existing source_ids
+before posting (client-side, in `run_import`; see "Critical invariant" below), so there is never a
+penalty for re-probing or re-importing.
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
+| Target picked + def exists? | for a user-defined/generic annotation, list the account's live annotation definitions and confirm the intended UUID is present: `curl --oauth2-bearer "$(fulcra auth print-access-token)" https://api.fulcradynamics.com/user/v1alpha1/annotation` (this is the GET `annotations_catalog()` reads; `fulcra catalog` lists *data types*, not user-defined annotation defs, so don't use it here). For a built-in type (`--data-type BodyMass`, etc.), no def is needed — this probe is N/A | the intended `--definition-id` UUID appears in the JSON with `deleted_at` null, OR the user is targeting a built-in type | **BOOTSTRAP** — mint a def with `fulcra-csv bootstrap …` (prints the UUID), then import against it. Do NOT bootstrap if the UUID is already present — that mints a duplicate def and splits the data |
+| Anything to import? | `fulcra-csv import <csv-path> --dry-run` **with a target flag** — `--definition-id <uuid>` (user-defined) or `--data-type <Name>` (built-in), plus the same column flags you'll use for the real run. `--dry-run` skips auth/ingest but the CLI still rejects the run with a UsageError if neither `--definition-id` nor `--data-type` is present (there'd be no target), so pass one even in dry-run | prints `parsed N events …` with N > 0 and the sampled rows look right (pure parse — no auth or ingest) | **EXPORT/COLLECT** — the file is empty or the column mapping is wrong; fix the flags or get a better file before importing |
+| Already landed? | `fulcra-csv export --definition-id <uuid> --start "30 days ago" --columns start_time,source_id` (built-in target: pass `--data-type <Name>` instead) | rows come back that match the CSV you're about to import (compare `source_id` hashes or timestamps) | **IMPORT** — nothing landed yet; run `fulcra-csv import … ` for real (drop `--dry-run`) |
+
+All probes pass → the data is already imported; tell the user and point them at
+[Context Web](https://context.fulcradynamics.com) to browse it. A brand-new user fails the first
+probe. Note the `fulcra auth print-access-token` command (probe 1, and reused inside the probe-2
+curl) belongs to the separate [fulcra-api](https://github.com/fulcradynamics/fulcra-api-python) CLI;
+`fulcra-csv` has no auth subcommand of its own. Probe 2 hits the Fulcra Life API annotation endpoint
+(`GET /user/v1alpha1/annotation` on `https://api.fulcradynamics.com`, the host the fulcra-api client
+is what this repo's fulcra-common client resolves from `FULCRA_API_BASE`; the fulcra-api lib derives the same host from its OIDC audience) directly with `curl` — the same GET the CLI's
+`annotations_catalog()` performs — because neither `fulcra` nor `fulcra-csv` exposes a subcommand
+that lists user-defined annotation definitions.
+
+---
+
 ## Three target modes — pick first
 
 Every import targets ONE of three places. Decide first which you're using:
@@ -40,12 +69,14 @@ fulcra-csv import weights.csv --data-type BodyMass \
 
 ⚠️ Built-in-type writes assume the receiving schema matches. Check `fulcra catalog` for known data types. As of this skill's writing, the data-type write API is forthcoming — when shipped, BodyMass/HeartRate/StepCount/etc. are first-class targets.
 
-### 3. Generic DurationAnnotation / InstantAnnotation — no flags
+### 3. Generic DurationAnnotation / InstantAnnotation — custom definition
 
-Defaults. The CLI writes plain DurationAnnotation events (or InstantAnnotation with `--annotation-type instant`). Useful for "throw a CSV in and forget" cases where you don't care to set up a named definition.
+Create a simple annotation definition with `bootstrap`, then import against it with `--definition-id`. The CLI writes plain DurationAnnotation events (or InstantAnnotation with `--annotation-type instant`). Useful for "throw a CSV in and forget" cases where the data does not belong to a built-in Fulcra type.
 
 ```bash
-fulcra-csv import random.csv  # all defaults: timestamp + title columns, DurationAnnotation
+fulcra-csv bootstrap --name "Imported CSV"
+# -> save UUID as $CSV_UUID
+fulcra-csv import random.csv --definition-id $CSV_UUID
 ```
 
 ---
@@ -136,7 +167,7 @@ fulcra-csv soft-delete <uuid> --confirm
 
 When `--source-id-col` is set, the column value is mixed into the hash **with** the timestamp, not used verbatim. Two plays of the same Spotify track at different times produce distinct events. Don't try to "preserve" content IDs in source_ids — they're hashed, idempotency is per-row, not per-content. (Content-level identity belongs in `--extra content_fingerprint=fp`.)
 
-This is why **re-running the same import is always safe** — same input rows produce same source_ids, Fulcra dedups silently. You don't need to track "have I imported this yet?"
+This is why **re-running the same import is always safe** — same input rows produce the same source_ids, and before posting each chunk `run_import` reads back the existing source_ids in that time window and skips the ones already present (client-side dedup, not a server-side guarantee). You don't need to track "have I imported this yet?"
 
 ---
 
@@ -293,7 +324,7 @@ For agent-driven recurring sync of a CSV that grows over time (e.g. a Pipedream 
 
 1. Download the latest CSV to a temp file.
 2. Run `fulcra-csv import <tempfile> ...` — re-imports are idempotent.
-3. Skipped rows are silent (Fulcra source-id dedup). Posted rows are the delta.
+3. Skipped rows are silent (the importer's client-side source-id readback dedup). Posted rows are the delta.
 
 The `--dry-run` flag is useful for a cheap "any new rows?" check (it parses and prints the first 5, doesn't ingest).
 
@@ -338,7 +369,7 @@ dateparser can't parse the timestamp column. Try `--tz America/New_York` if rows
 ## Don't
 
 - **Don't bake `--definition-id` into a script as a constant** — the user might soft-delete + re-bootstrap, changing the UUID. Always read it from a fresh `fulcra-csv bootstrap` or from the user's state.
-- **Don't try to dedup at the agent layer** — Fulcra handles source-id dedup natively. Just re-run the import; collisions are silent.
+- **Don't try to dedup at the agent layer** — the importer's `run_import` already reads back existing source_ids per window and skips duplicates before posting. Just re-run the import; already-landed rows are skipped silently.
 - **Don't write `data.note` from a column the user didn't intend to expose** — `--note-col` is opt-in.
 - **Don't pass `--value-type bool` for "0/1" rows unless that's truly the schema** — bool collapses any non-truthy string to false; for diary-style yes/no events use int (0/1).
 - **Don't print the user's access token to stdout** — neither in error envelopes nor in success messages. The CLI scrubs URL params in exception messages, but raw token blobs are sensitive.
