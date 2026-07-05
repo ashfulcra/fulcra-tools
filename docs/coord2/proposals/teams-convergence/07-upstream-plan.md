@@ -93,7 +93,7 @@ One `fulcra-agent-teams-v2` or `fulcra-agent-teams-pro` package would improve on
 the feature set easier to discover. It also avoids cross-skill version skew: users would not accidentally
 install `review` without the matching `reconcile`/`directives` assumptions.
 
-The plan still keeps 10 sibling skills because it matches upstream's current contribution shape and keeps
+The plan still keeps these as sibling skills because it matches upstream's current contribution shape and keeps
 review diffs small. The cost is real: the pitch must include an install recipe that enables the common
 bundle in one command or checklist, plus compatibility notes that name which skill versions were tested
 together. If upstream prefers a bundled pro skill for discoverability, use the existing sibling skills as
