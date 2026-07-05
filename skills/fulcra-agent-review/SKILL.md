@@ -15,6 +15,22 @@ verdicts, and the overall state is folded deterministically. The single-file act
 are prose over `fulcra-api file` + the teams inbox; the **verdict tally** is a `coord-engine` command
 (folding multiple reviewers is a derived state — code, not eyeballing).
 
+## Where to start — the re-entrancy probes
+
+Before requesting a review or leaving a verdict, probe where the handshake already stands. Enter at the
+**first probe that fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`);
+requesting is a single-file write and a verdict is an overwrite (re-uploading your verdict file just
+supersedes it), so re-entry never corrupts the tally:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT tally against a broken engine |
+| Review awaiting MY verdict? | `uv tool run coord-engine needs-me <team> --agent <id>` | NO `[REVIEW] pending verdict:` row is printed for you — nothing is blocked on your verdict (NON-mutating read) | **Leave a verdict** — a printed `  [REVIEW] pending verdict:` row names the slug awaiting you; write your verdict shard for it per [Lifecycle](#lifecycle) step 2 |
+| Known artifact's handshake state settled? | `uv tool run coord-engine review status <team> <slug>` | prints a line beginning `review <slug> in team/<team>:` ending in `APPROVED` or `CHANGES` (deterministic fold — never tally by hand) | if it prints `PENDING`, the review is not settled — chase the `awaiting required:` reviewers per [Lifecycle](#lifecycle) step 3 |
+
+All probes clean → nothing is blocked on your verdict and any artifact you name is at its folded state;
+proceed to request a new review or advance an existing one below.
+
 ## Layout (under `team/<team>/review/<slug>/`)
 - **`review/<slug>.md`** — the review request. OKF `type: Review`. `<slug>` is a short id for the
   artifact (e.g. `pr-42`). Frontmatter may name required reviewers:

@@ -18,6 +18,22 @@ resume brief**, so waking up is reliable instead of a re-read.
 Whether/when to snapshot is a judgment call (prose); building the schema and folding many snapshots to
 the newest is deterministic (the `coord-engine` tool).
 
+## Where to start — the re-entrancy probes
+
+On waking (fresh session / cron), before doing anything else, probe whether a resume brief already
+exists for you. Enter at the **first probe that fails** (per the repo's skill-quality pattern,
+`docs/skill-quality-pattern.md`); a snapshot is a single-file overwrite and `resume` is a pure read, so
+re-entry is always safe:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
+| Resumable snapshot for me? | `uv tool run coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
+
+Snapshot present → read the printed brief (objective / next actions / open questions / decisions) and
+resume that work. `resume <team> <agent> <task>` narrows to one task; the bare `resume <team> <agent>`
+form folds to the newest across all your tasks. Both are pure reads — safe to re-run any time.
+
 ## Snapshot schema (`member/<agent>/continuity/<task>/latest.json`)
 ```json
 { "schema": "coord.teams.continuity.v1",
