@@ -1136,7 +1136,7 @@ def cmd_answer(args: argparse.Namespace, transport: Any) -> int:
     try:
         doc, owner = tasks.apply_answer(transport.read(path), now=_iso(_now()),
                                         answer=args.with_text, relayer=_host(),
-                                        human=_human())
+                                        human=args.human or _human())
     except tasks.TaskError as e:
         print(f"answer failed: {e}", file=sys.stderr)
         return 1
@@ -1240,6 +1240,7 @@ def build_parser() -> argparse.ArgumentParser:
     aw = sub.add_parser("answer", help="operator return-leg: unblock + answer + hand back to owner")
     aw.add_argument("team"); aw.add_argument("name")
     aw.add_argument("--with", dest="with_text", required=True, help="the answer text")
+    aw.add_argument("--human", help="operator handle (default $FULCRA_COORD_HUMAN or 'human') — must match the handle used with `asks`")
     aw.set_defaults(func=cmd_answer)
 
     bf = sub.add_parser("briefing", help="one-call session-start bundle (tolerates absent add-ons)")

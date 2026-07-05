@@ -1104,3 +1104,22 @@ def test_roles_claim_warns_on_unregistered_role(capsys):
     t.put("team/r/roles/real-role.md", "---\ntype: Role\npolicy: shared\n---\n")
     assert cli.main(["roles", "claim", "r", "real-role", "--agent", "a"], transport=t) == 0
     assert "no registered role doc" not in capsys.readouterr().err
+
+
+def test_answer_human_flag_matches_asks(capsys):
+    # env-skew footgun: asks --human ash listed it; answer must accept with the same flag
+    t = FakeTransport()
+    cli.main(["task", "start", "r", "Pick window", "--status", "active"], transport=t)
+    cli.main(["task", "update", "r", "pick-window", "--status", "blocked",
+              "--blocked-on", "ash", "--assignee", "ash"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["answer", "r", "pick-window", "--with", "window B",
+                     "--human", "ash"], transport=t) == 0
+
+
+def test_answer_rejects_terminal_task_with_stale_needs_human(capsys):
+    t = FakeTransport()
+    t.put("team/r/task/oldie.md",
+          "---\ntype: Task\ntitle: O\nstatus: done\nowner: a\ntags: [needs:human]\n---\n")
+    assert cli.main(["answer", "r", "oldie", "--with", "hi"], transport=t) == 1
+    assert "not a waiting-for-operator ask" in capsys.readouterr().err
