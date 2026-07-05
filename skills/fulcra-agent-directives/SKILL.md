@@ -31,7 +31,9 @@ safe:
 Inbox clear → nothing is assigned to you and unacked; proceed to `tell` / `broadcast` / `remind` others,
 or capture backlog with `later`. (Add `--all` to also surface `@backlog` items in the count.)
 
-## Verbs (all `uv tool run coord-engine …`)
+## Verbs
+
+(all `uv tool run coord-engine …`)
 ```bash
 tell      <team> <assignee> <title> [-p P0..P3] [-s summary] [-n next] [--from me]   # direct work
 broadcast <team> <title> …                        # assignee '*' — reaches every non-stale agent
