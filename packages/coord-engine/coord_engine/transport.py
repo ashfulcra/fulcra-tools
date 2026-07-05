@@ -88,6 +88,24 @@ class FulcraFileTransport:
         self.command = command or _split_command()
         self.timeout = timeout
 
+    def updates(self, period: str) -> Optional[list]:
+        """File-change feed via ``fulcra-api data-updates`` — the reconcile fast
+        path's evidence source. Never raises: any failure returns None, which
+        callers treat as "no evidence, do the full pass"."""
+        import json as _json
+        try:
+            proc = subprocess.run(
+                [*self.command, "data-updates", period],
+                capture_output=True, text=True, timeout=self.timeout,
+            )
+            if proc.returncode != 0:
+                return None
+            data = _json.loads(proc.stdout)
+            changes = data.get("file_changes")
+            return changes if isinstance(changes, list) else None
+        except Exception:
+            return None
+
     def _run(self, args: list[str], **kw: Any) -> subprocess.CompletedProcess:
         return subprocess.run(
             [*self.command, "file", *args],

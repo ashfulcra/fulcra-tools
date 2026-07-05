@@ -51,3 +51,41 @@ def test_list_dir_sorted_by_name():
         "1B  2026-07-01 04:12PM UTC  zzz.md\n1B  2026-07-01 04:12PM UTC  aaa.md")
     names = [e["name"] for e in sorted(entries, key=lambda e: e.get("name") or "")]
     assert names == ["aaa.md", "zzz.md"]
+
+
+# --- transport.updates() (data-updates feed) ---
+
+class _Proc:
+    def __init__(self, rc, out):
+        self.returncode, self.stdout, self.stderr = rc, out, ""
+
+
+def _fake_run(result, calls):
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return result
+    return run
+
+
+def test_updates_parses_file_changes(monkeypatch):
+    from coord_engine import transport as tr
+    t = tr.FulcraFileTransport(command=["uv", "tool", "run", "fulcra-api"])
+    calls = []
+    monkeypatch.setattr(tr.subprocess, "run",
+                        _fake_run(_Proc(0, '{"file_changes": [{"full_name": "/team/r/task/a.md"}]}'), calls))
+    got = t.updates("900 seconds")
+    assert got == [{"full_name": "/team/r/task/a.md"}]
+    # exact command: the transport's own base verbatim — no binary rewriting
+    assert calls == [["uv", "tool", "run", "fulcra-api", "data-updates", "900 seconds"]]
+
+
+def test_updates_never_raises(monkeypatch):
+    from coord_engine import transport as tr
+    t = tr.FulcraFileTransport(command=["fulcra-api"])
+    for proc in (_Proc(2, ""), _Proc(0, "not json"), _Proc(0, '{"file_changes": "nope"}')):
+        monkeypatch.setattr(tr.subprocess, "run", _fake_run(proc, []))
+        assert t.updates("60 seconds") is None
+    def boom(cmd, **kw):
+        raise OSError("no binary")
+    monkeypatch.setattr(tr.subprocess, "run", boom)
+    assert t.updates("60 seconds") is None

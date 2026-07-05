@@ -136,3 +136,145 @@ def test_reconcile_degraded_on_list_failure_writes_nothing():
     res = _run(t)
     assert res["degraded"] is True
     assert t.store == before  # no truncated index written
+
+
+# --- data-updates fast path ---
+
+def _reconciled(t, now="2026-07-01T12:00:00Z"):
+    from coord_engine import reconcile as rec
+    return rec.reconcile(t, "r", now=now, today=now[:10], host="h")
+
+
+def _with_updates(t, changes):
+    t.updates_calls = []
+    def updates(period):
+        t.updates_calls.append(period)
+        return changes
+    t.updates = updates
+    return t
+
+
+def test_fast_path_skips_full_pass_when_no_relevant_changes():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)                                     # seed aggregate at 12:00
+    _with_updates(t, [{"full_name": "/team/r/presence/x.md"},   # irrelevant churn
+                      {"full_name": "/other/thing.md"}])
+    index_before = t.store["team/r/task/index.md"]
+    t.store["team/r/task/a.md"] = _task("Alpha CHANGED", "active")  # sneaky edit the feed missed
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert res.get("fast_path") is True
+    assert t.store["team/r/task/index.md"] == index_before   # index untouched (fold of unchanged inputs)
+    assert res["tasks"] == 1 and res["parsed"] == 0
+
+
+def test_fast_path_declines_on_task_change():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "/team/r/task/b.md"}])
+    t.put("team/r/task/b.md", _task("Bravo", "active"))
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")
+    assert res["tasks"] == 2
+
+
+def test_fast_path_declines_on_ack_change():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "/team/r/_coord/acks/x.json"}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")
+
+
+def test_fast_path_declines_on_malformed_feed_entry():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "/team/r/presence/x.md"}, {}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")
+
+
+def test_fast_path_declines_without_updates_support_or_on_error():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")   # no .updates attr
+    assert not res.get("fast_path")
+    def broken(period):
+        return None
+    t.updates = broken
+    res = _reconciled(t, now="2026-07-01T12:35:00Z")   # updates errors -> None
+    assert not res.get("fast_path")
+
+
+def test_fast_path_declines_when_aggregate_stale():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)                                     # generated_at 12:00
+    _with_updates(t, [])
+    res = _reconciled(t, now="2026-07-01T19:00:00Z")   # 7h later > 6h guard
+    assert not res.get("fast_path")
+
+
+def test_fast_path_still_writes_health_shard():
+    from coord_engine import health as health_mod
+    from coord_engine.tasks import agent_key
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    shard_path = f"{health_mod.health_prefix('r')}{agent_key('h')}.json"
+    t.store.pop(shard_path, None)                      # wipe; fast path must re-beat
+    _with_updates(t, [])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert res.get("fast_path") is True
+    assert shard_path in t.store                       # host doesn't go dark on fast path
+
+
+def test_fast_path_ignores_own_derived_artifacts_in_feed():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    # the previous pass's own index/log writes show up in the store feed
+    _with_updates(t, [{"full_name": "/team/r/task/index.md"},
+                      {"full_name": "/team/r/task/log.md"}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert res.get("fast_path") is True
+
+
+def test_fast_path_normalizes_missing_leading_slash():
+    # a relevant change WITHOUT the leading slash must still decline (fail-closed)
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "team/r/task/b.md"}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")
+
+
+def test_fast_path_declines_on_unparseable_feed_entries():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    for bad in (["just-a-string"], [{"full_name": 7}], [{"no_name": "x"}], [None]):
+        _with_updates(t, bad)
+        res = _reconciled(t, now="2026-07-01T12:30:00Z")
+        assert not res.get("fast_path"), f"feed {bad!r} must be doubt -> full pass"
+
+
+def test_fast_path_declines_on_deletion_entry():
+    # LIVE-CAPTURED feed shape for a deleted file (2026-07-05, fulcra data-updates):
+    # {"id": "6b369982-...", "full_name": "/team/fulcra/_scratch/del-probe.txt",
+    #  "scan_state": "unscanned", "size": 6, "uploaded_at": "2026-07-05T12:46:43Z",
+    #  "archived_at": null, "deleted_at": "2026-07-05T12:46:43.832485Z",
+    #  "state": "deleted"}
+    # -> deletions DO carry full_name; a deleted task file declines the fast path.
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "/team/r/task/gone.md", "state": "deleted",
+                       "deleted_at": "2026-07-01T12:10:00Z"}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")

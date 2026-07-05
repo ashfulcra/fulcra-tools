@@ -230,7 +230,7 @@ wheels = [
 
 [[package]]
 name = "fulcra-api"
-version = "0.1.34"
+version = "0.1.35"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -241,9 +241,9 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pytest" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7d/96/41503a85523cc4541a06f6a1fb4e6e6df81ca450b755d13a40a52ad2800a/fulcra_api-0.1.34.tar.gz", hash = "sha256:65435dd07762098e47ad3a7e671f7c0bf37128b2e7ffcb43735dea5d5d224482", size = 27386, upload-time = "2026-06-12T05:05:40.817Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/74/9b561c64c35c0915e26b6e12cec8face20d024cf76dbef0408554d1f208f/fulcra_api-0.1.35.tar.gz", hash = "sha256:6dfdb26f77e45cdb5d411ed85c9eac1a1d8f630293ba714a138badd59d5b79a4", size = 28460, upload-time = "2026-07-01T18:18:26.582Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ee/b6/bc49bda2f9f83444510a1e6290d2599e3fc10115caaac4fc13c97267130c/fulcra_api-0.1.34-py3-none-any.whl", hash = "sha256:a86eb03b327868b92ca0e9258defddb6ad683af23b796410b6cff534c6f3811b", size = 32155, upload-time = "2026-06-12T05:05:39.75Z" },
+    { url = "https://files.pythonhosted.org/packages/04/6d/447dacb9b0bc2b35efd237138d08ab3feccb71ac463e2e0c2746dcbc7952/fulcra_api-0.1.35-py3-none-any.whl", hash = "sha256:c26062a7b1d72836c5cbec339fad1de3f8b1272a9d57ef9481a74e28511a26e3", size = 33285, upload-time = "2026-07-01T18:18:21.345Z" },
 ]
 
 [[package]]

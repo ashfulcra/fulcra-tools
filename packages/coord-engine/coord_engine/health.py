@@ -36,6 +36,7 @@ def build_shard(*, host: str, now: str, engine_version: str,
         "parsed": result.get("parsed"),
         "reused": result.get("reused"),
         "warnings": len(result.get("warnings") or []),
+        "fast_path": bool(result.get("fast_path")),
     }
 
 
