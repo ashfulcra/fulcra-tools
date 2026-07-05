@@ -15,6 +15,22 @@ drop-zone of markdown files; this skill adds **structured directed work**: a dir
 deterministic per-agent **inbox** with **acks** (acking hides an item for you and stops re-notify) —
 without replacing the teams inbox for freeform messages.
 
+## Where to start — the re-entrancy probes
+
+On waking (or before directing more work), probe your own inbox — what is already assigned to you and
+unacked. Enter at the **first probe that fails** (per the repo's skill-quality pattern,
+`docs/skill-quality-pattern.md`); reading the inbox is a pure fold and an ack is an idempotent
+single-file write (acking an already-acked slug just rewrites the same shard), so re-entry is always
+safe:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT direct/ack against a broken engine |
+| Inbox clear for me? | `uv tool run coord-engine inbox <team> -a <id>` | the header line ends `0 item(s)` (the fold found nothing open + unacked for you) — NON-mutating read | **Work your inbox** — the header names a non-zero count and each following line is an open directive; act on / ack it (`inbox <team> --agent <id> --ack <slug>`) via [Verbs](#verbs) before directing new work |
+
+Inbox clear → nothing is assigned to you and unacked; proceed to `tell` / `broadcast` / `remind` others,
+or capture backlog with `later`. (Add `--all` to also surface `@backlog` items in the count.)
+
 ## Verbs (all `uv tool run coord-engine …`)
 ```bash
 tell      <team> <assignee> <title> [-p P0..P3] [-s summary] [-n next] [--from me]   # direct work

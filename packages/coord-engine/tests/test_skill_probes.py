@@ -23,7 +23,8 @@ CLI_SRC = (PKG / "coord_engine" / "cli.py").read_text(encoding="utf-8")
 
 #: skills that ship a probe table (repo-root skills/ tree)
 PROBE_SKILLS = ("fulcra-agent-presence", "fulcra-agent-roles", "fulcra-agent-tasks",
-                "fulcra-agent-automation")
+                "fulcra-agent-automation", "fulcra-agent-continuity",
+                "fulcra-agent-review", "fulcra-agent-directives")
 
 PROBE_HEADING = "## Where to start — the re-entrancy probes"
 
