@@ -1112,9 +1112,13 @@ def test_answer_human_flag_matches_asks(capsys):
     cli.main(["task", "start", "r", "Pick window", "--status", "active"], transport=t)
     cli.main(["task", "update", "r", "pick-window", "--status", "blocked",
               "--blocked-on", "ash", "--assignee", "ash"], transport=t)
+    cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
+    import json as _j
+    cli.main(["asks", "r", "--human", "ash", "--json"], transport=t)   # asks lists it...
+    assert any(g["name"] == "pick-window" for g in _j.loads(capsys.readouterr().out))
     assert cli.main(["answer", "r", "pick-window", "--with", "window B",
-                     "--human", "ash"], transport=t) == 0
+                     "--human", "ash"], transport=t) == 0              # ...and answer accepts it
 
 
 def test_answer_rejects_terminal_task_with_stale_needs_human(capsys):
