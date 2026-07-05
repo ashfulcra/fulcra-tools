@@ -296,12 +296,11 @@ def reconcile(
     prior_by_name = aggregate.rows_by_name(prior_rows)
 
     if _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
+        # NOTE: warnings from the prior aggregate are not resurfaced here; they
+        # reappear on the next full pass (<= MAX_FAST_PATH_HOURS away).
         result = {"tasks": len(prior_rows), "parsed": 0, "reused": len(prior_rows),
                   "transitions": 0, "warnings": [], "fast_path": True}
-        _write_health_shard(transport, team, host=host, now=now,
-                            result={"tasks": len(prior_rows), "parsed": 0,
-                                    "reused": len(prior_rows), "warnings": [],
-                                    "fast_path": True}, log=log)
+        _write_health_shard(transport, team, host=host, now=now, result=result, log=log)
         log.info("reconciled (fast path)", team=team, tasks=len(prior_rows))
         return result
 

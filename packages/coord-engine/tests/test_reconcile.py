@@ -262,3 +262,19 @@ def test_fast_path_declines_on_unparseable_feed_entries():
         _with_updates(t, bad)
         res = _reconciled(t, now="2026-07-01T12:30:00Z")
         assert not res.get("fast_path"), f"feed {bad!r} must be doubt -> full pass"
+
+
+def test_fast_path_declines_on_deletion_entry():
+    # LIVE-CAPTURED feed shape for a deleted file (2026-07-05, fulcra data-updates):
+    # {"id": "6b369982-...", "full_name": "/team/fulcra/_scratch/del-probe.txt",
+    #  "scan_state": "unscanned", "size": 6, "uploaded_at": "2026-07-05T12:46:43Z",
+    #  "archived_at": null, "deleted_at": "2026-07-05T12:46:43.832485Z",
+    #  "state": "deleted"}
+    # -> deletions DO carry full_name; a deleted task file declines the fast path.
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "/team/r/task/gone.md", "state": "deleted",
+                       "deleted_at": "2026-07-01T12:10:00Z"}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")
