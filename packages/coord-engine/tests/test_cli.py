@@ -871,6 +871,61 @@ def test_answer_rejects_non_ask_and_empty(capsys):
     assert "not a waiting-for-operator ask" in capsys.readouterr().err
 
 
+def test_answer_rejects_blocked_non_human_dependency(capsys):
+    from coord_engine import okf
+    t = FakeTransport()
+    t.put(
+        "team/r/task/ci-block.md",
+        "---\n"
+        "type: Task\n"
+        "title: CI Block\n"
+        "status: blocked\n"
+        "owner: build-agent\n"
+        "assignee: ci-agent\n"
+        "blocked_on: CI pipeline is red\n"
+        "timestamp: 2026-07-01T00:00:00Z\n"
+        "---\n",
+    )
+    assert cli.main(["answer", "r", "ci-block", "--with", "ship it"], transport=t) == 1
+    assert "not a waiting-for-operator ask" in capsys.readouterr().err
+    fm = okf.parse_frontmatter(t.store["team/r/task/ci-block.md"])
+    assert fm["status"] == "blocked"
+    assert fm["assignee"] == "ci-agent"
+    assert fm["blocked_on"] == "CI pipeline is red"
+
+
+def test_answer_accepts_configured_human_without_tag(capsys, monkeypatch):
+    from coord_engine import okf
+    monkeypatch.setenv("FULCRA_COORD_HUMAN", "ash")
+    t = FakeTransport()
+    for slug, assignee, blocked_on in (
+        ("assignee-ask", "ash", "choose a branch"),
+        ("blocked-on-ask", "build-agent", "ash"),
+    ):
+        t.put(
+            f"team/r/task/{slug}.md",
+            "---\n"
+            "type: Task\n"
+            f"title: {slug}\n"
+            "status: blocked\n"
+            "owner: build-agent\n"
+            f"assignee: {assignee}\n"
+            f"blocked_on: {blocked_on}\n"
+            "timestamp: 2026-07-01T00:00:00Z\n"
+            "---\n",
+        )
+
+    assert cli.main(["answer", "r", "assignee-ask", "--with", "use branch A"], transport=t) == 0
+    assert cli.main(["answer", "r", "blocked-on-ask", "--with", "approved"], transport=t) == 0
+
+    for slug in ("assignee-ask", "blocked-on-ask"):
+        fm = okf.parse_frontmatter(t.store[f"team/r/task/{slug}.md"])
+        assert fm["status"] == "active"
+        assert fm["assignee"] == "build-agent"
+        assert fm["blocked_on"] == ""
+        assert fm["next_action"].startswith("OPERATOR ANSWER:")
+
+
 def test_asks_oldest_first_ordering(capsys):
     import json as _j
     t = FakeTransport()
