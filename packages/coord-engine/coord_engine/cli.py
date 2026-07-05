@@ -869,6 +869,10 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
 def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     slug = tasks.agent_key(agent)
+    if okf.parse_frontmatter(transport.read(_role_doc_path(args.team, args.role))) is None:
+        print(f"note: role {args.role!r} has no registered role doc — status folds fall back "
+              f"to defaults and review role-routing will NOT match this role's holders; "
+              f"create team/{args.team}/roles/{args.role}.md", file=sys.stderr)
     shard_path = f"{_leases_prefix(args.team, args.role)}{slug}.md"
     state = _nonce_state_path(args.team, args.role, slug)
     # Same-id double-acting check: leases can't distinguish two sessions sharing one

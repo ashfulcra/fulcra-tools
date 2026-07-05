@@ -1029,3 +1029,13 @@ def test_needs_me_review_honors_role_doc_sla(capsys):
     cli.main(["needs-me", "r", "--agent", "tortoise", "--json"], transport=t)
     got = _j.loads(capsys.readouterr().out)
     assert any(g.get("name") == "pr-slow" for g in got if g.get("type") == "review-pending")
+
+
+def test_roles_claim_warns_on_unregistered_role(capsys):
+    t = FakeTransport()
+    assert cli.main(["roles", "claim", "r", "ghost-role", "--agent", "a"], transport=t) == 0
+    err = capsys.readouterr().err
+    assert "no registered role doc" in err
+    t.put("team/r/roles/real-role.md", "---\ntype: Role\npolicy: shared\n---\n")
+    assert cli.main(["roles", "claim", "r", "real-role", "--agent", "a"], transport=t) == 0
+    assert "no registered role doc" not in capsys.readouterr().err
