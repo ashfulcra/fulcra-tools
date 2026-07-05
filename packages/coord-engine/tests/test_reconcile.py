@@ -188,6 +188,15 @@ def test_fast_path_declines_on_ack_change():
     assert not res.get("fast_path")
 
 
+def test_fast_path_declines_on_malformed_feed_entry():
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _reconciled(t)
+    _with_updates(t, [{"full_name": "/team/r/presence/x.md"}, {}])
+    res = _reconciled(t, now="2026-07-01T12:30:00Z")
+    assert not res.get("fast_path")
+
+
 def test_fast_path_declines_without_updates_support_or_on_error():
     t = FakeTransport()
     t.put("team/r/task/a.md", _task("Alpha", "active"))

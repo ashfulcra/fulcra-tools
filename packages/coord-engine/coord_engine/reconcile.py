@@ -74,7 +74,11 @@ def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: st
     # index/log writes must not poison the next pass's no-change evidence
     derived = (f"/team/{team}/task/index.md", f"/team/{team}/task/log.md")
     for c in changes:
-        name = str((c or {}).get("full_name") or "")
+        if not isinstance(c, dict) or not isinstance(c.get("full_name"), str):
+            return False
+        name = c["full_name"]
+        if not name:
+            return False
         if name.startswith(relevant) and name not in derived:
             return False
     log.info("fast path: no fold-relevant changes in feed", team=team, window=period,
