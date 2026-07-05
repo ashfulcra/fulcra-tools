@@ -56,10 +56,14 @@ jobs:
 
       - name: Skill contract + installer tests (cheap, OS-agnostic)
         # Fast ubuntu gate for skill trees the expensive macOS job path-filters
-        # away: netflix contract tests + coord-engine suite (incl. the bash
-        # installer tests, which shim uname/launchctl/crontab so both platform
-        # branches run anywhere). Keeps "drift is caught at commit time" true
-        # for skill-only PRs. ~30s.
+        # away: netflix + csv-importer + media-helpers contract tests, plus the
+        # coord-engine suite (incl. the bash installer tests, which shim
+        # uname/launchctl/crontab so both platform branches run anywhere). Keeps
+        # "drift is caught at commit time" true for skill-only PRs. ~30s.
+        # The csv/media selections are node-id filtered to the SKILL-contract
+        # files so this stays cheap — their full suites run in the macOS job.
         run: |
           uv run --all-packages --extra dev python -m pytest \
-            packages/netflix-skill/tests packages/coord-engine/tests -q
+            packages/netflix-skill/tests packages/coord-engine/tests \
+            packages/csv-importer/tests/test_skill_contract.py \
+            packages/media-helpers/tests/test_skill_contract.py -q

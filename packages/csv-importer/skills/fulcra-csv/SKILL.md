@@ -11,6 +11,30 @@ This skill teaches you (the AI agent) how to import a CSV into the right Fulcra 
 
 ---
 
+## Where to start — the re-entrancy probes
+
+Before running an import, probe how far this user already got. The states are a prefix of
+the import flow — **authed? → target def exists? → anything-to-import? → already landed?** — so
+enter at the **first probe that fails** (per the repo's skill-quality pattern,
+`docs/skill-quality-pattern.md`). Every state is safely re-enterable: re-running an import produces
+the same deterministic source_ids and Fulcra dedups server-side (see "Critical invariant" below), so
+there is never a penalty for re-probing or re-importing.
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
+| Target picked + def exists? | for a user-defined annotation: `fulcra catalog` and confirm the definition UUID the user intends is listed. For a built-in type (`--data-type BodyMass`, etc.) or the generic no-flags path: no def is needed — this probe is N/A | the intended `--definition-id` UUID appears in the catalog, OR the user is targeting a built-in / generic type | **BOOTSTRAP** — mint a def with `fulcra-csv bootstrap …` (prints the UUID), then import against it |
+| Anything to import? | `fulcra-csv import <csv-path> --dry-run` (add the same column flags you'll use for the real run) | prints `parsed N events …` with N > 0 and the sampled rows look right (no auth or ingest — pure parse) | **EXPORT/COLLECT** — the file is empty or the column mapping is wrong; fix the flags or get a better file before importing |
+| Already landed? | `fulcra-csv export --definition-id <uuid> --start "30 days ago" --columns start_time,source_id` (built-in target: pass `--data-type <Name>` instead) | rows come back that match the CSV you're about to import (compare `source_id` hashes or timestamps) | **IMPORT** — nothing landed yet; run `fulcra-csv import … ` for real (drop `--dry-run`) |
+
+All probes pass → the data is already imported; tell the user and point them at
+[Context Web](https://context.fulcradynamics.com) to browse it. A brand-new user fails the first
+probe. Note the `fulcra …` (not `fulcra-csv …`) commands in the first two probes belong to the
+separate [fulcra-api](https://github.com/fulcradynamics/fulcra-api-python) CLI (`fulcra auth`,
+`fulcra catalog`); `fulcra-csv` has no auth or catalog subcommand of its own.
+
+---
+
 ## Three target modes — pick first
 
 Every import targets ONE of three places. Decide first which you're using:
