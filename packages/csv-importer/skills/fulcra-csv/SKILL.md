@@ -34,7 +34,7 @@ probe. Note the `fulcra auth print-access-token` command (probe 1, and reused in
 curl) belongs to the separate [fulcra-api](https://github.com/fulcradynamics/fulcra-api-python) CLI;
 `fulcra-csv` has no auth subcommand of its own. Probe 2 hits the Fulcra Life API annotation endpoint
 (`GET /user/v1alpha1/annotation` on `https://api.fulcradynamics.com`, the host the fulcra-api client
-resolves from `FULCRA_API_BASE`/its OIDC audience) directly with `curl` — the same GET the CLI's
+is what this repo's fulcra-common client resolves from `FULCRA_API_BASE`; the fulcra-api lib derives the same host from its OIDC audience) directly with `curl` — the same GET the CLI's
 `annotations_catalog()` performs — because neither `fulcra` nor `fulcra-csv` exposes a subcommand
 that lists user-defined annotation definitions.
 

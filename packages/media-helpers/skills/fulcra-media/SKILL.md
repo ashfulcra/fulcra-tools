@@ -16,7 +16,7 @@ This skill helps you (the AI agent) run imports on the user's behalf, schedule p
 ## Where to start — the re-entrancy probes
 
 Before running an import, probe how far this user already got. The states are a prefix of the flow —
-**authed? → defs bootstrapped? → anything to import? → already synced?** — so enter at the **first
+**authed? → defs bootstrapped? → nothing pending? → already synced?** — so enter at the **first
 probe that fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`). Every
 state is safely re-enterable: `bootstrap` is idempotent, and each import is idempotent (deterministic
 source_ids + the watermark layer), so re-probing or re-importing never double-counts. The rows below
@@ -29,7 +29,7 @@ steps) into one ordered entry point — see those sections for the fuller treatm
 | Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
 | Defs bootstrapped? | `fulcra-media status` | the JSON's `watched_definition_id` / `listened_definition_id` / `read_definition_id` are non-null for the category you're importing (Watched for netflix/trakt/youtube/…, Listened for lastfm/deezer/spotify/…, Read for goodreads) | **BOOTSTRAP** — run `fulcra-media bootstrap` (idempotent; no-op once defs exist) |
 | Nothing pending? | `fulcra-media import <name> --check-only --json` then read `would_post` (file-based importers also take their `<path>`/URL argument — e.g. `netflix`, `youtube`, `spotify-extended`, `spotify-ifttt`, `apple-takeout`, `generic-csv` take a file path; `generic-rss` takes a feed URL — so `--check-only` still needs it) | `would_post: 0` (`--check-only` skips the POST; costs an API readback but no ingest) | **IMPORT** — `would_post` > 0 means there is new media; run `fulcra-media import <name> --json` for real |
-| Already synced? | `fulcra-media status` and read `watermarks["<name>"]` | the pass-criterion depends on the importer's watermark class (see `fulcra_media/watermarks.py`, which defines all three shapes): **API-poll importers** (`lastfm`, `deezer`, `letterboxd`, `goodreads`, `generic-rss`) store an **ISO 8601 timestamp** — pass when it's present and recent. **Snapshot importers** (`apple-podcasts`) use the **JSON `{sha256, path, mtime}`** shape — pass when the recorded `sha256`/`mtime` still matches the on-disk file (unchanged file = nothing new). **No-watermark importers** — the one-shot GDPR/export uploads (`spotify-extended`, `spotify-ifttt`, `youtube`, `apple-takeout`, `netflix`) plus `trakt` and `generic-csv` — **never advance an ISO/snapshot watermark** in `state.watermarks`, so this probe is N/A for them: fall back to the `would_post` probe above | **IMPORT** — ISO watermark cold-start or stale, or the snapshot file changed; run the real import to advance it. For the no-watermark importers, re-check via `would_post`; for the export uploads specifically, re-run only when the user hands you a fresh export |
+| Already synced? | `fulcra-media status` and read `watermarks["<name>"]` | the pass-criterion depends on the importer's watermark class (only ISO watermarks are ever WRITTEN — `watermarks.py` also defines a snapshot shape, but no importer currently calls it): **API-poll importers** (`lastfm`, `deezer`, `letterboxd`, `goodreads`, `generic-rss`) store an **ISO 8601 timestamp** — pass when it's present and recent (note `goodreads` and `generic-rss` key theirs as `watermarks["goodreads:<user_id>"]` / `watermarks["generic-rss:<feed_url>"]`, not the bare name). **Everything else** — `apple-podcasts`, the one-shot GDPR/export uploads (`spotify-extended`, `spotify-ifttt`, `youtube`, `apple-takeout`, `netflix`), `trakt`, and `generic-csv` — **never advances a watermark**, so this probe is N/A for them: fall back to the `would_post` probe above | **IMPORT** — ISO watermark cold-start or stale; run the real import to advance it. For the no-watermark importers, re-check via `would_post`; for the export uploads specifically, re-run only when the user hands you a fresh export |
 
 All probes pass with `would_post: 0` and a fresh watermark → this importer is already synced; move on
 to the next source or tell the user they're up to date. A brand-new user fails the first probe.
@@ -49,7 +49,7 @@ fulcra-media status
 
 The output (JSON) tells you:
 - Which annotation definitions exist (`watched_definition_id`, `listened_definition_id`, `read_definition_id`) — if `null`, run `fulcra-media bootstrap` to create them
-- Per-importer watermarks (`watermarks["lastfm"]`, `watermarks["trakt"]`, ...) — empty means cold-start, ISO timestamp means incremental
+- Per-importer watermarks (`watermarks["lastfm"]`, `watermarks["deezer"]`, ...) — empty means cold-start, ISO timestamp means incremental
 - Service-tag UUIDs the user has already created
 
 If the user is brand new, walk them through `fulcra-media setup` (interactive picker) — but **don't run setup non-interactively**, it expects stdin input from a TTY.
