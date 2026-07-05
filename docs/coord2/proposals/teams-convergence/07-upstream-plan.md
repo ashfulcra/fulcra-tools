@@ -11,7 +11,10 @@ for *trivially adoptable*, not *persuasive*.
 The 11 `fulcra-agent-*` skills (operator was added after this doc's first draft), shape-identical to upstream (`skills/<name>/SKILL.md` + `references/`,
 scripts allowed per the `fulcra-dashboard` precedent). Contribution = `git mv` + polish:
 - **Wave 1 (low-friction, additive):** `presence`, `roles`, `continuity`, `review`, `directives`,
-  `health` — pure additions to a teams space; no change to any existing upstream skill's semantics.
+  `health` — additive derived state and team directories that do not reinterpret existing upstream
+  files or change any existing upstream skill's behavior. It still introduces durable `_coord/`
+  shards, review/task/presence folders, and generated views, so the pitch must be precise: "no
+  semantic change to current files," not "no new semantics."
 - **Wave 2 (touches teams' own conventions):** `reconcile`, `tasks`, `forge`, `automation`, `operator`. Reconcile
   makes `task/index.md` **engine-owned**, which contradicts `fulcra-agent-teams`' documented
   "hand-maintain the index" guidance — so wave 2 must include a small **amendment PR to
@@ -23,17 +26,27 @@ scripts allowed per the `fulcra-dashboard` precedent). Contribution = `git mv` +
 
 ### Track 2 — the engine (decide its home; this is the load-bearing open question)
 `coord-engine` is one stdlib-only tool the skills shell to, exactly like they shell to `fulcra-api`.
-Three options, in descending preference:
-1. **Fold into `fulcra-api`** as a command group (`fulcra-api team …`). Best end-state: one tool, one
+Initial adoption should minimize Fulcra review burden; the best long-term home does not have to be the
+first landing zone.
+
+Three options, in recommended adoption order:
+1. **`fulcradynamics/coord-engine` repo + PyPI** under Fulcra's org. This is the preferred initial ask:
+   it keeps the tool/skill separation, gives the official skills a Fulcra-owned dependency, and lets API
+   reviewers inspect a stdlib-only CLI without also accepting a fulcra-api surface-area change.
+2. **Tagged coord2 engine as bootstrap** (`ashfulcra/coord2` tag, already proven at v1.x). This is the
+   lowest-friction bridge while Fulcra decides ownership. It must be explicitly temporary and pinned by
+   tag/commit in docs so upstream skills do not drift against `main`.
+3. **Fold into `fulcra-api`** as a command group (`fulcra-api team …`). Best end-state: one tool, one
    auth, one install; the skills' prose changes from `uv tool run coord-engine X` to
-   `uv tool run fulcra-api team X`. Cost: Fulcra owns the code + release cadence; port is mechanical
-   (engine is stdlib-only, transport already shells to fulcra-api — folding in REMOVES the subprocess
-   layer and makes every fold dramatically faster via direct API calls).
-2. **`fulcradynamics/coord-engine` repo + PyPI** under Fulcra's org. Keeps the tool/skill separation;
-   minimal code review burden for their API team.
-3. **Stays in ashfulcra/coord2, referenced by tag** — the fallback that requires nothing from Fulcra but
-   leaves the official skills depending on a personal repo (acceptable interim, wrong end-state).
-Recommendation: propose 1, accept 2, ship the PRs referencing 3 until decided.
+   `uv tool run fulcra-api team X`. Cost: Fulcra owns the code + release cadence and the transport
+   rewrite replaces subprocess/text calls with internal APIs, so this is a convergence target after the
+   skill contract proves useful, not the first ask.
+
+Decision gates:
+- Start with option 1 if Fulcra is willing to host/release a small package.
+- Use option 2 for the first upstream skill PRs if repo/PyPI ownership would delay review.
+- Revisit option 3 only after wave 1 is accepted, the derived-state contract is stable, and API-team
+  sizing says the command group is worth carrying in fulcra-api proper.
 
 ### Track 3 — fulcra-api platform asks (filed as issues w/ evidence, independent of 1–2)
 Each has a concrete incident/measurement behind it from this build:
@@ -61,15 +74,44 @@ Each has a concrete incident/measurement behind it from this build:
 4. **Post-acceptance:** coord2 repo becomes a thin dev mirror or archives; fleet reinstalls from
    upstream (setup script already installs by copy — repointing the clone URL is the whole change).
 
+## Standalone posture if Fulcra stalls
+If Fulcra does not accept or host the work within ~3 months, coord2 remains a credible standalone package
+rather than an indefinitely personal experiment:
+- Release cadence: monthly patch releases while active, immediate patch for data-loss/security bugs, and
+  a tagged minor release whenever the OKF/task/review schema changes.
+- Compatibility matrix: each release notes the tested `fulcra-api` range, supported upstream
+  `fulcra-agent-teams` commit/tag, and any required migration step for `_coord/` or task shards.
+- Install docs: keep a forge-neutral install path that does not assume upstream acceptance
+  (`uv tool install`, copy/install skills from a tag, verify with `coord-engine doctor/reconcile`).
+- Ownership: Ash owns product direction; automation agents can prepare fixes, but security and
+  data-loss releases require explicit operator review plus the same independent bus review before merge.
+- Exit criteria: if Fulcra accepts wave 1 or hosts the engine, standalone docs switch to "development
+  mirror"; if not, coord2 keeps tagged releases and compatibility notes until the bus stack is replaced.
+
+## Road not taken — one bundled skill
+One `fulcra-agent-teams-v2` or `fulcra-agent-teams-pro` package would improve one-shot install and make
+the feature set easier to discover. It also avoids cross-skill version skew: users would not accidentally
+install `review` without the matching `reconcile`/`directives` assumptions.
+
+The plan still keeps 10 sibling skills because it matches upstream's current contribution shape and keeps
+review diffs small. The cost is real: the pitch must include an install recipe that enables the common
+bundle in one command or checklist, plus compatibility notes that name which skill versions were tested
+together. If upstream prefers a bundled pro skill for discoverability, use the existing sibling skills as
+source modules and expose the bundle as the packaging surface.
+
 ## Explicitly NOT upstreamed
 - `migrate.py` + docs 06 (coord-specific, one-shot, done).
 - The incumbent (`fulcra-tools-coord`) and its 0.15.x fixes — sunsetting.
 - The account-specific canonical pins (host-local cache entries).
 - `docs/proposals/` history (summarized into DESIGN.md instead).
+- Proposal-only rationale that upstream reviewers need to operate the system. DESIGN.md must carry the
+  durable operational pieces: shard/ack garbage collection, stale/grace semantics, lease/session nonce
+  rationale, review fail-closed behavior, and health/history retention. Proposal history can stay out of
+  tree only after those invariants are summarized in the upstream artifact.
 
 ## Risks / open questions (inputs to the debugging pass)
 - Upstream conventions may have MOVED since the 2026-07-01 clone (repo is an active alpha).
-- Engine-fold (option 1) rewrites the transport layer — scope unknown until their API team weighs in.
+- Fulcra-api fold (option 3) rewrites the transport layer — scope unknown until their API team weighs in.
 - The teams-amendment (engine-owned index) is the one semantic change Fulcra could reject; wave 1 is
   deliberately independent of it.
 - `npx skills add ashfulcra/coord2` compatibility assumed, never tested.
