@@ -24,7 +24,7 @@ penalty for re-probing or re-importing.
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
-| Target picked + def exists? | for a user-defined annotation, list the account's live annotation definitions and confirm the intended UUID is present: `curl --oauth2-bearer "$(fulcra auth print-access-token)" https://api.fulcradynamics.com/user/v1alpha1/annotation` (this is the GET `annotations_catalog()` reads; `fulcra catalog` lists *data types*, not user-defined annotation defs, so don't use it here). For a built-in type (`--data-type BodyMass`, etc.) or the generic default annotation: no def is needed — this probe is N/A | the intended `--definition-id` UUID appears in the JSON with `deleted_at` null, OR the user is targeting a built-in / generic type | **BOOTSTRAP** — mint a def with `fulcra-csv bootstrap …` (prints the UUID), then import against it. Do NOT bootstrap if the UUID is already present — that mints a duplicate def and splits the data |
+| Target picked + def exists? | for a user-defined/generic annotation, list the account's live annotation definitions and confirm the intended UUID is present: `curl --oauth2-bearer "$(fulcra auth print-access-token)" https://api.fulcradynamics.com/user/v1alpha1/annotation` (this is the GET `annotations_catalog()` reads; `fulcra catalog` lists *data types*, not user-defined annotation defs, so don't use it here). For a built-in type (`--data-type BodyMass`, etc.), no def is needed — this probe is N/A | the intended `--definition-id` UUID appears in the JSON with `deleted_at` null, OR the user is targeting a built-in type | **BOOTSTRAP** — mint a def with `fulcra-csv bootstrap …` (prints the UUID), then import against it. Do NOT bootstrap if the UUID is already present — that mints a duplicate def and splits the data |
 | Anything to import? | `fulcra-csv import <csv-path> --dry-run` **with a target flag** — `--definition-id <uuid>` (user-defined) or `--data-type <Name>` (built-in), plus the same column flags you'll use for the real run. `--dry-run` skips auth/ingest but the CLI still rejects the run with a UsageError if neither `--definition-id` nor `--data-type` is present (there'd be no target), so pass one even in dry-run | prints `parsed N events …` with N > 0 and the sampled rows look right (pure parse — no auth or ingest) | **EXPORT/COLLECT** — the file is empty or the column mapping is wrong; fix the flags or get a better file before importing |
 | Already landed? | `fulcra-csv export --definition-id <uuid> --start "30 days ago" --columns start_time,source_id` (built-in target: pass `--data-type <Name>` instead) | rows come back that match the CSV you're about to import (compare `source_id` hashes or timestamps) | **IMPORT** — nothing landed yet; run `fulcra-csv import … ` for real (drop `--dry-run`) |
 
@@ -69,12 +69,14 @@ fulcra-csv import weights.csv --data-type BodyMass \
 
 ⚠️ Built-in-type writes assume the receiving schema matches. Check `fulcra catalog` for known data types. As of this skill's writing, the data-type write API is forthcoming — when shipped, BodyMass/HeartRate/StepCount/etc. are first-class targets.
 
-### 3. Generic DurationAnnotation / InstantAnnotation — no flags
+### 3. Generic DurationAnnotation / InstantAnnotation — custom definition
 
-Defaults. The CLI writes plain DurationAnnotation events (or InstantAnnotation with `--annotation-type instant`). Useful for "throw a CSV in and forget" cases where you don't care to set up a named definition.
+Create a simple annotation definition with `bootstrap`, then import against it with `--definition-id`. The CLI writes plain DurationAnnotation events (or InstantAnnotation with `--annotation-type instant`). Useful for "throw a CSV in and forget" cases where the data does not belong to a built-in Fulcra type.
 
 ```bash
-fulcra-csv import random.csv  # all defaults: timestamp + title columns, DurationAnnotation
+fulcra-csv bootstrap --name "Imported CSV"
+# -> save UUID as $CSV_UUID
+fulcra-csv import random.csv --definition-id $CSV_UUID
 ```
 
 ---

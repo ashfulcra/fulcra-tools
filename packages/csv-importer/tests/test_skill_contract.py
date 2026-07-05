@@ -135,3 +135,18 @@ def test_source_id_prefix_default_matches_cli():
     assert default in SKILL, (
         f"SKILL.md no longer documents the real --source-id-prefix default "
         f"{default!r}")
+
+
+def test_skill_does_not_claim_no_target_import_works():
+    """The CLI requires either --definition-id or --data-type before it will
+    parse/import. Guard the probe table + target modes against resurrecting the
+    old stale "generic no-flags" recipe."""
+    assert "Without one of those there's no target" in CLI_SRC
+    forbidden = (
+        "generic no-flags",
+        "no flags",
+        "omit both",
+        "fulcra-csv import random.csv  #",
+    )
+    stale = [phrase for phrase in forbidden if phrase in SKILL or phrase in CLI_SRC]
+    assert not stale, f"stale no-target import claims remain: {stale}"
