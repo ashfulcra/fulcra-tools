@@ -937,3 +937,64 @@ def test_roles_release_clears_nonce_state(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir())             # state file exists
     assert cli.main(["roles", "release", "r", "reviewer", "--agent", "coord-maintainer"], transport=t) == 0
     assert not list(tmp_path.iterdir())         # state cleaned up
+
+
+# --- pending-required review surfacing (needs-me / briefing), role-aware ---
+
+def _seed_review(t, slug, required, verdicts=()):
+    t.put(f"team/r/review/{slug}.md", f"---\ntype: Review\nrequired: {required}\n---\n")
+    for who, v in verdicts:
+        t.put(f"team/r/review/{slug}/verdicts/{who}.md",
+              f"---\ntype: Verdict\nreviewer: {who}\nverdict: {v}\n---\n")
+
+
+def test_needs_me_surfaces_pending_required_review(capsys):
+    import json as _j
+    t = FakeTransport()
+    _seed_review(t, "pr-9", "rev1")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    assert cli.main(["needs-me", "r", "--agent", "rev1", "--json"], transport=t) == 0
+    got = _j.loads(capsys.readouterr().out)
+    revs = [g for g in got if g.get("type") == "review-pending"]
+    assert [r["name"] for r in revs] == ["pr-9"]
+
+
+def test_needs_me_review_role_aware(capsys):
+    import json as _j
+    from coord_engine.tasks import agent_key
+    t = FakeTransport()
+    _seed_review(t, "pr-7", "codex-reviewer")
+    # workbook holds a FRESH lease on the codex-reviewer role
+    t.put("team/r/roles/codex-reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
+    t.put(f"team/r/roles/codex-reviewer/leases/{agent_key('workbook')}.md",
+          f"---\ntype: Lease\nagent: workbook\ntimestamp: {_now_iso()}\n---\n")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    for who in ("codex-reviewer", "workbook"):        # role id itself AND lease holder
+        cli.main(["needs-me", "r", "--agent", who, "--json"], transport=t)
+        got = _j.loads(capsys.readouterr().out)
+        assert any(g.get("name") == "pr-7" for g in got if g.get("type") == "review-pending"), who
+    cli.main(["needs-me", "r", "--agent", "bystander", "--json"], transport=t)
+    got = _j.loads(capsys.readouterr().out)
+    assert not [g for g in got if g.get("type") == "review-pending"]
+
+
+def test_needs_me_settled_reviews_not_surfaced(capsys):
+    import json as _j
+    t = FakeTransport()
+    _seed_review(t, "ok", "rev1", verdicts=[("rev1", "approve")])
+    _seed_review(t, "rejected", "rev2", verdicts=[("rev2", "changes")])
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    for who in ("rev1", "rev2"):
+        cli.main(["needs-me", "r", "--agent", who, "--json"], transport=t)
+        got = _j.loads(capsys.readouterr().out)
+        assert not [g for g in got if g.get("type") == "review-pending"], who
+
+
+def test_briefing_includes_pending_reviews(capsys):
+    import json as _j
+    t = FakeTransport()
+    _seed_review(t, "pr-5", "me")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
+    out = _j.loads(capsys.readouterr().out)
+    assert [r["name"] for r in out.get("pending_reviews", [])] == ["pr-5"]

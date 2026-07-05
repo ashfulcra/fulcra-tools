@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 from . import aggregate, continuity, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
+from .roles import age_hours
 from .transport import FulcraFileTransport, TransportError
 
 __all__ = ["main"]
@@ -115,12 +116,17 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     rows = _load_rows(transport, args.team)
     got = query.needs_me(rows, args.agent, now=_iso(_now()))
+    got += _pending_reviews_for(transport, args.team, args.agent)
     if args.json:
         print(json.dumps(got, indent=2))
     else:
         print(f"{len(got)} item(s) need {args.agent}:")
         for r in got:
-            print(_line(r))
+            if r.get("type") == "review-pending":
+                print(f"  [REVIEW] pending verdict: {r['name']} "
+                      f"(required: {', '.join(r['pending_required'])})")
+            else:
+                print(_line(r))
     return 0
 
 
@@ -352,8 +358,8 @@ def _verdicts_prefix(team: str, slug: str) -> str:
     return f"team/{team}/review/{slug}/verdicts/"
 
 
-def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
-    team, slug = args.team, args.slug
+def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
+    """Shared review fold: doc + verdict shards -> tally dict."""
     req_doc = okf.parse_frontmatter(transport.read(_review_doc_path(team, slug))) or {}
     required = req_doc.get("required")
     if isinstance(required, str):
@@ -373,7 +379,55 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
     except TransportError:
         pass
-    result = review.tally(verdicts, required=required)
+    return review.tally(verdicts, required=required)
+
+
+def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+    """Reviews whose pending_required names the agent — directly or via a role
+    it holds a fresh lease on. Best-effort: any listing failure yields []
+    (needs-me/briefing must not fail because the review add-on is absent)."""
+    out: list[dict[str, Any]] = []
+    now = _iso(_now())
+    role_holders: dict[str, list[str]] = {}
+    try:
+        entries = transport.list_dir(f"team/{team}/review/")
+    except TransportError:
+        return []
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        slug = n[:-3]
+        tally = _review_tally(transport, team, slug)
+        pending = tally.get("pending_required") or []
+        if tally.get("state") != "PENDING" or not pending:
+            continue
+        for r in pending:
+            if r not in role_holders:
+                # is r a role? fold its fresh lease holders (absent role -> [])
+                holders: list[str] = []
+                try:
+                    for f in transport.list_dir(_leases_prefix(team, r)):
+                        fn = f.get("name") or ""
+                        if f.get("is_dir") or not fn.endswith(".md"):
+                            continue
+                        fm = okf.parse_frontmatter(
+                            transport.read(_leases_prefix(team, r) + fn)) or {}
+                        ts = fm.get("timestamp")
+                        if ts and (age_h := age_hours(ts, now)) is not None                                 and age_h <= roles.DEFAULT_SLA_HOURS:
+                            holders.append(str(fm.get("agent") or fn[:-3]))
+                except TransportError:
+                    pass
+                role_holders[r] = holders
+        if review.is_pending_for(pending, agent, role_holders):
+            out.append({"type": "review-pending", "name": slug,
+                        "state": "PENDING", "pending_required": pending})
+    return out
+
+
+def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
+    team, slug = args.team, args.slug
+    result = _review_tally(transport, team, slug)
     result.update({"team": team, "slug": slug})
     if args.json:
         print(json.dumps(result, indent=2))
@@ -694,6 +748,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     except Exception as e:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
+    try:
+        out["pending_reviews"] = _pending_reviews_for(transport, args.team, agent)
+    except Exception as e:
+        print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
+        out["pending_reviews"] = []
     try:
         snaps = []
         for e in transport.list_dir(_continuity_prefix(args.team, agent)):
