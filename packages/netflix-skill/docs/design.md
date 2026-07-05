@@ -66,6 +66,8 @@ Re-runs are safe: deterministic IDs make re-imports no-ops server-side.
 
 **Known limitation — concurrent first-runs**: two imports racing on a brand-new account can both pass the "no def with the marker exists" check and each create a Watched def, leaving duplicate defs sharing the namespace marker. No data corruption follows — record dedup is det-id based, not def-scoped — but it's user-visible untidiness (two defs in the picker). Acceptable for an interactively-invoked CLI, where concurrent first-runs require deliberately racing yourself; not worth a locking scheme.
 
+**Known limitation — deep-historical dates may never index** (found by the 2026-07-04 live smoke): records with 1971 event times were accepted by ingest (and briefly served by the recent-writes path — `verified: 3`) but were still absent from every query path 18+ hours later, while identical records dated same-day indexed within seconds. There appears to be an index date-floor somewhere between 1971 and the present; platform-side investigation is pending. Practical impact: rows from very old history (e.g. DVD-era entries in a full Netflix GDPR export, 1998-2007) may import successfully yet remain invisible to queries. The importer does not warn about this yet. Smoke-test methodology lesson: use recent dates for live smokes — readback and `DeletedRecord` cleanup depend on queryability (the tombstone flow itself is proven end-to-end with recent-dated records: import → readback → tombstone → verified gone).
+
 ### 5. SHARE
 Immediately after import verification, walk the user through the manual share (same instructions as HELLO, now actionable):
 1. Open `https://context.fulcradynamics.com/sharing?type=sending`.
