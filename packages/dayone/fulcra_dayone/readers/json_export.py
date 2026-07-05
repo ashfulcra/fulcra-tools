@@ -30,6 +30,10 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
                 f"unsafe Day One export: symlink member not allowed: {info.filename!r}"
             )
         # Resolve the member's destination and confirm it stays under dest_root.
+        # `dest / info.filename` also catches ABSOLUTE members: pathlib replaces
+        # the base when the right operand is absolute (`Path("/d") / "/etc/x"` ->
+        # `/etc/x`), so an absolute member resolves outside dest_root and is
+        # rejected below just like `../` traversal.
         target = (dest / info.filename).resolve()
         if target != dest_root and dest_root not in target.parents:
             raise ValueError(
