@@ -50,7 +50,7 @@ uv tool run coord-engine continuity resume <team> <agent>          # newest acro
 ```bash
 uv tool run coord-engine continuity checkpoint <team> --role <r> [--ref PATH]  # get/set the role's durable resume point
 uv tool run coord-engine continuity park <team> [--agent X] [--objective "…"]  # session exit: snapshot EVERY held role + set its checkpoint_ref
-uv tool run coord-engine briefing <team> [--agent X] [--json]                  # session start: presence + board + inbox + needs-me + latest snapshot in ONE call
+uv tool run coord-engine briefing <team> [--agent X] [--json]                  # session start: presence + board + inbox + needs-me + pending reviews + latest snapshot in ONE call
 ```
 - `park` is the session-exit verb: each role you hold (fresh lease) gets a snapshot and the role doc's
   `checkpoint_ref` points at it — the next holder (or your next session) resumes from there via

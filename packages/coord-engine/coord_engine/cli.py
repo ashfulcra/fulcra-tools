@@ -25,7 +25,6 @@ from typing import Any, Optional
 
 from . import aggregate, continuity, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
-from .roles import age_hours
 from .transport import FulcraFileTransport, TransportError
 
 __all__ = ["main"]
@@ -382,10 +381,45 @@ def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
     return review.tally(verdicts, required=required)
 
 
+def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
+    """Fresh lease holders of role name per the CANONICAL fold: the role
+    doc's own sla_hours (falling back to the default) fed to
+    roles.fresh_holders — the same fold roles status uses, so the two
+    can never disagree about a lease. A name that is not a role (no role doc)
+    or contains a path separator returns []."""
+    if "/" in name:
+        return []  # a role name is a single path segment; anything else is not a role
+    reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, name)))
+    if reg is None:
+        return []
+    try:
+        sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
+    except (TypeError, ValueError):
+        sla = roles.DEFAULT_SLA_HOURS
+    leases: list[dict[str, Any]] = []
+    try:
+        for f in transport.list_dir(_leases_prefix(team, name)):
+            fn = f.get("name") or ""
+            if f.get("is_dir") or not fn.endswith(".md"):
+                continue
+            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn)) or {}
+            leases.append({"agent": fm.get("agent") or fn[:-3],
+                           "timestamp": fm.get("timestamp")})
+    except TransportError:
+        return []
+    return [str(l.get("agent")) for l in roles.fresh_holders(leases, now=now, sla_hours=sla)]
+
+
 def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
     it holds a fresh lease on. Best-effort: any listing failure yields []
-    (needs-me/briefing must not fail because the review add-on is absent)."""
+    (needs-me/briefing must not fail because the review add-on is absent).
+
+    COST: one listing of review/ plus, per unsettled review, the verdict fold —
+    and per unique role-shaped pending name, one role-doc read + lease fold.
+    Fine for inbox polling on teams with tens of reviews; do NOT call in a tight
+    loop. If review counts grow, the right home for this is the reconcile
+    pre-fold (like task rows) — tracked on the bus."""
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
@@ -402,23 +436,10 @@ def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str
         pending = tally.get("pending_required") or []
         if tally.get("state") != "PENDING" or not pending:
             continue
-        for r in pending:
-            if r not in role_holders:
-                # is r a role? fold its fresh lease holders (absent role -> [])
-                holders: list[str] = []
-                try:
-                    for f in transport.list_dir(_leases_prefix(team, r)):
-                        fn = f.get("name") or ""
-                        if f.get("is_dir") or not fn.endswith(".md"):
-                            continue
-                        fm = okf.parse_frontmatter(
-                            transport.read(_leases_prefix(team, r) + fn)) or {}
-                        ts = fm.get("timestamp")
-                        if ts and (age_h := age_hours(ts, now)) is not None                                 and age_h <= roles.DEFAULT_SLA_HOURS:
-                            holders.append(str(fm.get("agent") or fn[:-3]))
-                except TransportError:
-                    pass
-                role_holders[r] = holders
+        if agent not in pending:  # direct hit needs no role folding at all
+            for r in pending:
+                if r not in role_holders:
+                    role_holders[r] = _role_fresh_holders(transport, team, r, now=now)
         if review.is_pending_for(pending, agent, role_holders):
             out.append({"type": "review-pending", "name": slug,
                         "state": "PENDING", "pending_required": pending})

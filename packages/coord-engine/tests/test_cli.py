@@ -998,3 +998,34 @@ def test_briefing_includes_pending_reviews(capsys):
     assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
     out = _j.loads(capsys.readouterr().out)
     assert [r["name"] for r in out.get("pending_reviews", [])] == ["pr-5"]
+
+
+def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):
+    import json as _j
+    from coord_engine.tasks import agent_key
+    t = FakeTransport()
+    _seed_review(t, "pr-8", "codex-reviewer")
+    t.put("team/r/roles/codex-reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
+    t.put(f"team/r/roles/codex-reviewer/leases/{agent_key('sleeper')}.md",
+          "---\ntype: Lease\nagent: sleeper\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    cli.main(["needs-me", "r", "--agent", "sleeper", "--json"], transport=t)
+    got = _j.loads(capsys.readouterr().out)
+    assert not [g for g in got if g.get("type") == "review-pending"]  # stale lease != holder
+
+
+def test_needs_me_review_honors_role_doc_sla(capsys):
+    import json as _j
+    from datetime import datetime, timedelta, timezone
+    from coord_engine.tasks import agent_key
+    t = FakeTransport()
+    _seed_review(t, "pr-slow", "patient-role")
+    # role doc grants 72h SLA; lease is 30h old — stale by DEFAULT (24h), fresh per doc
+    t.put("team/r/roles/patient-role.md", "---\ntype: Role\npolicy: shared\nsla_hours: 72\n---\n")
+    ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat().replace("+00:00", "Z")
+    t.put(f"team/r/roles/patient-role/leases/{agent_key('tortoise')}.md",
+          f"---\ntype: Lease\nagent: tortoise\ntimestamp: {ts}\n---\n")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    cli.main(["needs-me", "r", "--agent", "tortoise", "--json"], transport=t)
+    got = _j.loads(capsys.readouterr().out)
+    assert any(g.get("name") == "pr-slow" for g in got if g.get("type") == "review-pending")
