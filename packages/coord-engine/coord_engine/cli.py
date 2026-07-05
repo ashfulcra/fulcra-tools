@@ -77,6 +77,7 @@ def cmd_reconcile(args: argparse.Namespace, transport: Any) -> int:
         f"reconciled team/{args.team}: {res['tasks']} tasks "
         f"({res['parsed']} parsed, {res['reused']} reused), "
         f"{res['transitions']} log entries, {len(res['warnings'])} warnings"
+        + (" [fast-path: no fold-relevant changes in store feed]" if res.get("fast_path") else "")
     )
     for w in res["warnings"]:
         print(f"  warn: {w}", file=sys.stderr)

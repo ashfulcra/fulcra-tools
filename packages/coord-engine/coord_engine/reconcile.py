@@ -42,6 +42,66 @@ def _acks_prefix(team: str) -> str:
     return f"team/{team}/_coord/acks/"
 
 
+#: Fast path is only trusted while the prior aggregate is this fresh — a
+#: periodic full pass bounds the blast radius of a missed/undelivered update.
+MAX_FAST_PATH_HOURS = 6.0
+
+
+def _fast_path_no_changes(transport: Any, team: str, prior_agg: dict, *, now: str, log: Any) -> bool:
+    """True iff the store's data-updates feed proves nothing fold-relevant
+    changed since the prior aggregate. ANY doubt (no feed support, feed error,
+    stale/missing aggregate, unparseable entries) returns False -> full pass."""
+    updates_fn = getattr(transport, "updates", None)
+    if updates_fn is None:
+        return False
+    gen = (prior_agg or {}).get("generated_at")
+    if not gen:
+        return False
+    age = age_hours(gen, now)
+    if age is None or age < 0 or age > MAX_FAST_PATH_HOURS:
+        return False
+    # overlap margin: ask for a slightly wider window than the true gap
+    period = f"{int(age * 3600) + 300} seconds"
+    try:
+        changes = updates_fn(period)
+    except Exception as e:
+        log.warn("data-updates probe failed; full pass", error=str(e))
+        return False
+    if changes is None:
+        return False
+    relevant = (f"/team/{team}/task/", f"/team/{team}/_coord/acks/")
+    # derived artifacts are OUTPUTS of reconcile, not inputs — a prior pass's own
+    # index/log writes must not poison the next pass's no-change evidence
+    derived = (f"/team/{team}/task/index.md", f"/team/{team}/task/log.md")
+    for c in changes:
+        name = str((c or {}).get("full_name") or "")
+        if name.startswith(relevant) and name not in derived:
+            return False
+    log.info("fast path: no fold-relevant changes in feed", team=team, window=period,
+             feed_entries=len(changes))
+    return True
+
+
+def _write_health_shard(transport: Any, team: str, *, host: str, now: str,
+                        result: dict, log: Any) -> None:
+    """Best-effort health beat + retention GC — never fails the pass."""
+    try:
+        from . import __version__ as _v
+        shard = health_mod.build_shard(host=host, now=now, engine_version=_v, result=result)
+        transport.write(f"{health_mod.health_prefix(team)}{agent_key(host)}.json",
+                        json.dumps(shard, indent=1))
+        for e in transport.list_dir(health_mod.health_prefix(team)):
+            n = e.get("name") or ""
+            if e.get("is_dir") or not n.endswith(".json"):
+                continue
+            sh = health_mod.parse_shard(transport.read(health_mod.health_prefix(team) + n))
+            ts = (sh or {}).get("at")
+            if ts and age_hours(ts, now) > health_mod.SHARD_RETENTION_HOURS                     and hasattr(transport, "delete"):
+                transport.delete(health_mod.health_prefix(team) + n)
+    except Exception as e:  # never fail the pass, but never go silently dark either
+        log.warn("health shard write/gc failed (host will look dark)", error=str(e))
+
+
 #: Retention: terminal tasks older than this many days are archived during
 #: reconcile when retention is enabled (env COORD_RETENTION_DAYS or --retention-days).
 #: OPTIONAL — off unless configured. Bounded per pass; throttled to once/day.
@@ -217,6 +277,16 @@ def reconcile(
     prior_agg = _load_prior_aggregate(transport, team)
     prior_rows = aggregate.aggregate_rows(prior_agg)
     prior_by_name = aggregate.rows_by_name(prior_rows)
+
+    if _fast_path_no_changes(transport, team, prior_agg, now=now, log=log):
+        result = {"tasks": len(prior_rows), "parsed": 0, "reused": len(prior_rows),
+                  "transitions": 0, "warnings": [], "fast_path": True}
+        _write_health_shard(transport, team, host=host, now=now,
+                            result={"tasks": len(prior_rows), "parsed": 0,
+                                    "reused": len(prior_rows), "warnings": [],
+                                    "fast_path": True}, log=log)
+        log.info("reconciled (fast path)", team=team, tasks=len(prior_rows))
+        return result
 
     prefix = task_prefix(team)
     try:
