@@ -23,3 +23,10 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["fulcra_netflix"]
+
+# Ride the skill folder INTO the wheel as package data, following the
+# monorepo convention (collect's _bundled/, fulcra-coord's _data/): a
+# non-editable install has no workspace tree next to site-packages, so
+# loader.py falls back to this copy when the source path is absent.
+[tool.hatch.build.targets.wheel.force-include]
+"skills/fulcra-netflix" = "fulcra_netflix/_bundled/skills/fulcra-netflix"
