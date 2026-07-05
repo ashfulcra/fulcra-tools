@@ -801,6 +801,9 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in out["inbox"][:5]:
         print(_line(r))
     print(f"  needs-me: {len(out['needs_me'])} item(s)")
+    print(f"  pending reviews: {len(out['pending_reviews'])} item(s)")
+    for r in out["pending_reviews"][:5]:
+        print(_line(r))
     print(continuity.render_resume(out["resume"]))
     return 0
 

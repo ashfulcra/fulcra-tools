@@ -1000,6 +1000,16 @@ def test_briefing_includes_pending_reviews(capsys):
     assert [r["name"] for r in out.get("pending_reviews", [])] == ["pr-5"]
 
 
+def test_briefing_text_includes_pending_reviews(capsys):
+    t = FakeTransport()
+    _seed_review(t, "pr-5", "me")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    assert cli.main(["briefing", "r", "--agent", "me"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "pending reviews: 1 item(s)" in out
+    assert "pr-5" in out
+
+
 def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):
     import json as _j
     from coord_engine.tasks import agent_key
