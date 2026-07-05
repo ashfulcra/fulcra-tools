@@ -100,11 +100,15 @@ else
   # drop our own prior line by exact label comment (fixed string via grep -F, not a regex over $TEAM)
   filtered="$(printf '%s\n' "$current" | grep -vF "# ${LABEL}" || true)"
   if [[ "$UNINSTALL" == "1" ]]; then
-    { [[ -n "$filtered" ]] && printf '%s\n' "$filtered"; } | crontab -
+    if [[ -n "$filtered" ]]; then printf '%s\n' "$filtered" | crontab -
+    else crontab - </dev/null   # our line was the only entry: install an empty crontab (pipefail-safe)
+    fi
     echo "uninstalled cron heartbeat for team/${TEAM}"; exit 0
   fi
   confirm "Install a cron heartbeat running '${CMD}' every ${INTERVAL}m?" || { echo "aborted."; exit 0; }
-  { [[ -n "$filtered" ]] && printf '%s\n' "$filtered"; printf '%s\n' "$LINE"; } | crontab -
+  if [[ -n "$filtered" ]]; then printf '%s\n%s\n' "$filtered" "$LINE" | crontab -
+    else printf '%s\n' "$LINE" | crontab -
+    fi
   echo "installed cron heartbeat: team/${TEAM} every ${INTERVAL}m"
   selftest
 fi
