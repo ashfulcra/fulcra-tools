@@ -15,6 +15,22 @@ a real `status`/`priority`/`assignee` and a **validated state machine** — so a
 (via `fulcra-agent-reconcile`) and can't take an illegal jump (e.g. `done → active`). Pairs with
 `fulcra-agent-reconcile`: this skill *writes* task state; reconcile *reads/heals* the views.
 
+## Where to start — the re-entrancy probes
+
+Before creating or transitioning a task, probe engine health and what work is already waiting. Enter at
+the **first probe that fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`);
+task writes are parse→modify→write and a same-status update is idempotent, so re-entry never corrupts
+state:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see Usage / fulcra-agent-reconcile) — do NOT write tasks against a broken engine |
+| Aggregate fresh? | `uv tool run coord-engine status <team>` | output does NOT contain `(no aggregate for team/<team> — run \`reconcile\` first)` | run `uv tool run coord-engine reconcile <team>` to build the aggregate, then re-probe |
+| Work for me? | `uv tool run coord-engine needs-me <team> --agent <id>` | prints `<n> item(s) need <id>:` — read the rows (including any `[REVIEW] pending verdict` review-pending rows) before starting new work | pick up the listed items (transition them via `task update`/`task done`) before creating more |
+
+All probes pass with nothing needing you → the engine is healthy, views are fresh, and your queue is
+clear; proceed to create or advance tasks below.
+
 ## Why the writes go through the engine
 Writing OKF frontmatter correctly and enforcing which transitions are legal are **deterministic**
 requirements — a malformed doc or an illegal `waiting → done` is a correctness bug, not a style choice.
