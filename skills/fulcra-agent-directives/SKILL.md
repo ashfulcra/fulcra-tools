@@ -33,7 +33,8 @@ or capture backlog with `later`. (Add `--all` to also surface `@backlog` items i
 
 ## Verbs
 
-(all `uv tool run coord-engine …`)
+All verbs below run as `uv tool run coord-engine <verb> …`:
+
 ```bash
 tell      <team> <assignee> <title> [-p P0..P3] [-s summary] [-n next] [--from me]   # direct work
 broadcast <team> <title> …                        # assignee '*' — reaches every non-stale agent
