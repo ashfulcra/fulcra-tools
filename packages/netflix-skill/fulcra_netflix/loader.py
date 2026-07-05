@@ -4,15 +4,22 @@ The shippable artifact is skills/fulcra-netflix/scripts/netflix_import.py —
 a single self-contained file end users run with `uv run`. Tests must cover
 THAT file (not a copy), so we import it by path. The PEP 723 header is
 comments, so a normal importlib load works.
+
+In a dev/editable checkout the script lives in the source tree next to this
+package. In a non-editable install (CI runs pytest with --no-editable) only
+the force-included copy under fulcra_netflix/_bundled/ exists — same
+convention as collect's _resources.py.
 """
 import sys
 from importlib import util
 from pathlib import Path
 
-SCRIPT_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "skills" / "fulcra-netflix" / "scripts" / "netflix_import.py"
-)
+_PKG_DIR = Path(__file__).resolve().parent
+_SCRIPT_REL = Path("skills") / "fulcra-netflix" / "scripts" / "netflix_import.py"
+_SOURCE_TREE = _PKG_DIR.parent / _SCRIPT_REL
+_BUNDLED = _PKG_DIR / "_bundled" / _SCRIPT_REL
+
+SCRIPT_PATH = _SOURCE_TREE if _SOURCE_TREE.exists() else _BUNDLED
 
 
 def load():
