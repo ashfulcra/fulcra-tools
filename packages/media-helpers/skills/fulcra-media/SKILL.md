@@ -28,8 +28,8 @@ steps) into one ordered entry point — see those sections for the fuller treatm
 |---|---|---|---|
 | Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
 | Defs bootstrapped? | `fulcra-media status` | the JSON's `watched_definition_id` / `listened_definition_id` / `read_definition_id` are non-null for the category you're importing (Watched for netflix/trakt/youtube/…, Listened for lastfm/deezer/spotify/…, Read for goodreads) | **BOOTSTRAP** — run `fulcra-media bootstrap` (idempotent; no-op once defs exist) |
-| Nothing pending? | `fulcra-media import <name> --check-only --json` then read `would_post` | `would_post: 0` (`--check-only` skips the POST; costs an API readback but no ingest) | **IMPORT** — `would_post` > 0 means there is new media; run `fulcra-media import <name> --json` for real |
-| Already synced? | `fulcra-media status` and read `watermarks["<name>"]` | an ISO timestamp is present and recent for this importer (empty/absent = cold-start; a stale one just means it's due for another run) | **IMPORT** — cold-start or stale; run the real import to advance the watermark |
+| Nothing pending? | `fulcra-media import <name> --check-only --json` then read `would_post` (file-based importers also take their `<path>`/URL argument — e.g. `netflix`, `youtube`, `spotify-extended`, `spotify-ifttt`, `apple-takeout`, `generic-csv` take a file path; `generic-rss` takes a feed URL — so `--check-only` still needs it) | `would_post: 0` (`--check-only` skips the POST; costs an API readback but no ingest) | **IMPORT** — `would_post` > 0 means there is new media; run `fulcra-media import <name> --json` for real |
+| Already synced? | `fulcra-media status` and read `watermarks["<name>"]` | the pass-criterion depends on the importer's watermark class (see `fulcra_media/watermarks.py`, which defines all three shapes): **API-poll importers** (`lastfm`, `deezer`, `letterboxd`, `goodreads`, `generic-rss`) store an **ISO 8601 timestamp** — pass when it's present and recent. **Snapshot importers** (`apple-podcasts`) use the **JSON `{sha256, path, mtime}`** shape — pass when the recorded `sha256`/`mtime` still matches the on-disk file (unchanged file = nothing new). **No-watermark importers** — the one-shot GDPR/export uploads (`spotify-extended`, `spotify-ifttt`, `youtube`, `apple-takeout`, `netflix`) plus `trakt` and `generic-csv` — **never advance an ISO/snapshot watermark** in `state.watermarks`, so this probe is N/A for them: fall back to the `would_post` probe above | **IMPORT** — ISO watermark cold-start or stale, or the snapshot file changed; run the real import to advance it. For the no-watermark importers, re-check via `would_post`; for the export uploads specifically, re-run only when the user hands you a fresh export |
 
 All probes pass with `would_post: 0` and a fresh watermark → this importer is already synced; move on
 to the next source or tell the user they're up to date. A brand-new user fails the first probe.
@@ -76,11 +76,13 @@ Every `fulcra-media import <importer> --json` writes exactly one line of JSON to
 ```
 
 - `ok: true` + `exit code 0` → success
-- `ok: false` + `exit code 2` → failure. Inspect `errors[].stage` (one of `setup`, `auth`, `args`, `fetch`):
+- `ok: false` + `exit code 2` → failure. Inspect `errors[].stage` (one of `setup`, `auth`, `args`, `fetch`, `snapshot`):
   - `setup` → run `fulcra-media bootstrap` first
   - `auth` → creds file missing or invalid; direct the user to the wizard
   - `args` → flag parse error (bad timezone, missing path)
   - `fetch` → upstream API failed; the `message` is scrubbed of credential params
+  - `snapshot` → a snapshot-source importer (e.g. `apple-podcasts`) couldn't read the on-device DB (stalled/inaccessible); check the file path and permissions
+  - (the long-running `webhook` server emits its own `bind` / `ready` / `shutdown` stages on its status lines — those are not import-envelope error stages)
 
 `--check-only` adds a non-null `would_post` integer (how many events *would* post) and skips the actual POST. Use this for cheap "is there anything to import?" probes.
 

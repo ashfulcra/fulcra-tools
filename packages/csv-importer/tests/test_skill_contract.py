@@ -18,9 +18,10 @@ SKILL = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 CLI_SRC = (PKG / "fulcra_csv" / "cli.py").read_text(encoding="utf-8")
 
 #: flags in the prose that belong to OTHER tools (the separate fulcra-api CLI —
-#: `fulcra auth`, `fulcra catalog` — and universal click builtins), not
-#: fulcra-csv itself. Kept explicit so a typo'd fulcra-csv flag can't hide here.
-FOREIGN_FLAGS: set[str] = set()
+#: `fulcra auth` — `curl`'s `--oauth2-bearer` used in the annotation-def probe,
+#: and universal click builtins), not fulcra-csv itself. Kept explicit so a
+#: typo'd fulcra-csv flag can't hide here.
+FOREIGN_FLAGS: set[str] = {"--oauth2-bearer"}
 
 
 def _cli_flags() -> set[str]:
@@ -73,17 +74,44 @@ def test_probe_table_commands_reference_real_tools():
     assert rows, "probe table missing from 'Where to start'"
     cmds = " ".join(rows)
     # auth + def-existence + dry-run + landed-evidence probes, per the pattern.
-    for token in ("fulcra auth print-access-token", "fulcra catalog",
+    # The def-existence probe hits the annotation endpoint directly (there is no
+    # CLI subcommand that lists user-defined annotation definitions) — pin the
+    # real endpoint so it can't silently regress to `fulcra catalog` (which
+    # lists data types, not annotation defs).
+    for token in ("fulcra auth print-access-token",
+                  "/user/v1alpha1/annotation",
                   "fulcra-csv import", "--dry-run", "fulcra-csv export"):
         assert token in cmds, f"probe table lost its {token!r} probe"
+    # The def-existence probe must READ the annotation endpoint via curl, not
+    # invoke `fulcra catalog` (which lists data types, not user-defined
+    # annotation defs — a false-negative there routes the user to bootstrap and
+    # mints a duplicate def). `fulcra catalog` may appear only as an explicit
+    # disavowal in the prose, never as the probe's command: pin the curl+bearer
+    # invocation and require any `fulcra catalog` mention to be the warning.
+    assert 'curl --oauth2-bearer "$(fulcra auth print-access-token)"' in cmds, (
+        "def-existence probe must curl the annotation endpoint with the bearer "
+        "token, not shell out to `fulcra catalog`")
+    for occurrence in re.findall(r"[^.|]*fulcra catalog[^.|]*", cmds):
+        assert "not user-defined annotation" in occurrence or "don't use it" in occurrence, (
+            f"`fulcra catalog` appears outside its disavowal warning — it must "
+            f"not be used as the def-existence probe command: {occurrence!r}")
 
 
 def test_subcommands_named_in_prose_are_real():
     """Every fulcra-csv subcommand the SKILL tells the agent to run must be a
-    real click command. Guards against renamed/removed commands."""
-    cli_cmds = set(re.findall(r'@cli\.command\(\s*"([a-z-]+)"', CLI_SRC))
-    # commands declared without an explicit name string take the function name.
-    cli_cmds |= {"bootstrap"}  # @cli.command() def bootstrap
+    real click command. Guards against renamed/removed commands.
+
+    Command names are read from the live click group (`cli.commands`) rather
+    than grepped, so commands declared with the bare `@cli.command()` form
+    (which derive their name from the function, e.g. `bootstrap`) are covered
+    without hardcoding — a rename can't slip past by being invisible to a regex.
+    """
+    from fulcra_csv.cli import cli
+
+    cli_cmds = set(cli.commands)
+    assert "bootstrap" in cli_cmds, (
+        "expected the bare-decorator `bootstrap` command to be registered on "
+        "the click group — extraction is broken if it's missing")
     referenced = set(re.findall(r"fulcra-csv (import|export|bootstrap|soft-delete)\b", SKILL))
     missing = referenced - cli_cmds
     assert not missing, f"SKILL references non-existent fulcra-csv subcommands: {sorted(missing)}"

@@ -34,6 +34,13 @@ FOREIGN_FLAGS = {"--help"}
 #: real fulcra-media CLI flags the SKILL.md intentionally leaves to `--help`
 #: rather than documenting inline. Adding a new CLI flag makes this test fail
 #: until you either document it in SKILL.md or add it here on purpose.
+#:
+#: These are NOT all per-importer flags. 6 of them belong to the two
+#: non-importer commands: the `webhook` server (`--bearer-token`, `--host`,
+#: `--port`) and the `reset` command (`--keep-listened`, `--keep-read`,
+#: `--keep-watched`). The remaining entries are per-importer flags (mostly
+#: `generic-csv`/`generic-rss` column-mapping + the API-poll pagination/since
+#: knobs) that the SKILL delegates to `--help`.
 UNDOCUMENTED_OK = {
     "--bearer-token", "--category", "--confidence", "--db", "--duration-col",
     "--end-col", "--fingerprint", "--host", "--id-col", "--keep-listened",
@@ -161,10 +168,58 @@ def test_reset_and_bootstrap_are_real_commands():
             f"SKILL.md no longer references the {cmd!r} command")
 
 
+#: stages emitted only by the long-running `webhook` server (bind/ready/
+#: shutdown lines), NOT by the import envelope. The SKILL documents these
+#: separately (they're not import-error stages), so they're excluded from the
+#: exact import-path stage set below.
+WEBHOOK_ONLY_STAGES = {"bind", "ready", "shutdown"}
+
+
+def _import_path_src() -> str:
+    """CLI source up to (but excluding) the `webhook` command — i.e. the import
+    subcommands + shared helpers. The webhook receiver is a separate long-lived
+    server, not part of the import envelope contract."""
+    m = re.search(r'@cli\.command\(\s*"webhook"', CLI_SRC)
+    assert m, "expected a `@cli.command(\"webhook\")` boundary in cli.py"
+    return CLI_SRC[: m.start()]
+
+
+def _import_path_stages() -> set[str]:
+    """Every `stage` value the import path emits (webhook stages excluded by
+    construction — they live after the boundary)."""
+    stages = set(re.findall(r'"stage":\s*"([a-z]+)"', _import_path_src()))
+    # Belt-and-suspenders: a webhook-only stage must never leak in here.
+    assert not (stages & WEBHOOK_ONLY_STAGES), (
+        f"webhook-only stage(s) found on the import path: "
+        f"{sorted(stages & WEBHOOK_ONLY_STAGES)}")
+    return stages
+
+
+def _skill_documented_stages() -> set[str]:
+    """Stages the SKILL enumerates as import-envelope `errors[].stage` values —
+    the backticked tokens in the `(one of ...)` list under the envelope section.
+    Anchored to that list so unrelated backticked words aren't swept in."""
+    m = re.search(r"`errors\[\]\.stage`\s*\(one of ([^)]*)\)", SKILL)
+    assert m, "could not find the enumerated `errors[].stage` (one of ...) list"
+    return set(re.findall(r"`([a-z]+)`", m.group(1)))
+
+
 def test_envelope_stages_documented_match_cli():
-    """The SKILL documents the error `stage` values; pin the ones it enumerates
-    against stages the CLI actually emits."""
-    cli_stages = set(re.findall(r'"stage":\s*"([a-z]+)"', CLI_SRC))
-    for stage in ("setup", "auth", "args", "fetch"):
-        assert stage in cli_stages, f"CLI no longer emits stage {stage!r}"
-        assert stage in SKILL, f"SKILL.md stopped documenting stage {stage!r}"
+    """Exact-set contract: the stages the SKILL documents as import-envelope
+    error stages must be EXACTLY the stages the import path emits — no more, no
+    fewer. Webhook's bind/ready/shutdown are excluded on both sides (documented
+    separately in the SKILL, and carved off the import path here)."""
+    cli_stages = _import_path_stages()
+    doc_stages = _skill_documented_stages()
+    # sanity: the union of import stages we expect today.
+    assert cli_stages == {"setup", "auth", "args", "fetch", "snapshot"}, (
+        f"import-path stage set changed: {sorted(cli_stages)} — update the SKILL "
+        f"enumeration and this expectation together")
+    missing_from_doc = cli_stages - doc_stages
+    assert not missing_from_doc, (
+        f"import stages emitted by the CLI but not enumerated in the SKILL: "
+        f"{sorted(missing_from_doc)}")
+    extra_in_doc = doc_stages - cli_stages
+    assert not extra_in_doc, (
+        f"SKILL enumerates stages the import path never emits: "
+        f"{sorted(extra_in_doc)} — remove them or they're stale")
