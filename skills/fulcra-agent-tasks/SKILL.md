@@ -25,8 +25,8 @@ state:
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see Usage / fulcra-agent-reconcile) — do NOT write tasks against a broken engine |
-| Aggregate fresh? | `uv tool run coord-engine status <team>` | output does NOT contain `(no aggregate for team/<team> — run \`reconcile\` first)` | run `uv tool run coord-engine reconcile <team>` to build the aggregate, then re-probe |
-| Work for me? | `uv tool run coord-engine needs-me <team> --agent <id>` | prints `<n> item(s) need <id>:` — read the rows (including any `[REVIEW] pending verdict` review-pending rows) before starting new work | pick up the listed items (transition them via `task update`/`task done`) before creating more |
+| Aggregate fresh? | `uv tool run coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint) | run `uv tool run coord-engine reconcile <team>` to build the aggregate, then re-probe |
+| Work for me? | `uv tool run coord-engine needs-me <team> --agent <id>` | prints `0 item(s) need <id>:` (a non-zero count means work is waiting — enter there) — read the rows (including any `[REVIEW] pending verdict` review-pending rows) before starting new work | pick up the listed items (transition them via `task update`/`task done`) before creating more |
 
 All probes pass with nothing needing you → the engine is healthy, views are fresh, and your queue is
 clear; proceed to create or advance tasks below.

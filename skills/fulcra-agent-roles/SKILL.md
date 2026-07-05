@@ -24,9 +24,9 @@ Before claiming, escalating, or reading a role's status, probe where this role s
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
-| Role doc registered? | `uv tool run coord-engine roles claim <team> <role>` | stderr does NOT print `note: role '<role>' has no registered role doc` | **Establish a role** — write `roles/<role>.md` (`type: Role` + policy/SLA/maintainer), then re-claim |
+| Role doc registered? | `uv tool run fulcra-api file download team/<team>/roles/<role>.md -` | prints a doc with `type: Role` (NON-mutating — do not probe registration via `roles claim`: claiming writes your lease before you've read the prior one, destroying same-id takeover evidence per "Claim / hold" below) | **Establish a role** — write `roles/<role>.md` (`type: Role` + policy/SLA/maintainer) |
 | Lease held by you? | `uv tool run coord-engine roles status <team> <role>` | prints `role <role> in team/<team>: HELD` and your agent id is among the `fresh holders:` line | **Claim / hold** — run `roles claim <team> <role>` to write/refresh your lease shard |
-| Today's escalation clear? | `uv tool run fulcra-api file download team/<team>/roles/<role>/escalations/$(date -u +%Y-%m-%d).md` | download FAILS (no marker) — the role is not sitting escalated today | **Escalate a vacancy** — a marker present means a vacancy already fired today; drain it per "Escalate a vacancy" below |
+| Today's escalation clear? | `uv tool run fulcra-api file download team/<team>/roles/<role>/escalations/$(date -u +%Y-%m-%d).md -` | download FAILS (no marker) — the role is not sitting escalated today | **Escalate a vacancy** — a marker present means a vacancy already fired today; drain it per "Escalate a vacancy" below |
 
 All probes pass → the role is registered, you hold a fresh lease, and no vacancy escalation is
 outstanding for today; just re-claim on your cadence to keep the lease fresh.
