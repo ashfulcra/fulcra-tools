@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import sys
 import tempfile
 import zipfile
@@ -9,6 +10,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..entry import DayOneEntry
+
+
+def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extract ``zf`` into ``dest``, rejecting members that escape ``dest``.
+
+    A Day One export .zip is untrusted input. This guards against "zip slip":
+    members with ``../`` traversal or absolute paths that resolve outside the
+    destination, and symlink members that could redirect a later write. Any
+    such member raises ``ValueError`` and nothing is extracted.
+    """
+    dest_root = dest.resolve()
+    for info in zf.infolist():
+        # Reject symlink members outright — a symlink inside the tree can be
+        # used to redirect a subsequent member's write outside dest_root.
+        mode = info.external_attr >> 16
+        if stat.S_ISLNK(mode):
+            raise ValueError(
+                f"unsafe Day One export: symlink member not allowed: {info.filename!r}"
+            )
+        # Resolve the member's destination and confirm it stays under dest_root.
+        # `dest / info.filename` also catches ABSOLUTE members: pathlib replaces
+        # the base when the right operand is absolute (`Path("/d") / "/etc/x"` ->
+        # `/etc/x`), so an absolute member resolves outside dest_root and is
+        # rejected below just like `../` traversal.
+        target = (dest / info.filename).resolve()
+        if target != dest_root and dest_root not in target.parents:
+            raise ValueError(
+                f"unsafe Day One export: member escapes extraction dir "
+                f"(path traversal): {info.filename!r}"
+            )
+    zf.extractall(dest)
 
 
 def _parse_date(raw: str) -> datetime:
@@ -78,7 +110,7 @@ def read_json_export(source: Path) -> list[DayOneEntry]:
     if source.is_file() and source.suffix.lower() == ".zip":
         with tempfile.TemporaryDirectory() as tmp:
             with zipfile.ZipFile(source) as zf:
-                zf.extractall(tmp)
+                _safe_extract(zf, Path(tmp))
             return _read_folder(Path(tmp))
     if source.is_dir():
         return _read_folder(source)
