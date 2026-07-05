@@ -94,7 +94,9 @@ else
   if [[ "$UNINSTALL" == "1" ]]; then
     current="$(crontab -l 2>/dev/null || true)"
     filtered="$(printf '%s\n' "$current" | grep -vF "# ${LABEL}" || true)"
-    { [[ -n "$filtered" ]] && printf '%s\n' "$filtered"; } | crontab -
+    if [[ -n "$filtered" ]]; then printf '%s\n' "$filtered" | crontab -
+    else crontab - </dev/null   # our line was the only entry: install an empty crontab (pipefail-safe)
+    fi
     echo "uninstalled listener for ${AGENT}/${TEAM}"; exit 0
   fi
   confirm "Install a cron listener for ${AGENT}/${TEAM} every ${INTERVAL}m?" || { echo "aborted."; exit 0; }
@@ -104,7 +106,9 @@ else
   LINE="${LINE} >> ${LOGDIR}/listener-${TEAM}-${SAFE_AGENT}.log 2>&1  # ${LABEL}"
   current="$(crontab -l 2>/dev/null || true)"
   filtered="$(printf '%s\n' "$current" | grep -vF "# ${LABEL}" || true)"
-  { [[ -n "$filtered" ]] && printf '%s\n' "$filtered"; printf '%s\n' "$LINE"; } | crontab -
+  if [[ -n "$filtered" ]]; then printf '%s\n%s\n' "$filtered" "$LINE" | crontab -
+    else printf '%s\n' "$LINE" | crontab -
+    fi
   echo "installed cron listener: ${AGENT}/${TEAM} every ${INTERVAL}m"
 fi
 

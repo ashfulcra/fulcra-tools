@@ -24,6 +24,8 @@ on:
     branches: [main]
     paths:
       - 'packages/fulcra-menubar/**'
+      - 'packages/coord-engine/**'
+      - 'skills/fulcra-agent-automation/**'
       - 'packages/fulcra-coord/fulcra_coord/remote.py'
       - 'packages/fulcra-coord/fulcra_coord/installers.py'
       - 'packages/fulcra-coord/fulcra_coord/listener.py'
@@ -38,6 +40,8 @@ on:
     branches: [main]
     paths:
       - 'packages/fulcra-menubar/**'
+      - 'packages/coord-engine/**'
+      - 'skills/fulcra-agent-automation/**'
       - 'packages/fulcra-coord/fulcra_coord/remote.py'
       - 'packages/fulcra-coord/fulcra_coord/installers.py'
       - 'packages/fulcra-coord/fulcra_coord/listener.py'
