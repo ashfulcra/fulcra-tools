@@ -28,7 +28,7 @@ steps) into one ordered entry point — see those sections for the fuller treatm
 |---|---|---|---|
 | Authed? | `fulcra auth print-access-token` | exits 0 and prints a non-empty token (the CLI mints/refreshes it; `FULCRA_ACCESS_TOKEN` in the env also satisfies this) | **AUTH** — tell the user to run `fulcra auth login` (interactive browser flow); see "Fulcra Life API auth" below |
 | Defs bootstrapped? | `fulcra-media status` | the JSON's `watched_definition_id` / `listened_definition_id` / `read_definition_id` are non-null for the category you're importing (Watched for netflix/trakt/youtube/…, Listened for lastfm/deezer/spotify/…, Read for goodreads) | **BOOTSTRAP** — run `fulcra-media bootstrap` (idempotent; no-op once defs exist) |
-| Anything to import? | `fulcra-media import <name> --check-only --json` then read `would_post` | `would_post` > 0 (`--check-only` skips the POST; costs an API readback but no ingest) | **IMPORT** — run `fulcra-media import <name> --json` for real; `would_post: 0` means nothing new, so skip |
+| Nothing pending? | `fulcra-media import <name> --check-only --json` then read `would_post` | `would_post: 0` (`--check-only` skips the POST; costs an API readback but no ingest) | **IMPORT** — `would_post` > 0 means there is new media; run `fulcra-media import <name> --json` for real |
 | Already synced? | `fulcra-media status` and read `watermarks["<name>"]` | an ISO timestamp is present and recent for this importer (empty/absent = cold-start; a stale one just means it's due for another run) | **IMPORT** — cold-start or stale; run the real import to advance the watermark |
 
 All probes pass with `would_post: 0` and a fresh watermark → this importer is already synced; move on
