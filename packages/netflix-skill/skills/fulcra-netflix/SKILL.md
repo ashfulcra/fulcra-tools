@@ -101,7 +101,7 @@ From the skill folder (the directory containing this SKILL.md), run:
 uv run scripts/netflix_import.py <csv-path> --json
 ```
 
-The script is self-contained (PEP 723 — `uv run` fetches its one dependency automatically). It auto-detects the CSV variant (slim vs GDPR) from the header, resolves-or-creates the Watched annotation definition idempotently, builds deterministic record IDs, POSTs in batches, and does a best-effort readback verification. Optional preflight: add `--check-only` to parse and count without posting anything (no auth needed) — useful for a quick "is this file right?" check.
+The script is self-contained (PEP 723 — `uv run` fetches its one dependency automatically). It auto-detects the CSV variant (slim vs GDPR) from the header, resolves-or-creates the Watched annotation definition idempotently, builds deterministic record IDs, POSTs in batches, and does a best-effort readback verification. Optional preflight: add `--check-only` to parse and count without posting anything (no auth needed) — useful for a quick "is this file right?" check. Add `--no-verify` to skip the post-import readback sampling (rarely needed; the verification is cheap and worth keeping on).
 
 It prints exactly one line of JSON. **Interpret the envelope; never parse human-mode output:**
 

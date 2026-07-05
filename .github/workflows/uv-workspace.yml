@@ -53,3 +53,13 @@ jobs:
           cd packages/fulcra-coord
           uv tool install --reinstall --force .
           fulcra-coord --version
+
+      - name: Skill contract + installer tests (cheap, OS-agnostic)
+        # Fast ubuntu gate for skill trees the expensive macOS job path-filters
+        # away: netflix contract tests + coord-engine suite (incl. the bash
+        # installer tests, which shim uname/launchctl/crontab so both platform
+        # branches run anywhere). Keeps "drift is caught at commit time" true
+        # for skill-only PRs. ~30s.
+        run: |
+          uv run --all-packages --extra dev python -m pytest \
+            packages/netflix-skill/tests packages/coord-engine/tests -q

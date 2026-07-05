@@ -57,7 +57,7 @@ humans and reviewers catch it late; CI catches it at commit time).
 
 | Skill tree | Probe preamble | Script tests | Notes |
 |---|---|---|---|
-| packages/netflix-skill/skills/fulcra-netflix | YES (reference) | YES | the pattern source; checklist item 4 itself pending — no SKILL.md contract test yet (follow-up) |
+| packages/netflix-skill/skills/fulcra-netflix | YES (reference) | YES | the pattern source; item 4 landed (tests/test_skill_contract.py) — and caught real drift (--no-verify undocumented) on its first run |
 | skills/fulcra-agent-* (11 coord2 skills) | health has doctor; NONE have an ordered probe table | engine folds fully unit-tested; the automation skill's bash installers have no CI tests | biggest win: probe tables + bats-or-subprocess tests for install-listener.sh / install-heartbeat.sh |
 | packages/csv-importer/skills | audit needed | audit needed | |
 | packages/media-helpers/skills | audit needed | audit needed | |
