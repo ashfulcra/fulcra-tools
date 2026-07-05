@@ -8,11 +8,11 @@ for *trivially adoptable*, not *persuasive*.
 ## What goes upstream (three separable tracks)
 
 ### Track 1 — the skills (PR to `fulcradynamics/agent-skills`)
-The 10 `fulcra-agent-*` skills, shape-identical to upstream (`skills/<name>/SKILL.md` + `references/`,
+The 11 `fulcra-agent-*` skills (operator was added after this doc's first draft), shape-identical to upstream (`skills/<name>/SKILL.md` + `references/`,
 scripts allowed per the `fulcra-dashboard` precedent). Contribution = `git mv` + polish:
 - **Wave 1 (low-friction, additive):** `presence`, `roles`, `continuity`, `review`, `directives`,
   `health` — pure additions to a teams space; no change to any existing upstream skill's semantics.
-- **Wave 2 (touches teams' own conventions):** `reconcile`, `tasks`, `forge`, `automation`. Reconcile
+- **Wave 2 (touches teams' own conventions):** `reconcile`, `tasks`, `forge`, `automation`, `operator`. Reconcile
   makes `task/index.md` **engine-owned**, which contradicts `fulcra-agent-teams`' documented
   "hand-maintain the index" guidance — so wave 2 must include a small **amendment PR to
   fulcra-agent-teams' SKILL.md** ("if fulcra-agent-reconcile is installed, do not hand-edit the index"),
@@ -73,7 +73,7 @@ Each has a concrete incident/measurement behind it from this build:
 - The teams-amendment (engine-owned index) is the one semantic change Fulcra could reject; wave 1 is
   deliberately independent of it.
 - `npx skills add ashfulcra/coord2` compatibility assumed, never tested.
-- 10 skills at once may be too big a bite for one review — wave split mitigates; be ready to trickle.
+- 11 skills at once may be too big a bite for one review — wave split mitigates; be ready to trickle.
 
 ---
 
