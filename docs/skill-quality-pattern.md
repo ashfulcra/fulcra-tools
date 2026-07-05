@@ -1,11 +1,12 @@
 # The netflix-skill quality pattern — probes-first preambles + tested skill scripts
 
-Extracted from `packages/netflix-skill` (the reference implementation, praised by the operator as
-"really good"), for adoption across every skill in this repo. Two reinforcing pieces:
+Extracted from `packages/netflix-skill` (the reference implementation), for adoption across every
+skill in this repo. Two reinforcing pieces:
 
 ## 1. The re-entrancy probe preamble
 
-Before a skill instructs the agent to DO anything, its SKILL.md opens with an ordered probe table:
+Before any STATE instructions (framing prose first is fine — netflix leads with its pitch/contract),
+the SKILL.md presents an ordered probe table:
 
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
@@ -40,8 +41,8 @@ by a tiny package-level `loader` and unit-tested in CI like any library code:
   CI installs too.
 
 Why it matters: SKILL.md prose describing a script WILL drift from the script (this repo caught
-prose/engine drift in review at least four times in two days — humans and reviewers catch it late;
-CI catches it at commit time).
+prose/code drift in review repeatedly within two days — e.g. commits 7f99b2a, e20bf71, 7b70683 —
+humans and reviewers catch it late; CI catches it at commit time).
 
 ## Adoption checklist (per skill)
 
@@ -56,8 +57,8 @@ CI catches it at commit time).
 
 | Skill tree | Probe preamble | Script tests | Notes |
 |---|---|---|---|
-| packages/netflix-skill/skills/fulcra-netflix | YES (reference) | YES | the pattern source |
-| skills/fulcra-agent-* (11 coord2 skills) | partial — reconcile/health have doctor; most lack an explicit ordered probe table | engine fully tested (213); the automation skill's bash installers have no CI tests | biggest win: probe tables + bats-or-subprocess tests for install-listener.sh / install-heartbeat.sh |
+| packages/netflix-skill/skills/fulcra-netflix | YES (reference) | YES | the pattern source; checklist item 4 itself pending — no SKILL.md contract test yet (follow-up) |
+| skills/fulcra-agent-* (11 coord2 skills) | health has doctor; NONE have an ordered probe table | engine folds fully unit-tested; the automation skill's bash installers have no CI tests | biggest win: probe tables + bats-or-subprocess tests for install-listener.sh / install-heartbeat.sh |
 | packages/csv-importer/skills | audit needed | audit needed | |
 | packages/media-helpers/skills | audit needed | audit needed | |
 
