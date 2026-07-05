@@ -26,7 +26,7 @@ fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`):
 | Engine usable? | `uv tool run coord-engine doctor <team>` | exits 0 and last line is `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT install jobs on a broken engine |
 | Heartbeat installed? | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.heartbeat.<team>.plist` (macOS) or `crontab -l \| grep coord-engine.heartbeat.<team>` (Linux) | file/line exists | §1 (install the heartbeat) |
 | Heartbeat loaded? | `launchctl list \| grep coord-engine.heartbeat.<team>` (macOS only) | a line appears | reinstall via §1 (plist exists but is not loaded — a reboot-era failure mode) |
-| Listener installed + loaded? | same two checks with `listener.<team>.<agent-key>` | both pass | §2 (install the listener) |
+| Listener installed + loaded? | same two checks with `listener.<team>.*` and confirm the plist `ProgramArguments` names the intended `<agent>` (the installer suffixes sanitized agent + checksum) | both pass | §2 (install the listener) |
 | Views actually fresh? | `uv tool run coord-engine health <team>` | this host's row shows a recent `last reconcile` | jobs exist but are not ticking — check `log show` / cron mail, then reinstall |
 
 All probes pass → nothing to install; re-running any installer is safe anyway (reinstall replaces the

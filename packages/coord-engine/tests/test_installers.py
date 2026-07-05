@@ -91,9 +91,12 @@ class TestListener:
         plists = _plists(env)
         assert len(plists) == 1, [p.name for p in plists]
         pl = plistlib.loads(plists[0].read_bytes())
+        assert pl["Label"].startswith("com.fulcra.coord-engine.listener.teamx.coord-maintainer-")
         assert pl["StartInterval"] == 10 * 60
         joined = " ".join(str(a) for a in pl["ProgramArguments"])
         assert "listener-tick" in joined
+        assert "teamx" in pl["ProgramArguments"]
+        assert "coord-maintainer" in pl["ProgramArguments"]
         log = env["log"].read_text()
         assert "launchctl load" in log and "plutil -lint" in log
 
