@@ -937,3 +937,115 @@ def test_roles_release_clears_nonce_state(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir())             # state file exists
     assert cli.main(["roles", "release", "r", "reviewer", "--agent", "coord-maintainer"], transport=t) == 0
     assert not list(tmp_path.iterdir())         # state cleaned up
+
+
+# --- pending-required review surfacing (needs-me / briefing), role-aware ---
+
+def _seed_review(t, slug, required, verdicts=()):
+    t.put(f"team/r/review/{slug}.md", f"---\ntype: Review\nrequired: {required}\n---\n")
+    for who, v in verdicts:
+        t.put(f"team/r/review/{slug}/verdicts/{who}.md",
+              f"---\ntype: Verdict\nreviewer: {who}\nverdict: {v}\n---\n")
+
+
+def test_needs_me_surfaces_pending_required_review(capsys):
+    import json as _j
+    t = FakeTransport()
+    _seed_review(t, "pr-9", "rev1")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    assert cli.main(["needs-me", "r", "--agent", "rev1", "--json"], transport=t) == 0
+    got = _j.loads(capsys.readouterr().out)
+    revs = [g for g in got if g.get("type") == "review-pending"]
+    assert [r["name"] for r in revs] == ["pr-9"]
+
+
+def test_needs_me_review_role_aware(capsys):
+    import json as _j
+    from coord_engine.tasks import agent_key
+    t = FakeTransport()
+    _seed_review(t, "pr-7", "codex-reviewer")
+    # workbook holds a FRESH lease on the codex-reviewer role
+    t.put("team/r/roles/codex-reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
+    t.put(f"team/r/roles/codex-reviewer/leases/{agent_key('workbook')}.md",
+          f"---\ntype: Lease\nagent: workbook\ntimestamp: {_now_iso()}\n---\n")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    for who in ("codex-reviewer", "workbook"):        # role id itself AND lease holder
+        cli.main(["needs-me", "r", "--agent", who, "--json"], transport=t)
+        got = _j.loads(capsys.readouterr().out)
+        assert any(g.get("name") == "pr-7" for g in got if g.get("type") == "review-pending"), who
+    cli.main(["needs-me", "r", "--agent", "bystander", "--json"], transport=t)
+    got = _j.loads(capsys.readouterr().out)
+    assert not [g for g in got if g.get("type") == "review-pending"]
+
+
+def test_needs_me_settled_reviews_not_surfaced(capsys):
+    import json as _j
+    t = FakeTransport()
+    _seed_review(t, "ok", "rev1", verdicts=[("rev1", "approve")])
+    _seed_review(t, "rejected", "rev2", verdicts=[("rev2", "changes")])
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    for who in ("rev1", "rev2"):
+        cli.main(["needs-me", "r", "--agent", who, "--json"], transport=t)
+        got = _j.loads(capsys.readouterr().out)
+        assert not [g for g in got if g.get("type") == "review-pending"], who
+
+
+def test_briefing_includes_pending_reviews(capsys):
+    import json as _j
+    t = FakeTransport()
+    _seed_review(t, "pr-5", "me")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    assert cli.main(["briefing", "r", "--agent", "me", "--json"], transport=t) == 0
+    out = _j.loads(capsys.readouterr().out)
+    assert [r["name"] for r in out.get("pending_reviews", [])] == ["pr-5"]
+
+
+def test_briefing_text_includes_pending_reviews(capsys):
+    t = FakeTransport()
+    _seed_review(t, "pr-5", "me")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    assert cli.main(["briefing", "r", "--agent", "me"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "pending reviews: 1 item(s)" in out
+    assert "pr-5" in out
+
+
+def test_needs_me_review_stale_lease_holder_not_surfaced(capsys):
+    import json as _j
+    from coord_engine.tasks import agent_key
+    t = FakeTransport()
+    _seed_review(t, "pr-8", "codex-reviewer")
+    t.put("team/r/roles/codex-reviewer.md", "---\ntype: Role\npolicy: shared\n---\n")
+    t.put(f"team/r/roles/codex-reviewer/leases/{agent_key('sleeper')}.md",
+          "---\ntype: Lease\nagent: sleeper\ntimestamp: 2020-01-01T00:00:00Z\n---\n")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    cli.main(["needs-me", "r", "--agent", "sleeper", "--json"], transport=t)
+    got = _j.loads(capsys.readouterr().out)
+    assert not [g for g in got if g.get("type") == "review-pending"]  # stale lease != holder
+
+
+def test_needs_me_review_honors_role_doc_sla(capsys):
+    import json as _j
+    from datetime import datetime, timedelta, timezone
+    from coord_engine.tasks import agent_key
+    t = FakeTransport()
+    _seed_review(t, "pr-slow", "patient-role")
+    # role doc grants 72h SLA; lease is 30h old — stale by DEFAULT (24h), fresh per doc
+    t.put("team/r/roles/patient-role.md", "---\ntype: Role\npolicy: shared\nsla_hours: 72\n---\n")
+    ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat().replace("+00:00", "Z")
+    t.put(f"team/r/roles/patient-role/leases/{agent_key('tortoise')}.md",
+          f"---\ntype: Lease\nagent: tortoise\ntimestamp: {ts}\n---\n")
+    cli.main(["reconcile", "r"], transport=t); capsys.readouterr()
+    cli.main(["needs-me", "r", "--agent", "tortoise", "--json"], transport=t)
+    got = _j.loads(capsys.readouterr().out)
+    assert any(g.get("name") == "pr-slow" for g in got if g.get("type") == "review-pending")
+
+
+def test_roles_claim_warns_on_unregistered_role(capsys):
+    t = FakeTransport()
+    assert cli.main(["roles", "claim", "r", "ghost-role", "--agent", "a"], transport=t) == 0
+    err = capsys.readouterr().err
+    assert "no registered role doc" in err
+    t.put("team/r/roles/real-role.md", "---\ntype: Role\npolicy: shared\n---\n")
+    assert cli.main(["roles", "claim", "r", "real-role", "--agent", "a"], transport=t) == 0
+    assert "no registered role doc" not in capsys.readouterr().err

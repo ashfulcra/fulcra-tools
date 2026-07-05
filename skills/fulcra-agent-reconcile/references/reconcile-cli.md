@@ -24,7 +24,7 @@ uv tool run coord-engine reconcile <team>
 # Read views (one aggregate download each; run reconcile first):
 uv tool run coord-engine status   <team> [--json]          # counts by status
 uv tool run coord-engine board    <team> [--json]          # open work grouped active/waiting/blocked/proposed
-uv tool run coord-engine needs-me <team> --agent <id> [--json]  # assigned-to / blocking <id>, gated on not_before
+uv tool run coord-engine needs-me <team> --agent <id> [--json]  # assigned-to / blocking <id>, gated on not_before; PLUS pending-required reviews for <id> or any role it holds (rows with type: review-pending)
 uv tool run coord-engine search   <team> <query> [--json]  # substring over id/title/description/tags
 ```
 

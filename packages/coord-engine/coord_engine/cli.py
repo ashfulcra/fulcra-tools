@@ -115,12 +115,17 @@ def cmd_board(args: argparse.Namespace, transport: Any) -> int:
 def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     rows = _load_rows(transport, args.team)
     got = query.needs_me(rows, args.agent, now=_iso(_now()))
+    got += _pending_reviews_for(transport, args.team, args.agent)
     if args.json:
         print(json.dumps(got, indent=2))
     else:
         print(f"{len(got)} item(s) need {args.agent}:")
         for r in got:
-            print(_line(r))
+            if r.get("type") == "review-pending":
+                print(f"  [REVIEW] pending verdict: {r['name']} "
+                      f"(required: {', '.join(r['pending_required'])})")
+            else:
+                print(_line(r))
     return 0
 
 
@@ -352,8 +357,8 @@ def _verdicts_prefix(team: str, slug: str) -> str:
     return f"team/{team}/review/{slug}/verdicts/"
 
 
-def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
-    team, slug = args.team, args.slug
+def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
+    """Shared review fold: doc + verdict shards -> tally dict."""
     req_doc = okf.parse_frontmatter(transport.read(_review_doc_path(team, slug))) or {}
     required = req_doc.get("required")
     if isinstance(required, str):
@@ -373,7 +378,77 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
             verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
     except TransportError:
         pass
-    result = review.tally(verdicts, required=required)
+    return review.tally(verdicts, required=required)
+
+
+def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
+    """Fresh lease holders of role name per the CANONICAL fold: the role
+    doc's own sla_hours (falling back to the default) fed to
+    roles.fresh_holders — the same fold roles status uses, so the two
+    can never disagree about a lease. A name that is not a role (no role doc)
+    or contains a path separator returns []."""
+    if "/" in name:
+        return []  # a role name is a single path segment; anything else is not a role
+    reg = okf.parse_frontmatter(transport.read(_role_doc_path(team, name)))
+    if reg is None:
+        return []
+    try:
+        sla = float(reg.get("sla_hours") or roles.DEFAULT_SLA_HOURS)
+    except (TypeError, ValueError):
+        sla = roles.DEFAULT_SLA_HOURS
+    leases: list[dict[str, Any]] = []
+    try:
+        for f in transport.list_dir(_leases_prefix(team, name)):
+            fn = f.get("name") or ""
+            if f.get("is_dir") or not fn.endswith(".md"):
+                continue
+            fm = okf.parse_frontmatter(transport.read(_leases_prefix(team, name) + fn)) or {}
+            leases.append({"agent": fm.get("agent") or fn[:-3],
+                           "timestamp": fm.get("timestamp")})
+    except TransportError:
+        return []
+    return [str(l.get("agent")) for l in roles.fresh_holders(leases, now=now, sla_hours=sla)]
+
+
+def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+    """Reviews whose pending_required names the agent — directly or via a role
+    it holds a fresh lease on. Best-effort: any listing failure yields []
+    (needs-me/briefing must not fail because the review add-on is absent).
+
+    COST: one listing of review/ plus, per unsettled review, the verdict fold —
+    and per unique role-shaped pending name, one role-doc read + lease fold.
+    Fine for inbox polling on teams with tens of reviews; do NOT call in a tight
+    loop. If review counts grow, the right home for this is the reconcile
+    pre-fold (like task rows) — tracked on the bus."""
+    out: list[dict[str, Any]] = []
+    now = _iso(_now())
+    role_holders: dict[str, list[str]] = {}
+    try:
+        entries = transport.list_dir(f"team/{team}/review/")
+    except TransportError:
+        return []
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        slug = n[:-3]
+        tally = _review_tally(transport, team, slug)
+        pending = tally.get("pending_required") or []
+        if tally.get("state") != "PENDING" or not pending:
+            continue
+        if agent not in pending:  # direct hit needs no role folding at all
+            for r in pending:
+                if r not in role_holders:
+                    role_holders[r] = _role_fresh_holders(transport, team, r, now=now)
+        if review.is_pending_for(pending, agent, role_holders):
+            out.append({"type": "review-pending", "name": slug,
+                        "state": "PENDING", "pending_required": pending})
+    return out
+
+
+def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
+    team, slug = args.team, args.slug
+    result = _review_tally(transport, team, slug)
     result.update({"team": team, "slug": slug})
     if args.json:
         print(json.dumps(result, indent=2))
@@ -695,6 +770,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(f"briefing: needs_me section unavailable ({type(e).__name__})", file=sys.stderr)
         out["needs_me"] = []
     try:
+        out["pending_reviews"] = _pending_reviews_for(transport, args.team, agent)
+    except Exception as e:
+        print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
+        out["pending_reviews"] = []
+    try:
         snaps = []
         for e in transport.list_dir(_continuity_prefix(args.team, agent)):
             n = (e.get("name") or "").rstrip("/")
@@ -721,6 +801,9 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in out["inbox"][:5]:
         print(_line(r))
     print(f"  needs-me: {len(out['needs_me'])} item(s)")
+    print(f"  pending reviews: {len(out['pending_reviews'])} item(s)")
+    for r in out["pending_reviews"][:5]:
+        print(_line(r))
     print(continuity.render_resume(out["resume"]))
     return 0
 
@@ -789,6 +872,10 @@ def cmd_agents(args: argparse.Namespace, transport: Any) -> int:
 def cmd_roles_claim(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     slug = tasks.agent_key(agent)
+    if okf.parse_frontmatter(transport.read(_role_doc_path(args.team, args.role))) is None:
+        print(f"note: role {args.role!r} has no registered role doc — status folds fall back "
+              f"to defaults and review role-routing will NOT match this role's holders; "
+              f"create team/{args.team}/roles/{args.role}.md", file=sys.stderr)
     shard_path = f"{_leases_prefix(args.team, args.role)}{slug}.md"
     state = _nonce_state_path(args.team, args.role, slug)
     # Same-id double-acting check: leases can't distinguish two sessions sharing one
