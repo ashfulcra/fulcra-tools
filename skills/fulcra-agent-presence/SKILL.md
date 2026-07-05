@@ -15,6 +15,21 @@ heartbeat + deterministic liveness folds — the roster that directives' broadca
 digest, and role-vacancy escalation all build on. Optional: without it, everything else still works;
 broadcasts just degrade to "acked-by-me hides it for me".
 
+## Where to start — the re-entrancy probes
+
+Before beating or reading the roster, probe how far this session already got. Enter at the **first probe
+that fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`); every step here is
+safely re-runnable (a beat is a single-file overwrite, a claim is a refresh):
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT beat against a broken engine |
+| Own shard live? | `uv tool run coord-engine presence show <team>` | a row for your agent id shows liveness `[live ]` (the `<1h` bucket) | **Beat** — run `presence beat <team>` (see Usage) to write/refresh your shard |
+| If identity=role, lease held? | `uv tool run coord-engine roles status <team> <role>` | prints `role <role> in team/<team>: HELD` for the role you act as | **Claim** — run `roles claim <team> <role>` (skip this probe entirely if you are not acting under a role identity) |
+
+All probes pass → you are present and (if role-scoped) holding your lease; just keep beating on your
+cadence. A brand-new session fails the first or second probe and enters at Beat.
+
 ## How it works
 - **Beat** (single-file write, safe as a command): `presence beat` writes/refreshes your shard
   `team/<team>/presence/<agent-key>.md` (collision-safe key) (OKF `type: Presence`: agent, workstreams, summary, timestamp).
