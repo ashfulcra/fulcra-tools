@@ -22,7 +22,8 @@ REPO = PKG.parents[1]                                # repo root
 CLI_SRC = (PKG / "coord_engine" / "cli.py").read_text(encoding="utf-8")
 
 #: skills that ship a probe table (repo-root skills/ tree)
-PROBE_SKILLS = ("fulcra-agent-presence", "fulcra-agent-roles", "fulcra-agent-tasks")
+PROBE_SKILLS = ("fulcra-agent-presence", "fulcra-agent-roles", "fulcra-agent-tasks",
+                "fulcra-agent-automation")
 
 PROBE_HEADING = "## Where to start — the re-entrancy probes"
 
@@ -77,8 +78,9 @@ def test_every_probe_verb_is_a_real_cli_verb():
     )
     for name in PROBE_SKILLS:
         section = _probe_section(_skill_text(name))
-        # only tokens that pair with a real leading verb count; drop stray words
-        # (e.g. 'show'/'claim' are validated via the group-verb pairing below).
+        # LIMITATION: tokens are checked against one flat verb set — a wrong-group
+        # pairing (e.g. 'presence claim') would pass; typos still fail CI.
+        # Full group-verb pairing is future work.
         mentioned = _probe_verbs(section)
         unknown = {v for v in mentioned if v not in real}
         assert not unknown, (
