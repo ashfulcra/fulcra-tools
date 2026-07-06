@@ -115,8 +115,12 @@ def cli_base_cmd() -> list[str]:
         # shlex (not str.split): a configured CLI path may legitimately contain
         # spaces (e.g. "/Applications/My Tools/fulcra-api") or quoted args, which
         # bare .split() would mis-tokenize into a broken argv. shlex honours
-        # quoting/escaping the way a shell would.
-        return shlex.split(env_cli)
+        # quoting/escaping the way a shell would. Malformed shell syntax
+        # (unbalanced quote) falls back to naive split rather than crashing.
+        try:
+            return shlex.split(env_cli)
+        except ValueError:
+            return env_cli.split()
 
     if shutil.which("fulcra-api"):
         return ["fulcra-api"]
@@ -131,8 +135,11 @@ def _backend_cmd() -> list[str]:
     if env_test:
         # shlex (not str.split): same rationale as cli_base_cmd — a fake-backend
         # invocation whose path/args contain spaces must tokenize the way a shell
-        # would rather than splitting mid-path.
-        return shlex.split(env_test)
+        # would rather than splitting mid-path. Fall back on malformed syntax.
+        try:
+            return shlex.split(env_test)
+        except ValueError:
+            return env_test.split()
 
     # 2-4. Resolved real CLI base + the `file` subcommand.
     return cli_base_cmd() + ["file"]

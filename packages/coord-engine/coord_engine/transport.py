@@ -12,6 +12,7 @@ limit — sub-minute double-edits are re-scanned on the next pass.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import tempfile
 from typing import Any, Optional
@@ -22,7 +23,13 @@ DEFAULT_COMMAND = ("fulcra-api",)
 def _split_command() -> list[str]:
     raw = os.environ.get("FULCRA_CLI_COMMAND")
     if raw:
-        return raw.split()
+        # shlex, not str.split, so a CLI path containing spaces stays one argv
+        # token. Malformed shell syntax (unbalanced quote) falls back to the
+        # naive split rather than crashing command resolution.
+        try:
+            return shlex.split(raw)
+        except ValueError:
+            return raw.split()
     return list(DEFAULT_COMMAND)
 
 

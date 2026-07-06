@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 
 from . import __version__
@@ -925,7 +926,15 @@ def main() -> int:
         return 1
 
     backend_env = os.environ.get("FULCRA_COORD_BACKEND", "").strip()
-    backend = backend_env.split() if backend_env else None
+    # shlex so a space-containing backend path stays one argv token; fall back
+    # to naive split on malformed shell syntax rather than crashing.
+    if backend_env:
+        try:
+            backend = shlex.split(backend_env)
+        except ValueError:
+            backend = backend_env.split()
+    else:
+        backend = None
 
     try:
         return fn(args, backend=backend) or 0
