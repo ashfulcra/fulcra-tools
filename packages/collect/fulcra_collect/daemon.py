@@ -166,14 +166,50 @@ class Daemon:
 
     # ---- account-switch pre-flight -------------------------------------
 
+    @staticmethod
+    def _account_identity(token: str) -> str:
+        """The stable identity a bearer token belongs to.
+
+        Fulcra bearer tokens are Auth0 JWTs; the `sub` claim identifies the
+        ACCOUNT and survives token rotation. Decode it locally (no network,
+        no signature verification — we need a stable identifier, not trust:
+        an attacker who can plant a forged token in the keychain already
+        owns the account's data path). Fall back to the raw token bytes for
+        opaque/non-JWT tokens (pasted API tokens), preserving the original
+        rotate-means-invalidate behavior for those.
+        """
+        import base64
+        import json as _json
+        parts = token.split(".")
+        if len(parts) == 3:
+            try:
+                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+                if isinstance(payload, dict):
+                    sub = payload.get("sub")
+                    if isinstance(sub, str) and sub:
+                        return f"sub:{sub}"
+            except (ValueError, UnicodeDecodeError):
+                pass  # malformed JWT-lookalike — fall through to raw bytes
+        return f"tok:{token}"
+
     def _check_account_fingerprint(self) -> None:
         """Detect a Fulcra-account switch since the previous boot and
         invalidate per-plugin caches that hold per-account UUIDs.
 
-        Fingerprint is a SHA-256 prefix of the bearer-token. False
-        positives on token rotation (same account → new JWT after refresh)
-        are acceptable: the recovery is just a cache rebuild on the
-        first run of each plugin, no data loss.
+        Fingerprint is a SHA-256 prefix of the token's stable ACCOUNT
+        identity (JWT `sub` claim) — NOT the token bytes. Access tokens
+        rotate hourly (refresh-on-401 rewrites the keychain), so the old
+        token-bytes fingerprint invalidated every plugin cache on
+        effectively every daemon restart >1h apart: a full definitions
+        re-resolution storm (one whole-catalog fetch per plugin) with no
+        actual account change. Opaque non-JWT tokens fall back to the
+        token-bytes behavior via _account_identity.
+
+        One-time migration note: fingerprints written by the old scheme
+        won't match the new one, so the first boot after this change
+        triggers a single spurious invalidation — same cost as one old
+        false positive, then never again.
         """
         import hashlib
         from . import credentials as _creds
@@ -183,7 +219,8 @@ class Daemon:
             # remember. The fingerprint file gets written the first time
             # we boot WITH a token.
             return
-        fingerprint = hashlib.sha256(token.encode()).hexdigest()[:16]
+        identity = self._account_identity(token)
+        fingerprint = hashlib.sha256(identity.encode()).hexdigest()[:16]
         fingerprint_path = config_mod.config_dir() / "auth-fingerprint"
         previous = (fingerprint_path.read_text().strip()
                     if fingerprint_path.exists() else None)
@@ -319,6 +356,11 @@ class Daemon:
             return self._delete_definition(request.get("def_id", ""))
         if cmd == "restore_definition":
             return self._restore_definition(request.get("def_id", ""))
+        if cmd == "update_definition":
+            return self._update_definition(
+                request.get("def_id", ""),
+                request.get("fields") or {},
+            )
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
     def _status(self) -> dict:
@@ -1166,6 +1208,173 @@ class Daemon:
                 "plugin bindings and favorites are not restored — "
                 "re-bind in plugin settings"
             ),
+        }
+
+    def _update_definition(self, def_id: str, fields: dict) -> dict:
+        """Rename/update an annotation definition IN PLACE via Fulcra's
+        ``PUT /user/v1alpha1/annotation/{id}`` — P2 item 7 from the collect
+        review. Before this, the only "rename" path was bind_definition's
+        force_new+new_name flow, which creates a brand-new definition and
+        orphans every event recorded under the old one. That flow stays
+        (it's correct for genuinely-new defs); this is the in-place edit.
+
+        Mirrors ``_delete_definition`` / ``_restore_definition``: same auth
+        check, same refresh-aware ``_RetryingClient``, same structured
+        ``{ok, code, error}`` returns translated by the HTTP route via
+        ``_DAEMON_CODE_TO_HTTP``. Shared by the HTTP route
+        (``routes/definitions.py:update_definition_route``) and the UDS
+        command branch in :meth:`handle_request` (menubar parity).
+
+        The Fulcra PUT is a FULL-REPLACE discriminated union (every member
+        requires name+description+tags; the measured types also require
+        measurement_spec, scale additionally spec). So this GETs the
+        current record, merges only the validated changed fields via
+        ``fulcra_common.merge_definition_update``, and PUTs the complete
+        body — a partial body would null-out measurement_spec/spec and
+        corrupt scale/numeric definitions. Only name/description/tags may
+        change; anything else is rejected as ``bad_request`` before any
+        network traffic (``fulcra_common.validate_definition_update``).
+
+        On success the in-memory quick-record cache is busted so the next
+        ``_quick_record_list`` shows the new name instead of a stale one.
+        Plugin bindings are untouched — the definition id is unchanged, so
+        every binding remains valid (that's the whole point).
+
+        Args:
+            def_id: the annotation definition UUID to update.
+            fields: dict with any of ``name`` / ``description`` / ``tags``.
+
+        Returns:
+            ``{"ok": True, "definition": {id, name, description, tags,
+            annotation_type}}`` on success (merged, as sent to Fulcra).
+            ``{"ok": False, "code": ..., "error": ...}`` on any failure.
+        """
+        from fulcra_common import (
+            merge_definition_update,
+            validate_definition_update,
+        )
+
+        from . import credentials as _creds
+        # Late import — tests monkeypatch ``fulcra_collect.web.httpx``; see
+        # the equivalent comment in _delete_definition.
+        from . import web as _web
+
+        _log = logging.getLogger("fulcra_collect.daemon")
+        if not def_id:
+            return {"ok": False, "code": "bad_request", "error": "def_id is required"}
+        try:
+            effective = validate_definition_update(
+                fields if isinstance(fields, dict) else {},
+            )
+        except ValueError as exc:
+            _log.warning("update_definition(%s): rejected: %s", def_id, exc)
+            return {"ok": False, "code": "bad_request", "error": str(exc)}
+
+        fulcra_token = _creds.get_user_secret("bearer-token")
+        if not fulcra_token:
+            return {"ok": False, "code": "unauthorized", "error": "not signed in to Fulcra"}
+
+        _log.info(
+            "update_definition(%s): updating field(s) %s",
+            def_id, ", ".join(sorted(effective)),
+        )
+        try:
+            with _web._RetryingClient(
+                fulcra_token, user_agent="fulcra-collect/daemon",
+            ) as client:
+                # Leg 1 — GET the current record. The PUT union is a full
+                # replace, so the unchanged fields must come from here.
+                r = client.get(f"/user/v1alpha1/annotation/{def_id}")
+                if r.status_code == 404:
+                    _log.warning("update_definition(%s): Fulcra returned 404 on GET", def_id)
+                    return {
+                        "ok": False,
+                        "code": "not_found",
+                        "error": "Definition not found — check the id, or it may have been deleted.",
+                    }
+                r.raise_for_status()
+                body = merge_definition_update(r.json(), effective)
+                # Leg 2 — PUT the complete merged body back.
+                r2 = client.put(
+                    f"/user/v1alpha1/annotation/{def_id}", json=body,
+                )
+                if r2.status_code == 404:
+                    _log.warning("update_definition(%s): Fulcra returned 404 on PUT", def_id)
+                    return {
+                        "ok": False,
+                        "code": "not_found",
+                        "error": "Definition not found — it may have been deleted just now.",
+                    }
+                # The OpenAPI spec declares a 307 success for this PUT and
+                # the client follows redirects — treat anything below 400
+                # as success, raise on the rest.
+                if r2.status_code >= 400:
+                    r2.raise_for_status()
+        except _web.httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            _log.warning("update_definition(%s): Fulcra returned %s", def_id, status)
+            if status in (401, 403):
+                return {
+                    "ok": False,
+                    "code": "unauthorized",
+                    "error": (
+                        "Fulcra rejected the request — your sign-in may have expired. "
+                        "Re-run sign-in from the wizard or paste a fresh token."
+                    ),
+                }
+            if 500 <= status < 600:
+                return {
+                    "ok": False,
+                    "code": "upstream_error",
+                    "error": f"Fulcra returned {status}. Try again in a moment.",
+                }
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": f"Fulcra returned an unexpected {status}.",
+            }
+        except (_web.httpx.ConnectError, _web.httpx.ConnectTimeout) as exc:
+            _log.warning("update_definition(%s): connect failed: %r", def_id, exc)
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": "Couldn't reach Fulcra. Check your internet, then try again.",
+            }
+        except _web.httpx.TimeoutException as exc:
+            _log.warning("update_definition(%s): timed out: %r", def_id, exc)
+            return {
+                "ok": False,
+                "code": "timeout",
+                "error": "Fulcra took too long to respond. Try again in a moment.",
+            }
+        except Exception as exc:
+            _log.exception("update_definition(%s): unexpected failure", def_id)
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": (
+                    f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
+                    "Check the daemon log for details."
+                ),
+            }
+
+        # Bust the in-memory quick-record cache so the next list call shows
+        # the new name/tags instead of a stale snapshot. Plugin bindings
+        # deliberately untouched — the id didn't change.
+        self._quick_record_cache = None
+        _log.info(
+            "update_definition(%s): updated on Fulcra; quick-record cache busted",
+            def_id,
+        )
+        return {
+            "ok": True,
+            "definition": {
+                "id": def_id,
+                "annotation_type": body.get("annotation_type"),
+                "name": body.get("name"),
+                "description": body.get("description"),
+                "tags": body.get("tags"),
+            },
         }
 
     def _run(self, plugin_id: str) -> dict:

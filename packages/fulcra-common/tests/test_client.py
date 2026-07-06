@@ -529,6 +529,191 @@ def test_data_updates_summary_never_logs_file_changes(recording_transport, monke
     assert marker not in caplog.text
     # And the returned dict carries no reference to file_changes content.
     assert marker not in repr(out)
+# update_definition — rename/update WITHOUT orphaning history (collect P2 #7)
+#
+# The Fulcra PUT /user/v1alpha1/annotation/{id} is a FULL-REPLACE over a
+# discriminated union (moment/duration/boolean/numeric/people/scale): every
+# union member requires name+description+tags, and boolean/duration/numeric/
+# scale additionally require measurement_spec (scale also requires spec).
+# A partial body would null-out measurement_spec/spec and corrupt scale /
+# numeric definitions — so update_definition must GET the current record,
+# merge only the changed fields, and PUT the complete body back.
+# ---------------------------------------------------------------------------
+
+def _current_def(annotation_type: str) -> dict:
+    """A representative GET body for each PUT-union annotation_type.
+
+    measurement_spec / spec values are deliberately non-trivial so the
+    merge tests can assert they ride through the PUT byte-identical.
+    """
+    base = {
+        "id": "def-1",
+        "annotation_type": annotation_type,
+        "name": "Old Name",
+        "description": "old description",
+        "tags": ["tag-a", "tag-b"],
+        # Record-only fields the GET returns but the PUT union does not
+        # accept — the merge must NOT copy these into the PUT body.
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-06-01T00:00:00Z",
+        "deleted_at": None,
+        "fulcra_userid": "00000000-0000-0000-0000-000000000001",
+        "fulcra_source_id": "com.fulcradynamics.annotation.def-1",
+    }
+    if annotation_type in ("moment", "people"):
+        base["measurement_spec"] = None
+        base["spec"] = None
+    elif annotation_type == "scale":
+        base["measurement_spec"] = {
+            "measurement_type": "scale", "min": 1, "max": 10,
+        }
+        base["spec"] = {
+            "scale": {"labels": {"1": "awful", "10": "great"}},
+        }
+    else:  # boolean / duration / numeric
+        base["measurement_spec"] = {
+            "measurement_type": annotation_type
+            if annotation_type in ("boolean", "duration") else "count",
+            "unit": "s" if annotation_type == "duration" else None,
+        }
+        base["spec"] = None
+    return base
+
+
+def _update_transport(recording_transport, current: dict, *,
+                      get_status: int = 200, put_status: int = 200):
+    """Transport answering GET with `current` and echoing the PUT body."""
+    def responder(r: httpx.Request) -> httpx.Response:
+        if r.method == "GET":
+            return httpx.Response(get_status, json=current)
+        assert r.method == "PUT"
+        import json as _json
+        return httpx.Response(put_status, json=_json.loads(r.content or b"{}"))
+    return recording_transport(responder)
+
+
+@pytest.mark.parametrize(
+    "annotation_type",
+    ["moment", "duration", "boolean", "numeric", "people", "scale"],
+)
+def test_update_definition_full_replace_preserves_specs(
+    recording_transport, annotation_type,
+):
+    """The PUT body is the GET body with only the requested fields changed.
+
+    For every union member: measurement_spec and spec must ride through
+    IDENTICAL to what the GET returned (None stays None for moment/people;
+    the scale/numeric specs are preserved exactly), annotation_type is
+    unchanged, and record-only fields (created_at etc.) are not sent.
+    """
+    current = _current_def(annotation_type)
+    transport = _update_transport(recording_transport, current)
+    client = BaseFulcraClient(transport=transport)
+
+    assert client.update_definition("def-1", name="New Name") is True
+
+    assert [r.method for r in transport.requests] == ["GET", "PUT"]
+    get_req, put_req = transport.requests
+    assert get_req.url.path == "/user/v1alpha1/annotation/def-1"
+    assert put_req.url.path == "/user/v1alpha1/annotation/def-1"
+    # Both legs are authed.
+    assert get_req.headers["Authorization"].startswith("Bearer ")
+    assert put_req.headers["Authorization"].startswith("Bearer ")
+
+    import json as _json
+    body = _json.loads(put_req.content)
+    assert body["name"] == "New Name"
+    # Unchanged fields are the GET values, verbatim.
+    assert body["annotation_type"] == annotation_type
+    assert body["description"] == current["description"]
+    assert body["tags"] == current["tags"]
+    assert body["measurement_spec"] == current["measurement_spec"]
+    assert body["spec"] == current["spec"]
+    # Record-only fields must not leak into the PUT union body.
+    for record_only in ("created_at", "updated_at", "deleted_at",
+                        "fulcra_userid", "fulcra_source_id"):
+        assert record_only not in body
+
+
+def test_update_definition_merges_description_and_tags(recording_transport):
+    current = _current_def("scale")
+    transport = _update_transport(recording_transport, current)
+    client = BaseFulcraClient(transport=transport)
+
+    assert client.update_definition(
+        "def-1", description="new desc", tags=["tag-z"],
+    ) is True
+
+    import json as _json
+    body = _json.loads(transport.requests[1].content)
+    assert body["description"] == "new desc"
+    assert body["tags"] == ["tag-z"]
+    # Name untouched; specs preserved exactly.
+    assert body["name"] == "Old Name"
+    assert body["measurement_spec"] == current["measurement_spec"]
+    assert body["spec"] == current["spec"]
+
+
+def test_update_definition_false_on_get_404(recording_transport):
+    """Unknown id on the GET leg → False, and NO PUT is attempted."""
+    transport = _update_transport(
+        recording_transport, {"detail": "not found"}, get_status=404,
+    )
+    client = BaseFulcraClient(transport=transport)
+    assert client.update_definition("def-missing", name="X") is False
+    assert [r.method for r in transport.requests] == ["GET"]
+
+
+def test_update_definition_false_on_put_404(recording_transport):
+    """A 404 on the PUT leg (deleted between GET and PUT) → False."""
+    transport = _update_transport(
+        recording_transport, _current_def("moment"), put_status=404,
+    )
+    client = BaseFulcraClient(transport=transport)
+    assert client.update_definition("def-1", name="X") is False
+
+
+def test_update_definition_propagates_non_404_errors(recording_transport):
+    """A 500 from Fulcra raises — never silently swallowed."""
+    transport = _update_transport(
+        recording_transport, _current_def("moment"), put_status=500,
+    )
+    client = BaseFulcraClient(transport=transport)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.update_definition("def-1", name="X")
+
+    transport2 = _update_transport(
+        recording_transport, {"detail": "boom"}, get_status=503,
+    )
+    client2 = BaseFulcraClient(transport=transport2)
+    with pytest.raises(httpx.HTTPStatusError):
+        client2.update_definition("def-1", name="X")
+
+
+def test_update_definition_rejects_forbidden_fields(recording_transport):
+    """annotation_type / measurement_spec / spec changes are a different,
+    dangerous operation — reject with ValueError BEFORE any HTTP request."""
+    transport = _update_transport(recording_transport, _current_def("scale"))
+    client = BaseFulcraClient(transport=transport)
+    for forbidden in (
+        {"annotation_type": "numeric"},
+        {"measurement_spec": {"measurement_type": "count"}},
+        {"spec": {"scale": {}}},
+    ):
+        with pytest.raises(ValueError, match="name.*description.*tags"):
+            client.update_definition("def-1", name="X", **forbidden)
+    assert transport.requests == []
+
+
+def test_update_definition_rejects_empty_update(recording_transport):
+    """No fields (or all-None fields) → ValueError, no HTTP traffic."""
+    transport = _update_transport(recording_transport, _current_def("moment"))
+    client = BaseFulcraClient(transport=transport)
+    with pytest.raises(ValueError, match="at least one"):
+        client.update_definition("def-1")
+    with pytest.raises(ValueError, match="at least one"):
+        client.update_definition("def-1", name=None, description=None, tags=None)
+    assert transport.requests == []
 
 
 def test_get_token_finds_cli_in_well_known_locations(monkeypatch, tmp_path):

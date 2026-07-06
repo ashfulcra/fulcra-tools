@@ -65,6 +65,83 @@ def find_fulcra_cli() -> str | None:
     return None
 
 
+#: The only definition fields that may change through update_definition /
+#: the collect daemon's _update_definition. annotation_type changes would
+#: re-type every existing event; measurement_spec / spec changes silently
+#: re-scale historical data — both are different, dangerous operations.
+DEFINITION_UPDATABLE_FIELDS = frozenset({"name", "description", "tags"})
+
+#: The keys of the PUT /user/v1alpha1/annotation/{id} discriminated-union
+#: body (AnnotationRoot: moment/duration/boolean/numeric/people/scale).
+#: The GET record carries more (created_at, fulcra_userid, …) — those are
+#: record-only and must NOT be echoed back into the PUT body.
+_DEFINITION_PUT_BODY_FIELDS = (
+    "annotation_type",
+    "name",
+    "description",
+    "tags",
+    "measurement_spec",
+    "spec",
+)
+
+
+def validate_definition_update(updates: dict) -> dict:
+    """Validate a definition-update field dict; return the effective updates.
+
+    Raises ValueError when `updates` names any non-updatable field (see
+    DEFINITION_UPDATABLE_FIELDS), when no field is provided (None values
+    mean "not provided"), or when a provided value has the wrong shape
+    (empty/blank name, non-string description, non-list tags).
+
+    Shared by `BaseFulcraClient.update_definition` and collect's
+    `Daemon._update_definition` so the forbidden-field guard cannot drift
+    between the two surfaces.
+    """
+    forbidden = set(updates) - DEFINITION_UPDATABLE_FIELDS
+    if forbidden:
+        raise ValueError(
+            "definition update can only change name/description/tags; "
+            f"refusing to change: {', '.join(sorted(forbidden))}"
+        )
+    effective = {k: v for k, v in updates.items() if v is not None}
+    if not effective:
+        raise ValueError(
+            "empty update — provide at least one of name, description, tags"
+        )
+    name = effective.get("name")
+    if name is not None and (not isinstance(name, str) or not name.strip()):
+        raise ValueError("name must be a non-empty string")
+    description = effective.get("description")
+    if description is not None and not isinstance(description, str):
+        raise ValueError("description must be a string")
+    tags = effective.get("tags")
+    if tags is not None and (
+        not isinstance(tags, list)
+        or not all(isinstance(t, str) for t in tags)
+    ):
+        raise ValueError("tags must be a list of strings")
+    return effective
+
+
+def merge_definition_update(current: dict, effective: dict) -> dict:
+    """Build the FULL-REPLACE PUT body from the GET record + changed fields.
+
+    The Fulcra PUT annotation endpoint takes a discriminated union
+    (AnnotationRoot) where every member requires name+description+tags and
+    the measured types (boolean/duration/numeric/scale) also require
+    measurement_spec (scale additionally requires spec). It is NOT a patch:
+    a partial body would null-out measurement_spec/spec and corrupt scale /
+    numeric definitions. So the complete body is reconstructed here —
+    union-body keys copied verbatim from `current` (including explicit
+    nulls for moment/people measurement_spec), then only the validated
+    `effective` fields overlaid. Record-only keys (created_at, id, …) are
+    dropped: the union members don't accept them.
+    """
+    body = {k: current[k] for k in _DEFINITION_PUT_BODY_FIELDS if k in current}
+    body.update(effective)
+    return body
+
+
 @dataclass
 class ImportResult:
     """Outcome of an import run — how many events were seen, skipped as
@@ -339,6 +416,59 @@ class BaseFulcraClient:
         # Rebuild the dict so no reference to the parsed body (and its
         # file_changes sibling) escapes to callers.
         return {str(k): int(v) for k, v in data_types.items()}
+    def update_definition(
+        self,
+        definition_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        **forbidden: object,
+    ) -> bool:
+        """Rename/update an annotation definition IN PLACE — keeping all
+        history under it (unlike delete-and-recreate, which orphans every
+        event recorded against the old definition id).
+
+        Fulcra's ``PUT /user/v1alpha1/annotation/{id}`` is a FULL-REPLACE
+        over a discriminated union, so this GETs the current record first,
+        merges only the changed fields, and PUTs the complete body back —
+        ``measurement_spec`` / ``spec`` always ride through verbatim (see
+        ``merge_definition_update``). The installed fulcra_api lib (0.1.35)
+        has no update method, so both legs are raw httpx via ``_client()``.
+
+        Only name/description/tags may change. Attempting anything else
+        (``annotation_type``, ``measurement_spec``, ``spec``, …) raises
+        ValueError before any HTTP request — a type or spec change re-types
+        / re-scales existing events and is a different, dangerous
+        operation. An all-None update also raises ValueError.
+
+        Returns True on success, False on a 404 from either leg (unknown
+        id, or deleted between the GET and the PUT). Any other HTTP error
+        propagates as ``httpx.HTTPStatusError``, like the siblings above.
+        """
+        if forbidden:
+            raise ValueError(
+                "definition update can only change name/description/tags; "
+                f"refusing to change: {', '.join(sorted(forbidden))}"
+            )
+        effective = validate_definition_update(
+            {"name": name, "description": description, "tags": tags}
+        )
+        path = f"/user/v1alpha1/annotation/{definition_id}"
+        r = self._client().get(path, headers=self._authed_headers())
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        body = merge_definition_update(r.json(), effective)
+        r2 = self._client().put(path, json=body, headers=self._authed_headers())
+        if r2.status_code == 404:
+            return False
+        # The spec declares a 307 success response for this PUT; the client
+        # follows redirects, so anything below 400 that survives to here is
+        # success. Only 4xx/5xx (minus the 404 above) raise.
+        if r2.status_code >= 400:
+            r2.raise_for_status()
+        return True
 
     def fetch_records(
         self,

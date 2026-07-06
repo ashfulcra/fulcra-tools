@@ -1563,6 +1563,205 @@ def test_restore_definition_returns_404_when_unknown(
     assert "definition" in r.json()["detail"].lower()
 
 
+# ---------------------------------------------------------------------------
+# PUT /api/definitions/{def_id} — rename/update a definition IN PLACE.
+# P2 item 7 from the collect review: the only rename path before this was
+# bind_definition force_new+new_name, which creates a brand-new definition
+# and orphans all history under the old one. Fulcra's PUT endpoint is a
+# FULL-REPLACE discriminated union, so the daemon GETs the current record,
+# merges only the changed fields, and PUTs the complete body back —
+# measurement_spec / spec must ride through unchanged.
+# ---------------------------------------------------------------------------
+
+def _patch_fulcra_update(
+    monkeypatch, *, get_status: int = 200, get_body: dict | None = None,
+    put_status: int = 200,
+):
+    """Patch fulcra_collect.web.httpx with a GET+PUT fake for the update
+    route. Mirrors _patch_fulcra_delete / _patch_fulcra_restore. Returns a
+    list that captures every PUT payload (json kwarg) so tests can assert
+    the full-replace merge preserved measurement_spec/spec.
+    """
+    put_payloads: list[dict] = []
+
+    class _FakeResponse:
+        def __init__(self, code, body=None):
+            self.status_code = code
+            self._body = body
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import httpx as _h
+                req = _h.Request("PUT", "http://test")
+                raise _h.HTTPStatusError(
+                    f"{self.status_code}",
+                    request=req,
+                    response=_h.Response(self.status_code, request=req),
+                )
+        def json(self):
+            return self._body if self._body is not None else {}
+
+    class _FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **kw):  # noqa: ARG002
+            return _FakeResponse(get_status, get_body)
+        def put(self, path, **kw):
+            put_payloads.append(kw.get("json"))
+            return _FakeResponse(put_status, kw.get("json"))
+
+    import httpx as _real_httpx
+    monkeypatch.setattr(
+        "fulcra_collect.web.httpx",
+        type("httpx", (), {
+            "Client": _FakeClient,
+            "HTTPStatusError": _real_httpx.HTTPStatusError,
+            "ConnectError": _real_httpx.ConnectError,
+            "ConnectTimeout": _real_httpx.ConnectTimeout,
+            "TimeoutException": _real_httpx.TimeoutException,
+            "HTTPError": _real_httpx.HTTPError,
+        })(),
+    )
+    return put_payloads
+
+
+_SCALE_DEF_BODY = {
+    "id": "def-upd",
+    "annotation_type": "scale",
+    "name": "Old Name",
+    "description": "old description",
+    "tags": ["tag-a"],
+    "measurement_spec": {"measurement_type": "scale", "min": 1, "max": 10},
+    "spec": {"scale": {"labels": {"1": "awful", "10": "great"}}},
+    "created_at": "2026-01-01T00:00:00Z",
+    "deleted_at": None,
+}
+
+
+def test_update_definition_requires_fulcra_auth(collect_home, _in_memory_keyring):
+    """Without a stored Fulcra bearer-token the route returns 401."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.put("/api/definitions/def-x", json={"name": "New"})
+    assert r.status_code == 401
+
+
+def test_update_definition_happy_path_renames_and_busts_cache(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """A rename comes back in the daemon response, the PUT body sent to
+    Fulcra is the FULL merged record (specs preserved verbatim), and the
+    quick-record cache is busted so the next list shows the new name."""
+    import fulcra_collect.credentials as _creds_mod
+
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    put_payloads = _patch_fulcra_update(
+        monkeypatch, get_status=200, get_body=dict(_SCALE_DEF_BODY),
+    )
+
+    daemon = _build_test_daemon(collect_home)
+    # Warm cache — the update must bust it (mirror the restore behaviour).
+    daemon._quick_record_cache = {"at": 1e18, "defs": [{"id": "def-upd", "name": "Old Name"}]}
+    client = _client(daemon)
+    r = client.put("/api/definitions/def-upd", json={"name": "New Name"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["definition"]["name"] == "New Name"
+
+    # Full-replace merge: exactly one PUT, carrying the complete union
+    # body — name changed, everything else identical to the GET record,
+    # record-only fields (created_at/deleted_at/id) not sent.
+    assert len(put_payloads) == 1
+    sent = put_payloads[0]
+    assert sent["name"] == "New Name"
+    assert sent["annotation_type"] == "scale"
+    assert sent["description"] == _SCALE_DEF_BODY["description"]
+    assert sent["tags"] == _SCALE_DEF_BODY["tags"]
+    assert sent["measurement_spec"] == _SCALE_DEF_BODY["measurement_spec"]
+    assert sent["spec"] == _SCALE_DEF_BODY["spec"]
+    assert "created_at" not in sent
+    assert "id" not in sent
+
+    # Cache busted so the rename is visible on the next list call.
+    assert daemon._quick_record_cache is None
+
+
+def test_update_definition_returns_404_when_unknown(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """Fulcra responding 404 on the GET leg must surface as 404."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_update(monkeypatch, get_status=404)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.put("/api/definitions/def-nope", json={"name": "New"})
+    assert r.status_code == 404
+    # Distinguish the daemon's not-found from FastAPI's route-miss 404 so
+    # this test can't pass before the route exists.
+    assert "definition" in r.json()["detail"].lower()
+
+
+def test_update_definition_rejects_empty_payload(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """{} (and all-null fields) is a 400 — nothing to update."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    put_payloads = _patch_fulcra_update(monkeypatch, get_body=dict(_SCALE_DEF_BODY))
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.put("/api/definitions/def-upd", json={})
+    assert r.status_code == 400
+    r2 = client.put(
+        "/api/definitions/def-upd",
+        json={"name": None, "description": None, "tags": None},
+    )
+    assert r2.status_code == 400
+    assert put_payloads == []  # never reached Fulcra
+
+
+def test_update_definition_rejects_forbidden_fields(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """annotation_type / measurement_spec / spec changes are rejected with
+    400 — a type change is a different, dangerous operation, and letting a
+    partial spec through the full-replace PUT would corrupt the def."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    put_payloads = _patch_fulcra_update(monkeypatch, get_body=dict(_SCALE_DEF_BODY))
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    for payload in (
+        {"annotation_type": "numeric"},
+        {"name": "ok", "measurement_spec": {"measurement_type": "count"}},
+        {"name": "ok", "spec": {"scale": {}}},
+        {"name": "ok", "bogus_field": 1},
+    ):
+        r = client.put("/api/definitions/def-upd", json=payload)
+        assert r.status_code == 400, (payload, r.text)
+    assert put_payloads == []  # never reached Fulcra
+
+
+def test_update_definition_uds_command_dispatch(collect_home, _in_memory_keyring):
+    """Menubar parity: handle_request routes cmd=update_definition to the
+    daemon method (bad_request validation proves the branch exists without
+    needing a fake Fulcra)."""
+    daemon = _build_test_daemon(collect_home)
+    response = daemon.handle_request({"cmd": "update_definition", "def_id": ""})
+    assert response.get("ok") is False
+    assert response.get("code") == "bad_request"
+    response2 = daemon.handle_request({
+        "cmd": "update_definition", "def_id": "def-x", "fields": {},
+    })
+    assert response2.get("ok") is False
+    assert response2.get("code") == "bad_request"
+
+
 def test_definitions_route_include_deleted_shows_tombstones(
     collect_home, _in_memory_keyring, monkeypatch,
 ):
