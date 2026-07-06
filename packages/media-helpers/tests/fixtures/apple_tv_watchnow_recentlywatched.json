@@ -1,0 +1,308 @@
+{
+ "data": {
+  "canvas": {
+   "id": "uts.tcvs.home-canvas",
+   "title": "Home",
+   "url": "https://tv.apple.com/us/root/home/tahoma_watchnow",
+   "shelves": [
+    {
+     "displayType": "lockup",
+     "id": "uts.col.Watchlist",
+     "url": "https://tv.apple.com/us/collection/watchlist/uts.col.Watchlist?ctx_root=tahoma_watchnow&ctx_cvs=uts.tcvs.home-canvas&ctx_proot=tahoma_watchnow&ctx_shelf=uts.shlf.gen.Watchlist",
+     "header": {
+      "title": "Watchlist"
+     },
+     "items": [
+      {
+       "type": "Movie",
+       "title": "Fast Swap",
+       "showTitle": null,
+       "id": "umc.anon.439a012a8e33"
+      },
+      {
+       "type": "Movie",
+       "title": "Turbine Red-Eye",
+       "showTitle": null,
+       "id": "umc.anon.21de8c1d500d"
+      }
+     ]
+    },
+    {
+     "id": "uts.marker.SharedWithYou",
+     "markerType": "SharedWithYou"
+    },
+    {
+     "displayType": "playHistory",
+     "id": "uts.col.PlayHistory",
+     "url": "https://tv.apple.com/us/collection/recently-watched/uts.col.PlayHistory?ctx_root=tahoma_watchnow&ctx_cvs=uts.tcvs.home-canvas&ctx_proot=tahoma_watchnow&ctx_shelf=uts.shlf.gen.RecentlyWatched",
+     "header": {
+      "title": "Recently Watched"
+     },
+     "items": [
+      {
+       "duration": 2460,
+       "episodeNumber": 5,
+       "fractionalEpisodeNumber": 5.0,
+       "id": "umc.anon.2dd41d7591f4",
+       "releaseDate": 1255590000000,
+       "seasonId": "umc.anon.aeaa0b2a4c68",
+       "seasonNumber": 2,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 2.5",
+       "type": "Episode"
+      },
+      {
+       "duration": 2460,
+       "episodeNumber": 4,
+       "fractionalEpisodeNumber": 4.0,
+       "id": "umc.anon.81e8ecd683c4",
+       "releaseDate": 1254985200000,
+       "seasonId": "umc.anon.aeaa0b2a4c68",
+       "seasonNumber": 2,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 2.4",
+       "type": "Episode"
+      },
+      {
+       "duration": 2460,
+       "episodeNumber": 3,
+       "fractionalEpisodeNumber": 3.0,
+       "id": "umc.anon.d7dd99255e61",
+       "releaseDate": 1254380400000,
+       "seasonId": "umc.anon.aeaa0b2a4c68",
+       "seasonNumber": 2,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 2.3",
+       "type": "Episode"
+      },
+      {
+       "duration": 2460,
+       "episodeNumber": 2,
+       "fractionalEpisodeNumber": 2.0,
+       "id": "umc.anon.ba9c2dd88463",
+       "releaseDate": 1253775600000,
+       "seasonId": "umc.anon.aeaa0b2a4c68",
+       "seasonNumber": 2,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 2.2",
+       "type": "Episode"
+      },
+      {
+       "duration": 2460,
+       "episodeNumber": 1,
+       "fractionalEpisodeNumber": 1.0,
+       "id": "umc.anon.2539b6ff59ef",
+       "releaseDate": 1253170800000,
+       "seasonId": "umc.anon.aeaa0b2a4c68",
+       "seasonNumber": 2,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 2.1",
+       "type": "Episode"
+      },
+      {
+       "duration": 2640,
+       "episodeNumber": 21,
+       "fractionalEpisodeNumber": 21.0,
+       "id": "umc.anon.149c14a1c743",
+       "releaseDate": 1242111600000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.21",
+       "type": "Episode"
+      },
+      {
+       "duration": 2520,
+       "episodeNumber": 20,
+       "fractionalEpisodeNumber": 20.0,
+       "id": "umc.anon.70ba39261bce",
+       "releaseDate": 1241506800000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.20",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 19,
+       "fractionalEpisodeNumber": 19.0,
+       "id": "umc.anon.feac52537e7c",
+       "releaseDate": 1240902000000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.19",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 15,
+       "fractionalEpisodeNumber": 15.0,
+       "id": "umc.anon.c4f0dba05365",
+       "releaseDate": 1234252800000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.15",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 14,
+       "fractionalEpisodeNumber": 14.0,
+       "id": "umc.anon.7ff10562c55a",
+       "releaseDate": 1233648000000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.14",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 18,
+       "fractionalEpisodeNumber": 18.0,
+       "id": "umc.anon.e4606c41efb3",
+       "releaseDate": 1240297200000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.18",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 17,
+       "fractionalEpisodeNumber": 17.0,
+       "id": "umc.anon.4ff81feca400",
+       "releaseDate": 1239692400000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.17",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 16,
+       "fractionalEpisodeNumber": 16.0,
+       "id": "umc.anon.b582a79e54e0",
+       "releaseDate": 1239087600000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.16",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 13,
+       "fractionalEpisodeNumber": 13.0,
+       "id": "umc.anon.b2797b7bf48d",
+       "releaseDate": 1233043200000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.13",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 12,
+       "fractionalEpisodeNumber": 12.0,
+       "id": "umc.anon.b6fdd52bf80c",
+       "releaseDate": 1232438400000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.12",
+       "type": "Episode"
+      },
+      {
+       "duration": 2880,
+       "episodeNumber": 10,
+       "fractionalEpisodeNumber": 10.0,
+       "id": "umc.anon.cdc34fb3011a",
+       "isAppleOriginal": true,
+       "releaseDate": 1781654400000,
+       "seasonId": "umc.anon.5ea566f45fe9",
+       "seasonNumber": 1,
+       "showId": "umc.anon.4b17775efeb3",
+       "showTitle": "Orphan Cove",
+       "title": "Chapter 1.10",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 11,
+       "fractionalEpisodeNumber": 11.0,
+       "id": "umc.anon.242ee0f9c1c5",
+       "releaseDate": 1228204800000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.11",
+       "type": "Episode"
+      },
+      {
+       "duration": 2760,
+       "episodeNumber": 10,
+       "fractionalEpisodeNumber": 10.0,
+       "id": "umc.anon.3b133d47e53f",
+       "releaseDate": 1227600000000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.10",
+       "type": "Episode"
+      },
+      {
+       "duration": 2760,
+       "episodeNumber": 9,
+       "fractionalEpisodeNumber": 9.0,
+       "id": "umc.anon.4a2d0dc0b4b2",
+       "releaseDate": 1226995200000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.9",
+       "type": "Episode"
+      },
+      {
+       "duration": 2820,
+       "episodeNumber": 8,
+       "fractionalEpisodeNumber": 8.0,
+       "id": "umc.anon.7eaa3a213f39",
+       "releaseDate": 1226390400000,
+       "seasonId": "umc.anon.3daa07783501",
+       "seasonNumber": 1,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "title": "Chapter 1.8",
+       "type": "Episode"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

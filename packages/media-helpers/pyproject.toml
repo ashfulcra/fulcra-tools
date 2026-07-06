@@ -40,6 +40,7 @@ letterboxd = "fulcra_media.plugins.letterboxd:PLUGIN"
 goodreads = "fulcra_media.plugins.goodreads:PLUGIN"
 apple-podcasts = "fulcra_media.plugins.apple_podcasts:PLUGIN"
 apple-podcasts-timemachine = "fulcra_media.plugins.apple_podcasts_timemachine:PLUGIN"
+apple-tv = "fulcra_media.plugins.apple_tv:PLUGIN"
 generic-csv = "fulcra_media.plugins.generic_csv:PLUGIN"
 media-webhook = "fulcra_media.plugins.media_webhook:PLUGIN"
 

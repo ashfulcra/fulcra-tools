@@ -28,6 +28,7 @@ BUNDLED_PLUGINS: tuple[tuple[str, str], ...] = (
     ("apple-podcasts", "fulcra_media.plugins.apple_podcasts:PLUGIN"),
     ("apple-podcasts-timemachine",
      "fulcra_media.plugins.apple_podcasts_timemachine:PLUGIN"),
+    ("apple-tv", "fulcra_media.plugins.apple_tv:PLUGIN"),
     ("generic-csv", "fulcra_media.plugins.generic_csv:PLUGIN"),
     ("media-webhook", "fulcra_media.plugins.media_webhook:PLUGIN"),
     ("dayone", "fulcra_dayone.collect_plugin:PLUGIN"),
