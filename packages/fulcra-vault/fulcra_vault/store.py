@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import PurePosixPath
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -131,7 +132,12 @@ def _default_runner(cmd: list[str], timeout: int) -> subprocess.CompletedProcess
 def _cli_base() -> list[str]:
     env_cli = os.environ.get("FULCRA_CLI_COMMAND", "").strip()
     if env_cli:
-        return env_cli.split()
+        # shlex so a space-containing CLI path stays one argv token; fall back
+        # to naive split on malformed shell syntax rather than crashing.
+        try:
+            return shlex.split(env_cli)
+        except ValueError:
+            return env_cli.split()
     if shutil.which("fulcra-api"):
         return ["fulcra-api"]
     return ["uv", "tool", "run", "fulcra-api"]

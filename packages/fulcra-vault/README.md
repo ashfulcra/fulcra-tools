@@ -166,6 +166,28 @@ uv run fulcra-vault map --check
 Locks coordinate agent writes. They do not restrict direct human edits through
 the future local mirror.
 
+## Data classification
+
+Despite the name, `fulcra-vault` is **not** an encrypted store. It is a
+**plaintext markdown store** persisted through the Fulcra Files API. There is no
+encryption at the application layer — notes are written and read as ordinary
+markdown bytes, and the CLI performs zero cryptographic operations.
+
+Concretely:
+
+- **Do NOT store secrets or credentials** here — passwords, API keys, tokens,
+  private keys, recovery codes, or anything whose disclosure is harmful. Use a
+  real secrets manager for those.
+- The vault provides **integrity and safe-mutation** guarantees (frontmatter
+  validation, owned sections, advisory locks, path-traversal defense — note
+  paths are normalized to Fulcra absolute paths and excluded/`meta.json` paths
+  refuse writes), but it does **not** provide **confidentiality**. Path
+  traversal is defended; secrecy of contents is not.
+- Treat vault contents at the confidentiality level of your Fulcra account: any
+  agent or session authenticated to the same account can read every note.
+
+Classify what you put here as durable *context and memory*, not sensitive data.
+
 ## Development Notes
 
 Most modules are pure and dependency-injected:

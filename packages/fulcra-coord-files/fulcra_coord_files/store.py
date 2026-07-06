@@ -31,7 +31,7 @@ how anything built on this transport must behave:
     and must be avoided rather than guarded.
 
 Backend resolution order:
-  1. FULCRA_COORD_BACKEND env var (split on whitespace) — for testing
+  1. FULCRA_COORD_BACKEND env var (shlex-tokenized) — for testing
   2. FULCRA_CLI_COMMAND env var
   3. ``fulcra-api`` if found on PATH
   4. ``uv tool run fulcra-api`` (fallback)
@@ -55,6 +55,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -111,7 +112,15 @@ def cli_base_cmd() -> list[str]:
     their own base via ``FULCRA_CLI_COMMAND``."""
     env_cli = os.environ.get("FULCRA_CLI_COMMAND", "").strip()
     if env_cli:
-        return env_cli.split()
+        # shlex (not str.split): a configured CLI path may legitimately contain
+        # spaces (e.g. "/Applications/My Tools/fulcra-api") or quoted args, which
+        # bare .split() would mis-tokenize into a broken argv. shlex honours
+        # quoting/escaping the way a shell would. Malformed shell syntax
+        # (unbalanced quote) falls back to naive split rather than crashing.
+        try:
+            return shlex.split(env_cli)
+        except ValueError:
+            return env_cli.split()
 
     if shutil.which("fulcra-api"):
         return ["fulcra-api"]
@@ -124,7 +133,13 @@ def _backend_cmd() -> list[str]:
     # 1. Test override (fake backend emulator speaking the `file` protocol).
     env_test = os.environ.get("FULCRA_COORD_BACKEND", "").strip()
     if env_test:
-        return env_test.split()
+        # shlex (not str.split): same rationale as cli_base_cmd — a fake-backend
+        # invocation whose path/args contain spaces must tokenize the way a shell
+        # would rather than splitting mid-path. Fall back on malformed syntax.
+        try:
+            return shlex.split(env_test)
+        except ValueError:
+            return env_test.split()
 
     # 2-4. Resolved real CLI base + the `file` subcommand.
     return cli_base_cmd() + ["file"]
