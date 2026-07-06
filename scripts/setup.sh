@@ -58,12 +58,13 @@ bold "=== 2/5  Workspace sync (--all-packages --all-extras) ==="
 uv sync --all-packages --all-extras
 
 bold "=== 3/5  Fulcra CLI ==="
-if uv tool list 2>/dev/null | grep -q '^fulcra-api '; then
-  echo "  fulcra-api already installed as a uv tool"
-else
-  echo "  installing fulcra-api uv tool…"
-  uv tool install fulcra-api
-fi
+# Install-or-upgrade unconditionally: the old "skip if present" check
+# stranded machines on whatever CLI version they first installed, silently
+# missing newer command groups (file, data-updates, data-type, tag) that
+# collect and fulcra-coord depend on. `uv tool install --upgrade` is
+# idempotent and a no-op when already current.
+echo "  installing/upgrading fulcra-api uv tool…"
+uv tool install --upgrade fulcra-api
 have fulcra && echo "  fulcra: $(command -v fulcra)" || \
   yellow "  warning: \`fulcra\` not on PATH — add ~/.local/bin to PATH or use the launchd agent's bundled PATH"
 
