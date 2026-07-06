@@ -385,7 +385,12 @@ class RunContext:
         try:
             from fulcra_common import BaseFulcraClient
             return BaseFulcraClient().get_token()
-        except (RuntimeError, OSError):
+        except (RuntimeError, OSError) as exc:
+            # Deliberate swallow (callers treat this as "not signed in yet"),
+            # but LOG it: the 2026-06-10 launchd CLI-resolution failure was
+            # invisible precisely because this catch turned "CLI not found"
+            # into a silent None that surfaced only as "not authenticated".
+            self.log.warning("fulcra_token fallback failed: %s", exc)
             return None
 
     def resolved_definition_id(
