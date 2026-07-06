@@ -177,8 +177,18 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
     ctx = RunContext(
         plugin_id=plugin.id,
         config=cfg.plugin_settings.get(plugin.id, {}),
+        # Route each credential to the keychain scope the plugin declared —
+        # user_level creds live in the account-scoped store (get_user_secret),
+        # everything else in the plugin-scoped one. This mirrors the daemon's
+        # _credential_status / _set_credential / _delete_credential routing;
+        # reading only the plugin scope here made any required user_level
+        # credential falsely "missing" every run (P3 #14).
         credentials={
-            c.key: credentials.get_secret(plugin.id, c.key)
+            c.key: (
+                credentials.get_user_secret(c.key)
+                if getattr(c, "user_level", False)
+                else credentials.get_secret(plugin.id, c.key)
+            )
             for c in plugin.required_credentials
         },
         state=state.load(plugin.id),
@@ -189,9 +199,16 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
         _unclaim_dedup_keys=_unclaim_dedup_keys,
         # Keychain write-back: lets a plugin persist rotated secrets (e.g.
         # Trakt's single-use OAuth refresh tokens) without importing
-        # fulcra_collect.credentials itself.
-        _set_credential=lambda key, value: credentials.set_secret(
-            plugin.id, key, value),
+        # fulcra_collect.credentials itself. Routes by the credential's
+        # declared scope, mirroring the read side above — writing a
+        # user_level credential to the plugin scope would silently rotate
+        # the WRONG keychain entry (the read side would keep serving the
+        # stale user-level value).
+        _set_credential=lambda key, value: (
+            credentials.set_user_secret(key, value)
+            if any(getattr(c, "user_level", False)
+                   for c in plugin.required_credentials if c.key == key)
+            else credentials.set_secret(plugin.id, key, value)),
     )
     missing = sorted(c.key for c in plugin.required_credentials
                      if not ctx.credentials.get(c.key))

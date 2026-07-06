@@ -109,10 +109,14 @@ def _capture_validate_store_cli_token(cli_path: str) -> None:
     # same as the paste-token path. Catches the (rare) case where the
     # CLI's stored token is for the wrong tenant or has been revoked
     # server-side.
+    # Same DEFAULT_BASE_URL routing as every other caller (fulcra_common
+    # .client, web._RetryingClient) — this site used to hardcode prod
+    # (P3 #18). Late import so tests can monkeypatch it.
+    from fulcra_common import DEFAULT_BASE_URL
     try:
         with _web.httpx.Client(timeout=10.0) as client:
             r = client.get(
-                "https://api.fulcradynamics.com/user/v1alpha1/annotation",
+                f"{DEFAULT_BASE_URL}/user/v1alpha1/annotation",
                 headers={"Authorization": f"Bearer {token}"},
             )
         if r.status_code in (401, 403):
@@ -183,10 +187,12 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         # Validate against Fulcra before storing so typos are caught at
         # the door, not on first plugin run.
         _log = logging.getLogger("fulcra_collect.web")
+        # DEFAULT_BASE_URL honors the FULCRA_API_BASE override (P3 #18).
+        from fulcra_common import DEFAULT_BASE_URL
         try:
             with _web.httpx.Client(timeout=10.0) as client:
                 r = client.get(
-                    "https://api.fulcradynamics.com/user/v1alpha1/annotation",
+                    f"{DEFAULT_BASE_URL}/user/v1alpha1/annotation",
                     headers={"Authorization": f"Bearer {token}"},
                 )
             if r.status_code == 401 or r.status_code == 403:

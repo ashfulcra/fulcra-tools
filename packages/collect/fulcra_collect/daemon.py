@@ -546,9 +546,12 @@ class Daemon:
         endpoint; excludes soft-deleted; sorts by (pinned-first,
         annotation_type, created_at desc). Caches for 60s in-memory.
 
-        Sprint B (2026-05-26) widened this from Moment-only to all
-        annotation types so users can record Durations / Watched /
-        Listened / Read events from the menubar too.
+        Sprint B (2026-05-26) widened this from Moment-only to moment +
+        duration so users can record finished movies / listening /
+        reading sessions from the menubar too. Only those two types are
+        offered because they're the only ones ``_record_annotation`` can
+        write (P3 #15) — any other annotation_type would produce a
+        value-less record.
 
         Task #64 (2026-05-26) added a ``pinned`` field per def and made
         favorites sort to the top of each annotation_type group. When
@@ -599,51 +602,39 @@ class Daemon:
                 "error": "Fulcra didn't respond. Check your internet, then try again.",
                 "definitions": [],
             }
-        # Drop soft-deleted defs but keep ALL annotation types.
-        live = [d for d in all_defs if not d.get("deleted_at")]
-        # Group ordering: moments first, then durations, then anything else
-        # alphabetically; within each group, most-recently-created first.
-        # This mirrors how the popover lays out section headers so the
-        # daemon's order is already correct without re-sorting client-side.
+        # Drop soft-deleted defs, and keep only the annotation types the
+        # quick-record write path can actually record: _record_annotation
+        # writes MomentEvent / DurationEvent carrying just a comment, so a
+        # def of any other annotation_type (scale, numeric, ...) recorded
+        # from the popover would produce a VALUE-LESS record (P3 #15).
+        _RECORDABLE_TYPES = ("moment", "duration")
+        live = [
+            d for d in all_defs
+            if not d.get("deleted_at")
+            and d.get("annotation_type") in _RECORDABLE_TYPES
+        ]
+        # Group ordering: moments first, then durations; groupby below
+        # needs the list pre-sorted by the same key. This mirrors how the
+        # popover lays out section headers so the daemon's order is
+        # already correct without re-sorting client-side.
         _GROUP_ORDER = {"moment": 0, "duration": 1}
-        live.sort(key=lambda d: (
-            _GROUP_ORDER.get(d.get("annotation_type", ""), 2),
-            d.get("annotation_type", ""),
-            # Negate via reverse-string trick on created_at: sort desc by
-            # using a tuple where the second element is the negated
-            # lexicographic order — but Python doesn't negate strings, so
-            # we use the trick of sorting by created_at desc separately
-            # via a stable two-pass.
-        ))
-        # Stable sort preserves the group ordering above; then within
-        # each group sort pinned-first, then by created_at desc. Apply
-        # group-by, sort, flatten. Annotate each def with a ``pinned``
-        # boolean so the menubar can render the star state without re-
-        # consulting the favorites file.
+
+        def _group_key(d: dict) -> tuple:
+            return (_GROUP_ORDER.get(d.get("annotation_type", ""), 2),
+                    d.get("annotation_type", ""))
+
+        live.sort(key=_group_key)
+        # Within each group: pinned defs first, and each pinned/unpinned
+        # bucket ordered by created_at desc. Annotate each def with a
+        # ``pinned`` boolean so the menubar can render the star state
+        # without re-consulting the favorites file.
         favorites = _favs.load()
         from itertools import groupby
         flattened: list[dict] = []
-        for _, group in groupby(live, key=lambda d: (
-            _GROUP_ORDER.get(d.get("annotation_type", ""), 2),
-            d.get("annotation_type", ""),
-        )):
+        for _, group in groupby(live, key=_group_key):
             group_list = list(group)
             for entry in group_list:
                 entry["pinned"] = entry.get("id") in favorites
-            # Two-key sort: pinned (True first) then created_at desc.
-            # Python sorts True > False so we negate via ``not pinned``.
-            group_list.sort(
-                key=lambda d: (not d.get("pinned", False),
-                               # reverse via prepending NUL bytes is uglier
-                               # than a separate reverse sort — fall back
-                               # to a stable two-pass:
-                               ""),
-            )
-            # Within each (pinned-bucket), sort by created_at desc. We
-            # do this by splitting the group then re-concatenating, so
-            # pinned defs are ordered most-recent-first AMONG pinned
-            # and unpinned defs are ordered most-recent-first AMONG
-            # unpinned — exactly what the spec asks for.
             pinned_part = [d for d in group_list if d.get("pinned")]
             unpinned_part = [d for d in group_list if not d.get("pinned")]
             pinned_part.sort(key=lambda d: d.get("created_at", ""),
