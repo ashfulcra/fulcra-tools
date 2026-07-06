@@ -59,6 +59,13 @@ def test_wizard_netflix_invokes_walkthrough():
     assert "Download all" in result.output
 
 
+def test_wizard_apple_tv_invokes_walkthrough():
+    result = CliRunner().invoke(cli, ["wizard", "apple-tv"])
+    assert result.exit_code == 0, result.output
+    assert "Apple TV app setup" in result.output
+    assert "Fulcra Collect dashboard" in result.output
+
+
 def test_import_netflix_runs_pipeline(tmp_path: Path, mocker):
     # Prep a tiny CSV and state on disk
     csv = tmp_path / "small.csv"

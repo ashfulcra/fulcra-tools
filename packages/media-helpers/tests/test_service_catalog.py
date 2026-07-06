@@ -46,6 +46,14 @@ def test_trakt_is_top_video_pick():
     assert video[0].key == "trakt"
 
 
+def test_apple_tv_has_registered_wizard():
+    apple_tv = get("apple-tv")
+    assert apple_tv is not None
+    assert apple_tv.available is True
+    assert apple_tv.pathway == "local-db"
+    assert apple_tv.wizard == "apple-tv"
+
+
 def test_get_by_key():
     assert get("lastfm").label == "Last.fm"
     assert get("nonexistent") is None
