@@ -10,8 +10,28 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal
+
+# How long a successful definition_exists validation is trusted before the
+# cached definition id must be re-validated against the live catalog.
+#
+# WHY a plain TTL and not a data-updates gate: the fleet directive asked
+# whether GET /data/v1/updates could signal "definitions changed" so the
+# gate could be event-driven. Investigated live (2026-07-06): it CANNOT.
+# data_updates reports per-data-type RECORD processing counts; definition
+# soft-deletes — the exact hazard the validation exists for — produce NO
+# signal at all (an 11-definition delete burst shows data_types == {} over
+# its own window), and definition creates surface only as the first real
+# record written under the new def, not as the create itself. A zero-
+# activity window therefore proves nothing about definition liveness, so
+# consulting data_updates here would be a wasted round trip dressed up as
+# a signal. Time-based it is: honest, cheap, bounded.
+DEFINITION_VALIDATION_TTL = timedelta(minutes=15)
+
+# Absolute ceiling regardless of any future TTL tuning: never trust a
+# cached definition id for more than 24h without revalidating it.
+DEFINITION_VALIDATION_HARD_CAP = timedelta(hours=24)
 
 PluginKind = Literal["service", "scheduled", "manual"]
 _KINDS = ("service", "scheduled", "manual")
@@ -393,6 +413,50 @@ class RunContext:
             self.log.warning("fulcra_token fallback failed: %s", exc)
             return None
 
+    def _definition_validation_fresh(self, cached: str) -> bool:
+        """True iff the validated-at watermark covers exactly `cached` and
+        is younger than min(TTL, hard cap) — i.e. the cached definition id
+        was confirmed live on this account recently enough to skip the
+        full-catalog ``definition_exists`` fetch this run.
+
+        Every failure mode fails OPEN into a real validation (returns
+        False): watermark unset, watermark for a different id, malformed
+        or naive timestamp, or a timestamp in the future (clock skew).
+        The gate can only ever SKIP work that would have confirmed a live
+        def; it can never extend trust past the hard cap."""
+        if getattr(self.state, "definition_id", None) != cached:
+            return False
+        stamp = getattr(self.state, "definition_validated_at", None)
+        if not stamp:
+            return False
+        try:
+            validated_at = datetime.fromisoformat(stamp)
+        except (TypeError, ValueError):
+            return False
+        if validated_at.tzinfo is None:
+            return False
+        age = datetime.now(timezone.utc) - validated_at
+        ttl = min(DEFINITION_VALIDATION_TTL, DEFINITION_VALIDATION_HARD_CAP)
+        return timedelta(0) <= age < ttl
+
+    def _mark_definition_validated(self) -> None:
+        """Advance the validated-at watermark to now (UTC). Called ONLY
+        after a validation that actually ran and confirmed the def live,
+        or after a fresh resolve (the resolver just found/created the def
+        on the live account — that IS a validation). Never called on the
+        trust-the-cache-on-network-error path, so a flake can't extend
+        the watermark. Best-effort on duck-typed states that reject new
+        attributes: the gate simply stays off."""
+        try:
+            self.state.definition_validated_at = (
+                datetime.now(timezone.utc).isoformat()
+            )
+        except Exception:  # noqa: BLE001 — frozen/slotted fake states
+            self.log.debug(
+                "state object rejects definition_validated_at; "
+                "validation gate disabled for this run",
+            )
+
     def resolved_definition_id(
         self,
         expected_spec: dict,
@@ -418,7 +482,13 @@ class RunContext:
 
         Stale-cache guard: when `state.definition_id` is set, validate
         that the def still exists on the *current* Fulcra account before
-        returning it. After a daemon re-auth to a different account, the
+        returning it — at most once per ``DEFINITION_VALIDATION_TTL``
+        (15 min; 24-h hard cap): a fresh ``definition_validated_at``
+        watermark skips the full-catalog ``definition_exists`` fetch that
+        every run used to pay. The TTL is time-based on purpose —
+        ``GET /data/v1/updates`` was investigated (live, 2026-07-06) and
+        does NOT surface definition create/soft-delete, so there is no
+        cheaper change signal to key on. After a daemon re-auth to a different account, the
         cached id points at a def that doesn't exist here — ingest
         accepts events keyed to it silently and they end up orphaned in
         the timeline. On a stale hit we clear the cache and fall through
@@ -438,17 +508,27 @@ class RunContext:
         """
         cached = getattr(self.state, "definition_id", None)
         if cached and not force_new:
+            # Validation gate: skip the full-catalog definition_exists
+            # fetch while the validated-at watermark is fresh (15-min TTL,
+            # 24-h hard cap). Every plugin run used to pay this fetch.
+            if self._definition_validation_fresh(cached):
+                return cached
             client = (self._fulcra_client_factory()
                       if self._fulcra_client_factory is not None else None)
             still_present = True
+            validated = False
             if client is not None and hasattr(client, "definition_exists"):
                 try:
                     still_present = client.definition_exists(cached)
+                    validated = still_present
                 except Exception:
                     # Network/adapter failure — be conservative and trust
-                    # the cache. The next run will retry the check.
+                    # the cache. The next run will retry the check. The
+                    # watermark is NOT advanced: the check didn't run.
                     still_present = True
             if still_present:
+                if validated:
+                    self._mark_definition_validated()
                 return cached
             # Stale: clear and re-resolve. Caller's state mutation is
             # picked up by the runner at run end (state.definition_id
@@ -489,6 +569,9 @@ class RunContext:
                 create_extra=create_extra,
             )
         self.state.definition_id = new_id
+        # A fresh resolve IS a validation — the resolver just found or
+        # created this def on the live account. Start the gate window now.
+        self._mark_definition_validated()
         return new_id
 
     def ensure_definition(
@@ -522,6 +605,14 @@ class RunContext:
         def after a daemon re-auth.
         """
         if cached:
+            # Validation gate (same as resolved_definition_id): while the
+            # watermark is fresh AND covers exactly this id, skip the
+            # full-catalog definition_exists fetch. The watermark only
+            # covers `cached` once a prior successful validation synced
+            # state.definition_id to it, so a per-package cache that
+            # disagrees with per-plugin state always gets a real check.
+            if self._definition_validation_fresh(cached):
+                return cached
             client = (self._fulcra_client_factory()
                       if self._fulcra_client_factory is not None else None)
             if client is not None and hasattr(client, "definition_exists"):
@@ -532,8 +623,11 @@ class RunContext:
                         # without another round trip.
                         if getattr(self.state, "definition_id", None) != cached:
                             self.state.definition_id = cached
+                        self._mark_definition_validated()
                         return cached
                 except Exception:
+                    # Trust the cache on a flaky check; the watermark is
+                    # NOT advanced (the check didn't run to completion).
                     if getattr(self.state, "definition_id", None) != cached:
                         self.state.definition_id = cached
                     return cached

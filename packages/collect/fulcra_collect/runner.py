@@ -44,6 +44,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
     error: str | None = "worker emitted no result"
     watermark: str | None = None
     definition_id: str | None = None
+    definition_validated_at: str | None = None
     # Track whether the worker pushed any annotation events at all so the
     # final run-summary entry (added at the bottom) can pick the right
     # message: "Ran, no new data" when the run was clean but quiet, vs.
@@ -77,6 +78,7 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
                 error = event.get("error")
                 watermark = event.get("watermark")
                 definition_id = event.get("definition_id")
+                definition_validated_at = event.get("definition_validated_at")
             elif event_type == "annotation":
                 # Surface this in the daemon's activity buffer so the web UI's
                 # dashboard "Recently" feed shows the receipt.
@@ -100,6 +102,8 @@ def run(plugin_id: str, command: list[str], *, now: datetime,
         st.watermark = watermark
     if definition_id is not None:
         st.definition_id = definition_id
+    if definition_validated_at is not None:
+        st.definition_validated_at = definition_validated_at
     st.record_finish(outcome=outcome, when=now, error=error)
     state.save(st)
 

@@ -421,6 +421,174 @@ def test_resolved_definition_id_trusts_cache_when_validation_errors():
     assert client.list_calls == 0
 
 
+# ---------------------------------------------------------------------------
+# Definition-validation gate (P2 items 5+10 — data-updates adoption batch).
+#
+# Investigated live 2026-07-06: GET /data/v1/updates does NOT surface
+# definition create/soft-delete (an 11-def delete burst shows data_types
+# == {} over its own window), so the gate is a plain TTL watermark — see
+# DEFINITION_VALIDATION_TTL in plugin.py. These tests pin the watermark
+# semantics: trust while fresh, validate on expiry, 24h hard cap, and
+# fail-open on every malformed/failed path.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone  # noqa: E402
+
+
+def _stamp(delta: timedelta) -> str:
+    """ISO watermark `delta` in the past (negative = future)."""
+    return (datetime.now(timezone.utc) - delta).isoformat()
+
+
+def test_gate_skips_validation_while_watermark_fresh():
+    """A watermark younger than the TTL means NO definition_exists call —
+    the whole point: stop paying a full-catalog fetch on every run."""
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id",
+                        definition_validated_at=_stamp(timedelta(minutes=1)))
+    client = _FakeClientWithValidation(live_ids={"cached-id"})
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "cached-id"
+    assert client.exists_calls == []          # gate skipped the check
+    assert client.list_calls == 0             # resolver untouched
+
+
+def test_gate_validates_and_advances_watermark_on_expiry():
+    """Past the TTL the real check runs, and a successful check advances
+    the watermark so the next 15 minutes are gated again."""
+    old = _stamp(timedelta(minutes=16))
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id",
+                        definition_validated_at=old)
+    client = _FakeClientWithValidation(live_ids={"cached-id"})
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "cached-id"
+    assert client.exists_calls == ["cached-id"]
+    assert state.definition_validated_at is not None
+    assert state.definition_validated_at > old  # advanced
+
+
+def test_gate_hard_cap_forces_validation_even_with_huge_ttl(monkeypatch):
+    """Never trust a cached definition longer than 24h: even if the TTL
+    were tuned absurdly high, a watermark older than the hard cap must
+    force a real validation."""
+    import fulcra_collect.plugin as plugin_mod
+    monkeypatch.setattr(plugin_mod, "DEFINITION_VALIDATION_TTL",
+                        timedelta(days=365))
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id",
+                        definition_validated_at=_stamp(timedelta(hours=25)))
+    client = _FakeClientWithValidation(live_ids={"cached-id"})
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "cached-id"
+    assert client.exists_calls == ["cached-id"]  # cap overrode the TTL
+
+
+def test_gate_malformed_watermark_fails_open_into_validation():
+    """A garbage timestamp must behave exactly like no watermark."""
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id",
+                        definition_validated_at="not-a-timestamp")
+    client = _FakeClientWithValidation(live_ids={"cached-id"})
+    ctx = _make_ctx(state, client)
+    assert ctx.resolved_definition_id(
+        {"annotation_type": "moment"}, canonical_name="lastfm-listens",
+    ) == "cached-id"
+    assert client.exists_calls == ["cached-id"]
+
+
+def test_gate_future_watermark_fails_open_into_validation():
+    """Clock skew: a watermark from the future is not trusted."""
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id",
+                        definition_validated_at=_stamp(-timedelta(hours=1)))
+    client = _FakeClientWithValidation(live_ids={"cached-id"})
+    ctx = _make_ctx(state, client)
+    ctx.resolved_definition_id({"annotation_type": "moment"},
+                               canonical_name="lastfm-listens")
+    assert client.exists_calls == ["cached-id"]
+
+
+def test_gate_check_failure_does_not_advance_watermark():
+    """definition_exists raising → trust the cache (pre-existing
+    behaviour) but do NOT advance the watermark: a flake must not buy
+    15 minutes of trust it didn't earn."""
+    state = PluginState(plugin_id="lastfm", definition_id="cached-id",
+                        definition_validated_at=None)
+
+    class _FlakyClient(_FakeClient):
+        def definition_exists(self, def_id):
+            raise RuntimeError("network down")
+
+    ctx = _make_ctx(state, _FlakyClient())
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "cached-id"
+    assert state.definition_validated_at is None  # not advanced
+
+
+def test_gate_fresh_resolve_starts_the_watermark():
+    """A brand-new resolve is itself a validation — the watermark starts
+    there, so the very next run is gated."""
+    state = PluginState(plugin_id="lastfm")
+    client = _FakeClient()
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "def-fresh"
+    assert state.definition_validated_at is not None
+
+
+def test_gate_stale_def_still_re_resolves_after_expiry():
+    """The gate must not defeat the original stale-cache guard: once the
+    watermark expires and the check says the def is gone, re-resolution
+    still happens."""
+    state = PluginState(plugin_id="lastfm", definition_id="orphan-from-A",
+                        definition_validated_at=_stamp(timedelta(hours=2)))
+    client = _FakeClientWithValidation(live_ids=set())
+    ctx = _make_ctx(state, client)
+    out = ctx.resolved_definition_id({"annotation_type": "moment"},
+                                     canonical_name="lastfm-listens")
+    assert out == "def-fresh"
+    assert client.exists_calls == ["orphan-from-A"]
+
+
+def test_ensure_definition_gate_skips_check_when_fresh_and_synced():
+    """ensure_definition honours the same gate — but only when the
+    watermark covers exactly the per-package cached id."""
+    state = PluginState(plugin_id="lastfm", definition_id="pkg-id",
+                        definition_validated_at=_stamp(timedelta(minutes=1)))
+    client = _FakeClientWithValidation(live_ids={"pkg-id"})
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached="pkg-id",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "pkg-id"
+    assert client.exists_calls == []
+
+
+def test_ensure_definition_gate_ignores_watermark_for_different_id():
+    """A fresh watermark for a DIFFERENT id must not shield the
+    per-package cached id from a real check."""
+    state = PluginState(plugin_id="lastfm", definition_id="other-id",
+                        definition_validated_at=_stamp(timedelta(minutes=1)))
+    client = _FakeClientWithValidation(live_ids={"pkg-id", "other-id"})
+    ctx = _make_ctx(state, client)
+    out = ctx.ensure_definition(
+        cached="pkg-id",
+        expected_spec={"annotation_type": "moment"},
+        canonical_name="Listened",
+    )
+    assert out == "pkg-id"
+    assert client.exists_calls == ["pkg-id"]  # gate did not apply
+    # Successful check synced per-plugin state and started the watermark
+    # for the id it actually checked.
+    assert state.definition_id == "pkg-id"
+
+
 def test_ensure_definition_returns_cached_when_live():
     """The per-package helper: cached value is validated and returned
     as-is. Per-plugin state.definition_id is also synced so the next

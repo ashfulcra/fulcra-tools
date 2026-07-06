@@ -36,6 +36,12 @@ class PluginState:
     # Set by the web UI's definition picker when the user types a custom
     # name for "Create new"; cleared once the resolver has used it.
     override_definition_name: str | None = None
+    # ISO-8601 UTC timestamp of the last time definition_id was confirmed
+    # live on the current Fulcra account. Read by RunContext's validation
+    # gate: while fresh (15-minute TTL, 24-hour hard cap) the per-run
+    # full-catalog definition_exists fetch is skipped. None = never
+    # validated → the gate fails open into a normal validation.
+    definition_validated_at: str | None = None
 
     def record_finish(self, *, outcome: str, when: datetime,
                        error: str | None = None) -> None:
@@ -76,6 +82,7 @@ def load(plugin_id: str) -> PluginState:
         watermark=row["watermark"],
         definition_id=row["definition_id"],
         override_definition_name=row["override_definition_name"],
+        definition_validated_at=row["definition_validated_at"],
     )
 
 
@@ -94,4 +101,5 @@ def save(st: PluginState) -> None:
         watermark=st.watermark,
         definition_id=st.definition_id,
         override_definition_name=st.override_definition_name,
+        definition_validated_at=st.definition_validated_at,
     )

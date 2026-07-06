@@ -444,6 +444,91 @@ def test_restore_definition_propagates_other_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# data_updates_summary (P2 items 5+10 — data-updates gating)
+# ---------------------------------------------------------------------------
+
+def test_data_updates_summary_returns_only_data_types(recording_transport, monkeypatch):
+    """Hits GET /data/v1/updates with ISO-Z start/end params and returns the
+    data_types dict alone — file_changes (megabytes on busy accounts) never
+    escapes to the caller."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+
+    def responder(r: httpx.Request) -> httpx.Response:
+        assert r.url.path == "/data/v1/updates"
+        params = dict(r.url.params)
+        assert params["start_time"] == "2026-07-05T00:00:00Z"
+        assert params["end_time"] == "2026-07-06T00:00:00Z"
+        return httpx.Response(200, json={
+            "data_types": {"DurationAnnotation": 3, "StepCount": 412},
+            "file_changes": [{"path": "huge"}] * 50,
+        })
+
+    transport = recording_transport(responder)
+    client = BaseFulcraClient(transport=transport)
+    out = client.data_updates_summary(
+        datetime(2026, 7, 5, tzinfo=timezone.utc),
+        datetime(2026, 7, 6, tzinfo=timezone.utc),
+    )
+    assert out == {"DurationAnnotation": 3, "StepCount": 412}
+
+
+def test_data_updates_summary_empty_and_missing_data_types(recording_transport, monkeypatch):
+    """A window with no activity ({} or missing data_types) yields {}."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient(
+        transport=recording_transport(
+            lambda r: httpx.Response(200, json={"data_types": {}, "file_changes": []}),
+        ),
+    )
+    t0 = datetime(2020, 6, 1, tzinfo=timezone.utc)
+    t1 = datetime(2020, 7, 1, tzinfo=timezone.utc)
+    assert client.data_updates_summary(t0, t1) == {}
+    client2 = BaseFulcraClient(
+        transport=recording_transport(lambda r: httpx.Response(200, json={})),
+    )
+    assert client2.data_updates_summary(t0, t1) == {}
+
+
+def test_data_updates_summary_raises_on_http_error(recording_transport, monkeypatch):
+    """HTTP errors raise (the live server 500s on large windows). Callers
+    fail open — 'can't gate; proceed without the optimization'."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient(
+        transport=recording_transport(
+            lambda r: httpx.Response(500, text="Internal Server Error"),
+        ),
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        client.data_updates_summary(
+            datetime(2026, 6, 29, tzinfo=timezone.utc),
+            datetime(2026, 7, 6, tzinfo=timezone.utc),
+        )
+
+
+def test_data_updates_summary_never_logs_file_changes(recording_transport, monkeypatch, caplog):
+    """file_changes must never be materialised into a log record — it can be
+    megabytes of coordination-bus churn."""
+    import logging as _logging
+
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    marker = "SENTINEL-FILE-CHANGE-PATH"
+    client = BaseFulcraClient(
+        transport=recording_transport(
+            lambda r: httpx.Response(200, json={
+                "data_types": {"MomentAnnotation": 1},
+                "file_changes": [{"path": marker}],
+            }),
+        ),
+    )
+    with caplog.at_level(_logging.DEBUG):
+        out = client.data_updates_summary(
+            datetime(2026, 7, 5, tzinfo=timezone.utc),
+            datetime(2026, 7, 6, tzinfo=timezone.utc),
+        )
+    assert out == {"MomentAnnotation": 1}
+    assert marker not in caplog.text
+    # And the returned dict carries no reference to file_changes content.
+    assert marker not in repr(out)
 # update_definition — rename/update WITHOUT orphaning history (collect P2 #7)
 #
 # The Fulcra PUT /user/v1alpha1/annotation/{id} is a FULL-REPLACE over a

@@ -286,3 +286,19 @@ def test_runner_calls_on_spawn_with_the_worker_process(collect_home: Path):
     assert isinstance(spawned[0], subprocess.Popen)
     # the worker has been awaited, so it is finished by the time run returns
     assert spawned[0].poll() is not None
+
+
+def test_runner_persists_definition_validated_at_from_the_result(collect_home: Path):
+    """The definition-validation gate's watermark must cross the worker
+    boundary exactly like watermark/definition_id, or the gate re-validates
+    every run and the TTL never engages."""
+    script = (
+        "import json,sys;"
+        "sys.stdout.write(json.dumps({'type':'result','outcome':'done',"
+        "'error':None,'watermark':None,'definition_id':'def-abc123',"
+        "'definition_validated_at':'2026-07-06T12:00:00+00:00'})+chr(10))"
+    )
+    runner.run("p", _python_worker(script),
+               now=datetime(2026, 7, 6, tzinfo=timezone.utc))
+    st = state.load("p")
+    assert st.definition_validated_at == "2026-07-06T12:00:00+00:00"

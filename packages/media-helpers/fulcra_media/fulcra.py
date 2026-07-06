@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from fulcra_common import BaseFulcraClient, ImportResult
@@ -27,6 +27,18 @@ if TYPE_CHECKING:
 __all__ = ["FulcraClient", "ImportResult"]
 
 _MEDIA_NAMESPACE = "com.fulcra.media."
+
+# The dedup-readback pre-gate (GET /data/v1/updates before the per-chunk
+# event readback) only runs when the chunk's window starts within this span
+# of now. Two live findings force the bound (2026-07-06):
+#   * data_updates is PROCESSING-time based, so the sound gate window is
+#     [win_start, now] — for a historical chunk (2020 event times) that
+#     span covers years, and
+#   * the endpoint 500s on large windows (a 7-day range failed live).
+# Live polled imports — the case where the readback is usually pointless —
+# have win_start within minutes of now, so they gate; historical bulk
+# imports skip the gate entirely and pay the normal readback.
+_UPDATES_GATE_MAX_SPAN = timedelta(hours=48)
 
 
 def _importer_namespace_prefix(det_id: str) -> str | None:
@@ -163,6 +175,7 @@ class FulcraClient(BaseFulcraClient):
         check_only: bool = False,
         claim: "Callable[[set[str]], bool] | None" = None,
         unclaim: "Callable[[set[str]], None] | None" = None,
+        updates_summary: "Callable[[datetime, datetime], dict[str, int]] | None" = None,
     ) -> ImportResult:
         """Run the dedup-readback + ingest pipeline.
 
@@ -200,6 +213,25 @@ class FulcraClient(BaseFulcraClient):
         them. On POST success the claims stay. When ``unclaim is None`` the
         keys are left claimed on failure (the pre-fix behaviour) — only the
         daemon path supplies it, and only it has durable-loss exposure.
+
+        `updates_summary`: OPTIONAL injectable seam (same style as
+        ``claim``/``unclaim``) for the dedup-readback PRE-GATE. Before each
+        chunk's ``fetch_existing_source_groups`` readback, the pipeline asks
+        ``GET /data/v1/updates`` (via ``BaseFulcraClient.data_updates_summary``
+        when no callable is injected) whether ANY record of the chunk's data
+        type was PROCESSED between the chunk's window start and now. Zero →
+        the readback cannot match anything (a record with an event time in
+        the window must have been processed after that event started), so
+        the readback fetch is skipped and every event is treated as new —
+        the per-event ``claim`` still runs, so the write-dedup guarantee is
+        untouched. Non-zero, or any error from the updates call → the normal
+        readback runs (fail-open: gating failure must NEVER block or
+        de-safe an import). The gate only engages when ``win_start`` is
+        within ``_UPDATES_GATE_MAX_SPAN`` of now — data_updates is
+        processing-time based (verified live 2026-07-06), so the sound gate
+        window for an old chunk would span years and the endpoint 500s on
+        large windows. Injected callables receive ``(window_start,
+        window_end)`` datetimes and return ``{data_type: processed_count}``.
         """
         events = list(events)
         total = len(events)
@@ -236,14 +268,43 @@ class FulcraClient(BaseFulcraClient):
         # claim block below.
         run_claimed_keys: set[str] = set()
 
+        # The readback (and therefore the pre-gate) is over DurationAnnotation
+        # records: run_import ingests every NormalizedEvent category through
+        # to_duration_event, and fetch_existing_source_groups below queries
+        # the same type. Keep the two keyed on ONE name so they can't drift.
+        readback_data_type = "DurationAnnotation"
+
         for i in range(0, len(events_sorted), chunk_size):
             chunk = events_sorted[i : i + chunk_size]
             win_start = min(e.start_time for e in chunk) - timedelta(minutes=window_pad_minutes)
             win_end = max(e.end_time for e in chunk) + timedelta(minutes=window_pad_minutes)
 
-            existing_groups = self.fetch_existing_source_groups(
-                win_start, win_end, only_for_defs=current_def_source_ids or None
-            )
+            # Dedup-readback pre-gate: if zero records of the readback's data
+            # type were PROCESSED between win_start and now, no record with an
+            # event time inside this chunk's window can exist (a matching
+            # record — a prior import of a past play — is always processed
+            # after its event started), so the readback would return nothing.
+            # Skip it and treat `existing` as empty. Failure of the updates
+            # call, a non-zero count, or a window too old to gate soundly →
+            # the normal readback (fail-open in every direction).
+            skip_readback = False
+            gate_now = datetime.now(timezone.utc)
+            if timedelta(0) <= gate_now - win_start <= _UPDATES_GATE_MAX_SPAN:
+                summary_fn = (updates_summary if updates_summary is not None
+                              else self.data_updates_summary)
+                try:
+                    counts = summary_fn(win_start, max(win_end, gate_now))
+                    skip_readback = counts.get(readback_data_type, 0) == 0
+                except Exception:  # noqa: BLE001 — never let gating block an import
+                    skip_readback = False
+
+            if skip_readback:
+                existing_groups: list[set[str]] = []
+            else:
+                existing_groups = self.fetch_existing_source_groups(
+                    win_start, win_end, only_for_defs=current_def_source_ids or None,
+                    data_type=readback_data_type,
+                )
             existing: set[str] = set()
             for grp in existing_groups:
                 existing |= grp

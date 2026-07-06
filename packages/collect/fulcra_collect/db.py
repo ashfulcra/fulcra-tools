@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .config import config_dir
 
-LATEST_VERSION = 4
+LATEST_VERSION = 5
 
 _LOG = logging.getLogger("fulcra_collect.db")
 
@@ -173,6 +173,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < 4:
         _migration_004_forwarded_events(conn)
         _record_version(conn, 4)
+    if current < 5:
+        _migration_005_definition_validated_at(conn)
+        _record_version(conn, 5)
 
 
 def _migration_001_initial(conn: sqlite3.Connection) -> None:
@@ -333,6 +336,23 @@ def _migration_004_forwarded_events(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_005_definition_validated_at(conn: sqlite3.Connection) -> None:
+    """Add ``plugin_state.definition_validated_at`` — the last time the
+    cached ``definition_id`` was confirmed live on the current Fulcra
+    account (ISO-8601 UTC, nullable).
+
+    Before this column every plugin run re-validated its cached def id by
+    fetching the ENTIRE annotations catalog (``definition_exists``), i.e.
+    one full-catalog GET per plugin per run. The RunContext gate reads
+    this watermark and skips re-validation while it is fresh (15-minute
+    TTL, 24-hour hard cap). NULL — including every pre-existing row —
+    means "never validated", which fails open into a normal validation on
+    the next run."""
+    conn.execute(
+        "ALTER TABLE plugin_state ADD COLUMN definition_validated_at TEXT",
+    )
+
+
 # ---- low-level CRUD used by state.py --------------------------------
 
 
@@ -351,19 +371,20 @@ def upsert_plugin_state(conn: sqlite3.Connection, *, plugin_id: str,
                         consecutive_failures: int,
                         watermark: str | None,
                         definition_id: str | None,
-                        override_definition_name: str | None) -> None:
+                        override_definition_name: str | None,
+                        definition_validated_at: str | None = None) -> None:
     conn.execute(
         """
         INSERT OR REPLACE INTO plugin_state (
             plugin_id, last_run, last_outcome, last_error,
             consecutive_failures, watermark, definition_id,
-            override_definition_name, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            override_definition_name, definition_validated_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             plugin_id, last_run, last_outcome, last_error,
             int(consecutive_failures), watermark, definition_id,
-            override_definition_name,
+            override_definition_name, definition_validated_at,
             datetime.now(timezone.utc).isoformat(),
         ),
     )

@@ -68,7 +68,7 @@ def test_plugin_state_table_has_the_phase1_columns(collect_home):
     assert cols == {
         "plugin_id", "last_run", "last_outcome", "last_error",
         "consecutive_failures", "watermark", "definition_id",
-        "override_definition_name", "updated_at",
+        "override_definition_name", "definition_validated_at", "updated_at",
     }
 
 
@@ -297,3 +297,28 @@ def test_claim_dedup_keys_repeated_key_in_one_set_is_not_self_duplicate(
     caller) must not be mis-flagged as already-present — the event is new."""
     conn = db.open()
     assert db.claim_dedup_keys(conn, ["dup", "dup", "other"]) is True
+
+
+def test_migration_005_adds_definition_validated_at_to_existing_dbs(tmp_path):
+    """Upgrade safety: a version-4 db (pre-gate) gains the
+    definition_validated_at column via ALTER, and pre-existing rows read
+    back as NULL — 'never validated', which fails open into a normal
+    validation on the next run."""
+    path = tmp_path / "upgrade5.db"
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    db._migration_001_initial(conn)
+    db._record_version(conn, 1)
+    db._migration_002_import_plugin_state_json(conn)
+    db._record_version(conn, 2)
+    db._migration_003_forwarded_attention(conn)
+    db._record_version(conn, 3)
+    db._migration_004_forwarded_events(conn)
+    db._record_version(conn, 4)
+    conn.execute(
+        "INSERT INTO plugin_state (plugin_id, consecutive_failures, updated_at) "
+        "VALUES ('legacy', 0, '2026-01-01T00:00:00+00:00')",
+    )
+    db.migrate(conn)
+    row = db.fetch_plugin_state(conn, "legacy")
+    assert row["definition_validated_at"] is None
