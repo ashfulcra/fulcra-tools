@@ -227,6 +227,7 @@ def doctor() -> None:
         )
 
     # ── 2. fulcra CLI reachable (actually works / signed in) ─────────────────
+    signed_in: bool | None = None  # None = couldn't determine (CLI missing/timeout)
     if cli_path:
         try:
             r = subprocess.run(
@@ -236,8 +237,10 @@ def doctor() -> None:
                 timeout=10,
             )
             if r.returncode == 0 and r.stdout.strip():
+                signed_in = True
                 _row("fulcra CLI reachable", "OK", "auth OK, token returned")
             else:
+                signed_in = False
                 _row(
                     "fulcra CLI reachable",
                     "WARN",
@@ -317,6 +320,10 @@ def doctor() -> None:
                 except (json.JSONDecodeError, TypeError, ValueError):
                     _row("Fulcra data liveness (last hour)", "FAIL",
                          "data-updates returned unparseable output")
+            elif signed_in is False:
+                _row("Fulcra data liveness (last hour)", "WARN",
+                     "skipped — not signed in (fix: fulcra auth login; "
+                     "see 'fulcra CLI reachable' above)")
             else:
                 stderr_tail = (r.stderr or "").strip()[-200:]
                 _row("Fulcra data liveness (last hour)", "FAIL",

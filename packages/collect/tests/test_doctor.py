@@ -333,3 +333,37 @@ def test_doctor_data_liveness_failure_surfaces_stderr_tail(collect_home: Path,
     assert "[FAIL]" in liveness
     assert "HTTP Error 500" in liveness
     assert result.exit_code == 1
+
+
+def test_doctor_data_liveness_warns_not_fails_when_signed_out(
+        collect_home: Path, monkeypatch):
+    """Signed-out is already reported (as WARN) by the 'fulcra CLI reachable'
+    check; the liveness row must not pile a second hard FAIL on top of it —
+    it WARNs with a sign-in hint instead. Doctor run before first sign-in
+    (a normal onboarding state) should not look like a broken install."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+
+    def _fake_run(cmd, **kw):
+        if "print-access-token" in cmd:
+            r = MagicMock()
+            r.returncode = 1
+            r.stdout = ""
+            r.stderr = "Error: not logged in"
+            return r
+        if "data-updates" in cmd and "--help" not in cmd:
+            r = MagicMock()
+            r.returncode = 1
+            r.stdout = ""
+            r.stderr = "Error: HTTP Error 401: Unauthorized"
+            return r
+        return _dispatch_probe_ok(cmd)
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    result = CliRunner().invoke(cli, ["doctor"])
+    liveness = [ln for ln in result.output.splitlines()
+                if "data liveness" in ln][0]
+    assert "[WARN]" in liveness
+    assert "not signed in" in liveness
+    assert "401" not in liveness  # the raw stderr FAIL path was not taken
