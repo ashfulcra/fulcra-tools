@@ -1048,7 +1048,9 @@ def test_fingerprint_preflight_invalidates_on_token_change(collect_home, monkeyp
     # And the fingerprint file is updated to the new token.
     new_fp = (collect_home / "auth-fingerprint").read_text()
     import hashlib
-    assert new_fp == hashlib.sha256(b"tok-account-B").hexdigest()[:16]
+    # Opaque tokens fingerprint via the "tok:<bytes>" identity (JWTs use
+    # "sub:<claim>" — see Daemon._account_identity).
+    assert new_fp == hashlib.sha256(b"tok:tok-account-B").hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -1234,3 +1236,76 @@ def test_set_quick_record_favorites_rejects_non_list(collect_home):
     })
     assert reply["ok"] is False
     assert "list" in reply["error"].lower()
+
+
+def _fake_jwt(sub: str, nonce: str) -> str:
+    """Minimal unsigned-JWT shape: header.payload.signature (base64url)."""
+    import base64
+    import json as _json
+
+    def b64(obj) -> str:
+        raw = _json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{b64({'alg': 'RS256', 'typ': 'JWT'})}.{b64({'sub': sub, 'jti': nonce})}.sig-{nonce}"
+
+
+def test_fingerprint_survives_token_rotation_same_account(collect_home, monkeypatch):
+    """Access tokens rotate hourly (refresh-on-401 rewrites the keychain), so
+    fingerprinting the raw token invalidated every plugin cache on effectively
+    every daemon restart >1h apart — a full definitions re-resolution storm
+    with no actual account change. The fingerprint must key on the JWT `sub`
+    claim (the account), not the token bytes."""
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret",
+        lambda key: _fake_jwt("auth0|user-A", "boot1") if key == "bearer-token" else None)
+    d1 = Daemon(registry=_registry(), config=Config())
+    d1._check_account_fingerprint()
+    fp_path = collect_home / "auth-fingerprint"
+    first_fp = fp_path.read_text()
+
+    # Same account, ROTATED token (different bytes, same sub).
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret",
+        lambda key: _fake_jwt("auth0|user-A", "boot2") if key == "bearer-token" else None)
+    d2 = Daemon(registry=_registry(), config=Config())
+    d2._check_account_fingerprint()
+
+    assert fp_path.read_text() == first_fp
+    assert [e for e in d2.activity.recent() if e.plugin_id == "daemon"] == []
+
+
+def test_fingerprint_still_invalidates_on_real_account_switch(collect_home, monkeypatch):
+    """Different JWT sub → genuine account switch → caches must clear."""
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret",
+        lambda key: _fake_jwt("auth0|user-A", "a1") if key == "bearer-token" else None)
+    d1 = Daemon(registry=_registry(), config=Config())
+    d1._check_account_fingerprint()
+
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret",
+        lambda key: _fake_jwt("auth0|user-B", "b1") if key == "bearer-token" else None)
+    d2 = Daemon(registry=_registry(), config=Config())
+    d2._check_account_fingerprint()
+
+    daemon_entries = [e for e in d2.activity.recent() if e.plugin_id == "daemon"]
+    assert len(daemon_entries) == 1
+
+
+def test_fingerprint_falls_back_to_token_hash_for_non_jwt(collect_home, monkeypatch):
+    """Opaque (non-JWT) tokens keep the old token-hash behavior: same token →
+    stable; different token → invalidation. (Covers pasted tokens and the
+    pre-existing tests' fixtures.)"""
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret",
+        lambda key: "not-a-jwt-token" if key == "bearer-token" else None)
+    d1 = Daemon(registry=_registry(), config=Config())
+    d1._check_account_fingerprint()
+    fp_path = collect_home / "auth-fingerprint"
+    first_fp = fp_path.read_text()
+
+    d2 = Daemon(registry=_registry(), config=Config())
+    d2._check_account_fingerprint()
+    assert fp_path.read_text() == first_fp
+    assert [e for e in d2.activity.recent() if e.plugin_id == "daemon"] == []
