@@ -22,11 +22,14 @@ fulcra-common = { workspace = true }
 fulcra-csv = "fulcra_csv.cli:cli"
 
 [project.optional-dependencies]
-# Optional `fulcra` CLI — never imported as a library; installed separately
-# via `uv tool install fulcra-api`. Out of base deps so it doesn't drag
-# pyarrow into installs / the bundled app.
+# The `fulcra` CLI console script. NOTE (2026-07-06): fulcra-api is in every
+# install's tree anyway (fulcra-common hard-depends on it as a library since
+# the CRUD delegation), so this extra no longer gates the dependency — what it
+# DOES do is ensure the `fulcra` console script lands in the workspace venv
+# (`uv sync --all-extras`), which the launchd-proof CLI resolver checks first
+# (venv sibling, see fulcra_common.client.find_fulcra_cli). Keep it.
 fulcra-cli = [
-    "fulcra-api>=0.1.34",
+    "fulcra-api>=0.1.35",
 ]
 dev = [
     "pytest>=7.4,<8",

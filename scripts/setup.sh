@@ -7,7 +7,7 @@
 #      DOESN'T install the dev/macos extras → tests fail + menubar can't import).
 #   3. Fulcra CLI: `uv tool install fulcra-api` (used by browser sign-in +
 #      token refresh; idempotent).
-#   4. Test suite: `uv run pytest packages/ -q` (~1500 tests, must NOT hit the
+#   4. Test suite: `uv run pytest packages/ -q` (the full test suite, must NOT hit the
 #      network — if it does, that's the bug, not slowness).
 #   5. Print the next steps for actually running the app.
 #

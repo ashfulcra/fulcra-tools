@@ -65,6 +65,11 @@ Collect is the product; the daemon is the hub everything else plugs into.
 | [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records Moment annotations and surfaces daemon status. |
 | [`packages/fulcra-common`](../packages/fulcra-common) | The **shared Fulcra API client** + cross-plugin definition resolver. Pulled in by every other package. |
 
+**Reading it back:** everything Collect ingests is readable by any agent or
+tool via the `fulcra` CLI (`get-records`, `data-updates`), the REST API, or
+the official read-only MCP server (`uvx fulcra-context-mcp@latest` / hosted at
+mcp.fulcradynamics.com). Collect is the write side of that pair.
+
 ### Plugins (the data sources Collect runs)
 
 | Package | Sources it adds |
