@@ -92,9 +92,19 @@ CANVAS_URL_MARKER = "uts/v3/canvases/Roots/tahoma_watchnow"
 # Direct shelf-page fetches of the play-history collection.
 HISTORY_URL_MARKERS = ("RecentlyWatched", "PlayHistory")
 
-# Same rationale as apple_podcasts.SNAPSHOT_TIMEOUT_SECONDS: an I/O-stalled
-# file must fail fast with a clear error instead of hanging the daemon.
-SNAPSHOT_TIMEOUT_SECONDS = 120
+# Snapshot deadline. Unlike apple_podcasts (a 347MB library where a legit copy
+# can genuinely take tens of seconds), this cache is ~1-2MB, so a healthy
+# APFS clonefile completes in well under a second. A copy that runs longer
+# than a few seconds is NOT slow I/O — it means the TV app is currently open
+# and actively holding the group container, which serializes every external
+# read of Cache.db at the VFS layer (verified live 2026-07-06: with the app
+# open, cp -c, plain cp, sqlite .backup, AND an immutable read-only open ALL
+# block indefinitely; with the app closed they return instantly). There is no
+# code-level way in — the background service refreshes the cache while the app
+# is closed, which is exactly when scheduled runs land, so the right behavior
+# is to fail fast and retry next interval rather than block a worker for two
+# minutes on a collision with an active viewing session.
+SNAPSHOT_TIMEOUT_SECONDS = 20
 
 
 class SnapshotError(RuntimeError):
@@ -116,10 +126,10 @@ class CacheEntry:
 
 def _snapshot_db(cache_dir: Path) -> Path:
     """Clone Cache.db (+ -wal/-shm sidecars) into a fresh tempdir and return
-    the snapshot dir. Mirrors apple_podcasts.parse_db: `cp -c` performs an
-    APFS clonefile(2) — no bulk read, so it can't stall behind the live
-    writer — with a killable-subprocess timeout for the non-APFS fallback
-    copy path. Caller must shutil.rmtree the returned dir."""
+    the snapshot dir. Uses `cp -c` for the normal APFS clonefile(2) path,
+    with a killable subprocess timeout so an active TV app cannot pin the
+    worker indefinitely when macOS serializes reads of its group container.
+    Caller must shutil.rmtree the returned dir."""
     src = cache_dir / CACHE_DB_NAME
     snap_dir = Path(tempfile.mkdtemp(prefix="apple-tv-cache-snap-"))
     try:
@@ -143,8 +153,11 @@ def _snapshot_db(cache_dir: Path) -> Path:
                 raise SnapshotError(
                     f"Apple TV cache snapshot timed out after "
                     f"{SNAPSHOT_TIMEOUT_SECONDS}s copying {candidate.name} "
-                    f"({size_mb:.0f}MB). The cache file is likely I/O-stalled "
-                    f"or inaccessible."
+                    f"({size_mb:.0f}MB). The TV app is most likely open right "
+                    f"now — while it is actively running, macOS serializes "
+                    f"external reads of its group container and every copy "
+                    f"blocks. This run is skipped; the next scheduled run will "
+                    f"pick it up once the app is closed."
                 ) from exc
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or b"").decode(errors="replace").strip()
