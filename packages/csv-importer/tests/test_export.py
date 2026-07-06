@@ -121,6 +121,31 @@ def test_formula_injection_is_neutralised_by_default():
     assert body.lstrip('"').startswith("'=")
 
 
+def test_formula_guard_neutralises_sum_and_leaves_normal_value_unchanged():
+    """OWASP CSV-injection guard: a `=SUM(A1)` cell is neutralised with a
+    leading `'` so a spreadsheet renders it literally, while an ordinary value
+    is written byte-for-byte. Both cells share one export so we prove the guard
+    only fires on the trigger char, not every cell.
+
+    Round-trip note: the leading `'` is a spreadsheet display hint, not data.
+    The importer (fulcra_csv.parser) reads arbitrary CSVs via a caller-supplied
+    ColumnMap and does NOT strip the guard, so a guarded cell re-imports with
+    the `'` intact. That is intentional — the export is a spreadsheet-SAFE
+    artifact, not a lossless serialization; power users who pipe exports back
+    through the parser set guard_formulas=False (see test below)."""
+    dangerous = _rec(data={"note": "=SUM(A1)"})
+    normal = _rec(data={"note": "just text"})
+    opts = ExportOptions(columns=("data.note",))
+    out = io.StringIO()
+    write_csv([dangerous, normal], out, opts)
+    lines = out.getvalue().strip().splitlines()
+    # Dangerous cell: `=` is no longer the leading char (csv may quote it).
+    assert not lines[1].lstrip('"').startswith("=")
+    assert lines[1].lstrip('"').startswith("'=SUM(A1)")
+    # Normal cell: untouched.
+    assert lines[2] == "just text"
+
+
 def test_formula_guard_can_be_disabled():
     rec = _rec(data={"note": "=A1"})
     opts = ExportOptions(columns=("data.note",), guard_formulas=False)
