@@ -211,3 +211,75 @@ def test_pipeline_ingest_batch_raises_without_client():
         assert "BaseFulcraClient" in str(exc)
     else:
         raise AssertionError("ingest_batch without client must raise")
+
+
+class _StatusTransport(httpx.BaseTransport):
+    """Answer each call with the next queued status; record calls."""
+
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.calls: list[tuple[str, bytes, dict]] = []
+
+    def handle_request(self, request):
+        self.calls.append((str(request.url), request.read(),
+                           dict(request.headers)))
+        return httpx.Response(self.statuses.pop(0))
+
+
+def _client_with(transport):
+    from fulcra_common import BaseFulcraClient
+
+    class _Client(BaseFulcraClient):
+        def get_token(self): return "tok"
+
+    return _Client(base_url="https://api.test", transport=transport)
+
+
+def test_ingest_one_posts_single_record_json():
+    """ingest_one uses the spec's single-record endpoint: one DataRecordV1
+    as application/json to /ingest/v1/record (not a one-line JSONL batch) —
+    per-record error bodies instead of opaque batch failures."""
+    import json as _json
+
+    transport = _FakeTransport()
+    pipe = IngestPipeline(client=_client_with(transport))
+    pipe.ingest_one(MomentEvent(
+        definition_id="def-1", source_id="s",
+        ts=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
+    ))
+    assert len(transport.calls) == 1
+    url, body, headers = transport.calls[0]
+    assert url == "https://api.test/ingest/v1/record"
+    assert headers["content-type"] == "application/json"
+    record = _json.loads(body)
+    assert record["specversion"] == 1
+    assert set(record) >= {"specversion", "data", "metadata"}
+
+
+def test_ingest_one_falls_back_to_batch_on_missing_endpoint():
+    """A deploy without the single-record endpoint (404/405) must not break
+    quick-record/tombstone writes — fall back to the proven batch path."""
+    transport = _StatusTransport([404, 204])
+    pipe = IngestPipeline(client=_client_with(transport))
+    pipe.ingest_one(MomentEvent(
+        definition_id="def-1", source_id="s",
+        ts=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
+    ))
+    assert len(transport.calls) == 2
+    assert transport.calls[0][0].endswith("/ingest/v1/record")
+    assert transport.calls[1][0].endswith("/ingest/v1/record/batch")
+
+
+def test_ingest_one_does_not_swallow_real_errors():
+    """A 422 (validation) or 500 from the single-record endpoint is a REAL
+    error about this record — raise it, don't retry it into the batch."""
+    import pytest
+
+    transport = _StatusTransport([422])
+    pipe = IngestPipeline(client=_client_with(transport))
+    with pytest.raises(httpx.HTTPStatusError):
+        pipe.ingest_one(MomentEvent(
+            definition_id="def-1", source_id="s",
+            ts=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
+        ))
+    assert len(transport.calls) == 1

@@ -197,8 +197,34 @@ class IngestPipeline:
         )
 
     def ingest_one(self, event: IngestableEvent) -> None:
-        """Post a single event. Convenience around `ingest_batch`."""
-        self.ingest_batch([event])
+        """Post a single event via the single-record endpoint.
+
+        POST /ingest/v1/record takes one DataRecordV1 as plain JSON — the
+        exact envelope `wire.build_record` already emits — and answers
+        per-record error bodies (a 422 names THIS record's problem) instead
+        of the batch endpoint's opaque failures. Used by the single-shot
+        callers (quick-record, the tombstone write).
+
+        Fail-open on endpoint absence: a 404/405 (deploy without the
+        single-record route) falls back to the proven batch path. Any other
+        error (422 validation, 5xx) is a real error about this record and
+        raises, exactly like `ingest_batch`.
+        """
+        if self.client is None:
+            raise RuntimeError(
+                "IngestPipeline.ingest_one needs a BaseFulcraClient; "
+                "pipeline was built with client=None (build_record-only).",
+            )
+        record = self.build_record(event)
+        r = self.client._client().post(
+            "/ingest/v1/record",
+            json=record,
+            headers=self.client._authed_headers(),
+        )
+        if r.status_code in (404, 405):
+            self.ingest_batch([event])
+            return
+        r.raise_for_status()
 
     def ingest_batch(self, events: Iterable[IngestableEvent]) -> None:
         """Post a batch of events to /ingest/v1/record/batch.
