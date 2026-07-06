@@ -307,6 +307,34 @@ def test_cli_login_poll_wrong_code_surfaces_stderr_tail(
     assert "expired_token" in r.json()["detail"]
 
 
+def test_cli_login_poll_redacts_device_code_from_cli_error(
+    collect_home, _in_memory_keyring, cli_on_path, monkeypatch, caplog,
+):
+    """If a future CLI echoes the device code in an error, keep it out of
+    both daemon logs and the browser-visible error text."""
+    secret = "GkI_65iHqAeTVNxsPtpJ1KgH"
+    monkeypatch.setattr(
+        subprocess, "run",
+        _fake_run_factory({
+            "--device-code": (
+                1,
+                "",
+                f"Error: device code {secret} is invalid or expired\n",
+            ),
+        }),
+    )
+    client = _client(_build_daemon(collect_home))
+    with caplog.at_level(logging.WARNING):
+        r = client.post(
+            "/api/fulcra/auth/cli_login_poll",
+            json={"device_code": secret},
+        )
+    assert r.status_code == 400
+    assert secret not in r.json()["detail"]
+    assert secret not in caplog.text
+    assert "GkI_…(24 chars)" in r.json()["detail"]
+
+
 def test_cli_login_poll_empty_device_code_is_400(
     collect_home, _in_memory_keyring, cli_on_path, monkeypatch,
 ):

@@ -29,6 +29,13 @@ def _mask_code(code: str) -> str:
     return f"{code[:4]}…({len(code)} chars)"
 
 
+def _redact_device_code(text: str, device_code: str) -> str:
+    """Remove a device code if a CLI error echoes it back."""
+    if not text or not device_code:
+        return text
+    return text.replace(device_code, _mask_code(device_code))
+
+
 def _parse_get_auth_url_output(stdout: str) -> dict[str, str] | None:
     """Parse ``fulcra auth login --get-auth-url`` stdout.
 
@@ -437,6 +444,7 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         if login.returncode != 0:
             tail = (login.stderr or login.stdout or "").strip().splitlines()
             msg = tail[-1] if tail else f"fulcra auth login exit {login.returncode}"
+            msg = _redact_device_code(msg, device_code)
             _log.warning(
                 "cli_login_poll: completion failed rc=%d: %s",
                 login.returncode, msg,
