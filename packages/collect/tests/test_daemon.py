@@ -1250,6 +1250,18 @@ def _fake_jwt(sub: str, nonce: str) -> str:
     return f"{b64({'alg': 'RS256', 'typ': 'JWT'})}.{b64({'sub': sub, 'jti': nonce})}.sig-{nonce}"
 
 
+def _fake_jwt_payload(payload, nonce: str) -> str:
+    """JWT-looking token with an arbitrary JSON payload."""
+    import base64
+    import json as _json
+
+    def b64(obj) -> str:
+        raw = _json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{b64({'alg': 'RS256', 'typ': 'JWT'})}.{b64(payload)}.sig-{nonce}"
+
+
 def test_fingerprint_survives_token_rotation_same_account(collect_home, monkeypatch):
     """Access tokens rotate hourly (refresh-on-401 rewrites the keychain), so
     fingerprinting the raw token invalidated every plugin cache on effectively
@@ -1309,3 +1321,10 @@ def test_fingerprint_falls_back_to_token_hash_for_non_jwt(collect_home, monkeypa
     d2._check_account_fingerprint()
     assert fp_path.read_text() == first_fp
     assert [e for e in d2.activity.recent() if e.plugin_id == "daemon"] == []
+
+
+def test_fingerprint_falls_back_for_non_object_jwt_payload():
+    """A JWT-looking token whose payload is valid JSON but not an object is
+    malformed for our purposes; it must not crash the pre-flight."""
+    token = _fake_jwt_payload(["not", "a", "dict"], "array")
+    assert Daemon._account_identity(token) == f"tok:{token}"

@@ -185,9 +185,10 @@ class Daemon:
             try:
                 payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
                 payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
-                sub = payload.get("sub")
-                if isinstance(sub, str) and sub:
-                    return f"sub:{sub}"
+                if isinstance(payload, dict):
+                    sub = payload.get("sub")
+                    if isinstance(sub, str) and sub:
+                        return f"sub:{sub}"
             except (ValueError, UnicodeDecodeError):
                 pass  # malformed JWT-lookalike — fall through to raw bytes
         return f"tok:{token}"
