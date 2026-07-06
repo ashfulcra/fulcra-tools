@@ -1,0 +1,288 @@
+{
+ "data": {
+  "canvas": {
+   "id": "uts.tcvs.home-canvas",
+   "title": "Home",
+   "url": "https://tv.apple.com/us/root/home/tahoma_watchnow",
+   "nextToken": "10",
+   "shelves": [
+    {
+     "displayType": "epicStage",
+     "id": "uts.col.home_epic_stage",
+     "url": "https://tv.apple.com/us/collection/uts.col.home_epic_stage?ctx_root=tahoma_watchnow&ctx_cvs=uts.tcvs.home-canvas&ctx_proot=tahoma_watchnow&ctx_shelf=uts.shlf.gen.home_epic_stage",
+     "header": {
+      "title": null
+     },
+     "items": [
+      {
+       "type": "Show",
+       "title": "Sovereign: Age of Beasts",
+       "showTitle": null,
+       "id": "umc.anon.bee9c7083b44"
+      },
+      {
+       "type": "Show",
+       "title": "Honeytrap",
+       "showTitle": null,
+       "id": "umc.anon.95114559f052"
+      }
+     ]
+    },
+    {
+     "displayType": "upNextLockup",
+     "id": "uts.col.UpNext",
+     "url": "https://tv.apple.com/us/collection/continue-watching/uts.col.UpNext?ctx_root=tahoma_watchnow&ctx_cvs=uts.tcvs.home-canvas&ctx_proot=tahoma_watchnow&ctx_shelf=uts.shlf.gen.UpNextMarker",
+     "header": {
+      "title": "Continue Watching"
+     },
+     "items": [
+      {
+       "context": "Continue",
+       "duration": 2460,
+       "episodeNumber": 15,
+       "fractionalEpisodeNumber": 15.0,
+       "id": "umc.anon.6f0750696351",
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Continue",
+       "releaseDate": 1265270400000,
+       "seasonId": "umc.anon.aeaa0b2a4c68",
+       "seasonNumber": 2,
+       "showId": "umc.anon.3c6189ad0ac1",
+       "showTitle": "Edgeworld",
+       "timestamp": 1783359806043,
+       "title": "Chapter 2.15",
+       "type": "Episode"
+      },
+      {
+       "context": "AddedToUpNext",
+       "id": "umc.anon.bee9c7083b44",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Recently Added",
+       "timestamp": 1783330237419,
+       "title": "Sovereign: Age of Beasts",
+       "type": "Show"
+      },
+      {
+       "context": "Continue",
+       "duration": 3060,
+       "episodeNumber": 1,
+       "fractionalEpisodeNumber": 1.0,
+       "id": "umc.anon.9e1303e015f9",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Continue",
+       "releaseDate": 1783036800000,
+       "seasonId": "umc.anon.cc9e4d1e914d",
+       "seasonNumber": 3,
+       "showId": "umc.anon.1fd712f83a04",
+       "showTitle": "Vaultfall",
+       "timestamp": 1783114319398,
+       "title": "Chapter 3.1",
+       "type": "Episode"
+      },
+      {
+       "context": "AddedToUpNext",
+       "duration": 5280,
+       "id": "umc.anon.439a012a8e33",
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Recently Added",
+       "timestamp": 1782510575105,
+       "title": "Fast Swap",
+       "type": "Movie"
+      },
+      {
+       "context": "Continue",
+       "duration": 3420,
+       "episodeNumber": 4,
+       "fractionalEpisodeNumber": 4.0,
+       "id": "umc.anon.ab3d419a8e54",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Continue",
+       "releaseDate": 1724803200000,
+       "seasonId": "umc.anon.4578e53bfeb4",
+       "seasonNumber": 1,
+       "showId": "umc.anon.c42807eb8e04",
+       "showTitle": "Odd Lizard",
+       "timestamp": 1782336366691,
+       "title": "Chapter 1.4",
+       "type": "Episode"
+      },
+      {
+       "context": "NextSeason",
+       "duration": 2220,
+       "episodeNumber": 1,
+       "fractionalEpisodeNumber": 1.0,
+       "id": "umc.anon.50be318472ee",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Next Season",
+       "releaseDate": 1781827200000,
+       "seasonId": "umc.anon.e5442daa9ebf",
+       "seasonNumber": 2,
+       "showId": "umc.anon.95114559f052",
+       "showTitle": "Honeytrap",
+       "timestamp": 1781830800000,
+       "title": "Chapter 2.1",
+       "type": "Episode"
+      },
+      {
+       "context": "NextEpisode",
+       "duration": 1740,
+       "episodeNumber": 6,
+       "fractionalEpisodeNumber": 6.0,
+       "id": "umc.anon.b41d3d1a5264",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Next Episode",
+       "releaseDate": 1781654400000,
+       "seasonId": "umc.anon.3668ce83ef83",
+       "seasonNumber": 1,
+       "showId": "umc.anon.9c17689b71af",
+       "showTitle": "Ultimate Fun Assured",
+       "timestamp": 1781658000000,
+       "title": "Chapter 1.6",
+       "type": "Episode"
+      },
+      {
+       "context": "Continue",
+       "duration": 3300,
+       "episodeNumber": 1,
+       "fractionalEpisodeNumber": 1.0,
+       "id": "umc.anon.45eb1e3266ae",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Continue",
+       "releaseDate": 1780617600000,
+       "seasonId": "umc.anon.40140d41afc9",
+       "seasonNumber": 1,
+       "showId": "umc.anon.311879e25fe9",
+       "showTitle": "Bay of Dread",
+       "timestamp": 1781587780317,
+       "title": "Chapter 1.1",
+       "type": "Episode"
+      },
+      {
+       "context": "Continue",
+       "duration": 4980,
+       "id": "umc.anon.10bd336f3804",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Continue",
+       "timestamp": 1781553255271,
+       "title": "End Result",
+       "type": "Movie"
+      },
+      {
+       "context": "AddedToUpNext",
+       "duration": 3600,
+       "id": "umc.anon.21de8c1d500d",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Recently Added",
+       "timestamp": 1780522089262,
+       "title": "Turbine Red-Eye",
+       "type": "Movie"
+      },
+      {
+       "context": "AvailableNow",
+       "id": "umc.anon.9b4eb30ae798",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Now Available",
+       "timestamp": 1780016400000,
+       "title": "Comet Town",
+       "type": "Show"
+      },
+      {
+       "context": "AddedToUpNext",
+       "id": "umc.anon.cd75ea5bb57f",
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Recently Added",
+       "network": "CBS",
+       "timestamp": 1779930801706,
+       "title": "Deputies",
+       "type": "Show"
+      },
+      {
+       "context": "AddedToUpNext",
+       "id": "umc.anon.d5f3658eeeb0",
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Recently Added",
+       "network": "Paramount",
+       "timestamp": 1779930784833,
+       "title": "Hemsted Farm",
+       "type": "Show"
+      },
+      {
+       "context": "AddedToUpNext",
+       "id": "umc.anon.3ae8cf5aac5f",
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Recently Added",
+       "network": "Paramount",
+       "timestamp": 1779930763275,
+       "title": "The Bradford",
+       "type": "Show"
+      },
+      {
+       "context": "Continue",
+       "duration": 2100,
+       "episodeNumber": 1,
+       "fractionalEpisodeNumber": 1.0,
+       "id": "umc.anon.73a459b722ee",
+       "isAppleOriginal": true,
+       "isPurchase": false,
+       "isRental": false,
+       "localizedContext": "Continue",
+       "releaseDate": 1776211200000,
+       "seasonId": "umc.anon.fae84d765b5c",
+       "seasonNumber": 1,
+       "showId": "umc.anon.4a0136e5b357",
+       "showTitle": "Greta’s Got Cash Problems",
+       "timestamp": 1779930663960,
+       "title": "Chapter 1.1",
+       "type": "Episode"
+      }
+     ]
+    },
+    {
+     "displayType": "chart",
+     "id": "uts.col.ChartsShows.tvs.sbd.4000",
+     "url": "https://tv.apple.com/us/collection/top-10-tv-shows-on-appletv/uts.col.ChartsShows.tvs.sbd.4000?ctx_root=tahoma_watchnow&ctx_cvs=uts.tcvs.home-canvas&ctx_proot=tahoma_watchnow&ctx_shelf=uts.shlf.gen.BrandChart_tvs.sbd.4000_Show",
+     "header": {
+      "title": "Top 10 TV Shows on Apple TV"
+     },
+     "items": [
+      {
+       "type": "Show",
+       "title": "Vaultfall",
+       "showTitle": null,
+       "id": "umc.anon.1fd712f83a04"
+      },
+      {
+       "type": "Show",
+       "title": "Bay of Dread",
+       "showTitle": null,
+       "id": "umc.anon.311879e25fe9"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

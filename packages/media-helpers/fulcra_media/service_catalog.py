@@ -87,15 +87,23 @@ SERVICES: list[ServiceEntry] = [
               "(10-column rich variant with timestamps + durations).",
     ),
     ServiceEntry(
+        key="apple-tv", label="Apple TV app (on-device)",
+        category="video", rank=3, pathway="local-db",
+        import_cmd=None, wizard="apple-tv",
+        blurb="Reads the macOS TV app's local Watch Now cache (Up Next "
+              "progress + Recently Watched shelf). No sign-in, no export, "
+              "no Full Disk Access; polls every 6 hours.",
+    ),
+    ServiceEntry(
         key="apple-takeout", label="Apple TV (privacy export)",
-        category="video", rank=3, pathway="gdpr",
+        category="video", rank=4, pathway="gdpr",
         import_cmd="apple-takeout", wizard="apple-takeout",
         blurb="privacy.apple.com → request data → Apple TV Playback Activity "
               "CSV. EU/UK/JP users can schedule recurring exports.",
     ),
     ServiceEntry(
         key="youtube", label="YouTube (Google Takeout)",
-        category="video", rank=5, pathway="gdpr",
+        category="video", rank=6, pathway="gdpr",
         import_cmd="youtube", wizard="youtube",
         blurb="Google Takeout watch-history.json. Supports scheduled exports "
               "every 2 months, so works for ongoing capture too. No duration "
@@ -103,7 +111,7 @@ SERVICES: list[ServiceEntry] = [
     ),
     ServiceEntry(
         key="generic-csv-video", label="Generic CSV (video)",
-        category="video", rank=6, pathway="via-generic-csv",
+        category="video", rank=7, pathway="via-generic-csv",
         import_cmd="generic-csv", wizard="ifttt",
         blurb="For everything else (Hulu/Disney+/Max/Prime Video/Peacock) "
               "— privacy request, then convert to CSV and import.",
@@ -143,7 +151,7 @@ SERVICES: list[ServiceEntry] = [
 
     # ---- Books / reading (future) ----
     ServiceEntry(
-        key="letterboxd", label="Letterboxd (RSS)", category="video", rank=4,
+        key="letterboxd", label="Letterboxd (RSS)", category="video", rank=5,
         pathway="rss", import_cmd="letterboxd", wizard="letterboxd",
         blurb="Public diary RSS feed; polls hourly. API is closed beta so we "
               "scrape /<user>/rss/ — fingerprints films for cross-source dedup.",

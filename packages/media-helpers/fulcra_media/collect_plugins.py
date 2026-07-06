@@ -24,6 +24,7 @@ from .plugins.apple_music_takeout import PLUGIN as APPLE_MUSIC_TAKEOUT_PLUGIN
 from .plugins.apple_podcasts import PLUGIN as APPLE_PODCASTS_PLUGIN
 from .plugins.apple_podcasts_timemachine import PLUGIN as APPLE_PODCASTS_TIMEMACHINE_PLUGIN
 from .plugins.apple_takeout import PLUGIN as APPLE_TAKEOUT_PLUGIN
+from .plugins.apple_tv import PLUGIN as APPLE_TV_PLUGIN
 from .plugins.deezer import PLUGIN as DEEZER_PLUGIN
 from .plugins.generic_csv import PLUGIN as GENERIC_CSV_PLUGIN
 from .plugins.generic_rss import PLUGIN as GENERIC_RSS_PLUGIN
@@ -44,6 +45,7 @@ from .plugins.apple_music_takeout import APPLE_MUSIC_TAKEOUT_LISTENED_SPEC
 from .plugins.apple_podcasts import APPLE_PODCASTS_LISTENED_SPEC
 from .plugins.apple_podcasts_timemachine import APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC
 from .plugins.apple_takeout import APPLE_TAKEOUT_WATCHED_SPEC
+from .plugins.apple_tv import APPLE_TV_WATCHED_SPEC
 from .plugins.deezer import DEEZER_LISTENED_SPEC
 from .plugins.goodreads import GOODREADS_READ_SPEC
 from .plugins.lastfm import LASTFM_LISTENED_SPEC
@@ -67,6 +69,7 @@ __all__ = [
     "APPLE_PODCASTS_PLUGIN",
     "APPLE_PODCASTS_TIMEMACHINE_PLUGIN",
     "APPLE_TAKEOUT_PLUGIN",
+    "APPLE_TV_PLUGIN",
     "DEEZER_PLUGIN",
     "GENERIC_CSV_PLUGIN",
     "GENERIC_RSS_PLUGIN",
@@ -84,6 +87,7 @@ __all__ = [
     "APPLE_PODCASTS_LISTENED_SPEC",
     "APPLE_PODCASTS_TIMEMACHINE_LISTENED_SPEC",
     "APPLE_TAKEOUT_WATCHED_SPEC",
+    "APPLE_TV_WATCHED_SPEC",
     "DEEZER_LISTENED_SPEC",
     "GOODREADS_READ_SPEC",
     "LASTFM_LISTENED_SPEC",
