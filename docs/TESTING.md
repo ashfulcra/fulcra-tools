@@ -60,7 +60,7 @@ When you want to pull newer code into your checkout, run:
 bash scripts/update.sh
 ```
 
-It fast-forwards `git pull`, re-runs `uv sync --all-packages`, then restarts
+It fast-forwards `git pull`, re-runs `uv sync --all-packages --all-extras`, then restarts
 the launchd daemon (if installed) and the menubar app (if running) so they
 pick up the new code. Pieces you aren't using are skipped with a note.
 
