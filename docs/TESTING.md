@@ -381,9 +381,12 @@ To wire up and test the extension:
 3. Browse a couple of HTTP(S) pages, then confirm the events reached
    Fulcra:
    ```bash
-   fulcra get-records --type DurationAnnotation --start "5 minutes ago" \
-     | jq '.[] | select(.data.service == "web")'
+   fulcra get-records DurationAnnotation "5 minutes" \
+     | jq 'select(.data.service == "web")'
    ```
+   (`get-records` takes the data type and time range as positional
+   arguments — there are no `--type`/`--start` options — and emits one
+   JSON record per line.)
    Records carry source ids under `com.fulcra.attention.v3.<hash>` and the
    `attention` + `web` tags (plus `machine:<slug>` when a label is set).
    A 401 from the API means the device-flow token is missing or expired —
