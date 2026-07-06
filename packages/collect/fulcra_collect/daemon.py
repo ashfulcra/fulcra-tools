@@ -166,14 +166,50 @@ class Daemon:
 
     # ---- account-switch pre-flight -------------------------------------
 
+    @staticmethod
+    def _account_identity(token: str) -> str:
+        """The stable identity a bearer token belongs to.
+
+        Fulcra bearer tokens are Auth0 JWTs; the `sub` claim identifies the
+        ACCOUNT and survives token rotation. Decode it locally (no network,
+        no signature verification — we need a stable identifier, not trust:
+        an attacker who can plant a forged token in the keychain already
+        owns the account's data path). Fall back to the raw token bytes for
+        opaque/non-JWT tokens (pasted API tokens), preserving the original
+        rotate-means-invalidate behavior for those.
+        """
+        import base64
+        import json as _json
+        parts = token.split(".")
+        if len(parts) == 3:
+            try:
+                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+                if isinstance(payload, dict):
+                    sub = payload.get("sub")
+                    if isinstance(sub, str) and sub:
+                        return f"sub:{sub}"
+            except (ValueError, UnicodeDecodeError):
+                pass  # malformed JWT-lookalike — fall through to raw bytes
+        return f"tok:{token}"
+
     def _check_account_fingerprint(self) -> None:
         """Detect a Fulcra-account switch since the previous boot and
         invalidate per-plugin caches that hold per-account UUIDs.
 
-        Fingerprint is a SHA-256 prefix of the bearer-token. False
-        positives on token rotation (same account → new JWT after refresh)
-        are acceptable: the recovery is just a cache rebuild on the
-        first run of each plugin, no data loss.
+        Fingerprint is a SHA-256 prefix of the token's stable ACCOUNT
+        identity (JWT `sub` claim) — NOT the token bytes. Access tokens
+        rotate hourly (refresh-on-401 rewrites the keychain), so the old
+        token-bytes fingerprint invalidated every plugin cache on
+        effectively every daemon restart >1h apart: a full definitions
+        re-resolution storm (one whole-catalog fetch per plugin) with no
+        actual account change. Opaque non-JWT tokens fall back to the
+        token-bytes behavior via _account_identity.
+
+        One-time migration note: fingerprints written by the old scheme
+        won't match the new one, so the first boot after this change
+        triggers a single spurious invalidation — same cost as one old
+        false positive, then never again.
         """
         import hashlib
         from . import credentials as _creds
@@ -183,7 +219,8 @@ class Daemon:
             # remember. The fingerprint file gets written the first time
             # we boot WITH a token.
             return
-        fingerprint = hashlib.sha256(token.encode()).hexdigest()[:16]
+        identity = self._account_identity(token)
+        fingerprint = hashlib.sha256(identity.encode()).hexdigest()[:16]
         fingerprint_path = config_mod.config_dir() / "auth-fingerprint"
         previous = (fingerprint_path.read_text().strip()
                     if fingerprint_path.exists() else None)
