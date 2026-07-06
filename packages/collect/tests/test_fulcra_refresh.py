@@ -480,6 +480,7 @@ def test_refresh_finds_fulcra_in_well_known_location_when_not_on_path(
     ~/.local/bin. Closes the bug discovered in SP5 Task 4 where the
     launchd-managed daemon's PATH excluded the CLI install dir."""
     from fulcra_collect import credentials as _creds
+    import fulcra_common.client as common_client
 
     # Create a fake fulcra binary in tmp_path
     fake_cli = tmp_path / "fulcra"
@@ -491,10 +492,10 @@ def test_refresh_finds_fulcra_in_well_known_location_when_not_on_path(
     monkeypatch.setattr("fulcra_common.client.sys.executable",
                         str(tmp_path / "nosuch" / "python"))
     # shutil.which returns None (CLI not on PATH)
-    monkeypatch.setattr(_creds.shutil, "which", lambda name: None)
+    monkeypatch.setattr(common_client.shutil, "which", lambda name: None)
     # but _find_fulcra_cli should walk the candidates list — point
     # the first candidate at our fake binary
-    monkeypatch.setattr(_creds.os.path, "expanduser",
+    monkeypatch.setattr(common_client.os.path, "expanduser",
                         lambda p: str(fake_cli) if p == "~/.local/bin/fulcra" else p)
 
     found = _creds._find_fulcra_cli()
@@ -513,6 +514,7 @@ def test_cli_status_uses_find_fulcra_cli_fallback_when_not_on_path(
     same gap on the sign-in path.
     """
     import os
+    import fulcra_common.client as common_client
     FAKE = "/fake/.local/bin/fulcra"
     _real_isfile, _real_access, _real_expand = (
         os.path.isfile, os.access, os.path.expanduser,
@@ -522,18 +524,18 @@ def test_cli_status_uses_find_fulcra_cli_fallback_when_not_on_path(
     # fulcra_common.client now), then simulate launchd's restricted PATH.
     monkeypatch.setattr("fulcra_common.client.sys.executable",
                         "/nonexistent/venv/python")
-    monkeypatch.setattr(_creds_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(common_client.shutil, "which", lambda name: None)
     # ...but it IS installed at ~/.local/bin, which _find_fulcra_cli checks.
     monkeypatch.setattr(
-        _creds_mod.os.path, "expanduser",
+        common_client.os.path, "expanduser",
         lambda p: FAKE if p == "~/.local/bin/fulcra" else _real_expand(p),
     )
     monkeypatch.setattr(
-        _creds_mod.os.path, "isfile",
+        common_client.os.path, "isfile",
         lambda p: True if p == FAKE else _real_isfile(p),
     )
     monkeypatch.setattr(
-        _creds_mod.os, "access",
+        common_client.os, "access",
         lambda p, mode: True if p == FAKE else _real_access(p, mode),
     )
 

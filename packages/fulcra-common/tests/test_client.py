@@ -1,7 +1,6 @@
 """Tests for the shared BaseFulcraClient."""
 from __future__ import annotations
 
-import json
 import subprocess
 import urllib.error
 from datetime import datetime, timezone
