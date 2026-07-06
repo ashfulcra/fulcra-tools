@@ -28,6 +28,13 @@ class FulcraTokenBody(BaseModel):
     token: str
 
 
+class CliDeviceCodeBody(BaseModel):
+    """Body for POST /api/fulcra/auth/cli_login_poll — the opaque device
+    code returned by cli_login_start. Treated as a secret: routes must
+    never log it un-masked."""
+    device_code: str
+
+
 class DefinitionBindBody(BaseModel):
     definition_id: str | None = None
     force_new: bool = False

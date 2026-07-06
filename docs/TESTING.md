@@ -120,8 +120,12 @@ launchctl kickstart -k gui/$(id -u)/com.fulcra.collect
 ## Step 3 — Install the fulcra CLI (for browser sign-in)
 
 The wizard signs you in to Fulcra by handing off to the official
-`fulcra` CLI, which opens a browser tab for you and handles the OAuth
-device-authorization flow. Install it once with:
+`fulcra` CLI, which handles the OAuth device-authorization flow. With
+fulcra-api 0.1.35 or newer the wizard shows you a **sign-in link to
+click** — nothing needs to open a browser from the daemon, so this
+works even when the daemon runs under launchd, over SSH, or headless.
+(Older CLIs fall back to the daemon subprocess trying to open a tab
+itself.) Install the CLI once with:
 
 ```bash
 uv tool install fulcra-api
@@ -162,13 +166,21 @@ Go back to Step 2.
 The wizard's first screen offers **Sign in with Fulcra**.
 
 1. Click the button.
-2. A second browser tab opens with the Fulcra sign-in page. Sign in (or
+2. The wizard shows an **Open the sign-in page** link and a short
+   verification code. Click the link — a new tab opens with the Fulcra
+   sign-in page. Check the page shows the same code, then sign in (or
    confirm if you're already signed in).
 3. The tab confirms the connection and the wizard advances to the plugin
    list automatically.
 
+> **Older CLI?** If your `fulcra` CLI predates 0.1.35 (no
+> `--get-auth-url` support), the wizard falls back to the classic flow
+> where the daemon-side CLI opens the browser tab itself. That fallback
+> can't open a tab when the daemon runs under launchd or SSH — upgrade
+> with `uv tool upgrade fulcra-api` if no tab appears.
+
 The flow times out after 2 minutes — if it does, click **Sign in with
-Fulcra** again.
+Fulcra** again (the verification code is short-lived).
 
 If the button does not appear (the wizard says "checking for the fulcra
 CLI…" and then shows a paste-token form instead), the `fulcra` CLI is
