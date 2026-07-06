@@ -5,9 +5,19 @@
  *
  * Multi-step flow:
  *   0  welcome         — static intro, Next button
- *   1  signin          — sign in to Fulcra. Default: browser-based device-auth
- *                        flow via POST /api/fulcra/auth/cli_login. Fallback
- *                        (when fulcra CLI is unavailable, or user clicks
+ *   1  signin          — sign in to Fulcra. Default: device-auth flow via
+ *                        POST /api/fulcra/auth/cli_login_start (returns the
+ *                        web-auth URL we render as a clickable link + the
+ *                        verification code) then cli_login_poll (blocks
+ *                        server-side until the user approves in the
+ *                        browser). If the installed fulcra CLI predates
+ *                        --get-auth-url (fulcra-api < 0.1.35) the start
+ *                        call returns 409 and we fall back to the classic
+ *                        blocking POST /api/fulcra/auth/cli_login, where
+ *                        the daemon-side CLI subprocess tries to open a
+ *                        browser tab itself (fragile under launchd/SSH —
+ *                        that fragility is why the split flow exists).
+ *                        Final fallback (no CLI at all, or user clicks
  *                        "Use a token instead"): paste-token via POST
  *                        /api/fulcra/auth/token.
  *   2  collect_modes   — static explanation of historical-vs-live capture
@@ -50,6 +60,14 @@ function onboarding() {
     signinError: "",
     signinLoading: false,
     signinAccount: null,
+    // Split device-auth flow state (cli_login_start / cli_login_poll).
+    // authUrl non-empty ⇒ the template renders the "Open the sign-in
+    // page" link + verification code instead of the classic "a tab
+    // should have opened" copy. deviceCode is the completion secret we
+    // POST back to cli_login_poll — never rendered.
+    authUrl: "",
+    webAuthCode: "",
+    deviceCode: "",
 
     // --- pick_plugins state ---
     allPlugins: [],         // full list from /api/status
@@ -141,25 +159,47 @@ function onboarding() {
       this.phase = "signin";
     },
 
-    // Browser-based sign-in via the fulcra CLI. The POST blocks until the
-    // user finishes the device-auth flow in their browser (up to ~2 min),
-    // then the daemon validates+stores the token. We just need to wait and
-    // surface progress/errors.
+    // Browser-based sign-in via the fulcra CLI, split flow (fulcra-api
+    // >= 0.1.35): cli_login_start returns the web-auth URL + codes
+    // without opening anything, we render the URL as a real link the
+    // user clicks, then cli_login_poll blocks server-side (up to
+    // ~2.5 min) until the browser flow is approved and the daemon has
+    // validated+stored the token. A 409 from start means the installed
+    // CLI predates --get-auth-url — fall back to the classic flow.
     async signinViaCli() {
       this.signinError = "";
       this.signinLoading = true;
+      this.authUrl = "";
+      this.webAuthCode = "";
+      this.deviceCode = "";
       try {
-        const result = await api("/api/fulcra/auth/cli_login", {
+        let start;
+        try {
+          start = await api("/api/fulcra/auth/cli_login_start", {
+            method: "POST",
+            body: JSON.stringify({}),
+          });
+        } catch (e) {
+          if (e.status === 409) {
+            // Old CLI without --get-auth-url — classic blocking flow
+            // (the daemon-side subprocess opens the browser tab).
+            await this._signinViaCliClassic();
+            return;
+          }
+          throw e;
+        }
+        this.authUrl = start.auth_url;
+        this.webAuthCode = start.web_auth_code || "";
+        this.deviceCode = start.device_code;
+        // This POST blocks until the user finishes in the browser (the
+        // daemon polls the CLI for up to ~2.5 min). The link + code stay
+        // on screen the whole time.
+        const result = await api("/api/fulcra/auth/cli_login_poll", {
           method: "POST",
-          body: JSON.stringify({}),
+          body: JSON.stringify({ device_code: this.deviceCode }),
         });
         if (result.ok) {
-          // Hand off to the static explainer screen; load plugins in the
-          // background so the pick_plugins list is ready by the time the
-          // user advances. pickLoading covers the race if they're faster
-          // than the API.
-          this.phase = "collect_modes";
-          this._loadPlugins();  // intentionally not awaited
+          this._onSigninSuccess();
         } else {
           this.signinError = result.error || "Sign-in didn't complete. Please try again.";
         }
@@ -167,7 +207,34 @@ function onboarding() {
         this.signinError = e.message || "Sign-in failed. Please try again.";
       } finally {
         this.signinLoading = false;
+        this.authUrl = "";
+        this.webAuthCode = "";
+        this.deviceCode = "";
       }
+    },
+
+    // Classic pre-0.1.35 flow: POST cli_login blocks while the daemon's
+    // CLI subprocess opens a browser tab itself. Only reached via the
+    // 409 fallback from signinViaCli(); errors propagate to its catch.
+    async _signinViaCliClassic() {
+      const result = await api("/api/fulcra/auth/cli_login", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      if (result.ok) {
+        this._onSigninSuccess();
+      } else {
+        this.signinError = result.error || "Sign-in didn't complete. Please try again.";
+      }
+    },
+
+    // Shared success hand-off: static explainer screen next; load plugins
+    // in the background so the pick_plugins list is ready by the time the
+    // user advances. pickLoading covers the race if they're faster than
+    // the API.
+    _onSigninSuccess() {
+      this.phase = "collect_modes";
+      this._loadPlugins();  // intentionally not awaited
     },
 
     // Fallback path: user pasted a token by hand.
@@ -186,8 +253,7 @@ function onboarding() {
         });
         if (result.ok) {
           // Same flow as signinViaCli — explainer then pick.
-          this.phase = "collect_modes";
-          this._loadPlugins();  // intentionally not awaited
+          this._onSigninSuccess();
         } else {
           this.signinError = result.error || "Token not accepted. Please try again.";
         }

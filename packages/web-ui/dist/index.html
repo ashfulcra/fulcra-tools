@@ -148,13 +148,14 @@
             <div>
               <h2 class="text-2xl font-semibold mb-2">Sign in to Fulcra</h2>
               <p class="text-slate-600 text-sm" x-show="signinMode === 'cli'">
-                We'll open a browser tab so you can sign in to Fulcra securely.
+                We'll give you a sign-in link to open in your browser.
                 No tokens to copy and paste.
               </p>
               <p class="text-slate-600 text-sm" x-show="signinMode === 'token'">
-                Paste your Fulcra access token below. You can find it in
-                <a href="https://app.fulcra.io/settings/api" target="_blank"
-                   class="text-violet-600 underline">Fulcra Settings → API</a>.
+                Paste your Fulcra access token below. You can generate one at
+                <a href="https://fulcradynamics.com" target="_blank"
+                   class="text-violet-600 underline">fulcradynamics.com</a>
+                → your avatar → <strong>Settings</strong> → <strong>API tokens</strong>.
               </p>
               <p class="text-slate-500 text-xs" x-show="signinMode === 'auto'">
                 Checking for the fulcra CLI…
@@ -167,13 +168,42 @@
                 <p class="text-red-600 text-sm" x-text="signinError"></p>
               </template>
 
-              <template x-if="signinLoading">
+              <!-- Split flow (fulcra-api >= 0.1.35): the daemon returned a
+                   sign-in URL — render it as a real link the user clicks.
+                   Nothing here depends on the daemon being able to open a
+                   browser (it can't under launchd / SSH / headless). -->
+              <template x-if="signinLoading && authUrl">
+                <div class="rounded border border-violet-200 bg-violet-50 p-3 text-sm text-violet-800 space-y-3">
+                  <p class="font-medium">Finish sign-in in your browser</p>
+                  <a :href="authUrl" target="_blank" rel="noopener"
+                     class="inline-block px-5 py-2 rounded bg-violet-600 text-white font-medium hover:bg-violet-700 transition-colors">
+                    Open the sign-in page
+                  </a>
+                  <p class="text-violet-700" x-show="webAuthCode">
+                    Check that the page shows this code:
+                    <code class="font-mono font-semibold bg-white border border-violet-200 rounded px-1.5 py-0.5"
+                          x-text="webAuthCode"></code>
+                  </p>
+                  <p class="text-violet-700">
+                    This page will move on automatically once you approve.
+                    The flow times out after 2 minutes — the code is
+                    short-lived, so click <strong>Sign in with Fulcra</strong>
+                    again if it stalls.
+                  </p>
+                </div>
+              </template>
+
+              <!-- Classic fallback (fulcra CLI without --get-auth-url): the
+                   daemon-side CLI subprocess tries to open the tab itself. -->
+              <template x-if="signinLoading && !authUrl">
                 <div class="rounded border border-violet-200 bg-violet-50 p-3 text-sm text-violet-800">
                   <p class="font-medium">Waiting for browser sign-in…</p>
                   <p class="text-violet-700 mt-1">
                     A browser tab should have opened. Finish signing in there;
                     this page will move on automatically. The flow times out
-                    after 2 minutes.
+                    after 2 minutes. If no tab appeared, upgrade the CLI with
+                    <code class="font-mono">uv tool upgrade fulcra-api</code>
+                    and try again, or use a token instead.
                   </p>
                 </div>
               </template>
