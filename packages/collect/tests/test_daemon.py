@@ -679,10 +679,10 @@ def test_record_annotation_unauthenticated(collect_home, monkeypatch):
 def test_record_annotation_happy_path(collect_home, monkeypatch):
     """record_annotation calls Fulcra POST and surfaces ok=True + activity entry.
 
-    The fix replaced a dead /data/v0/annotations URL with the real
-    /ingest/v1/record/batch ingest endpoint. This test asserts the POST
-    URL, the JSONL content-type, and that the def's tags propagate into
-    the wire record's metadata.
+    Quick-record is a single-shot write, so it uses the single-record
+    endpoint (POST /ingest/v1/record, one DataRecordV1 as JSON — per-record
+    error bodies). This test asserts the POST URL and that the def's tags
+    propagate into the wire record's metadata.
     """
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
@@ -710,22 +710,19 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
     )
     assert reply["name"] == "Test Moment"
 
-    # Exactly one POST went out, to the live ingest endpoint with JSONL.
-    # Post-refactor #69: the URL is relative because the
-    # _QuickRecordClient (BaseFulcraClient subclass) sets base_url on the
-    # httpx.Client. The fake records `url` as-passed.
+    # Exactly one POST went out, to the single-record ingest endpoint.
+    # The URL is relative because the _QuickRecordClient (BaseFulcraClient
+    # subclass) sets base_url on the httpx.Client; the fake records `url`
+    # as-passed and the record dict under the `json` kwarg.
     post_reqs = [r for r in fake_client.requests if r["method"] == "POST"]
     assert len(post_reqs) == 1
     post = post_reqs[0]
-    assert post["url"] == "/ingest/v1/record/batch"
-    assert post["headers"]["content-type"] == "application/x-jsonl"
+    assert post["url"] == "/ingest/v1/record"
     assert post["headers"]["Authorization"] == "Bearer tok"
 
-    # Body is JSONL — one wire record per line, sorted-key JSON.
     import json
-    lines = [l for l in post["content"].decode().split("\n") if l]
-    assert len(lines) == 1
-    record = json.loads(lines[0])
+    record = post["json"]
+    assert record["specversion"] == 1
     md = record["metadata"]
     assert md["data_type"] == "MomentAnnotation"
     # The def's tags must propagate into the event so Fulcra associates
@@ -834,8 +831,7 @@ def test_record_annotation_duration_writes_duration_record(
 
     posts = [r for r in fake_client.requests if r["method"] == "POST"]
     assert len(posts) == 1
-    lines = [ln for ln in posts[0]["content"].decode().split("\n") if ln]
-    record = json.loads(lines[0])
+    record = posts[0]["json"]
     md = record["metadata"]
     assert md["data_type"] == "DurationAnnotation"
     # recorded_at is an object for durations.
@@ -871,9 +867,7 @@ def test_record_annotation_moment_fallback_when_no_times(
     assert reply["ok"] is True
 
     posts = [r for r in fake_client.requests if r["method"] == "POST"]
-    record = json.loads(
-        [ln for ln in posts[0]["content"].decode().split("\n") if ln][0]
-    )
+    record = posts[0]["json"]
     md = record["metadata"]
     assert md["data_type"] == "MomentAnnotation"
     # recorded_at is a scalar string for moments.
@@ -931,9 +925,7 @@ def test_delete_annotation_writes_tombstone(collect_home, monkeypatch):
 
     posts = [r for r in fake_client.requests if r["method"] == "POST"]
     assert len(posts) == 1
-    record = json.loads(
-        [ln for ln in posts[0]["content"].decode().split("\n") if ln][0]
-    )
+    record = posts[0]["json"]
     payload = json.loads(record["data"])
     # The tombstone references the original source_id so any future
     # Fulcra-side superseded-by logic can join them.
