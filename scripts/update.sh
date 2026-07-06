@@ -8,10 +8,13 @@
 #                                     dev (pytest) + macos (PyObjC/rumps) extras.
 #                                     Without --all-extras, uv prunes those out,
 #                                     re-breaking the menubar import + the tests.
-#   3. restart the launchd daemon   — only if it's installed; picks up new code
-#   4. restart the menubar app      — only if it's currently running
+#   3. upgrade the fulcra CLI       — only if installed as a uv tool; a
+#                                     kept-current checkout otherwise runs
+#                                     whatever CLI it first installed forever
+#   4. restart the launchd daemon   — only if it's installed; picks up new code
+#   5. restart the menubar app      — only if it's currently running
 #
-# Steps 3 and 4 are best-effort: if you run the daemon in the foreground
+# Steps 3–5 are best-effort: if you run the daemon in the foreground
 # (`uv run fulcra-collect daemon`) or don't use the menubar, those steps are
 # skipped with a note rather than failing.
 #
@@ -21,14 +24,28 @@ set -euo pipefail
 cd "$(dirname "$0")/.."                        # repo root
 REPO="$PWD"
 
-echo "=== 1/4  git pull --ff-only ==="
+echo "=== 1/5  git pull --ff-only ==="
 git pull --ff-only
 
-echo "=== 2/4  uv sync --all-packages --all-extras ==="
+echo "=== 2/5  uv sync --all-packages --all-extras ==="
 uv sync --all-packages --all-extras
 
+echo "=== 3/5  upgrade the fulcra CLI ==="
+# Newer CLI command groups (file, data-updates, data-type, tag) are load-
+# bearing for collect + fulcra-coord; a checkout that stays current via this
+# script previously never upgraded the CLI it installed on day one.
+if uv tool list 2>/dev/null | grep -q '^fulcra-api '; then
+  if uv tool install --upgrade fulcra-api >/dev/null 2>&1; then
+    echo "  fulcra-api: $(uv tool list 2>/dev/null | grep '^fulcra-api ' | head -1)"
+  else
+    echo "  warning: fulcra-api upgrade failed — continuing (daemon still restarts)"
+  fi
+else
+  echo "  fulcra-api not installed as a uv tool — skipping (scripts/setup.sh installs it)"
+fi
+
 LABEL="com.fulcra.collect"
-echo "=== 3/4  restart the launchd daemon ($LABEL) ==="
+echo "=== 4/5  restart the launchd daemon ($LABEL) ==="
 if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
   # -k sends SIGKILL and relaunches, so the fresh process imports the new code.
   launchctl kickstart -k "gui/$(id -u)/$LABEL"
@@ -38,7 +55,7 @@ else
   echo "  'uv run fulcra-collect daemon', or install it per docs/TESTING.md)."
 fi
 
-echo "=== 4/4  restart the menubar app ==="
+echo "=== 5/5  restart the menubar app ==="
 if pgrep -f fulcra-menubar >/dev/null 2>&1; then
   pkill -f fulcra-menubar || true
   sleep 1
