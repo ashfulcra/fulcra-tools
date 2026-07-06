@@ -185,12 +185,13 @@ def _worker(plugin_id: str) -> None:
 
 @cli.command()
 def doctor() -> None:
-    """Run a pre-flight diagnostic — checks the seven things that most often
+    """Run a pre-flight diagnostic — checks the ten things that most often
     go wrong during first-run onboarding and prints OK / WARN / FAIL for each.
 
     Exits 0 when there are no FAILs, 1 otherwise. Output is copy/pasteable
     into a bug report or support thread.
     """
+    import json
     import platform
     import subprocess
 
@@ -251,7 +252,83 @@ def doctor() -> None:
     else:
         _row("fulcra CLI reachable", "FAIL", "skipped — CLI not found (see above)")
 
-    # ── 3. Daemon control socket reachable ───────────────────────────────────
+    # ── 3. fulcra CLI file group present ─────────────────────────────────────
+    # `fulcra file --help` exiting 0 proves the CLI build carries the
+    # file-commands group. There is no `fulcra --version` to ask, so
+    # capability rows are feature probes against subcommand --help.
+    _UPGRADE_HINT = "fix: uv tool install --upgrade fulcra-api"
+    if cli_path:
+        try:
+            r = subprocess.run(
+                [cli_path, "file", "--help"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                _row("fulcra CLI file group", "OK", "file commands available")
+            else:
+                _row("fulcra CLI file group", "FAIL",
+                     f"`fulcra file --help` exited {r.returncode} — {_UPGRADE_HINT}")
+        except subprocess.TimeoutExpired:
+            _row("fulcra CLI file group", "FAIL",
+                 "timed out invoking fulcra file --help")
+    else:
+        _row("fulcra CLI file group", "FAIL", "skipped — CLI not found (see above)")
+
+    # ── 4. fulcra CLI data-updates (fulcra-api >= 0.1.35) ────────────────────
+    data_updates_available = False
+    if cli_path:
+        try:
+            r = subprocess.run(
+                [cli_path, "data-updates", "--help"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                data_updates_available = True
+                _row("fulcra CLI data-updates (>=0.1.35)", "OK",
+                     "data-updates command available")
+            else:
+                _row("fulcra CLI data-updates (>=0.1.35)", "FAIL",
+                     f"`fulcra data-updates --help` exited {r.returncode} — "
+                     f"{_UPGRADE_HINT}")
+        except subprocess.TimeoutExpired:
+            _row("fulcra CLI data-updates (>=0.1.35)", "FAIL",
+                 "timed out invoking fulcra data-updates --help")
+    else:
+        _row("fulcra CLI data-updates (>=0.1.35)", "FAIL",
+             "skipped — CLI not found (see above)")
+
+    # ── 5. Data liveness via data-updates ────────────────────────────────────
+    # One authed round trip that proves data is actually flowing. Only the
+    # data_types counts are summarised — file_changes can be megabytes of
+    # coordination-bus churn and must never be printed or logged.
+    if data_updates_available:
+        try:
+            r = subprocess.run(
+                [cli_path, "data-updates", "1 hour"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                try:
+                    counts = json.loads(r.stdout).get("data_types") or {}
+                    n_records = sum(int(v) for v in counts.values())
+                    _row("Fulcra data liveness (last hour)", "OK",
+                         f"{len(counts)} data type(s), "
+                         f"{n_records} record(s) processed")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    _row("Fulcra data liveness (last hour)", "FAIL",
+                         "data-updates returned unparseable output")
+            else:
+                stderr_tail = (r.stderr or "").strip()[-200:]
+                _row("Fulcra data liveness (last hour)", "FAIL",
+                     f"data-updates failed: {stderr_tail or 'no stderr'}")
+        except subprocess.TimeoutExpired:
+            _row("Fulcra data liveness (last hour)", "FAIL",
+                 "timed out invoking fulcra data-updates")
+    else:
+        _row("Fulcra data liveness (last hour)", "FAIL",
+             "skipped — data-updates unavailable (see above)")
+
+    # ── 6. Daemon control socket reachable ───────────────────────────────────
     sock = config_mod.config_dir() / "control.sock"
     plist_exists = (
         service_manager.launchd_plist_path().exists()
@@ -282,7 +359,7 @@ def doctor() -> None:
                 "not reachable — fix: uv run fulcra-collect install  (then bootstrap)",
             )
 
-    # ── 4. launchd / systemd agent installed ─────────────────────────────────
+    # ── 7. launchd / systemd agent installed ─────────────────────────────────
     system = platform.system()
     if system == "Darwin":
         plist_path = service_manager.launchd_plist_path()
@@ -307,7 +384,7 @@ def doctor() -> None:
     else:
         _row("Service agent installed", "OK", f"skipped (platform={system!r})")
 
-    # ── 5. launchd agent loaded + running (macOS only) ───────────────────────
+    # ── 8. launchd agent loaded + running (macOS only) ───────────────────────
     if system == "Darwin":
         try:
             r = subprocess.run(
@@ -331,7 +408,7 @@ def doctor() -> None:
         except FileNotFoundError:
             _row("launchd agent running", "WARN", "launchctl not found (non-macOS?)")
 
-    # ── 6. Web token + cookie bootstrap ─────────────────────────────────────
+    # ── 9. Web token + cookie bootstrap ─────────────────────────────────────
     web_token_path = config_mod.config_dir() / "web-token"
     if web_token_path.exists() and web_token_path.read_bytes().strip():
         _row("Web token present", "OK", str(web_token_path))
@@ -343,7 +420,7 @@ def doctor() -> None:
             "(it writes this file on startup)",
         )
 
-    # ── 7. Bearer token in keychain + Fulcra API healthy ────────────────────
+    # ── 10. Bearer token in keychain + Fulcra API healthy ────────────────────
     tok = credentials.get_user_secret("bearer-token")
     if not tok:
         web_url_path = config_mod.config_dir() / "web-url"

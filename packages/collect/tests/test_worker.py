@@ -23,7 +23,8 @@ def test_worker_emits_a_done_result_for_a_successful_run(collect_home: Path):
     events = _run_capturing(plugin, collect_home)
     assert events[-1] == {"type": "result", "outcome": "done",
                           "error": None, "watermark": None,
-                          "definition_id": None}
+                          "definition_id": None,
+                          "definition_validated_at": None}
 
 
 def test_worker_carries_the_watermark_set_by_the_plugin(collect_home: Path):

@@ -48,6 +48,25 @@ def _daemon_reply_ok() -> dict:
             "load_errors": {}}
 
 
+def _make_data_updates_ok() -> object:
+    """A CompletedProcess that looks like `fulcra data-updates "1 hour"`.
+    file_changes deliberately carries a sentinel — doctor must never print it."""
+    r = MagicMock()
+    r.returncode = 0
+    r.stdout = ('{"data_types": {"HeartRate": 795, "StepCount": 306}, '
+                '"file_changes": [{"path": "NEVER-PRINT-THIS"}]}')
+    r.stderr = ""
+    return r
+
+
+def _dispatch_probe_ok(cmd) -> object:
+    """Route a fulcra subprocess call to the right OK-shaped fake: JSON for
+    the data-liveness probe, a plain rc-0 result for auth/--help probes."""
+    if "data-updates" in cmd and "--help" not in cmd:
+        return _make_data_updates_ok()
+    return _make_cli_ok()
+
+
 # ---------------------------------------------------------------------------
 # (a) CLI not found — should print FAIL + hint
 # ---------------------------------------------------------------------------
@@ -147,9 +166,9 @@ def test_doctor_all_ok_exits_zero(collect_home: Path, monkeypatch):
         lambda: "/usr/local/bin/fulcra",
     )
 
-    # subprocess.run is called for both the CLI auth check AND launchctl; we
-    # need to return an OK result for both.
-    cli_ok = _make_cli_ok()
+    # subprocess.run is called for the CLI auth check, the file/data-updates
+    # feature probes, the data-liveness probe AND launchctl; return an OK
+    # result shaped correctly for each.
     launchctl_ok = MagicMock()
     launchctl_ok.returncode = 0
     launchctl_ok.stdout = "..."
@@ -161,7 +180,7 @@ def test_doctor_all_ok_exits_zero(collect_home: Path, monkeypatch):
         call_count[0] += 1
         if "launchctl" in cmd[0]:
             return launchctl_ok
-        return cli_ok
+        return _dispatch_probe_ok(cmd)
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     monkeypatch.setattr("fulcra_collect.control.send_request",
@@ -191,3 +210,126 @@ def test_doctor_all_ok_exits_zero(collect_home: Path, monkeypatch):
 
     assert "FAIL" not in result.output
     assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# (e) data-updates adoption rows: file group, version floor (feature probe —
+#     there is no `fulcra --version`), and data liveness.
+# ---------------------------------------------------------------------------
+
+def _quiet_other_checks(collect_home: Path, monkeypatch):
+    """Keep the non-CLI checks green so the row under test is the only
+    FAIL candidate."""
+    monkeypatch.setattr("fulcra_collect.control.send_request",
+                        lambda *a, **k: _daemon_reply_ok())
+    (collect_home / "web-token").write_text("tok\n")
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda k: None)
+
+
+def test_doctor_file_group_missing_fails_with_upgrade_hint(collect_home: Path,
+                                                           monkeypatch):
+    """An old fulcra-api build without the file group → FAIL + upgrade hint."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+
+    def _fake_run(cmd, **kw):
+        if "file" in cmd:
+            r = MagicMock()
+            r.returncode = 2
+            r.stdout = ""
+            r.stderr = "Error: No such command 'file'."
+            return r
+        return _dispatch_probe_ok(cmd)
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    result = CliRunner().invoke(cli, ["doctor"])
+    assert "fulcra CLI file group" in result.output
+    assert "uv tool install --upgrade fulcra-api" in result.output
+    assert result.exit_code == 1
+
+
+def test_doctor_data_updates_probe_passes_when_command_exists(collect_home: Path,
+                                                              monkeypatch):
+    """`fulcra data-updates --help` exiting 0 implies fulcra-api >= 0.1.35
+    (feature probe — the CLI has no --version); the row reads OK."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _dispatch_probe_ok(cmd))
+    result = CliRunner().invoke(cli, ["doctor"])
+    assert "fulcra CLI data-updates (>=0.1.35)" in result.output
+    line = [ln for ln in result.output.splitlines()
+            if "data-updates (>=0.1.35)" in ln][0]
+    assert "[OK]" in line
+
+
+def test_doctor_data_updates_probe_fails_on_old_cli(collect_home: Path,
+                                                    monkeypatch):
+    """A pre-0.1.35 CLI (no data-updates command) → FAIL + upgrade hint on
+    the version-floor row AND the liveness row is skipped as FAIL."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+
+    def _fake_run(cmd, **kw):
+        if "data-updates" in cmd:
+            r = MagicMock()
+            r.returncode = 2
+            r.stdout = ""
+            r.stderr = "Error: No such command 'data-updates'."
+            return r
+        return _dispatch_probe_ok(cmd)
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    result = CliRunner().invoke(cli, ["doctor"])
+    assert "uv tool install --upgrade fulcra-api" in result.output
+    liveness = [ln for ln in result.output.splitlines()
+                if "data liveness" in ln][0]
+    assert "[FAIL]" in liveness and "skipped" in liveness
+    assert result.exit_code == 1
+
+
+def test_doctor_data_liveness_summarises_data_types_never_file_changes(
+        collect_home: Path, monkeypatch):
+    """PASS prints a compact data_types summary; the (potentially huge)
+    file_changes array must never reach the output."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _dispatch_probe_ok(cmd))
+    result = CliRunner().invoke(cli, ["doctor"])
+    liveness = [ln for ln in result.output.splitlines()
+                if "data liveness" in ln][0]
+    assert "[OK]" in liveness
+    # 795 + 306 records across 2 data types (from _make_data_updates_ok).
+    assert "2 data type(s)" in liveness
+    assert "1101 record(s)" in liveness
+    assert "NEVER-PRINT-THIS" not in result.output
+
+
+def test_doctor_data_liveness_failure_surfaces_stderr_tail(collect_home: Path,
+                                                           monkeypatch):
+    """A failing liveness probe (e.g. signed out, API down) FAILs with the
+    stderr tail so the user sees the server's actual complaint."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+
+    def _fake_run(cmd, **kw):
+        if "data-updates" in cmd and "--help" not in cmd:
+            r = MagicMock()
+            r.returncode = 1
+            r.stdout = ""
+            r.stderr = "Error: HTTP Error 500: Internal Server Error"
+            return r
+        return _dispatch_probe_ok(cmd)
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    result = CliRunner().invoke(cli, ["doctor"])
+    liveness = [ln for ln in result.output.splitlines()
+                if "data liveness" in ln][0]
+    assert "[FAIL]" in liveness
+    assert "HTTP Error 500" in liveness
+    assert result.exit_code == 1

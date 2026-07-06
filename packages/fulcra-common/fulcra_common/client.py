@@ -292,6 +292,54 @@ class BaseFulcraClient:
                 return False
             raise
 
+    def data_updates_summary(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> dict[str, int]:
+        """Per-data-type processed-record counts over [window_start, window_end).
+
+        GET /data/v1/updates (fulcra-api >= 0.1.35; the endpoint is absent
+        from the published OpenAPI spec — this is coded against the lib's
+        ``FulcraAPI.data_updates``, which sends the same ``start_time`` /
+        ``end_time`` query params). The server's response has two keys:
+
+        * ``data_types`` — {data type: number of records PROCESSED during
+          the window}. PROCESSING time, not event time: a record ingested
+          today with a 2020 event timestamp counts in TODAY's window and in
+          no window around 2020 (verified live 2026-07-06 — 501 records
+          with 2020-06 event times exist while data_updates over 2020-06
+          returns ``{}``). Callers gating work on these counts must reason
+          in processing time.
+        * ``file_changes`` — a list of changed uploaded files that can run
+          to MEGABYTES on accounts with coordination-bus churn (1,793
+          entries in a single hour, live). It is dropped here, never
+          returned, and must NEVER be logged or embedded in an error.
+
+        Definition create/soft-delete/restore does NOT surface in
+        ``data_types`` at all (verified live: an 11-definition soft-delete
+        burst shows ``{}`` over its exact window), so this is NOT a signal
+        for definition-cache staleness.
+
+        On any HTTP error this RAISES (httpx.HTTPStatusError etc. — the
+        server 500s on large windows, seen live with a 7-day range).
+        Callers treat a raise as "can't gate; proceed without the
+        optimization" — a gating failure must never block an import.
+        """
+        r = self._client().get(
+            "/data/v1/updates",
+            params={
+                "start_time": window_start.isoformat().replace("+00:00", "Z"),
+                "end_time": window_end.isoformat().replace("+00:00", "Z"),
+            },
+            headers=self._authed_headers(),
+        )
+        r.raise_for_status()
+        data_types = r.json().get("data_types") or {}
+        # Rebuild the dict so no reference to the parsed body (and its
+        # file_changes sibling) escapes to callers.
+        return {str(k): int(v) for k, v in data_types.items()}
+
     def fetch_records(
         self,
         start: datetime,
