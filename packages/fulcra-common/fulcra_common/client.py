@@ -217,8 +217,9 @@ class BaseFulcraClient:
 
         Returns True on success, False on a 404 (not found). Events under
         the def are NOT removed from query results — they stay visible but
-        their source_id points at a deleted def. This is the only delete
-        primitive Fulcra exposes; there is no per-event delete.
+        their source_id points at a deleted def. There is no per-EVENT
+        delete primitive; definition soft-delete is reversible via
+        `restore_definition` (Fulcra's cancel_deletion endpoint).
 
         Any non-404 error from the lib is propagated to the caller.
         """
@@ -226,6 +227,26 @@ class BaseFulcraClient:
 
         try:
             self._lib().delete_annotation(definition_id)
+            return True
+        except _ue.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            raise
+
+    def restore_definition(self, definition_id: str) -> bool:
+        """Restore (un-soft-delete) an annotation definition.
+
+        Inverse of `soft_delete_definition` — calls Fulcra's
+        `POST /user/v1alpha1/annotation/{id}/cancel_deletion` via the lib's
+        `restore_annotation`. Returns True on success, False on a 404
+        (unknown definition id).
+
+        Any non-404 error from the lib is propagated to the caller.
+        """
+        import urllib.error as _ue
+
+        try:
+            self._lib().restore_annotation(definition_id)
             return True
         except _ue.HTTPError as exc:
             if exc.code == 404:

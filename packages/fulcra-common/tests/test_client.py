@@ -390,3 +390,50 @@ def test_soft_delete_definition_propagates_other_errors(monkeypatch):
 
     with pytest.raises(urllib.error.HTTPError):
         client.soft_delete_definition("def-err")
+
+
+# ---------------------------------------------------------------------------
+# restore_definition — undo for soft_delete_definition
+# ---------------------------------------------------------------------------
+
+def test_restore_definition_true_on_success(monkeypatch):
+    """Returns True when restore_annotation succeeds (no exception)."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    # The lib returns the restored annotation's JSON body on success.
+    fake_lib.restore_annotation.return_value = {"id": "def-1", "deleted_at": None}
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.restore_definition("def-1") is True
+    fake_lib.restore_annotation.assert_called_once_with("def-1")
+
+
+def test_restore_definition_false_on_not_found(monkeypatch):
+    """Returns False when restore_annotation raises HTTPError 404 (not found)."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.restore_annotation.side_effect = urllib.error.HTTPError(
+        url="http://x", code=404, msg="Not Found", hdrs=None, fp=None
+    )
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    assert client.restore_definition("def-missing") is False
+
+
+def test_restore_definition_propagates_other_errors(monkeypatch):
+    """Non-404 HTTPErrors (e.g. 500) are re-raised, not swallowed."""
+    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
+    client = BaseFulcraClient()
+
+    fake_lib = MagicMock()
+    fake_lib.restore_annotation.side_effect = urllib.error.HTTPError(
+        url="http://x", code=500, msg="Server Error", hdrs=None, fp=None
+    )
+    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
+
+    with pytest.raises(urllib.error.HTTPError):
+        client.restore_definition("def-err")

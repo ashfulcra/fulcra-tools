@@ -1,4 +1,4 @@
-"""Definitions — list, preview recent entries, bind / clear, delete.
+"""Definitions — list, preview recent entries, bind / clear, delete, restore.
 
 This module talks to the Fulcra HTTP API via the shared http-client
 factory on the :class:`RouteContext`. The factory pulls ``httpx`` from
@@ -14,6 +14,73 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from ._deps import DefinitionBindBody, RouteContext
 
+#: Maps the machine-readable ``code`` field on daemon-method error returns
+#: (``_delete_definition`` / ``_restore_definition``) to the HTTP status the
+#: route surfaces. Shared so the two shim routes can't drift.
+_DAEMON_CODE_TO_HTTP = {
+    "bad_request": 400,
+    "unauthorized": 401,
+    "not_found": 404,
+    "timeout": 504,
+    "upstream_error": 502,
+}
+
+
+def _fulcra_error_to_http(exc: Exception, op: str) -> HTTPException:
+    """Translate a failed direct-to-Fulcra call into an ``HTTPException``.
+
+    Single home for the five-way ladder previously duplicated verbatim in
+    ``list_definitions`` and ``definition_recent`` — same statuses, same
+    user-facing messages, same log lines (parameterised by ``op``).
+    ``httpx`` is reached via :mod:`fulcra_collect.web` so tests that
+    monkeypatch ``fulcra_collect.web.httpx`` keep working. Callers use it
+    as ``raise _fulcra_error_to_http(exc, "op") from exc`` inside a broad
+    ``except Exception`` (after re-raising ``HTTPException`` untouched).
+
+    isinstance order matters: ``ConnectTimeout`` subclasses
+    ``TimeoutException``, so the connect-failure pair is checked first —
+    matching the original except-clause ordering.
+    """
+    from .. import web as _web  # late import — tests monkeypatch web.httpx
+
+    _log = logging.getLogger("fulcra_collect.web")
+    if isinstance(exc, _web.httpx.HTTPStatusError):
+        status = exc.response.status_code
+        _log.warning("%s: Fulcra returned %s", op, status)
+        if status in (401, 403):
+            return HTTPException(
+                401,
+                "Fulcra rejected the request — your sign-in may have expired. "
+                "Re-run sign-in from the wizard or paste a fresh token.",
+            )
+        if 500 <= status < 600:
+            return HTTPException(
+                502,
+                f"Fulcra returned {status}. Try again in a moment.",
+            )
+        return HTTPException(
+            502,
+            f"Fulcra returned an unexpected {status}.",
+        )
+    if isinstance(exc, (_web.httpx.ConnectError, _web.httpx.ConnectTimeout)):
+        _log.warning("%s: connect failed: %r", op, exc)
+        return HTTPException(
+            502,
+            "Couldn't reach Fulcra. Check your internet, then try again.",
+        )
+    if isinstance(exc, _web.httpx.TimeoutException):
+        _log.warning("%s: timed out: %r", op, exc)
+        return HTTPException(
+            504,
+            "Fulcra took too long to respond. Try again in a moment.",
+        )
+    _log.exception("%s: unexpected failure", op)
+    return HTTPException(
+        502,
+        f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
+        "Check the daemon log for details.",
+    )
+
 
 def register(app: FastAPI, ctx: RouteContext) -> None:
     daemon = ctx.daemon
@@ -22,18 +89,22 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
     fulcra_http_client = ctx.fulcra_http_client
 
     @app.get("/api/definitions", dependencies=[Depends(require_token)])
-    def list_definitions(annotation_type: str | None = None):  # noqa: ARG001
-        """List all non-deleted Fulcra annotation definitions.
+    def list_definitions(
+        annotation_type: str | None = None,  # noqa: ARG001
+        include_deleted: bool = False,
+    ):
+        """List Fulcra annotation definitions (non-deleted by default).
 
         The annotation_type query parameter is accepted for backwards
         compatibility but ignored — all definitions are returned so the
         frontend can group compatible vs. other types itself.
 
+        ``include_deleted=true`` also returns soft-deleted definitions
+        (identifiable by a non-null ``deleted_at``) so the UI can offer a
+        restore affordance backed by ``POST /api/definitions/{id}/restore``.
+
         Calls the Fulcra API directly with the user-level bearer token.
         """
-        from .. import web as _web  # late import — tests monkeypatch web.httpx
-
-        _log = logging.getLogger("fulcra_collect.web")
         fulcra_token = fulcra_token_or_401()
         try:
             with fulcra_http_client(fulcra_token) as client:
@@ -42,46 +113,13 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                 defs = r.json()
         except HTTPException:
             raise
-        except _web.httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            _log.warning("list_definitions: Fulcra returned %s", status)
-            if status in (401, 403):
-                raise HTTPException(
-                    401,
-                    "Fulcra rejected the request — your sign-in may have expired. "
-                    "Re-run sign-in from the wizard or paste a fresh token.",
-                ) from exc
-            if 500 <= status < 600:
-                raise HTTPException(
-                    502,
-                    f"Fulcra returned {status}. Try again in a moment.",
-                ) from exc
-            raise HTTPException(
-                502,
-                f"Fulcra returned an unexpected {status}.",
-            ) from exc
-        except (_web.httpx.ConnectError, _web.httpx.ConnectTimeout) as exc:
-            _log.warning("list_definitions: connect failed: %r", exc)
-            raise HTTPException(
-                502,
-                "Couldn't reach Fulcra. Check your internet, then try again.",
-            ) from exc
-        except _web.httpx.TimeoutException as exc:
-            _log.warning("list_definitions: timed out: %r", exc)
-            raise HTTPException(
-                504,
-                "Fulcra took too long to respond. Try again in a moment.",
-            ) from exc
         except Exception as exc:
-            _log.exception("list_definitions: unexpected failure")
-            raise HTTPException(
-                502,
-                f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
-                "Check the daemon log for details.",
-            ) from exc
-        # Filter out soft-deleted definitions; annotation_type filtering is
-        # intentionally NOT applied — the frontend groups types itself.
-        defs = [d for d in defs if not d.get("deleted_at")]
+            raise _fulcra_error_to_http(exc, "list_definitions") from exc
+        # Filter out soft-deleted definitions unless the caller asked for
+        # them; annotation_type filtering is intentionally NOT applied —
+        # the frontend groups types itself.
+        if not include_deleted:
+            defs = [d for d in defs if not d.get("deleted_at")]
         return {"definitions": defs}
 
     @app.get("/api/definitions/{def_id}/recent", dependencies=[Depends(require_token)])
@@ -92,8 +130,6 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         Uses the DurationAnnotation data type by default; the response
         contains raw event records from the Fulcra API. limit must be 1-20.
         """
-        from .. import web as _web  # late import — tests monkeypatch web.httpx
-
         if limit < 1 or limit > 20:
             raise HTTPException(400, "limit must be 1-20")
         fulcra_token = fulcra_token_or_401()
@@ -129,50 +165,9 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
                         break
         except HTTPException:
             raise
-        except _web.httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            _log = logging.getLogger("fulcra_collect.web")
-            _log.warning("definition_recent(%s): Fulcra returned %s",
-                          def_id, status)
-            if status in (401, 403):
-                raise HTTPException(
-                    401,
-                    "Fulcra rejected the request — your sign-in may have "
-                    "expired. Re-run sign-in from the wizard or paste a "
-                    "fresh token.",
-                ) from exc
-            if 500 <= status < 600:
-                raise HTTPException(
-                    502,
-                    f"Fulcra returned {status}. Try again in a moment.",
-                ) from exc
-            raise HTTPException(
-                502, f"Fulcra returned an unexpected {status}.",
-            ) from exc
-        except (_web.httpx.ConnectError, _web.httpx.ConnectTimeout) as exc:
-            logging.getLogger("fulcra_collect.web").warning(
-                "definition_recent(%s): connect failed: %r", def_id, exc,
-            )
-            raise HTTPException(
-                502,
-                "Couldn't reach Fulcra. Check your internet, then try again.",
-            ) from exc
-        except _web.httpx.TimeoutException as exc:
-            logging.getLogger("fulcra_collect.web").warning(
-                "definition_recent(%s): timed out: %r", def_id, exc,
-            )
-            raise HTTPException(
-                504,
-                "Fulcra took too long to respond. Try again in a moment.",
-            ) from exc
         except Exception as exc:
-            logging.getLogger("fulcra_collect.web").exception(
-                "definition_recent(%s): unexpected failure", def_id,
-            )
-            raise HTTPException(
-                502,
-                f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
-                "Check the daemon log for details.",
+            raise _fulcra_error_to_http(
+                exc, f"definition_recent({def_id})",
             ) from exc
         # Sort by recorded_at descending and return the most recent `limit`
         def _sort_key(rec: dict) -> str:
@@ -254,14 +249,33 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         # implementation coupled HTTP status to error-text content).
         err = result.get("error", "delete failed")
         code = result.get("code", "upstream_error")
-        status_map = {
-            "bad_request": 400,
-            "unauthorized": 401,
-            "not_found": 404,
-            "timeout": 504,
-            "upstream_error": 502,
-        }
-        raise HTTPException(status_map.get(code, 502), err)
+        raise HTTPException(_DAEMON_CODE_TO_HTTP.get(code, 502), err)
+
+    @app.post(
+        "/api/definitions/{def_id}/restore",
+        dependencies=[Depends(require_token)],
+    )
+    def restore_definition_route(def_id: str):
+        """Restore a soft-deleted Fulcra annotation definition — the undo
+        for ``DELETE /api/definitions/{def_id}``.
+
+        HTTP shim over :meth:`Daemon._restore_definition`, mirroring the
+        delete route above: the upfront 401 check keeps the original
+        "set a bearer token first" wording on the HTTP surface, and the
+        daemon method's structured ``code`` returns are translated back
+        into ``HTTPException`` via the shared map.
+
+        Note the success payload's ``rebound: false`` — plugin bindings
+        and quick-record favorites cleared by the delete are NOT
+        re-established; the caller must re-bind in plugin settings.
+        """
+        fulcra_token_or_401()
+        result = daemon._restore_definition(def_id)
+        if result.get("ok"):
+            return result
+        err = result.get("error", "restore failed")
+        code = result.get("code", "upstream_error")
+        raise HTTPException(_DAEMON_CODE_TO_HTTP.get(code, 502), err)
 
     @app.delete("/api/plugin/{plugin_id}/definition", dependencies=[Depends(require_token)])
     def clear_definition(plugin_id: str):
