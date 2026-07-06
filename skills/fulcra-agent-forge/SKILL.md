@@ -18,6 +18,21 @@ GitHub PR URL, the forge is the ground truth — this skill mirrors it onto the 
 - **Auto-verdict**: when the PR merges, a `verdicts/forge.md` approval is written (reviewer `forge`) —
   the review tally then folds it like any reviewer.
 
+## Where to start — the re-entrancy probes
+
+The forge is **stateless** — `forge mirror` is a full idempotent pass, so there is no mid-journey
+resume; the probes are a preflight confirming you *can* mirror. Enter at the **first probe that
+fails** (per `docs/skill-quality-pattern.md`); both probes are non-mutating (the mirror pass itself
+is the only write, and it's idempotent):
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT mirror against a broken engine |
+| GitHub reachable? | `gh auth status` | exits 0 (an authenticated `gh` is installed) | authenticate the GitHub CLI: `gh auth login` — without it `forge mirror` is a clean no-op (exit 0) and no evidence is written, so review status stays stale |
+
+Both probes clean → run one mirror pass to fold current PR state into review evidence (see
+[Usage](#usage)); re-run on your heartbeat alongside `reconcile`.
+
 ## Usage
 ```bash
 uv tool run coord-engine forge mirror <team>   # one pass over all PR-backed reviews

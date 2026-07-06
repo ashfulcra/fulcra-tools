@@ -65,6 +65,21 @@ and moves the task's ack/response shards with it. Once per day, capped per pass.
 restore <team> <slug>` brings one back; `coord-engine search <team> <q> --archived` searches the cold
 archive. Off by default.
 
+## Where to start — the re-entrancy probes
+
+Before reconciling or querying, probe whether the engine is usable and whether the aggregate this skill
+owns is already fresh. Enter at the **first probe that fails** (per the repo's skill-quality pattern,
+`docs/skill-quality-pattern.md`); reconcile is the healer — a full rebuild from ground truth, orphan-proof
+and degraded-safe — so re-running it never corrupts state and re-entry is always safe:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first — a `✗` line names the broken leg (launcher not on PATH, or File Store unreachable → `fulcra-api auth login`); do NOT reconcile against a broken engine |
+| Aggregate present + fresh? | `uv tool run coord-engine status <team>` | output does NOT contain `(no aggregate for team/` (the CLI's missing-aggregate hint, printed only when no aggregate has been built) | **Reconcile** — run `uv tool run coord-engine reconcile <team>` (see [Usage](#usage)) to scan the task docs and build/heal the aggregate, then re-probe |
+
+Both probes pass → the engine is healthy and the aggregate exists, so `status`/`board`/`needs-me`/`search`
+read the fresh view; reconcile again on your cadence (or heartbeat) to keep it healed as tasks change.
+
 ## Usage
 This skill drives the shared **`coord-engine`** tool — invoked the same way this ecosystem already
 invokes `fulcra-api` (`uv tool run …`), so the skill itself stays pure prose + references (no bundled

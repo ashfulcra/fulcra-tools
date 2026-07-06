@@ -14,6 +14,20 @@ kills: an agent hits a wall, quietly parks the work, and the operator never find
 forgotten. Instead: **asks are first-class bus state**, an orchestrator nags on them by age, and the
 answer is a single deterministic write that puts the work back in motion.
 
+## Where to start — the re-entrancy probes
+
+Before surfacing or answering asks, probe whether the engine is usable and whether any asks are
+waiting. Enter at the **first probe that fails** (per the repo's skill-quality pattern,
+`docs/skill-quality-pattern.md`); both probes are pure reads, and the answer leg is a single
+idempotent write, so re-entry never corrupts state:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT surface asks against a broken engine |
+| Any asks waiting on the operator? | `uv tool run coord-engine asks <team> [--human <id>]` | the header line reads `asks — 0 waiting on <id> (oldest first)` — nothing to surface (NON-mutating read) | **The orchestrator's duty** — a non-zero count means asks are rotting; surface the oldest to the operator and relay the answer per party 2 below |
+
+Both probes clean → the engine is healthy and no ask is waiting; keep polling on your heartbeat.
+
 ## The three parties
 
 ### 1. Any agent — raising an ask (when you're stuck on the operator)
