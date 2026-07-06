@@ -186,8 +186,18 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
     monkeypatch.setattr(
         "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache", _boom)
 
-    with pytest.raises(RuntimeError, match="I/O-stalled"):
+    with pytest.raises(RuntimeError, match="TV app is most likely open"):
         APPLE_TV_PLUGIN.run(_make_ctx({}))
+
+
+def test_snapshot_timeout_is_fast_fail():
+    """The snapshot deadline must stay short. This cache is ~1-2MB (a healthy
+    clonefile is sub-second); a copy that runs seconds means the TV app is
+    open and blocking reads, so we must retry next interval rather than pin a
+    worker for two minutes. Guards against a copy-paste back to podcasts' 120s
+    (justified there by a 347MB library, not here)."""
+    from fulcra_media.importers import apple_tv
+    assert apple_tv.SNAPSHOT_TIMEOUT_SECONDS <= 30
 
 
 # ---------------------------------------------------------------------------

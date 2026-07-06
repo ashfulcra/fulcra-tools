@@ -47,8 +47,9 @@ def _run_apple_tv(ctx: RunContext) -> None:
         events = apple_tv_importer.parse_cache(cache_dir)
     except apple_tv_importer.SnapshotError as exc:
         raise RuntimeError(
-            f"apple-tv: cache snapshot failed — the cache file is likely "
-            f"I/O-stalled. Try again later. Details: {exc}"
+            f"apple-tv: cache snapshot failed — the TV app is most likely open "
+            f"(its group container is unreadable while it runs). The next "
+            f"scheduled run will retry once it is closed. Details: {exc}"
         ) from exc
 
     import_events(
