@@ -212,6 +212,38 @@ def test_doctor_all_ok_exits_zero(collect_home: Path, monkeypatch):
     assert result.exit_code == 0
 
 
+def test_doctor_api_health_respects_api_base_override(collect_home: Path,
+                                                      monkeypatch):
+    """P3 #18: the doctor's API-health probe must hit
+    fulcra_common.DEFAULT_BASE_URL (which honors FULCRA_API_BASE), not a
+    hardcoded prod URL."""
+    monkeypatch.setattr("fulcra_common.DEFAULT_BASE_URL",
+                        "https://fulcra.test")
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    monkeypatch.setattr("subprocess.run",
+                        lambda cmd, **kw: _dispatch_probe_ok(cmd))
+    monkeypatch.setattr("fulcra_collect.control.send_request",
+                        lambda *a, **k: _daemon_reply_ok())
+    (collect_home / "web-token").write_text("tok\n")
+    monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
+                        lambda k: "fake-bearer-tok")
+
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    import sys
+    fake_httpx = MagicMock()
+    fake_httpx.get.return_value = fake_resp
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    runner = CliRunner()
+    runner.invoke(cli, ["doctor"])
+
+    assert fake_httpx.get.called, "API-health probe never fired"
+    (url,), _kwargs = fake_httpx.get.call_args
+    assert url == "https://fulcra.test/user/v1alpha1/annotation"
+
+
 # ---------------------------------------------------------------------------
 # (e) data-updates adoption rows: file group, version floor (feature probe —
 #     there is no `fulcra --version`), and data liveness.

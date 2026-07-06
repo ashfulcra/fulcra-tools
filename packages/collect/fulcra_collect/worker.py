@@ -177,8 +177,18 @@ def run_plugin(plugin: Plugin, *, out: TextIO) -> str:
     ctx = RunContext(
         plugin_id=plugin.id,
         config=cfg.plugin_settings.get(plugin.id, {}),
+        # Route each credential to the keychain scope the plugin declared —
+        # user_level creds live in the account-scoped store (get_user_secret),
+        # everything else in the plugin-scoped one. This mirrors the daemon's
+        # _credential_status / _set_credential / _delete_credential routing;
+        # reading only the plugin scope here made any required user_level
+        # credential falsely "missing" every run (P3 #14).
         credentials={
-            c.key: credentials.get_secret(plugin.id, c.key)
+            c.key: (
+                credentials.get_user_secret(c.key)
+                if getattr(c, "user_level", False)
+                else credentials.get_secret(plugin.id, c.key)
+            )
             for c in plugin.required_credentials
         },
         state=state.load(plugin.id),

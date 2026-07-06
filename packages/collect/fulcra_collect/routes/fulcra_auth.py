@@ -46,12 +46,17 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         if not token:
             raise HTTPException(400, "token is empty")
         # Validate against Fulcra before storing so typos are caught at
-        # the door, not on first plugin run.
+        # the door, not on first plugin run. Late import so tests can
+        # monkeypatch fulcra_common.DEFAULT_BASE_URL; the shared constant
+        # honors the FULCRA_API_BASE env override like every other caller
+        # (fulcra_common.client, web._RetryingClient) — this site used to
+        # hardcode prod (P3 #18).
+        from fulcra_common import DEFAULT_BASE_URL
         _log = logging.getLogger("fulcra_collect.web")
         try:
             with _web.httpx.Client(timeout=10.0) as client:
                 r = client.get(
-                    "https://api.fulcradynamics.com/user/v1alpha1/annotation",
+                    f"{DEFAULT_BASE_URL}/user/v1alpha1/annotation",
                     headers={"Authorization": f"Bearer {token}"},
                 )
             if r.status_code == 401 or r.status_code == 403:
@@ -176,11 +181,13 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         # Belt-and-braces: validate against the Fulcra API before storing,
         # same as the paste-token path. Catches the (rare) case where the
         # CLI's stored token is for the wrong tenant or has been revoked
-        # server-side.
+        # server-side. Same DEFAULT_BASE_URL routing as the paste-token
+        # path above (P3 #18).
+        from fulcra_common import DEFAULT_BASE_URL
         try:
             with _web.httpx.Client(timeout=10.0) as client:
                 r = client.get(
-                    "https://api.fulcradynamics.com/user/v1alpha1/annotation",
+                    f"{DEFAULT_BASE_URL}/user/v1alpha1/annotation",
                     headers={"Authorization": f"Bearer {token}"},
                 )
             if r.status_code in (401, 403):

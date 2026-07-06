@@ -445,8 +445,13 @@ def doctor() -> None:
         try:
             import httpx
 
+            # Same base URL every other Fulcra caller uses — honors the
+            # FULCRA_API_BASE env override instead of hardcoding prod
+            # (P3 #18). Late import so tests can monkeypatch it.
+            from fulcra_common import DEFAULT_BASE_URL
+
             resp = httpx.get(
-                "https://api.fulcradynamics.com/user/v1alpha1/annotation",
+                f"{DEFAULT_BASE_URL}/user/v1alpha1/annotation",
                 headers={"Authorization": f"Bearer {tok}"},
                 timeout=10,
             )

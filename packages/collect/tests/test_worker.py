@@ -190,6 +190,69 @@ def test_worker_fails_fast_when_a_required_credential_is_missing(collect_home: P
     assert "api-key" in events[-1]["error"]
 
 
+def test_worker_reads_user_level_credentials_from_user_store(
+        collect_home: Path, monkeypatch):
+    """P3 #14: a Credential declared ``user_level=True`` lives in the
+    account-scoped keychain store (``get_user_secret``), not the
+    plugin-scoped one — the daemon's set/status/delete paths already
+    route by that flag. The worker built ctx.credentials from the
+    plugin-scoped store only, so the first plugin declaring a required
+    user-level credential would falsely fail "missing required
+    credential" every run."""
+    from fulcra_collect.plugin import Credential
+
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret",
+        lambda key: "user-scoped-tok" if key == "bearer-token" else None,
+    )
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_secret",
+        lambda plugin_id, key: "plugin-scoped-val" if key == "api-key" else None,
+    )
+
+    seen: list[dict] = []
+    plugin = Plugin(
+        id="mixed-creds", name="Mixed Creds", kind="manual",
+        collect_mode="historical",
+        run=lambda ctx: seen.append(dict(ctx.credentials)),
+        required_credentials=(
+            Credential(key="bearer-token", label="T", help="h",
+                       user_level=True),
+            Credential(key="api-key", label="K", help="h"),
+        ),
+    )
+    events = _run_capturing(plugin, collect_home)
+    assert events[-1]["outcome"] == "done", events[-1]
+    assert seen == [{"bearer-token": "user-scoped-tok",
+                     "api-key": "plugin-scoped-val"}]
+
+
+def test_worker_missing_user_level_credential_still_fails_fast(
+        collect_home: Path, monkeypatch):
+    """Companion to the routing test above: an ABSENT user-level
+    credential still produces the fail-fast missing-credential error."""
+    from fulcra_collect.plugin import Credential
+
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret", lambda key: None)
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_secret", lambda plugin_id, key: None)
+
+    ran: list = []
+    plugin = Plugin(
+        id="needs-user-cred", name="Needs User Cred", kind="manual",
+        collect_mode="historical", run=lambda ctx: ran.append(True),
+        required_credentials=(
+            Credential(key="bearer-token", label="T", help="h",
+                       user_level=True),
+        ),
+    )
+    events = _run_capturing(plugin, collect_home)
+    assert ran == []
+    assert events[-1]["outcome"] == "error"
+    assert "bearer-token" in events[-1]["error"]
+
+
 # ---------------------------------------------------------------------------
 # R5: worker supplies _fulcra_client_factory in RunContext
 # ---------------------------------------------------------------------------

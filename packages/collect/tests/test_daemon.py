@@ -555,9 +555,9 @@ def test_quick_record_list_returns_empty_when_unauthenticated(collect_home, monk
 
 
 def test_quick_record_list_happy_path(collect_home, monkeypatch):
-    """quick_record_list returns ALL non-deleted defs (Sprint B widened
-    this from Moment-only); excludes soft-deleted; caps at 40; sorted with
-    moments first, then durations, then anything else."""
+    """quick_record_list returns all non-deleted moment/duration defs
+    (Sprint B widened this from Moment-only); excludes soft-deleted;
+    caps at 40; sorted with moments first, then durations."""
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
     defs = [
@@ -593,9 +593,14 @@ def test_quick_record_list_happy_path(collect_home, monkeypatch):
     assert moment_ids == ["m-4", "m-3", "m-2", "m-1", "m-0"]
 
 
-def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatch):
-    """Sprint B: a mixed payload with moment + duration + other types
-    must all come back so the menubar can render them in grouped sections.
+def test_quick_record_list_filters_unsupported_annotation_types(collect_home, monkeypatch):
+    """P3 #15: quick-record only offers annotation types its write path
+    can actually record. ``_record_annotation`` writes MomentEvent /
+    DurationEvent with just a comment — any other annotation_type
+    (scale, numeric, read, ...) recorded through it would produce a
+    VALUE-LESS record. Those defs must not appear in the popover list.
+    (This inverts the former ``returns_all_annotation_types`` test,
+    which pinned the Sprint-B all-types behavior.)
     """
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
@@ -607,6 +612,8 @@ def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatc
          "deleted_at": None, "created_at": "2026-05-15T00:00:00Z"},
         {"id": "w-1", "name": "Book", "annotation_type": "read",
          "deleted_at": None, "created_at": "2026-05-10T00:00:00Z"},
+        {"id": "s-1", "name": "Mood", "annotation_type": "scale",
+         "deleted_at": None, "created_at": "2026-05-05T00:00:00Z"},
     ]
     fake_client = FakeHttpxClient(get_data=defs)
     install_fake_httpx(monkeypatch, fake_client)
@@ -616,7 +623,9 @@ def test_quick_record_list_returns_all_annotation_types(collect_home, monkeypatc
 
     assert reply["ok"] is True
     returned_types = {d["annotation_type"] for d in reply["definitions"]}
-    assert returned_types == {"moment", "duration", "read"}
+    assert returned_types == {"moment", "duration"}
+    returned_ids = {d["id"] for d in reply["definitions"]}
+    assert returned_ids == {"m-1", "d-1"}
 
 
 def test_quick_record_list_caches_result(collect_home, monkeypatch):

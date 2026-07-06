@@ -127,40 +127,69 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         """Return the last N annotations from a Fulcra definition for
         preview in the definition-picker UI.
 
-        Uses the DurationAnnotation data type by default; the response
-        contains raw event records from the Fulcra API. limit must be 1-20.
+        The def's ``annotation_type`` (from the definitions listing)
+        selects which event data type to query — a moment def never pays
+        a DurationAnnotation fetch. If the def isn't in the listing (or
+        its type doesn't map), fall back to trying Duration then Moment.
+
+        Each fetch pushes the work server-side: ``sort=desc`` plus a
+        ``filter=source:...`` for this definition (both documented on
+        GET /data/v1alpha1/event/{data_type}), over a short window that
+        widens 7d → 30d → 365d and stops at the first hit — instead of
+        the old "fetch a full year of ALL events, filter client-side"
+        per preview click. The response contains raw event records from
+        the Fulcra API. limit must be 1-20.
         """
         if limit < 1 or limit > 20:
             raise HTTPException(400, "limit must be 1-20")
         fulcra_token = fulcra_token_or_401()
+        _TYPE_TO_DATA_TYPE = {
+            "moment": "MomentAnnotation",
+            "duration": "DurationAnnotation",
+        }
+        def_source = f"com.fulcradynamics.annotation.{def_id}"
         try:
             from datetime import datetime, timezone, timedelta
             now = datetime.now(timezone.utc)
-            # Look back 1 year as a practical window for "recent" entries.
-            start = now - timedelta(days=365)
             with fulcra_http_client(fulcra_token) as client:
-                # Try DurationAnnotation first, fall back to MomentAnnotation
-                # if the definition has no duration events.
+                # Learn the def's annotation_type from the (cheap) defs
+                # listing so we query only the matching event data type.
+                data_types = ("DurationAnnotation", "MomentAnnotation")
+                r = client.get("/user/v1alpha1/annotation")
+                r.raise_for_status()
+                for d in r.json():
+                    if d.get("id") == def_id:
+                        mapped = _TYPE_TO_DATA_TYPE.get(d.get("annotation_type"))
+                        if mapped:
+                            data_types = (mapped,)
+                        break
                 entries: list[dict] = []
-                for data_type in ("DurationAnnotation", "MomentAnnotation"):
-                    r = client.get(
-                        f"/data/v1alpha1/event/{data_type}",
-                        params={
-                            "start_time": start.isoformat().replace("+00:00", "Z"),
-                            "end_time": now.isoformat().replace("+00:00", "Z"),
-                        },
-                    )
-                    r.raise_for_status()
-                    body = r.json()
-                    records = body if isinstance(body, list) else body.get("data", []) or []
-                    # Filter to only events belonging to this definition
-                    def_source = f"com.fulcradynamics.annotation.{def_id}"
-                    matched = [
-                        rec for rec in records
-                        if def_source in ((rec.get("metadata") or {}).get("source") or [])
-                        or rec.get("source_id") == def_source
-                    ]
-                    entries.extend(matched)
+                for data_type in data_types:
+                    for days in (7, 30, 365):
+                        start = now - timedelta(days=days)
+                        r = client.get(
+                            f"/data/v1alpha1/event/{data_type}",
+                            params={
+                                "start_time": start.isoformat().replace("+00:00", "Z"),
+                                "end_time": now.isoformat().replace("+00:00", "Z"),
+                                "sort": "desc",
+                                "filter": [f"source:{def_source}"],
+                            },
+                        )
+                        r.raise_for_status()
+                        body = r.json()
+                        records = body if isinstance(body, list) else body.get("data", []) or []
+                        # Belt-and-braces: the server already filtered by
+                        # source, but keep the original client-side match
+                        # so a permissive upstream can't change results.
+                        matched = [
+                            rec for rec in records
+                            if def_source in ((rec.get("metadata") or {}).get("source") or [])
+                            or rec.get("source_id") == def_source
+                        ]
+                        if matched:
+                            entries = matched
+                            break
                     if entries:
                         break
         except HTTPException:

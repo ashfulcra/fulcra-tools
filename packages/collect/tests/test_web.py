@@ -810,6 +810,24 @@ def test_fulcra_auth_token_rejects_401_from_fulcra(collect_home, _in_memory_keyr
     assert _creds.get_user_secret("bearer-token") is None
 
 
+def test_fulcra_auth_token_validation_respects_api_base_override(
+        collect_home, _in_memory_keyring, mocker, monkeypatch):
+    """P3 #18: the paste-token validation must hit the same base URL every
+    other Fulcra caller uses (fulcra_common.DEFAULT_BASE_URL, which honors
+    the FULCRA_API_BASE env override) — not a hardcoded prod URL."""
+    monkeypatch.setattr(
+        "fulcra_common.DEFAULT_BASE_URL", "https://fulcra.test")
+    mock_client = _mock_httpx_success(mocker)
+    mocker.patch("httpx.Client", return_value=mock_client)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/fulcra/auth/token", json={"token": "abc"})
+    assert r.status_code == 200
+    (url,), _kwargs = mock_client.get.call_args
+    assert url == "https://fulcra.test/user/v1alpha1/annotation"
+
+
 def test_fulcra_auth_token_rejects_network_failure(collect_home, _in_memory_keyring, mocker):
     """If Fulcra is unreachable, the token is NOT stored."""
     import httpx
@@ -1136,6 +1154,177 @@ def test_definition_recent_returns_entries(collect_home, _in_memory_keyring, mon
     # Sorted newest-first by end_time
     end_times = [e["metadata"]["recorded_at"]["end_time"] for e in entries]
     assert end_times[0] > end_times[1]
+
+
+class _RecentRoutingClient:
+    """Fake httpx client for the definition_recent tests that routes by
+    path: the definitions listing gets ``defs``, event fetches get a
+    response from ``event_responses`` (a callable taking (data_type,
+    params) → list of records). Records every request in ``requests``."""
+
+    def __init__(self, *, defs, event_responses):
+        self._defs = defs
+        self._event_responses = event_responses
+        self.requests: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def get(self, path, **kw):
+        self.requests.append({"path": path, **kw})
+
+        class _Resp:
+            status_code = 200
+            def __init__(self, data): self._data = data
+            def raise_for_status(self): pass
+            def json(self): return self._data
+
+        if path == "/user/v1alpha1/annotation":
+            return _Resp(self._defs)
+        assert path.startswith("/data/v1alpha1/event/"), path
+        data_type = path.rsplit("/", 1)[-1]
+        return _Resp(self._event_responses(data_type, kw.get("params") or {}))
+
+
+def _install_recent_client(monkeypatch, fake_client):
+    class _Factory:
+        def __new__(cls, **kw):
+            return fake_client
+    monkeypatch.setattr(
+        "fulcra_collect.web.httpx", type("httpx", (), {"Client": _Factory})(),
+    )
+
+
+def test_definition_recent_moment_def_skips_duration_fetch(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """P2 #9: the def's annotation_type is known from the definitions
+    listing — a moment def must query ONLY MomentAnnotation events (the
+    old code always paid a full DurationAnnotation fetch first)."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    def_id = "def-moment"
+    def_source = f"com.fulcradynamics.annotation.{def_id}"
+    defs = [{"id": def_id, "name": "Coffee", "annotation_type": "moment",
+             "deleted_at": None}]
+    records = [{"metadata": {"source": [def_source],
+                             "recorded_at": "2026-07-01T10:00:00Z"}}]
+    fake = _RecentRoutingClient(
+        defs=defs, event_responses=lambda dt, params: records)
+    _install_recent_client(monkeypatch, fake)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get(f"/api/definitions/{def_id}/recent?limit=5")
+    assert r.status_code == 200
+    # Response shape unchanged: {"entries": [...]}.
+    entries = r.json()["entries"]
+    assert len(entries) == 1
+    # No DurationAnnotation fetch happened.
+    event_paths = [q["path"] for q in fake.requests
+                   if q["path"].startswith("/data/")]
+    assert event_paths == ["/data/v1alpha1/event/MomentAnnotation"]
+
+
+def test_definition_recent_uses_sort_and_source_filter(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """P2 #9: event fetches must push the work server-side — sort=desc
+    plus a source: filter for the definition (see the event endpoint's
+    `sort` / `filter` params in the OpenAPI spec)."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    def_id = "def-filter"
+    def_source = f"com.fulcradynamics.annotation.{def_id}"
+    defs = [{"id": def_id, "name": "Movie", "annotation_type": "duration",
+             "deleted_at": None}]
+    records = [{"metadata": {"source": [def_source],
+                             "recorded_at": {"start_time": "2026-07-01T10:00:00Z",
+                                             "end_time": "2026-07-01T11:00:00Z"}}}]
+    fake = _RecentRoutingClient(
+        defs=defs, event_responses=lambda dt, params: records)
+    _install_recent_client(monkeypatch, fake)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get(f"/api/definitions/{def_id}/recent?limit=5")
+    assert r.status_code == 200
+    event_reqs = [q for q in fake.requests if q["path"].startswith("/data/")]
+    assert len(event_reqs) == 1
+    params = event_reqs[0]["params"]
+    assert params["sort"] == "desc"
+    assert params["filter"] == [f"source:{def_source}"]
+
+
+def test_definition_recent_widens_window_progressively(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """P2 #9: start with a short window and widen 7d → 30d → 365d,
+    stopping at the first window with a hit — instead of always
+    fetching a full year of events."""
+    from datetime import datetime, timezone
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    def_id = "def-widen"
+    def_source = f"com.fulcradynamics.annotation.{def_id}"
+    defs = [{"id": def_id, "name": "Coffee", "annotation_type": "moment",
+             "deleted_at": None}]
+    records = [{"metadata": {"source": [def_source],
+                             "recorded_at": "2026-06-10T10:00:00Z"}}]
+
+    def _window_days(params) -> int:
+        start = datetime.fromisoformat(params["start_time"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(params["end_time"].replace("Z", "+00:00"))
+        return round((end - start).total_seconds() / 86400)
+
+    def _events(data_type, params):
+        # Empty inside 7 days; hit at the 30-day window.
+        return records if _window_days(params) > 7 else []
+
+    fake = _RecentRoutingClient(defs=defs, event_responses=_events)
+    _install_recent_client(monkeypatch, fake)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get(f"/api/definitions/{def_id}/recent?limit=5")
+    assert r.status_code == 200
+    assert len(r.json()["entries"]) == 1
+    event_reqs = [q for q in fake.requests if q["path"].startswith("/data/")]
+    windows = [_window_days(q["params"]) for q in event_reqs]
+    # 7d (empty) → 30d (hit) → STOP; the 365d fetch never fires.
+    assert windows == [7, 30]
+
+
+def test_definition_recent_unknown_type_falls_back_to_both(
+        collect_home, _in_memory_keyring, monkeypatch):
+    """A def missing from the listing (or with an unmapped annotation_type)
+    keeps the old duration-then-moment fallback so the preview still works."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    def_id = "def-unknown"
+    def_source = f"com.fulcradynamics.annotation.{def_id}"
+    records = [{"metadata": {"source": [def_source],
+                             "recorded_at": "2026-07-01T10:00:00Z"}}]
+
+    def _events(data_type, params):
+        # No duration events; the moment fetch has the hit.
+        return records if data_type == "MomentAnnotation" else []
+
+    fake = _RecentRoutingClient(defs=[], event_responses=_events)
+    _install_recent_client(monkeypatch, fake)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.get(f"/api/definitions/{def_id}/recent?limit=5")
+    assert r.status_code == 200
+    assert len(r.json()["entries"]) == 1
+    data_types = {q["path"].rsplit("/", 1)[-1] for q in fake.requests
+                  if q["path"].startswith("/data/")}
+    assert data_types == {"DurationAnnotation", "MomentAnnotation"}
 
 
 def test_definition_recent_handles_null_metadata(collect_home, _in_memory_keyring, monkeypatch):
