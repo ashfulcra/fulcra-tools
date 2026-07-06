@@ -58,7 +58,7 @@ brings it up on login:
 ```bash
 uv tool install --force --editable packages/collect
 fulcra-collect install         # writes ~/Library/LaunchAgents/com.fulcra.collect.plist
-launchctl load ~/Library/LaunchAgents/com.fulcra.collect.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fulcra.collect.plist
 ```
 
 On Linux, `install` writes a `~/.config/systemd/user/fulcra-collect.service`
