@@ -217,26 +217,16 @@ def _find_fulcra_cli() -> str | None:
     to know the daemon just can't find the CLI binary.
 
     Returns the absolute path to the CLI if found, None if not.
-    """
-    found = shutil.which("fulcra")
-    if found:
-        return found
 
-    # Well-known locations the launchd-default PATH misses. Order
-    # matters: ~/.local/bin first (uv tool install), then
-    # /opt/homebrew/bin (Apple Silicon brew), then /usr/local/bin
-    # (Intel brew + general). All paths are static; we don't try to
-    # introspect $HOME for portability across machines that might
-    # have unusual home-dir layouts.
-    candidates = [
-        os.path.expanduser("~/.local/bin/fulcra"),
-        "/opt/homebrew/bin/fulcra",
-        "/usr/local/bin/fulcra",
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    Now a thin delegate to ``fulcra_common.client.find_fulcra_cli`` — the
+    resolver moved there (2026-07-06) so worker-side clients created via
+    ``BaseFulcraClient.get_token`` survive launchd too, instead of only the
+    refresh path. The shared resolver additionally checks the venv-sibling
+    location first (a venv-local install wins).
+    """
+    from fulcra_common.client import find_fulcra_cli
+
+    return find_fulcra_cli()
 
 
 def refresh_fulcra_access_token() -> str | None:

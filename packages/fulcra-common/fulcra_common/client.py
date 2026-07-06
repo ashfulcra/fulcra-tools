@@ -9,6 +9,7 @@ calls. That shared core lives here. Each package subclasses
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -24,6 +25,44 @@ if TYPE_CHECKING:
     from fulcra_api.core import FulcraAPI
 
 DEFAULT_BASE_URL = os.environ.get("FULCRA_API_BASE", "https://api.fulcradynamics.com")
+
+
+def find_fulcra_cli() -> str | None:
+    """Resolve the `fulcra` CLI binary, launchd-proof.
+
+    A launchd/systemd-managed process inherits a minimal PATH
+    (`/usr/bin:/bin:/usr/sbin:/sbin`) that misses every common install
+    location for a user-installed Python CLI, so bare
+    ``shutil.which("fulcra")`` fails exactly where the daemon runs (live
+    failure 2026-06-10: every worker-side ingest died with "fulcra CLI not
+    found" until the binary was hand-symlinked into the daemon venv).
+
+    Resolution order:
+      1. next to the running interpreter (a venv-local install wins),
+      2. PATH (terminal-launched processes, manual installs),
+      3. well-known locations the launchd PATH misses — ``~/.local/bin``
+         (uv tool install), ``/opt/homebrew/bin`` (Apple Silicon brew),
+         ``/usr/local/bin`` (Intel brew + general).
+
+    This mirrors (and supersedes) collect's ``credentials._find_fulcra_cli``,
+    which only did steps 2–3; it lives here so every fulcra-tools package
+    that shells out to the CLI shares one resolver. Returns the absolute
+    path, or None when the CLI is nowhere.
+    """
+    sibling = Path(sys.executable).parent / "fulcra"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    found = shutil.which("fulcra")
+    if found:
+        return found
+    for candidate in (
+        os.path.expanduser("~/.local/bin/fulcra"),
+        "/opt/homebrew/bin/fulcra",
+        "/usr/local/bin/fulcra",
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 @dataclass
@@ -68,11 +107,11 @@ class BaseFulcraClient:
         env = os.environ.get("FULCRA_ACCESS_TOKEN")
         if env:
             return env
-        # A launchd/systemd-managed process inherits a minimal PATH that
-        # excludes the venv bin dir, so look for `fulcra` next to the
-        # running interpreter before falling back to PATH.
-        sibling = Path(sys.executable).parent / "fulcra"
-        fulcra_cmd = str(sibling) if sibling.exists() else "fulcra"
+        fulcra_cmd = find_fulcra_cli()
+        if fulcra_cmd is None:
+            raise RuntimeError(
+                "fulcra CLI not found; install it or set FULCRA_ACCESS_TOKEN."
+            )
         try:
             result = subprocess.run(
                 [fulcra_cmd, "auth", "print-access-token"],
