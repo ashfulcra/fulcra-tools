@@ -390,3 +390,41 @@ def test_fulcra_definition_adapter_create_definition_lets_spec_override_defaults
     )
     assert posted[0]["description"] == "What the user paid attention to."
     assert posted[0]["tags"] == ["tag-a", "tag-b"]
+
+
+def test_set_credential_writes_to_declared_scope(
+        collect_home: Path, monkeypatch):
+    """The write-back must route by the credential's declared scope like the
+    read side: rotating a user_level credential must hit the USER store, not
+    the plugin store (else the read side keeps serving the stale value)."""
+    from fulcra_collect.plugin import Credential
+
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_user_secret", lambda key: "u-val")
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.get_secret", lambda pid, key: "p-val")
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.set_user_secret",
+        lambda k, v: writes.append(("user", k, v)))
+    monkeypatch.setattr(
+        "fulcra_collect.credentials.set_secret",
+        lambda pid, k, v: writes.append(("plugin", pid, k, v)))
+
+    def _rotate(ctx):
+        ctx.set_credential("shared-tok", "new-user-val")
+        ctx.set_credential("api-key", "new-plugin-val")
+
+    plugin = Plugin(
+        id="scopetest", name="Scope Test", kind="manual",
+        collect_mode="historical", run=_rotate,
+        required_credentials=(
+            Credential(key="shared-tok", label="s", help="h",
+                       user_level=True),
+            Credential(key="api-key", label="a", help="h"),
+        ),
+    )
+    events = _run_capturing(plugin, collect_home)
+    assert events[-1]["outcome"] == "done", events[-1]
+    assert ("user", "shared-tok", "new-user-val") in writes
+    assert ("plugin", "scopetest", "api-key", "new-plugin-val") in writes
