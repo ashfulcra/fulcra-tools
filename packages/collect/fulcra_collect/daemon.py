@@ -317,6 +317,8 @@ class Daemon:
             )
         if cmd == "delete_definition":
             return self._delete_definition(request.get("def_id", ""))
+        if cmd == "restore_definition":
+            return self._restore_definition(request.get("def_id", ""))
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
     def _status(self) -> dict:
@@ -1042,6 +1044,129 @@ class Daemon:
                 def_id,
             )
         return {"ok": True, "cleared_plugins": cleared}
+
+    def _restore_definition(self, def_id: str) -> dict:
+        """Restore (un-soft-delete) an annotation definition via Fulcra's
+        ``cancel_deletion`` endpoint — the undo for :meth:`_delete_definition`.
+
+        Mirrors ``_delete_definition``'s structure (same auth check, same
+        refresh-aware HTTP wrapper, same structured error returns keyed by
+        ``code``) so the HTTP route's error translation is shared. Shared
+        by the HTTP route (``routes/definitions.py:restore_definition_route``)
+        and the UDS command branch in :meth:`handle_request`.
+
+        Deliberately does NOT re-establish local state that the delete
+        cleaned up:
+
+        - plugin ``definition_id`` bindings cleared by the delete are NOT
+          re-bound (we can't know which plugins *should* point at the def
+          again — a plugin may have re-resolved a fresh def since);
+        - quick-record favorites pruned by the delete are NOT re-pinned.
+
+        The success payload carries ``rebound: False`` plus a human-readable
+        ``note`` so callers/UI surface the caveat. The quick-record cache IS
+        busted so the restored def shows up in the next list call.
+
+        Args:
+            def_id: the annotation definition UUID to restore.
+
+        Returns:
+            ``{"ok": True, "rebound": False, "note": ...}`` on success.
+            ``{"ok": False, "code": ..., "error": ...}`` on any failure mode.
+        """
+        from . import credentials as _creds
+        # Late import — tests monkeypatch ``fulcra_collect.web.httpx``; see
+        # the equivalent comment in _delete_definition.
+        from . import web as _web
+
+        _log = logging.getLogger("fulcra_collect.daemon")
+        if not def_id:
+            return {"ok": False, "code": "bad_request", "error": "def_id is required"}
+
+        fulcra_token = _creds.get_user_secret("bearer-token")
+        if not fulcra_token:
+            return {"ok": False, "code": "unauthorized", "error": "not signed in to Fulcra"}
+
+        _log.info("restore_definition(%s): requesting cancel_deletion", def_id)
+        try:
+            with _web._RetryingClient(
+                fulcra_token, user_agent="fulcra-collect/daemon",
+            ) as client:
+                r = client.post(f"/user/v1alpha1/annotation/{def_id}/cancel_deletion")
+                if r.status_code == 404:
+                    _log.warning("restore_definition(%s): Fulcra returned 404", def_id)
+                    return {
+                        "ok": False,
+                        "code": "not_found",
+                        "error": "Definition not found — check the id, or it may have been permanently removed.",
+                    }
+                # Any 2xx counts as restored (the endpoint returns the
+                # annotation body on 200; tolerate a bodyless 204 too).
+                r.raise_for_status()
+        except _web.httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            _log.warning("restore_definition(%s): Fulcra returned %s", def_id, status)
+            if status in (401, 403):
+                return {
+                    "ok": False,
+                    "code": "unauthorized",
+                    "error": (
+                        "Fulcra rejected the request — your sign-in may have expired. "
+                        "Re-run sign-in from the wizard or paste a fresh token."
+                    ),
+                }
+            if 500 <= status < 600:
+                return {
+                    "ok": False,
+                    "code": "upstream_error",
+                    "error": f"Fulcra returned {status}. Try again in a moment.",
+                }
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": f"Fulcra returned an unexpected {status}.",
+            }
+        except (_web.httpx.ConnectError, _web.httpx.ConnectTimeout) as exc:
+            _log.warning("restore_definition(%s): connect failed: %r", def_id, exc)
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": "Couldn't reach Fulcra. Check your internet, then try again.",
+            }
+        except _web.httpx.TimeoutException as exc:
+            _log.warning("restore_definition(%s): timed out: %r", def_id, exc)
+            return {
+                "ok": False,
+                "code": "timeout",
+                "error": "Fulcra took too long to respond. Try again in a moment.",
+            }
+        except Exception as exc:
+            _log.exception("restore_definition(%s): unexpected failure", def_id)
+            return {
+                "ok": False,
+                "code": "upstream_error",
+                "error": (
+                    f"Fulcra request failed unexpectedly ({type(exc).__name__}). "
+                    "Check the daemon log for details."
+                ),
+            }
+
+        # Bust the in-memory quick-record cache so the next list call sees
+        # the restored def instead of a stale tombstone-filtered snapshot.
+        self._quick_record_cache = None
+        _log.info(
+            "restore_definition(%s): restored on Fulcra; plugin bindings and "
+            "favorites intentionally not re-established",
+            def_id,
+        )
+        return {
+            "ok": True,
+            "rebound": False,
+            "note": (
+                "plugin bindings and favorites are not restored — "
+                "re-bind in plugin settings"
+            ),
+        }
 
     def _run(self, plugin_id: str) -> dict:
         if plugin_id not in self.registry.plugins:

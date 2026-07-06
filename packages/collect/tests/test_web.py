@@ -1444,6 +1444,172 @@ def test_delete_definition_leaves_other_plugins_state_alone(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/definitions/{def_id}/restore — undo for the soft-delete above.
+# Fulcra's cancel_deletion endpoint un-tombstones the definition; plugin
+# bindings and quick-record favorites cleared by the delete are NOT
+# re-established (the response carries that caveat).
+# ---------------------------------------------------------------------------
+
+def _patch_fulcra_restore(monkeypatch, *, status_code: int, body: dict | None = None):
+    """Patch fulcra_collect.web.httpx so POST returns the given status.
+
+    Mirrors _patch_fulcra_delete so the restore route under test doesn't
+    reach the real Fulcra API.
+    """
+    class _FakeResponse:
+        def __init__(self, code):
+            self.status_code = code
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import httpx as _h
+                req = _h.Request("POST", "http://test")
+                raise _h.HTTPStatusError(
+                    f"{self.status_code}",
+                    request=req,
+                    response=_h.Response(self.status_code, request=req),
+                )
+        def json(self):
+            return body if body is not None else {}
+
+    class _FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, path, **kw):  # noqa: ARG002
+            return _FakeResponse(status_code)
+
+    monkeypatch.setattr(
+        "fulcra_collect.web.httpx",
+        type("httpx", (), {"Client": _FakeClient})(),
+    )
+
+
+def test_restore_definition_requires_fulcra_auth(collect_home, _in_memory_keyring):
+    """Without a stored Fulcra bearer-token the route returns 401."""
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/definitions/def-x/restore")
+    assert r.status_code == 401
+
+
+def test_restore_definition_happy_path_does_not_rebind(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """A 2xx from Fulcra returns ok — and explicitly does NOT re-bind
+    plugin state or favorites that the earlier delete cleared."""
+    import fulcra_collect.credentials as _creds_mod
+    from fulcra_collect.plugin import Plugin
+    from fulcra_collect import state as _state_mod
+
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_restore(
+        monkeypatch, status_code=200,
+        body={"id": "def-restored", "deleted_at": None},
+    )
+
+    # Plugin that WAS bound to this def before it was deleted — the
+    # delete cleared the binding; restore must not silently re-add it.
+    plugin = Plugin(id="was-bound", name="WasBound", kind="manual",
+                    collect_mode="historical",
+                    run=lambda c: None)
+    st = _state_mod.load("was-bound")
+    st.definition_id = None
+    _state_mod.save(st)
+
+    daemon = _build_test_daemon(collect_home, plugins={"was-bound": plugin})
+    client = _client(daemon)
+    r = client.post("/api/definitions/def-restored/restore")
+    assert r.status_code == 200, r.text
+    resp_body = r.json()
+    assert resp_body["ok"] is True
+    assert resp_body["rebound"] is False
+    assert "note" in resp_body  # tells the caller bindings weren't restored
+
+    # Binding stays cleared — restore is Fulcra-side only.
+    assert _state_mod.load("was-bound").definition_id is None
+
+
+def test_restore_definition_accepts_bodyless_204(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """Fulcra may acknowledge cancel_deletion with a bodyless 204."""
+    import fulcra_collect.credentials as _creds_mod
+
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_restore(monkeypatch, status_code=204)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/definitions/def-restored/restore")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+
+def test_restore_definition_returns_404_when_unknown(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """Fulcra responding 404 (unknown id) must surface as 404."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_restore(monkeypatch, status_code=404)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/definitions/def-nope/restore")
+    assert r.status_code == 404
+    # Distinguish the daemon's not-found from FastAPI's route-miss 404
+    # ({"detail": "Not Found"}) so this test can't pass before the route
+    # exists.
+    assert "definition" in r.json()["detail"].lower()
+
+
+def test_definitions_route_include_deleted_shows_tombstones(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """?include_deleted=true returns soft-deleted defs (with deleted_at set)
+    so the UI can offer a restore affordance; the default still hides them."""
+    import fulcra_collect.credentials as _creds_mod
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+
+    fake_defs = [
+        {"id": "def-live", "name": "Watched", "annotation_type": "duration",
+         "deleted_at": None},
+        {"id": "def-gone", "name": "Old", "annotation_type": "duration",
+         "deleted_at": "2026-01-01T00:00:00Z"},
+    ]
+
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return fake_defs
+
+    class FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **kw): return FakeResponse()
+
+    monkeypatch.setattr("fulcra_collect.web.httpx", type("httpx", (), {"Client": FakeClient})())
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+
+    # Default — tombstoned def hidden (unchanged contract).
+    r = client.get("/api/definitions")
+    assert r.status_code == 200
+    ids = {d["id"] for d in r.json()["definitions"]}
+    assert ids == {"def-live"}
+
+    # include_deleted=true — tombstone comes back, deleted_at intact.
+    r2 = client.get("/api/definitions?include_deleted=true")
+    assert r2.status_code == 200
+    defs2 = r2.json()["definitions"]
+    assert {d["id"] for d in defs2} == {"def-live", "def-gone"}
+    gone = next(d for d in defs2 if d["id"] == "def-gone")
+    assert gone["deleted_at"] == "2026-01-01T00:00:00Z"
+
+
+# ---------------------------------------------------------------------------
 # Phase G — quick-record HTTP routes
 #
 # The fake-httpx seam (install_fake_httpx, with its get_data / post_exc
@@ -1948,4 +2114,3 @@ def test_delete_definition_prunes_from_favorites(
 
     # def-pinned was removed from favorites; def-other is untouched.
     assert _favs.load() == {"def-other"}
-
