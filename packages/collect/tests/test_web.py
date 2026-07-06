@@ -1529,6 +1529,22 @@ def test_restore_definition_happy_path_does_not_rebind(
     assert _state_mod.load("was-bound").definition_id is None
 
 
+def test_restore_definition_accepts_bodyless_204(
+    collect_home, _in_memory_keyring, monkeypatch,
+):
+    """Fulcra may acknowledge cancel_deletion with a bodyless 204."""
+    import fulcra_collect.credentials as _creds_mod
+
+    _creds_mod.set_user_secret("bearer-token", "valid-token")
+    _patch_fulcra_restore(monkeypatch, status_code=204)
+
+    daemon = _build_test_daemon(collect_home)
+    client = _client(daemon)
+    r = client.post("/api/definitions/def-restored/restore")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+
 def test_restore_definition_returns_404_when_unknown(
     collect_home, _in_memory_keyring, monkeypatch,
 ):
@@ -2098,4 +2114,3 @@ def test_delete_definition_prunes_from_favorites(
 
     # def-pinned was removed from favorites; def-other is untouched.
     assert _favs.load() == {"def-other"}
-

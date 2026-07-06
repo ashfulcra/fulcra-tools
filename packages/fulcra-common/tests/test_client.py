@@ -1,7 +1,6 @@
 """Tests for the shared BaseFulcraClient."""
 from __future__ import annotations
 
-import json
 import subprocess
 import urllib.error
 from datetime import datetime, timezone
@@ -69,12 +68,17 @@ def test_get_token_shells_out_when_env_unset(monkeypatch):
 
 
 def test_get_token_falls_back_to_path_when_sibling_missing(monkeypatch, tmp_path):
-    """When no `fulcra` sits next to sys.executable, fall back to a bare
-    PATH lookup so the CLI is still found."""
+    """When no `fulcra` sits next to sys.executable, fall back to a PATH
+    lookup so the CLI is still found. The resolver now execs the RESOLVED
+    absolute path (not the bare name), so exec-time PATH no longer matters."""
+    import fulcra_common.client as client_mod
+
     monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
     fake_python = tmp_path / "python"
     fake_python.write_text("")
     monkeypatch.setattr("fulcra_common.client.sys.executable", str(fake_python))
+    monkeypatch.setattr(client_mod.shutil, "which",
+                        lambda name: "/resolved/from/path/fulcra")
     captured: dict = {}
 
     def fake_run(cmd, **kwargs):
@@ -83,7 +87,7 @@ def test_get_token_falls_back_to_path_when_sibling_missing(monkeypatch, tmp_path
 
     monkeypatch.setattr("fulcra_common.client.subprocess.run", fake_run)
     assert BaseFulcraClient().get_token() == "path-tok"
-    assert captured["cmd"][0] == "fulcra"  # bare PATH lookup
+    assert captured["cmd"][0] == "/resolved/from/path/fulcra"
 
 
 def test_get_token_raises_runtimeerror_on_cli_failure(monkeypatch):
@@ -437,3 +441,42 @@ def test_restore_definition_propagates_other_errors(monkeypatch):
 
     with pytest.raises(urllib.error.HTTPError):
         client.restore_definition("def-err")
+
+
+def test_get_token_finds_cli_in_well_known_locations(monkeypatch, tmp_path):
+    """Under launchd the daemon gets PATH=/usr/bin:/bin:/usr/sbin:/sbin and
+    the CLI lives at ~/.local/bin/fulcra (uv tool install) — neither the venv
+    sibling nor bare PATH resolution finds it, and every worker-side client
+    call died with 'fulcra CLI not found' (live failure 2026-06-10; the
+    collect daemon needed a manual venv symlink). get_token must fall back to
+    the same well-known locations collect's credentials._find_fulcra_cli uses."""
+    import fulcra_common.client as client_mod
+
+    monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
+    # No venv sibling, nothing on PATH.
+    monkeypatch.setattr(client_mod.sys, "executable", str(tmp_path / "venv" / "python"))
+    monkeypatch.setattr(client_mod.shutil, "which", lambda name: None)
+    # A fake HOME with the CLI at ~/.local/bin/fulcra.
+    home = tmp_path / "home"
+    cli = home / ".local" / "bin" / "fulcra"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/bin/sh\necho well-known-tok\n")
+    cli.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+
+    assert BaseFulcraClient().get_token() == "well-known-tok"
+
+
+def test_get_token_error_when_cli_nowhere(monkeypatch, tmp_path):
+    """When the CLI is genuinely absent everywhere, the error must stay the
+    clear actionable RuntimeError (not a FileNotFoundError traceback)."""
+    import pytest
+    import fulcra_common.client as client_mod
+
+    monkeypatch.delenv("FULCRA_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(client_mod.sys, "executable", str(tmp_path / "venv" / "python"))
+    monkeypatch.setattr(client_mod.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+
+    with pytest.raises(RuntimeError, match="fulcra CLI not found"):
+        BaseFulcraClient().get_token()
