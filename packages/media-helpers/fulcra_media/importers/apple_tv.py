@@ -126,10 +126,10 @@ class CacheEntry:
 
 def _snapshot_db(cache_dir: Path) -> Path:
     """Clone Cache.db (+ -wal/-shm sidecars) into a fresh tempdir and return
-    the snapshot dir. Mirrors apple_podcasts.parse_db: `cp -c` performs an
-    APFS clonefile(2) — no bulk read, so it can't stall behind the live
-    writer — with a killable-subprocess timeout for the non-APFS fallback
-    copy path. Caller must shutil.rmtree the returned dir."""
+    the snapshot dir. Uses `cp -c` for the normal APFS clonefile(2) path,
+    with a killable subprocess timeout so an active TV app cannot pin the
+    worker indefinitely when macOS serializes reads of its group container.
+    Caller must shutil.rmtree the returned dir."""
     src = cache_dir / CACHE_DB_NAME
     snap_dir = Path(tempfile.mkdtemp(prefix="apple-tv-cache-snap-"))
     try:
