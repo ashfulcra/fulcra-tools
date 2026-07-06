@@ -63,7 +63,11 @@ work on the bus via [`fulcra-coord`](packages/fulcra-coord/SKILL.md): check
 your inbox, announce presence, post directives instead of working blind.
 [`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) maps the whole platform surface
 (auth, files, annotations, queries, MCP) by agent capability tier — CLI, raw
-HTTP, or MCP-only.
+HTTP, or MCP-only. If you only need to **read** Fulcra data, the official MCP
+server is the fastest path (`uvx fulcra-context-mcp@latest`, or hosted at
+mcp.fulcradynamics.com) — it is read-only; **Collect is the write/ingest
+side**, and MCP tokens are not API tokens (see the primitives doc's MCP
+section for both caveats).
 
 ## Review conventions
 

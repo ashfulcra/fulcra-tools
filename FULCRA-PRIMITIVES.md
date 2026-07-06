@@ -95,7 +95,7 @@ runs on, so it is battle-tested at load.
   `GET /user/v1alpha1/schema/annotation`.
 
 **Records** (instances on the timeline) are **write-via-ingest only** — still
-true as of CLI 0.1.34; there is no `fulcra` record-write/delete command and no
+true as of CLI 0.1.35; there is no `fulcra` record-write/delete command and no
 record-write/delete lib method, only definition + tag management:
 
 - `POST /ingest/v1/record` with `DataRecordV1`:
@@ -163,14 +163,22 @@ no provenance. Don't park agent/preference data here; use files + annotations
   `openid/profile/name/email`). **MCP tokens are NOT API tokens** — different
   issuer/audience; they will not authenticate against
   `api.fulcradynamics.com`. Don't try.
-- Published tool list: not yet documented (docs page is a stub). Evidence in
-  docs suggests data-read tools (metrics, calendar, workouts, location).
+- Tool list (verified from source, `fulcradynamics/fulcra-context-mcp`,
+  2026-07-06): 11 READ-ONLY tools — get_annotations, get_workouts,
+  annotations_catalog, get_metrics_catalog, get_metric_time_series,
+  get_metric_samples, get_sleep_cycles, get_location_at_time,
+  get_location_time_series, debug_token_info, get_user_info. Run locally
+  with `uvx fulcra-context-mcp@latest` (stdio) or use the hosted endpoint.
+  Server docs: https://fulcradynamics.github.io/developer-docs/mcp-server/
 - **No file or annotation write path via MCP today.** MCP-only agents are
   read-side; write requires tier 1/2 (a gap filed with the platform team).
+  fulcra-collect is the write/ingest side of that split: MCP reads what
+  collect (and the other tier-1/2 writers) put in.
 
 ## Pointers
 
 - Developer docs: https://docs.fulcradynamics.com (API reference + concepts)
+- Developer portal (guides incl. MCP server): https://fulcradynamics.github.io/developer-docs/
 - OpenAPI: https://api.fulcradynamics.com/openapi.json (public, no auth)
 - Python lib/CLI: https://github.com/fulcradynamics/fulcra-api-python
 - Agent skills (incl. fulcra-onboarding): https://github.com/fulcradynamics/agent-skills
