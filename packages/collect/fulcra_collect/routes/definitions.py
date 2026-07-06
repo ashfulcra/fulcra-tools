@@ -1,4 +1,4 @@
-"""Definitions — list, preview recent entries, bind / clear, delete, restore.
+"""Definitions — list, preview recent entries, bind / clear, delete, restore, update.
 
 This module talks to the Fulcra HTTP API via the shared http-client
 factory on the :class:`RouteContext`. The factory pulls ``httpx`` from
@@ -274,6 +274,34 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
         if result.get("ok"):
             return result
         err = result.get("error", "restore failed")
+        code = result.get("code", "upstream_error")
+        raise HTTPException(_DAEMON_CODE_TO_HTTP.get(code, 502), err)
+
+    @app.put(
+        "/api/definitions/{def_id}",
+        dependencies=[Depends(require_token)],
+    )
+    def update_definition_route(def_id: str, body: dict | None = None):
+        """Rename/update a Fulcra annotation definition IN PLACE (P2 #7).
+
+        Body: any of ``{"name": ..., "description": ..., "tags": [...]}``.
+        This is the history-preserving alternative to the force_new+new_name
+        flow above — the definition id never changes, so every event and
+        plugin binding under it stays attached. Empty payloads and attempts
+        to change anything else (``annotation_type``, ``measurement_spec``,
+        ``spec``, unknown keys) are rejected with 400 by the daemon method's
+        validation (``code: bad_request`` → 400 via the shared map).
+
+        HTTP shim over :meth:`Daemon._update_definition`, mirroring the
+        delete/restore routes above: upfront 401 check for the original
+        wording, structured ``code`` returns translated back into
+        ``HTTPException`` via ``_DAEMON_CODE_TO_HTTP``.
+        """
+        fulcra_token_or_401()
+        result = daemon._update_definition(def_id, body or {})
+        if result.get("ok"):
+            return result
+        err = result.get("error", "update failed")
         code = result.get("code", "upstream_error")
         raise HTTPException(_DAEMON_CODE_TO_HTTP.get(code, 502), err)
 
