@@ -66,6 +66,10 @@ def _run_apple_takeout(ctx: RunContext) -> None:
         ctx, events, "apple-tv",
         fulcra_client_cls=FulcraClient,
         state_load=_state_load,
+        # The takeout backfills historical watches a realtime source (Trakt)
+        # may already have at high confidence; low-conf rows defer to those.
+        # Complements the `until` cutoff above. Operator config overrides.
+        default_twin_policy="auto-discard",
     )
 
 

@@ -474,3 +474,116 @@ def test_apple_podcasts_auto_discard_consults_cache(cache_path, monkeypatch):
 
     # The matched low-conf twin was dropped; the unmatched one stays.
     assert captured["imported"] == [keep]
+
+
+# ---------------------------------------------------------------------------
+# Plugin-default twin policy: apple-tv / netflix / apple-takeout ship with
+# default_twin_policy="auto-discard" so low-conf twins of an already-imported
+# high-conf watch (e.g. Trakt) are dropped even without operator config.
+# ---------------------------------------------------------------------------
+
+def test_import_events_default_policy_auto_discard_drops_twin(cache_path):
+    """import_events(default_twin_policy='auto-discard') with NO config
+    override drops a low-conf event whose fingerprint matches a cached
+    high-conf twin — the plugin default alone is enough."""
+    from fulcra_media.plugins import _common
+    twin_cache.record_imported_events(
+        [_evt(fp="tv:dune:s01e01", confidence="high", sid="trakt-1",
+              ts=datetime(2026, 4, 1, tzinfo=timezone.utc))],
+        cache_path)
+    low = _evt(fp="tv:dune:s01e01", confidence="low", sid="appletv-1",
+               ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
+    captured = {}
+    ctx = RunContext(plugin_id="apple-tv", config={}, credentials={},
+                     state=PluginState("apple-tv"),
+                     log=logging.getLogger("t"), _emit=lambda e: None)
+    _common.import_events(
+        ctx, [low], "apple-tv",
+        fulcra_client_cls=_make_fake_client(captured, result=_FakeResult(posted=0)),
+        state_load=lambda p: _bootstrapped_media_state(),
+        default_twin_policy="auto-discard")
+    assert captured["imported"] == []
+
+
+def test_import_events_config_overrides_default_policy(cache_path):
+    """Operator config twin_policy='keep' wins over a plugin default of
+    auto-discard — the low-conf twin is kept."""
+    from fulcra_media.plugins import _common
+    twin_cache.record_imported_events(
+        [_evt(fp="tv:dune:s01e01", confidence="high", sid="trakt-1",
+              ts=datetime(2026, 4, 1, tzinfo=timezone.utc))],
+        cache_path)
+    low = _evt(fp="tv:dune:s01e01", confidence="low", sid="appletv-1",
+               ts=datetime(2026, 5, 16, tzinfo=timezone.utc))
+    captured = {}
+    ctx = RunContext(plugin_id="apple-tv", config={"twin_policy": "keep"},
+                     credentials={}, state=PluginState("apple-tv"),
+                     log=logging.getLogger("t"), _emit=lambda e: None)
+    _common.import_events(
+        ctx, [low], "apple-tv",
+        fulcra_client_cls=_make_fake_client(captured, result=_FakeResult(posted=1)),
+        state_load=lambda p: _bootstrapped_media_state(),
+        default_twin_policy="auto-discard")
+    assert captured["imported"] == [low]
+
+
+def _capture_default_policy(monkeypatch, module_path, func_name):
+    captured = {}
+
+    def spy(*args, **kwargs):
+        captured["policy"] = kwargs.get("default_twin_policy", "keep")
+
+    monkeypatch.setattr(f"{module_path}.{func_name}", spy)
+    return captured
+
+
+def test_apple_tv_plugin_defaults_to_auto_discard(monkeypatch):
+    from fulcra_media.collect_plugins import APPLE_TV_PLUGIN
+    captured = _capture_default_policy(
+        monkeypatch, "fulcra_media.plugins.apple_tv", "import_events")
+    monkeypatch.setattr(
+        "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache",
+        lambda cache_dir: [])
+    monkeypatch.setattr("fulcra_media.plugins.apple_tv._state_load",
+                        lambda p: _bootstrapped_media_state())
+    ctx = RunContext(plugin_id="apple-tv", config={}, credentials={},
+                     state=PluginState("apple-tv"),
+                     log=logging.getLogger("t"), _emit=lambda e: None)
+    APPLE_TV_PLUGIN.run(ctx)
+    assert captured["policy"] == "auto-discard"
+
+
+def test_netflix_plugin_defaults_to_auto_discard(monkeypatch):
+    from fulcra_media.collect_plugins import NETFLIX_PLUGIN
+    captured = _capture_default_policy(
+        monkeypatch, "fulcra_media.plugins.netflix", "run_file_import")
+    # netflix.run ensures the Watched definition before importing; stub that
+    # pre-step (it needs a real client factory) so the test isolates the
+    # policy passed to run_file_import.
+    monkeypatch.setattr("fulcra_media.plugins.netflix.ensure_media_def",
+                        lambda *a, **k: None)
+    monkeypatch.setattr("fulcra_media.plugins.netflix._state_load",
+                        lambda p: _bootstrapped_media_state())
+    ctx = RunContext(plugin_id="netflix", config={"path": "/x.csv"},
+                     credentials={}, state=PluginState("netflix"),
+                     log=logging.getLogger("t"), _emit=lambda e: None)
+    NETFLIX_PLUGIN.run(ctx)
+    assert captured["policy"] == "auto-discard"
+
+
+def test_apple_takeout_plugin_defaults_to_auto_discard(monkeypatch):
+    from fulcra_media.collect_plugins import APPLE_TAKEOUT_PLUGIN
+    captured = _capture_default_policy(
+        monkeypatch, "fulcra_media.plugins.apple_takeout", "import_events")
+    monkeypatch.setattr(
+        "fulcra_media.plugins.apple_takeout.apple_takeout_importer.parse_any",
+        lambda resolved, since, until: [])
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout.resolve_path",
+                        lambda ctx, lib: "/x.zip")
+    monkeypatch.setattr("fulcra_media.plugins.apple_takeout._state_load",
+                        lambda p: _bootstrapped_media_state())
+    ctx = RunContext(plugin_id="apple-takeout", config={"path": "/x.zip"},
+                     credentials={}, state=PluginState("apple-takeout"),
+                     log=logging.getLogger("t"), _emit=lambda e: None)
+    APPLE_TAKEOUT_PLUGIN.run(ctx)
+    assert captured["policy"] == "auto-discard"
