@@ -1,0 +1,17 @@
+{
+  "lab": "LabCorp",
+  "report_date": "2026-03-16",
+  "collected_at": "2026-03-15",
+  "observations": [
+    {"marker_raw": "Cholesterol, Total", "value_raw": "185", "unit_raw": "mg/dL", "reference_range_raw": "100-199", "flag_raw": null},
+    {"marker_raw": "LDL Chol Calc (NIH)", "value_raw": "110", "unit_raw": "mg/dL", "reference_range_raw": "0-99", "flag_raw": "H"},
+    {"marker_raw": "HDL Cholesterol", "value_raw": "55", "unit_raw": "mg/dL", "reference_range_raw": ">39", "flag_raw": null},
+    {"marker_raw": "Triglycerides", "value_raw": "130", "unit_raw": "mg/dL", "reference_range_raw": "0-149", "flag_raw": null},
+    {"marker_raw": "Glucose", "value_raw": "92", "unit_raw": "mg/dL", "reference_range_raw": "65-99", "flag_raw": null},
+    {"marker_raw": "TSH", "value_raw": "2.10", "unit_raw": "uIU/mL", "reference_range_raw": "0.450-4.500", "flag_raw": null},
+    {"marker_raw": "Hemoglobin A1c", "value_raw": "5.4", "unit_raw": "%", "reference_range_raw": "4.8-5.6", "flag_raw": null},
+    {"marker_raw": "T4,Free(Direct)", "value_raw": "1.3", "unit_raw": "ng/dL", "reference_range_raw": "0.82-1.77", "flag_raw": null},
+    {"marker_raw": "Ferritin", "value_raw": "95", "unit_raw": "ng/mL", "reference_range_raw": "30-400", "flag_raw": null},
+    {"marker_raw": "Vitamin D, 25-Hydroxy", "value_raw": "42", "unit_raw": "ng/mL", "reference_range_raw": "30-100", "flag_raw": null}
+  ]
+}
