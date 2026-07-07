@@ -192,10 +192,12 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
 
 def test_snapshot_timeout_is_fast_fail():
     """The snapshot deadline must stay short. This cache is ~1-2MB (a healthy
-    clonefile is sub-second); a copy that runs seconds means the TV app is
-    open and blocking reads, so we must retry next interval rather than pin a
-    worker for two minutes. Guards against a copy-paste back to podcasts' 120s
-    (justified there by a 347MB library, not here)."""
+    clonefile is sub-second); a copy that runs seconds means macOS App Group
+    protection is gating the open (a per-app TCC grant is missing and the
+    open(2) blocks until the user answers the prompt), so we must fail fast
+    and retry next interval rather than pin a worker for two minutes. Guards
+    against a copy-paste back to podcasts' 120s (justified there by a 347MB
+    library, not here)."""
     from fulcra_media.importers import apple_tv
     assert apple_tv.SNAPSHOT_TIMEOUT_SECONDS <= 30
 
