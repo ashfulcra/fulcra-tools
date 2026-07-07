@@ -95,15 +95,16 @@ HISTORY_URL_MARKERS = ("RecentlyWatched", "PlayHistory")
 # Snapshot deadline. Unlike apple_podcasts (a 347MB library where a legit copy
 # can genuinely take tens of seconds), this cache is ~1-2MB, so a healthy
 # APFS clonefile completes in well under a second. A copy that runs longer
-# than a few seconds is NOT slow I/O — it means the TV app is currently open
-# and actively holding the group container, which serializes every external
-# read of Cache.db at the VFS layer (verified live 2026-07-06: with the app
-# open, cp -c, plain cp, sqlite .backup, AND an immutable read-only open ALL
-# block indefinitely; with the app closed they return instantly). There is no
-# code-level way in — the background service refreshes the cache while the app
-# is closed, which is exactly when scheduled runs land, so the right behavior
-# is to fail fast and retry next interval rather than block a worker for two
-# minutes on a collision with an active viewing session.
+# than a few seconds is NOT slow I/O — it means macOS App Group protection
+# (Sequoia+) is gating the open: reads of another app's group container by a
+# process without a TCC grant park INSIDE the open(2) syscall until the
+# per-app "wants to access data from other apps" prompt is answered (verified
+# live 2026-07-07 by sampling a hung reader: the stack sits in __open; stat(2)
+# succeeds, every data open blocks — cp, sqlite, raw read alike). The grant is
+# per-client: approving Terminal does not approve the daemon's python. Once
+# the user clicks Allow for the daemon's python binary the grant is durable
+# and opens return instantly. Until then the right behavior is to fail fast
+# with instructions and retry next interval, not pin a worker.
 SNAPSHOT_TIMEOUT_SECONDS = 20
 
 
@@ -153,11 +154,13 @@ def _snapshot_db(cache_dir: Path) -> Path:
                 raise SnapshotError(
                     f"Apple TV cache snapshot timed out after "
                     f"{SNAPSHOT_TIMEOUT_SECONDS}s copying {candidate.name} "
-                    f"({size_mb:.0f}MB). The TV app is most likely open right "
-                    f"now — while it is actively running, macOS serializes "
-                    f"external reads of its group container and every copy "
-                    f"blocks. This run is skipped; the next scheduled run will "
-                    f"pick it up once the app is closed."
+                    f"({size_mb:.0f}MB). macOS App Group protection is "
+                    f"blocking this process from the TV service's container. "
+                    f"Fix: watch for the macOS prompt \"python wants to "
+                    f"access data from other apps\" and click Allow (the "
+                    f"grant is per-app and permanent), or pre-approve under "
+                    f"System Settings > Privacy & Security. This run is "
+                    f"skipped; the next scheduled run retries."
                 ) from exc
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or b"").decode(errors="replace").strip()
