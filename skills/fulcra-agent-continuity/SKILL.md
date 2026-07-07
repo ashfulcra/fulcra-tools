@@ -46,7 +46,7 @@ An agent that beats presence but has no fresh snapshot is flagged `continuity-st
 | Claude Cowork (desktop) | same as Claude Code (same core; same settings.json) | same listener |
 | Claude web (claude.ai) | prose only — run rule 1 when the skill loads; rule 3 before ending | no background pickup; use cloud routines that open a duty-cycle session |
 | Codex | `~/.codex/hooks.json` + app-thread automation (`scripts/codex/install_codex_watch.py`) — the automation prompt embeds rules 1–3 | the same automation ticks the inbox |
-| OpenClaw | managed block in `HEARTBEAT.md`/`BOOT.md` (`scripts/openclaw/install_openclaw.py`) embeds rules 1–3 | HEARTBEAT tick |
+| OpenClaw | managed block in `HEARTBEAT.md`/`BOOT.md` (`scripts/openclaw/install_openclaw.py`) embeds rules 1–2; rule 3 (park) can't be automated from a prose block (no shutdown hook) — follow it as prose | HEARTBEAT tick |
 | Hermes (Daytona sandbox) | fhd provisioner installs the Claude Code adapter inside the sandbox at provision time (standalone hermes-daytona repo) | listener installed at provision time |
 
 ## Where to start — the re-entrancy probes

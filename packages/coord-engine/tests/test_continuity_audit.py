@@ -96,3 +96,28 @@ def test_health_survives_malformed_snapshot_and_still_flags_from_valid_data(caps
     assert any("carol" in ln and "missing" in ln for ln in flagged)
     assert any("dan" in ln and "stale (30.0h)" in ln for ln in flagged)
     assert not any("erin" in ln for ln in flagged)
+
+
+# --- cmd_health wiring (JSON path) -------------------------------------------
+
+def test_health_json_includes_flagged_agent_under_continuity_stale(capsys):
+    t = FakeTransport()
+    _beat(t, "r", "bob", 1)  # fresh presence, no snapshot -> flagged
+    assert cli.main(["health", "r", "--json"], transport=t) in (0, 1)
+    payload = json.loads(capsys.readouterr().out)
+    assert "continuity_stale" in payload
+    agents = [row["agent"] for row in payload["continuity_stale"]]
+    assert agents == ["bob"]
+    row = payload["continuity_stale"][0]
+    # same fields stale_agents returns
+    assert set(row) == {"agent", "presence_age_h", "snapshot_age_h"}
+    assert row["snapshot_age_h"] is None
+
+
+def test_health_json_continuity_stale_empty_when_clean(capsys):
+    t = FakeTransport()
+    _beat(t, "r", "alice", 1)
+    _snap(t, "r", "alice", "t1", 2)  # fresh snapshot -> clean
+    assert cli.main(["health", "r", "--json"], transport=t) in (0, 1)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["continuity_stale"] == []

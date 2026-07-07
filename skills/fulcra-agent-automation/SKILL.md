@@ -104,8 +104,10 @@ already know the watch thread.
 python3 scripts/openclaw/install_openclaw.py <team> <agent> [--workspace DIR] [--uninstall] [--dry-run]
 ```
 Merges a `fulcra-coord2`-fenced block (`<!-- fulcra-coord2:begin … -->` / `<!-- fulcra-coord2:end -->`)
-into the workspace's `HEARTBEAT.md` and `BOOT.md`, embedding contract rules 1–3 for OpenClaw to read at
-boot and on each heartbeat tick. This is the **prose-block layer only** — no hooks-dir machinery. It
+into the workspace's `HEARTBEAT.md` and `BOOT.md`, embedding contract rules 1–2 for OpenClaw to read at
+boot and on each heartbeat tick. Rule 3 (park on shutdown) is **not** embedded — the prose-block layer
+has no shutdown hook to fire it, so it must be followed as prose. This is the **prose-block layer
+only** — no hooks-dir machinery. It
 validates marker balance before any write and **refuses (exit 1) on unbalanced or crossed markers**
 rather than risk destroying user content between an orphan marker and an appended one.
 

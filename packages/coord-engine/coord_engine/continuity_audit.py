@@ -1,9 +1,10 @@
 """Continuity-staleness audit — the harness-independent guarantee.
 
 An agent with fresh presence but no fresh continuity snapshot is working
-without a recoverable trail. This fold flags them; ``cmd_health`` prints the
-flags and the roster's inbox nag closes the loop. Pure function: injected
-rows + clock, no I/O (repo convention: prose for judgment, code for folds).
+without a recoverable trail. This fold flags them; the flag surfaces in
+``coord-engine health`` (both the text output and the ``--json`` payload's
+``continuity_stale`` key). Pure function: injected rows + clock, no I/O
+(repo convention: prose for judgment, code for folds).
 """
 from __future__ import annotations
 from datetime import datetime

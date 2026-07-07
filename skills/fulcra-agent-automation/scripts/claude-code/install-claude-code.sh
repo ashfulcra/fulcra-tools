@@ -43,10 +43,21 @@ for event, (script, matcher) in mapping.items():
     cmd = f"{hooks_dir}/{script}"
     rules = hooks.setdefault(event, [])
     # dedupe: drop any prior entry for THIS exact command, then re-add.
-    # Keys on our exact path only, so legacy entries are never disturbed.
+    # Keys on our exact path only, so legacy/foreign entries are never disturbed.
+    # A rule is dropped ONLY if removing our command is what emptied it; a rule
+    # that never held our command (including one already empty or lacking a
+    # hooks key) is left exactly as found.
+    kept = []
     for r in rules:
-        r["hooks"] = [h for h in r.get("hooks", []) if h.get("command") != cmd]
-    rules[:] = [r for r in rules if r.get("hooks")]
+        orig = r.get("hooks", [])
+        if not any(h.get("command") == cmd for h in orig):
+            kept.append(r)  # foreign — leave untouched
+            continue
+        r["hooks"] = [h for h in orig if h.get("command") != cmd]
+        if r["hooks"]:
+            kept.append(r)  # still has other hooks
+        # else: our removal emptied it — drop
+    rules[:] = kept
     if not uninstall:
         entry = {"hooks": [{"type": "command", "command": cmd}]}
         if matcher is not None:

@@ -956,21 +956,10 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
         pass
     view = health_mod.fold(shards, now=_iso(_now()))
     code = 0 if view["healthy"] else 1
-    if args.json:
-        print(json.dumps(view, indent=2))
-        return code
-    print(f"health — team/{args.team}: {view['fresh']}/{view['total']} host(s) fresh"
-          + ("" if view["healthy"] else "  [NO FRESH RECONCILER]"))
-    if view["total"] == 0:
-        print("  (no health shards at all — nobody has ever reconciled this team)")
-    for h in view["hosts"]:
-        age = "?" if h["age_hours"] is None else f"{h['age_hours']:g}h"
-        flag = "STALE" if h["stale"] else "ok"
-        print(f"  [{flag:5}] {h['host']} — last reconcile {age} ago"
-              f" (v{h.get('engine_version')}, {h.get('tasks')} tasks, {h.get('warnings')} warn)")
     # Tier-1 continuity audit: an agent beating presence but with no fresh
-    # snapshot is working without a recoverable trail. Flag it (does not move
-    # health's exit code — that stays reconciler-driven).
+    # snapshot is working without a recoverable trail. Compute it here so both
+    # the JSON payload and the text output surface it; it does not move health's
+    # exit code — that stays reconciler-driven.
     now_dt = _now()
     pres_rows: list[dict[str, Any]] = []
     snap_rows: list[dict[str, Any]] = []
@@ -983,7 +972,24 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
             sts = continuity._parse_created_at(snap.get("created_at"))
             if sts is not None:
                 snap_rows.append({"agent": r["agent"], "ts": sts})
-    for flagged in continuity_audit.stale_agents(pres_rows, snap_rows, now=now_dt):
+    flagged_agents = continuity_audit.stale_agents(pres_rows, snap_rows, now=now_dt)
+    # Same row fields stale_agents returns: agent/presence_age_h/snapshot_age_h.
+    view["continuity_stale"] = flagged_agents
+    if args.json:
+        print(json.dumps(view, indent=2))
+        return code
+    print(f"health — team/{args.team}: {view['fresh']}/{view['total']} host(s) fresh"
+          + ("" if view["healthy"] else "  [NO FRESH RECONCILER]"))
+    if view["total"] == 0:
+        print("  (no health shards at all — nobody has ever reconciled this team)")
+    for h in view["hosts"]:
+        age = "?" if h["age_hours"] is None else f"{h['age_hours']:g}h"
+        flag = "STALE" if h["stale"] else "ok"
+        print(f"  [{flag:5}] {h['host']} — last reconcile {age} ago"
+              f" (v{h.get('engine_version')}, {h.get('tasks')} tasks, {h.get('warnings')} warn)")
+    # Tier-1 continuity audit (computed above): an agent beating presence but
+    # with no fresh snapshot is working without a recoverable trail.
+    for flagged in flagged_agents:
         y = flagged["snapshot_age_h"]
         snap_desc = "missing" if y is None else f"stale ({y}h)"
         print(f"  continuity-stale: {flagged['agent']}"
