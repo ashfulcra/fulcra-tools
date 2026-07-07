@@ -176,14 +176,20 @@ def apply_twin_policy(
     return [e for e in events if twin_cache._source_id_of(e) not in to_drop]
 
 
-def consult_twin_cache(ctx: RunContext, events: list) -> list:
+def consult_twin_cache(
+    ctx: RunContext, events: list, *, default_twin_policy: str = "keep"
+) -> list:
     """Load the twin cache and apply ctx's configured twin policy to ``events``.
 
-    The single seam scheduled plugins call before importing. With the default
-    ("keep") policy this loads nothing and returns ``events`` unchanged — so it
-    is free and behaviour-preserving until a user opts into "auto-discard".
+    The single seam scheduled plugins call before importing. ``twin_policy`` is
+    resolved from ``ctx.config`` first, then the plugin-supplied
+    ``default_twin_policy`` — so operator config always wins, and a plugin can
+    opt its whole class of imports into "auto-discard" (e.g. apple-tv, netflix,
+    apple-takeout, which routinely re-observe watches a realtime source like
+    Trakt already recorded at high confidence). The global fallback stays
+    "keep" so unmigrated plugins are behaviour-preserving.
     """
-    twin_policy = ctx.config.get("twin_policy", "keep")
+    twin_policy = ctx.config.get("twin_policy", default_twin_policy)
     if twin_policy == "keep":
         # Fast path: no need to touch the cache for the no-op default.
         return events
@@ -294,12 +300,16 @@ def import_events(
     *,
     fulcra_client_cls,
     state_load,
+    default_twin_policy: str = "keep",
 ) -> None:
     """Run the standard ensure_tag + run_import pipeline and report progress."""
     ctx.progress(stage="parsed", count=len(events))
 
-    # Cross-source twin dedup (default "keep" → no-op); see run_scheduled_import.
-    events = consult_twin_cache(ctx, events)
+    # Cross-source twin dedup. ``default_twin_policy`` lets a plugin opt in
+    # (apple-tv/netflix/apple-takeout pass "auto-discard"); operator config
+    # still overrides. Global default stays "keep" → no-op for other plugins.
+    events = consult_twin_cache(ctx, events,
+                                default_twin_policy=default_twin_policy)
 
     media_state = state_load(STATE_PATH)
     client = fulcra_client_cls()
@@ -327,6 +337,7 @@ def run_file_import(
     library_mod,
     fulcra_client_cls,
     state_load,
+    default_twin_policy: str = "keep",
 ) -> None:
     """Resolve path → parse → import. Used by the simple file-based plugins."""
     resolved = resolve_path(ctx, library_mod)
@@ -335,6 +346,7 @@ def run_file_import(
         ctx, events, tag,
         fulcra_client_cls=fulcra_client_cls,
         state_load=state_load,
+        default_twin_policy=default_twin_policy,
     )
 
 

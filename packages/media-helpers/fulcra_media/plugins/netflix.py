@@ -36,6 +36,10 @@ def _run_netflix(ctx: RunContext) -> None:
         library_mod=library,
         fulcra_client_cls=FulcraClient,
         state_load=_state_load,
+        # Netflix titles can also land via Trakt at high confidence; a low-conf
+        # takeout row should defer to those. Operator config `twin_policy`
+        # still overrides.
+        default_twin_policy="auto-discard",
     )
 
 

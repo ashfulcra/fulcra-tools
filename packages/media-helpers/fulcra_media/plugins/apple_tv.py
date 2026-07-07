@@ -57,6 +57,10 @@ def _run_apple_tv(ctx: RunContext) -> None:
         ctx, events, "apple-tv",
         fulcra_client_cls=FulcraClient,
         state_load=_state_load,
+        # Apple TV+ watches also arrive via Trakt at high confidence; the
+        # low-conf history-shelf backfill here should defer to those. Operator
+        # config `twin_policy` still overrides.
+        default_twin_policy="auto-discard",
     )
 
 
