@@ -3,7 +3,9 @@
 # the legacy hook's unbounded board dump is a known context-flooding failure.
 # Degrades silently (exit 0) if coord-engine is not on PATH.
 set +e
-TEAM="__TEAM__"; AGENT="__AGENT__"
+# __TEAM__/__AGENT__ are rendered by install-claude-code.sh as shell-quoted
+# literals (shlex.quote), so a bare assignment here round-trips any id verbatim.
+TEAM=__TEAM__; AGENT=__AGENT__
 export FULCRA_COORD_AGENT="$AGENT"
 command -v coord-engine >/dev/null 2>&1 || exit 0
 BRIEF="$(coord-engine continuity resume "$TEAM" "$AGENT" 2>/dev/null | head -25)"

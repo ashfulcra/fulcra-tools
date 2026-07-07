@@ -16,11 +16,28 @@ SETTINGS="$HOME/.claude/settings.json"
 
 if [ "$UNINSTALL" -eq 0 ]; then
   mkdir -p "$HOOKS_DIR"
-  for s in session-start pre-compact session-end; do
-    sed -e "s/__TEAM__/$TEAM/g" -e "s/__AGENT__/$AGENT/g" \
-      "$SRC_DIR/$s.sh" > "$HOOKS_DIR/$s.sh"
-    chmod +x "$HOOKS_DIR/$s.sh"
-  done
+  # Render the hook templates, substituting the __TEAM__/__AGENT__ tokens as
+  # SHELL-QUOTED literals. coord2 agent ids are NOT plain alphanumerics (engine
+  # ids look like `claude_code/host/repo` or `claude-code:host:repo`); a raw
+  # `sed s/__AGENT__/$AGENT/` would treat '/' as the substitute delimiter
+  # (fatal: `sed: bad flag`) and '&' as the matched-text backreference (exit 0
+  # but a silently WRONG identity baked into the script). python3 str.replace
+  # with shlex.quote round-trips any byte an id can carry (/, &, :, spaces,
+  # quotes) exactly, so the rendered TEAM=/AGENT= assignments are the id verbatim.
+  python3 - "$SRC_DIR" "$HOOKS_DIR" "$TEAM" "$AGENT" <<'EOF'
+import os, shlex, sys
+src_dir, hooks_dir, team, agent = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+subs = {"__TEAM__": shlex.quote(team), "__AGENT__": shlex.quote(agent)}
+for name in ("session-start.sh", "pre-compact.sh", "session-end.sh"):
+    with open(os.path.join(src_dir, name)) as f:
+        text = f.read()
+    for token, value in subs.items():
+        text = text.replace(token, value)
+    dest = os.path.join(hooks_dir, name)
+    with open(dest, "w") as f:
+        f.write(text)
+    os.chmod(dest, 0o755)
+EOF
 fi
 
 python3 - "$SETTINGS" "$HOOKS_DIR" "$UNINSTALL" <<'EOF'
