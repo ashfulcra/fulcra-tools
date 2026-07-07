@@ -315,16 +315,31 @@ class BaseFulcraClient:
         Fulcra's ingest endpoint accepts events with a source_id whose
         def doesn't exist and they're silently invisible in the timeline.
 
-        Network failure → returns True (conservative: assume the def is
-        fine, retry on the next validation window). A flaky API should
-        never trigger spurious re-resolutions.
+        Uses the per-id GET (/user/v1alpha1/annotation/{id}) — O(1)
+        instead of the previous whole-catalog fetch, which grew with the
+        account's definition count for a single-id answer.
+
+        Network failure / auth flake (401) / 5xx → returns True
+        (conservative: assume the def is fine, retry on the next
+        validation window). A flaky API should never trigger spurious
+        re-resolutions. 403/404 → False (not valid for this account).
         """
         try:
-            catalog = self._lib().annotations_catalog()
-            for d in catalog:
-                if d.get("id") == definition_id and not d.get("deleted_at"):
-                    return True
-            return False
+            r = self._client().get(
+                f"/user/v1alpha1/annotation/{definition_id}",
+                headers=self._authed_headers(),
+            )
+            # Live-verified 2026-07-07: soft-deleted defs return 200 WITH
+            # deleted_at set (not 404); an id that isn't this account's —
+            # nonexistent OR another account's, the exact re-auth hazard
+            # this method guards — returns 403. Both mean "not valid for
+            # this account". 401 is an auth flake mid-refresh, and 5xx is
+            # the server's problem: conservative True for those.
+            if r.status_code in (403, 404):
+                return False
+            if r.status_code >= 400:
+                return True
+            return not r.json().get("deleted_at")
         except Exception:
             return True
 

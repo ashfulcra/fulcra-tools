@@ -291,62 +291,78 @@ def test_import_result_is_a_plain_record():
 # definition_exists (A2)
 # ---------------------------------------------------------------------------
 
-def test_definition_exists_true_when_present_and_not_deleted(monkeypatch):
-    """Returns True when the id is in the catalog and has no deleted_at."""
-    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
-    client = BaseFulcraClient()
+def _exists_client(recording_transport, handler):
+    return BaseFulcraClient(transport=recording_transport(handler))
 
-    fake_lib = MagicMock()
-    fake_lib.annotations_catalog.return_value = [
-        {"id": "def-a", "deleted_at": None},
-        {"id": "def-b"},
-    ]
-    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
 
+def test_definition_exists_true_when_live(recording_transport):
+    """Per-id GET returns the def with deleted_at null -> True. Uses
+    GET /user/v1alpha1/annotation/{id}, NOT the whole-catalog fetch —
+    O(1) instead of O(catalog) per validation."""
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/user/v1alpha1/annotation/def-a"
+        return httpx.Response(200, json={"id": "def-a", "deleted_at": None})
+
+    client = _exists_client(recording_transport, handler)
     assert client.definition_exists("def-a") is True
-    fake_lib.annotations_catalog.assert_called_once()
 
 
-def test_definition_exists_false_when_absent(monkeypatch):
-    """Returns False when the id is not in the catalog at all."""
-    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
-    client = BaseFulcraClient()
+def test_definition_exists_false_when_soft_deleted(recording_transport):
+    """Verified live 2026-07-07: a soft-deleted def returns 200 WITH
+    deleted_at set (not 404) — must check the field."""
+    def handler(request):
+        return httpx.Response(200, json={
+            "id": "def-gone", "deleted_at": "2026-01-01T00:00:00Z"})
 
-    fake_lib = MagicMock()
-    fake_lib.annotations_catalog.return_value = [
-        {"id": "def-other"},
-    ]
-    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
-
-    assert client.definition_exists("def-missing") is False
-
-
-def test_definition_exists_false_when_soft_deleted(monkeypatch):
-    """Returns False when the id is present but has a non-None deleted_at."""
-    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
-    client = BaseFulcraClient()
-
-    fake_lib = MagicMock()
-    fake_lib.annotations_catalog.return_value = [
-        {"id": "def-gone", "deleted_at": "2026-01-01T00:00:00Z"},
-    ]
-    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
-
+    client = _exists_client(recording_transport, handler)
     assert client.definition_exists("def-gone") is False
 
 
-def test_definition_exists_true_on_lib_exception(monkeypatch):
-    """Conservative: returns True on any network/lib failure (assume-exists).
+def test_definition_exists_false_on_403_wrong_account(recording_transport):
+    """Verified live 2026-07-07: an id that isn't yours (nonexistent OR
+    another account's — the exact account-switch hazard this method guards)
+    returns 403, not 404. Both mean 'not valid for this account' -> False."""
+    def handler(request):
+        return httpx.Response(403, json={"detail": "forbidden"})
 
-    A flaky API must never trigger spurious re-resolution.
-    """
-    monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "test-tok")
-    client = BaseFulcraClient()
+    client = _exists_client(recording_transport, handler)
+    assert client.definition_exists("def-foreign") is False
 
-    fake_lib = MagicMock()
-    fake_lib.annotations_catalog.side_effect = Exception("network error")
-    monkeypatch.setattr(BaseFulcraClient, "_lib", lambda self: fake_lib)
 
+def test_definition_exists_false_on_404(recording_transport):
+    def handler(request):
+        return httpx.Response(404, json={"detail": "not found"})
+
+    client = _exists_client(recording_transport, handler)
+    assert client.definition_exists("def-missing") is False
+
+
+def test_definition_exists_true_on_auth_flake_401(recording_transport):
+    """401 is an auth hiccup (expired token mid-refresh), not a verdict on
+    the def — conservative True so a flake never triggers re-resolution."""
+    def handler(request):
+        return httpx.Response(401, json={"detail": "unauthorized"})
+
+    client = _exists_client(recording_transport, handler)
+    assert client.definition_exists("def-any") is True
+
+
+def test_definition_exists_true_on_server_error(recording_transport):
+    def handler(request):
+        return httpx.Response(500)
+
+    client = _exists_client(recording_transport, handler)
+    assert client.definition_exists("def-any") is True
+
+
+def test_definition_exists_true_on_network_exception(recording_transport):
+    """Conservative: returns True on any network failure (assume-exists).
+    A flaky API must never trigger spurious re-resolution."""
+    def handler(request):
+        raise httpx.ConnectError("boom")
+
+    client = _exists_client(recording_transport, handler)
     assert client.definition_exists("def-any") is True
 
 
