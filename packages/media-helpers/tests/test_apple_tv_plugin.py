@@ -186,7 +186,7 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
     monkeypatch.setattr(
         "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache", _boom)
 
-    with pytest.raises(RuntimeError, match="TV app is most likely open"):
+    with pytest.raises(RuntimeError, match="App Group protection"):
         APPLE_TV_PLUGIN.run(_make_ctx({}))
 
 
