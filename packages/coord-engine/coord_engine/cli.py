@@ -23,7 +23,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, continuity, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -486,6 +486,30 @@ def cmd_continuity_snapshot(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _agent_snapshots(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+    """All of one agent's latest-per-task continuity snapshots.
+
+    Same transport mechanism ``cmd_continuity_resume`` uses to find an agent's
+    single latest snapshot — here every task's ``latest.json`` is collected so
+    the health audit can fold across agents.
+    """
+    snaps: list[dict[str, Any]] = []
+    try:
+        for e in transport.list_dir(_continuity_prefix(team, agent)):
+            n = (e.get("name") or "").rstrip("/")
+            if not e.get("is_dir") or not n:
+                continue
+            raw = transport.read(_continuity_path(team, agent, n))
+            if raw:
+                try:
+                    snaps.append(json.loads(raw))
+                except Exception:
+                    pass
+    except TransportError:
+        pass
+    return snaps
+
+
 def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
     if args.task:
         raw = transport.read(_continuity_path(args.team, args.agent, tasks.slugify(args.task)))
@@ -494,21 +518,7 @@ def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
         except Exception:
             snap = None
     else:
-        snaps: list[dict[str, Any]] = []
-        try:
-            for e in transport.list_dir(_continuity_prefix(args.team, args.agent)):
-                n = (e.get("name") or "").rstrip("/")
-                if not e.get("is_dir") or not n:
-                    continue
-                raw = transport.read(_continuity_path(args.team, args.agent, n))
-                if raw:
-                    try:
-                        snaps.append(json.loads(raw))
-                    except Exception:
-                        pass
-        except TransportError:
-            pass
-        snap = continuity.latest(snaps)
+        snap = continuity.latest(_agent_snapshots(transport, args.team, args.agent))
     if args.json:
         print(json.dumps(snap, indent=2))
     else:
@@ -946,6 +956,25 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
         pass
     view = health_mod.fold(shards, now=_iso(_now()))
     code = 0 if view["healthy"] else 1
+    # Tier-1 continuity audit: an agent beating presence but with no fresh
+    # snapshot is working without a recoverable trail. Compute it here so both
+    # the JSON payload and the text output surface it; it does not move health's
+    # exit code — that stays reconciler-driven.
+    now_dt = _now()
+    pres_rows: list[dict[str, Any]] = []
+    snap_rows: list[dict[str, Any]] = []
+    for r in presence.roster(_presence_shards(transport, args.team), now=_iso(now_dt)):
+        pts = roles._parse(r.get("last_seen"))
+        if pts is None:
+            continue
+        pres_rows.append({"agent": r["agent"], "ts": pts})
+        for snap in _agent_snapshots(transport, args.team, r["agent"]):
+            sts = continuity._parse_created_at(snap.get("created_at"))
+            if sts is not None:
+                snap_rows.append({"agent": r["agent"], "ts": sts})
+    flagged_agents = continuity_audit.stale_agents(pres_rows, snap_rows, now=now_dt)
+    # Same row fields stale_agents returns: agent/presence_age_h/snapshot_age_h.
+    view["continuity_stale"] = flagged_agents
     if args.json:
         print(json.dumps(view, indent=2))
         return code
@@ -958,6 +987,14 @@ def cmd_health(args: argparse.Namespace, transport: Any) -> int:
         flag = "STALE" if h["stale"] else "ok"
         print(f"  [{flag:5}] {h['host']} — last reconcile {age} ago"
               f" (v{h.get('engine_version')}, {h.get('tasks')} tasks, {h.get('warnings')} warn)")
+    # Tier-1 continuity audit (computed above): an agent beating presence but
+    # with no fresh snapshot is working without a recoverable trail.
+    for flagged in flagged_agents:
+        y = flagged["snapshot_age_h"]
+        snap_desc = "missing" if y is None else f"stale ({y}h)"
+        print(f"  continuity-stale: {flagged['agent']}"
+              f" presence-fresh ({flagged['presence_age_h']}h)"
+              f" but snapshot {snap_desc} — see fulcra-agent-continuity contract")
     # empty fleet reads UNHEALTHY: "nobody ever reconciled" is the primary
     # cold-start failure a monitor probe exists to catch (review finding).
     return code

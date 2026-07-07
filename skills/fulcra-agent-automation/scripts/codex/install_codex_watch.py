@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""coord2-first Codex watch installer (fulcra-agent-automation).
+
+Standalone (Python 3.10+ stdlib only). Ports the hardened legacy Codex
+adapter mechanics onto the coord2 engine, in three layers:
+
+  * ``hooks.json`` merge — SessionStart (matcher ``startup|resume|clear|compact``)
+    + PreCompact, same entry shape as Claude Code settings.json. Deliberately
+    NO Stop hook: Codex Stop fires every turn, and parking the active task on
+    every turn would thrash it between active/waiting.
+  * managed scripts — materialized under ``<codex>/fulcra-coord2-hooks/``.
+    SessionStart emits a bounded resume brief + inbox as additionalContext;
+    PreCompact backgrounds ``coord-engine continuity park``. Both degrade
+    silently (exit 0) when coord-engine is not on PATH.
+  * app-thread automation — writes the coord2-first ``COORD2_WATCH_PROMPT``
+    to ``<codex>/automations/coord2-watch-<agent-slug>/automation.toml``.
+    This is the durable coord2-first replacement for the legacy watch prompt.
+    The target thread id is taken from ``--thread-id``, else preserved from
+    our existing managed automation; with neither, the automation write is
+    deferred and the SessionStart hook seeds it (once, only while absent) from
+    the first app session's id — so an already-armed watch thread can never be
+    stolen by a later (possibly headless) session.
+
+DELIBERATELY OMITTED (security scope ruling): the legacy ``wake.json``
+host-wake layer. It spawns headless ``codex exec`` sessions with
+``--dangerously-bypass-approvals-and-sandbox`` — a consent-gated,
+security-sensitive surface not shipped in this pass. The existing coord2
+listener already covers wake.
+
+COEXISTENCE: the legacy adapter is live on real hosts — managed scripts dir
+``fulcra-coord-hooks`` and automation ids ``fulcra-coord-task-listener-*``.
+This installer keys everything on the DISTINCT marker ``fulcra-coord2-hooks``
+and automation id prefix ``coord2-watch-``; neither marker is a substring of
+the other's, so this installer's dedupe/uninstall can never match — let alone
+modify — a legacy-managed hooks entry, and it only ever unlinks its own
+automation directory. Those legacy names appear in this file only in this
+comment.
+
+CLI:
+  python3 install_codex_watch.py <team> <agent>
+      [--codex-dir DIR] [--thread-id ID] [--uninstall] [--dry-run]
+
+``--dry-run`` prints the would-be hooks.json + automation body + prompt and
+writes nothing.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+MANAGED_DIRNAME = "fulcra-coord2-hooks"
+AUTOMATION_ID_PREFIX = "coord2-watch-"
+WATCH_INTERVAL_MIN = 5
+# Marker carried once in hooks.json (as a trailing shell comment on the
+# SessionStart command — inert under sh -c) and as the automation prompt's
+# first line, so re-runs converge and audits can grep one string.
+MANAGED_MARKER = "coord2 watch (managed by fulcra-agent-automation/scripts/codex)"
+
+# event name -> (script filename, matcher or None). Deliberately NO Stop.
+_EVENTS: "dict[str, tuple[str, str | None]]" = {
+    "SessionStart": ("session-start.sh", "startup|resume|clear|compact"),
+    "PreCompact": ("pre-compact.sh", None),
+}
+
+COORD2_WATCH_PROMPT = """\
+[coord2 watch — managed by fulcra-agent-automation/scripts/codex; do not hand-edit]
+You are {agent} on coord2 team {team}. Each tick, in order:
+1. coord-engine continuity resume {team} {agent}   # resume before new work
+2. coord-engine inbox {team} --agent {agent}       # and your role inboxes, e.g. codex-reviewer
+3. coord-engine needs-me {team} --agent {agent}
+Act on anything new (reviews -> verdict via the review handshake). After completing
+any work item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
+Before this session ends: coord-engine continuity park {team} --agent {agent} --objective "..."
+If nothing is actionable reply WATCH_OK.
+"""
+
+SESSION_START_SH = """\
+#!/bin/bash
+# coord2 SessionStart hook (Codex) — bounded resume brief + inbox context.
+# Managed by fulcra-agent-automation/scripts/codex/install_codex_watch.py.
+# Output is bounded: an unbounded board dump is a known context-flooding
+# failure. Degrades silently (exit 0) when coord-engine is not on PATH.
+set +e
+TEAM="__TEAM__"; AGENT="__AGENT__"
+HOOKS_DIR="__HOOKS_DIR__"; CODEX_DIR="__CODEX_DIR__"
+export FULCRA_COORD_AGENT="$AGENT"
+INPUT="$(cat 2>/dev/null)"
+SESSION_ID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
+# Seed the coord2 watch automation with this app thread's id — only while the
+# managed automation does not exist yet, so a later session (e.g. a headless
+# exec run) can never steal an already-armed watch thread. Backgrounded +
+# silenced so it never blocks or slows session start.
+if [ -n "$SESSION_ID" ] && [ ! -f "__AUTOMATION_TOML__" ]; then
+  python3 "$HOOKS_DIR/install_codex_watch.py" "$TEAM" "$AGENT" \\
+    --codex-dir "$CODEX_DIR" --thread-id "$SESSION_ID" >/dev/null 2>&1 &
+fi
+command -v coord-engine >/dev/null 2>&1 || exit 0
+BRIEF="$(coord-engine continuity resume "$TEAM" "$AGENT" 2>/dev/null | head -25)"
+INBOX="$(coord-engine inbox "$TEAM" --agent "$AGENT" 2>/dev/null | head -8)"
+[ -z "$BRIEF$INBOX" ] && exit 0
+python3 - "$BRIEF" "$INBOX" <<'PYEOF'
+import json, sys
+brief, inbox = sys.argv[1], sys.argv[2]
+ctx = "coord2 resume brief:\\n" + brief + "\\n\\ncoord2 inbox:\\n" + inbox
+print(json.dumps({"hookSpecificOutput": {
+    "hookEventName": "SessionStart", "additionalContext": ctx[:4000]}}))
+PYEOF
+exit 0
+"""
+
+PRE_COMPACT_SH = """\
+#!/bin/bash
+# coord2 park-on-context-loss hook (Codex PreCompact).
+# Managed by fulcra-agent-automation/scripts/codex/install_codex_watch.py.
+# Backgrounded, never blocks; degrades silently if coord-engine is absent.
+set +e
+TEAM="__TEAM__"; AGENT="__AGENT__"
+export FULCRA_COORD_AGENT="$AGENT"
+command -v coord-engine >/dev/null 2>&1 || exit 0
+coord-engine continuity park "$TEAM" --agent "$AGENT" \\
+  --objective "context-loss park ($(date -u +%Y-%m-%dT%H:%MZ))" >/dev/null 2>&1 &
+exit 0
+"""
+
+
+def _agent_slug(agent: str) -> str:
+    """Filesystem-safe slug: collapse non-[a-z0-9-_.] runs to '-', lowercased."""
+    slug = re.sub(r"[^a-z0-9\-_.]+", "-", agent.lower()).strip("-")
+    return slug or "agent"
+
+
+def _is_managed(cmd: str) -> bool:
+    return MANAGED_DIRNAME in cmd
+
+
+def _atomic_write(path: Path, text: str, mode: "int | None" = None) -> None:
+    """Write-then-rename so a concurrently-executing script keeps its inode."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    if mode is not None:
+        tmp.chmod(mode)
+    os.replace(tmp, path)
+
+
+def _load_hooks_config(path: Path, dry_run: bool) -> dict:
+    """Parse hooks.json; a corrupt file is backed up (.bak) before replacement
+    so the user's content is never silently destroyed (legacy hardening)."""
+    config: Any = {}
+    if path.is_file():
+        try:
+            config = json.loads(path.read_text())
+        except ValueError:
+            if not dry_run:
+                try:
+                    path.with_suffix(path.suffix + ".bak").write_bytes(path.read_bytes())
+                except OSError:
+                    pass
+            config = {}
+    return config if isinstance(config, dict) else {}
+
+
+def _strip_managed(hooks: dict) -> None:
+    """Remove only OUR entries (marker-keyed), preserving foreign entries —
+    including non-dict oddities — within shared events."""
+    for event in _EVENTS:
+        entries = hooks.get(event, [])
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                kept.append(entry)
+                continue
+            entry_hooks = [h for h in entry.get("hooks", [])
+                           if not (isinstance(h, dict) and _is_managed(h.get("command", "")))]
+            if entry_hooks:
+                kept.append({**entry, "hooks": entry_hooks})
+            elif not entry.get("hooks"):
+                kept.append(entry)
+        if kept:
+            hooks[event] = kept
+        elif event in hooks:
+            del hooks[event]
+
+
+def _automation_path(codex_dir: Path, agent: str) -> Path:
+    aid = AUTOMATION_ID_PREFIX + _agent_slug(agent)
+    return codex_dir / "automations" / aid / "automation.toml"
+
+
+def _toml_str(s: str) -> str:
+    return json.dumps(s)
+
+
+def _parse_simple_toml_fields(text: str) -> dict:
+    out: dict = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = [p.strip() for p in line.split("=", 1)]
+        try:
+            out[key] = json.loads(val)
+        except Exception:
+            try:
+                out[key] = int(val)
+            except ValueError:
+                out[key] = val.strip('"')
+    return out
+
+
+def install_automation(team: str, agent: str, codex_dir: Path, *,
+                       thread_id: "str | None", uninstall: bool,
+                       dry_run: bool) -> dict:
+    """Install/update our coord2 watch automation. Preserves created_at and
+    (absent an explicit --thread-id) the existing target thread on re-runs;
+    with no thread id at all, defers (SessionStart hook seeds it later)."""
+    path = _automation_path(codex_dir, agent)
+    aid = path.parent.name
+    plan: dict = {"id": aid, "path": str(path), "deferred": False}
+    if uninstall:
+        if not dry_run and path.exists():
+            try:
+                path.unlink()
+                path.parent.rmdir()
+            except OSError:
+                pass
+        plan["removed"] = True
+        return plan
+
+    existing: dict = {}
+    if path.is_file():
+        try:
+            existing = _parse_simple_toml_fields(path.read_text())
+        except OSError:
+            existing = {}
+    thread = thread_id or existing.get("target_thread_id") or ""
+    if not thread:
+        plan["deferred"] = True
+        plan["note"] = ("no thread id yet: pass --thread-id, or the SessionStart "
+                        "hook seeds it on the next Codex app session start")
+        return plan
+
+    now_ms = int(time.time() * 1000)
+    created = existing.get("created_at")
+    created_at = created if isinstance(created, int) else now_ms
+    prompt = COORD2_WATCH_PROMPT.format(team=team, agent=agent)
+    body = (
+        "version = 1\n"
+        f"id = {_toml_str(aid)}\n"
+        'kind = "heartbeat"\n'
+        f"name = {_toml_str('coord2 watch (' + agent + ')')}\n"
+        f"prompt = {_toml_str(prompt)}\n"
+        'status = "ACTIVE"\n'
+        f'rrule = "FREQ=MINUTELY;INTERVAL={WATCH_INTERVAL_MIN}"\n'
+        f"target_thread_id = {_toml_str(str(thread))}\n"
+        f"created_at = {created_at}\n"
+        f"updated_at = {now_ms}\n"
+    )
+    plan["target_thread_id"] = str(thread)
+    plan["would_write"] = body
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, body)
+    return plan
+
+
+def install(team: str, agent: str, *, codex_dir: Path,
+            thread_id: "str | None" = None, uninstall: bool = False,
+            dry_run: bool = False) -> dict:
+    hooks_path = codex_dir / "hooks.json"
+    hooks_dir = codex_dir / MANAGED_DIRNAME
+    plan: dict = {"hooks_file": str(hooks_path), "hooks_dir": str(hooks_dir),
+                  "uninstall": uninstall, "dry_run": dry_run,
+                  "events": [], "scripts": []}
+
+    config = _load_hooks_config(hooks_path, dry_run)
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    config["hooks"] = hooks
+    _strip_managed(hooks)
+
+    if not uninstall:
+        for event, (fname, matcher) in _EVENTS.items():
+            cmd = str(hooks_dir / fname)
+            if event == "SessionStart":
+                cmd = f"{cmd}  # {MANAGED_MARKER}"
+            entry: dict = {"hooks": [{"type": "command", "command": cmd}]}
+            if matcher:
+                entry["matcher"] = matcher
+            hooks.setdefault(event, []).append(entry)
+            plan["events"].append(event)
+            plan["scripts"].append(str(hooks_dir / fname))
+
+    plan["automation"] = install_automation(
+        team, agent, codex_dir, thread_id=thread_id,
+        uninstall=uninstall, dry_run=dry_run)
+
+    if dry_run:
+        plan["would_write_hooks_json"] = config
+        if not uninstall:
+            plan["prompt"] = COORD2_WATCH_PROMPT.format(team=team, agent=agent)
+        return plan
+
+    if uninstall:
+        shutil.rmtree(hooks_dir, ignore_errors=True)
+    else:
+        automation_toml = _automation_path(codex_dir, agent)
+        subs = {"__TEAM__": team, "__AGENT__": agent,
+                "__HOOKS_DIR__": str(hooks_dir), "__CODEX_DIR__": str(codex_dir),
+                "__AUTOMATION_TOML__": str(automation_toml)}
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        for fname, body in (("session-start.sh", SESSION_START_SH),
+                            ("pre-compact.sh", PRE_COMPACT_SH)):
+            for k, v in subs.items():
+                body = body.replace(k, v)
+            _atomic_write(hooks_dir / fname, body, mode=0o755)
+        # Self-copy so the SessionStart hook can (re)seed the automation.
+        me = Path(__file__).resolve()
+        dest = hooks_dir / "install_codex_watch.py"
+        if not (dest.exists() and dest.resolve() == me):
+            _atomic_write(dest, me.read_text(), mode=0o755)
+
+    if not (uninstall and not hooks_path.exists()):
+        hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(hooks_path, json.dumps(config, indent=2) + "\n")
+    return plan
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    p = argparse.ArgumentParser(
+        description="Install the coord2-first Codex watch (hooks + automation).")
+    p.add_argument("team")
+    p.add_argument("agent")
+    p.add_argument("--codex-dir", default=None,
+                   help="Codex home (default ~/.codex); overridable for tests")
+    p.add_argument("--thread-id", default=None,
+                   help="app thread id for the watch automation (else preserved "
+                        "from the existing managed automation, else hook-seeded)")
+    p.add_argument("--uninstall", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    args = p.parse_args(argv)
+    codex_dir = (Path(args.codex_dir).expanduser() if args.codex_dir
+                 else Path.home() / ".codex")
+    plan = install(args.team, args.agent, codex_dir=codex_dir,
+                   thread_id=args.thread_id, uninstall=args.uninstall,
+                   dry_run=args.dry_run)
+    print(json.dumps(plan, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

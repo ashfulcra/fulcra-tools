@@ -18,6 +18,37 @@ resume brief**, so waking up is reliable instead of a re-read.
 Whether/when to snapshot is a judgment call (prose); building the schema and folding many snapshots to
 the newest is deterministic (the `coord-engine` tool).
 
+## The lifecycle contract (applies on every harness)
+
+Any agent participating in a team space owes these four behaviors. Harness adapters
+(see fulcra-agent-automation §Harness adapters) automate them where the platform
+allows; where it doesn't, follow them as prose:
+
+1. **On wake** (new session, cron fire, heartbeat, automation tick):
+   `coord-engine continuity resume <team> <agent>` and read your inbox
+   (`coord-engine inbox <team> --agent <agent>`) BEFORE taking new work.
+2. **On material change** (a decision made, an artifact produced, a task claimed or
+   finished) and at least hourly while actively working:
+   `coord-engine continuity snapshot <team> <agent> <task> --objective … [--decision …] [--next …]`.
+3. **Before context loss** (compaction, model handoff, session end):
+   `coord-engine continuity park <team> --agent <agent> --objective "<one line>"` —
+   parks every held role with a checkpoint.
+4. **Inbox cadence:** while live, poll your inbox at least every 30 minutes. If your
+   platform has a durable scheduler, install the listener instead of trusting yourself.
+
+An agent that beats presence but has no fresh snapshot is flagged `continuity-stale` by `coord-engine health`.
+
+## Which adapter automates this for you
+
+| Harness | Lifecycle (rules 1–3) | Pickup (rule 4) |
+|---|---|---|
+| Claude Code (CLI/desktop) | hooks: SessionStart→resume+inbox, PreCompact/SessionEnd→park (`fulcra-agent-automation/scripts/claude-code/install-claude-code.sh`) | launchd/cron listener (`scripts/install-listener.sh`) |
+| Claude Cowork (desktop) | same as Claude Code (same core; same settings.json) | same listener |
+| Claude web (claude.ai) | prose only — run rule 1 when the skill loads; rule 3 before ending | no background pickup; use cloud routines that open a duty-cycle session |
+| Codex | `~/.codex/hooks.json` + app-thread automation (`scripts/codex/install_codex_watch.py`) — the automation prompt embeds rules 1–3 | the same automation ticks the inbox |
+| OpenClaw | managed block in `HEARTBEAT.md`/`BOOT.md` (`scripts/openclaw/install_openclaw.py`) embeds rules 1–2; rule 3 (park) can't be automated from a prose block (no shutdown hook) — follow it as prose | HEARTBEAT tick |
+| Hermes (Daytona sandbox) | fhd provisioner installs the Claude Code adapter inside the sandbox at provision time (standalone hermes-daytona repo) | listener installed at provision time |
+
 ## Where to start — the re-entrancy probes
 
 On waking (fresh session / cron), before doing anything else, probe whether a resume brief already
@@ -29,6 +60,8 @@ re-entry is always safe:
 |---|---|---|---|
 | Engine + auth usable? | `uv tool run coord-engine doctor <team>` | exits 0 and the last line is exactly `doctor: healthy` | fix engine/auth first (see fulcra-agent-reconcile) — do NOT snapshot/resume against a broken engine |
 | Resumable snapshot for me? | `uv tool run coord-engine continuity resume <team> <agent>` | prints a line beginning `Resume:` (the newest snapshot across your tasks) — NOT the single line `No continuity snapshot found.` | **Snapshot first** — you have no resume state; take a snapshot now (see [Usage](#usage)) before spending context, so the next wake resumes clean |
+| Latest snapshot fresh? | `coord-engine continuity resume <team> <agent>` | header timestamp < your work cadence | write one now (rule 2) |
+| Am I continuity-stale? | `coord-engine health <team>` | your agent row has no `continuity-stale` flag | rules 2–3, then re-check |
 
 Snapshot present → read the printed brief (objective / next actions / open questions / decisions) and
 resume that work. `resume <team> <agent> <task>` narrows to one task; the bare `resume <team> <agent>`
