@@ -2,7 +2,8 @@
 
 The macOS TV app's service process keeps a CFURL cache at
 ``~/Library/Group Containers/group.tvappservices.container/Cache.db``
-(readable WITHOUT Full Disk Access) holding JSON responses from
+(a protected group container — the daemon needs Full Disk Access
+to read it) holding JSON responses from
 ``uts-api.itunes.apple.com/uts/v3/canvases/Roots/tahoma_watchnow`` — the
 Watch Now canvas, auto-refreshed every few hours even when the app isn't
 being used. Two shelves in those payloads carry watch signals:

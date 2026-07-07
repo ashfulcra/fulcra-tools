@@ -10,13 +10,18 @@ Apple TV app setup (macOS only)
 
   The Apple TV app keeps a local Watch Now cache with Up Next progress
   and a Recently Watched shelf. The Fulcra Collect apple-tv plugin reads
-  that cache read-only - no Apple sign-in, data export, Full Disk Access,
-  or network call is required for the local scan.
+  that cache read-only - no Apple sign-in, data export, or network
+  call is required for the local scan. The daemon DOES need a one-time
+  Full Disk Access grant (the cache lives in a macOS-protected group
+  container; without FDA every read blocks).
 
   Recommended setup:
 
   1. Open the Apple TV app once and visit the Home tab so macOS creates
      and refreshes the Watch Now cache.
+  1b. Grant Full Disk Access to the daemon's python interpreter (System
+      Settings > Privacy & Security > Full Disk Access; add the resolved
+      uv cpython binary), then restart the daemon.
   2. In the Fulcra Collect dashboard, enable the "Apple TV app
      (on-device)" plugin.
   3. Run the plugin health check. It should count parseable watch events

@@ -35,9 +35,13 @@ def test_plugin_metadata_is_scheduled_local_no_credentials():
     assert APPLE_TV_PLUGIN.requires_network is False
     assert APPLE_TV_PLUGIN.category == "video"
     assert APPLE_TV_PLUGIN.canonical_definition_name == "Watched"
-    # The whole point of the UTS-cache pathway: no creds, no FDA.
+    # No credentials (local cache read) — but the cache lives in a
+    # macOS-protected group container, so the daemon DOES need Full Disk
+    # Access (live-verified 2026-07-07: without FDA, reads block in
+    # open(2) and every run times out).
     assert APPLE_TV_PLUGIN.required_credentials == ()
-    assert APPLE_TV_PLUGIN.required_permissions == ()
+    assert [p.id for p in APPLE_TV_PLUGIN.required_permissions] == [
+        "full-disk-access"]
 
 
 def test_plugin_declares_a_health_check():
