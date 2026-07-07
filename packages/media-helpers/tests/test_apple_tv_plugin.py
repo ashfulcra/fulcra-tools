@@ -186,16 +186,16 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
     monkeypatch.setattr(
         "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache", _boom)
 
-    with pytest.raises(RuntimeError, match="App Group protection"):
+    with pytest.raises(RuntimeError, match="Full Disk Access"):
         APPLE_TV_PLUGIN.run(_make_ctx({}))
 
 
 def test_snapshot_timeout_is_fast_fail():
     """The snapshot deadline must stay short. This cache is ~1-2MB (a healthy
-    clonefile is sub-second); a copy that runs seconds means macOS App Group
-    protection is gating the open (a per-app TCC grant is missing and the
-    open(2) blocks until the user answers the prompt), so we must fail fast
-    and retry next interval rather than pin a worker for two minutes. Guards
+    clonefile is sub-second); a copy that runs seconds means the daemon's
+    interpreter lacks Full Disk Access, so opening the TV service's group
+    container blocks in open(2) rather than failing fast — we must skip and
+    retry next interval rather than pin a worker for two minutes. Guards
     against a copy-paste back to podcasts' 120s (justified there by a 347MB
     library, not here)."""
     from fulcra_media.importers import apple_tv

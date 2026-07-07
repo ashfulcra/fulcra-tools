@@ -95,16 +95,18 @@ HISTORY_URL_MARKERS = ("RecentlyWatched", "PlayHistory")
 # Snapshot deadline. Unlike apple_podcasts (a 347MB library where a legit copy
 # can genuinely take tens of seconds), this cache is ~1-2MB, so a healthy
 # APFS clonefile completes in well under a second. A copy that runs longer
-# than a few seconds is NOT slow I/O — it means macOS App Group protection
-# (Sequoia+) is gating the open: reads of another app's group container by a
-# process without a TCC grant park INSIDE the open(2) syscall until the
-# per-app "wants to access data from other apps" prompt is answered (verified
-# live 2026-07-07 by sampling a hung reader: the stack sits in __open; stat(2)
-# succeeds, every data open blocks — cp, sqlite, raw read alike). The grant is
-# per-client: approving Terminal does not approve the daemon's python. Once
-# the user clicks Allow for the daemon's python binary the grant is durable
-# and opens return instantly. Until then the right behavior is to fail fast
-# with instructions and retry next interval, not pin a worker.
+# than a few seconds is NOT slow I/O — it means the process reading the cache
+# lacks Full Disk Access. The cache lives in another app's group container
+# (~/Library/Group Containers/group.tvappservices.container), and on Sequoia+
+# a read of it by a process without FDA parks INSIDE the open(2) syscall
+# rather than failing fast (verified live 2026-07-07 by sampling a hung
+# reader: the stack sits in __open; stat(2) succeeds, every data open blocks
+# — cp, sqlite, raw read alike — while control reads of non-container paths
+# return instantly). FDA is per-binary: it must be granted to the DAEMON's
+# actual interpreter (the resolved uv cpython, not the .venv/bin/python
+# symlink, and not Terminal). With that grant on, opens return instantly and
+# scheduled runs are silent; without it, fail fast and retry next interval
+# rather than pinning a worker.
 SNAPSHOT_TIMEOUT_SECONDS = 20
 
 
@@ -154,13 +156,13 @@ def _snapshot_db(cache_dir: Path) -> Path:
                 raise SnapshotError(
                     f"Apple TV cache snapshot timed out after "
                     f"{SNAPSHOT_TIMEOUT_SECONDS}s copying {candidate.name} "
-                    f"({size_mb:.0f}MB). macOS App Group protection is "
-                    f"blocking this process from the TV service's container. "
-                    f"Fix: watch for the macOS prompt \"python wants to "
-                    f"access data from other apps\" and click Allow (the "
-                    f"grant is per-app and permanent), or pre-approve under "
-                    f"System Settings > Privacy & Security. This run is "
-                    f"skipped; the next scheduled run retries."
+                    f"({size_mb:.0f}MB) — the reading process lacks Full Disk "
+                    f"Access, so opening the TV service's group container "
+                    f"blocks. Fix: grant FDA to the daemon's interpreter "
+                    f"(System Settings > Privacy & Security > Full Disk "
+                    f"Access, add the resolved uv cpython binary, toggle on) "
+                    f"and restart the daemon. This run is skipped; the next "
+                    f"scheduled run retries."
                 ) from exc
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or b"").decode(errors="replace").strip()

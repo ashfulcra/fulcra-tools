@@ -47,10 +47,11 @@ def _run_apple_tv(ctx: RunContext) -> None:
         events = apple_tv_importer.parse_cache(cache_dir)
     except apple_tv_importer.SnapshotError as exc:
         raise RuntimeError(
-            f"apple-tv: cache snapshot failed — macOS App Group protection is "
-            f"blocking access to the TV service's container. Approve the "
-            f"\"access data from other apps\" prompt for the daemon's python "
-            f"(one-time, per-app), then this heals. Details: {exc}"
+            f"apple-tv: cache snapshot failed — the daemon's interpreter "
+            f"lacks Full Disk Access, so reading the TV service's group "
+            f"container blocks. Grant FDA to the daemon's uv cpython binary "
+            f"(Privacy & Security > Full Disk Access) and restart the daemon; "
+            f"then this heals. Details: {exc}"
         ) from exc
 
     import_events(
