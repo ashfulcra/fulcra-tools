@@ -85,13 +85,18 @@ def cross_check(pass_a: dict, pass_b: dict) -> CheckResult:
     agreed: list[dict] = []
     disagreements: list[dict] = []
 
-    # Collection date is report-level; a mismatch taints every row, so flag it.
+    # Collection date is report-level; every agreed row gets stamped with
+    # it, so a mismatch TAINTS THE WHOLE BATCH — not just a flag (codex
+    # finding on #320: recording the disagreement while still emitting
+    # pass A's date produced ingest-ready data under an unverified date).
     _, iso_a = parse_collected_at(pass_a.get("collected_at") or pass_a.get("report_date"))
     _, iso_b = parse_collected_at(pass_b.get("collected_at") or pass_b.get("report_date"))
-    if iso_a != iso_b:
+    date_tainted = iso_a != iso_b
+    if date_tainted:
         disagreements.append({
             "marker": _COLLECTED_SENTINEL,
-            "reason": "collection date differs between passes",
+            "reason": "collection date differs between passes — whole batch "
+                      "withheld until a re-read resolves the date",
             "pass_a": iso_a,
             "pass_b": iso_b,
         })
@@ -121,11 +126,19 @@ def cross_check(pass_a: dict, pass_b: dict) -> CheckResult:
                         "unit_raw": o.get("unit_raw")} for o in b_list],
         })
 
+    if date_tainted:
+        # Values may agree, but the date stamps every row: nothing is
+        # ingest-ready until the third-pass re-read settles collected_at.
+        log.warning(
+            "cross-check: collection date mismatch (%s vs %s) — withholding "
+            "%d value-agreed row(s) from the agreed set", iso_a, iso_b,
+            len(agreed))
+        agreed = []
     log.info("cross-check: %d agreed, %d disagreements", len(agreed), len(disagreements))
     return CheckResult(
         lab=pass_a.get("lab") or pass_b.get("lab"),
         report_date=pass_a.get("report_date") or pass_b.get("report_date"),
-        collected_at=iso_a,
+        collected_at=None if date_tainted else iso_a,
         observations=agreed,
         disagreements=disagreements,
     )

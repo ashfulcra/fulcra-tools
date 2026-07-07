@@ -43,3 +43,23 @@ def test_collection_date_mismatch_flagged(load_fixture):
     b = {**a, "collected_at": "2026-03-14"}
     result = cross_check(a, b)
     assert any(d["marker"] == "__collected_at__" for d in result.disagreements)
+
+
+def test_collection_date_mismatch_taints_the_whole_batch():
+    """If the two passes disagree on the collection date, NO rows may come
+    out ingest-ready — the date stamps every observation, so an unverified
+    date silently corrupts the entire batch's position on the timeline
+    (codex finding on #320). Values agreeing is not enough."""
+    a = {"lab": "LabCorp", "collected_at": "2026-06-01",
+         "observations": [{"marker_raw": "Glucose", "value_raw": "95",
+                           "unit_raw": "mg/dL"}]}
+    b = {"lab": "LabCorp", "collected_at": "2026-06-11",  # OCR-style slip
+         "observations": [{"marker_raw": "Glucose", "value_raw": "95",
+                           "unit_raw": "mg/dL"}]}
+    res = cross_check(a, b)
+    assert res.observations == [], "date-mismatched batch must not emit agreed rows"
+    assert res.collected_at is None
+    assert any(d["reason"].startswith("collection date differs")
+               for d in res.disagreements)
+    # And the value agreement is still visible for the third-pass workflow.
+    assert any(d.get("marker") == "__collected_at__" for d in res.disagreements)
