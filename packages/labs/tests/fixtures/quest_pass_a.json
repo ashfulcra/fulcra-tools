@@ -1,0 +1,16 @@
+{
+  "lab": "Quest Diagnostics",
+  "report_date": "2026-05-02",
+  "collected_at": "2026-05-01T08:30:00-04:00",
+  "observations": [
+    {"marker_raw": "GLUCOSE", "value_raw": "5.5", "unit_raw": "mmol/L", "reference_range_raw": "3.6-5.5", "flag_raw": null},
+    {"marker_raw": "CREATININE", "value_raw": "79.6", "unit_raw": "umol/L", "reference_range_raw": "62-106", "flag_raw": null},
+    {"marker_raw": "SODIUM", "value_raw": "140", "unit_raw": "mmol/L", "reference_range_raw": "135-146", "flag_raw": null},
+    {"marker_raw": "POTASSIUM", "value_raw": "4.2", "unit_raw": "mmol/L", "reference_range_raw": "3.5-5.3", "flag_raw": null},
+    {"marker_raw": "WHITE BLOOD CELL COUNT", "value_raw": "6.1", "unit_raw": "x10E3/uL", "reference_range_raw": "3.8-10.8", "flag_raw": null},
+    {"marker_raw": "PLATELET COUNT", "value_raw": "250", "unit_raw": "x10E3/uL", "reference_range_raw": "140-400", "flag_raw": null},
+    {"marker_raw": "AST", "value_raw": "22", "unit_raw": "U/L", "reference_range_raw": "10-40", "flag_raw": null},
+    {"marker_raw": "PSA, TOTAL", "value_raw": "<0.1", "unit_raw": "ng/mL", "reference_range_raw": "0.0-4.0", "flag_raw": null},
+    {"marker_raw": "HEMOGLOBIN A1C", "value_raw": "38", "unit_raw": "mmol/mol", "reference_range_raw": "20-38", "flag_raw": null}
+  ]
+}

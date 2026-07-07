@@ -29,5 +29,6 @@ pythonpath = [
     "packages/collect/tests",
     "packages/coord-engine/tests",
     "packages/dayone/tests",
+    "packages/labs/tests",
     "packages/media-helpers/tests",
 ]

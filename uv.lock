@@ -13,6 +13,7 @@ members = [
     "fulcra-coord-files",
     "fulcra-csv-importer",
     "fulcra-dayone",
+    "fulcra-labs",
     "fulcra-media-helpers",
     "fulcra-menubar",
     "fulcra-netflix-skill",
@@ -448,6 +449,38 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "fulcra-labs"
+version = "0.1.0"
+source = { editable = "packages/labs" }
+dependencies = [
+    { name = "click" },
+    { name = "fulcra-common" },
+    { name = "httpx" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-mock" },
+    { name = "ruff" },
+]
+fulcra-cli = [
+    { name = "fulcra-api" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1" },
+    { name = "fulcra-api", marker = "extra == 'fulcra-cli'", specifier = ">=0.1.35" },
+    { name = "fulcra-common", editable = "packages/fulcra-common" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4,<8" },
+    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+]
+provides-extras = ["fulcra-cli", "dev"]
 
 [[package]]
 name = "fulcra-media-helpers"
