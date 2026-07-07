@@ -65,8 +65,9 @@ coord-engine health fulcra            # which hosts heal the team; who went dark
 ## 4:45 — close (15s)
 
 > "Eleven skills, one stdlib-only engine, 200 tests, dual AI review on every PR. Wave 1 is six
-> purely-additive skills. The engine can fold into fulcra-api — sized with your team — or live in
-> a Fulcra repo. Evidence pack is one page in DESIGN.md."
+> purely-additive skills. The engine's natural first home is a small Fulcra-owned repo — folding
+> into fulcra-api stays on the table as the long-term convergence, sized with your team. Evidence
+> pack is one page in DESIGN.md."
 
 ## Fallbacks
 
