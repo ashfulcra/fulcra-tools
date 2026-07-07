@@ -92,7 +92,7 @@ SERVICES: list[ServiceEntry] = [
         import_cmd=None, wizard="apple-tv",
         blurb="Reads the macOS TV app's local Watch Now cache (Up Next "
               "progress + Recently Watched shelf). No sign-in, no export, "
-              "no Full Disk Access; polls every 6 hours.",
+              "needs a one-time Full Disk Access grant; polls every 6 hours.",
     ),
     ServiceEntry(
         key="apple-takeout", label="Apple TV (privacy export)",

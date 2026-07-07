@@ -35,9 +35,13 @@ def test_plugin_metadata_is_scheduled_local_no_credentials():
     assert APPLE_TV_PLUGIN.requires_network is False
     assert APPLE_TV_PLUGIN.category == "video"
     assert APPLE_TV_PLUGIN.canonical_definition_name == "Watched"
-    # The whole point of the UTS-cache pathway: no creds, no FDA.
+    # No credentials (local cache read) — but the cache lives in a
+    # macOS-protected group container, so the daemon DOES need Full Disk
+    # Access (live-verified 2026-07-07: without FDA, reads block in
+    # open(2) and every run times out).
     assert APPLE_TV_PLUGIN.required_credentials == ()
-    assert APPLE_TV_PLUGIN.required_permissions == ()
+    assert [p.id for p in APPLE_TV_PLUGIN.required_permissions] == [
+        "full-disk-access"]
 
 
 def test_plugin_declares_a_health_check():
@@ -186,16 +190,18 @@ def test_plugin_run_surfaces_snapshot_error_as_runtime_error(monkeypatch):
     monkeypatch.setattr(
         "fulcra_media.plugins.apple_tv.apple_tv_importer.parse_cache", _boom)
 
-    with pytest.raises(RuntimeError, match="App Group protection"):
+    with pytest.raises(RuntimeError, match="Full Disk Access"):
         APPLE_TV_PLUGIN.run(_make_ctx({}))
 
 
 def test_snapshot_timeout_is_fast_fail():
     """The snapshot deadline must stay short. This cache is ~1-2MB (a healthy
-    clonefile is sub-second); a copy that runs seconds means the TV app is
-    open and blocking reads, so we must retry next interval rather than pin a
-    worker for two minutes. Guards against a copy-paste back to podcasts' 120s
-    (justified there by a 347MB library, not here)."""
+    clonefile is sub-second); a copy that runs seconds means the daemon's
+    interpreter lacks Full Disk Access, so opening the TV service's group
+    container blocks in open(2) rather than failing fast — we must skip and
+    retry next interval rather than pin a worker for two minutes. Guards
+    against a copy-paste back to podcasts' 120s (justified there by a 347MB
+    library, not here)."""
     from fulcra_media.importers import apple_tv
     assert apple_tv.SNAPSHOT_TIMEOUT_SECONDS <= 30
 

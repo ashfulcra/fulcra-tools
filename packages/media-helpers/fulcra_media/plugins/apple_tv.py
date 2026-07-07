@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from fulcra_collect.plugin import Plugin, RunContext, SetupStep
+from fulcra_collect.plugin import Permission, Plugin, RunContext, SetupStep
 
 from ..apple_tv_health import apple_tv_health_check
 from ..fulcra import FulcraClient
@@ -18,6 +18,16 @@ from ._common import DURATION_SPEC, ensure_media_def, import_events
 # Same structure as NETFLIX_WATCHED_SPEC and the other "Watched" plugins.
 APPLE_TV_WATCHED_SPEC: dict = DURATION_SPEC
 
+_FULL_DISK_ACCESS_PERMISSION = Permission(
+    id="full-disk-access",
+    explanation=(
+        "Reads the TV app service's Watch Now cache "
+        "(~/Library/Group Containers/group.tvappservices.container), a "
+        "macOS-protected group container — without Full Disk Access for "
+        "the daemon, reads block and every run times out."
+    ),
+)
+
 
 def _run_apple_tv(ctx: RunContext) -> None:
     """Scan the TV app's UTS cache and import watch events.
@@ -28,8 +38,9 @@ def _run_apple_tv(ctx: RunContext) -> None:
     watermark/rewind bookkeeping is needed — source-id dedup in the ingest
     layer discards re-imports, exactly like apple-music-takeout's flow.
 
-    A SnapshotError (the cache is I/O-stalled) is surfaced as a
-    RuntimeError with a clear message so the scheduler can retry later.
+    A SnapshotError (the daemon lacks Full Disk Access, so the cache
+    read blocks and times out) is surfaced as a RuntimeError with the fix
+    so the scheduler can retry after the grant.
     """
     raw_dir = ctx.config.get("cache_dir")
     cache_dir = Path(raw_dir) if raw_dir else apple_tv_importer.DEFAULT_CACHE_DIR
@@ -47,10 +58,11 @@ def _run_apple_tv(ctx: RunContext) -> None:
         events = apple_tv_importer.parse_cache(cache_dir)
     except apple_tv_importer.SnapshotError as exc:
         raise RuntimeError(
-            f"apple-tv: cache snapshot failed — macOS App Group protection is "
-            f"blocking access to the TV service's container. Approve the "
-            f"\"access data from other apps\" prompt for the daemon's python "
-            f"(one-time, per-app), then this heals. Details: {exc}"
+            f"apple-tv: cache snapshot failed — the daemon's interpreter "
+            f"lacks Full Disk Access, so reading the TV service's group "
+            f"container blocks. Grant FDA to the daemon's uv cpython binary "
+            f"(Privacy & Security > Full Disk Access) and restart the daemon; "
+            f"then this heals. Details: {exc}"
         ) from exc
 
     import_events(
@@ -72,8 +84,9 @@ PLUGIN = Plugin(
     run=_run_apple_tv,
     description=(
         "Captures what you watch in the Apple TV app by reading the app's "
-        "local Watch Now cache — no sign-in, no export, and no Full Disk "
-        "Access needed. The cache auto-refreshes every few hours even when "
+        "local Watch Now cache — no sign-in or export needed; requires a "
+        "one-time Full Disk Access grant for the daemon (the cache lives "
+        "in a protected group container). Auto-refreshes every few hours even when "
         "the app is closed. In-progress items give exact activity times; "
         "the Recently Watched shelf backfills history with approximate "
         "times. Runs every 6 hours."
@@ -82,7 +95,7 @@ PLUGIN = Plugin(
     requires_network=False,
     category="video",
     canonical_definition_name="Watched",
-    required_permissions=(),
+    required_permissions=(_FULL_DISK_ACCESS_PERMISSION,),
     required_credentials=(),
     setup_steps=(
         SetupStep(
@@ -92,8 +105,10 @@ PLUGIN = Plugin(
                 "The TV app keeps a local cache of its Watch Now screen, "
                 "including your **Up Next** progress and **Recently "
                 "Watched** shelf. We read that cache every 6 hours — the "
-                "app doesn't need to be open, and unlike most Apple app "
-                "data it doesn't require Full Disk Access.\n\n"
+                "app doesn't need to be open. Like other Apple app data, "
+                "the cache lives in a macOS-protected container, so the "
+                "daemon needs a one-time **Full Disk Access** grant "
+                "(Privacy & Security > Full Disk Access).\n\n"
                 "Items you're mid-way through carry an exact last-activity "
                 "time. Recently Watched history has no watch times, so "
                 "those events are recorded with approximate (low-"
