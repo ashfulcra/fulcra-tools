@@ -27,11 +27,15 @@ atomic unblock.
 1. **Accept the wave-1 skills PR** into `fulcradynamics/agent-skills`: presence, roles,
    continuity, review, directives, health. Purely additive — no teams semantics change, same
    frontmatter shape, scripts precedent already exists (`fulcra-dashboard`).
-2. **Decide the engine's home.** Preferred: fold into `fulcra-api` as a command group (one tool,
-   one auth, one install — and the fold *removes* a subprocess layer, making every fold faster).
-   Honest sizing: this is NOT mechanical; it replaces the text transport with internal API calls
-   and should be estimated with your API team. Acceptable: a Fulcra-owned repo + PyPI. Interim
-   only: stays in ashfulcra/fulcra-tools (packages/coord-engine), installed by git tag (proven mechanism).
+2. **Decide the engine's home.** Preferred first step: a **Fulcra-owned repo + PyPI**
+   (`fulcradynamics/coord-engine`) — a small stdlib-only CLI your team can review on its own,
+   without coupling this pitch to a `fulcra-api` surface-area decision. Interim bridge (already
+   what the wave-1 PR installs): stays in ashfulcra/fulcra-tools (packages/coord-engine), pinned
+   by git tag — explicitly temporary. Long-term convergence target, once wave 1 lands and the
+   contract proves stable: fold into `fulcra-api` as a command group (one tool, one auth, one
+   install — and the fold *removes* a subprocess layer). Honest sizing on that fold: it is NOT
+   mechanical; it replaces the text transport with internal API calls and should be estimated
+   with your API team when the time comes.
 3. **Take five platform issues**, each with incident evidence attached — they extend the new
    `fulcra` binary's JSON-default direction to `file` ops: structured output, per-file
    version-ids, batch read, record-write verbs, archived-type flags in catalog.
