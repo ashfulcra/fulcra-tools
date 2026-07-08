@@ -34,3 +34,37 @@ def test_unknown_phase_is_invalid():
 def test_slugify_normalizes_titles():
     assert model.slugify("Sourdough Coach: The App!") == "sourdough-coach-the-app"
     assert model.slugify("  ---  ") == "engagement"
+
+
+def test_engagement_doc_roundtrips_through_render_and_parse():
+    meta = {
+        "schema": model.SCHEMA,
+        "slug": "sourdough-coach",
+        "title": "Sourdough Coach",
+        "phase": "interview",
+        "created_at": "2026-07-08T17:00:00Z",
+        "updated_at": "2026-07-08T18:00:00Z",
+        "phase_history": [
+            "intake 2026-07-08T17:00:00Z",
+            "interview 2026-07-08T18:00:00Z",
+        ],
+    }
+    parsed = model.parse_engagement(model.render_engagement(meta))
+    assert parsed == meta
+
+
+def test_parse_rejects_non_engagement_docs():
+    assert model.parse_engagement(None) is None
+    assert model.parse_engagement("") is None
+    assert model.parse_engagement("# just prose\n") is None
+    assert model.parse_engagement("---\nschema: something.else\n---\n") is None
+
+
+def test_parse_tolerates_prose_body_and_blank_lines():
+    text = model.render_engagement({
+        "schema": model.SCHEMA, "slug": "x", "title": "X", "phase": "intake",
+        "created_at": "t0", "updated_at": "t0",
+        "phase_history": ["intake t0"],
+    }) + "\nExtra prose the humans wrote.\n"
+    parsed = model.parse_engagement(text)
+    assert parsed is not None and parsed["slug"] == "x"
