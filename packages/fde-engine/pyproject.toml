@@ -18,6 +18,13 @@ dev = ["pytest"]
 [project.scripts]
 fde-engine = "fde_engine.cli:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+# Adds tests/ to sys.path so test modules can `import fde_engine_test_helpers`
+# (plain helper classes that aren't pytest fixtures).
+pythonpath = ["tests"]
+
 [tool.hatch.version]
 path = "fde_engine/__init__.py"
 
