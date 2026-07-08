@@ -267,7 +267,16 @@ def _sweep_pr(
     reviews_raw = runner(["gh", "pr", "view", url, "--json", "author,reviews"])
     inline_raw = runner(["gh", "api", f"repos/{owner_repo}/pulls/{num}/comments"])
     comments_raw = runner(["gh", "pr", "view", url, "--json", "comments"])
-    gh_ok = any(r is not None for r in (reviews_raw, inline_raw, comments_raw))
+    # Per-surface availability, not just the aggregate. A partial failure (one
+    # surface None while others return) previously reported clean, silently
+    # recreating the motivating blind spot (a persistently failing reviews
+    # surface goes unseen). Track each raw-is-None so the caller can note the
+    # unavailable surface while still ingesting the healthy ones.
+    raw_by_surface = (
+        ("review", reviews_raw), ("inline", inline_raw), ("comment", comments_raw),
+    )
+    unavailable = [name for name, raw in raw_by_surface if raw is None]
+    gh_ok = len(unavailable) < len(raw_by_surface)  # False only when ALL three None
 
     pr_author, review_items = _parse_reviews(reviews_raw)
     surfaces = (
@@ -287,6 +296,13 @@ def _sweep_pr(
             body = str(it.get("body") or "")
             stem = f"{surface}-{_node_seg(node)}"
             path = f"team/{team}/_coord/forge/feedback/{slug}/{stem}.md"
+            # Key ORDERING here is load-bearing: `excerpt` MUST stay last.
+            # okf's block-scalar rendering has a pre-existing limitation where a
+            # `---` line inside a value's body truncates the parsed value (but
+            # nothing after it survives). Keeping the free-text `excerpt` — the
+            # only field that can contain an embedded `---` — as the final key
+            # confines that truncation to the excerpt and protects every
+            # structured field above it. Do not reorder.
             fm = {
                 "type": "Feedback", "source": "forge", "surface": surface,
                 "author": author, "submitted_at": it.get("submitted_at"),
@@ -295,7 +311,7 @@ def _sweep_pr(
             }
             if transport.write(path, okf.render_frontmatter(fm) + "\n" + body + "\n"):
                 items += 1
-    return {"items": items, "gh_ok": gh_ok,
+    return {"items": items, "gh_ok": gh_ok, "unavailable": unavailable,
             "author_unknown": pr_author is None and items > 0}
 
 
@@ -325,6 +341,11 @@ def feedback_sweep(
             skipped.append(f"{slug}: gh unavailable")
             continue
         items_written += res["items"]
+        # A partially-failed sweep (some surfaces healthy) still lands its
+        # healthy items, but each unavailable surface is noted so the blind spot
+        # is visible rather than reported clean.
+        for surface in res.get("unavailable", []):
+            notes.append(f"{slug}: {surface} surface unavailable")
         if res.get("author_unknown"):
             notes.append(f"{slug}: author unknown — self-skip not applied")
     return {"prs": prs_checked, "items": items_written,

@@ -71,7 +71,7 @@ target set.
 two steps (non-obvious, so spell it out):
 1. `uv tool run coord-engine needs-me <team> --agent <me> --json` — each `forge-feedback` row carries an
    `items` array; those stems are the ack ids.
-2. `uv tool run coord-engine inbox --ack <item-id> --agent <me>` — ack each stem. A later sweep that finds a
+2. `uv tool run coord-engine inbox <team> --ack <item-id> --agent <me>` — ack each stem. A later sweep that finds a
    *new* node id writes a new shard, which re-surfaces — you silence only what you've already seen.
 
 ## Notes

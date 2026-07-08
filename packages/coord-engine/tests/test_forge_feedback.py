@@ -282,9 +282,46 @@ def test_author_unknown_reports_note_but_still_ingests():
 
     res = forge.feedback_sweep(t, "r", runner=run)
     assert res["items"] == 2  # inline + comment still ingested
-    assert res["notes"] == ["o-r-42: author unknown — self-skip not applied"]
+    # reviews surface was down (hence author unknown) — BOTH facts are noted:
+    # the unavailable surface AND its self-skip consequence.
+    assert res["notes"] == ["o-r-42: review surface unavailable",
+                            "o-r-42: author unknown — self-skip not applied"]
     assert res["skipped"] == []  # not skipped — items were written
     assert "team/r/_coord/forge/feedback/o-r-42/inline-PRRC_1.md" in t.store
+
+
+def test_partial_surface_failure_is_noted_while_healthy_surfaces_ingest():
+    """A partial gh failure (one surface None, others healthy) must not report
+    clean — the motivating blind spot was exactly a persistently failing
+    reviews surface going unseen. The healthy surfaces still ingest; each
+    unavailable surface lands a note. All-three-None stays in ``skipped``."""
+    t = FakeTransport()
+    _watch(t, agent="bob", url=URL)   # o-r-42: reviews down, comments healthy
+    _watch(t, agent="bob", url=URL2)  # o-r-99: every surface down → skipped
+
+    def run(args):
+        joined = " ".join(args)
+        if "/pull/42" in joined or "pulls/42" in joined:
+            if "api" in args:
+                return None  # inline surface down too
+            if "--json" in args:
+                j = args[args.index("--json") + 1]
+                if "reviews" in j:
+                    return None  # reviews surface down
+                if j == "comments":
+                    return json.dumps({"comments": [_COMMENT]})  # comments healthy
+        return None  # o-r-99: all three surfaces down
+
+    res = forge.feedback_sweep(t, "r", runner=run)
+    # comment from the healthy surface still lands
+    assert res["items"] == 1
+    assert "team/r/_coord/forge/feedback/o-r-42/comment-IC_1.md" in t.store
+    # the reviews-unavailable line is present (partial failure surfaced, not clean)
+    assert "o-r-42: review surface unavailable" in res["notes"]
+    assert "o-r-42: inline surface unavailable" in res["notes"]
+    # the all-three-None PR stays in skipped, NOT notes
+    assert any("o-r-99" in s for s in res["skipped"])
+    assert not any("o-r-99" in n for n in res["notes"])
 
 
 def test_needs_me_text_output_renders_forge_line(capsys):
