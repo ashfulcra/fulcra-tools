@@ -8,7 +8,7 @@ flags the account for cap calibration.
 """
 from __future__ import annotations
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from typing import Any, Optional
 
@@ -123,6 +123,121 @@ def parse_accounts(text: Optional[str]) -> dict[str, Any]:
         return out
     except (ValueError, TypeError) as e:
         return {"accounts": [], "tiers": {}, "error": str(e)}
+
+
+def route(accounts: dict[str, Any], models: dict[str, Any], needs: list[str],
+          shards: list[dict[str, Any]], *,
+          demotions: Optional[dict[str, list[str]]] = None,
+          now: Optional[datetime] = None) -> dict[str, Any]:
+    """Rank the models that cover ALL requested needs, each bound to its
+    best-headroom eligible account, in a deterministic cost/headroom order.
+
+    Inputs:
+      * ``accounts`` — a parsed-accounts dict (``parse_accounts`` output shape:
+        ``{"accounts": [...], "tiers": {...}}``).
+      * ``models`` — a merged model map (``merge_models`` / ``load_default_models``
+        output shape: ``{"map_version": str, "models": {id: entry}}``). Overlay
+        entries reach here with unvalidated ``cost_rank``/``harnesses`` by design;
+        this fold coerces them defensively and never crashes.
+      * ``needs`` — requested capability tags; every one must be in ``TAXONOMY``.
+      * ``shards`` — usage rows in the ``headroom`` fold's input shape.
+      * ``demotions`` — ``{model_id: [needs...]}`` (Task 3 fold; default ``{}``):
+        a model demoted for ANY requested need sorts below all non-demoted ones.
+
+    Algorithm: (1) unknown need short-circuits to ``reason="unknown need: x"``;
+    (2) coverage keeps models whose tags ⊇ needs; (3) each covering model binds
+    to its highest-min-window-headroom account whose harnesses intersect the
+    model's and whose EVERY window has headroom > 0 (throttle-zeroed windows
+    exclude the account); (4) demotions push below non-demoted; (5) sort:
+    non-demoted first, cost_rank DESC, headroom-% DESC, model id ASC.
+
+    Returns ``{"candidates": [...], "map_version": str, "reason": str|None,
+    "dropped_unknown_tags": [str, ...]}``. ``dropped_unknown_tags`` carries this
+    fold's defensive-coercion notes (bad cost_rank / harnesses).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    demotions = demotions or {}
+    map_version = models.get("map_version")
+
+    # (1) unknown need -> bail (CLI maps this to exit 2).
+    for n in needs:
+        if n not in TAXONOMY:
+            return {"candidates": [], "map_version": map_version,
+                    "reason": f"unknown need: {n}", "dropped_unknown_tags": []}
+
+    accounts_list = accounts.get("accounts") or []
+    model_map = models.get("models") or {}
+    reports: list[str] = []
+
+    # Per-account eligibility: EVERY declared window must have headroom > 0
+    # (throttle-zeroed windows fail this). An eligible account's routing score
+    # is its worst (min) window headroom-%.
+    hrows = headroom(accounts_list, shards, now)
+    by_acct: dict[str, list[dict[str, Any]]] = {}
+    for r in hrows:
+        by_acct.setdefault(r["account"], []).append(r)
+    acct_pct: dict[str, float] = {}
+    for a in accounts_list:
+        aid = a.get("id")
+        rows = by_acct.get(aid, [])
+        if rows and all(r["headroom"] > 0 for r in rows):
+            acct_pct[aid] = min(r["pct"] for r in rows)
+
+    need_set = set(needs)
+    candidates: list[dict[str, Any]] = []
+    coverage_count = 0
+    for mid, entry in model_map.items():
+        tags = entry.get("tags")
+        if not isinstance(tags, list):
+            tags = []
+        if not need_set <= set(tags):
+            continue
+        coverage_count += 1
+
+        # Defensive coercion — overlay content reaches here unvalidated.
+        harnesses = entry.get("harnesses")
+        if not isinstance(harnesses, list) or not all(isinstance(h, str) for h in harnesses):
+            reports.append(f"model {mid}: 'harnesses' not a list of strings; "
+                           "treated as unroutable")
+            harnesses = []
+        cost_rank = entry.get("cost_rank")
+        if (isinstance(cost_rank, bool) or not isinstance(cost_rank, int)
+                or not (1 <= cost_rank <= 9)):
+            reports.append(f"model {mid}: invalid cost_rank {cost_rank!r}; "
+                           "treated as 5 (mid)")
+            cost_rank = 5
+
+        hset = set(harnesses)
+        eligible = [
+            (acct_pct[a["id"]], a["id"]) for a in accounts_list
+            if a.get("id") in acct_pct
+            and (hset & set(a["harnesses"] if isinstance(a.get("harnesses"), list) else []))
+        ]
+        if not eligible:
+            continue  # covers needs but no account has headroom + a shared harness
+        best_pct, best_acct = sorted(eligible, key=lambda t: (-t[0], t[1]))[0]
+
+        demoted_needs = [n for n in needs if n in set(demotions.get(mid) or [])]
+        candidates.append({
+            "model": mid, "account": best_acct, "headroom_pct": best_pct,
+            "tags": list(tags), "cost_rank": cost_rank, "demoted": demoted_needs,
+        })
+
+    # (5) deterministic sort: non-demoted first, cost_rank DESC, headroom-% DESC,
+    # model id ASC.
+    candidates.sort(key=lambda c: (bool(c["demoted"]), -c["cost_rank"],
+                                   -c["headroom_pct"], c["model"]))
+
+    if candidates:
+        reason: Optional[str] = None
+    elif coverage_count == 0:
+        reason = "no model covers needs"
+    else:
+        reason = "no account headroom"
+
+    return {"candidates": candidates, "map_version": map_version,
+            "reason": reason, "dropped_unknown_tags": reports}
 
 
 def headroom(accounts: list[dict[str, Any]], shards: list[dict[str, Any]],

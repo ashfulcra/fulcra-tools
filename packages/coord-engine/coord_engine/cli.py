@@ -956,6 +956,53 @@ def cmd_headroom(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _atc_models_overlay(text: Optional[str]) -> Optional[dict[str, Any]]:
+    """Extract the optional top-level ``models`` overlay from accounts.json.
+
+    Returns the overlay dict, or ``None`` when absent/malformed (v1 accounts.json
+    has no ``models`` key -> defaults-only routing). Never raises."""
+    if not text:
+        return None
+    try:
+        d = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    m = d.get("models") if isinstance(d, dict) else None
+    return m if isinstance(m, dict) else None
+
+
+def cmd_route(args: argparse.Namespace, transport: Any) -> int:
+    text = transport.read(_atc_accounts_path(args.team))
+    parsed = atc.parse_accounts(text)
+    merged, merge_reports = atc.merge_models(
+        atc.load_default_models(), _atc_models_overlay(text))
+    needs = [n.strip() for n in (args.needs or "").split(",") if n.strip()]
+    shards = _atc_usage_shards(transport, args.team)
+    result = atc.route(parsed, merged, needs, shards, now=_now())
+    # Surface the overlay-merge notes alongside the fold's own coercion notes.
+    result["dropped_unknown_tags"] = merge_reports + result.get("dropped_unknown_tags", [])
+    reason = result.get("reason")
+    unknown_need = bool(reason) and reason.startswith("unknown need:")
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 2 if unknown_need else 0
+    if unknown_need:
+        print(f"route — {reason} (needs must be one of: "
+              f"{','.join(sorted(atc.TAXONOMY))})")
+        return 2
+    if not result["candidates"]:
+        print(f"no candidates: {reason}")
+        return 0
+    print(f"route — {args.team} — needs {','.join(needs)} "
+          f"(map {result['map_version']})")
+    for i, c in enumerate(result["candidates"], 1):
+        pct = f"{c['headroom_pct']:g}"
+        tags = ",".join(c["tags"])
+        demo = f"  demoted({','.join(c['demoted'])})" if c["demoted"] else ""
+        print(f"{i}. {c['model']} — ({c['account']}) — {pct}% — {tags}{demo}")
+    return 0
+
+
 def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     fm = {
@@ -1408,6 +1455,14 @@ def build_parser() -> argparse.ArgumentParser:
     hr = sub.add_parser("headroom", help="per-account cap headroom fold (fulcra-agent-atc)")
     hr.add_argument("team"); hr.add_argument("--json", action="store_true")
     hr.set_defaults(func=cmd_headroom)
+
+    rt = sub.add_parser("route", help="rank models covering needs by cost + headroom (fulcra-agent-atc)")
+    rt.add_argument("team")
+    rt.add_argument("--needs", required=True,
+                    help="comma-separated capability tags (e.g. code,long-context)")
+    rt.add_argument("--json", action="store_true")
+    rt.set_defaults(func=cmd_route)
+
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
     dr.set_defaults(func=cmd_doctor)
