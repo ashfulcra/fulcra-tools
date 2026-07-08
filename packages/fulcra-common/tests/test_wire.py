@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
+from fulcra_common import wire
 from fulcra_common.wire import (
     DURATION_ANNOTATION,
     MOMENT_ANNOTATION,
@@ -144,3 +147,51 @@ def test_moment_definition_payload_omits_measurement_spec():
         "tags": [],
     }
     assert "measurement_spec" not in p
+
+
+def test_build_typed_record_moment_shape():
+    """Typed records are UNWRAPPED (no specversion/data-string envelope) and
+    carry only served-schema keys — the typed endpoint silently strips
+    unknown fields (live-verified 2026-07-08), so emitting one is a bug."""
+    rec = wire.build_typed_record(
+        base_type="MomentAnnotation",
+        start_time=datetime(2026, 7, 8, 21, 0, tzinfo=UTC),
+        note="hello",
+        source_id="com.fulcra.test.m1",
+        definition_id="def-uuid-1",
+        tags=["tag-1"],
+    )
+    assert rec == {
+        "recorded_at": "2026-07-08T21:00:00Z",
+        "note": "hello",
+        "sources": ["com.fulcra.test.m1",
+                    "com.fulcradynamics.annotation.def-uuid-1"],
+        "tags": ["tag-1"],
+    }
+    assert "specversion" not in rec and "data" not in rec and "metadata" not in rec
+
+
+def test_build_typed_record_duration_range_and_numeric_value():
+    rec = wire.build_typed_record(
+        base_type="DurationAnnotation",
+        start_time=datetime(2026, 7, 8, 21, 0, tzinfo=UTC),
+        end_time=datetime(2026, 7, 8, 21, 30, tzinfo=UTC),
+        source_id="s", note=None,
+    )
+    assert rec["recorded_at"] == {"start_time": "2026-07-08T21:00:00Z",
+                                  "end_time": "2026-07-08T21:30:00Z"}
+    assert "note" not in rec  # None fields omitted, not null-filled
+
+    num = wire.build_typed_record(
+        base_type="NumericAnnotation",
+        start_time=datetime(2026, 7, 8, 21, 0, tzinfo=UTC),
+        source_id="s", value=42.5, unit="mg/dL",
+    )
+    assert num["value"] == 42.5 and num["unit"] == "mg/dL"
+
+
+def test_build_typed_record_rejects_value_on_non_numeric():
+    with pytest.raises(ValueError, match="value/unit only apply"):
+        wire.build_typed_record(base_type="MomentAnnotation",
+                                start_time=datetime(2026, 7, 8, tzinfo=UTC),
+                                source_id="s", value=1.0)

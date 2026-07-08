@@ -81,6 +81,54 @@ def build_record(*, data_type: str, start_time: datetime, data: dict,
     }
 
 
+def build_typed_record(
+    *,
+    base_type: str,
+    start_time: datetime,
+    end_time: datetime | None = None,
+    note: str | None = None,
+    source_id: str,
+    definition_id: str | None = None,
+    extra_sources: Sequence[str] = (),
+    tags: Sequence[str] = (),
+    value: float | None = None,
+    unit: str | None = None,
+) -> dict:
+    """Build an UNWRAPPED record for POST /ingest/v1/record/{base_type}.
+
+    The typed endpoint accepts only the served-schema keys and SILENTLY
+    STRIPS anything else (live-verified 2026-07-08) — so unlike
+    build_record there is no free-form data payload; ``note`` is the only
+    free-text slot. Custom data types bind exactly like annotations do:
+    the definition's ``com.fulcradynamics.annotation.<id>`` goes in
+    ``sources`` (dev-confirmed interim mechanics).
+
+    None fields are OMITTED (the server defaults them), never null-filled.
+    """
+    if value is not None and base_type != "NumericAnnotation":
+        raise ValueError(
+            f"value/unit only apply to NumericAnnotation, got {base_type}")
+    sources = [source_id, *extra_sources]
+    if definition_id:
+        sources.append(f"com.fulcradynamics.annotation.{definition_id}")
+    if base_type == "DurationAnnotation":
+        if end_time is None:
+            raise ValueError("DurationAnnotation requires end_time")
+        recorded_at: object = {"start_time": iso_z(start_time),
+                               "end_time": iso_z(end_time)}
+    else:
+        recorded_at = iso_z(start_time)
+    rec: dict = {"recorded_at": recorded_at, "sources": sources,
+                 "tags": list(tags)}
+    if note is not None:
+        rec["note"] = note
+    if value is not None:
+        rec["value"] = value
+        if unit is not None:
+            rec["unit"] = unit
+    return rec
+
+
 def encode_batch(records: Sequence[dict]) -> bytes:
     """Encode records as the JSONL body for POST /ingest/v1/record/batch —
     one sorted-key JSON object per line, newline-joined."""

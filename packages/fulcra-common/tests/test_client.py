@@ -11,6 +11,8 @@ import pytest
 
 from fulcra_common import BaseFulcraClient, ImportResult
 
+UTC = timezone.utc
+
 
 def test_get_token_prefers_env_var(monkeypatch):
     monkeypatch.setenv("FULCRA_ACCESS_TOKEN", "tok-from-env")
@@ -280,6 +282,24 @@ def test_fetch_existing_source_ids_collects_and_filters_by_def(recording_transpo
     assert client.fetch_existing_source_ids(
         t0, t1, only_for_defs={"com.fulcradynamics.annotation.def-keep"},
     ) == {"src-1", "com.fulcradynamics.annotation.def-keep"}
+
+
+def test_records_visible_returns_found_subset(recording_transport):
+    """Typed ingest is async with NO server dedup and silent line drops, so
+    callers verify landings by re-querying. This helper answers 'which of
+    my source_ids are visible yet?'"""
+    rows = [
+        {"sources": ["com.fulcra.test.a", "com.fulcradynamics.annotation.d1"]},
+        {"sources": ["com.fulcra.test.b"]},
+    ]
+    def handler(request):
+        assert "/data/v1alpha1/event/MomentAnnotation" in str(request.url)
+        return httpx.Response(200, json=rows)
+    client = BaseFulcraClient(transport=recording_transport(handler))
+    got = client.records_visible(
+        "MomentAnnotation", {"com.fulcra.test.a", "com.fulcra.test.c"},
+        datetime(2026, 7, 8, tzinfo=UTC), datetime(2026, 7, 9, tzinfo=UTC))
+    assert got == {"com.fulcra.test.a"}
 
 
 def test_import_result_is_a_plain_record():

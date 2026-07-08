@@ -569,3 +569,29 @@ class BaseFulcraClient:
         ):
             out |= group
         return out
+
+    def records_visible(
+        self,
+        base_type: str,
+        source_ids: set[str],
+        window_start: datetime,
+        window_end: datetime,
+    ) -> set[str]:
+        """Which of `source_ids` are visible in query results for the window.
+
+        The landed-count check for typed ingest: 201 means queued, not
+        stored (async ~1-2 min), a JSONL batch silently drops bad lines,
+        and there is no upload-status endpoint — re-querying is the only
+        confirmation (live-verified 2026-07-08). Raises on HTTP errors so
+        callers distinguish 'not visible yet' from 'could not check'.
+
+        Reuses `fetch_records` (the same event-fetch + list/`{"data": …}`
+        normalization `fetch_existing_source_ids` rides on) and intersects
+        the `sources` arrays it returns with `source_ids`.
+        """
+        rows = self.fetch_records(
+            window_start, window_end, data_type=base_type)
+        seen: set[str] = set()
+        for row in rows:
+            seen.update(row.get("sources") or [])
+        return source_ids & seen
