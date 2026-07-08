@@ -23,7 +23,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -1059,6 +1059,26 @@ def cmd_atc_report(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def cmd_dash(args: argparse.Namespace, transport: Any) -> int:
+    """Serve the localhost ATC dashboard in the foreground (127.0.0.1 only).
+
+    ``data_fn`` recomputes ``dash_data`` from the live ledger on every
+    ``/data.json`` request, so the page's 30s poll reflects fresh headroom
+    without restarting the server. Bind host is never operator-controllable —
+    there is deliberately no ``--host`` flag."""
+    def data_fn() -> dict[str, Any]:
+        text = transport.read(_atc_accounts_path(args.team))
+        parsed = atc.parse_accounts(text)
+        shards = _atc_usage_shards(transport, args.team)
+        merged, _ = atc.merge_models(atc.load_default_models(),
+                                     _atc_models_overlay(text))
+        return atc_dash.dash_data(parsed, shards, team=args.team,
+                                  models=merged, now=_now())
+
+    atc_dash.serve(args.team, port=args.port, data_fn=data_fn)
+    return 0
+
+
 def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     fm = {
@@ -1533,6 +1553,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="trailing window in days (default 7)")
     atr.add_argument("--json", action="store_true")
     atr.set_defaults(func=cmd_atc_report)
+
+    dsh = sub.add_parser("dash",
+                         help="serve the localhost ATC gauge dashboard (127.0.0.1 only)")
+    dsh.add_argument("team")
+    dsh.add_argument("--port", type=int, default=8787,
+                     help="loopback port to bind (default 8787)")
+    dsh.set_defaults(func=cmd_dash)
 
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
