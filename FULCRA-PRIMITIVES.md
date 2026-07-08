@@ -2,15 +2,17 @@
 
 What the Fulcra platform actually provides and how to use it, **by agent
 capability tier**. Written so you don't have to re-research the platform
-surface. Verified against live services on 2026-07-07 (`fulcra-api` CLI/lib
-**0.1.35** from PyPI, fulcra-api-python main @ `694f858`,
-api.fulcradynamics.com OpenAPI — **48 paths**; the file API + a v1 catalog +
+surface. Verified against live services on 2026-07-07, **Records section
+re-verified 2026-07-08** (`fulcra-api` CLI/lib **0.1.35** from PyPI,
+fulcra-api-python main @ `694f858`, api.fulcradynamics.com OpenAPI — **53
+paths as of 2026-07-08**, up from 48 on 07-07; the file API + a v1 catalog +
 an insights endpoint are published in the spec — docs.fulcradynamics.com,
 mcp.fulcradynamics.com discovery docs). 0.1.35 added the `data-updates`
-command and refined `auth login` (see below); still no record-level commands.
-The 2026-07-07 re-verification found **no released-surface drift** — PyPI is
-still 0.1.35, the OpenAPI is still 48 paths (same annotation/ingest/file/tag/
-insight set), records remain ingest-only (CLI `data-type` still exposes only
+command and refined `auth login` (see below); still no record-level CLI
+commands. **Drift since 2026-07-07: the platform published the typed record
+ingest surface** (`POST /ingest/v1/record/{data_type}` + catalog schema
+discovery — see §Records, live-verified 2026-07-08); PyPI is still 0.1.35,
+records remain CLI-less (CLI `data-type` still exposes only
 `create`/`archive`/`restore`), and the MCP server still lists the same 11
 read-only tools. The one delta: fulcra-api-python `main` advanced past the
 0.1.35 tag (`62f580b`→`694f858`) with **unreleased** work — shorthand data-type
