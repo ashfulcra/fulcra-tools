@@ -76,20 +76,37 @@ from typing import Any
 _BEGIN = "<!-- fulcra-coord2:begin (managed; do not edit between markers) -->"
 _END = "<!-- fulcra-coord2:end -->"
 
-# Block bodies (brief-binding). {team} / {agent} are the only format fields;
-# `<task>`, `"..."`, and HEARTBEAT_OK are literal prose.
+# Block bodies (brief-binding: the canonical watcher tick, OpenClaw voice).
+# {team} / {agent} are the only format fields; the placeholders `<slug>`,
+# `<task>`, `<acct>`, `<tier>`, `<est>`, the `"..."`, and HEARTBEAT_OK are
+# literal prose the agent fills in / emits at run time.
 HEARTBEAT_BLOCK = """\
-On each heartbeat, as {agent} on coord2 team {team}:
+On each heartbeat, as {agent} on coord2 team {team}, in order:
 1. coord-engine continuity resume {team} {agent}
-2. coord-engine inbox {team} --agent {agent} ; coord-engine needs-me {team} --agent {agent}
-3. Act on anything new; after completing a work item:
-   coord-engine continuity snapshot {team} {agent} <task> --objective "..."
-4. Otherwise reply HEARTBEAT_OK.
+2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
+3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
+   write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
+   verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
+   ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
+4. Handle any other actionable work end-to-end.
+5. After each completed item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
+6. coord-engine usage log {team} --account <acct> --tier <tier> --units <est>   # ATC, when accounts are declared
+7. Before session end: coord-engine continuity park {team} --agent {agent} --objective "..."
+If nothing is actionable, reply HEARTBEAT_OK.
 """
 
 BOOT_BLOCK = """\
-On boot, as {agent} on coord2 team {team}: run
-coord-engine continuity resume {team} {agent} and read your inbox before new work.
+On boot, as {agent} on coord2 team {team}, before any new work, in order:
+1. coord-engine continuity resume {team} {agent}
+2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
+3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
+   write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
+   verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
+   ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
+4. Handle any other actionable work end-to-end.
+5. After each completed item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
+6. coord-engine usage log {team} --account <acct> --tier <tier> --units <est>   # ATC, when accounts are declared
+7. Before session end: coord-engine continuity park {team} --agent {agent} --objective "..."
 """
 
 # Canonical workspace basename -> block body template. These are the ONLY files
