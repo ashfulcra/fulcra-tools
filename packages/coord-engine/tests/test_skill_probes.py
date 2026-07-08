@@ -25,7 +25,8 @@ CLI_SRC = (PKG / "coord_engine" / "cli.py").read_text(encoding="utf-8")
 PROBE_SKILLS = ("fulcra-agent-presence", "fulcra-agent-roles", "fulcra-agent-tasks",
                 "fulcra-agent-automation", "fulcra-agent-continuity",
                 "fulcra-agent-review", "fulcra-agent-directives",
-                "fulcra-agent-reconcile", "fulcra-agent-forge", "fulcra-agent-operator")
+                "fulcra-agent-reconcile", "fulcra-agent-forge", "fulcra-agent-operator",
+                "fulcra-agent-atc")
 
 PROBE_HEADING = "## Where to start — the re-entrancy probes"
 
