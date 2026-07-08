@@ -7,8 +7,9 @@ name = "fde-engine"
 dynamic = ["version"]
 description = "Engagement engine for the Fulcra FDE skill — seven-phase lifecycle, Fulcra-Files-backed state, deterministic resume"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
+authors = [{name = "Ash", email = "ash@fulcradynamics.com"}]
 # stdlib-only runtime (transport is a CLI-subprocess call to `fulcra-api`); no runtime deps.
 dependencies = []
 
@@ -17,6 +18,10 @@ dev = ["pytest"]
 
 [project.scripts]
 fde-engine = "fde_engine.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ashfulcra/fulcra-tools"
+Repository = "https://github.com/ashfulcra/fulcra-tools"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

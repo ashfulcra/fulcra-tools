@@ -20,7 +20,8 @@ improvising across sessions and harnesses:
 
 ## Usage
 
-    uv tool install fde-engine
+    uv tool install --from git+https://github.com/ashfulcra/fulcra-tools#subdirectory=packages/fde-engine fde-engine
+    # (plain `uv tool install fde-engine` once the package is published to PyPI — do not use it before then)
 
     fde-engine init <slug> --title "Sourdough Coach"
     fde-engine status <slug> [--json]     # phase + artifact checklist + next move

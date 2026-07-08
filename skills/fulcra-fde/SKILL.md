@@ -35,8 +35,13 @@ improvise engagement state.
 ## Setup
 
 ```bash
-uv tool install fde-engine            # or: uv tool run fde-engine ...
-fulcra auth login                     # first act if the user has no account
+uv tool install --from git+https://github.com/ashfulcra/fulcra-tools#subdirectory=packages/fde-engine fde-engine
+# or: uv tool run --from git+https://github.com/ashfulcra/fulcra-tools#subdirectory=packages/fde-engine fde-engine ...
+# (plain `uv tool install fde-engine` once the package is published to PyPI — do not use it before then)
+fulcra auth login                     # first act if the user has no account;
+                                       # delegate to the fulcra-onboarding skill
+                                       # (github.com/fulcradynamics/agent-skills)
+                                       # for new-user onboarding where available
 fde-engine list                       # existing engagements, if any
 ```
 
