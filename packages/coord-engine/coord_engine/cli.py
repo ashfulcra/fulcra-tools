@@ -912,9 +912,16 @@ def _atc_usage_shards(transport: Any, team: str) -> list[dict[str, Any]]:
             ts = continuity._parse_created_at(fm.get("ts"))
             if ts is None or not fm.get("account"):
                 continue
-            rows.append({"account": fm["account"], "ts": ts,
-                         "units": int(fm.get("units") or 0),
-                         "throttled": bool(fm.get("throttled"))})
+            row = {"account": fm["account"], "ts": ts,
+                   "units": int(fm.get("units") or 0),
+                   "throttled": bool(fm.get("throttled"))}
+            # Task-3 outcome fields flow through only when present; v1 shards
+            # (no model/task_class/outcome) reach the demotions fold untouched
+            # and are ignored there.
+            for k in ("model", "task_class", "outcome"):
+                if fm.get(k) is not None:
+                    row[k] = fm[k]
+            rows.append(row)
         except Exception:
             continue
     return rows
@@ -922,17 +929,35 @@ def _atc_usage_shards(transport: Any, team: str) -> list[dict[str, Any]]:
 
 def cmd_usage_log(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
+    task_class = getattr(args, "task_class", None)
+    # --task-class is taxonomy-validated (exit 2 on unknown, matching route's
+    # unknown-need contract) — validate BEFORE any write so a rejected
+    # invocation leaves no shard behind. --outcome is argparse-choices gated.
+    if task_class is not None and task_class not in atc.TAXONOMY:
+        print(f"usage log — unknown task-class: {task_class} (must be one of: "
+              f"{','.join(sorted(atc.TAXONOMY))})", file=sys.stderr)
+        return 2
     ts = _iso(_now())
     fm = {"schema": "atc-usage/v1", "agent": agent, "ts": ts,
           "account": args.account, "tier": args.tier,
           "units": int(args.units or 0), "throttled": bool(args.throttled)}
+    # Outcome-attribution fields are written ONLY when provided, so v1 shards
+    # stay v1 (the headroom + demotions folds both tolerate their absence).
+    if getattr(args, "model", None):
+        fm["model"] = args.model
+    if task_class is not None:
+        fm["task_class"] = task_class
+    if getattr(args, "outcome", None) is not None:
+        fm["outcome"] = args.outcome
     # Path-safe stamp (colons stripped) + agent slug, matching the repo's
     # timestamped-shard convention (_stamp_for_path); fm["ts"] keeps the real
     # ISO value the headroom fold parses.
     transport.write(_atc_usage_prefix(args.team) + _stamp_for_path(ts, agent) + ".md",
                     okf.render_frontmatter(fm) + "\n")
+    extra = "".join(
+        f", {k}={fm[k]}" for k in ("model", "task_class", "outcome") if k in fm)
     print(f"logged {fm['units']} units -> {args.account} ({args.tier}"
-          + (", THROTTLED" if args.throttled else "") + ")")
+          + (", THROTTLED" if args.throttled else "") + ")" + extra)
     return 0
 
 
@@ -944,9 +969,15 @@ def cmd_headroom(args: argparse.Namespace, transport: Any) -> int:
               + (f" ({parsed['error']})" if parsed.get("error") else "")
               + " — see fulcra-agent-atc §setup")
         return 0
-    rows = atc.headroom(parsed["accounts"], _atc_usage_shards(transport, args.team), _now())
+    shards = _atc_usage_shards(transport, args.team)
+    rows = atc.headroom(parsed["accounts"], shards, _now())
     if args.json:
-        print(json.dumps(rows, indent=2))
+        # Contract change (task 3): headroom --json now emits an OBJECT with the
+        # per-window rows under "windows" plus a "demotions" list folded from the
+        # outcome shards — the array top-level could not gain a sibling key.
+        demo = [{"model": m, "task_class": tc, "bad": v["bad"], "of": v["of"]}
+                for (m, tc), v in sorted(atc.demotions(shards).items())]
+        print(json.dumps({"windows": rows, "demotions": demo}, indent=2))
         return 0
     print(f"headroom — {args.team}")
     for r in rows:
@@ -978,7 +1009,11 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
         atc.load_default_models(), _atc_models_overlay(text))
     needs = [n.strip() for n in (args.needs or "").split(",") if n.strip()]
     shards = _atc_usage_shards(transport, args.team)
-    result = atc.route(parsed, merged, needs, shards, now=_now())
+    # Fold outcome shards -> demoted (model, task_class) pairs, then adapt to the
+    # {model: [tags]} shape route consumes (task_class values are taxonomy tags).
+    demo_for_route = atc._demotions_for_route(atc.demotions(shards))
+    result = atc.route(parsed, merged, needs, shards,
+                       demotions=demo_for_route, now=_now())
     # Surface the overlay-merge notes alongside the fold's own coercion notes.
     result["dropped_unknown_tags"] = merge_reports + result.get("dropped_unknown_tags", [])
     reason = result.get("reason")
@@ -998,7 +1033,7 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
     for i, c in enumerate(result["candidates"], 1):
         pct = f"{c['headroom_pct']:g}"
         tags = ",".join(c["tags"])
-        demo = f"  demoted({','.join(c['demoted'])})" if c["demoted"] else ""
+        demo = f" [demoted: {', '.join(c['demoted'])}]" if c["demoted"] else ""
         print(f"{i}. {c['model']} — ({c['account']}) — {pct}% — {tags}{demo}")
     return 0
 
@@ -1450,6 +1485,11 @@ def build_parser() -> argparse.ArgumentParser:
     ul.add_argument("team"); ul.add_argument("--account", required=True)
     ul.add_argument("--tier", required=True); ul.add_argument("--units", type=int, default=0)
     ul.add_argument("--throttled", action="store_true"); ul.add_argument("--agent")
+    ul.add_argument("--model", help="model id this spend attributes to (for outcome routing)")
+    ul.add_argument("--task-class", dest="task_class",
+                    help="capability tag the work exercised (taxonomy-validated)")
+    ul.add_argument("--outcome", choices=["clean", "rework", "escalated"],
+                    help="how the dispatched work turned out (feeds the demotion fold)")
     ul.set_defaults(func=cmd_usage_log)
 
     hr = sub.add_parser("headroom", help="per-account cap headroom fold (fulcra-agent-atc)")

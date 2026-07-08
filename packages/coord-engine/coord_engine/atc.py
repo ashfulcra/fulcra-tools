@@ -180,8 +180,16 @@ def route(accounts: dict[str, Any], models: dict[str, Any], needs: list[str],
     acct_pct: dict[str, float] = {}
     for a in accounts_list:
         aid = a.get("id")
+        declared = a.get("windows") or []
         rows = by_acct.get(aid, [])
-        if rows and all(r["headroom"] > 0 for r in rows):
+        if not declared:
+            # An account declaring ZERO windows is "uncapped" — the operator's
+            # local-ollama case: no declared caps means unlimited headroom, so it
+            # is ELIGIBLE at 100.0%, not ineligible. KNOWN CONSERVATIVE GAP: with
+            # no windows there is nothing for a throttled shard to zero, so an
+            # uncapped account can never be throttle-excluded and always routes.
+            acct_pct[aid] = 100.0
+        elif rows and all(r["headroom"] > 0 for r in rows):
             acct_pct[aid] = min(r["pct"] for r in rows)
 
     need_set = set(needs)
@@ -261,3 +269,64 @@ def headroom(accounts: list[dict[str, Any]], shards: list[dict[str, Any]],
                 "throttled": throttled, "calibrate": throttled,
             })
     return sorted(rows, key=lambda r: (r["account"], r["window_hours"]))
+
+
+# Trailing-window demotion policy (frozen): a (model, task_class) pair is demoted
+# when recent work goes badly. BAD outcomes are rework/escalated; the window is
+# the trailing 5 outcome-bearing shards by ts; and — the strict insufficient-
+# evidence rule — a pair demotes ONLY when at least DEMOTE_MIN outcome-bearing
+# shards exist for it AND at least DEMOTE_MIN of the trailing window are bad
+# (so 2-of-2 bad never demotes; 3-of-3 does).
+_DEMOTE_WINDOW = 5
+_DEMOTE_MIN = 3
+_BAD_OUTCOMES = frozenset({"rework", "escalated"})
+
+
+def demotions(shards: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Fold usage shards into the set of demoted ``(model, task_class)`` pairs.
+
+    Pure over the injected rows. Only shards carrying ALL of ``model`` +
+    ``task_class`` + ``outcome`` participate — v1 shards (and partial rows
+    missing any of the three) are ignored silently, so pre-task-3 data flows
+    through untouched. For each pair the outcome-bearing shards are ordered by
+    ``ts`` ascending (stable), the trailing ``_DEMOTE_WINDOW`` (5) are taken, and
+    the pair is DEMOTED iff ≥``_DEMOTE_MIN`` (3) outcome shards exist for it AND
+    ≥``_DEMOTE_MIN`` of that trailing window are ``rework``/``escalated``.
+
+    Returns ``{(model, task_class): {"bad": n, "of": m, "window": 5}}`` for the
+    demoted pairs ONLY (a recovered pair — later clean shards pulling the trailing
+    ratio under threshold — simply drops out of the mapping). ``of`` is the size
+    of the trailing window actually inspected (``min(5, total)``); ``window`` is
+    the policy window size."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for s in shards:
+        model, tc, outcome = s.get("model"), s.get("task_class"), s.get("outcome")
+        if not model or not tc or not outcome:
+            continue  # v1 / partial shard — outside the outcome ledger
+        groups.setdefault((model, tc), []).append(s)
+
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, group in groups.items():
+        # Stable sort by ts asc -> deterministic trailing window even for shards
+        # sharing a ts (input order breaks the tie).
+        ordered = sorted(group, key=lambda s: s["ts"])
+        trailing = ordered[-_DEMOTE_WINDOW:]
+        bad = sum(1 for s in trailing if s.get("outcome") in _BAD_OUTCOMES)
+        if len(ordered) >= _DEMOTE_MIN and bad >= _DEMOTE_MIN:
+            out[key] = {"bad": bad, "of": len(trailing), "window": _DEMOTE_WINDOW}
+    return out
+
+
+def _demotions_for_route(demo_map: dict[tuple[str, str], dict[str, Any]]
+                         ) -> dict[str, list[str]]:
+    """Adapt ``demotions`` output to the shape ``route`` consumes.
+
+    ``demotions`` keys by ``(model, task_class)``; ``route`` wants
+    ``{model_id: [demoted tags...]}``. task_class values are TAXONOMY tags (the
+    CLI validates ``--task-class`` against the taxonomy), so a pair demoted for
+    ``(model, "code")`` demotes that model for the ``code`` need. Tags are sorted
+    for a deterministic list."""
+    out: dict[str, list[str]] = {}
+    for (model, tc) in demo_map:
+        out.setdefault(model, []).append(tc)
+    return {m: sorted(tags) for m, tags in out.items()}
