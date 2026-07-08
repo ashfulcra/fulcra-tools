@@ -74,7 +74,7 @@ def test_migrate_slug_collision_disambiguates():
     assert len(news) == 1                                     # suffixed, original untouched
 
 
-def test_migrate_mark_failure_reports_but_keeps_coord2_doc():
+def test_migrate_mark_failure_reports_but_keeps_coord_doc():
     t = FakeTransport()
     t.put("/coordination/tasks/TASK-X-1.json", json.dumps(_incumbent("TASK-X-1", "Fix it")))
     orig = t.write
@@ -89,12 +89,12 @@ def test_migrate_readback_mismatch_leaves_incumbent_open():
     t.put("/coordination/tasks/TASK-X-1.json", json.dumps(_incumbent("TASK-X-1", "Fix it")))
     orig = t.read
 
-    def corrupt_coord2_read(path):
+    def corrupt_coord_read(path):
         if path == "team/fulcra/task/fix-it.md":
             return "corrupted"
         return orig(path)
 
-    t.read = corrupt_coord2_read
+    t.read = corrupt_coord_read
     res = migrate.migrate(t, "fulcra", now=NOW)
     assert res["migrated"] == 0 and any("not readable back" in e for e in res["errors"])
     inc = json.loads(t.store["/coordination/tasks/TASK-X-1.json"])
@@ -133,7 +133,7 @@ def test_migrate_skips_review_workstream_dispatches():
 
 def test_migrate_repair_pass_finishes_incumbent_transition():
     t = FakeTransport()
-    # coord2 twin exists (migrated_from), incumbent still open (mark failed previously)
+    # coord twin exists (migrated_from), incumbent still open (mark failed previously)
     t.put("team/fulcra/task/fix-it.md",
           "---\ntype: Task\ntitle: Fix it\nstatus: active\nmigrated_from: TASK-X-1\n---\n")
     t.put("/coordination/tasks/TASK-X-1.json", json.dumps(_incumbent("TASK-X-1", "Fix it")))

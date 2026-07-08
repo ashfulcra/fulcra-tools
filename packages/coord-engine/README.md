@@ -1,6 +1,6 @@
 # coord-reconcile (L1)
 
-The linchpin layer of coord2. Gives a `fulcra-agent-teams` namespace **queryable, self-healing views**
+The linchpin layer of coord. Gives a `fulcra-agent-teams` namespace **queryable, self-healing views**
 by scanning the OKF markdown and regenerating its indexes + a fast-path aggregate — no shadow store.
 
 - **Reads:** `team/<team>/task/*.md` (OKF `type: Task` concept docs).

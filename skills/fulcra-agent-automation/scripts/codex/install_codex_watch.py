@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""coord2-first Codex watch installer (fulcra-agent-automation).
+"""coord-first Codex watch installer (fulcra-agent-automation).
 
 Standalone (Python 3.10+ stdlib only). Ports the hardened legacy Codex
-adapter mechanics onto the coord2 engine, in three layers:
+adapter mechanics onto the coord engine, in three layers:
 
   * ``hooks.json`` merge — SessionStart (matcher ``startup|resume|clear|compact``)
     + PreCompact, same entry shape as Claude Code settings.json. Deliberately
@@ -14,7 +14,7 @@ adapter mechanics onto the coord2 engine, in three layers:
     silently (exit 0) when coord-engine is not on PATH.
   * app-thread automation — writes the coord2-first ``COORD2_WATCH_PROMPT``
     to ``<codex>/automations/coord2-watch-<agent-slug>/automation.toml``.
-    This is the durable coord2-first replacement for the legacy watch prompt.
+    This is the durable coord-first replacement for the legacy watch prompt.
     The target thread id is taken from ``--thread-id``, else preserved from
     our existing managed automation; with neither, the automation write is
     deferred and the SessionStart hook seeds it (once, only while absent) from
@@ -24,7 +24,7 @@ adapter mechanics onto the coord2 engine, in three layers:
 DELIBERATELY OMITTED (security scope ruling): the legacy ``wake.json``
 host-wake layer. It spawns headless ``codex exec`` sessions with
 ``--dangerously-bypass-approvals-and-sandbox`` — a consent-gated,
-security-sensitive surface not shipped in this pass. The existing coord2
+security-sensitive surface not shipped in this pass. The existing coord
 listener already covers wake.
 
 COEXISTENCE: the legacy adapter is live on real hosts — managed scripts dir
@@ -123,7 +123,7 @@ BRIEFING="$(coord-engine briefing "$TEAM" --agent "$AGENT" 2>/dev/null | head -6
 python3 - "$BRIEF" "$BRIEFING" <<'PYEOF'
 import json, sys
 brief, briefing = sys.argv[1], sys.argv[2]
-ctx = "coord2 resume brief:\\n" + brief + "\\n\\ncoord2 briefing:\\n" + briefing
+ctx = "coord resume brief:\\n" + brief + "\\n\\ncoord briefing:\\n" + briefing
 print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "SessionStart", "additionalContext": ctx[:4000]}}))
 PYEOF
@@ -236,7 +236,7 @@ def _parse_simple_toml_fields(text: str) -> dict:
 def install_automation(team: str, agent: str, codex_dir: Path, *,
                        thread_id: "str | None", uninstall: bool,
                        dry_run: bool) -> dict:
-    """Install/update our coord2 watch automation. Preserves created_at and
+    """Install/update our coord watch automation. Preserves created_at and
     (absent an explicit --thread-id) the existing target thread on re-runs;
     with no thread id at all, defers (SessionStart hook seeds it later)."""
     path = _automation_path(codex_dir, agent)
@@ -360,7 +360,7 @@ def install(team: str, agent: str, *, codex_dir: Path,
 
 def main(argv: "list[str] | None" = None) -> int:
     p = argparse.ArgumentParser(
-        description="Install the coord2-first Codex watch (hooks + automation).")
+        description="Install the coord-first Codex watch (hooks + automation).")
     p.add_argument("team")
     p.add_argument("agent")
     p.add_argument("--codex-dir", default=None,

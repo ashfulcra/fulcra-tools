@@ -1,4 +1,4 @@
-# coord2: the pro tier for fulcra-agent-teams
+# coord: the pro tier for fulcra-agent-teams
 
 *One page for the Fulcra pitch. Companion: `DESIGN.md` (architecture + evidence), 5-min live demo.*
 

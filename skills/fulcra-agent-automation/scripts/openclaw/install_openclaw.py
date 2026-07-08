@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""coord2 OpenClaw HEARTBEAT/BOOT managed-block installer (fulcra-agent-automation).
+"""coord OpenClaw HEARTBEAT/BOOT managed-block installer (fulcra-agent-automation).
 
 Standalone (Python 3.10+ stdlib only). Ports ONLY the prose-file marker layer
 from the legacy adapter ``packages/fulcra-coord/fulcra_coord/openclaw.py``: the
@@ -20,7 +20,7 @@ COEXISTENCE: the legacy adapter is live on real hosts and fences its BOOT.md /
 HEARTBEAT.md block with ``<!-- fulcra-coord:begin ... -->`` /
 ``<!-- fulcra-coord:end -->``. This installer uses a DISTINCT coord2 pair,
 ``<!-- fulcra-coord2:begin ... -->`` / ``<!-- fulcra-coord2:end -->``. The
-scanner matches marker lines by exact string comparison against the coord2
+scanner matches marker lines by exact string comparison against the coord
 markers, and ``fulcra-coord2:begin`` is not a substring of
 ``fulcra-coord:begin`` (nor vice-versa), so this installer's install/uninstall
 can only ever touch the coord2-fenced region — a workspace carrying the legacy
@@ -36,7 +36,7 @@ it exists the fenced region is appended/replaced in place, preserving all user
 content.
 
 CONTENT SAFETY (hardened after review — three reproduced findings):
-  * Marker integrity — before ANY write, each target file's coord2 markers are
+  * Marker integrity — before ANY write, each target file's coord markers are
     validated line-wise. Unbalanced markers (e.g. an orphan BEGIN left by a
     crash-truncated write) or an END preceding its BEGIN abort with exit 1 and
     a message telling the operator to repair the file manually; nothing is
@@ -49,9 +49,9 @@ CONTENT SAFETY (hardened after review — three reproduced findings):
     span matching, so a user documenting the markers in a fenced sample never
     has that sample treated as a real managed block. Only a marker alone at
     the start of its own line, outside any code fence, counts.
-  * Gated husk delete — on uninstall a file is deleted only if a coord2 block
+  * Gated husk delete — on uninstall a file is deleted only if a coord block
     was actually stripped from it AND nothing remains. A pre-existing empty or
-    whitespace-only file that never held a coord2 block is left untouched.
+    whitespace-only file that never held a coord block is left untouched.
 
 CLI:
   python3 install_openclaw.py <team> <agent>
@@ -143,7 +143,7 @@ def _managed_block(body: str) -> str:
 
 
 class MarkerIntegrityError(ValueError):
-    """The file's coord2 markers are unbalanced/malformed; refuse to write."""
+    """The file's coord markers are unbalanced/malformed; refuse to write."""
 
 
 def _is_marker_line(raw: str, marker: str) -> bool:
@@ -159,11 +159,11 @@ def _is_marker_line(raw: str, marker: str) -> bool:
 
 
 def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]":
-    """Line-wise scan for coord2 blocks, code-fence-aware, integrity-checked.
+    """Line-wise scan for coord blocks, code-fence-aware, integrity-checked.
 
     Returns ``(lines, spans)`` where ``lines`` is ``splitlines(keepends=True)``
     and each span is an inclusive ``(begin_line_idx, end_line_idx)`` of a
-    well-formed coord2 block. Lines whose stripped form starts with ``` toggle
+    well-formed coord block. Lines whose stripped form starts with ``` toggle
     code-fence state; marker lines inside a code fence are IGNORED for both
     counting and span matching (finding 2). Raises MarkerIntegrityError on an
     orphan BEGIN, an END with no open BEGIN, or a nested BEGIN (finding 1) —
@@ -183,7 +183,7 @@ def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]"
         if _is_marker_line(raw, _BEGIN):
             if open_begin is not None:
                 raise MarkerIntegrityError(
-                    f"{filename}: coord2 BEGIN marker on line {i + 1} while the "
+                    f"{filename}: coord BEGIN marker on line {i + 1} while the "
                     f"block opened on line {open_begin + 1} is still open "
                     "(unbalanced markers). Refusing to modify the file; repair "
                     "it manually so every BEGIN has exactly one matching END.")
@@ -191,7 +191,7 @@ def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]"
         elif _is_marker_line(raw, _END):
             if open_begin is None:
                 raise MarkerIntegrityError(
-                    f"{filename}: coord2 END marker on line {i + 1} with no "
+                    f"{filename}: coord END marker on line {i + 1} with no "
                     "preceding BEGIN (unbalanced markers). Refusing to modify "
                     "the file; repair it manually so every END follows its "
                     "BEGIN.")
@@ -199,7 +199,7 @@ def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]"
             open_begin = None
     if open_begin is not None:
         raise MarkerIntegrityError(
-            f"{filename}: orphan coord2 BEGIN marker on line "
+            f"{filename}: orphan coord BEGIN marker on line "
             f"{open_begin + 1} with no matching END (e.g. a crash-truncated "
             "write). Refusing to modify the file; repair it manually — remove "
             "the orphan marker or restore the missing END — then re-run.")
@@ -207,7 +207,7 @@ def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]"
 
 
 def _strip_block(text: str, filename: str) -> str:
-    """Remove every well-formed coord2 block (marker lines inclusive)."""
+    """Remove every well-formed coord block (marker lines inclusive)."""
     lines, spans = _scan(text, filename)
     if not spans:
         return text
@@ -237,14 +237,14 @@ def _resolve_target(workspace: Path, name: str) -> Path:
 
 def install(team: str, agent: str, *, workspace: Path,
             uninstall: bool = False, dry_run: bool = False) -> dict[str, Any]:
-    """Install/uninstall the coord2 managed block in BOOT.md + HEARTBEAT.md.
+    """Install/uninstall the coord managed block in BOOT.md + HEARTBEAT.md.
 
     Idempotent. ``dry_run`` writes nothing but returns the plan; ``uninstall``
-    surgically removes only the coord2-fenced region, preserving user content
+    surgically removes only the coord-fenced region, preserving user content
     (and deleting a file left empty because it held ONLY our block — never a
     pre-existing empty/whitespace-only file that had no block).
 
-    Raises MarkerIntegrityError — before any write — if a target file's coord2
+    Raises MarkerIntegrityError — before any write — if a target file's coord
     markers are unbalanced (orphan BEGIN, END-before-BEGIN, nested BEGIN).
     """
     plan: dict[str, Any] = {
@@ -267,7 +267,7 @@ def install(team: str, agent: str, *, workspace: Path,
 
         if uninstall:
             new_text = stripped
-            # Only a "remove" if there was actually a coord2 block to drop.
+            # Only a "remove" if there was actually a coord block to drop.
             if new_text != existing:
                 plan["removes"].append(str(path))
                 if new_text.strip() == "":
@@ -308,7 +308,7 @@ def install(team: str, agent: str, *, workspace: Path,
 
 def main(argv: "list[str] | None" = None) -> int:
     p = argparse.ArgumentParser(
-        description="Install the coord2 OpenClaw HEARTBEAT/BOOT managed block.")
+        description="Install the coord OpenClaw HEARTBEAT/BOOT managed block.")
     p.add_argument("team")
     p.add_argument("agent")
     p.add_argument("--workspace", default=None,

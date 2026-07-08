@@ -1,8 +1,8 @@
-"""One-shot exporter: incumbent fulcra-coord JSON tasks -> coord2 task docs.
+"""One-shot exporter: incumbent fulcra-coord JSON tasks -> coord task docs.
 
 The migration plan's approach C (docs 06): deterministic field mapping, idempotent
 (re-runs skip already-migrated work), one-way, and **marked** — after a verified
-coord2 write the incumbent task gains a ``migrated:coord2`` tag so a task lives in
+coord write the incumbent task gains a ``migrated:coord`` tag so a task lives in
 exactly one active system. Never deletes anything on the incumbent.
 """
 
@@ -155,7 +155,7 @@ def migrate(
                            for e in (t.get("events") or []))
             if reopened and not already_terminal:
                 errors.append(f"{t['id']}: reopened by operator after migration — left open "
-                              f"(coord2 twin task/{twin}.md also exists; resolve manually)")
+                              f"(coord twin task/{twin}.md also exists; resolve manually)")
                 continue
             if not already_terminal and mark and not dry_run:
                 if transport.write(f"{source}/tasks/{n}",
@@ -188,10 +188,10 @@ def migrate(
         dst = f"team/{team}/task/{slug}.md"
         content = okf.render_frontmatter(fm) + body
         if not transport.write(dst, content):
-            errors.append(f"{t['id']}: coord2 write failed; incumbent untouched")
+            errors.append(f"{t['id']}: coord write failed; incumbent untouched")
             continue
         if transport.read(dst) != content:  # verify before marking (one-active-system)
-            errors.append(f"{t['id']}: coord2 write not readable back; incumbent untouched")
+            errors.append(f"{t['id']}: coord write not readable back; incumbent untouched")
             continue
         migrated += 1
         existing_slugs.add(slug)

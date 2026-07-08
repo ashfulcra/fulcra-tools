@@ -2,7 +2,7 @@
 # fulcra-primitives-maintainer — daily drift detector.
 # Fingerprints the live Fulcra surface (OpenAPI spec, CLI HEAD, annotation
 # commands, MCP discovery) and compares to a stored baseline. On drift it
-# posts to the coord2 team bus (team fulcra) as fulcra-primitives-maintainer and writes an
+# posts to the coord team bus (team fulcra) as fulcra-primitives-maintainer and writes an
 # ALERT file so a Claude session does the actual FULCRA-PRIMITIVES.md rewrite.
 # Detection is unattended; the rewrite (model judgment) is not.
 #

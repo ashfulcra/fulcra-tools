@@ -31,12 +31,12 @@ NEW="$(comm -13 \
 printf '%s\n' "$CURRENT_KEYS" > "$ITEMS_FILE"
 
 if [[ "$NEW" -gt 0 ]]; then
-  MSG="coord2: ${NEW} new directive(s) for ${AGENT} in team/${TEAM} (${COUNT} open)"
+  MSG="coord: ${NEW} new directive(s) for ${AGENT} in team/${TEAM} (${COUNT} open)"
   echo "$(date -u +%FT%TZ) $MSG"
   if command -v osascript >/dev/null 2>&1; then
     # display only; TEAM/AGENT are validated by the installer, but escape quotes anyway
     SAFE_MSG="${MSG//\"/}"
-    osascript -e "display notification \"${SAFE_MSG}\" with title \"coord2 inbox\"" || true
+    osascript -e "display notification \"${SAFE_MSG}\" with title \"coord inbox\"" || true
   fi
   if [[ "$#" -gt 0 ]]; then
     # consent-gated wake command (installer requires explicit --wake-cmd)

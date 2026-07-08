@@ -1,6 +1,6 @@
-# Upstream plan — contributing coord2 to Fulcra
+# Upstream plan — contributing coord to Fulcra
 
-**Goal:** get coord2's skills + engine adopted upstream (`fulcradynamics/agent-skills` + the fulcra-api
+**Goal:** get coord's skills + engine adopted upstream (`fulcradynamics/agent-skills` + the fulcra-api
 surface), so the "pro tier of the official skill" stops being a personal fork and becomes the official
 capability. Operator (Ash) is at Fulcra — this is an internal champion play, not a cold OSS PR: optimize
 for *trivially adoptable*, not *persuasive*.
@@ -20,7 +20,7 @@ scripts allowed per the `fulcra-dashboard` precedent). Contribution = `git mv` +
   "hand-maintain the index" guidance — so wave 2 must include a small **amendment PR to
   fulcra-agent-teams' SKILL.md** ("if fulcra-agent-reconcile is installed, do not hand-edit the index"),
   and that's a conversation, not just a diff.
-- Polish before PR: strip coord2-repo-relative links from SKILL.md files; ensure every skill stands alone;
+- Polish before PR: strip coord-repo-relative links from SKILL.md files; ensure every skill stands alone;
   drop `docs/proposals/` internals (upstream gets a single DESIGN.md summarizing the architecture +
   review lineage instead).
 
@@ -50,7 +50,7 @@ Decision gates:
 
 ### Track 3 — fulcra-api platform asks (filed as issues w/ evidence, independent of 1–2)
 Each has a concrete incident/measurement behind it from this build:
-- **`--format json` for `file` + `catalog` + `data-type` verbs.** Evidence: coord2 line-parses text
+- **`--format json` for `file` + `catalog` + `data-type` verbs.** Evidence: coord line-parses text
   (two review findings — list-order nondeterminism, minute-granular mtimes); the catalog **shape drift
   in 0.1.35 caused the duplicate-timeline-tracks incident** (9× + 4× dupes) because there is no stable
   structured contract.
@@ -62,7 +62,7 @@ Each has a concrete incident/measurement behind it from this build:
 - **`catalog` should hide (or flag) archived data types.** Evidence: `data-type archive` leaves entries
   listed with no marker — we needed per-host pins (0.15.18) purely because archived duplicates still
   match by name.
-- **Record-write CLI verbs** (create/correct/delete). Evidence: coord2 deferred timeline-annotate on
+- **Record-write CLI verbs** (create/correct/delete). Evidence: coord deferred timeline-annotate on
   this gap; the prefs backlog (`native record delete/replace`) is blocked on the same thing.
 
 ## Sequencing
@@ -71,7 +71,7 @@ Each has a concrete incident/measurement behind it from this build:
 2. **Internal pitch** (Ash): one pager + demo on the live team (`briefing`, `board`, `health` on real
    data beats any deck). Decide Track-2 home with the API team; hand them Track-3 issues.
 3. **PRs**: wave-1 skills PR → teams-amendment + wave-2 PR → engine per the Track-2 decision.
-4. **Post-acceptance:** coord2 repo becomes a thin dev mirror or archives; fleet reinstalls from
+4. **Post-acceptance:** coord repo becomes a thin dev mirror or archives; fleet reinstalls from
    upstream (setup script already installs by copy — repointing the clone URL is the whole change).
 
 ## Standalone posture if Fulcra stalls
@@ -143,7 +143,7 @@ source modules and expose the bundle as the packaging surface.
 3. **Polish list**: + homepage flip at merge; + upstream drift re-check IMMEDIATELY before opening each
    PR (the repo moves weekly — A1 falsified in 3 days).
 4. **Ops note**: verifying A10 required upgrading this host to fulcra-api 0.1.35 mid-pass; regression
-   check confirmed `file` output shape unchanged (coord2 parsers + 0.15.17 matcher unaffected).
+   check confirmed `file` output shape unchanged (coord parsers + 0.15.17 matcher unaffected).
 
 ---
 

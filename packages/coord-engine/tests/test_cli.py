@@ -75,7 +75,7 @@ def test_cli_roles_status_vacant_escalation_due(capsys):
 def test_cli_task_start_then_reconcile_shows_it(capsys):
     from coord_engine import okf
     t = FakeTransport()
-    assert cli.main(["task", "start", "r", "Build the thing", "-w", "coord2",
+    assert cli.main(["task", "start", "r", "Build the thing", "-w", "coord",
                      "--status", "active", "-p", "P1"], transport=t) == 0
     assert "created" in capsys.readouterr().out
     fm = okf.parse_frontmatter(t.store["team/r/task/build-the-thing.md"])

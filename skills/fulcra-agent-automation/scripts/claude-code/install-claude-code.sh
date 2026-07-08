@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install coord2 lifecycle hooks for Claude Code / Cowork (idempotent).
+# Install coord lifecycle hooks for Claude Code / Cowork (idempotent).
 # Usage: install-claude-code.sh <team> <agent>
 #        install-claude-code.sh --uninstall <team> <agent>
 #
@@ -17,7 +17,7 @@ SETTINGS="$HOME/.claude/settings.json"
 if [ "$UNINSTALL" -eq 0 ]; then
   mkdir -p "$HOOKS_DIR"
   # Render the hook templates, substituting the __TEAM__/__AGENT__ tokens as
-  # SHELL-QUOTED literals. coord2 agent ids are NOT plain alphanumerics (engine
+  # SHELL-QUOTED literals. coord agent ids are NOT plain alphanumerics (engine
   # ids look like `claude_code/host/repo` or `claude-code:host:repo`); a raw
   # `sed s/__AGENT__/$AGENT/` would treat '/' as the substitute delimiter
   # (fatal: `sed: bad flag`) and '&' as the matched-text backreference (exit 0
@@ -85,6 +85,6 @@ for event, (script, matcher) in mapping.items():
 with open(settings_path, "w") as f:
     json.dump(d, f, indent=2)
     f.write("\n")
-print(("removed" if uninstall else "installed") + " coord2 hooks:",
+print(("removed" if uninstall else "installed") + " coord hooks:",
       ", ".join(mapping))
 EOF

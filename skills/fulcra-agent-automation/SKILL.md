@@ -9,7 +9,7 @@ metadata: { "openclaw": { "emoji": "⏱️" } }
 
 # Fulcra Agent Automation
 
-Ties the coord2 skills together for **unattended** operation. `fulcra-agent-reconcile` heals a team's
+Ties the coord skills together for **unattended** operation. `fulcra-agent-reconcile` heals a team's
 index/views, but someone has to run it; this skill **schedules** it, and makes wake-ups
 (cron/heartbeat) **resume structured continuity** first. Scheduling is a single, platform-specific action
 (not a fold), so this skill is prose + one bundled install script — no engine logic.
@@ -70,7 +70,7 @@ The listener (§2) delivers inbox notifications, but the **lifecycle contract** 
 snapshot-on-change, park-before-context-loss — is owned by a per-harness adapter that hooks the
 platform's own session events. The contract itself (rules 1–4) lives in
 [`fulcra-agent-continuity` §The lifecycle contract](../fulcra-agent-continuity/SKILL.md); the adapters
-below automate it. Each keys everything on a distinct `coord2` marker and coexists with the legacy
+below automate it. Each keys everything on a distinct `coord` marker and coexists with the legacy
 `fulcra-coord` adapters until the phase-3 freeze retires them — installing one never touches a legacy
 entry. All installers are idempotent (reinstall replaces, never duplicates) and ship an `--uninstall`
 inverse.
@@ -108,10 +108,10 @@ and the same settings.json, so the same installer covers it.
 python3 scripts/codex/install_codex_watch.py <team> <agent> [--codex-dir DIR] [--thread-id ID] [--uninstall] [--dry-run]
 ```
 Merges SessionStart (matcher `startup|resume|clear|compact`) + PreCompact entries into
-`~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord2-first app-thread automation
+`~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord-first app-thread automation
 under `~/.codex/automations/coord2-watch-<agent>/` whose prompt embeds contract rules 1–3 and ticks the
 inbox. The consent-gated `wake.json` host-wake layer is **deliberately not shipped** (security ruling:
-it spawns headless `codex exec` with approvals/sandbox bypassed; the coord2 listener already covers
+it spawns headless `codex exec` with approvals/sandbox bypassed; the coord listener already covers
 wake). Deployment precondition: on the first real host, verify the SessionStart hook actually fires
 before relying on hook-based automation seeding — pass `--thread-id` for the deterministic path if you
 already know the watch thread.
@@ -154,6 +154,6 @@ Then process the team inbox and, before concluding, snapshot again
 3. **Gate merges** with `fulcra-agent-review` (`review status`), and keep roles fresh with
    `fulcra-agent-roles` (`roles status`), escalating vacancies.
 
-That's the full coord2 stack running unattended on top of a `fulcra-agent-teams` space.
+That's the full coord stack running unattended on top of a `fulcra-agent-teams` space.
 
 See the bundled [`scripts/install-heartbeat.sh`](scripts/install-heartbeat.sh).

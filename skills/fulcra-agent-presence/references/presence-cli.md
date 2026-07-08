@@ -18,7 +18,7 @@ Shard shape (`team/<team>/presence/<agent-slug>.md`):
 ---
 type: Presence
 agent: claude-code:host:repo
-workstreams: [web, coord2]
+workstreams: [web, coord]
 summary: shipping the A3 layer
 timestamp: 2026-07-02T12:00:00Z
 ---

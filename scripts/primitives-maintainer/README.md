@@ -26,7 +26,7 @@ Reply if the doc is wrong for your platform."
 
 This is part of the doc-update procedure, not optional: the doc is only useful
 if the fleet re-aligns to it. (Operator directive, 2026-06-15; retargeted to
-coord2 team `fulcra` on 2026-07-04.)
+coord team `fulcra` on 2026-07-04.)
 
 ## Scripts
 
@@ -35,10 +35,10 @@ coord2 team `fulcra` on 2026-07-04.)
 | `drift-check.sh` | daily | Narrow fingerprint — OpenAPI endpoint paths + annotation methods, `fulcra-api-python` main HEAD, published `fulcra-api` PyPI version, annotation-command count, MCP scopes — vs `.primitives-state/baseline.json`. The fast tripwire for the documented full-rewrite trigger (annotation **record** commands, incl. delete, landing in the CLI). |
 | `weekly-review.sh` | weekly | Wide fingerprint — full path+method set, all schema names, docs page + MCP discovery hashes — vs `weekly-baseline.json`, **and** always drops `WEEKLY-REVIEW-DUE.txt` so a session does a genuine end-to-end human-eyes re-read (catches docs prose / new MCP tools a hash can't judge). |
 
-On drift either script posts an alert to the **coord2** team bus (`coord-engine
+On drift either script posts an alert to the **coord** team bus (`coord-engine
 tell fulcra …`) into the `claude-code:Mac:fulcra-primitives-maintainer` inbox —
 the role that acts on it — then advances its baseline so it alerts once per
-change, not every run. (Alerts moved off the legacy `fulcra-coord` bus to coord2
+change, not every run. (Alerts moved off the legacy `fulcra-coord` bus to coord
 on 2026-07-04.)
 
 Both scripts derive their checkout root from their own location and find
@@ -51,7 +51,7 @@ at the checkout root and is gitignored.
 The role pushes the doc **directly to `main`** (doc-only); everything else,
 including this tooling, goes through the normal PR + review flow.
 
-1. Clone the repo to a dedicated checkout. coord2 takes identity per-command via
+1. Clone the repo to a dedicated checkout. coord takes identity per-command via
    `--agent`/`--from` (no persisted identity to set); announce presence once:
    ```bash
    coord-engine presence beat fulcra --agent claude-code:<host>:fulcra-primitives-maintainer \

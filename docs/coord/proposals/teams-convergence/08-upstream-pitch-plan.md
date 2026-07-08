@@ -1,4 +1,4 @@
-# Upstream pitch plan — getting coord2 adopted by Fulcra
+# Upstream pitch plan — getting coord adopted by Fulcra
 
 Execution plan for the internal-champion play defined in `07-upstream-plan.md` (adversarially
 reviewed, APPROVE, 2026-07-04). Ash pitches; coord-maintainer packages and executes. The three
@@ -8,7 +8,7 @@ carry-forward risks from the review are baked in below.
 
 Produce an `upstream-ready` branch + evidence pack so the pitch can happen any day Ash picks:
 
-1. **Skills polish**: strip coord2-repo-relative links; flip `homepage:` placeholders; confirm each
+1. **Skills polish**: strip coord-repo-relative links; flip `homepage:` placeholders; confirm each
    of the 11 skills stands alone (PR#33/#34 doctrine + PR#36 prose already landed — re-verify after).
 2. **DESIGN.md**: single upstream-facing doc replacing `docs/proposals/` history — architecture
    (prose skills over one deterministic engine), tier framing (teams = base, coord = pro), review
@@ -50,7 +50,7 @@ Produce an `upstream-ready` branch + evidence pack so the pitch can happen any d
    operator. Sequenced after wave-1 lands to keep the bite size reviewable.
 3. **Engine** per the Track-2 decision (port plan sized with API team if fold; repo transfer if
    option 2; tag-pin docs if option 3).
-4. **Post-acceptance**: coord2 → thin dev mirror; fleet reinstalls from upstream (setup script
+4. **Post-acceptance**: coord → thin dev mirror; fleet reinstalls from upstream (setup script
    URL flip); phase-3 incumbent freeze proceeds independently of upstreaming.
 
 ## Timeline & owners

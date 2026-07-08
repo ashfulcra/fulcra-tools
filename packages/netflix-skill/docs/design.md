@@ -1,7 +1,7 @@
 # fulcra-netflix skill — design
 
 **Date:** 2026-07-03
-**Status:** APPROVED — coord2 review `netflix-skill-design`: CHANGES round (share scope, occurrence-index dedup, namespace contract) folded 2026-07-03; share-scope open question resolved 2026-07-04 (Context Web shares all annotations — honest-disclosure wording is live; per-def scoping arrives with CLI sharing); re-affirmed approve by Ashs-MBP-Work:Codex-Review-Workbook 2026-07-04 at 4df70f0
+**Status:** APPROVED — coord review `netflix-skill-design`: CHANGES round (share scope, occurrence-index dedup, namespace contract) folded 2026-07-03; share-scope open question resolved 2026-07-04 (Context Web shares all annotations — honest-disclosure wording is live; per-def scoping arrives with CLI sharing); re-affirmed approve by Ashs-MBP-Work:Codex-Review-Workbook 2026-07-04 at 4df70f0
 **Location:** `packages/netflix-skill/` in ashfulcra/fulcra-tools — the shippable skill lives at `packages/netflix-skill/skills/fulcra-netflix/` (same package-wraps-skill convention as `media-helpers`/`fulcra-media`), agent-skills folder layout inside so it can be PR'd upstream to `fulcradynamics/agent-skills` later
 
 ## What this is

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# coord2-setup.sh — install coord2 standalone from a checkout of this repo:
+# coord-setup.sh — install coord standalone from a checkout of this repo:
 #   1. install the `coord-engine` tool from ./engine (so the engine + skills are
 #      the SAME version by construction), and
 #   2. install the 6 fulcra-agent-* skills into your agent's skills directory.
@@ -9,8 +9,8 @@
 # convenience (a `git pull` then updates the skills in place).
 #
 # Usage:
-#   scripts/coord2-setup.sh [--symlink] [--skills-dir DIR] [--engine-only] [--skills-only] [--yes]
-#   scripts/coord2-setup.sh --uninstall [--skills-dir DIR] [--yes]
+#   scripts/coord-setup.sh [--symlink] [--skills-dir DIR] [--engine-only] [--skills-only] [--yes]
+#   scripts/coord-setup.sh --uninstall [--skills-dir DIR] [--yes]
 #
 # Defaults: copy; skills dir = ~/.claude/skills (Claude Code — verified discovery path).
 # For another agent, pass --skills-dir (e.g. an OpenClaw skills dir).
@@ -40,10 +40,10 @@ confirm() { [[ "$YES" == "1" ]] && return 0; read -r -p "$1 [y/N] " a || true; [
 skill_names() { find "$SKILLS_SRC" -maxdepth 1 -type d -name 'fulcra-agent-*' -exec basename {} \; | sort; }
 
 if [[ "$UNINSTALL" == "1" ]]; then
-  confirm "Uninstall coord2: remove skills from ${SKILLS_DIR} + uninstall coord-engine?" || { echo aborted; exit 0; }
+  confirm "Uninstall coord: remove skills from ${SKILLS_DIR} + uninstall coord-engine?" || { echo aborted; exit 0; }
   for n in $(skill_names); do rm -rf "${SKILLS_DIR:?}/$n" && echo "removed ${SKILLS_DIR}/$n" || true; done
   command -v uv >/dev/null 2>&1 && uv tool uninstall coord-engine >/dev/null 2>&1 && echo "uninstalled coord-engine" || true
-  echo "note: coord2 leaves a team space's _coord/ sidecar + engine-owned index.md in place; to revert a"
+  echo "note: coord leaves a team space's _coord/ sidecar + engine-owned index.md in place; to revert a"
   echo "      team to bare fulcra-agent-teams, delete team/<t>/_coord/ and let an agent re-author task/index.md."
   exit 0
 fi
@@ -54,7 +54,7 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 3
 fi
 if [[ "$DO_ENGINE" == "1" && ! -d "$ENGINE_SRC" ]]; then
-  echo "error: engine/ not found next to this script — run from a coord2 checkout." >&2; exit 3
+  echo "error: engine/ not found next to this script — run from a coord checkout." >&2; exit 3
 fi
 
 if [[ "$DO_ENGINE" == "1" ]]; then
@@ -81,6 +81,6 @@ if command -v fulcra-api >/dev/null 2>&1; then echo "  ✓ fulcra-api on PATH (e
   echo "  ✗ fulcra-api NOT found — the engine needs it. Install + auth: uv tool install fulcra-api && fulcra-api auth login" >&2; fi
 if [[ "$DO_SKILLS" == "1" ]]; then
   got="$(ls "$SKILLS_DIR" 2>/dev/null | grep -c '^fulcra-agent-' || true)"
-  echo "  ✓ ${got} coord2 skills present in ${SKILLS_DIR}"
+  echo "  ✓ ${got} coord skills present in ${SKILLS_DIR}"
 fi
 echo "done. Try: coord-engine reconcile <team>   (see skills/fulcra-agent-reconcile)"

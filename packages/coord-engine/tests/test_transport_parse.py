@@ -23,7 +23,7 @@ def test_parse_list_output_empty():
 
 def test_parse_stat_output():
     text = (
-        "/_coord2-probe/probe.md (93 bytes)\n"
+        "/_coord-probe/probe.md (93 bytes)\n"
         "Uploaded: 2026-07-01T16:12:44.623092Z\n"
         "Version: 75c13308-76c0-4379-837e-8a96b4899535\n"
         "Previous Versions: 1\n"
@@ -34,7 +34,7 @@ def test_parse_stat_output():
     assert st["version"] == "75c13308-76c0-4379-837e-8a96b4899535"
     assert st["previous_count"] == 1
     assert st["previous"][0]["version"] == "b8b68ea9-0986-4f9b-bb24-4a693d380ba4"
-    assert st["path"] == "/_coord2-probe/probe.md"
+    assert st["path"] == "/_coord-probe/probe.md"
 
 
 def test_parse_stat_no_previous():
