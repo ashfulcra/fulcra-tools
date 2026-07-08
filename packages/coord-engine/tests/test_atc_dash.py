@@ -39,9 +39,11 @@ def test_dash_data_shape():
     out = atc_dash.dash_data(_accts(FRONTIER_ACCT), [_sh("frontier", units=100)],
                              team="fulcra", models={"map_version": "mv1", "models": {}},
                              now=NOW)
-    assert set(out) == {"headroom", "tier_mix", "headline", "map_version", "generated_at"}
+    assert set(out) == {"headroom", "tier_mix", "demotions", "headline",
+                        "map_version", "generated_at"}
     assert isinstance(out["headroom"], list)
     assert isinstance(out["tier_mix"], dict)
+    assert isinstance(out["demotions"], list)
     assert isinstance(out["headline"], str)
     assert out["map_version"] == "mv1"
     assert isinstance(out["generated_at"], str) and out["generated_at"].startswith("2026-07-08")
@@ -67,6 +69,32 @@ def test_dash_data_tier_mix_from_report_fold():
     out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="fulcra", now=NOW)
     # 1 frontier / 3 cheap of 4 total
     assert out["tier_mix"] == {"frontier": 25, "cheap": 75}
+
+
+def _outcome(model, tc, outcome, age_h=1):
+    return {"account": "amax", "ts": NOW - timedelta(hours=age_h),
+            "tier": "cheap", "units": 1, "model": model, "task_class": tc,
+            "outcome": outcome}
+
+
+def test_dash_data_demotions_match_headroom_json_shape():
+    # A (model, task_class) pair with ≥3 bad of its trailing window demotes; the
+    # dashboard's "demotions" list must be the exact same {model, task_class, bad,
+    # of} shape headroom --json builds from the same shards.
+    shards = [_outcome("haiku-4.5", "code", "rework", age_h=h) for h in (5, 4, 3)]
+    shards += [_outcome("haiku-4.5", "code", "accept", age_h=h) for h in (2, 1)]
+    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), shards, team="fulcra", now=NOW)
+    expect = [{"model": m, "task_class": tc, "bad": v["bad"], "of": v["of"]}
+              for (m, tc), v in sorted(atc.demotions(shards).items())]
+    assert out["demotions"] == expect
+    assert out["demotions"] == [{"model": "haiku-4.5", "task_class": "code",
+                                 "bad": 3, "of": 5}]
+
+
+def test_dash_data_demotions_empty_when_no_bad_outcomes():
+    out = atc_dash.dash_data(_accts(FRONTIER_ACCT), [_sh("frontier", units=100)],
+                             team="fulcra", now=NOW)
+    assert out["demotions"] == []
 
 
 def test_dash_data_headline_string_when_frontier_declared():
@@ -111,6 +139,7 @@ def test_data_json_matches_fold():
         assert status == 200
         assert "json" in ctype
         assert json.loads(body) == data
+        assert "demotions" in json.loads(body)  # the served payload carries it
     finally:
         srv.shutdown()
         srv.server_close()
@@ -160,7 +189,8 @@ def test_page_escapes_bus_derived_strings():
     page = atc_dash.PAGE
     assert "function esc(" in page
     for site in ("esc(r.account)", "esc(r.window_hours)", "esc(r.headroom)",
-                 "esc(r.cap)", "esc(r.pct)", "esc(k)", "esc(tm[k])"):
+                 "esc(r.cap)", "esc(r.pct)", "esc(k)", "esc(tm[k])",
+                 "esc(x.model)", "esc(x.task_class)", "esc(x.bad)", "esc(x.of)"):
         assert site in page, f"missing escaped interpolation: {site}"
     # the raw (unescaped) label/right interpolations must be gone
     assert "r.account + " not in page
@@ -236,8 +266,8 @@ def test_dash_cli_wires_serve_foreground(monkeypatch, capsys):
     assert captured["team"] == "fulcra"
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8787          # default
-    assert set(captured["data"]) == {"headroom", "tier_mix", "headline",
-                                     "map_version", "generated_at"}
+    assert set(captured["data"]) == {"headroom", "tier_mix", "demotions",
+                                     "headline", "map_version", "generated_at"}
 
 
 def test_atc_dash_subgroup_alias_wires_same_handler(monkeypatch):

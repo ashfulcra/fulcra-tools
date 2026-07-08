@@ -40,15 +40,22 @@ def dash_data(accounts: dict[str, Any], shards: list[dict[str, Any]], *,
     re-deriving them, and the ``headroom`` fold for the per-window gauges.
     Returns a JSON-serialisable dict::
 
-        {"headroom": [...], "tier_mix": {tier: pct}, "headline": str,
-         "map_version": str|None, "generated_at": iso}
+        {"headroom": [...], "tier_mix": {tier: pct}, "demotions": [...],
+         "headline": str, "map_version": str|None, "generated_at": iso}
+
+    The ``demotions`` list reuses the exact ``{model, task_class, bad, of}``
+    shape ``headroom --json`` emits (folded from the same ``demotions`` map), so
+    the page can show the active demotions the SKILL doc promises.
     """
     if now is None:
         now = datetime.now(timezone.utc)
     accounts_list = accounts.get("accounts") or []
     hrows = headroom(accounts_list, shards, now)
-    rep = report_fold(accounts, shards, team=team, demotions=demotions(shards),
+    demo_map = demotions(shards)
+    rep = report_fold(accounts, shards, team=team, demotions=demo_map,
                       models=models, days=days, now=now)
+    demo = [{"model": m, "task_class": tc, "bad": v["bad"], "of": v["of"]}
+            for (m, tc), v in sorted(demo_map.items())]
     # tier-mix as {name: pct} — a flat dict is what the gauge page renders; the
     # counts already live in the report verb for anyone who needs them.
     tier_mix = {t["tier"]: t["pct"] for t in rep["tiers"]}
@@ -61,6 +68,7 @@ def dash_data(accounts: dict[str, Any], shards: list[dict[str, Any]], *,
     return {
         "headroom": hrows,
         "tier_mix": tier_mix,
+        "demotions": demo,
         "headline": headline,
         "map_version": (models or {}).get("map_version"),
         "generated_at": now.isoformat().replace("+00:00", "Z"),
@@ -180,6 +188,8 @@ PAGE = """<!doctype html>
   .fill.warn { background: #e8590c; }
   .fill.crit { background: #c92a2a; }
   .throttled { color: #c92a2a; font-weight: 600; }
+  .demo { font-size: 13px; margin-bottom: 6px; }
+  .demo .bad { color: #c92a2a; font-weight: 600; }
   .empty { color: GrayText; font-style: italic; }
   footer { padding: 12px 20px; color: GrayText; font-size: 12px;
            border-top: 1px solid GrayText; }
@@ -202,6 +212,10 @@ PAGE = """<!doctype html>
   <section>
     <h2>Dispatch tier mix (last 7d)</h2>
     <div id="tiermix"><div class="empty">loading&hellip;</div></div>
+  </section>
+  <section>
+    <h2>Active demotions</h2>
+    <div id="demotions"><div class="empty">loading&hellip;</div></div>
   </section>
 </main>
 <footer id="foot">map &mdash; &middot; updated &mdash;</footer>
@@ -234,6 +248,11 @@ PAGE = """<!doctype html>
     document.getElementById("tiermix").innerHTML = keys.length ? keys.map(function (k) {
       return bar(tm[k], { label: esc(k), right: esc(tm[k]) + "%" });
     }).join("") : '<div class="empty">no dispatches in window</div>';
+    var dm = d.demotions || [];
+    document.getElementById("demotions").innerHTML = dm.length ? dm.map(function (x) {
+      return '<div class="demo">' + esc(x.model) + " &mdash; " + esc(x.task_class) +
+        ' &mdash; <span class="bad">' + esc(x.bad) + "/" + esc(x.of) + " bad</span></div>";
+    }).join("") : '<div class="empty">none</div>';
     document.getElementById("foot").textContent =
       "map " + (d.map_version || "—") + " · updated " + (d.generated_at || "—");
   }
