@@ -50,10 +50,14 @@ def _watch(t, agent="bob", url=URL, team="r"):
           okf.render_frontmatter({"type": "Watch", "url": url, "agent": agent, "ts": NOW}))
 
 
-def _review_doc(t, slug="pr-42", artifact=URL, requested_by="alice", team="r"):
+def _review_doc(t, slug="pr-42", artifact=URL, requested_by="alice", team="r", key="of"):
+    """A review doc. Default ``key="of"`` mimics what the real ``review request``
+    verb (``cmd_review_request``) actually writes — the PR url under ``of``, no
+    ``artifact`` key. ``key="artifact"`` exercises the legacy hand-written shape
+    that forge discovery must still honor."""
     t.put(f"team/{team}/review/{slug}.md",
           f"---\ntype: Review\nschema: review-request/v1\n"
-          f"requested_by: {requested_by}\nof: X\nartifact: {artifact}\n---\n")
+          f"requested_by: {requested_by}\n{key}: {artifact}\n---\n")
 
 
 _REVIEW = {"id": "PRR_1", "author": {"login": "rev"}, "state": "CHANGES_REQUESTED",
@@ -93,7 +97,7 @@ def test_sweep_writes_shards_from_all_three_surfaces():
     t = FakeTransport()
     _watch(t, agent="bob")
     fx = _fixtures(reviews=[_REVIEW], inline=[_INLINE], comments=[_COMMENT])
-    res = forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(fx))
+    res = forge.feedback_sweep(t, "r", runner=_runner_for(fx))
     assert res["prs"] == 1 and res["items"] == 3 and res["skipped"] == []
     base = "team/r/_coord/forge/feedback/o-r-42/"
     assert base + "review-PRR_1.md" in t.store
@@ -112,7 +116,7 @@ def test_sweep_discovers_review_artifact_prs_without_a_watch():
     t = FakeTransport()
     _review_doc(t)  # PR is a review artifact, not watched
     fx = _fixtures(reviews=[_REVIEW])
-    res = forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(fx))
+    res = forge.feedback_sweep(t, "r", runner=_runner_for(fx))
     assert res["prs"] == 1 and res["items"] == 1
     assert "team/r/_coord/forge/feedback/o-r-42/review-PRR_1.md" in t.store
 
@@ -123,10 +127,10 @@ def test_rerun_converges_to_identical_store_listing():
     t = FakeTransport()
     _watch(t, agent="bob")
     fx = _fixtures(reviews=[_REVIEW], inline=[_INLINE], comments=[_COMMENT])
-    forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(fx))
+    forge.feedback_sweep(t, "r", runner=_runner_for(fx))
     before = sorted(t.store)
     snapshot = dict(t.store)
-    forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(fx))
+    forge.feedback_sweep(t, "r", runner=_runner_for(fx))
     assert sorted(t.store) == before
     assert t.store == snapshot  # byte-identical, not just same keys
 
@@ -145,7 +149,7 @@ def test_self_authored_items_are_skipped_case_insensitively():
                   {"id": "IC_other", "author": {"login": "bob2"},
                    "body": "real feedback", "createdAt": NOW}],
     )
-    res = forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(fx))
+    res = forge.feedback_sweep(t, "r", runner=_runner_for(fx))
     assert res["items"] == 1
     base = "team/r/_coord/forge/feedback/o-r-42/"
     assert base + "comment-IC_other.md" in t.store
@@ -159,7 +163,7 @@ def test_needs_me_surfaces_unacked_ack_clears_and_new_item_resurfaces(capsys):
     t = FakeTransport()
     _watch(t, agent="bob")
     fx = _fixtures(reviews=[_REVIEW], comments=[_COMMENT])  # 2 items
-    forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(fx))
+    forge.feedback_sweep(t, "r", runner=_runner_for(fx))
 
     assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
     got = json.loads(capsys.readouterr().out)
@@ -182,7 +186,7 @@ def test_needs_me_surfaces_unacked_ack_clears_and_new_item_resurfaces(capsys):
     fx2 = _fixtures(reviews=[_REVIEW],
                     comments=[_COMMENT, {"id": "IC_2", "author": {"login": "carol"},
                                          "body": "new note", "createdAt": NOW}])
-    forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(fx2))
+    forge.feedback_sweep(t, "r", runner=_runner_for(fx2))
     assert cli.main(["needs-me", "r", "--agent", "bob", "--json"], transport=t) == 0
     got3 = json.loads(capsys.readouterr().out)
     fb3 = [r for r in got3 if r.get("type") == "forge-feedback"][0]
@@ -193,7 +197,7 @@ def test_needs_me_surfaces_unacked_ack_clears_and_new_item_resurfaces(capsys):
 def test_needs_me_surfaces_to_review_requester_for_artifact_pr(capsys):
     t = FakeTransport()
     _review_doc(t, requested_by="alice")  # not watched; requester = alice
-    forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(_fixtures(reviews=[_REVIEW])))
+    forge.feedback_sweep(t, "r", runner=_runner_for(_fixtures(reviews=[_REVIEW])))
     assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
     got = json.loads(capsys.readouterr().out)
     fb = [r for r in got if r.get("type") == "forge-feedback"]
@@ -204,10 +208,89 @@ def test_needs_me_surfaces_to_review_requester_for_artifact_pr(capsys):
     assert [r for r in got2 if r.get("type") == "forge-feedback"] == []
 
 
+# --- (e2) of/artifact discovery: the real `review request` writes `of` --------
+
+def test_of_keyed_review_is_discovered_by_mirror_swept_and_surfaces_to_requester(capsys):
+    """The real `review request` verb writes the PR url under `of` (not
+    `artifact`). Forge discovery must read `of`, or every CLI-opened review is
+    invisible to the mirror and the sweep — a pre-existing v1 bug. This drives
+    the doc through the ACTUAL verb so the frontmatter is exactly what ships."""
+    t = FakeTransport()
+    p = build_parser()
+    # open the review through the real verb: `of` = PR url, no `artifact` key
+    a = p.parse_args(["review", "request", "r", "pr-42", "--of", URL,
+                      "--reviewer", "carol", "--from", "alice"])
+    assert a.func(a, t) == 0
+    capsys.readouterr()  # drain the verb's stdout so it doesn't pollute --json
+    fm = okf.parse_frontmatter(t.store["team/r/review/pr-42.md"])
+    assert fm.get("of") == URL and "artifact" not in fm  # exact shipped shape
+
+    # mirror discovers it via `of`
+    mres = forge.mirror(t, "r", now=NOW,
+                        runner=lambda args: json.dumps(
+                            {"state": "OPEN", "mergedAt": None, "reviewDecision": None}))
+    assert mres["checked"] == 1
+
+    # sweep discovers it via `of` and writes the shard
+    fres = forge.feedback_sweep(t, "r", runner=_runner_for(_fixtures(reviews=[_REVIEW])))
+    assert fres["prs"] == 1 and fres["items"] == 1
+    assert "team/r/_coord/forge/feedback/o-r-42/review-PRR_1.md" in t.store
+
+    # the requester (alice) gets the needs-me item
+    assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
+    fb = [r for r in json.loads(capsys.readouterr().out)
+          if r.get("type") == "forge-feedback"]
+    assert len(fb) == 1 and fb[0]["count"] == 1 and fb[0]["pr_slug"] == "o-r-42"
+
+
+def test_legacy_artifact_keyed_review_doc_is_still_discovered(capsys):
+    """A hand-written doc keyed with `artifact` (no `of`) must keep working —
+    the fallback arm of the of/artifact lookup."""
+    t = FakeTransport()
+    _review_doc(t, requested_by="alice", key="artifact")  # legacy shape
+    mres = forge.mirror(t, "r", now=NOW,
+                        runner=lambda args: json.dumps(
+                            {"state": "OPEN", "mergedAt": None, "reviewDecision": None}))
+    assert mres["checked"] == 1
+    fres = forge.feedback_sweep(t, "r", runner=_runner_for(_fixtures(reviews=[_REVIEW])))
+    assert fres["prs"] == 1 and fres["items"] == 1
+    assert cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t) == 0
+    fb = [r for r in json.loads(capsys.readouterr().out)
+          if r.get("type") == "forge-feedback"]
+    assert len(fb) == 1 and fb[0]["count"] == 1
+
+
+# --- (e3) author unknown → self-skip not applied, but reported ----------------
+
+def test_author_unknown_reports_note_but_still_ingests():
+    """When the reviews call fails, the PR author is unknown, so self-skip can't
+    be applied. Per over-capture preference we still ingest the inline/comment
+    items — but the sweep records a note so the silent weakening is visible."""
+    t = FakeTransport()
+    _watch(t, agent="bob")
+
+    def run(args):
+        if "api" in args:  # inline succeeds
+            return json.dumps([_INLINE])
+        if "--json" in args:
+            j = args[args.index("--json") + 1]
+            if "reviews" in j:
+                return None  # reviews call fails → pr_author unknown
+            if j == "comments":
+                return json.dumps({"comments": [_COMMENT]})
+        return None
+
+    res = forge.feedback_sweep(t, "r", runner=run)
+    assert res["items"] == 2  # inline + comment still ingested
+    assert res["notes"] == ["o-r-42: author unknown — self-skip not applied"]
+    assert res["skipped"] == []  # not skipped — items were written
+    assert "team/r/_coord/forge/feedback/o-r-42/inline-PRRC_1.md" in t.store
+
+
 def test_needs_me_text_output_renders_forge_line(capsys):
     t = FakeTransport()
     _watch(t, agent="bob")
-    forge.feedback_sweep(t, "r", now=NOW, runner=_runner_for(_fixtures(reviews=[_REVIEW])))
+    forge.feedback_sweep(t, "r", runner=_runner_for(_fixtures(reviews=[_REVIEW])))
     assert cli.main(["needs-me", "r", "--agent", "bob"], transport=t) == 0
     out = capsys.readouterr().out
     assert "[FORGE] feedback on o-r-42" in out and "from rev" in out
@@ -235,7 +318,7 @@ def test_gh_failure_on_one_pr_is_reported_and_pass_continues():
                     return json.dumps({"comments": []})
         return None  # the failing PR: every call returns None
 
-    res = forge.feedback_sweep(t, "r", now=NOW, runner=run)
+    res = forge.feedback_sweep(t, "r", runner=run)
     assert res["prs"] == 2 and res["items"] == 1
     assert any("o-r-42" in s for s in res["skipped"])
     # the healthy PR still wrote its shard despite the sibling's failure

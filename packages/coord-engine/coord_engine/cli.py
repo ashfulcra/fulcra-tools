@@ -475,7 +475,7 @@ def _forge_responsible(transport: Any, team: str) -> dict[str, set]:
             if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
                 continue
             fm = okf.parse_frontmatter(transport.read(review_prefix + n)) or {}
-            slug = forge_mod.pr_slug(fm.get("artifact"))
+            slug = forge_mod.pr_slug(forge_mod.review_artifact(fm))
             who = fm.get("requested_by")
             if slug and who:
                 resp.setdefault(slug, set()).add(str(who))
@@ -1646,13 +1646,15 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
           f"{res['mirrored']} evidence shard(s) written, {res['verdicts']} auto-verdict(s)")
     # Extended: mirror also sweeps the three feedback surfaces so a formal review
     # (or inline / conversation comment) can never go unseen.
-    fb = forge_mod.feedback_sweep(transport, args.team, now=_iso(_now()),
+    fb = forge_mod.feedback_sweep(transport, args.team,
                                   runner=args.runner or forge_mod.default_runner,
                                   repo=args.repo)
     print(f"forge feedback: {fb['prs']} PR(s) swept, {fb['items']} feedback shard(s) written"
           + (f", {len(fb['skipped'])} skipped" if fb["skipped"] else ""))
     for line in fb["skipped"]:
         print(f"  skipped {line}", file=sys.stderr)
+    for line in fb.get("notes", []):
+        print(f"  note {line}", file=sys.stderr)
     return 0
 
 
@@ -1663,13 +1665,15 @@ def cmd_forge_feedback(args: argparse.Namespace, transport: Any) -> int:
         print("forge feedback: gh CLI not found — nothing swept (install GitHub CLI to enable)",
               file=sys.stderr)
         return 0  # degradation, not an error
-    fb = forge_mod.feedback_sweep(transport, args.team, now=_iso(_now()),
+    fb = forge_mod.feedback_sweep(transport, args.team,
                                   runner=args.runner or forge_mod.default_runner,
                                   repo=args.repo)
     print(f"forge feedback: {fb['prs']} PR(s) swept, {fb['items']} feedback shard(s) written"
           + (f", {len(fb['skipped'])} skipped" if fb["skipped"] else ""))
     for line in fb["skipped"]:
         print(f"  skipped {line}", file=sys.stderr)
+    for line in fb.get("notes", []):
+        print(f"  note {line}", file=sys.stderr)
     return 0
 
 

@@ -38,6 +38,15 @@ def _node_seg(node: str) -> str:
     return _NODE.sub("-", str(node)).strip("-")
 
 
+def review_artifact(fm: dict[str, Any]) -> Any:
+    """The PR-bearing field of a review doc: ``of`` (the key the real
+    ``review request`` verb writes the artifact under) first, falling back to
+    ``artifact`` (older hand-written docs). Reading only ``artifact`` missed
+    every review opened through the CLI — a pre-existing discovery bug."""
+    got = fm.get("of")
+    return got if got is not None else fm.get("artifact")
+
+
 def parse_pr_url(artifact: Optional[str], *, repo: Optional[str] = None) -> Optional[str]:
     """Return the canonical PR URL, or None if the artifact isn't a GitHub PR.
     With ``repo`` (owner/name), URLs for any OTHER repo return None — the
@@ -97,7 +106,7 @@ def mirror(
             continue
         slug = n[:-3]
         fm = okf.parse_frontmatter(transport.read(prefix + n)) or {}
-        url = parse_pr_url(fm.get("artifact"), repo=repo)
+        url = parse_pr_url(review_artifact(fm), repo=repo)
         if not url:
             continue
         checked += 1
@@ -222,7 +231,7 @@ def _discover_prs(transport: Any, team: str, repo: Optional[str]) -> dict[str, s
             if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
                 continue
             fm = okf.parse_frontmatter(transport.read(review_prefix + n)) or {}
-            url = parse_pr_url(fm.get("artifact"), repo=repo)
+            url = parse_pr_url(review_artifact(fm), repo=repo)
             if url:
                 prs[url] = pr_slug(url)
     except TransportError:
@@ -243,11 +252,14 @@ def _discover_prs(transport: Any, team: str, repo: Optional[str]) -> dict[str, s
 
 
 def _sweep_pr(
-    transport: Any, team: str, slug: str, url: str, *, now: str,
+    transport: Any, team: str, slug: str, url: str, *,
     runner: Callable[[list[str]], Optional[str]],
 ) -> dict[str, Any]:
-    """Sweep one PR's three surfaces → shards. Returns {items, gh_ok}. gh_ok is
-    False only when EVERY call returned None (a gh failure for this PR)."""
+    """Sweep one PR's three surfaces → shards. Returns {items, gh_ok,
+    author_unknown}. gh_ok is False only when EVERY call returned None (a gh
+    failure for this PR). author_unknown is True when items were ingested while
+    the PR author was unknown (reviews call failed) — self-skip could not be
+    applied, so it is reported rather than silently dropped."""
     from . import okf
 
     m = _PR_URL.search(url)
@@ -283,24 +295,29 @@ def _sweep_pr(
             }
             if transport.write(path, okf.render_frontmatter(fm) + "\n" + body + "\n"):
                 items += 1
-    return {"items": items, "gh_ok": gh_ok}
+    return {"items": items, "gh_ok": gh_ok,
+            "author_unknown": pr_author is None and items > 0}
 
 
 def feedback_sweep(
-    transport: Any, team: str, *, now: str,
+    transport: Any, team: str, *,
     runner: Callable[[list[str]], Optional[str]] = default_runner,
     repo: Optional[str] = None,
 ) -> dict[str, Any]:
     """One three-surface sweep over every discovered PR. Returns
-    {prs, items, skipped}. Never crashes: a per-PR failure adds a report line to
-    ``skipped`` and the pass continues."""
+    {prs, items, skipped, notes}. Never crashes: a per-PR failure adds a report
+    line to ``skipped`` and the pass continues. Shards deliberately carry no
+    wall-clock (node-id keyed → idempotent), so no ``now`` is threaded through.
+    ``notes`` records non-fatal observations — e.g. a PR whose author was
+    unknown, so self-skip could not be applied (items still ingested)."""
     prs = _discover_prs(transport, team, repo)
     prs_checked = items_written = 0
     skipped: list[str] = []
+    notes: list[str] = []
     for url, slug in sorted(prs.items()):
         prs_checked += 1
         try:
-            res = _sweep_pr(transport, team, slug, url, now=now, runner=runner)
+            res = _sweep_pr(transport, team, slug, url, runner=runner)
         except Exception as ex:  # never-crash: isolate one PR's blast radius
             skipped.append(f"{slug}: {type(ex).__name__}")
             continue
@@ -308,4 +325,7 @@ def feedback_sweep(
             skipped.append(f"{slug}: gh unavailable")
             continue
         items_written += res["items"]
-    return {"prs": prs_checked, "items": items_written, "skipped": skipped}
+        if res.get("author_unknown"):
+            notes.append(f"{slug}: author unknown — self-skip not applied")
+    return {"prs": prs_checked, "items": items_written,
+            "skipped": skipped, "notes": notes}
