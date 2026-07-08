@@ -1059,6 +1059,169 @@ def cmd_atc_report(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# Plan-seeded rolling-window cap defaults for `atc init`. These are OPERATOR-
+# CORRECTABLE ESTIMATES, not measured limits — subscriptions don't publish their
+# caps, so init seeds a plausible starting point per provider and throttle events
+# calibrate them from there (a real rate-limit hit zeroes that window regardless
+# of the declared number). An operator edits the numbers freely, and DELETING an
+# account's windows declares it uncapped (route treats no-windows as 100%
+# headroom). Keyed by provider; anything else falls to the placeholder.
+_ATC_SEED_WINDOWS: dict[str, list[dict[str, int]]] = {
+    "anthropic": [{"hours": 5, "cap": 1000}, {"hours": 168, "cap": 15000}],
+    "openai": [{"hours": 5, "cap": 600}],
+}
+_ATC_SEED_WINDOWS_DEFAULT: list[dict[str, int]] = [{"hours": 5, "cap": 500}]
+
+
+def _atc_seed_windows(provider: str) -> list[dict[str, int]]:
+    """Fresh copies (never the shared constant) so callers can't mutate defaults."""
+    src = _ATC_SEED_WINDOWS.get(provider, _ATC_SEED_WINDOWS_DEFAULT)
+    return [dict(w) for w in src]
+
+
+def _atc_provider_harnesses(defaults: dict[str, Any]) -> dict[str, list[str]]:
+    """Per-provider harness union folded from the default model map: every model's
+    ``provider`` -> the sorted set of its declared ``harnesses``. This is the
+    default an account's ``harnesses[]`` seeds from at init time."""
+    acc: dict[str, set[str]] = {}
+    for entry in (defaults.get("models") or {}).values():
+        prov = entry.get("provider")
+        if not isinstance(prov, str) or not prov:
+            continue
+        for h in entry.get("harnesses") or []:
+            if isinstance(h, str) and h:
+                acc.setdefault(prov, set()).add(h)
+    return {p: sorted(hs) for p, hs in acc.items()}
+
+
+def _atc_parse_account_spec(spec: str) -> Optional[tuple[str, str, str]]:
+    """Parse a ``--account id=provider:plan`` token. ``:plan`` is optional. Returns
+    ``(id, provider, plan)`` or ``None`` if the required ``id=provider`` shape is
+    absent (the caller turns ``None`` into an exit-2 refusal)."""
+    if "=" not in spec:
+        return None
+    acct_id, rest = spec.split("=", 1)
+    acct_id = acct_id.strip()
+    if not acct_id or not rest.strip():
+        return None
+    if ":" in rest:
+        provider, plan = rest.split(":", 1)
+    else:
+        provider, plan = rest, ""
+    provider, plan = provider.strip(), plan.strip()
+    if not provider:
+        return None
+    return acct_id, provider, plan
+
+
+def _atc_build_account(acct_id: str, provider: str, plan: str,
+                       prov_harnesses: dict[str, list[str]],
+                       harness_override: Optional[list[str]]) -> dict[str, Any]:
+    harnesses = (list(harness_override) if harness_override
+                 else list(prov_harnesses.get(provider, [])))
+    acct: dict[str, Any] = {"id": acct_id, "provider": provider}
+    if plan:
+        acct["plan"] = plan
+    acct["harnesses"] = harnesses
+    acct["windows"] = _atc_seed_windows(provider)
+    return acct
+
+
+def _atc_init_interactive(providers: list[str],
+                          prov_harnesses: dict[str, list[str]],
+                          harness_override: Optional[list[str]]) -> list[dict[str, Any]]:
+    """Numbered-prompt onboarding over the default map's provider set. Reads via
+    the builtin ``input`` (monkeypatched in tests). An empty/blank selection
+    returns ``[]`` — the caller refuses zero accounts with exit 2."""
+    print("Providers in the packaged default model map:")
+    for i, p in enumerate(providers, 1):
+        print(f"  {i}. {p}")
+    sel = input("Select providers to declare (comma-separated numbers): ").strip()
+    chosen: list[str] = []
+    for tok in sel.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            idx = int(tok)
+        except ValueError:
+            continue
+        if 1 <= idx <= len(providers) and providers[idx - 1] not in chosen:
+            chosen.append(providers[idx - 1])
+    gathered: list[dict[str, Any]] = []
+    for prov in chosen:
+        default_id = f"{prov}-main"
+        acct_id = input(f"  account id for {prov} [{default_id}]: ").strip() or default_id
+        plan = input(f"  plan for {prov} (blank for none): ").strip()
+        gathered.append(_atc_build_account(acct_id, prov, plan,
+                                           prov_harnesses, harness_override))
+    return gathered
+
+
+def cmd_atc_init(args: argparse.Namespace, transport: Any) -> int:
+    """Standalone ATC onboarding: seed ``team/<team>/atc/accounts.json`` so a
+    fresh operator has a routable cap ledger in one command.
+
+    Interactive by default (numbered prompts over the default map's providers);
+    ``--yes`` runs non-interactively and requires >=1 ``--account id=provider:plan``.
+    Idempotent: an existing accounts.json is loaded, the newly-declared accounts
+    merged in by id (existing entries and sibling keys like ``tiers``/``models``
+    are preserved), and the result written back through the same transport-write
+    seam the review-request flow uses. Refuses a zero-account run with exit 2."""
+    defaults = atc.load_default_models()
+    prov_harnesses = _atc_provider_harnesses(defaults)
+    providers = sorted(prov_harnesses)
+
+    if args.yes:
+        gathered: list[dict[str, Any]] = []
+        for spec in (args.account or []):
+            parsed = _atc_parse_account_spec(spec)
+            if parsed is None:
+                print(f"atc init: malformed --account {spec!r} "
+                      "(expected id=provider:plan)", file=sys.stderr)
+                return 2
+            gathered.append(_atc_build_account(*parsed, prov_harnesses, args.harness))
+    else:
+        gathered = _atc_init_interactive(providers, prov_harnesses, args.harness)
+
+    if not gathered:
+        print("atc init: no accounts declared — nothing written "
+              "(--yes needs >=1 --account id=provider:plan)", file=sys.stderr)
+        return 2
+
+    # Idempotent merge: load whatever exists, keep it verbatim, append only the
+    # new-by-id accounts. Read the raw doc (not parse_accounts) so sibling keys
+    # (tiers, models overlay) survive untouched.
+    path = _atc_accounts_path(args.team)
+    raw = transport.read(path)
+    try:
+        doc = json.loads(raw) if raw else {}
+        if not isinstance(doc, dict):
+            doc = {}
+    except (ValueError, TypeError):
+        doc = {}
+    existing = doc.get("accounts")
+    if not isinstance(existing, list):
+        existing = []
+    existing_ids = {a.get("id") for a in existing if isinstance(a, dict)}
+    added = [a for a in gathered if a["id"] not in existing_ids]
+    doc["accounts"] = existing + added
+    doc.setdefault("tiers", {})
+
+    transport.write(path, json.dumps(doc, indent=2) + "\n")
+
+    ex_id = gathered[0]["id"]
+    print(f"wrote {path}: {len(doc['accounts'])} account(s) declared "
+          f"({len(added)} new this run)")
+    print("next steps — paste these:")
+    print("  1. install the skill — see skills/fulcra-agent-atc/SKILL.md §Setup")
+    print(f"  2. coord-engine route {args.team} --needs code")
+    print(f"  3. coord-engine usage log {args.team} --account {ex_id} "
+          "--tier standard --units <est> --model <model> "
+          "--task-class code --outcome clean")
+    return 0
+
+
 def cmd_dash(args: argparse.Namespace, transport: Any) -> int:
     """Serve the localhost ATC dashboard in the foreground (127.0.0.1 only).
 
@@ -1553,6 +1716,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="trailing window in days (default 7)")
     atr.add_argument("--json", action="store_true")
     atr.set_defaults(func=cmd_atc_report)
+    ati = atsub.add_parser(
+        "init", help="standalone onboarding: seed team/<team>/atc/accounts.json")
+    ati.add_argument("--team", default="solo",
+                     help="team to onboard (default: solo)")
+    ati.add_argument("--yes", action="store_true",
+                     help="non-interactive; requires >=1 --account id=provider:plan")
+    ati.add_argument("--account", action="append", metavar="id=provider:plan",
+                     help="declare an account (repeatable); :plan is optional")
+    ati.add_argument("--harness", action="append",
+                     help="override the seeded harnesses for declared accounts "
+                          "(repeatable; default is the map's per-provider union)")
+    ati.set_defaults(func=cmd_atc_init)
 
     dsh = sub.add_parser("dash",
                          help="serve the localhost ATC gauge dashboard (127.0.0.1 only)")
