@@ -1,0 +1,30 @@
+{
+  "map_version": "2026-07-08",
+  "_comment": "Seed for coord_engine/default_models.json. Tags: code, architecture, writing, long-context (>=400k usable), vision, fast, tool-use. cost_rank: 1 = scarcest cap-weight, 9 = locally free. Sources: 2026-07-08 research pass (frontier + OSS), citations in session ledger.",
+  "models": {
+    "claude-fable-5": {"tags": ["code", "architecture", "writing", "long-context", "vision", "tool-use"], "cost_rank": 1, "provider": "anthropic", "harnesses": ["claude-code", "cowork"], "context": 1000000, "notes": "flagship; adaptive thinking always-on; slower latency"},
+    "claude-opus-4-8": {"tags": ["code", "architecture", "writing", "long-context", "vision", "tool-use"], "cost_rank": 2, "provider": "anthropic", "harnesses": ["claude-code", "cowork"], "context": 1000000, "notes": "complex agentic coding; effort defaults high"},
+    "claude-sonnet-5": {"tags": ["code", "architecture", "writing", "long-context", "vision", "fast", "tool-use"], "cost_rank": 3, "provider": "anthropic", "harnesses": ["claude-code", "cowork"], "context": 1000000, "notes": "Claude Code default; ~5x lighter cap-weight than Opus (documented)"},
+    "claude-haiku-4-5": {"tags": ["code", "vision", "fast", "tool-use"], "cost_rank": 5, "provider": "anthropic", "harnesses": ["claude-code", "cowork"], "context": 200000, "notes": "fastest; escalates on multi-step agentic code"},
+    "gpt-5.5": {"tags": ["code", "architecture", "long-context", "vision", "tool-use"], "cost_rank": 2, "provider": "openai", "harnesses": ["codex"], "context": 400000, "notes": "Codex default; 400k nominal, client-reported ~258k usable; vision inferred"},
+    "gpt-5.4": {"tags": ["code", "architecture", "vision", "tool-use"], "cost_rank": 3, "provider": "openai", "harnesses": ["codex"], "context": 0, "notes": "context unpublished; vision inferred"},
+    "gpt-5.4-mini": {"tags": ["code", "fast", "tool-use"], "cost_rank": 5, "provider": "openai", "harnesses": ["codex"], "context": 0, "notes": "subagent/responsive tier; context unpublished"},
+    "gpt-5.3-codex-spark": {"tags": ["code", "fast"], "cost_rank": 6, "provider": "openai", "harnesses": ["codex"], "context": 0, "notes": "ChatGPT Pro only; near-instant iteration; research preview"},
+    "gemini-3.1-pro-preview": {"tags": ["code", "architecture", "long-context", "vision", "tool-use"], "cost_rank": 2, "provider": "google", "harnesses": ["gemini-cli"], "context": 1000000, "notes": "superseding gemini-3-pro in CLI rollout"},
+    "gemini-3.5-flash": {"tags": ["code", "long-context", "vision", "fast", "tool-use"], "cost_rank": 4, "provider": "google", "harnesses": ["gemini-cli"], "context": 1000000, "notes": "current default Flash"},
+    "gemini-3.1-flash-lite": {"tags": ["vision", "fast", "tool-use"], "cost_rank": 6, "provider": "google", "harnesses": ["gemini-cli"], "context": 1000000, "notes": "cheapest tier"},
+    "grok-4.20-0309-reasoning": {"tags": ["code", "architecture", "tool-use"], "cost_rank": 3, "provider": "xai", "harnesses": ["grok-cli"], "context": 128000, "notes": "medium confidence on id string and CLI accept-list"},
+    "grok-code-fast-1": {"tags": ["code", "fast", "tool-use"], "cost_rank": 5, "provider": "xai", "harnesses": ["grok-cli"], "context": 128000, "notes": "dedicated agentic coder; medium confidence"},
+    "qwen3-coder:30b": {"tags": ["code", "fast", "tool-use"], "cost_rank": 9, "provider": "oss", "harnesses": ["ollama"], "context": 262144, "notes": "default local agentic coder; q4 on 24GB"},
+    "glm-4.7-flash": {"tags": ["code", "architecture", "fast", "tool-use"], "cost_rank": 9, "provider": "oss", "harnesses": ["ollama"], "context": 198000, "notes": "strongest 30B-class agentic; q4 on 24GB; enable preserved-thinking for long loops"},
+    "gpt-oss:20b": {"tags": ["code", "fast", "tool-use"], "cost_rank": 9, "provider": "oss", "harnesses": ["ollama"], "context": 128000, "notes": "high-throughput cheap lane; fits 16GB"},
+    "qwen3.6:27b": {"tags": ["code", "architecture", "vision", "tool-use"], "cost_rank": 9, "provider": "oss", "harnesses": ["ollama"], "context": 262144, "notes": "multimodal generalist; q4 on 24GB"},
+    "deepseek-v4-flash": {"tags": ["code", "architecture", "long-context", "fast", "tool-use"], "cost_rank": 7, "provider": "deepseek-hosted", "harnesses": ["api"], "context": 1000000, "notes": "hosted overflow valve; ~$0.14/$0.28 per MTok; open weights but cloud-scale"}
+  },
+  "_watch_items": {
+    "gpt-5.6": "Sol/Terra/Luna preview is API+partner only as of 2026-07-08; not consumer-dispatchable; ids unpublished. Add on ChatGPT GA.",
+    "claude-mythos-5": "invitation-only, no self-serve; excluded.",
+    "glm-5.2": "leads open-weights AA index but hosted/frontier-priced; add if a cheap endpoint appears.",
+    "kimi-k2.6": "ollama :cloud only; competes on hosted price, not free; revisit."
+  }
+}

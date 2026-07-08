@@ -23,3 +23,7 @@ path = "coord_engine/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["coord_engine"]
+
+# Ship the packaged default model map (ATC v2 reads it via importlib.resources).
+[tool.hatch.build.targets.wheel.force-include]
+"coord_engine/default_models.json" = "coord_engine/default_models.json"

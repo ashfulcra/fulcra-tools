@@ -60,3 +60,23 @@ Fold: window math, multi-window accounts, throttle-zeroing + expiry, unknown acc
 
 1. **Name:** shipping as ATC/`fulcra-agent-atc` unless renamed.
 2. **Real cap numbers:** accounts.json ships with placeholder windows for your Anthropic + OpenAI subscriptions; correct the caps when awake (throttle events will calibrate regardless).
+
+## v2 — smart dispatch (2026-07-08)
+
+v1 shipped a tier rubric (frontier/standard/cheap) the operator applied by hand and a cap ledger. v2 keeps the ledger and makes the *model choice itself* a fold: the operator declares needs, the engine ranks models, and outcomes feed back. The skill is rewritten **standalone-first** — it now onboards and routes on a single account with no other `fulcra-agent-*` skill installed; the coord-team story moves to a bottom upgrade section.
+
+**Model map.** `packages/coord-engine/coord_engine/default_models.json` (`map_version 2026-07-08`) is a packaged, capability-tagged catalog: each model carries `tags` from a **frozen taxonomy** (`code`, `architecture`, `writing`, `long-context`, `vision`, `fast`, `tool-use`), a `cost_rank` (1 = scarcest cap-weight … 9 = locally free), `provider`, `harnesses[]`, and `context`. A top-level `"models"` object in `accounts.json` overlays it by the same merge the router uses (add/retag/reprice a model) — absent by default, so v1 accounts.json routes on defaults only. The tier rubric survives in prose as the **ambiguous-case fallback** (does this task need `architecture`, or is the plain tag enough?), plus the turn-count-beats-token-price caveat.
+
+**Router.** `coord-engine route <team> --needs a,b [--json]` ranks the models covering *every* requested need, **cheapest-capable-first**, filtered to accounts with live headroom. Output is `N. <model> — (<account>) — <pct>% — <tags>`. Sort key (frozen): non-demoted before demoted, then `cost_rank` (cheap first), then headroom-% desc, then model id. A need outside the taxonomy exits 2 with the valid set. **Uncapped accounts** (no `windows`) are legal and route at 100% headroom — the sanctioned way to declare a local ollama or any pay-nothing lane (conservative gap: nothing to zero, so they can't be throttle-excluded).
+
+**Outcomes → demotion.** `usage log` gains `--model`, `--task-class` (taxonomy-validated), and `--outcome {clean,rework,escalated}`, written only when supplied so v1 shards stay v1 and both folds tolerate their absence. The demotion fold (frozen policy): a (model, task_class) pair demotes when it has **≥3** outcome-bearing shards **and ≥3 of its trailing 5** are `rework`/`escalated` (strict insufficient-evidence rule — 2-of-2 bad never demotes; a recovered pair drops out on later clean shards). `route` marks demoted candidates `[demoted: <need>]` and sinks them below all healthy ones. The skill **mandates outcome logging at task completion** (outcome is only knowable once the work lands), and `headroom --json` changed shape to carry it: **`{"windows": [...], "demotions": [...]}`**, an object, not v1's bare array.
+
+**Onboarding.** `coord-engine atc init [team] [--yes] [--account id=provider:plan …] [--harness …]` seeds `team/<team>/atc/accounts.json` in one command (team defaults `solo`): plausible per-provider starter windows (anthropic 5h/1000 + 168h/15000; openai 5h/600; else 5h/500), `harnesses[]` folded from the map's per-provider union, `--harness` override, unknown-provider warning. Idempotent (merge new accounts by id, preserve `tiers`/`models` siblings), `--account` implies `--yes`, refuses a zero-account run (exit 2), prints paste-ready next commands. The skill's Install section is three commands: `uv tool install fulcra-api`, the coord-engine git-install, `atc init`.
+
+**Proof surfaces.** `coord-engine atc report <team> [--days N] [--json]` — trailing-window dispatch report (tier mix, by-model, throttle events, windows exhausted, calibration/demotion lines) with a required "all figures are estimates" disclaimer; empty ledger → `no dispatches in window`. `coord-engine dash <team> [--port N]` — localhost-only gauge dashboard (binds `127.0.0.1`, default 8787) for headroom + active demotions.
+
+**Watch-items (map maintenance).** Tracked in `default_models.json` `_watch_items`, revisit as the market moves:
+- **gpt-5.6** (Sol/Terra/Luna preview) — API+partner only as of 2026-07-08, ids unpublished, **not consumer-dispatchable**; add on ChatGPT GA.
+- **claude-mythos-5** — invitation-only, no self-serve; **excluded**.
+- **glm-5.2** — leads the open-weights index but is **hosted/frontier-priced**; add if a cheap endpoint appears.
+- **kimi-k2.6** — ollama `:cloud` only, competes on hosted price not free; revisit.
