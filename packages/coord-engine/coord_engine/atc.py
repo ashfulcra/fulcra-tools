@@ -317,6 +317,177 @@ def demotions(shards: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, A
     return out
 
 
+# --- team report (task 4): dispatch/tier/calibration fold + text renderer ----
+
+# Canonical tier ordering for the dispatch breakdown. Any tier outside this set
+# (operator free-text) sorts after the known three, alphabetically.
+_TIER_ORDER = ("frontier", "standard", "cheap")
+
+
+def _tier_sort_key(name: str) -> tuple[int, Any]:
+    try:
+        return (0, _TIER_ORDER.index(name))
+    except ValueError:
+        return (1, name)
+
+
+def report_fold(accounts: dict[str, Any], shards: list[dict[str, Any]], *,
+                team: str,
+                demotions: Optional[dict[tuple[str, str], dict[str, Any]]] = None,
+                models: Optional[dict[str, Any]] = None,
+                days: int = 7,
+                now: Optional[datetime] = None) -> dict[str, Any]:
+    """Fold usage shards into a team dispatch report over the trailing ``days``.
+
+    Pure over injected rows + clock (``now=`` for testability). Inputs:
+      * ``accounts`` — a ``parse_accounts`` dict (``{"accounts": [...], "tiers":
+        {...}}``); the declared 5h caps feed the headline denominator and the
+        exhausted-windows count.
+      * ``shards`` — usage rows in the ``headroom`` fold's shape. v1 shards
+        (``account``/``tier``/``units``/``throttled``) and task-3 outcome shards
+        both flow through; a shard with no ``ts`` is dropped (never crashes).
+      * ``demotions`` — the ``demotions`` fold's output
+        (``{(model, task_class): {"bad", "of", "window"}}``); rendered as the
+        calibration lines.
+      * ``models`` — the merged model map. Accepted for the documented ATC
+        interface; the current report does not consume it (reserved for future
+        by-model cost annotation).
+
+    EVERY figure is an estimate from self-reported units and operator-declared
+    caps — the header renders that disclaimer. Returns a JSON-serialisable dict;
+    ``render_report`` turns it into the operator-facing text block.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    demotions = demotions or {}
+    accounts_list = accounts.get("accounts") or []
+    cutoff = now - timedelta(days=days)
+    windowed = [s for s in shards if s.get("ts") and s["ts"] >= cutoff]
+    total = len(windowed)
+
+    # Tier breakdown — the shard's `tier` field (v1); a missing/blank tier is
+    # bucketed as "untiered" so the percentages always sum over `total`.
+    tier_counts: dict[str, int] = {}
+    for s in windowed:
+        name = s.get("tier") or "untiered"
+        tier_counts[name] = tier_counts.get(name, 0) + 1
+    tiers = [
+        {"tier": name, "count": c,
+         "pct": round(c * 100.0 / total) if total else 0}
+        for name, c in sorted(tier_counts.items(),
+                              key=lambda kv: _tier_sort_key(kv[0]))
+    ]
+
+    # By-model — only shards carrying a `model` field participate; count DESC
+    # then id ASC for a deterministic ordering.
+    model_counts: dict[str, int] = {}
+    for s in windowed:
+        m = s.get("model")
+        if m:
+            model_counts[m] = model_counts.get(m, 0) + 1
+    by_model = [{"model": m, "count": c}
+                for m, c in sorted(model_counts.items(),
+                                   key=lambda kv: (-kv[1], kv[0]))]
+
+    # Throttle events — one entry per throttled shard, ordered by ts.
+    throttle_events = [
+        {"account": s.get("account"), "date": s["ts"].strftime("%m-%d")}
+        for s in sorted((s for s in windowed if s.get("throttled")),
+                        key=lambda s: s["ts"])
+    ]
+
+    # Windows exhausted — a point-in-time headroom snapshot (its own 5h/… windows
+    # over the full shard set, not the report window), counting zeroed windows.
+    hrows = headroom(accounts_list, shards, now)
+    windows_exhausted = sum(1 for r in hrows if r["headroom"] == 0)
+
+    # Calibration — straight from the demotions fold, sorted (model, task_class).
+    calibration = [
+        {"model": m, "task_class": tc, "bad": v.get("bad"), "of": v.get("of")}
+        for (m, tc), v in sorted(demotions.items())
+    ]
+
+    # Headline — below-frontier units ÷ the frontier account's declared 5h cap.
+    # The frontier account(s) are those carrying frontier-tier dispatches in the
+    # window; the denominator sums their declared 5h caps. No such account with a
+    # 5h window => n/a (the value is None).
+    below_units = sum(
+        max(0, int(s.get("units") or 0))
+        for s in windowed if (s.get("tier") or "untiered") != "frontier")
+    frontier_accts = {s.get("account") for s in windowed if s.get("tier") == "frontier"}
+    cap = 0
+    for a in accounts_list:
+        if a.get("id") in frontier_accts:
+            for w in a.get("windows") or []:
+                if w.get("hours") == 5 and isinstance(w.get("cap"), (int, float)):
+                    cap += int(w["cap"])
+    value = round(below_units / cap, 1) if cap > 0 else None
+    headline = {"value": value, "below_units": below_units,
+                "cap": cap if cap > 0 else None}
+
+    return {
+        "team": team, "days": days, "total": total, "tiers": tiers,
+        "by_model": by_model, "throttle_events": throttle_events,
+        "windows_exhausted": windows_exhausted, "calibration": calibration,
+        "headline": headline,
+    }
+
+
+def render_report(rep: dict[str, Any]) -> str:
+    """Render ``report_fold`` output as the operator-facing text block.
+
+    Line 1 carries the REQUIRED estimate disclaimer. An empty window collapses to
+    the header plus ``no dispatches in window`` (never crashes on an empty
+    ledger)."""
+    lines = [
+        f"ATC report — team {rep['team']} — last {rep['days']} days  "
+        "(all figures are estimates from self-reported units and "
+        "operator-declared caps)"
+    ]
+    if rep["total"] == 0:
+        lines.append("no dispatches in window")
+        return "\n".join(lines)
+
+    parts = []
+    for t in rep["tiers"]:
+        seg = f"{t['tier']} {t['pct']}%"
+        if t["tier"] == "frontier":  # the scarce tier gets its raw count too
+            seg += f" ({t['count']})"
+        parts.append(seg)
+    lines.append(f"dispatches: {rep['total']} total — " + " / ".join(parts))
+
+    if rep["by_model"]:
+        bm = " · ".join(f"{m['model']} {m['count']}" for m in rep["by_model"])
+    else:
+        bm = "(no model attribution)"
+    lines.append(f"by model: {bm}")
+
+    if rep["throttle_events"]:
+        te = "; ".join(f"{e['account']}, {e['date']}" for e in rep["throttle_events"])
+        lines.append(f"throttle events: {len(rep['throttle_events'])} ({te})")
+    else:
+        lines.append("throttle events: 0")
+
+    lines.append(f"windows exhausted: {rep['windows_exhausted']}")
+
+    if rep["calibration"]:
+        cal = "; ".join(
+            f"{c['model']} demoted for {c['task_class']} ({c['bad']}/{c['of']} escalated)"
+            for c in rep["calibration"])
+        lines.append(f"calibration: {cal}")
+    else:
+        lines.append("calibration: none")
+
+    h = rep["headline"]
+    if h["value"] is None:
+        lines.append("headline: n/a (no frontier account declared)")
+    else:
+        lines.append(
+            f"headline: ~{h['value']:.1f} frontier window-days preserved "
+            "(below-frontier units ÷ frontier 5h cap)")
+    return "\n".join(lines)
+
+
 def _demotions_for_route(demo_map: dict[tuple[str, str], dict[str, Any]]
                          ) -> dict[str, list[str]]:
     """Adapt ``demotions`` output to the shape ``route`` consumes.

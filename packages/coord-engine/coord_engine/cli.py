@@ -1038,6 +1038,27 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def cmd_atc_report(args: argparse.Namespace, transport: Any) -> int:
+    """Team dispatch/tier/calibration report over the trailing --days window.
+
+    Reads the same accounts.json + usage shards the other ATC verbs use, folds
+    the demotions (calibration) and merged model map alongside, and renders the
+    estimate-labelled text block. Never crashes on an empty/corrupt ledger."""
+    text = transport.read(_atc_accounts_path(args.team))
+    parsed = atc.parse_accounts(text)
+    shards = _atc_usage_shards(transport, args.team)
+    merged, _ = atc.merge_models(atc.load_default_models(),
+                                 _atc_models_overlay(text))
+    rep = atc.report_fold(parsed, shards, team=args.team,
+                          demotions=atc.demotions(shards), models=merged,
+                          days=args.days, now=_now())
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return 0
+    print(atc.render_report(rep))
+    return 0
+
+
 def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     fm = {
@@ -1502,6 +1523,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="comma-separated capability tags (e.g. code,long-context)")
     rt.add_argument("--json", action="store_true")
     rt.set_defaults(func=cmd_route)
+
+    at = sub.add_parser("atc", help="ATC reports (fulcra-agent-atc)")
+    atsub = at.add_subparsers(dest="atc_command", required=True)
+    atr = atsub.add_parser("report",
+                           help="team dispatch/tier/calibration report over the last N days")
+    atr.add_argument("team")
+    atr.add_argument("--days", type=int, default=7,
+                     help="trailing window in days (default 7)")
+    atr.add_argument("--json", action="store_true")
+    atr.set_defaults(func=cmd_atc_report)
 
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
