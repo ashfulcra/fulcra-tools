@@ -21,7 +21,15 @@ def parse_accounts(text: Optional[str]) -> dict[str, Any]:
         tiers = d.get("tiers") or {}
         if not isinstance(accounts, list) or not isinstance(tiers, dict):
             raise ValueError("accounts must be a list, tiers a dict")
-        return {"accounts": accounts, "tiers": tiers}
+        valid = [a for a in accounts
+                 if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"]]
+        out: dict[str, Any] = {"accounts": valid, "tiers": tiers}
+        dropped = len(accounts) - len(valid)
+        if dropped:
+            out["error"] = (
+                f"skipped {dropped} account entr{'y' if dropped == 1 else 'ies'} "
+                "missing a non-empty string 'id'")
+        return out
     except (ValueError, TypeError) as e:
         return {"accounts": [], "tiers": {}, "error": str(e)}
 
@@ -37,7 +45,7 @@ def headroom(accounts: list[dict[str, Any]], shards: list[dict[str, Any]],
                 continue
             cutoff = now - timedelta(hours=hours)
             in_win = [s for s in acct_shards if s.get("ts") and s["ts"] >= cutoff]
-            used = sum(int(s.get("units") or 0) for s in in_win)
+            used = sum(max(0, int(s.get("units") or 0)) for s in in_win)
             throttled = any(s.get("throttled") for s in in_win)
             head = 0 if throttled else max(0, int(cap) - used)
             rows.append({

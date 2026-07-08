@@ -59,6 +59,26 @@ def test_unknown_account_shard_ignored_not_crash():
     rows = headroom(accounts, [_shard("ghost", 1, 100)], NOW)
     assert all(r["used"] == 0 for r in rows)
 
+def test_parse_accounts_drops_idless_entries_and_headroom_survives():
+    text = json.dumps({
+        "accounts": [
+            {"id": "good", "windows": [{"hours": 5, "cap": 100}]},
+            {"provider": "anthropic", "windows": [{"hours": 5, "cap": 100}]},
+        ],
+        "tiers": {},
+    })
+    d = parse_accounts(text)
+    assert [a["id"] for a in d["accounts"]] == ["good"]
+    assert "error" in d
+    rows = headroom(d["accounts"], [_shard("good", 1, 10)], NOW)
+    assert [(r["account"], r["used"]) for r in rows] == [("good", 10)]
+
+def test_negative_units_clamped():
+    accounts = parse_accounts(ACCOUNTS_JSON)["accounts"]
+    rows = headroom(accounts, [_shard("anthropic-max", 1, -10)], NOW)
+    r5 = next(r for r in rows if r["account"] == "anthropic-max" and r["window_hours"] == 5)
+    assert r5["used"] == 0 and r5["headroom"] == r5["cap"]
+
 def test_empty_ledger_full_headroom():
     accounts = parse_accounts(ACCOUNTS_JSON)["accounts"]
     rows = headroom(accounts, [], NOW)
