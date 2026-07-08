@@ -84,3 +84,38 @@ def set_phase(transport, slug: str, new_phase: str, *, now: str) -> dict:
                            model.render_engagement(meta)):
         raise EngagementError(f"failed to persist phase change for '{slug}'")
     return meta
+
+
+def status(transport, slug: str) -> dict[str, Any]:
+    """Meta + per-artifact presence + the next-move hint. Deterministic fold —
+    an agent should never eyeball the tree to answer 'where are we'."""
+    meta = load_engagement(transport, slug)
+    if meta is None:
+        raise EngagementError(f"no engagement '{slug}'")
+    artifacts: dict[str, bool] = {}
+    for phase in model.PHASES:
+        for rel in EXPECTED_ARTIFACTS[phase]:
+            artifacts[rel] = transport.read(remote_path(slug, rel)) is not None
+    return {
+        "slug": slug,
+        "title": meta.get("title", ""),
+        "phase": meta.get("phase", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "phase_history": list(meta.get("phase_history", [])),
+        "artifacts": artifacts,
+        "next": NEXT_HINT.get(meta.get("phase", ""), ""),
+    }
+
+
+def list_engagements(transport) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for entry in transport.list_dir(REMOTE_ROOT + "/"):
+        if not entry.get("is_dir"):
+            continue
+        slug = entry["name"].rstrip("/")
+        meta = load_engagement(transport, slug)
+        if meta is None:
+            continue  # tolerate junk dirs; only schema-valid docs count
+        rows.append({"slug": slug, "title": meta.get("title", ""),
+                     "phase": meta.get("phase", "")})
+    return sorted(rows, key=lambda r: r["slug"])

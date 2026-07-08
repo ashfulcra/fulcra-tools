@@ -50,3 +50,37 @@ def test_set_phase_rejects_invalid_transition():
 def test_set_phase_rejects_missing_engagement():
     with pytest.raises(engagement.EngagementError):
         engagement.set_phase(FakeTransport(), "ghost", "interview", now=NOW)
+
+
+def test_status_folds_meta_artifacts_and_hint():
+    t = FakeTransport()
+    engagement.init_engagement(t, "x", "X", now=NOW)
+    t.write("fde/engagements/x/intake/brief.md", "the brief")
+    st = engagement.status(t, "x")
+    assert st["slug"] == "x" and st["phase"] == "intake"
+    assert st["artifacts"]["intake/brief.md"] is True
+    assert st["artifacts"]["architecture.md"] is False
+    assert "interview" in st["next"]  # hint points at the next move
+
+
+def test_status_raises_for_missing_engagement():
+    with pytest.raises(engagement.EngagementError):
+        engagement.status(FakeTransport(), "ghost")
+
+
+def test_list_engagements_returns_slug_title_phase_sorted():
+    t = FakeTransport()
+    engagement.init_engagement(t, "beta", "Beta", now=NOW)
+    engagement.init_engagement(t, "alpha", "Alpha", now=NOW)
+    engagement.set_phase(t, "alpha", "interview", now=LATER)
+    rows = engagement.list_engagements(t)
+    assert [(r["slug"], r["phase"]) for r in rows] == [
+        ("alpha", "interview"), ("beta", "intake"),
+    ]
+
+
+def test_list_skips_directories_without_a_valid_engagement_doc():
+    t = FakeTransport()
+    engagement.init_engagement(t, "real", "Real", now=NOW)
+    t.write("fde/engagements/junk/notes.md", "not an engagement")
+    assert [r["slug"] for r in engagement.list_engagements(t)] == ["real"]
