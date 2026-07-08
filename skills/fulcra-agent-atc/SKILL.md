@@ -1,6 +1,6 @@
 ---
 name: fulcra-agent-atc
-description: "Model & cap routing (ATC) for a fulcra-agent-teams space: a tier rubric for matching work to the cheapest sufficient model, a cross-subscription cap ledger with a deterministic headroom fold, and an edge-routing procedure any agent follows before dispatching — with an optional step-up to resident per-platform dispatchers."
+description: "Model & cap routing (ATC) for a subscription fleet: declare your accounts once, then a capability-ranked router (`coord-engine route --needs …`) picks the cheapest model that can do the job across every subscription, a cross-account cap ledger keeps traffic inside its windows, and outcome logging demotes a model that keeps failing a task class. Standalone on one account; scales to a coord team of resident dispatchers."
 homepage: "https://github.com/ashfulcra/fulcra-tools"
 license: "MIT"
 user-invocable: true
@@ -9,101 +9,158 @@ metadata: { "openclaw": { "emoji": "🛫" } }
 
 # Fulcra Agent ATC
 
-Enhances [`fulcra-agent-teams`](https://github.com/fulcradynamics/agent-skills). A subscription fleet
-(Claude Max, OpenAI/Codex plans, several harnesses on one coord2 bus) has two failure modes that waste
-money and stall work: it **burns frontier budget on mechanical work** that a cheap model would finish,
-and it **stalls on one capped account** — hitting a window cap on one subscription while another sits
-idle. ATC (air-traffic control) is the routing layer that fixes both. It is three parts:
+A subscription fleet — Claude Max, OpenAI/Codex plans, maybe a local ollama and a
+hosted overflow lane, across one or several harnesses — has two failure modes that
+waste money and stall work: it **burns frontier budget on mechanical work** a cheap
+model would finish, and it **stalls on one capped account** — hitting a window cap on
+one subscription while another sits idle. ATC (air-traffic control) is the routing
+layer that fixes both, and it runs on **one account** the same way it runs on a fleet.
 
-- **Policy** — this prose: a tier rubric and an edge-routing procedure any agent follows *before* it
-  dispatches work.
-- **Ledger** — `coord-engine usage log` / `coord-engine headroom`: usage shards written after spend,
-  folded deterministically into cross-subscription headroom (the presence-fold pattern). The genuinely
-  novel piece is that headroom is *shared fleet state* — every agent sees which account has room.
-- **Dispatch** — native, per harness. No new execution machinery: the agent that has the work is
-  already awake, so it consults policy + headroom and dispatches through its own harness. Cross-harness
-  work posts to the target's inbox, where the already-deployed listeners/heartbeats wake it.
+Three parts:
 
-## Where to start — the re-entrancy probes
+- **The map** — a packaged default model map (`map_version 2026-07-08`) tagging every
+  model by capability (`code`, `architecture`, `writing`, `long-context`, `vision`,
+  `fast`, `tool-use`) and a cost rank (1 = scarcest cap-weight, 9 = locally free). You
+  declare accounts; the map says which models each can run and what they cost.
+- **The router** — `coord-engine route <team> --needs …`: ranks the models that cover
+  your declared needs **cheapest-capable-first**, filtered to the accounts that have
+  headroom right now. `coord-engine headroom` is the shared cap ledger it reads.
+- **The feedback loop** — `coord-engine usage log … --model --task-class --outcome`:
+  every dispatch logs what it cost and how it turned out. Repeated bad outcomes on a
+  (model, task_class) pair **demote** it — the router marks it and ranks it below
+  everything that hasn't been failing.
 
-Probe what this team already has before doing anything. Enter at the **first probe that fails** (per the
-repo's skill-quality pattern, `docs/skill-quality-pattern.md`):
+Dispatch itself stays native to your harness — ATC decides *which model against which
+account*; your harness runs it. Nothing here depends on the other `fulcra-agent-*`
+skills; the last section shows the fleet upgrade path if you have a coord team.
 
-| Probe (run in order) | Command | Passes when | If it fails, enter at |
-|---|---|---|---|
-| Accounts declared? | `coord-engine headroom <team>` | account rows print (not `no accounts declared`) | §Setup |
-| Ledger being fed? | `coord-engine headroom <team> --json` | `used` > 0 on accounts you've dispatched to | §Edge routing (step 6 — log every spend) |
-| Near a cap? | `coord-engine digest <team>` | no `headroom LOW:` line | §Edge routing (step 6 fallback — degrade or defer) |
+## Install
 
-## Setup
+Three commands to a routable ledger. The engine is stdlib-only and installs on its own:
 
-ATC needs one operator-declared file: `team/<team>/atc/accounts.json`. Subscriptions don't expose their
-caps, so you declare them. Caps are **operator estimates** — they don't have to be exact, because
-throttle events calibrate them (a real rate-limit hit zeroes that window regardless of the declared
-number; see §Throttle events). The file is strict JSON (parsed with `json.loads`), so it takes **no
-comments** — keep the caveat in your head, not in the file.
+```bash
+uv tool install fulcra-api   # the `fulcra` CLI: auth + the Fulcra File Store (the bus)
+uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.3.0#subdirectory=packages/coord-engine"
+fulcra auth login            # browser sign-in; an account is created on first login
+```
 
-Shape (this is the canonical example the fold is tested against):
+Then seed your accounts. `atc init` writes `team/<team>/atc/accounts.json` (team
+defaults to `solo`) and is idempotent — re-running merges new accounts in by id and
+leaves the rest untouched:
+
+```bash
+coord-engine atc init                 # interactive: pick providers from the default map
+# — or non-interactively (each --account implies --yes):
+coord-engine atc init solo --account anthropic-max=anthropic:max --account openai-codex=openai:pro
+```
+
+`--account id=provider:plan` (the `:plan` is optional). init seeds plausible starter
+windows per provider (anthropic 5h/1000 + 168h/15000, openai 5h/600, else 5h/500) and
+fills each account's `harnesses[]` from the map's per-provider union; `--harness`
+overrides that. A provider absent from the map is seeded with no harnesses and a
+warning — pass `--harness` or edit the file to make it routable. It prints the exact
+next commands to paste.
+
+### The accounts file
+
+`team/<team>/atc/accounts.json` is the one operator-declared file. Subscriptions don't
+publish their caps, so you declare them; the numbers are **estimates** and don't have to
+be exact — throttle events calibrate them (a real rate-limit hit zeroes that window
+regardless of the declared number; see §Throttle events). It is strict JSON (parsed with
+`json.loads`), so it takes **no comments**.
 
 ```json
 {
   "accounts": [
     {"id": "anthropic-max", "provider": "anthropic", "plan": "max",
      "harnesses": ["claude-code", "cowork"],
-     "windows": [{"hours": 5, "cap": 800}, {"hours": 168, "cap": 12000}]},
+     "windows": [{"hours": 5, "cap": 1000}, {"hours": 168, "cap": 15000}]},
     {"id": "openai-codex", "provider": "openai", "plan": "pro",
      "harnesses": ["codex"],
-     "windows": [{"hours": 5, "cap": 600}]}
-  ],
-  "tiers": {"frontier": ["fable-5"], "standard": ["opus-4.8", "sonnet-5"],
-            "cheap": ["haiku-4.5"]}
+     "windows": [{"hours": 5, "cap": 600}]},
+    {"id": "local-ollama", "provider": "oss", "harnesses": ["ollama"]}
+  ]
 }
 ```
 
-Each account carries an `id`, the `harnesses[]` that can spend on it, and one or more rolling `windows`
-(`hours` + `cap`). The `tiers` map names which model ids count as `frontier`, `standard`, and `cheap`.
-Upload it with the File Store CLI:
+Each account carries an `id`, the `harnesses[]` that can spend on it, and zero or more
+rolling `windows` (`hours` + `cap`). **An account with no `windows` is uncapped** — it
+routes at 100% headroom and can never be throttle-excluded. That is how you declare a
+local ollama or any pay-nothing lane: omit the windows. An account entry with no
+non-empty string `id` is dropped and reported, but the fold survives — one bad entry
+never breaks the rest.
 
-```bash
-uv tool run fulcra-api file upload ./accounts.json team/<team>/atc/accounts.json
-```
+**Overriding the map (optional).** A top-level `"models"` object in the same file
+overlays the packaged default map — add a model, retag one, or change a `cost_rank` — by
+the same merge the router uses. Absent (the init default), routing runs on defaults only.
 
-Then `coord-engine headroom <team>` should print a row per account × window. An account entry with no
-non-empty string `id` is dropped and reported, but the fold survives — one bad entry never breaks the
-rest.
+Edit `atc init`'s starter windows to your real caps when you know them; until then the
+throttle path keeps them honest.
 
-## The tier rubric
+## Declaring the work's needs
 
-Classify the work, not the worker. Pick the **cheapest tier that can do the job right**:
+Route by **what the task exercises**, not by a tier guess. Pick the capability tags from
+the frozen taxonomy that the work actually demands, and pass them to `route`:
 
-- **frontier** — ambiguous porting where the target shape is unclear; architecture and system design;
-  adversarial review of subtle code; cross-system debugging where the fault could be anywhere.
-- **standard** — well-specified implementation against a clear interface; integration work with defined
-  contracts; documentation that requires judgment about what matters.
-- **cheap** — transcription of a complete spec into code; formatting and mechanical reshaping; bulk
-  sweeps (rename, lint-fix) across many files; a single-file fix with an obvious diff.
+| Tag | The work needs… |
+|---|---|
+| `code` | writing/editing/reasoning over source |
+| `architecture` | system design, cross-component reasoning, non-obvious refactors |
+| `writing` | prose that carries judgment about what matters |
+| `long-context` | ≥400k usable context in one shot |
+| `vision` | reading images/screenshots/diagrams |
+| `fast` | latency-sensitive, cheap, high-throughput turns |
+| `tool-use` | reliable multi-step tool/function calling |
 
-**Caveat:** turn count beats token price — a cheap model taking 3× the turns costs more than the
-standard tier doing it once. If a tier is thrashing (re-asking, backtracking, failing its own checks),
-step it up rather than paying for the retries.
+A tag outside this set is refused (`route` exits 2 and lists the valid set), so a typo
+can't silently route to nothing. Most tasks are one or two tags — `--needs code`,
+`--needs code,long-context`, `--needs writing,vision`. The router does the cost/headroom
+math; your only judgment call is naming the needs honestly.
 
-## Edge routing (the v1 procedure)
+**When the need is ambiguous** — you can't tell whether a task is "just" mechanical or
+genuinely hard — fall back to the tier rubric and let it tell you whether to add
+`architecture` (which pulls in the pricier, more-capable models) or stay on the plain
+capability tag:
+
+- **frontier judgment** (add `architecture`) — ambiguous porting where the target shape
+  is unclear; architecture and system design; adversarial review of subtle code;
+  cross-system debugging where the fault could be anywhere.
+- **standard** (the plain tag, e.g. `code` / `writing`) — well-specified implementation
+  against a clear interface; integration work with defined contracts; documentation that
+  requires judgment about what matters.
+- **cheap** (add `fast`) — transcription of a complete spec into code; formatting and
+  mechanical reshaping; bulk sweeps (rename, lint-fix) across many files; a single-file
+  fix with an obvious diff.
+
+**Caveat:** turn count beats token price — a cheap model taking 3× the turns costs more
+than the standard tier doing it once. If a tier is thrashing (re-asking, backtracking,
+failing its own checks), step it up rather than paying for the retries.
+
+## Routing — the procedure
 
 Any agent runs this **before dispatching** work it can't or shouldn't do itself:
 
-1. **Classify** the work into a tier with the rubric above.
-2. **Read shared headroom:** `coord-engine headroom <team> --json` — one row per account × window with
-   `account`, `window_hours`, `cap`, `used`, `headroom`, `pct`, `throttled`, `calibrate`.
-3. **Filter to capable accounts:** keep accounts whose `harnesses[]` include a harness that can run one
-   of the tier's model ids (cross-reference the account's `harnesses` against the `tiers` map). An
-   account that can't run the tier is not a candidate, however much headroom it has.
-4. **Pick the target:** lowest sufficient tier first, then among the capable accounts the one with the
-   highest `pct` (most headroom in its tightest relevant window).
-5. **Dispatch natively:**
-   - *Same harness as yours* → spawn a model-pinned subagent locally (see the table).
-   - *Different harness* → `coord-engine tell <team> <role> "<title>"` to post the work to that
-     platform's dispatcher inbox, with the tier named in the task (tag it `route:`); the deployed
-     listeners/heartbeats wake the target.
+1. **Declare needs** — the capability tags from the taxonomy above.
+
+2. **Rank the candidates:** `coord-engine route <team> --needs <tags>` — models covering
+   every requested need, ranked cheapest-capable-first among the accounts with headroom
+   right now. Each line is `N. <model> — (<account>) — <pct>% — <tags>`:
+
+   ```
+   route — solo — needs code (map 2026-07-08)
+   1. claude-sonnet-5 — (anthropic-max) — 82% — code,architecture,writing,long-context,vision,fast,tool-use
+   2. gpt-5.5 — (openai-codex) — 61% — code,architecture,long-context,vision,tool-use
+   ```
+
+   Take rank 1 unless you have a reason not to. `pct` is the account's headroom in its
+   tightest relevant window; an uncapped account shows `100%`. `route` adds ` [demoted:
+   <need>]` to any candidate that recent outcomes have soured for a requested need — a
+   demoted candidate sorts **below every non-demoted one** regardless of cost, so it only
+   surfaces when nothing healthy covers the need. Prefer a non-demoted candidate; take a
+   demoted one only knowingly. `--json` emits the full structure (candidates, dropped
+   tags, `reason` when empty).
+
+3. **Dispatch natively.** Pin the chosen model on your own harness:
 
    | Harness | Pinned-model spawn | Wake surface for a resident dispatcher |
    |---|---|---|
@@ -113,52 +170,123 @@ Any agent runs this **before dispatching** work it can't or shouldn't do itself:
    | OpenClaw | per-agent model config | HEARTBEAT.md managed block |
    | Hermes (Daytona/Vercel sandboxes) | spawn env/config | AGENTS.md loop + provision adapter |
 
-6. **Log the spend:** `coord-engine usage log <team> --account <id> --tier <tier> --units <est>` — units
-   are coarse and self-reported (a rough token estimate or request count; honesty over false precision).
-   This is what feeds the headroom fold for the next agent.
+   If the chosen model runs on a harness other than yours and you have a coord team, post
+   the work to that platform's dispatcher inbox (see the last section). Standalone, you
+   dispatch on your own harness or pick the best candidate you can run locally.
 
-   **Fallback — everyone's near a cap:** if every capable account is under ~10% headroom, either
-   **degrade one tier** (run it on the next tier down and note that in the task), or
-   `coord-engine later <team> "<title>"` to defer the work past the window boundary so it lands when a
-   cap has rolled over.
+4. **Log the spend AND the outcome — at task completion.** When the dispatched work
+   finishes, log it with the full attribution. The outcome is known only once the work
+   is done, so this is a completion-time step, not a dispatch-time one:
+
+   ```bash
+   coord-engine usage log <team> --account <id> --tier <tier> --units <est> \
+     --model <model-id> --task-class <tag> --outcome clean|rework|escalated
+   ```
+
+   - `--units` is coarse and self-reported (a rough token estimate or request count;
+     honesty over false precision) — it feeds the headroom fold.
+   - `--model` + `--task-class` + `--outcome` are what feed the demotion fold. `--model`
+     is the id you actually ran; `--task-class` is the single taxonomy tag the work most
+     exercised (validated — an unknown tag exits 2); `--outcome` is `clean` (landed as
+     dispatched), `rework` (needed another pass), or `escalated` (had to bump to a bigger
+     model). **Log all three or the outcome loop can't learn** — a shard missing any of
+     them still counts toward headroom but is invisible to demotion.
+
+   The demotion rule (frozen): a (model, task_class) pair demotes when it has **≥3**
+   outcome-bearing shards **and ≥3 of its trailing 5** are `rework`/`escalated`. Below
+   that it's insufficient evidence and the pair stays healthy; later clean shards pull it
+   back out of demotion on their own.
+
+5. **Throttle events override the estimate** — log immediately, see §Throttle events.
+
+6. **Fallback — everyone's near a cap:** if `route` returns `no candidates` (or every
+   candidate is near zero), either **degrade the needs** (drop `architecture`, run the
+   next tier down, and note it), or defer the work past the window boundary so it lands
+   when a cap has rolled over. Declaring an uncapped local lane (§accounts file) gives
+   `route` something to fall to instead of nothing.
 
 ## Throttle events
 
-The declared caps are estimates; a real rate-limit or cap error is ground truth and overrides them. When
-a dispatch hits a throttle, log it **immediately** with the same account:
+The declared caps are estimates; a real rate-limit or cap error is ground truth and
+overrides them. When a dispatch hits a throttle, log it **immediately** against that
+account:
 
 ```bash
 coord-engine usage log <team> --account <id> --tier <tier> --throttled
 ```
 
-A throttled shard **zeroes that account's headroom for the rest of the window** (`headroom` → 0,
-`pct` → 0.0) and flags the account `calibrate: true` — `headroom` renders it as
-`THROTTLED(calibrate caps)`, and `digest` surfaces a `headroom LOW:` line. The flag expires when the
-throttled shard ages out of the window. When things are calm, correct the window `cap` in
-`accounts.json` so the estimate matches what you actually observed.
+A throttled shard **zeroes that account's headroom for the rest of the window**
+(`headroom` → 0, `pct` → 0.0) and flags the account `calibrate: true` — `headroom`
+renders it `THROTTLED(calibrate caps)`, `route` drops it from candidacy, and `digest`
+surfaces a `headroom LOW:` line. The flag expires when the throttled shard ages out of
+the window. (An uncapped account has no window to zero, so it can't be throttle-excluded
+— a known conservative gap.) When things are calm, correct the window `cap` in
+`accounts.json` to match what you actually observed.
 
-## Step up to B: resident dispatchers
+## Proof surfaces
 
-Edge routing needs no standing process — the agent with the work does the routing. When one platform's
-work is heavy enough to want a dedicated router, an agent steps up to a **resident dispatcher** without
-any new engine surface:
+Two read-only folds show ATC is working, from the same accounts.json + usage shards:
+
+- **`coord-engine atc report <team> [--days N] [--json]`** — the trailing-window
+  dispatch report: tier mix, by-model breakdown, throttle events, windows exhausted, and
+  the calibration (demotion) lines. Every figure is labelled an estimate from
+  self-reported units and operator-declared caps. `by model: (no model attribution)`
+  means dispatches aren't logging `--model` — fix that at step 4. Empty ledger collapses
+  to `no dispatches in window`, never a crash.
+
+- **`coord-engine dash <team> [--port N]`** — a localhost gauge dashboard (binds
+  `127.0.0.1` only, default port 8787) showing per-account headroom and the active
+  demotions live. For eyeballing the fleet; the ledger is the source of truth.
+
+- **`coord-engine headroom <team> [--json]`** — the raw ledger. `--json` returns
+  `{"windows": [...], "demotions": [...]}` — an **object**, not the bare array v1 emitted
+  (the top level had to gain the demotions sibling). Each window row carries `account`,
+  `window_hours`, `cap`, `used`, `headroom`, `pct`, `throttled`, `calibrate`; each
+  demotion carries `model`, `task_class`, `bad`, `of`.
+
+## Where to start — the re-entrancy probes
+
+Probe what's already set up before doing anything. Enter at the **first probe that
+fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`):
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Accounts declared? | `coord-engine headroom <team>` | account rows print (not `no accounts declared`) | §Install |
+| Does route rank? | `coord-engine route <team> --needs code` | a ranked candidate list prints (not `no candidates`) | §Install / §Declaring the work's needs |
+| Ledger being fed? | `coord-engine headroom <team> --json` | `used` > 0 on accounts you've dispatched to | §Routing (step 4 — log every spend) |
+| Outcomes being logged? | `coord-engine atc report <team>` | the `by model:` line shows real ids (not `(no model attribution)`) | §Routing (step 4 — log `--model`/`--task-class`/`--outcome`) |
+| Near a cap? | `coord-engine digest <team>` | no `headroom LOW:` line | §Routing (step 6 — degrade or defer) |
+
+## Running with a coord team
+
+Everything above works on one account. On a `fulcra-agent-teams` space — several
+harnesses on one shared bus — ATC's headroom becomes **shared fleet state**: every agent
+reads the same `headroom`, so the cap ledger is honest across subscriptions and one
+agent's spend is visible to the next. Two upgrades open up:
+
+**Cross-harness dispatch.** When the best candidate runs on a harness other than yours,
+post the work to that platform's dispatcher inbox with the chosen model/tier named in the
+task (tag it `route:`); the target's deployed listeners/heartbeats (the right column of
+the harness table) wake it. Same-harness work you still spawn locally.
+
+**Step up to a resident dispatcher (§B).** When one platform's routed work is heavy
+enough to want a dedicated router, an agent steps up — no new engine surface:
 
 1. **Claim the role:** `coord-engine roles claim <team> dispatcher-<platform>` (e.g.
    `dispatcher-codex`) — a durable lease other agents can see.
-2. **Arm your native tick:** wire the platform's own wake surface (the right column of the harness
-   table) — Codex app automation, Cowork scheduled task, CC launchd listener, OpenClaw HEARTBEAT.md,
-   Hermes loop.
-3. **Watch the queue:** each tick, `coord-engine inbox <team> --agent <id>` and pick up tasks tagged `route:`.
-4. **Spawn model-pinned subagents locally** for each, per the tier named in the task.
-5. **Log every spend** with `coord-engine usage log …` so headroom stays honest fleet-wide.
+2. **Arm your native tick:** wire the platform's own wake surface (the harness table's
+   right column) — Codex app automation, Cowork scheduled task, CC launchd listener,
+   OpenClaw HEARTBEAT.md, Hermes loop.
+3. **Watch the queue:** each tick, `coord-engine inbox <team> --agent <id>` and pick up
+   tasks tagged `route:`.
+4. **Route and spawn:** `coord-engine route <team> --needs …`, spawn the model-pinned
+   subagent locally per the ranked pick.
+5. **Log every spend** with `coord-engine usage log … --model --task-class --outcome` so
+   headroom and the demotion loop stay honest fleet-wide.
 
-**Tick on the cheapest tier.** The dispatcher is polling, not doing the work — it must not eat the
-budget it exists to guard.
+**Tick on the cheapest model.** The dispatcher is polling, not doing the work — it must
+not eat the budget it exists to guard.
 
-## Relationship to the lifecycle contract
-
-ATC governs **which model runs the work and against which account** — a decision made once, at dispatch
-time. It does not replace continuity: every session ATC spawns is still bound by the
-[fulcra-agent-continuity lifecycle contract](../fulcra-agent-continuity/SKILL.md#the-lifecycle-contract-applies-on-every-harness)
-— resume on wake, snapshot on change, park before context loss. Route at dispatch; the contract runs for
-the life of the session that routing created.
+Routing is a decision made once, at dispatch time — which model, against which account.
+Whatever session it spawns still runs its own lifecycle for the rest of its life; ATC
+governs the runway assignment, not the flight.
