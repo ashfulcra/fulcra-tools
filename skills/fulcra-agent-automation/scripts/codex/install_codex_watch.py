@@ -9,7 +9,7 @@ adapter mechanics onto the coord2 engine, in three layers:
     NO Stop hook: Codex Stop fires every turn, and parking the active task on
     every turn would thrash it between active/waiting.
   * managed scripts — materialized under ``<codex>/fulcra-coord2-hooks/``.
-    SessionStart emits a bounded resume brief + inbox as additionalContext;
+    SessionStart emits a bounded resume brief + briefing as additionalContext;
     PreCompact backgrounds ``coord-engine continuity park``. Both degrade
     silently (exit 0) when coord-engine is not on PATH.
   * app-thread automation — writes the coord2-first ``COORD2_WATCH_PROMPT``
@@ -88,7 +88,7 @@ If nothing actionable reply WATCH_OK.
 
 SESSION_START_SH = """\
 #!/bin/bash
-# coord2 SessionStart hook (Codex) — bounded resume brief + inbox context.
+# coord2 SessionStart hook (Codex) — bounded resume brief + briefing context.
 # Managed by fulcra-agent-automation/scripts/codex/install_codex_watch.py.
 # Output is bounded: an unbounded board dump is a known context-flooding
 # failure. Degrades silently (exit 0) when coord-engine is not on PATH.
@@ -114,12 +114,12 @@ if [ -n "$SESSION_ID" ] && [ ! -f __AUTOMATION_TOML__ ]; then
 fi
 command -v coord-engine >/dev/null 2>&1 || exit 0
 BRIEF="$(coord-engine continuity resume "$TEAM" "$AGENT" 2>/dev/null | head -25)"
-INBOX="$(coord-engine inbox "$TEAM" --agent "$AGENT" 2>/dev/null | head -8)"
-[ -z "$BRIEF$INBOX" ] && exit 0
-python3 - "$BRIEF" "$INBOX" <<'PYEOF'
+BRIEFING="$(coord-engine briefing "$TEAM" --agent "$AGENT" 2>/dev/null | head -60)"
+[ -z "$BRIEF$BRIEFING" ] && exit 0
+python3 - "$BRIEF" "$BRIEFING" <<'PYEOF'
 import json, sys
-brief, inbox = sys.argv[1], sys.argv[2]
-ctx = "coord2 resume brief:\\n" + brief + "\\n\\ncoord2 inbox:\\n" + inbox
+brief, briefing = sys.argv[1], sys.argv[2]
+ctx = "coord2 resume brief:\\n" + brief + "\\n\\ncoord2 briefing:\\n" + briefing
 print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "SessionStart", "additionalContext": ctx[:4000]}}))
 PYEOF
