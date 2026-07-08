@@ -94,3 +94,12 @@ def test_parse_tolerates_prose_body_and_blank_lines():
     }) + "\nExtra prose the humans wrote.\n"
     parsed = model.parse_engagement(text)
     assert parsed is not None and parsed["slug"] == "x"
+
+
+def test_render_sanitizes_the_body_heading_too():
+    text = model.render_engagement({
+        "schema": model.SCHEMA, "slug": "x", "title": "Two\nLines", "phase": "intake",
+        "created_at": "t0", "updated_at": "t0", "phase_history": ["intake t0"],
+    })
+    heading = [l for l in text.splitlines() if l.startswith("# Engagement:")][0]
+    assert heading == "# Engagement: Two Lines"
