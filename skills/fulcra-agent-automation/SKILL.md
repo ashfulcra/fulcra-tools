@@ -82,9 +82,13 @@ context, leaving the verdict-before-ack duty steps to the review skill's reviewe
 reviews) → for each review request, **slug-exact verdict-before-ack** (write the verdict file, verify
 `review status` clears you from `pending_required`, only then ack — never ack bare or against a different
 slug) → handle other work → `continuity snapshot` → `usage log` (ATC, when accounts are declared) →
-`continuity park` before session end. **These hooks/prompts/blocks are rendered artifacts, not live
-references:** after upgrading `fulcra-tools`, **RE-RUN YOUR ADAPTER INSTALLER** to regenerate them —
-an un-regenerated hook keeps emitting the doctrine it was rendered under.
+`continuity park` before session end → **report last**: the human-visible summary is the tick's final
+output, composed after every command above. Text followed by more tool activity may never render —
+"sent" is not "delivered" — so anything that MUST reach a recipient (human or agent) goes on the bus
+as a durable artifact (ask, review doc, snapshot), never only in session text. **These
+hooks/prompts/blocks are rendered artifacts, not live references:** after upgrading `fulcra-tools`,
+**RE-RUN YOUR ADAPTER INSTALLER** to regenerate them — an un-regenerated hook keeps emitting the
+doctrine it was rendered under.
 
 **Claude Code / Cowork** — settings.json hooks.
 ```bash
