@@ -148,7 +148,7 @@ any new engine surface:
 2. **Arm your native tick:** wire the platform's own wake surface (the right column of the harness
    table) — Codex app automation, Cowork scheduled task, CC launchd listener, OpenClaw HEARTBEAT.md,
    Hermes loop.
-3. **Watch the queue:** each tick, `coord-engine inbox --agent <id>` and pick up tasks tagged `route:`.
+3. **Watch the queue:** each tick, `coord-engine inbox <team> --agent <id>` and pick up tasks tagged `route:`.
 4. **Spawn model-pinned subagents locally** for each, per the tier named in the task.
 5. **Log every spend** with `coord-engine usage log …` so headroom stays honest fleet-wide.
 

@@ -59,4 +59,4 @@ Fold: window math, multi-window accounts, throttle-zeroing + expiry, unknown acc
 ## Open questions for Ash (non-blocking, defaulted)
 
 1. **Name:** shipping as ATC/`fulcra-agent-atc` unless renamed.
-2. **Real cap numbers:** accounts.md ships with placeholder windows for your Anthropic + OpenAI subscriptions; correct the caps when awake (throttle events will calibrate regardless).
+2. **Real cap numbers:** accounts.json ships with placeholder windows for your Anthropic + OpenAI subscriptions; correct the caps when awake (throttle events will calibrate regardless).
