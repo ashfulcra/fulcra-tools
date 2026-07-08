@@ -27,3 +27,4 @@ packages/menubar/build/
 packages/menubar/dist/
 packages/menubar/logs/
 .primitives-state/
+/.worktrees/
