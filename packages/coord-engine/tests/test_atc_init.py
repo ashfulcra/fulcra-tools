@@ -126,6 +126,61 @@ def test_bad_account_spec_yes(capsys):
     assert t.read(PATH) is None
 
 
+def test_account_implies_yes(capsys):
+    # --account is an unambiguous non-interactive intent, so it implies --yes
+    # even without --yes and without touching input().
+    t = FakeTransport()
+    rc = cli.main(["atc", "init", "--account", "anthropic-main=anthropic:max"],
+                  transport=t)
+    assert rc == 0
+    accts = {a["id"]: a for a in atc.parse_accounts(t.read(PATH))["accounts"]}
+    assert accts["anthropic-main"]["provider"] == "anthropic"
+
+
+def test_team_positional_default_and_override(capsys):
+    # team is positional-with-default(solo); a positional overrides the path.
+    t = FakeTransport()
+    rc = cli.main(["atc", "init", "myteam", "--yes",
+                   "--account", "anthropic-main=anthropic:max"], transport=t)
+    assert rc == 0
+    assert t.read("team/myteam/atc/accounts.json") is not None
+    assert t.read(PATH) is None  # default 'solo' untouched
+
+
+def test_unknown_provider_warns_but_writes(capsys):
+    t = FakeTransport()
+    rc = cli.main(["atc", "init", "--yes", "--account", "cust=antropic:x"],
+                  transport=t)
+    assert rc == 0  # never crashes; account still written
+    err = capsys.readouterr().err
+    assert "warning: provider 'antropic' not in default map" in err
+    accts = {a["id"]: a for a in atc.parse_accounts(t.read(PATH))["accounts"]}
+    assert accts["cust"]["provider"] == "antropic"
+    assert accts["cust"]["harnesses"] == []  # unroutable until operator edits
+    assert accts["cust"]["windows"] == [{"hours": 5, "cap": 500}]
+
+
+def test_unknown_provider_with_harness_override_no_warning(capsys):
+    t = FakeTransport()
+    rc = cli.main(["atc", "init", "--yes", "--account", "cust=antropic:x",
+                   "--harness", "codex"], transport=t)
+    assert rc == 0
+    assert "warning: provider" not in capsys.readouterr().err
+
+
+def test_interactive_reports_ignored_tokens(monkeypatch, capsys):
+    t = FakeTransport()
+    # 1 = anthropic (valid); 7 = out of range; foo = non-numeric.
+    answers = iter(["1, 7, foo", "", "max"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    rc = cli.main(["atc", "init"], transport=t)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ignored: 7, foo" in out
+    accts = {a["id"]: a for a in atc.parse_accounts(t.read(PATH))["accounts"]}
+    assert "anthropic-main" in accts  # valid token still honored
+
+
 def test_prints_three_paste_lines(capsys):
     t = FakeTransport()
     cli.main(["atc", "init", "--yes", "--account", "anthropic-main=anthropic:max"],

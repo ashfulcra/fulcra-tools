@@ -1119,6 +1119,10 @@ def _atc_build_account(acct_id: str, provider: str, plan: str,
                        harness_override: Optional[list[str]]) -> dict[str, Any]:
     harnesses = (list(harness_override) if harness_override
                  else list(prov_harnesses.get(provider, [])))
+    if provider not in prov_harnesses and not harness_override:
+        print(f"warning: provider {provider!r} not in default map; seeded "
+              "5h/500 with no harnesses — pass --harness or edit accounts.json "
+              "to make it routable", file=sys.stderr)
     acct: dict[str, Any] = {"id": acct_id, "provider": provider}
     if plan:
         acct["plan"] = plan
@@ -1138,6 +1142,7 @@ def _atc_init_interactive(providers: list[str],
         print(f"  {i}. {p}")
     sel = input("Select providers to declare (comma-separated numbers): ").strip()
     chosen: list[str] = []
+    ignored: list[str] = []
     for tok in sel.split(","):
         tok = tok.strip()
         if not tok:
@@ -1145,9 +1150,15 @@ def _atc_init_interactive(providers: list[str],
         try:
             idx = int(tok)
         except ValueError:
+            ignored.append(tok)
             continue
-        if 1 <= idx <= len(providers) and providers[idx - 1] not in chosen:
+        if not (1 <= idx <= len(providers)):
+            ignored.append(tok)
+            continue
+        if providers[idx - 1] not in chosen:
             chosen.append(providers[idx - 1])
+    if ignored:
+        print("ignored: " + ", ".join(ignored))
     gathered: list[dict[str, Any]] = []
     for prov in chosen:
         default_id = f"{prov}-main"
@@ -1172,7 +1183,9 @@ def cmd_atc_init(args: argparse.Namespace, transport: Any) -> int:
     prov_harnesses = _atc_provider_harnesses(defaults)
     providers = sorted(prov_harnesses)
 
-    if args.yes:
+    # --account is itself an unambiguous statement of non-interactive intent, so
+    # its presence implies --yes even when --yes was not passed.
+    if args.yes or args.account:
         gathered: list[dict[str, Any]] = []
         for spec in (args.account or []):
             parsed = _atc_parse_account_spec(spec)
@@ -1718,7 +1731,7 @@ def build_parser() -> argparse.ArgumentParser:
     atr.set_defaults(func=cmd_atc_report)
     ati = atsub.add_parser(
         "init", help="standalone onboarding: seed team/<team>/atc/accounts.json")
-    ati.add_argument("--team", default="solo",
+    ati.add_argument("team", nargs="?", default="solo",
                      help="team to onboard (default: solo)")
     ati.add_argument("--yes", action="store_true",
                      help="non-interactive; requires >=1 --account id=provider:plan")
