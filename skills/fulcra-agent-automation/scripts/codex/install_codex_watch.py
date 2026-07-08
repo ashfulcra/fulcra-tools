@@ -84,7 +84,10 @@ You are {agent} on coord2 team {team}. Each tick, in order:
 5. After each completed item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
 6. coord-engine usage log {team} --account <acct> --tier <tier> --units <est>   # ATC, when accounts are declared
 7. Before session end: coord-engine continuity park {team} --agent {agent} --objective "..."
-If nothing actionable reply WATCH_OK.
+8. LAST, after every command above: compose your human-visible report as the tick's final
+   output. Text followed by more tool activity may never render — "sent" is not "delivered".
+   Anything that MUST reach someone goes on the bus (ask, review doc, snapshot), not in
+   session text. If nothing actionable, the final output is exactly WATCH_OK.
 """
 
 SESSION_START_SH = """\
