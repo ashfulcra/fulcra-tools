@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "coord-engine",
+    "fde-engine",
     "fulcra-attention",
     "fulcra-collect",
     "fulcra-common",
@@ -216,6 +217,19 @@ sdist = { url = "https://files.pythonhosted.org/packages/81/2d/ff8d91d7b564d4646
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/82/45359b62a067409bd929ae8a56b8ed13e5a8c8a61194b3c236920999ab83/fastapi-0.136.3-py3-none-any.whl", hash = "sha256:3d2a69bdf04b7e9f3afa292c3bc7a98816bbfafa10bc9b45f3f3700d2f761620", size = 117481, upload-time = "2026-05-23T18:53:16.924Z" },
 ]
+
+[[package]]
+name = "fde-engine"
+source = { editable = "packages/fde-engine" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'" }]
+provides-extras = ["dev"]
 
 [[package]]
 name = "feedparser"
