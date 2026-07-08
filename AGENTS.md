@@ -147,14 +147,22 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   easier — a documented raw REST call is a legitimate tool, not a last resort.
   Still prefer the `fulcra` CLI / Python lib when you have a shell and a verb
   exists; the MCP server is read-only.
-- **Records are write-via-ingest.** A timeline record is written by POSTing a
-  `DataRecordV1` to `POST /ingest/v1/record` (the `data_type` rides in
-  `metadata`), or a JSONL batch to `POST /ingest/v1/record/batch`. There is
-  **no record-level delete/replace and no `fulcra` record-write/delete CLI verb
-  yet** — model corrections as new (superseding) records; JSON-schema discovery
-  is `GET /user/v1alpha1/schema/annotation` and `…/schema/measurement`. When a
-  first-class record verb lands, the primitives doc gets a full re-verification,
-  not a patch — flag it on the bus.
+- **Records are write-via-ingest.** Two write paths, both in the OpenAPI spec
+  (spec-verified 2026-07-08):
+  - **Typed (preferred, new):** `POST /ingest/v1/record/{data_type}` takes an
+    **unwrapped** record payload for that data type, and accepts jsonlines for
+    batch (one record per line). Discover types via `GET /data/v1/catalog`
+    (`recordable`/`api_version` fields) and the record shape via
+    `GET /data/v1/catalog/{data_type}/{api_version}/schema`. Caveat: custom
+    data types still reference the annotation id in the record's `sources`.
+  - **Legacy (still valid):** `POST /ingest/v1/record` with a wrapped
+    `DataRecordV1` (`data_type` rides in `metadata`), or a JSONL batch to
+    `POST /ingest/v1/record/batch`.
+
+  There is **no record-level delete/replace and no `fulcra` record-write/delete
+  CLI verb yet** (the CLI verbs will be built on the typed endpoints) — model
+  corrections as new (superseding) records. When the CLI record verbs land, the
+  primitives doc gets a full re-verification, not a patch — flag it on the bus.
 - **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
   It defaults to off (inert); leave it there — an accidental `on` has caused
   duplicate-record proliferation. The writer is being ported to coord with a
