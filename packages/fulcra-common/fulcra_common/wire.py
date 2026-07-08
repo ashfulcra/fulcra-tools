@@ -105,9 +105,15 @@ def build_typed_record(
 
     None fields are OMITTED (the server defaults them), never null-filled.
     """
-    if value is not None and base_type != "NumericAnnotation":
+    if (value is not None or unit is not None) and base_type != "NumericAnnotation":
         raise ValueError(
             f"value/unit only apply to NumericAnnotation, got {base_type}")
+    if unit is not None and value is None:
+        # codex CHANGES on #330: unit without value used to be silently
+        # dropped (unit only attached inside the value branch) — a caller
+        # got a false-success record missing its unit. The unit qualifies
+        # the value; without one it is a caller bug, so fail loud.
+        raise ValueError("unit requires value")
     sources = [source_id, *extra_sources]
     if definition_id:
         sources.append(f"com.fulcradynamics.annotation.{definition_id}")

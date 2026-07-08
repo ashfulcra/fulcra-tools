@@ -195,3 +195,23 @@ def test_build_typed_record_rejects_value_on_non_numeric():
         wire.build_typed_record(base_type="MomentAnnotation",
                                 start_time=datetime(2026, 7, 8, tzinfo=UTC),
                                 source_id="s", value=1.0)
+
+
+def test_build_typed_record_rejects_unit_without_value():
+    """codex CHANGES on #330: unit without value was silently dropped (the
+    unit only attached inside the value branch) — a caller passing just a
+    unit got a false-success record with the unit missing. Loud rejection
+    instead: the unit qualifies the value; alone it is a caller bug."""
+    with pytest.raises(ValueError, match="unit requires value"):
+        wire.build_typed_record(
+            base_type="NumericAnnotation",
+            start_time=datetime(2026, 7, 8, tzinfo=UTC),
+            source_id="s", unit="mg/dL")
+
+
+def test_build_typed_record_rejects_unit_on_non_numeric():
+    with pytest.raises(ValueError, match="value/unit only apply"):
+        wire.build_typed_record(
+            base_type="MomentAnnotation",
+            start_time=datetime(2026, 7, 8, tzinfo=UTC),
+            source_id="s", unit="mg/dL")
