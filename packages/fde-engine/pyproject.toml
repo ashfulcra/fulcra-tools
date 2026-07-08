@@ -9,7 +9,7 @@ description = "Engagement engine for the Fulcra FDE skill — seven-phase lifecy
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-authors = [{name = "Ash", email = "ash@fulcradynamics.com"}]
+authors = [{name = "Ash", email = "114089064+ashfulcra@users.noreply.github.com"}]
 # stdlib-only runtime (transport is a CLI-subprocess call to `fulcra-api`); no runtime deps.
 dependencies = []
 
