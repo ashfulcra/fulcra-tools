@@ -33,7 +33,7 @@ v1: agent-fleet operators on subscriptions — concretely, this fleet (Claude Co
 
 ### Engine additions (stdlib only)
 
-- **Accounts doc** `team/<team>/atc/accounts.md` — operator-declared (subscriptions don't expose caps): frontmatter listing accounts `{id, provider, plan, harnesses[], windows[{hours, cap, metric}]}` and a `tiers` map (`frontier|standard|cheap` → model ids). Caps are estimates; corrections come from throttle events.
+- **Accounts doc** `team/<team>/atc/accounts.json` — operator-declared (subscriptions don't expose caps), strict JSON (the stdlib mini-frontmatter parser doesn't do nested structures): accounts `{id, provider, plan, harnesses[], windows[{hours, cap, metric}]}` and a `tiers` map (`frontier|standard|cheap` → model ids). Caps are estimates; corrections come from throttle events.
 - **`coord-engine usage log <team> --account <id> --tier <tier> [--units N] [--throttled]`** — writes one usage shard (agent, ts, account, tier, units, throttled?). Units are coarse and self-reported in v1 (a dispatch = its rough token estimate or request count); honesty over false precision.
 - **`coord-engine headroom <team> [--json]`** — pure fold: per account × window, `cap − Σ(shards in window)` → headroom + percent; a `--throttled` shard **zeroes that account's headroom for the remainder of its window** (conservative ground truth beats the estimate) and flags the account `calibrate`. Unknown accounts/tiers in shards are reported, never crash the fold (health-surface discipline).
 - **`digest`/`briefing` hook-in:** one headroom line when any account is <15% (surfaces in the operator loop like everything else).
