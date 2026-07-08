@@ -68,7 +68,7 @@ def render_engagement(meta: dict[str, Any]) -> str:
         lines.append(f"  - {_single_line(entry)}")
     lines.append("---")
     lines.append("")
-    lines.append(f"# Engagement: {meta.get('title') or meta.get('slug', '')}")
+    lines.append(f"# Engagement: {_single_line(meta.get('title') or meta.get('slug', ''))}")
     lines.append("")
     lines.append(
         "State record owned by fde-engine — edit prose below freely; the "
