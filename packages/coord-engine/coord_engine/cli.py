@@ -446,6 +446,39 @@ def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str
     return out
 
 
+def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
+    """Open a review with named REQUIRED reviewers, making the obligation
+    structurally durable: the doc lands at the SAME path `_review_tally` reads
+    (`_review_doc_path`), so each required reviewer's `pending_required` marker
+    surfaces in `needs-me` and stays there until their verdict file exists.
+
+    Requesters SHOULD name roles, not identities (role-routing doctrine) — a
+    role name is resolved to its fresh lease holders by the needs-me fold."""
+    team = args.team
+    # A title slugs like `tell` slugs titles; an already-slug-like arg round-trips
+    # through the same helper unchanged (single path segment).
+    slug = tasks.slugify(args.name)
+    required = [r.strip() for r in (args.reviewer or []) if r and r.strip()]
+    path = _review_doc_path(team, slug)
+    if transport.read(path) is not None:
+        print(f"review {slug} already exists", file=sys.stderr)
+        return 1
+    fm = {
+        "type": "Review",
+        "schema": "review-request/v1",
+        "requested_by": getattr(args, "sender", None) or _host(),
+        "of": args.of,
+        "required": required,
+        "ts": _iso(_now()),
+    }
+    body = f"\nReview requested: {args.of}\n"
+    transport.write(path, okf.render_frontmatter(fm) + body)
+    print(f"review {slug} requested (required: {', '.join(required)})")
+    for r in required:
+        print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
+    return 0
+
+
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
     result = _review_tally(transport, team, slug)
@@ -1453,6 +1486,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     rv = sub.add_parser("review", help="review verdict tally (fulcra-agent-review)")
     rvsub = rv.add_subparsers(dest="review_command", required=True)
+    rvq = rvsub.add_parser("request", help="open a review with required reviewers (durable obligation)")
+    rvq.add_argument("team"); rvq.add_argument("name", help="slug or title")
+    rvq.add_argument("--of", required=True, help="artifact under review (PR url or description)")
+    rvq.add_argument("--reviewer", action="append", required=True,
+                     help="required reviewer (role preferred); repeat for many")
+    rvq.add_argument("--from", dest="sender", help="requesting agent (defaults to host)")
+    rvq.set_defaults(func=cmd_review_request)
     rvs = rvsub.add_parser("status", help="APPROVED/CHANGES/PENDING from reviewers' verdicts")
     rvs.add_argument("team"); rvs.add_argument("slug"); add_json(rvs)
     rvs.set_defaults(func=cmd_review_status)
