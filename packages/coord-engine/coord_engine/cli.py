@@ -23,7 +23,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -912,9 +912,16 @@ def _atc_usage_shards(transport: Any, team: str) -> list[dict[str, Any]]:
             ts = continuity._parse_created_at(fm.get("ts"))
             if ts is None or not fm.get("account"):
                 continue
-            rows.append({"account": fm["account"], "ts": ts,
-                         "units": int(fm.get("units") or 0),
-                         "throttled": bool(fm.get("throttled"))})
+            row = {"account": fm["account"], "ts": ts,
+                   "units": int(fm.get("units") or 0),
+                   "throttled": bool(fm.get("throttled"))}
+            # `tier` drives the report/dash tier-mix + headline; the outcome
+            # fields (model/task_class/outcome) flow through only when present.
+            # v1 shards missing any of these reach the folds untouched.
+            for k in ("tier", "model", "task_class", "outcome"):
+                if fm.get(k) is not None:
+                    row[k] = fm[k]
+            rows.append(row)
         except Exception:
             continue
     return rows
@@ -922,17 +929,35 @@ def _atc_usage_shards(transport: Any, team: str) -> list[dict[str, Any]]:
 
 def cmd_usage_log(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
+    task_class = getattr(args, "task_class", None)
+    # --task-class is taxonomy-validated (exit 2 on unknown, matching route's
+    # unknown-need contract) — validate BEFORE any write so a rejected
+    # invocation leaves no shard behind. --outcome is argparse-choices gated.
+    if task_class is not None and task_class not in atc.TAXONOMY:
+        print(f"usage log — unknown task-class: {task_class} (must be one of: "
+              f"{','.join(sorted(atc.TAXONOMY))})", file=sys.stderr)
+        return 2
     ts = _iso(_now())
     fm = {"schema": "atc-usage/v1", "agent": agent, "ts": ts,
           "account": args.account, "tier": args.tier,
           "units": int(args.units or 0), "throttled": bool(args.throttled)}
+    # Outcome-attribution fields are written ONLY when provided, so v1 shards
+    # stay v1 (the headroom + demotions folds both tolerate their absence).
+    if getattr(args, "model", None):
+        fm["model"] = args.model
+    if task_class is not None:
+        fm["task_class"] = task_class
+    if getattr(args, "outcome", None) is not None:
+        fm["outcome"] = args.outcome
     # Path-safe stamp (colons stripped) + agent slug, matching the repo's
     # timestamped-shard convention (_stamp_for_path); fm["ts"] keeps the real
     # ISO value the headroom fold parses.
     transport.write(_atc_usage_prefix(args.team) + _stamp_for_path(ts, agent) + ".md",
                     okf.render_frontmatter(fm) + "\n")
+    extra = "".join(
+        f", {k}={fm[k]}" for k in ("model", "task_class", "outcome") if k in fm)
     print(f"logged {fm['units']} units -> {args.account} ({args.tier}"
-          + (", THROTTLED" if args.throttled else "") + ")")
+          + (", THROTTLED" if args.throttled else "") + ")" + extra)
     return 0
 
 
@@ -944,15 +969,295 @@ def cmd_headroom(args: argparse.Namespace, transport: Any) -> int:
               + (f" ({parsed['error']})" if parsed.get("error") else "")
               + " — see fulcra-agent-atc §setup")
         return 0
-    rows = atc.headroom(parsed["accounts"], _atc_usage_shards(transport, args.team), _now())
+    shards = _atc_usage_shards(transport, args.team)
+    rows = atc.headroom(parsed["accounts"], shards, _now())
     if args.json:
-        print(json.dumps(rows, indent=2))
+        # Contract change (task 3): headroom --json now emits an OBJECT with the
+        # per-window rows under "windows" plus a "demotions" list folded from the
+        # outcome shards — the array top-level could not gain a sibling key.
+        demo = [{"model": m, "task_class": tc, "bad": v["bad"], "of": v["of"]}
+                for (m, tc), v in sorted(atc.demotions(shards).items())]
+        print(json.dumps({"windows": rows, "demotions": demo}, indent=2))
         return 0
     print(f"headroom — {args.team}")
     for r in rows:
         flags = " THROTTLED(calibrate caps)" if r["throttled"] else ""
         print(f"  {r['account']:<20} {r['window_hours']:>4}h  "
               f"{r['headroom']}/{r['cap']} ({r['pct']}%){flags}")
+    return 0
+
+
+def _atc_models_overlay(text: Optional[str]) -> Optional[dict[str, Any]]:
+    """Extract the optional top-level ``models`` overlay from accounts.json.
+
+    Returns the overlay dict, or ``None`` when absent/malformed (v1 accounts.json
+    has no ``models`` key -> defaults-only routing). Never raises."""
+    if not text:
+        return None
+    try:
+        d = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    m = d.get("models") if isinstance(d, dict) else None
+    return m if isinstance(m, dict) else None
+
+
+def cmd_route(args: argparse.Namespace, transport: Any) -> int:
+    text = transport.read(_atc_accounts_path(args.team))
+    parsed = atc.parse_accounts(text)
+    merged, merge_reports = atc.merge_models(
+        atc.load_default_models(), _atc_models_overlay(text))
+    needs = [n.strip() for n in (args.needs or "").split(",") if n.strip()]
+    # An empty/whitespace-only --needs (e.g. `--needs ""` or `--needs ,`) is a
+    # taxonomy-strictness error, not "match everything" — mirror the unknown-need
+    # exit 2 rather than silently routing ALL models.
+    if not needs:
+        print("route — no needs given", file=sys.stderr)
+        return 2
+    shards = _atc_usage_shards(transport, args.team)
+    # Fold outcome shards -> demoted (model, task_class) pairs, then adapt to the
+    # {model: [tags]} shape route consumes (task_class values are taxonomy tags).
+    demo_for_route = atc._demotions_for_route(atc.demotions(shards))
+    result = atc.route(parsed, merged, needs, shards,
+                       demotions=demo_for_route, now=_now())
+    # Surface the overlay-merge notes alongside the fold's own coercion notes.
+    result["dropped_unknown_tags"] = merge_reports + result.get("dropped_unknown_tags", [])
+    reason = result.get("reason")
+    unknown_need = bool(reason) and reason.startswith("unknown need:")
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return 2 if unknown_need else 0
+    if unknown_need:
+        print(f"route — {reason} (needs must be one of: "
+              f"{','.join(sorted(atc.TAXONOMY))})")
+        return 2
+    if not result["candidates"]:
+        print(f"no candidates: {reason}")
+        return 0
+    print(f"route — {args.team} — needs {','.join(needs)} "
+          f"(map {result['map_version']})")
+    for i, c in enumerate(result["candidates"], 1):
+        pct = f"{c['headroom_pct']:g}"
+        tags = ",".join(c["tags"])
+        demo = f" [demoted: {', '.join(c['demoted'])}]" if c["demoted"] else ""
+        print(f"{i}. {c['model']} — ({c['account']}) — {pct}% — {tags}{demo}")
+    return 0
+
+
+def cmd_atc_report(args: argparse.Namespace, transport: Any) -> int:
+    """Team dispatch/tier/calibration report over the trailing --days window.
+
+    Reads the same accounts.json + usage shards the other ATC verbs use, folds
+    the demotions (calibration) and merged model map alongside, and renders the
+    estimate-labelled text block. Never crashes on an empty/corrupt ledger."""
+    text = transport.read(_atc_accounts_path(args.team))
+    parsed = atc.parse_accounts(text)
+    shards = _atc_usage_shards(transport, args.team)
+    merged, _ = atc.merge_models(atc.load_default_models(),
+                                 _atc_models_overlay(text))
+    rep = atc.report_fold(parsed, shards, team=args.team,
+                          demotions=atc.demotions(shards), models=merged,
+                          days=args.days, now=_now())
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return 0
+    print(atc.render_report(rep))
+    return 0
+
+
+# Plan-seeded rolling-window cap defaults for `atc init`. These are OPERATOR-
+# CORRECTABLE ESTIMATES, not measured limits — subscriptions don't publish their
+# caps, so init seeds a plausible starting point per provider and throttle events
+# calibrate them from there (a real rate-limit hit zeroes that window regardless
+# of the declared number). An operator edits the numbers freely, and DELETING an
+# account's windows declares it uncapped (route treats no-windows as 100%
+# headroom). Keyed by provider; anything else falls to the placeholder.
+_ATC_SEED_WINDOWS: dict[str, list[dict[str, int]]] = {
+    "anthropic": [{"hours": 5, "cap": 1000}, {"hours": 168, "cap": 15000}],
+    "openai": [{"hours": 5, "cap": 600}],
+}
+_ATC_SEED_WINDOWS_DEFAULT: list[dict[str, int]] = [{"hours": 5, "cap": 500}]
+
+
+def _atc_seed_windows(provider: str) -> list[dict[str, int]]:
+    """Fresh copies (never the shared constant) so callers can't mutate defaults."""
+    src = _ATC_SEED_WINDOWS.get(provider, _ATC_SEED_WINDOWS_DEFAULT)
+    return [dict(w) for w in src]
+
+
+def _atc_provider_harnesses(defaults: dict[str, Any]) -> dict[str, list[str]]:
+    """Per-provider harness union folded from the default model map: every model's
+    ``provider`` -> the sorted set of its declared ``harnesses``. This is the
+    default an account's ``harnesses[]`` seeds from at init time."""
+    acc: dict[str, set[str]] = {}
+    for entry in (defaults.get("models") or {}).values():
+        prov = entry.get("provider")
+        if not isinstance(prov, str) or not prov:
+            continue
+        for h in entry.get("harnesses") or []:
+            if isinstance(h, str) and h:
+                acc.setdefault(prov, set()).add(h)
+    return {p: sorted(hs) for p, hs in acc.items()}
+
+
+def _atc_parse_account_spec(spec: str) -> Optional[tuple[str, str, str]]:
+    """Parse a ``--account id=provider:plan`` token. ``:plan`` is optional. Returns
+    ``(id, provider, plan)`` or ``None`` if the required ``id=provider`` shape is
+    absent (the caller turns ``None`` into an exit-2 refusal)."""
+    if "=" not in spec:
+        return None
+    acct_id, rest = spec.split("=", 1)
+    acct_id = acct_id.strip()
+    if not acct_id or not rest.strip():
+        return None
+    if ":" in rest:
+        provider, plan = rest.split(":", 1)
+    else:
+        provider, plan = rest, ""
+    provider, plan = provider.strip(), plan.strip()
+    if not provider:
+        return None
+    return acct_id, provider, plan
+
+
+def _atc_build_account(acct_id: str, provider: str, plan: str,
+                       prov_harnesses: dict[str, list[str]],
+                       harness_override: Optional[list[str]]) -> dict[str, Any]:
+    harnesses = (list(harness_override) if harness_override
+                 else list(prov_harnesses.get(provider, [])))
+    if provider not in prov_harnesses and not harness_override:
+        print(f"warning: provider {provider!r} not in default map; seeded "
+              "5h/500 with no harnesses — pass --harness or edit accounts.json "
+              "to make it routable", file=sys.stderr)
+    acct: dict[str, Any] = {"id": acct_id, "provider": provider}
+    if plan:
+        acct["plan"] = plan
+    acct["harnesses"] = harnesses
+    acct["windows"] = _atc_seed_windows(provider)
+    return acct
+
+
+def _atc_init_interactive(providers: list[str],
+                          prov_harnesses: dict[str, list[str]],
+                          harness_override: Optional[list[str]]) -> list[dict[str, Any]]:
+    """Numbered-prompt onboarding over the default map's provider set. Reads via
+    the builtin ``input`` (monkeypatched in tests). An empty/blank selection
+    returns ``[]`` — the caller refuses zero accounts with exit 2."""
+    print("Providers in the packaged default model map:")
+    for i, p in enumerate(providers, 1):
+        print(f"  {i}. {p}")
+    sel = input("Select providers to declare (comma-separated numbers): ").strip()
+    chosen: list[str] = []
+    ignored: list[str] = []
+    for tok in sel.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            idx = int(tok)
+        except ValueError:
+            ignored.append(tok)
+            continue
+        if not (1 <= idx <= len(providers)):
+            ignored.append(tok)
+            continue
+        if providers[idx - 1] not in chosen:
+            chosen.append(providers[idx - 1])
+    if ignored:
+        print("ignored: " + ", ".join(ignored))
+    gathered: list[dict[str, Any]] = []
+    for prov in chosen:
+        default_id = f"{prov}-main"
+        acct_id = input(f"  account id for {prov} [{default_id}]: ").strip() or default_id
+        plan = input(f"  plan for {prov} (blank for none): ").strip()
+        gathered.append(_atc_build_account(acct_id, prov, plan,
+                                           prov_harnesses, harness_override))
+    return gathered
+
+
+def cmd_atc_init(args: argparse.Namespace, transport: Any) -> int:
+    """Standalone ATC onboarding: seed ``team/<team>/atc/accounts.json`` so a
+    fresh operator has a routable cap ledger in one command.
+
+    Interactive by default (numbered prompts over the default map's providers);
+    ``--yes`` runs non-interactively and requires >=1 ``--account id=provider:plan``.
+    Idempotent: an existing accounts.json is loaded, the newly-declared accounts
+    merged in by id (existing entries and sibling keys like ``tiers``/``models``
+    are preserved), and the result written back through the same transport-write
+    seam the review-request flow uses. Refuses a zero-account run with exit 2."""
+    defaults = atc.load_default_models()
+    prov_harnesses = _atc_provider_harnesses(defaults)
+    providers = sorted(prov_harnesses)
+
+    # --account is itself an unambiguous statement of non-interactive intent, so
+    # its presence implies --yes even when --yes was not passed.
+    if args.yes or args.account:
+        gathered: list[dict[str, Any]] = []
+        for spec in (args.account or []):
+            parsed = _atc_parse_account_spec(spec)
+            if parsed is None:
+                print(f"atc init: malformed --account {spec!r} "
+                      "(expected id=provider:plan)", file=sys.stderr)
+                return 2
+            gathered.append(_atc_build_account(*parsed, prov_harnesses, args.harness))
+    else:
+        gathered = _atc_init_interactive(providers, prov_harnesses, args.harness)
+
+    if not gathered:
+        print("atc init: no accounts declared — nothing written "
+              "(--yes needs >=1 --account id=provider:plan)", file=sys.stderr)
+        return 2
+
+    # Idempotent merge: load whatever exists, keep it verbatim, append only the
+    # new-by-id accounts. Read the raw doc (not parse_accounts) so sibling keys
+    # (tiers, models overlay) survive untouched.
+    path = _atc_accounts_path(args.team)
+    raw = transport.read(path)
+    try:
+        doc = json.loads(raw) if raw else {}
+        if not isinstance(doc, dict):
+            doc = {}
+    except (ValueError, TypeError):
+        doc = {}
+    existing = doc.get("accounts")
+    if not isinstance(existing, list):
+        existing = []
+    existing_ids = {a.get("id") for a in existing if isinstance(a, dict)}
+    added = [a for a in gathered if a["id"] not in existing_ids]
+    doc["accounts"] = existing + added
+    doc.setdefault("tiers", {})
+
+    transport.write(path, json.dumps(doc, indent=2) + "\n")
+
+    ex_id = gathered[0]["id"]
+    print(f"wrote {path}: {len(doc['accounts'])} account(s) declared "
+          f"({len(added)} new this run)")
+    print("next steps — paste these:")
+    print("  1. install the skill — see skills/fulcra-agent-atc/SKILL.md §Install")
+    print(f"  2. coord-engine route {args.team} --needs code")
+    print(f"  3. coord-engine usage log {args.team} --account {ex_id} "
+          "--tier standard --units <est> --model <model> "
+          "--task-class code --outcome clean")
+    return 0
+
+
+def cmd_dash(args: argparse.Namespace, transport: Any) -> int:
+    """Serve the localhost ATC dashboard in the foreground (127.0.0.1 only).
+
+    ``data_fn`` recomputes ``dash_data`` from the live ledger on every
+    ``/data.json`` request, so the page's 30s poll reflects fresh headroom
+    without restarting the server. Bind host is never operator-controllable —
+    there is deliberately no ``--host`` flag."""
+    def data_fn() -> dict[str, Any]:
+        text = transport.read(_atc_accounts_path(args.team))
+        parsed = atc.parse_accounts(text)
+        shards = _atc_usage_shards(transport, args.team)
+        merged, _ = atc.merge_models(atc.load_default_models(),
+                                     _atc_models_overlay(text))
+        return atc_dash.dash_data(parsed, shards, team=args.team,
+                                  models=merged, now=_now())
+
+    atc_dash.serve(args.team, port=args.port, data_fn=data_fn)
     return 0
 
 
@@ -1403,11 +1708,59 @@ def build_parser() -> argparse.ArgumentParser:
     ul.add_argument("team"); ul.add_argument("--account", required=True)
     ul.add_argument("--tier", required=True); ul.add_argument("--units", type=int, default=0)
     ul.add_argument("--throttled", action="store_true"); ul.add_argument("--agent")
+    ul.add_argument("--model", help="model id this spend attributes to (for outcome routing)")
+    ul.add_argument("--task-class", dest="task_class",
+                    help="capability tag the work exercised (taxonomy-validated)")
+    ul.add_argument("--outcome", choices=["clean", "rework", "escalated"],
+                    help="how the dispatched work turned out (feeds the demotion fold)")
     ul.set_defaults(func=cmd_usage_log)
 
     hr = sub.add_parser("headroom", help="per-account cap headroom fold (fulcra-agent-atc)")
     hr.add_argument("team"); hr.add_argument("--json", action="store_true")
     hr.set_defaults(func=cmd_headroom)
+
+    rt = sub.add_parser("route", help="rank models covering needs by cost + headroom (fulcra-agent-atc)")
+    rt.add_argument("team")
+    rt.add_argument("--needs", required=True,
+                    help="comma-separated capability tags (e.g. code,long-context)")
+    rt.add_argument("--json", action="store_true")
+    rt.set_defaults(func=cmd_route)
+
+    at = sub.add_parser("atc", help="ATC reports (fulcra-agent-atc)")
+    atsub = at.add_subparsers(dest="atc_command", required=True)
+    atr = atsub.add_parser("report",
+                           help="team dispatch/tier/calibration report over the last N days")
+    atr.add_argument("team")
+    atr.add_argument("--days", type=int, default=7,
+                     help="trailing window in days (default 7)")
+    atr.add_argument("--json", action="store_true")
+    atr.set_defaults(func=cmd_atc_report)
+    ati = atsub.add_parser(
+        "init", help="standalone onboarding: seed team/<team>/atc/accounts.json")
+    ati.add_argument("team", nargs="?", default="solo",
+                     help="team to onboard (default: solo)")
+    ati.add_argument("--yes", action="store_true",
+                     help="non-interactive; requires >=1 --account id=provider:plan")
+    ati.add_argument("--account", action="append", metavar="id=provider:plan",
+                     help="declare an account (repeatable); :plan is optional")
+    ati.add_argument("--harness", action="append",
+                     help="override the seeded harnesses for declared accounts "
+                          "(repeatable; default is the map's per-provider union)")
+    ati.set_defaults(func=cmd_atc_init)
+
+    def _add_dash_parser(parent: Any) -> None:
+        d = parent.add_parser(
+            "dash", help="serve the localhost ATC gauge dashboard (127.0.0.1 only)")
+        d.add_argument("team")
+        d.add_argument("--port", type=int, default=8787,
+                       help="loopback port to bind (default 8787)")
+        d.set_defaults(func=cmd_dash)
+
+    # `dash` lives both top-level (legacy) and under the `atc` group (spec says
+    # `atc dash`) — same handler, so either invocation serves the dashboard.
+    _add_dash_parser(sub)
+    _add_dash_parser(atsub)
+
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
     dr.set_defaults(func=cmd_doctor)

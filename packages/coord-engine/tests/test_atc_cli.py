@@ -38,8 +38,9 @@ def test_headroom_text_and_json(capsys):
     out = capsys.readouterr().out
     assert rc == 0 and "anthropic-max" in out and "600" in out and "75.0%" in out
     rc = cli.main(["headroom", "fulcra", "--json"], transport=t)
-    rows = json.loads(capsys.readouterr().out)
-    assert rows[0]["headroom"] == 600
+    doc = json.loads(capsys.readouterr().out)
+    # task 3: headroom --json is now {"windows": [...], "demotions": [...]}
+    assert doc["windows"][0]["headroom"] == 600 and doc["demotions"] == []
 
 
 def test_headroom_no_accounts_doc_graceful(capsys):
@@ -64,7 +65,7 @@ def test_throttled_flag_round_trip(capsys):
               "--tier", "frontier", "--throttled"], transport=t)
     capsys.readouterr()
     cli.main(["headroom", "fulcra", "--json"], transport=t)
-    rows = json.loads(capsys.readouterr().out)
+    rows = json.loads(capsys.readouterr().out)["windows"]
     assert rows[0]["headroom"] == 0 and rows[0]["calibrate"] is True
 
 
