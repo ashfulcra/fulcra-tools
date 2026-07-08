@@ -19,7 +19,7 @@ import sys
 from datetime import datetime, timezone
 
 from . import engagement, resume, sync
-from .transport import FulcraFileTransport
+from .transport import FulcraFileTransport, TransportError
 
 
 def _now() -> str:
@@ -127,7 +127,7 @@ def main(argv=None, transport=None) -> int:
     transport = transport or FulcraFileTransport()
     try:
         return args.func(args, transport)
-    except (engagement.EngagementError, sync.SyncError) as exc:
+    except (engagement.EngagementError, sync.SyncError, TransportError) as exc:
         print(f"fde-engine: {exc}", file=sys.stderr)
         return 1
 

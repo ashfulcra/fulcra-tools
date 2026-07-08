@@ -44,6 +44,16 @@ def test_invalid_phase_transition_is_a_clean_error(capsys):
     assert "invalid transition" in err
 
 
+def test_unreachable_store_is_a_clean_error(capsys):
+    class DeadTransport(FakeTransport):
+        def list_dir(self, prefix):
+            from fde_engine.transport import TransportError
+            raise TransportError("list failed: store unreachable")
+    assert run(["list"], DeadTransport()) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("fde-engine: ") and "unreachable" in err
+
+
 def test_sync_push_and_pull(capsys, tmp_path):
     t = FakeTransport()
     run(["init", "x", "--title", "X"], t)
