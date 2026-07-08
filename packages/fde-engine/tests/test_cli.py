@@ -44,6 +44,15 @@ def test_invalid_phase_transition_is_a_clean_error(capsys):
     assert "invalid transition" in err
 
 
+def test_init_rejects_invalid_slug_cleanly(capsys):
+    t = FakeTransport()
+    assert run(["init", "../evil", "--title", "X"], t) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("fde-engine: ")
+    assert "invalid slug" in err
+    assert "evil" in err  # suggests the slugified form
+
+
 def test_unreachable_store_is_a_clean_error(capsys):
     class DeadTransport(FakeTransport):
         def list_dir(self, prefix):

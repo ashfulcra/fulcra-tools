@@ -70,10 +70,26 @@ class FulcraFileTransport:
         self.timeout = timeout
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [*self.command, "file", *args],
-            capture_output=True, text=True, timeout=self.timeout,
-        )
+        # A missing binary or a hung backing CLI must surface as a clean,
+        # actionable TransportError — not a raw FileNotFoundError/
+        # TimeoutExpired traceback dumped at whoever is driving the agent.
+        # read()/write()/delete() have no try/except of their own around this
+        # call, so the TransportError raised here propagates straight
+        # through them to main()'s existing TransportError handler.
+        try:
+            return subprocess.run(
+                [*self.command, "file", *args],
+                capture_output=True, text=True, timeout=self.timeout,
+            )
+        except FileNotFoundError:
+            raise TransportError(
+                f"cannot run {self.command[0]!r} — is the fulcra CLI "
+                f"installed? (uv tool install fulcra-api)"
+            )
+        except subprocess.TimeoutExpired:
+            raise TransportError(
+                f"{self.command[0]} timed out after {self.timeout}s"
+            )
 
     def list_dir(self, prefix: str) -> list[dict[str, Any]]:
         cp = self._run(["list", prefix])

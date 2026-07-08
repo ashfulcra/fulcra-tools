@@ -46,6 +46,25 @@ def _local_files(local_dir: str) -> dict[str, str]:
     return out
 
 
+# engagement.md is exclusively machine-managed via `fde-engine phase` (see
+# engagement.py). A push must never touch it: the local mirror is just a
+# working copy, and if it's stale (last pulled before another session
+# advanced the phase), pushing its copy of engagement.md would silently
+# revert phase/history that session wrote remotely. Pull may still bring a
+# fresh copy down — only the upload direction is blocked.
+_MACHINE_MANAGED = "engagement.md"
+
+
+def _validate_rel(rel: str) -> None:
+    """The remote listing is treated as untrusted input here: a traversal
+    segment or absolute path in a listed entry name must not let a pull
+    write outside local_dir onto the caller's filesystem."""
+    if os.path.isabs(rel) or any(seg == ".." for seg in rel.split("/")):
+        raise SyncError(
+            f"pull rejected remote entry {rel!r} — path escapes the local mirror"
+        )
+
+
 def _remote_files(transport, slug: str) -> dict[str, str]:
     """rel-path -> content for every file under the engagement's remote tree."""
     out: dict[str, str] = {}
@@ -56,6 +75,7 @@ def _remote_files(transport, slug: str) -> dict[str, str]:
         for entry in transport.list_dir(prefix):
             name = entry["name"]
             rel = f"{rel_dir}{name}" if rel_dir else name
+            _validate_rel(rel)
             if entry.get("is_dir"):
                 pending.append(rel if rel.endswith("/") else rel + "/")
                 continue
@@ -66,9 +86,18 @@ def _remote_files(transport, slug: str) -> dict[str, str]:
 
 
 def push(transport, slug: str, local_dir: str) -> dict[str, Any]:
-    """Upload local files whose content differs from remote. Local wins."""
-    pushed, skipped = [], 0
+    """Upload local files whose content differs from remote. Local wins,
+    except engagement.md, which is never uploaded (see _MACHINE_MANAGED)."""
+    if not os.path.isdir(local_dir):
+        raise SyncError(
+            f"local dir {local_dir} does not exist — nothing to push "
+            f"(wrong --dir or CWD?)"
+        )
+    pushed, skipped, excluded = [], 0, []
     for rel, content in sorted(_local_files(local_dir).items()):
+        if rel == _MACHINE_MANAGED:
+            excluded.append(rel)
+            continue
         if transport.read(remote_path(slug, rel)) == content:
             skipped += 1
             continue
@@ -80,7 +109,7 @@ def push(transport, slug: str, local_dir: str) -> dict[str, Any]:
                 f"re-run `fde-engine sync <slug> push` after fixing the cause"
             )
         pushed.append(rel)
-    return {"pushed": pushed, "skipped": skipped}
+    return {"pushed": pushed, "skipped": skipped, "excluded": excluded}
 
 
 def pull(transport, slug: str, local_dir: str) -> dict[str, Any]:

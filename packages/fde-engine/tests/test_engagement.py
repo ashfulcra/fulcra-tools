@@ -3,6 +3,7 @@
 import pytest
 
 from fde_engine import engagement, model
+from fde_engine.transport import TransportError
 from fde_engine_test_helpers import FakeTransport
 
 NOW = "2026-07-08T17:00:00Z"
@@ -84,3 +85,92 @@ def test_list_skips_directories_without_a_valid_engagement_doc():
     engagement.init_engagement(t, "real", "Real", now=NOW)
     t.write("fde/engagements/junk/notes.md", "not an engagement")
     assert [r["slug"] for r in engagement.list_engagements(t)] == ["real"]
+
+
+# --- Fix C2: slug validation at the remote_path chokepoint ----------------
+
+
+def test_init_rejects_path_traversal_slug():
+    t = FakeTransport()
+    with pytest.raises(engagement.EngagementError, match="invalid slug"):
+        engagement.init_engagement(t, "../../etc/whatever", "X", now=NOW)
+    # nothing was written anywhere -- the traversal never reached transport.write
+    assert t.files == {}
+
+
+def test_remote_path_rejects_invalid_slug_directly():
+    with pytest.raises(engagement.EngagementError, match="invalid slug"):
+        engagement.remote_path("../evil", "engagement.md")
+
+
+def test_init_suggests_the_slugified_form_in_the_error():
+    t = FakeTransport()
+    with pytest.raises(engagement.EngagementError, match="evil"):
+        engagement.init_engagement(t, "../evil", "X", now=NOW)
+
+
+def test_init_with_a_valid_hyphenated_slug_still_works():
+    t = FakeTransport()
+    meta = engagement.init_engagement(t, "sourdough-coach-2", "X", now=NOW)
+    assert meta["slug"] == "sourdough-coach-2"
+
+
+# --- Fix I1: corrupt engagement.md must not read as "no engagement" -------
+
+
+def _write_corrupt_doc(t, slug="x"):
+    t.write(f"fde/engagements/{slug}/engagement.md", "not even frontmatter, just garbage")
+
+
+def test_init_refuses_to_overwrite_a_corrupt_engagement_doc():
+    t = FakeTransport()
+    _write_corrupt_doc(t)
+    with pytest.raises(engagement.EngagementError, match="does not parse"):
+        engagement.init_engagement(t, "x", "X", now=NOW)
+    # refused to overwrite -> content is untouched
+    assert t.read("fde/engagements/x/engagement.md") == "not even frontmatter, just garbage"
+
+
+def test_init_corrupt_doc_error_mentions_refusing_to_overwrite():
+    t = FakeTransport()
+    _write_corrupt_doc(t)
+    with pytest.raises(engagement.EngagementError, match="refusing to overwrite"):
+        engagement.init_engagement(t, "x", "X", now=NOW)
+
+
+def test_status_raises_distinct_error_for_corrupt_engagement_doc():
+    t = FakeTransport()
+    _write_corrupt_doc(t)
+    with pytest.raises(engagement.EngagementError, match="does not parse"):
+        engagement.status(t, "x")
+
+
+def test_set_phase_raises_distinct_error_for_corrupt_engagement_doc():
+    t = FakeTransport()
+    _write_corrupt_doc(t)
+    with pytest.raises(engagement.EngagementError, match="does not parse"):
+        engagement.set_phase(t, "x", "interview", now=NOW)
+
+
+# --- Fix I4: unreachable store must not read as "no engagement" -----------
+
+
+class UnreachableTransport(FakeTransport):
+    """read() behaves like "not found" everywhere (as an expired-auth /
+    offline backend would), but list_dir() raises -- the store itself is
+    unreachable, not merely missing this one document."""
+
+    def list_dir(self, prefix):
+        raise TransportError("list failed: store unreachable")
+
+
+def test_status_raises_transport_error_when_store_unreachable():
+    t = UnreachableTransport()
+    with pytest.raises(TransportError):
+        engagement.status(t, "ghost")
+
+
+def test_set_phase_raises_transport_error_when_store_unreachable():
+    t = UnreachableTransport()
+    with pytest.raises(TransportError):
+        engagement.set_phase(t, "ghost", "interview", now=NOW)

@@ -61,8 +61,11 @@ def cmd_sync(args, transport) -> int:
     local_dir = args.dir or _default_dir(args.slug)
     if args.direction == "push":
         report = sync.push(transport, args.slug, local_dir)
-        print(f"pushed: {', '.join(report['pushed']) or '(nothing)'} "
-              f"(skipped {report['skipped']} unchanged)")
+        msg = (f"pushed: {', '.join(report['pushed']) or '(nothing)'} "
+               f"(skipped {report['skipped']} unchanged)")
+        if report.get("excluded"):
+            msg += " (engagement.md is machine-managed — never pushed)"
+        print(msg)
     else:
         report = sync.pull(transport, args.slug, local_dir)
         print(f"pulled: {', '.join(report['pulled']) or '(nothing)'} "
