@@ -116,6 +116,7 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
     rows = _load_rows(transport, args.team)
     got = query.needs_me(rows, args.agent, now=_iso(_now()))
     got += _pending_reviews_for(transport, args.team, args.agent)
+    got += _forge_feedback_for(transport, args.team, args.agent)
     if args.json:
         print(json.dumps(got, indent=2))
     else:
@@ -124,6 +125,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             if r.get("type") == "review-pending":
                 print(f"  [REVIEW] pending verdict: {r['name']} "
                       f"(required: {', '.join(r['pending_required'])})")
+            elif r.get("type") == "forge-feedback":
+                print(_forge_feedback_line(r))
             else:
                 print(_line(r))
     return 0
@@ -444,6 +447,83 @@ def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str
             out.append({"type": "review-pending", "name": slug,
                         "state": "PENDING", "pending_required": pending})
     return out
+
+
+def _forge_responsible(transport: Any, team: str) -> dict[str, set]:
+    """{pr_slug: {responsible agents}}. Responsibility comes from two sources,
+    unioned: the watch registry (its ``agent``) and, for review-artifact PRs,
+    the review's ``requested_by``. Best-effort — any listing failure is skipped
+    so needs-me/briefing never fail because the forge add-on is absent."""
+    resp: dict[str, set] = {}
+    watch_prefix = f"team/{team}/_coord/forge/watch/"
+    try:
+        for e in transport.list_dir(watch_prefix):
+            n = e.get("name") or ""
+            if e.get("is_dir") or not n.endswith(".md"):
+                continue
+            fm = okf.parse_frontmatter(transport.read(watch_prefix + n)) or {}
+            slug = forge_mod.pr_slug(fm.get("url")) or n[:-3]
+            a = fm.get("agent")
+            if a:
+                resp.setdefault(slug, set()).add(str(a))
+    except TransportError:
+        pass
+    review_prefix = f"team/{team}/review/"
+    try:
+        for e in transport.list_dir(review_prefix):
+            n = e.get("name") or ""
+            if e.get("is_dir") or not n.endswith(".md") or n == "index.md":
+                continue
+            fm = okf.parse_frontmatter(transport.read(review_prefix + n)) or {}
+            slug = forge_mod.pr_slug(forge_mod.review_artifact(fm))
+            who = fm.get("requested_by")
+            if slug and who:
+                resp.setdefault(slug, set()).add(str(who))
+    except TransportError:
+        pass
+    return resp
+
+
+def _forge_feedback_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+    """Unacked forge-feedback shards on PRs the agent is responsible for, one
+    row per PR: ``{type, pr_slug, count, authors, items}``. Ack state reuses the
+    directive ack namespace (``_coord/acks/<item-id>/<agent>.md``) — acked items
+    drop; a new node id (new shard) re-surfaces. Best-effort; never raises."""
+    out: list[dict[str, Any]] = []
+    resp = _forge_responsible(transport, team)
+    for slug, agents in sorted(resp.items()):
+        if agent not in agents:
+            continue
+        prefix = f"team/{team}/_coord/forge/feedback/{slug}/"
+        items: list[str] = []
+        authors: list[str] = []
+        try:
+            entries = transport.list_dir(prefix)
+        except TransportError:
+            continue
+        for e in entries:
+            n = e.get("name") or ""
+            if e.get("is_dir") or not n.endswith(".md"):
+                continue
+            stem = n[:-3]
+            if transport.read(_ack_path(team, stem, agent)) is not None:
+                continue  # acked by this agent — hidden
+            items.append(stem)
+            fm = okf.parse_frontmatter(transport.read(prefix + n)) or {}
+            a = fm.get("author")
+            if a and str(a) not in authors:
+                authors.append(str(a))
+        if items:
+            out.append({"type": "forge-feedback", "pr_slug": slug,
+                        "count": len(items), "authors": sorted(authors),
+                        "items": sorted(items)})
+    return out
+
+
+def _forge_feedback_line(r: dict[str, Any]) -> str:
+    who = ", ".join(r.get("authors") or []) or "?"
+    return (f"  [FORGE] feedback on {r.get('pr_slug')}: "
+            f"{r.get('count')} item(s) from {who}")
 
 
 def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
@@ -826,6 +906,11 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
         print(f"briefing: pending_reviews section unavailable ({type(e).__name__})", file=sys.stderr)
         out["pending_reviews"] = []
     try:
+        out["forge_feedback"] = _forge_feedback_for(transport, args.team, agent)
+    except Exception as e:
+        print(f"briefing: forge_feedback section unavailable ({type(e).__name__})", file=sys.stderr)
+        out["forge_feedback"] = []
+    try:
         snaps = []
         for e in transport.list_dir(_continuity_prefix(args.team, agent)):
             n = (e.get("name") or "").rstrip("/")
@@ -855,6 +940,9 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     print(f"  pending reviews: {len(out['pending_reviews'])} item(s)")
     for r in out["pending_reviews"][:5]:
         print(_line(r))
+    print(f"  forge feedback: {len(out.get('forge_feedback') or [])} PR(s)")
+    for r in (out.get("forge_feedback") or [])[:5]:
+        print(_forge_feedback_line(r))
     print(continuity.render_resume(out["resume"]))
     return 0
 
@@ -1556,6 +1644,72 @@ def cmd_forge_mirror(args: argparse.Namespace, transport: Any) -> int:
         return 1
     print(f"forge mirror: {res['checked']} PR review(s) checked, "
           f"{res['mirrored']} evidence shard(s) written, {res['verdicts']} auto-verdict(s)")
+    # Extended: mirror also sweeps the three feedback surfaces so a formal review
+    # (or inline / conversation comment) can never go unseen.
+    fb = forge_mod.feedback_sweep(transport, args.team,
+                                  runner=args.runner or forge_mod.default_runner,
+                                  repo=args.repo)
+    print(f"forge feedback: {fb['prs']} PR(s) swept, {fb['items']} feedback shard(s) written"
+          + (f", {len(fb['skipped'])} skipped" if fb["skipped"] else ""))
+    for line in fb["skipped"]:
+        print(f"  skipped {line}", file=sys.stderr)
+    for line in fb.get("notes", []):
+        print(f"  note {line}", file=sys.stderr)
+    return 0
+
+
+def cmd_forge_feedback(args: argparse.Namespace, transport: Any) -> int:
+    """Sweep-only verb: the three-surface feedback sweep, no state mirroring."""
+    import shutil as _sh
+    if not _sh.which("gh") and args.runner is None:
+        print("forge feedback: gh CLI not found — nothing swept (install GitHub CLI to enable)",
+              file=sys.stderr)
+        return 0  # degradation, not an error
+    fb = forge_mod.feedback_sweep(transport, args.team,
+                                  runner=args.runner or forge_mod.default_runner,
+                                  repo=args.repo)
+    print(f"forge feedback: {fb['prs']} PR(s) swept, {fb['items']} feedback shard(s) written"
+          + (f", {len(fb['skipped'])} skipped" if fb["skipped"] else ""))
+    for line in fb["skipped"]:
+        print(f"  skipped {line}", file=sys.stderr)
+    for line in fb.get("notes", []):
+        print(f"  note {line}", file=sys.stderr)
+    return 0
+
+
+def _watch_path(team: str, slug: str) -> str:
+    return f"team/{team}/_coord/forge/watch/{slug}.md"
+
+
+def cmd_forge_watch(args: argparse.Namespace, transport: Any) -> int:
+    """Register a PR to sweep for feedback even when it is not a review artifact.
+    Duplicate watch = idempotent update (overwrite), not an error."""
+    slug = forge_mod.pr_slug(args.pr_url)
+    if not slug:
+        print(f"forge watch: not a GitHub PR url: {args.pr_url}", file=sys.stderr)
+        return 1
+    url = forge_mod.parse_pr_url(args.pr_url)
+    agent = args.agent or _host()
+    fm = {"type": "Watch", "schema": "forge-watch/v1", "url": url,
+          "agent": agent, "ts": _iso(_now())}
+    transport.write(_watch_path(args.team, slug),
+                    okf.render_frontmatter(fm) + f"\nWatching {url} for {agent}.\n")
+    print(f"forge watch: {slug} -> {agent}")
+    return 0
+
+
+def cmd_forge_unwatch(args: argparse.Namespace, transport: Any) -> int:
+    """Remove a watch registration. Absent watch = clean no-op."""
+    slug = forge_mod.pr_slug(args.pr_url)
+    if not slug:
+        print(f"forge unwatch: not a GitHub PR url: {args.pr_url}", file=sys.stderr)
+        return 1
+    path = _watch_path(args.team, slug)
+    if transport.read(path) is None:
+        print(f"forge unwatch: {slug} was not watched")
+        return 0
+    transport.delete(path)
+    print(f"forge unwatch: {slug} removed")
     return 0
 
 
@@ -1789,10 +1943,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     fg = sub.add_parser("forge", help="mirror GitHub PR signals into review evidence (fulcra-agent-forge)")
     fgsub = fg.add_subparsers(dest="forge_command", required=True)
-    fgm = fgsub.add_parser("mirror", help="one pass: PR state -> evidence shards + auto-verdict on merge")
+    fgm = fgsub.add_parser("mirror", help="one pass: PR state -> evidence shards + auto-verdict on merge (also sweeps feedback)")
     fgm.add_argument("team")
     fgm.add_argument("--repo", help="owner/name allowlist: mirror ONLY PR urls of this repo")
     fgm.set_defaults(func=cmd_forge_mirror, runner=None)
+
+    fgf = fgsub.add_parser("feedback", help="sweep-only: mirror PR reviews/inline/comments to feedback shards")
+    fgf.add_argument("team")
+    fgf.add_argument("--repo", help="owner/name allowlist: sweep ONLY PR urls of this repo")
+    fgf.set_defaults(func=cmd_forge_feedback, runner=None)
+
+    fgw = fgsub.add_parser("watch", help="register a PR to sweep for feedback (owner-repo-number slug)")
+    fgw.add_argument("team"); fgw.add_argument("pr_url")
+    fgw.add_argument("--agent", help="responsible agent (default: caller)")
+    fgw.set_defaults(func=cmd_forge_watch)
+
+    fgu = fgsub.add_parser("unwatch", help="remove a PR watch registration")
+    fgu.add_argument("team"); fgu.add_argument("pr_url")
+    fgu.set_defaults(func=cmd_forge_unwatch)
 
     mg = sub.add_parser("migrate", help="one-shot exporter: incumbent fulcra-coord tasks -> this team (docs 06)")
     mg.add_argument("team")

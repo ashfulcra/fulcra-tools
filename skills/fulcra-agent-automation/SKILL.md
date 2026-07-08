@@ -85,7 +85,9 @@ slug) → handle other work → `continuity snapshot` → `usage log` (ATC, when
 `continuity park` before session end → **report last**: the human-visible summary is the tick's final
 output, composed after every command above. Text followed by more tool activity may never render —
 "sent" is not "delivered" — so anything that MUST reach a recipient (human or agent) goes on the bus
-as a durable artifact (ask, review doc, snapshot), never only in session text. **These
+as a durable artifact (ask, review doc, snapshot), never only in session text. PR/forge feedback
+arrives via `briefing` (forge mirror sweeps all three GitHub surfaces) — never hand-roll `gh` polls
+in a watch prompt. **These
 hooks/prompts/blocks are rendered artifacts, not live references:** after upgrading `fulcra-tools`,
 **RE-RUN YOUR ADAPTER INSTALLER** to regenerate them — an un-regenerated hook keeps emitting the
 doctrine it was rendered under.
