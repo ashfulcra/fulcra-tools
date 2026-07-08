@@ -105,25 +105,62 @@ runs on, so it is battle-tested at load.
 
 **Records** (instances on the timeline) are **write-via-ingest only** — still
 true as of CLI 0.1.35; there is no `fulcra` record-write/delete command and no
-record-write/delete lib method, only definition + tag management:
+record-write/delete lib method, only definition + tag management. There are now
+**two ingest write paths**, both published in the OpenAPI and **live round-trip
+verified 2026-07-08**:
 
-- `POST /ingest/v1/record` with `DataRecordV1`:
+- **Typed endpoint (preferred, new):** `POST /ingest/v1/record/{data_type}` —
+  `data_type` is a path segment (e.g. `MomentAnnotation`). The body is the
+  **unwrapped** record for that type — NOT the legacy `DataRecordV1` envelope.
+  For `MomentAnnotation` the schema is flat:
+  `{"note": <str>, "recorded_at": <iso8601>, "tags": [<tag uuid>],
+  "sources": [<source id>], "id": <optional uuid, generated if omitted>}`.
+  Send `Content-Type: application/json` for a single record, or
+  `application/x-jsonl` with **one record per line** for a batch (each line is
+  validated independently). A `content-length` header is required. 201 →
+  `{"upload_id": <uuid>}`.
+- **Schema discovery (stable v1 catalog):** `GET /data/v1/catalog` lists every
+  type with `recordable` + `api_version` fields;
+  `GET /data/v1/catalog/{data_type}/{api_version}/schema` returns the JSON Schema
+  for that type's record body (e.g. `…/MomentAnnotation/v1alpha1/schema`);
+  `GET /data/v1/catalog/{data_type}/{api_version}` returns type metadata incl.
+  `record_spec.schema`. Note `MomentAnnotation`'s `api_version` is **`v1alpha1`**,
+  not `v1` — read it off the catalog row, don't assume.
+- **Custom types (caveat — verified, does NOT work as a path segment):** the
+  typed `{data_type}` accepts only **base** types. A custom definition's
+  `MomentAnnotation/<definition-uuid>` is **not** a valid path segment —
+  `POST /ingest/v1/record/MomentAnnotation/<uuid>` (raw slash or `%2F`-encoded)
+  returns `404 {"detail":"Data type '…' not found"}`. To write a record against a
+  custom definition you still POST to the **base** type endpoint
+  (`/ingest/v1/record/MomentAnnotation`) and reference the definition in the
+  record's **`sources`** array as `"com.fulcradynamics.annotation.<definition-uuid>"`.
+  Verified 2026-07-08: such a record then reads back under
+  `fulcra get-records MomentAnnotation/<definition-uuid>`. (This is the same
+  definition-by-source mechanism the legacy writer already uses.)
+- **Legacy endpoint (still valid):** `POST /ingest/v1/record` with `DataRecordV1`:
   `{"data": "<string payload>", "metadata": {"data_type": <type>,
   "recorded_at": <iso8601 | {start,end} range>, "source": [<source ids>],
-  "content_type": <optional>}, "specversion": 1}`
-- Batch: `POST /ingest/v1/record/batch`, content-type `application/x-jsonl`,
-  one record per line. (This is the Attention extension's write path.)
+  "tags": [<tag uuid>], "content_type": <optional>}, "specversion": 1}`.
+  Batch: `POST /ingest/v1/record/batch`, content-type `application/x-jsonl`,
+  one record per line. (This is the Attention extension's write path.) Mind the
+  envelope differences vs the typed body: legacy uses `source` (singular key)
+  not `sources`, carries the payload as a JSON **string** in `data` rather than a
+  top-level `note`, and rides `data_type` inside `metadata`.
 - **No record-level delete/replace yet** — corrections are modeled as new
-  records (e.g. a superseding signal), not edits. CLI record commands are the
-  next thing expected to land; that arrival triggers this doc's full rewrite.
+  records (e.g. a superseding signal), not edits. Record-write/delete **CLI
+  verbs** (expected to be built on these typed endpoints) are still NOT shipped;
+  **their arrival — not the typed endpoint's — is what triggers this doc's full
+  re-verification + rewrite** (a patch won't do; announce it on the bus), and the
+  tier-2 guidance shifts to the CLI then.
 - The **fulcra-coord** Agent-Tasks annotation writer resolves its **tags** and
   annotation-**definitions** through the public `fulcra` CLI (`fulcra tag
   get/create`, `fulcra catalog`, `fulcra data-type create`) — coord is a
   dependency-light bus that shells out to the CLI rather than importing a client.
   Its **records** remain ingest-only over stdlib `urllib`
-  (`POST /ingest/v1/record/batch`) because the platform exposes no record-write
-  CLI/lib verb yet. That record POST is the one remaining raw-REST path in the
-  writer; it migrates to the CLI once a first-class record-write verb ships.
+  (`POST /ingest/v1/record/batch`, the legacy path) because the platform exposes
+  no record-write CLI/lib verb yet. That record POST is the one remaining raw-REST
+  path in the writer; it migrates to the CLI once a first-class record-write verb
+  ships (and could adopt the typed endpoint meanwhile).
 - **Reads:** tier 1 `fulcra get-records <DataType> "<range>"` (user-defined:
   `MomentAnnotation/<definition-uuid>`); tier 2 via
   `/data/v1alpha1/event/{data_type}`.
