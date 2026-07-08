@@ -161,14 +161,30 @@ def _cli_base_cmd() -> list[str]:
 
 
 def _write_timeout() -> int:
-    """Subprocess timeout (seconds) for annotation CLI shell-outs; env-tunable."""
-    raw = os.environ.get("FULCRA_COORD_WRITE_TIMEOUT")
-    if raw:
+    """Subprocess timeout (seconds) for annotation CLI shell-outs.
+
+    Legacy parity: honors ``FULCRA_COORD_TIMEOUT_SECONDS`` (the read-timeout
+    knob, default 30) with a ``max(60, ...)`` floor — uploads measured at 1-16s
+    idle routinely crossed a lower ceiling under host load, so the client
+    abandoned writes the server then completed (observed duplicate directives);
+    60s clears observed worst-case with margin. A non-numeric value falls back
+    to the default rather than crashing every write. ``FULCRA_COORD_WRITE_TIMEOUT``
+    is kept as an optional explicit override (floor 1) for callers wanting a
+    tighter bound than the legacy floor allows."""
+    override = os.environ.get("FULCRA_COORD_WRITE_TIMEOUT")
+    if override:
         try:
-            return max(1, int(float(raw)))
+            return max(1, int(float(override)))
         except ValueError:
             pass
-    return 60
+    raw = os.environ.get("FULCRA_COORD_TIMEOUT_SECONDS")
+    read = 30
+    if raw:
+        try:
+            read = int(float(raw))
+        except ValueError:
+            read = 30
+    return max(60, read)
 
 
 def _extract_kind_from_tags(tags: list[str]) -> str:
@@ -501,14 +517,23 @@ def _fulcra_cli_lines_or_error(
     if result.returncode != 0:
         return None
     out: list = []
+    saw_nonempty_line = False
     for line in (result.stdout or "").splitlines():
         line = line.strip()
         if not line:
             continue
+        saw_nonempty_line = True
         try:
             out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    if saw_nonempty_line and not out:
+        # rc==0 but stdout carried non-empty lines that ALL failed to parse — a
+        # banner / warning / format-drift, NOT a genuinely-empty catalog. Return
+        # the lookup-ERROR sentinel (None), never [] — an [] here would read as
+        # "verifiably absent" and let the caller create a duplicate definition.
+        # Per-line skip still holds when at least one line DID parse.
+        return None
     return out
 
 
@@ -727,27 +752,36 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
         return ""
 
     matches: list[dict[str, str]] = []
+    has_unreadable_same_name = False
     for e in lines:
         if not isinstance(e, dict) or e.get("name") != def_name:
             continue
         meta = e.get("metadata") or {}
+        top_id = e.get("id")
         # Legacy catalog shape: metadata.{annotation_type,id,deleted_at}.
-        if (meta.get("annotation_type") == "moment" and meta.get("id")
-                and not meta.get("deleted_at")):
-            matches.append({
-                "id": str(meta["id"]),
-                "created_at": str(meta.get("created_at") or e.get("created_at") or ""),
-            })
+        if meta.get("annotation_type") == "moment" and meta.get("id"):
+            if not meta.get("deleted_at"):
+                matches.append({
+                    "id": str(meta["id"]),
+                    "created_at": str(meta.get("created_at") or e.get("created_at") or ""),
+                })
+            # else: RECOGNIZED legacy soft-delete (deleted_at set) — permits a
+            # create (legacy behavior preserved); a known shape, not unreadable.
             continue
         # Current fulcra-api shape: TOP-LEVEL id "MomentAnnotation/<uuid>",
         # column_name "moment", no metadata.
-        top_id = e.get("id")
         if (e.get("column_name") == "moment" and isinstance(top_id, str)
-                and top_id.startswith("MomentAnnotation/") and not e.get("deprecated")):
-            matches.append({
-                "id": top_id.split("/", 1)[1],
-                "created_at": str(e.get("created_at") or ""),
-            })
+                and top_id.startswith("MomentAnnotation/")):
+            if not e.get("deprecated"):
+                matches.append({
+                    "id": top_id.split("/", 1)[1],
+                    "created_at": str(e.get("created_at") or ""),
+                })
+            # else: RECOGNIZED current soft-delete (deprecated) — permits create.
+            continue
+        # A same-name entry in NEITHER recognized shape: catalog schema drift.
+        # NOT verifiably absent — refuse below rather than create a duplicate.
+        has_unreadable_same_name = True
 
     if matches:
         matches.sort(key=_dedup_sort_key)
@@ -760,6 +794,18 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
                 len(matches), def_name, chosen, [m["id"] for m in matches])
         _DEF_ID_MEMO[def_name] = chosen
         return chosen
+
+    if has_unreadable_same_name:
+        # A same-name catalog entry exists but sits in a shape we can classify as
+        # neither recognized-live nor recognized-soft-deleted (schema drift). An
+        # unreadable same-name entry is NOT "verified absent" — creating here is
+        # exactly the 2026-07-03 proliferation bug's fail-OPEN. Refuse.
+        logger.error(
+            "annotations: catalog for definition %r has a same-name entry in an "
+            "unrecognized shape (neither recognized-live nor recognized-soft-"
+            "deleted); refusing to create to avoid definition proliferation",
+            def_name)
+        return ""
 
     # VERIFIED ABSENT (catalog returned a clean, empty reply) -> create once.
     cmd = ["data-type", "create", "MomentAnnotation", def_name,

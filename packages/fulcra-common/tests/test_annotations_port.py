@@ -27,8 +27,6 @@ import urllib.error
 
 import pytest
 
-# NB: `from fulcra_common import annotations` binds the __future__ feature that
-# fulcra_common/__init__ imports, not this submodule — import the submodule.
 import fulcra_common.annotations as ann
 
 
@@ -267,6 +265,56 @@ def test_verified_absent_creates_exactly_once(monkeypatch):
     assert len(creates) == 1, "verified-absent creates exactly once"
 
 
+# ---------------------------------------------------------------------------
+# RAW-output fail-closed: these feed real subprocess stdout THROUGH the parse
+# layer (via a `printf` CLI base) instead of stubbing the pre-parsed list. The
+# earlier stubs sat ABOVE the parser, so catalog-shape drift and non-JSON
+# banners — the actual 2026-07-03 fail-OPEN mechanisms — went unexercised.
+# ---------------------------------------------------------------------------
+
+def _printf_backend(monkeypatch, raw_stdout: str):
+    """Make the resolved CLI base a ``printf`` that emits ``raw_stdout`` verbatim
+    at rc==0 (the appended ``catalog --name ...`` args are ignored by printf,
+    which has no conversion specs). This routes ``_resolve_def_via_cli`` through
+    the REAL ``_fulcra_cli_lines_or_error`` parser."""
+    monkeypatch.setattr(ann, "_cli_base_cmd", lambda: ["printf", raw_stdout])
+
+
+def test_rc0_unrecognized_same_name_shape_refuses_no_create(monkeypatch):
+    # rc==0 catalog carrying a same-name entry in a THIRD, unrecognized shape
+    # (neither legacy metadata.moment nor current MomentAnnotation/ top-id). An
+    # unreadable same-name entry is NOT "verified absent" — creating would be the
+    # fail-OPEN. Fed as RAW stdout so the classifier sees it for real.
+    raw = '{"name": "Agent Tasks", "kind": "brand_new_shape", "ref": "xyz"}\n'
+    _printf_backend(monkeypatch, raw)
+    creates: list[list] = []
+    monkeypatch.setattr(
+        ann, "_fulcra_cli_json",
+        lambda args, **k: creates.append(list(args)) or {"id": "SHOULD-NOT"})
+
+    got = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+
+    assert got == "", "an unreadable same-name entry is NOT verified-absent; must refuse"
+    assert creates == [], "must NOT create when a same-name entry is in an unknown shape"
+
+
+def test_rc0_non_json_banner_is_lookup_error_refuses_no_create(monkeypatch):
+    # rc==0 stdout that is a plain-text banner (format drift / warning), not JSON.
+    # The parser must read "non-empty lines, zero parsed" as a lookup ERROR (None),
+    # never as an empty catalog ([]), so resolution refuses rather than creates.
+    raw = "WARNING: fulcra CLI catalog output format changed; re-auth required\n"
+    _printf_backend(monkeypatch, raw)
+    creates: list[list] = []
+    monkeypatch.setattr(
+        ann, "_fulcra_cli_json",
+        lambda args, **k: creates.append(list(args)) or {"id": "SHOULD-NOT"})
+
+    got = ann._resolve_def_via_cli(ann.DEFINITION_NAME, "desc", ["agent-tasks"])
+
+    assert got == "", "a non-JSON banner is a lookup error, not an empty catalog; must refuse"
+    assert creates == [], "must NOT create when the catalog reply was unparseable"
+
+
 def test_in_run_cache_prevents_relookup(monkeypatch):
     lookups = []
 
@@ -332,6 +380,52 @@ def test_write_is_best_effort_on_http_error(monkeypatch):
 
     # Must swallow and report False, never raise into the caller's task op.
     assert ann._write_http(_payload()) is False
+
+
+# ---------------------------------------------------------------------------
+# Timeout-knob parity: the port must honor the LEGACY FULCRA_COORD_TIMEOUT_SECONDS
+# read knob with its max(60, ...) write floor (not a bespoke new-only var).
+# ---------------------------------------------------------------------------
+
+def test_write_timeout_honors_legacy_knob(monkeypatch):
+    monkeypatch.delenv("FULCRA_COORD_WRITE_TIMEOUT", raising=False)
+    monkeypatch.delenv("FULCRA_COORD_TIMEOUT_SECONDS", raising=False)
+    # unset -> legacy read default (30), floored up to 60
+    assert ann._write_timeout() == 60
+    # a legacy value above the floor applies verbatim
+    monkeypatch.setenv("FULCRA_COORD_TIMEOUT_SECONDS", "120")
+    assert ann._write_timeout() == 120
+    # a legacy value below the floor is clamped up (max(60, ...))
+    monkeypatch.setenv("FULCRA_COORD_TIMEOUT_SECONDS", "10")
+    assert ann._write_timeout() == 60
+    # a non-numeric legacy value falls back to the default, still floored
+    monkeypatch.setenv("FULCRA_COORD_TIMEOUT_SECONDS", "not-a-number")
+    assert ann._write_timeout() == 60
+    # the explicit write override wins, with its own floor of 1
+    monkeypatch.setenv("FULCRA_COORD_WRITE_TIMEOUT", "5")
+    assert ann._write_timeout() == 5
+
+
+# ---------------------------------------------------------------------------
+# Import shadowing: `from fulcra_common import annotations` must yield the
+# submodule, not the __future__._Feature bound by the package __init__.
+# ---------------------------------------------------------------------------
+
+def test_annotations_submodule_not_shadowed_by_future_import():
+    # A genuine guard must run in a FRESH interpreter: this test module already
+    # does `import fulcra_common.annotations` at the top, which registers the
+    # submodule as a package attribute and masks the shadow. Spawn a subprocess
+    # whose ONLY access is the from-form.
+    import subprocess
+    import sys
+    code = (
+        "from fulcra_common import annotations as m; import sys; "
+        "sys.exit(0 if hasattr(m, 'emit_lifecycle_annotation') else 1)"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, (
+        "`from fulcra_common import annotations` yielded __future__._Feature, not "
+        "the submodule: " + (r.stderr or r.stdout))
 
 
 # ---------------------------------------------------------------------------
