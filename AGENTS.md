@@ -84,12 +84,12 @@ skills. Subagent-only work stays OFF the bus.
   that MUST reach a recipient (human or agent) goes on the bus as a durable
   artifact (ask, review doc, snapshot), never only in session text.
 - **Backlog.** A "do later" item goes ON THE BUS:
-  `coord-engine later "<title>" -s "<context>"` parks it on the `@backlog`
+  `coord-engine later <team> "<title>" -s "<context>"` parks it on the `@backlog`
   audience (durable, visible on the `board`, spams no inbox); route it later
   with the ordinary assignment verbs. Backlog in session memory alone dies at
   compaction.
 - **ATC (air-traffic control).** On a subscription-cap fleet, consult
-  `coord-engine route --needs <tags>` before a dispatch to pick the cheapest
+  `coord-engine route <team> --needs <tags>` before a dispatch to pick the cheapest
   model that covers the work, and log the outcome after:
   `coord-engine usage log <team> --account <id> --tier <tier> --model <m>
   --task-class <tag> --outcome clean|rework|escalated`. That ledger feeds the
@@ -155,9 +155,11 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
     (`recordable`/`api_version` fields) and the record shape via
     `GET /data/v1/catalog/{data_type}/{api_version}/schema`. Caveat: custom
     data types still reference the annotation id in the record's `sources`.
-  - **Legacy (still valid):** `POST /ingest/v1/record` with a wrapped
-    `DataRecordV1` (`data_type` rides in `metadata`), or a JSONL batch to
-    `POST /ingest/v1/record/batch`.
+  - **Legacy:** `POST /ingest/v1/record` with a wrapped `DataRecordV1`
+    (`data_type` rides in `metadata`) — published in the spec. The old JSONL
+    batch path `POST /ingest/v1/record/batch` is **NOT in the published
+    OpenAPI** (works in production; treat as retirement-eligible) — prefer the
+    typed endpoint's jsonlines mode for new code.
 
   There is **no record-level delete/replace and no `fulcra` record-write/delete
   CLI verb yet** (the CLI verbs will be built on the typed endpoints) — model
