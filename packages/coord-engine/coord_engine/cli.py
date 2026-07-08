@@ -459,6 +459,14 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # through the same helper unchanged (single path segment).
     slug = tasks.slugify(args.name)
     required = [r.strip() for r in (args.reviewer or []) if r and r.strip()]
+    if not required:
+        # An empty/whitespace-only --reviewer list would gate on nothing: the
+        # tally has no pending_required marker, so any stray verdict flips the
+        # review to APPROVED and no reviewer ever sees it in needs-me. Refuse,
+        # writing no doc, rather than open a review that gates on nothing.
+        print("review request needs at least one non-empty --reviewer",
+              file=sys.stderr)
+        return 2
     path = _review_doc_path(team, slug)
     if transport.read(path) is not None:
         print(f"review {slug} already exists", file=sys.stderr)

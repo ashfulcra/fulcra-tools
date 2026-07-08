@@ -79,9 +79,10 @@ proceed to request a new review or advance an existing one below.
    replaces: an acked directive leaves **no** durable marker, so a dropped or forgotten review vanishes
    silently and the merge gates on nothing. Never request reviews via `tell`.
 2. **Verdict** (reviewer): write `review/<slug>/verdicts/<you>.md` — **slug-exact**, named after **you**
-   (the filename is the identity the tally uses) — with `verdict: approve|changes` and notes. Then
+   (the filename is the identity the tally uses) — use the exact name the request's `required:` list names
+   you by (your role, not a session identity) — with `verdict: approve|changes` and notes. Then
    **verify** the fold reflects it (`coord-engine review status <team> <slug>` — you must no longer be in
-   `pending_required`) and **only then ack** the request in your inbox
+   `pending_required`) and **only then ack** the request in your inbox (if a directive accompanied the request)
    (`coord-engine inbox <team> --agent <you> --ack <slug>`). Never satisfy a review by acking without a
    verdict file, or against a different slug's status. To change your mind, re-upload your verdict file
    (overwrites; the File Store keeps the history). **Fail-closed:** a `changes` verdict keeps blocking

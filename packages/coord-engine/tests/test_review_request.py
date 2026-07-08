@@ -113,3 +113,14 @@ def test_request_requires_at_least_one_reviewer(capsys):
         assert False, "expected argparse to reject a request with no reviewer"
     except SystemExit as e:
         assert e.code == 2
+
+
+def test_request_rejects_whitespace_only_reviewer(capsys):
+    # A whitespace-only --reviewer filters to required=[] — the review would
+    # then gate on nothing. Guard: exit 2, write no doc.
+    t = FakeTransport()
+    assert cli.main(
+        ["review", "request", "r", "pr-9", "--of", "url", "--reviewer", "  "],
+        transport=t,
+    ) == 2
+    assert t.read("team/r/review/pr-9.md") is None, "must write no doc when gating on nothing"

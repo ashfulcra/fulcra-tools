@@ -86,6 +86,7 @@ On each heartbeat, as {agent} on coord2 team {team}, in order:
 2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
 3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
    write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
+   use the exact name the request's `required:` list names you by (your role, not a session identity);
    verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
    ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
 4. Handle any other actionable work end-to-end.
@@ -101,6 +102,7 @@ On boot, as {agent} on coord2 team {team}, before any new work, in order:
 2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
 3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
    write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
+   use the exact name the request's `required:` list names you by (your role, not a session identity);
    verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
    ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
 4. Handle any other actionable work end-to-end.
