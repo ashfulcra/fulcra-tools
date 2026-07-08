@@ -24,6 +24,9 @@ def test_skipping_phases_is_invalid():
     assert not model.valid_transition("intake", "architecture")
     assert not model.valid_transition("interview", "build")
     assert not model.valid_transition("retro", "intake")
+    # Self-transitions are deliberately invalid: every transition appends to
+    # phase_history, and a no-op entry would pollute the record.
+    assert not model.valid_transition("plan", "plan")
 
 
 def test_unknown_phase_is_invalid():
@@ -58,6 +61,29 @@ def test_parse_rejects_non_engagement_docs():
     assert model.parse_engagement("") is None
     assert model.parse_engagement("# just prose\n") is None
     assert model.parse_engagement("---\nschema: something.else\n---\n") is None
+
+
+def test_render_sanitizes_newlines_in_scalars():
+    # A newline-bearing title must not be able to corrupt the frontmatter
+    # (e.g. by smuggling in a premature `---` terminator or extra keys).
+    meta = {
+        "schema": model.SCHEMA,
+        "slug": "evil",
+        "title": "Evil\n---\nphase: architecture",
+        "phase": "intake",
+        "created_at": "t0",
+        "updated_at": "t0",
+        "phase_history": ["intake t0"],
+    }
+    parsed = model.parse_engagement(model.render_engagement(meta))
+    assert parsed is not None
+    assert parsed["title"] == "Evil --- phase: architecture"
+    assert parsed["phase"] == "intake"
+    assert parsed["slug"] == "evil"
+    assert parsed["schema"] == model.SCHEMA
+    assert parsed["created_at"] == "t0"
+    assert parsed["updated_at"] == "t0"
+    assert parsed["phase_history"] == ["intake t0"]
 
 
 def test_parse_tolerates_prose_body_and_blank_lines():
