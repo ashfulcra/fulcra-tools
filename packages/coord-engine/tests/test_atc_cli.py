@@ -66,3 +66,25 @@ def test_throttled_flag_round_trip(capsys):
     cli.main(["headroom", "fulcra", "--json"], transport=t)
     rows = json.loads(capsys.readouterr().out)
     assert rows[0]["headroom"] == 0 and rows[0]["calibrate"] is True
+
+
+def test_digest_flags_low_headroom(capsys):
+    low = json.dumps({"accounts": [
+        {"id": "anthropic-max", "provider": "anthropic", "plan": "max",
+         "harnesses": ["claude-code"], "windows": [{"hours": 5, "cap": 100}]}],
+        "tiers": {}})
+    t = FakeTransport()
+    t.put("team/fulcra/atc/accounts.json", low)
+    cli.main(["usage", "log", "fulcra", "--account", "anthropic-max",
+              "--tier", "frontier", "--units", "90"], transport=t)
+    capsys.readouterr()
+    cli.main(["digest", "fulcra"], transport=t)
+    out = capsys.readouterr().out
+    assert "headroom" in out and "anthropic-max" in out and "10.0%" in out
+
+
+def test_digest_silent_when_headroom_healthy(capsys):
+    t = FakeTransport()
+    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
+    cli.main(["digest", "fulcra"], transport=t)
+    assert "headroom" not in capsys.readouterr().out

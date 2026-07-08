@@ -1112,6 +1112,18 @@ def cmd_digest(args: argparse.Namespace, transport: Any) -> int:
         print(json.dumps(d, indent=2))
     else:
         print(digest_mod.render(d), end="")
+        try:
+            text = transport.read(_atc_accounts_path(args.team))
+            parsed = atc.parse_accounts(text)
+            if parsed["accounts"]:
+                rows = atc.headroom(parsed["accounts"],
+                                    _atc_usage_shards(transport, args.team), _now())
+                low = [r for r in rows if r["pct"] < 15.0]
+                for r in low:
+                    print(f"  headroom LOW: {r['account']} {r['window_hours']}h "
+                          f"at {r['pct']}%" + (" THROTTLED" if r["throttled"] else ""))
+        except Exception:
+            pass
     if args.store:
         day = now[:10]
         window = digest_mod.window_for(now)
