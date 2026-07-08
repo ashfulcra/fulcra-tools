@@ -65,8 +65,16 @@ as a launchd agent per [`docs/TESTING.md`](docs/TESTING.md); diagnose with
 uv tool install "git+https://github.com/ashfulcra/fulcra-tools@coord-engine-v1.3.0#subdirectory=packages/coord-engine"
 ```
 
-and `coord-engine doctor` checks the bus setup end to end. Continuity and
-Prefs install independently — see their READMEs.
+and `coord-engine doctor` checks the bus setup end to end. The FDE engagement
+engine installs the same way (it is not on PyPI yet — use the git source form
+until it is):
+
+```bash
+uv tool install --from "git+https://github.com/ashfulcra/fulcra-tools#subdirectory=packages/fde-engine" fde-engine
+```
+
+and `fde-engine list` shows any engagements already in your store. Continuity
+and Prefs install independently — see their READMEs.
 
 ## For agents
 
@@ -83,7 +91,12 @@ HTTP, or MCP-only. If you only need to **read** Fulcra data, the official MCP
 server is the fastest path (`uvx fulcra-context-mcp@latest`, or hosted at
 mcp.fulcradynamics.com) — it is read-only; **Collect is the write/ingest
 side**, and MCP tokens are not API tokens (see the primitives doc's MCP
-section for both caveats).
+section for both caveats). And when the task is building a *product* on
+Fulcra — a business plan, a deck, an idea that needs the platform as its
+backend — start from the [fulcra-fde skill](skills/fulcra-fde/SKILL.md): it
+runs the whole engagement (interview → architecture → prototype → build) with
+resumable state in the user's own file store, instead of improvising a
+one-off build.
 
 ## Review conventions
 
