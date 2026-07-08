@@ -68,6 +68,11 @@ bool is returned (True = an annotation was actually written this call).
 
 from __future__ import annotations
 
+# TOMBSTONE (2026-07-08): ported to fulcra_common.annotations (typed ingest
+# endpoint + fail-closed definition resolution). This module is deprecated-in-
+# place during the fulcra-pm cutover window; do not extend it — see
+# packages/fulcra-common/fulcra_common/annotations.py.
+
 import json
 import os
 import subprocess
