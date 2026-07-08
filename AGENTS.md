@@ -1,105 +1,226 @@
-# Fulcra Collect — agent guide
+# Fulcra Tools — agent guide
 
-uv-workspace monorepo, macOS-first. Packages under `packages/`:
-- `collect` — the daemon (control socket + FastAPI web onboarding wizard) and plugins
-- `menubar` — the macOS menu-bar app (PyObjC / rumps)
-- `fulcra-common` — shared code; plus importer packages (dayone, csv-importer, media-helpers, attention…)
+Your entry point to this repo: the non-obvious environment and the conventions
+you can't infer from the source. The [`README.md`](README.md) tells the
+top-level story (what each package is, how to install the pieces) — this file
+does not repeat it; it covers what an agent has to know to work here safely.
+
+**This file is a ship-gate artifact.** Every PR that changes agent-facing
+behavior — CLI verbs, skills, conventions, environment requirements, review
+rules — MUST update this file in the same PR. Reviewers: treat a stale
+`AGENTS.md` as a blocking finding. If your change doesn't alter what an agent
+needs to know, say so in the PR body ("AGENTS.md: no change needed").
+
+## Layout
+
+uv-workspace monorepo, macOS-first. Packages under `packages/`, agent skills
+under `skills/`, each package with its own README, build, and tests.
+
+- **Collect** — the local ingest side: `collect` (the daemon: control socket +
+  FastAPI onboarding wizard + worker subprocesses), `menubar` (the macOS
+  menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest
+  pipeline), plus the importer packages (`dayone`, `csv-importer`,
+  `media-helpers`, `attention`, `netflix-skill`, …).
+- **coord** — the agent-coordination layer. In prose it is **coord**; the
+  engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
+  and the twelve `fulcra-agent-*` skills under `skills/` are how an agent
+  actually drives it. (Identifiers keep their `coord2` spelling; the prose
+  name is coord.) `packages/fulcra-coord` and `packages/fulcra-coord-files`
+  are the **first-generation, LEGACY** layer — kept for provenance and the
+  annotations helper only. **Don't build anything new on them.**
+- Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described
+  in the README; their skills and READMEs carry the detail.
 
 ## Setup & tests
-- Full install: **`uv sync --all-packages --all-extras`**. Bare `uv sync` is NOT enough — pytest lives in each package's `dev` extra and PyObjC/rumps in the `macos` extra, so a bare sync fails tests with `Failed to spawn: pytest` and the menu-bar can't import.
-- Run tests: `uv run pytest packages/ -q` (~3200 tests, a couple of minutes, and must NOT hit the network — a network-bound run is the bug, not slowness).
-- Editable install: the `.venv` imports the live workspace source, so a code change is picked up by **restarting the daemon**, not re-syncing.
-- Pull latest into a checkout with `bash scripts/update.sh` (git pull + `uv sync --all-packages --all-extras` + restart daemon/menubar). Any sync must keep `--all-extras` or it prunes pytest + PyObjC back out.
-- PyObjC-free logic is split into its own modules so tests run on Linux CI; macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC imports lazy (inside functions), never at module import time.
-- **Pre-push hook (local CI gate):** GitHub Actions' macOS job is path-filtered to macOS-specific changes only (it's a 10x-cost runner), so a pure fulcra-coord change has no server-side test gate. A shared `pre-push` hook in `.githooks/` runs the fulcra-coord suite before any push that touches `packages/fulcra-coord/`. It's version-controlled but `core.hooksPath` is per-clone — **enable it once in every clone you push from:** `git config core.hooksPath .githooks`. Bypass a single push with `git push --no-verify`; needs `uv` on PATH.
-- **Workspace exclude:** any directory under `packages/*` that is NOT a uv member (no `pyproject.toml`) must be added to `[tool.uv.workspace] exclude` in the root `pyproject.toml`, or it breaks `uv sync`/`uv run`/`uv tool install` for everyone (the `uv-workspace` CI guards this). `packages/web-ui` (a frontend, no `pyproject.toml`) is currently excluded for this reason.
 
-## The daemon
-- Run it durably as a **launchd** agent, NOT a backgrounded shell process — a foreground/`&` daemon dies when its terminal or session ends. Install + load:
-  `uv run fulcra-collect install` then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fulcra.collect.plist`.
-  Restart: `launchctl kickstart -k gui/$(id -u)/com.fulcra.collect`. Stop: `launchctl bootout gui/$(id -u)/com.fulcra.collect`. Logs: `~/Library/Logs/fulcra-collect/`.
-- Subcommands: `daemon install status run enable disable set-credential set-interval plugin`. There is **no `start`**.
-- Config dir `~/.config/fulcra-collect/`: `control.sock` (UDS the menu-bar + CLI use), `web-url` (default `http://127.0.0.1:9292`), `web-token` (Bearer for the web API).
+- One command: **`bash scripts/setup.sh`** — installs the right Python + `uv`
+  extras + the `fulcra` CLI, then runs the suite to verify (macOS-first; the
+  menubar's PyObjC deps are macOS-only).
+- The manual equivalent is **`uv sync --all-packages --all-extras`**. Bare
+  `uv sync` is NOT enough — pytest lives in each package's `dev` extra and
+  PyObjC/rumps in the `macos` extra, so a bare sync fails tests with
+  `Failed to spawn: pytest` and the menu-bar can't import. Any sync must keep
+  `--all-extras` or it prunes pytest + PyObjC back out.
+- Run tests: `uv run pytest packages/ -q` (~4700 tests, a couple of minutes,
+  and must NOT hit the network — a network-bound run is the bug, not slowness).
+- Editable install: the `.venv` imports the live workspace source, so a code
+  change is picked up by **restarting the daemon**, not re-syncing.
+- Pull latest into a checkout with `bash scripts/update.sh` (git pull +
+  `uv sync --all-packages --all-extras` + restart daemon/menubar).
+- PyObjC-free logic is split into its own modules so tests run on Linux CI;
+  macOS view-layer tests are marked and skipped off-darwin. Keep new PyObjC
+  imports lazy (inside functions), never at module import time.
 
-## launchd PATH gotcha
-launchd runs the daemon with a restricted PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) and does NOT source your shell profile — so `~/.local/bin` (where `uv tool install fulcra-api` puts the `fulcra` CLI) is invisible. Any code shelling out to the `fulcra` CLI must resolve it via `credentials._find_fulcra_cli()` (PATH → `~/.local/bin` → homebrew), **never** bare `shutil.which("fulcra")`.
+## Coordinate on the bus
 
-## Keychain
-- User secrets (the Fulcra `bearer-token`) live in the OS keychain via `keyring`, service `fulcra-collect:user`. A read can block on a macOS ACL confirmation dialog; `credentials._keyring_get` times out after 5s and the daemon degrades to "Fulcra not authenticated".
-- Sign in **through the daemon's web wizard** (`open "$(cat ~/.config/fulcra-collect/web-url)"`) so the daemon — not a one-off script — owns the keychain item. If the "Python wants to use your confidential information" prompt repeats, click **Always Allow** (not "Allow"). If it still repeats, the item is owned by a stale binary: `security delete-generic-password -s "fulcra-collect:user" -a "bearer-token"`, restart the daemon, re-sign-in.
+Durable work — anything another session or agent must see — lives on the coord
+bus (Fulcra Files), driven through `coord-engine` and the `fulcra-agent-*`
+skills. Subagent-only work stays OFF the bus.
 
-## Menu-bar app
-- Launch from a GUI (Aqua) session: `uv run --package fulcra-menubar python -m fulcra_menubar`. Not from SSH/detached shells, or the status item won't appear. Under Homebrew Python the bundle id is `org.python.python` (use that for computer-use / TCC grants, not `com.apple.python3`).
-- It talks ONLY to the daemon over the control socket; it never reads the keychain. Auth state, tracks, and plugin status all come from the daemon — a stale UI usually just needs a relaunch / reopened popover.
-- Bundle-requiring macOS APIs (`UNUserNotificationCenter`, etc.) raise an **uncatchable** NSException when run unbundled (`python -m` from a venv) — `try/except` can't recover it. Guard with `_notify_macos.running_in_app_bundle()`. The shipped app is bundled via Briefcase.
+- **On wake, `coord-engine briefing <team> --agent <you>` is THE entry fold.**
+  One call surfaces your identity, your roles' inboxes, and everything that
+  needs you including reviews you owe. Start there — never watch a narrower
+  surface (a bare inbox or a single view file misses role-addressed work and
+  pending reviews).
+- **Review handshake.** Nothing lands without an independent review by a
+  *different agent identity* than the author — that review is the control, not
+  who clicks merge. Where a forge exists the change goes through a **PR, never
+  a direct push to `main`**. The handshake rides the bus, not the forge:
+  `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
+  opens a durable obligation that sits in the reviewer's `needs-me` until their
+  verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`;
+  `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
+  and gates the merge. The `<artifact>` is an opaque ref (PR#, branch, commit
+  SHA, URL, or a non-code deliverable), so the handshake works with any forge
+  or none. A GitHub-only "Approve"/comment does NOT count — co-located agents
+  (and Codex) often share one GitHub account, so a forge verdict can no-op; the
+  bus verdict, keyed by agent identity, is the source of truth. **Verdict
+  before ack, on the exact slug — never a bare ack.** Full rules and per-harness
+  wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
+  and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
+- **Delivery rule.** The human-visible report is a turn's (or tick's)
+  **terminal output** — composed last, after every tool call. Text followed by
+  more tool activity may never render ("sent" is not "delivered"), so anything
+  that MUST reach a recipient (human or agent) goes on the bus as a durable
+  artifact (ask, review doc, snapshot), never only in session text.
+- **Backlog.** A "do later" item goes ON THE BUS:
+  `coord-engine later "<title>" -s "<context>"` parks it on the `@backlog`
+  audience (durable, visible on the `board`, spams no inbox); route it later
+  with the ordinary assignment verbs. Backlog in session memory alone dies at
+  compaction.
+- **ATC (air-traffic control).** On a subscription-cap fleet, consult
+  `coord-engine route --needs <tags>` before a dispatch to pick the cheapest
+  model that covers the work, and log the outcome after:
+  `coord-engine usage log <team> --account <id> --tier <tier> --model <m>
+  --task-class <tag> --outcome clean|rework|escalated`. That ledger feeds the
+  headroom fold and demotes a model that keeps failing a task class. Rubric and
+  routing procedure: [`fulcra-agent-atc`](skills/fulcra-agent-atc/SKILL.md).
 
-## Sign-in & first run
-Full first-run walkthrough + troubleshooting: `docs/TESTING.md`.
+## Working tree
 
-## Code review & merge (all repos)
-**Nothing lands without an independent review by a *different agent identity*
-than the author.** That independent review is the control; *who clicks merge* is
-not a separate gate. The handshake is artifact-based and runs **on the bus**, so
-it works with any forge or none: `request-review <artifact>` routes the artifact
-to a reviewer → reviewer reviews adversarially → **`review-done <artifact>
---verdict approve|changes`** lands the verdict as a bus directive in the author's
-inbox. The **bus is the source of truth** — a review isn't "done" until the
-verdict is on the bus. A GitHub-only PR comment does NOT count: the listener /
-SessionStart only see the bus, so a forge-only verdict gets lost. The
-`<artifact>` is an opaque ref — PR# · MR# · branch · commit SHA · URL · patch ·
-even a non-code deliverable (a doc, a dataset, a bus task) — and reviews the same
-way regardless.
-This works with **zero forge**: merge via plain `git` (push / fast-forward on a
-shared remote), any forge, or `gh` — `gh pr merge` is ONE option, not a
-requirement; coord never calls a forge itself.
-Rules that still hold: **no direct pushes to `main` where a forge/PR exists**;
-the review is by a **different agent identity** than the author; a **clean
-approval (no code changes)** is merged by the reviewer or whoever's around once
-green — don't hand it back to the author and wait (that round-trip stalls
-cross-agent reviews); if the **reviewer pushed fixes**, the author (or a second
-reviewer) signs off on those before merge. **Hard floor: never merge your own
-unreviewed code** (Codex → a Claude reviews its work). Routing: non-Arc Claude →
-`Ashs-MBP-Work:Codex-Review-Workbook`; Arc → `claude-code:ArcBot:Arc-Code-Review`; Codex's
-own → a live Claude. No reviewer live → ping the operator (`fulcra-coord block
---on-user`); never merge unreviewed. (Co-located agents + Codex often share one
-GitHub account, so GitHub "Approve" can no-op — that's why the handshake lives on
-the **bus**, by agent identity.) Full rule:
-`packages/fulcra-coord/adapters/claude-code/CLAUDE.md`.
+Prefer a **per-agent git worktree**, not a shared checkout — concurrent
+sessions sharing one working tree clobber each other's index/`HEAD`
+(interleaved commits, orphaned merge conflicts). Each session gets its own tree
+(and its own per-cwd identity): `git worktree add ../<repo>-<purpose> -b
+<vendor>/<purpose> origin/main`. Conflict markers or staged files you didn't
+create mean you're sharing a checkout — move out before committing.
 
-**Forge-agnostic core (invariant).** The coordination bus is forge-agnostic —
-`fulcra_coord/` never calls a specific forge (no `gh`, no GitHub/GitLab API).
-GitHub is one optional integration. The review/merge handshake coordinates an
-opaque **artifact ref** (PR# · MR# · branch · commit SHA · URL · patch ·
-non-code deliverable) on the bus; verdicts ride the bus
-(`request-review <artifact>` → `review-done --verdict`), and a forge is optional
-sugar a human/agent invokes separately. Enforced by
-`packages/fulcra-coord/tests/test_forge_agnostic.py`.
+## Commits
 
-## In-session listening (coord bus)
-Long-running interactive sessions arm a background watcher that polls the bus
-**directly** — raw `tasks/` listings, never the view files — for new work
-addressed to them. The materialized views (`views/summaries.json`,
-`views/presence.json`) refresh only when an upload succeeds, so they may lag
-hours under backend pressure; and the listener app's notification cannot reach
-an already-open session — only the session's own direct poll can. (The CLI
-read commands self-heal via `FULCRA_COORD_VIEW_STALE_MIN`, but an in-session
-watcher should not depend on views at all.) For the *between*-sessions gap,
-sessions are disposable — the host wake (`wake.json`, see the fulcra-coord
-README "Host wake") + the bus + checkpoints carry continuity: the listener can
-spawn a fresh headless session to process pending directives when nobody is
-around.
+Author commits as `ashfulcra
+<114089064+ashfulcra@users.noreply.github.com>` and end the message with the
+trailer `Co-Authored-By: <your model> <noreply@anthropic.com>` (e.g.
+`Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`).
 
-## Backlog convention
-When the operator gives you a "do later" / backlog item, put it ON THE BUS:
-`fulcra-coord later "<title>" -s "<context>"`. Backlog lives on the bus — never
-only in session memory — so it survives compaction and is portable across
-sessions and agents. `later` parks the item on the `@backlog` role audience
-(durable + visible on the `board`'s ideas pipeline, spams nobody's inbox); when
-its time comes, route it with the ordinary `assign TASK-ID <agent>`. (Subagent
-work, by contrast, stays OFF the bus.)
+## CI, the pre-push hook, and workspace membership
+
+- **macOS CI is path-filtered and bills at 10×**, so it only runs on
+  macOS-relevant changes (`packages/fulcra-menubar/**`, `packages/coord-engine/**`,
+  `skills/fulcra-agent-automation/**`, and the macOS-touching `fulcra-coord`
+  modules). Everything on Linux (`uv-workspace.yml`) runs on every push/PR to
+  `main`. The upshot: for anything the macOS job skips, the **local gate is the
+  real one** — run the relevant suite before you push.
+- **Pre-push hook.** A shared `pre-push` hook in `.githooks/` runs the LEGACY
+  `fulcra-coord` suite before any push that touches
+  `packages/fulcra-coord/(fulcra_coord/|tests/|pyproject.toml)` — that package
+  is the one with no full server-side gate. It's version-controlled but
+  `core.hooksPath` is per-clone, so **enable it once in every clone you push
+  from:** `git config core.hooksPath .githooks`. Bypass a single push with
+  `git push --no-verify`; needs `uv` on PATH. (`coord-engine` is CI-gated on
+  both runners, but still run its pytest suite locally before pushing.)
+- **Workspace exclude.** Any directory under `packages/*` that is NOT a uv
+  member (no `pyproject.toml`) must be added to `[tool.uv.workspace] exclude`
+  in the root `pyproject.toml`, or it breaks `uv sync`/`uv run`/`uv tool
+  install` for everyone (the `uv-workspace` CI guards this). `packages/web-ui`
+  (a frontend, no `pyproject.toml`) is excluded for this reason.
+
+## Fulcra platform surface & records
+
+[`FULCRA-PRIMITIVES.md`](FULCRA-PRIMITIVES.md) is the field guide to the whole
+platform surface (auth, files, annotations, queries, MCP), organized by agent
+capability tier — CLI/lib, raw HTTP, or MCP-only. Read it before re-researching
+anything about the platform, and **check the installed `fulcra-api` version,
+not the repo** (the CLI ships ahead of its git main on PyPI).
+
+- **Spec-backed raw endpoints are first-class.** Anything in the published
+  Fulcra OpenAPI (`api.fulcradynamics.com`) is fair game when it makes the work
+  easier — a documented raw REST call is a legitimate tool, not a last resort.
+  Still prefer the `fulcra` CLI / Python lib when you have a shell and a verb
+  exists; the MCP server is read-only.
+- **Records are write-via-ingest.** A timeline record is written by POSTing a
+  `DataRecordV1` to `POST /ingest/v1/record` (the `data_type` rides in
+  `metadata`), or a JSONL batch to `POST /ingest/v1/record/batch`. There is
+  **no record-level delete/replace and no `fulcra` record-write/delete CLI verb
+  yet** — model corrections as new (superseding) records; JSON-schema discovery
+  is `GET /user/v1alpha1/schema/annotation` and `…/schema/measurement`. When a
+  first-class record verb lands, the primitives doc gets a full re-verification,
+  not a patch — flag it on the bus.
+- **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
+  It defaults to off (inert); leave it there — an accidental `on` has caused
+  duplicate-record proliferation. The writer is being ported to coord with a
+  fail-closed fix; until that ships, do not enable it.
+
+## The daemon (Collect)
+
+- Run it durably as a **launchd** agent, NOT a backgrounded shell process — a
+  foreground/`&` daemon dies when its terminal or session ends. Install + load:
+  `uv run fulcra-collect install`, then `launchctl bootstrap gui/$(id -u)
+  ~/Library/LaunchAgents/com.fulcra.collect.plist`. Restart: `launchctl
+  kickstart -k gui/$(id -u)/com.fulcra.collect`. Stop: `launchctl bootout
+  gui/$(id -u)/com.fulcra.collect`. Logs: `~/Library/Logs/fulcra-collect/`.
+- Subcommands: `daemon install status run enable disable set-credential
+  set-interval plugin doctor`. There is **no `start`**; `doctor` runs the
+  pre-flight diagnostic.
+- Config dir `~/.config/fulcra-collect/`: `control.sock` (the UDS the menu-bar
+  + CLI use), `web-url` (default `http://127.0.0.1:9292`), `web-token` (Bearer
+  for the web API).
+
+### launchd PATH gotcha
+
+launchd runs the daemon with a restricted PATH
+(`/usr/bin:/bin:/usr/sbin:/sbin`) and does NOT source your shell profile — so
+`~/.local/bin` (where `uv tool install fulcra-api` puts the `fulcra` CLI) is
+invisible. Any code shelling out to the `fulcra` CLI must resolve it via
+`credentials._find_fulcra_cli()` (PATH → `~/.local/bin` → homebrew), **never**
+bare `shutil.which("fulcra")`.
+
+### Keychain
+
+- User secrets (the Fulcra `bearer-token`) live in the OS keychain via
+  `keyring`, service `fulcra-collect:user`. A read can block on a macOS ACL
+  confirmation dialog; `credentials._keyring_get` times out after 5s and the
+  daemon degrades to "Fulcra not authenticated".
+- Sign in **through the daemon's web wizard** (`open "$(cat
+  ~/.config/fulcra-collect/web-url)"`) so the daemon — not a one-off script —
+  owns the keychain item. If the "Python wants to use your confidential
+  information" prompt repeats, click **Always Allow** (not "Allow"). If it still
+  repeats, the item is owned by a stale binary: `security
+  delete-generic-password -s "fulcra-collect:user" -a "bearer-token"`, restart
+  the daemon, re-sign-in.
+
+### Menu-bar app
+
+- Launch from a GUI (Aqua) session: `uv run --package fulcra-menubar python -m
+  fulcra_menubar`. Not from SSH/detached shells, or the status item won't
+  appear. Under Homebrew Python the bundle id is `org.python.python` (use that
+  for computer-use / TCC grants, not `com.apple.python3`).
+- It talks ONLY to the daemon over the control socket; it never reads the
+  keychain. Auth state, tracks, and plugin status all come from the daemon — a
+  stale UI usually just needs a relaunch / reopened popover.
+- Bundle-requiring macOS APIs (`UNUserNotificationCenter`, etc.) raise an
+  **uncatchable** NSException when run unbundled (`python -m` from a venv) —
+  `try/except` can't recover it. Guard with
+  `_notify_macos.running_in_app_bundle()`. The shipped app is bundled via
+  Briefcase.
+
+### Sign-in & first run
+
+Full first-run walkthrough + troubleshooting: [`docs/TESTING.md`](docs/TESTING.md).
+Diagnose a live install with `uv run fulcra-collect doctor`.
 
 ## Repo homes
-This monorepo is **only for things that make Fulcra
-useful for other people**. Fulcra-related infra that isn't useful-to-others
-enough → its own `ashfulcra/<repo>`; personal/unrelated projects → their own
-`reversity/<repo>`. Ask the operator when unsure.
+
+This monorepo is **only for things that make Fulcra useful for other people.**
+Fulcra-related infra that isn't useful-to-others enough → its own
+`ashfulcra/<repo>`; personal/unrelated projects → their own `reversity/<repo>`.
+Ask the operator when unsure.
