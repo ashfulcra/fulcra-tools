@@ -8,6 +8,15 @@ the recovery path if a direction was chosen wrongly.
 
 Engagement trees are small (dozens of files), so change detection is a full
 content compare — dead simple beats clever here.
+
+Known v1 limits:
+
+- Symlinked directories under the local mirror are not followed (``os.walk``
+  default), so their contents are silently excluded from a push.
+- If a transport read returns None mid-pull, that file is excluded from the
+  pass. The transport contract can't distinguish "missing" from a transient
+  read error, so a blip means the file is skipped this round rather than
+  failing loudly; a re-run picks it up once the read succeeds.
 """
 
 from __future__ import annotations
@@ -16,6 +25,10 @@ import os
 from typing import Any
 
 from .engagement import remote_path
+
+
+class SyncError(RuntimeError):
+    pass
 
 
 def _local_files(local_dir: str) -> dict[str, str]:
@@ -59,7 +72,13 @@ def push(transport, slug: str, local_dir: str) -> dict[str, Any]:
         if transport.read(remote_path(slug, rel)) == content:
             skipped += 1
             continue
-        transport.write(remote_path(slug, rel), content)
+        if not transport.write(remote_path(slug, rel), content):
+            # A partial push is not rolled back — files already uploaded are
+            # good; the error names where it stopped so a re-run can finish.
+            raise SyncError(
+                f"push failed at {rel} — {len(pushed)} file(s) already pushed; "
+                f"re-run `fde-engine sync <slug> push` after fixing the cause"
+            )
         pushed.append(rel)
     return {"pushed": pushed, "skipped": skipped}
 
@@ -76,8 +95,17 @@ def pull(transport, slug: str, local_dir: str) -> dict[str, Any]:
                     continue
         except OSError:
             pass  # missing locally -> pull it
-        os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
-        with open(full, "w", encoding="utf-8") as fh:
-            fh.write(content)
+        try:
+            os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+            with open(full, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        except OSError as exc:
+            # Typical case: remote has build/logs/x.md but local `build` is a
+            # plain file (IsADirectoryError/NotADirectoryError). Surface an
+            # actionable message instead of a raw traceback.
+            raise SyncError(
+                f"pull failed writing {rel}: {exc} — a local file/directory "
+                f"is in the way; move it aside and re-run pull"
+            ) from exc
         pulled.append(rel)
     return {"pulled": pulled, "skipped": skipped}

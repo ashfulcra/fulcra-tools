@@ -1,5 +1,7 @@
 """Explicit-direction sync between the local mirror and the remote tree."""
 
+import pytest
+
 from fde_engine import sync
 from fde_engine_test_helpers import FakeTransport
 
@@ -45,3 +47,37 @@ def test_push_skips_hidden_files(tmp_path):
     (d / "retro.md").write_text("done", encoding="utf-8")
     report = sync.push(t, "x", str(d))
     assert report["pushed"] == ["retro.md"]
+
+
+class FailingWriteTransport(FakeTransport):
+    """FakeTransport whose write() reports failure for one specific path."""
+
+    def __init__(self, fail_path):
+        super().__init__()
+        self.fail_path = fail_path
+
+    def write(self, path, content):
+        if path == self.fail_path:
+            return False
+        return super().write(path, content)
+
+
+def test_push_raises_when_a_transport_write_fails(tmp_path):
+    t = FailingWriteTransport("fde/engagements/x/intake/brief.md")
+    d = tmp_path / "eng"
+    (d / "intake").mkdir(parents=True)
+    (d / "engagement.md").write_text("meta", encoding="utf-8")
+    (d / "intake" / "brief.md").write_text("v1", encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="intake/brief.md"):
+        sync.push(t, "x", str(d))
+
+
+def test_pull_raises_actionable_error_on_file_vs_directory_collision(tmp_path):
+    t = FakeTransport()
+    t.write("fde/engagements/x/build/logs/x.md", "log line")
+    d = tmp_path / "eng"
+    d.mkdir()
+    # A plain local file where the remote tree needs a directory.
+    (d / "build").write_text("i am a file, not a directory", encoding="utf-8")
+    with pytest.raises(sync.SyncError, match="build/logs/x.md"):
+        sync.pull(t, "x", str(d))
