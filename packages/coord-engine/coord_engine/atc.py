@@ -423,7 +423,10 @@ def report_fold(accounts: dict[str, Any], shards: list[dict[str, Any]], *,
                     cap += int(w["cap"])
     value = round(below_units / cap, 1) if cap > 0 else None
     headline = {"value": value, "below_units": below_units,
-                "cap": cap if cap > 0 else None}
+                "cap": cap if cap > 0 else None,
+                # distinguishes the two n/a cases for the renderer: no frontier
+                # account at all vs. one declared but carrying no 5h window.
+                "frontier_declared": bool(frontier_accts)}
 
     return {
         "team": team, "days": days, "total": total, "tiers": tiers,
@@ -480,7 +483,10 @@ def render_report(rep: dict[str, Any]) -> str:
 
     h = rep["headline"]
     if h["value"] is None:
-        lines.append("headline: n/a (no frontier account declared)")
+        if h.get("frontier_declared"):
+            lines.append("headline: n/a (frontier account has no 5h window)")
+        else:
+            lines.append("headline: n/a (no frontier account declared)")
     else:
         lines.append(
             f"headline: ~{h['value']:.1f} frontier window-days preserved "

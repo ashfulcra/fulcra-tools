@@ -101,9 +101,11 @@ class _DashHandler(BaseHTTPRequestHandler):
             try:
                 body = json.dumps(self.server.data_fn()).encode("utf-8")  # type: ignore[attr-defined]
             except Exception as e:
-                # never crash the server on a bad fold — surface it as a 500
+                # never crash the server on a bad fold — surface it as a 500.
+                # The body is deliberately generic: exception text can reflect
+                # bus-derived data, so it must not leak into the response.
                 logger.exception("dash data_fn failed")
-                err = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode("utf-8")
+                err = json.dumps({"error": "internal error"}).encode("utf-8")
                 self._send(500, "application/json", err)
                 return
             self._send(200, "application/json", body)
@@ -204,6 +206,13 @@ PAGE = """<!doctype html>
 </main>
 <footer id="foot">map &mdash; &middot; updated &mdash;</footer>
 <script>
+  // Every bus-derived string (account labels, tier keys, right-hand texts) is
+  // built into innerHTML below, so it MUST pass through esc() first — a hostile
+  // account id or tier name like `<img src=x onerror=...>` is otherwise live.
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
   function bar(pct, extra) {
     var cls = pct < 15 ? "crit" : pct < 40 ? "warn" : "";
     var lbl = extra.label, right = extra.right;
@@ -217,13 +226,13 @@ PAGE = """<!doctype html>
     var hr = d.headroom || [];
     document.getElementById("headroom").innerHTML = hr.length ? hr.map(function (r) {
       var t = r.throttled ? ' <span class="throttled">THROTTLED</span>' : "";
-      return bar(r.pct, { label: r.account + " &middot; " + r.window_hours + "h" + t,
-        right: r.headroom + "/" + r.cap + " (" + r.pct + "%)" });
+      return bar(r.pct, { label: esc(r.account) + " &middot; " + esc(r.window_hours) + "h" + t,
+        right: esc(r.headroom) + "/" + esc(r.cap) + " (" + esc(r.pct) + "%)" });
     }).join("") : '<div class="empty">no accounts declared</div>';
     var tm = d.tier_mix || {};
     var keys = Object.keys(tm);
     document.getElementById("tiermix").innerHTML = keys.length ? keys.map(function (k) {
-      return bar(tm[k], { label: k, right: tm[k] + "%" });
+      return bar(tm[k], { label: esc(k), right: esc(tm[k]) + "%" });
     }).join("") : '<div class="empty">no dispatches in window</div>';
     document.getElementById("foot").textContent =
       "map " + (d.map_version || "—") + " · updated " + (d.generated_at || "—");

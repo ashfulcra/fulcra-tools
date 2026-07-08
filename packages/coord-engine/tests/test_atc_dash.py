@@ -135,6 +135,38 @@ def test_root_serves_selfcontained_html_no_external_urls():
         t.join(timeout=3)
 
 
+def test_page_escapes_bus_derived_strings():
+    # A hostile tier/account string arrives verbatim over /data.json (the fold
+    # does not sanitise — that's the browser's job), and the page MUST escape it
+    # before it reaches innerHTML.
+    hostile = '<img src=x onerror=alert(1)>'
+    data = {"headroom": [{"account": hostile, "window_hours": 5, "headroom": 1,
+                          "cap": 2, "pct": 50, "throttled": False}],
+            "tier_mix": {hostile: 50}, "headline": "ok",
+            "map_version": None, "generated_at": "2026-07-08T00:00:00Z"}
+    srv = atc_dash.make_server("127.0.0.1", 0, lambda: data)
+    port = srv.server_address[1]
+    t = _run(srv)
+    try:
+        # the raw hostile string is present in the JSON payload...
+        _, jbody, _ = _get(port, "/data.json")
+        assert hostile in jbody
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        t.join(timeout=3)
+    # ...but the page defines esc() and routes every bus-derived interpolation
+    # site through it (source-level assertion — the page is a static string).
+    page = atc_dash.PAGE
+    assert "function esc(" in page
+    for site in ("esc(r.account)", "esc(r.window_hours)", "esc(r.headroom)",
+                 "esc(r.cap)", "esc(r.pct)", "esc(k)", "esc(tm[k])"):
+        assert site in page, f"missing escaped interpolation: {site}"
+    # the raw (unescaped) label/right interpolations must be gone
+    assert "r.account + " not in page
+    assert "label: k," not in page
+
+
 def test_unknown_path_404s():
     srv = atc_dash.make_server("127.0.0.1", 0, lambda: {})
     port = srv.server_address[1]
@@ -171,6 +203,11 @@ def test_data_fn_error_does_not_crash_server():
             assert False, "expected 500"
         except urllib.error.HTTPError as e:
             assert e.code == 500
+            # body must be the generic string — the exception text ("fold blew
+            # up") can reflect bus-derived data and must never leak.
+            body = json.loads(e.read().decode("utf-8"))
+            assert body == {"error": "internal error"}
+            assert "fold blew up" not in json.dumps(body)
         # server still alive & serving after the failed request
         status, _, _ = _get(port, "/")
         assert status == 200
@@ -201,6 +238,21 @@ def test_dash_cli_wires_serve_foreground(monkeypatch, capsys):
     assert captured["port"] == 8787          # default
     assert set(captured["data"]) == {"headroom", "tier_mix", "headline",
                                      "map_version", "generated_at"}
+
+
+def test_atc_dash_subgroup_alias_wires_same_handler(monkeypatch):
+    # spec says `atc dash`; it must resolve to the same handler as top-level
+    # `dash` (top-level kept working — asserted by the tests above).
+    captured = {}
+    monkeypatch.setattr(cli.atc_dash, "serve",
+                        lambda team, host="127.0.0.1", port=8787, *, data_fn=None:
+                        captured.update(team=team, port=port))
+    t = FakeTransport()
+    t.put("team/fulcra/atc/accounts.json",
+          json.dumps({"accounts": [FRONTIER_ACCT], "tiers": {}}))
+    rc = cli.main(["atc", "dash", "fulcra", "--port", "9100"], transport=t)
+    assert rc == 0
+    assert captured["team"] == "fulcra" and captured["port"] == 9100
 
 
 def test_dash_cli_custom_port(monkeypatch):

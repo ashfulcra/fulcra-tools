@@ -915,10 +915,10 @@ def _atc_usage_shards(transport: Any, team: str) -> list[dict[str, Any]]:
             row = {"account": fm["account"], "ts": ts,
                    "units": int(fm.get("units") or 0),
                    "throttled": bool(fm.get("throttled"))}
-            # Task-3 outcome fields flow through only when present; v1 shards
-            # (no model/task_class/outcome) reach the demotions fold untouched
-            # and are ignored there.
-            for k in ("model", "task_class", "outcome"):
+            # `tier` drives the report/dash tier-mix + headline; the outcome
+            # fields (model/task_class/outcome) flow through only when present.
+            # v1 shards missing any of these reach the folds untouched.
+            for k in ("tier", "model", "task_class", "outcome"):
                 if fm.get(k) is not None:
                     row[k] = fm[k]
             rows.append(row)
@@ -1008,6 +1008,12 @@ def cmd_route(args: argparse.Namespace, transport: Any) -> int:
     merged, merge_reports = atc.merge_models(
         atc.load_default_models(), _atc_models_overlay(text))
     needs = [n.strip() for n in (args.needs or "").split(",") if n.strip()]
+    # An empty/whitespace-only --needs (e.g. `--needs ""` or `--needs ,`) is a
+    # taxonomy-strictness error, not "match everything" — mirror the unknown-need
+    # exit 2 rather than silently routing ALL models.
+    if not needs:
+        print("route — no needs given", file=sys.stderr)
+        return 2
     shards = _atc_usage_shards(transport, args.team)
     # Fold outcome shards -> demoted (model, task_class) pairs, then adapt to the
     # {model: [tags]} shape route consumes (task_class values are taxonomy tags).
@@ -1227,7 +1233,7 @@ def cmd_atc_init(args: argparse.Namespace, transport: Any) -> int:
     print(f"wrote {path}: {len(doc['accounts'])} account(s) declared "
           f"({len(added)} new this run)")
     print("next steps — paste these:")
-    print("  1. install the skill — see skills/fulcra-agent-atc/SKILL.md §Setup")
+    print("  1. install the skill — see skills/fulcra-agent-atc/SKILL.md §Install")
     print(f"  2. coord-engine route {args.team} --needs code")
     print(f"  3. coord-engine usage log {args.team} --account {ex_id} "
           "--tier standard --units <est> --model <model> "
@@ -1742,12 +1748,18 @@ def build_parser() -> argparse.ArgumentParser:
                           "(repeatable; default is the map's per-provider union)")
     ati.set_defaults(func=cmd_atc_init)
 
-    dsh = sub.add_parser("dash",
-                         help="serve the localhost ATC gauge dashboard (127.0.0.1 only)")
-    dsh.add_argument("team")
-    dsh.add_argument("--port", type=int, default=8787,
-                     help="loopback port to bind (default 8787)")
-    dsh.set_defaults(func=cmd_dash)
+    def _add_dash_parser(parent: Any) -> None:
+        d = parent.add_parser(
+            "dash", help="serve the localhost ATC gauge dashboard (127.0.0.1 only)")
+        d.add_argument("team")
+        d.add_argument("--port", type=int, default=8787,
+                       help="loopback port to bind (default 8787)")
+        d.set_defaults(func=cmd_dash)
+
+    # `dash` lives both top-level (legacy) and under the `atc` group (spec says
+    # `atc dash`) — same handler, so either invocation serves the dashboard.
+    _add_dash_parser(sub)
+    _add_dash_parser(atsub)
 
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")

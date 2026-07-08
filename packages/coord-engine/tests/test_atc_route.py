@@ -238,6 +238,15 @@ def test_cli_route_unknown_need_exit_2(capsys):
     assert rc == 2
 
 
+def test_cli_route_empty_needs_exit_2(capsys):
+    # whitespace/empty --needs must NOT route all models — it's an exit-2 error.
+    t = FakeTransport()
+    t.put("team/fulcra/atc/accounts.json", ACCOUNTS)
+    rc = cli.main(["route", "fulcra", "--needs", "  ,  "], transport=t)
+    err = capsys.readouterr().err
+    assert rc == 2 and "no needs given" in err
+
+
 def test_cli_route_empty_reason_exit_0(capsys):
     # no accounts declared -> no account headroom, graceful exit 0
     t = FakeTransport()

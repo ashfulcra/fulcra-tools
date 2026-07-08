@@ -180,6 +180,19 @@ def test_headline_below_frontier_units_over_frontier_5h_cap():
             "(below-frontier units ÷ frontier 5h cap)") in render_report(rep)
 
 
+def test_headline_sums_5h_caps_across_multiple_frontier_accounts():
+    # Two frontier accounts with 5h caps 800 and 200 => denominator 1000.
+    acct_a = {"id": "amax", "harnesses": ["h"], "windows": [{"hours": 5, "cap": 800}]}
+    acct_b = {"id": "bmax", "harnesses": ["h"], "windows": [{"hours": 5, "cap": 200}]}
+    shards = ([_sh("frontier", account="amax", units=10),
+               _sh("frontier", account="bmax", units=10)]
+              + [_sh("standard", account="other", units=500)])
+    rep = report_fold(_accts(acct_a, acct_b), shards, team="fulcra", now=NOW)
+    assert rep["headline"]["cap"] == 1000
+    assert rep["headline"]["below_units"] == 500
+    assert rep["headline"]["value"] == 0.5
+
+
 def test_headline_na_when_no_frontier_account_declared():
     # no frontier-tier shard => no frontier account => n/a
     shards = [_sh("standard", account="other", units=100)]
@@ -194,7 +207,10 @@ def test_headline_na_when_frontier_account_has_no_5h_window():
               _sh("cheap", account="amax", units=100)]
     rep = report_fold(_accts(acct), shards, team="fulcra", now=NOW)
     assert rep["headline"]["value"] is None
-    assert "no frontier account declared" in render_report(rep)
+    # a frontier account IS declared here — it just lacks a 5h window, so the
+    # renderer must not claim "no frontier account declared".
+    assert "headline: n/a (frontier account has no 5h window)" in render_report(rep)
+    assert "no frontier account declared" not in render_report(rep)
 
 
 # --- days filter -------------------------------------------------------------
