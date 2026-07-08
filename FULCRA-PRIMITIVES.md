@@ -106,8 +106,9 @@ runs on, so it is battle-tested at load.
 **Records** (instances on the timeline) are **write-via-ingest only** — still
 true as of CLI 0.1.35; there is no `fulcra` record-write/delete command and no
 record-write/delete lib method, only definition + tag management. There are now
-**two ingest write paths**, both published in the OpenAPI and **live round-trip
-verified 2026-07-08**:
+**two ingest write paths**. The typed endpoint is **live round-trip verified
+2026-07-08**; the legacy single-record path is published in the OpenAPI
+(spec-confirmed, not re-round-tripped):
 
 - **Typed endpoint (preferred, new):** `POST /ingest/v1/record/{data_type}` —
   `data_type` is a path segment (e.g. `MomentAnnotation`). The body is the
@@ -142,7 +143,11 @@ verified 2026-07-08**:
   "recorded_at": <iso8601 | {start,end} range>, "source": [<source ids>],
   "tags": [<tag uuid>], "content_type": <optional>}, "specversion": 1}`.
   Batch: `POST /ingest/v1/record/batch`, content-type `application/x-jsonl`,
-  one record per line. (This is the Attention extension's write path.) Mind the
+  one record per line. **Caveat: NOT in the published OpenAPI (53 paths,
+  checked 2026-07-08)** — it works in production (the Attention extension and
+  the legacy coord writer POST to it daily) but is unpublished, like
+  `/data/v1/updates`; treat it as retirement-eligible and prefer the typed
+  endpoint's jsonlines mode for new code. Mind the
   envelope differences vs the typed body: legacy uses `source` (singular key)
   not `sources`, carries the payload as a JSON **string** in `data` rather than a
   top-level `note`, and rides `data_type` inside `metadata`.
