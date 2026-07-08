@@ -42,7 +42,7 @@ An agent that beats presence but has no fresh snapshot is flagged `continuity-st
 
 | Harness | Lifecycle (rules 1–3) | Pickup (rule 4) |
 |---|---|---|
-| Claude Code (CLI/desktop) | hooks: SessionStart→resume+inbox, PreCompact/SessionEnd→park (`fulcra-agent-automation/scripts/claude-code/install-claude-code.sh`) | launchd/cron listener (`scripts/install-listener.sh`) |
+| Claude Code (CLI/desktop) | hooks: SessionStart→resume+briefing, PreCompact/SessionEnd→park (`fulcra-agent-automation/scripts/claude-code/install-claude-code.sh`) | launchd/cron listener (`scripts/install-listener.sh`) |
 | Claude Cowork (desktop) | same as Claude Code (same core; same settings.json) | same listener |
 | Claude web (claude.ai) | prose only — run rule 1 when the skill loads; rule 3 before ending | no background pickup; use cloud routines that open a duty-cycle session |
 | Codex | `~/.codex/hooks.json` + app-thread automation (`scripts/codex/install_codex_watch.py`) — the automation prompt embeds rules 1–3 | the same automation ticks the inbox |

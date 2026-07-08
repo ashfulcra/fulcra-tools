@@ -9,7 +9,7 @@ adapter mechanics onto the coord2 engine, in three layers:
     NO Stop hook: Codex Stop fires every turn, and parking the active task on
     every turn would thrash it between active/waiting.
   * managed scripts — materialized under ``<codex>/fulcra-coord2-hooks/``.
-    SessionStart emits a bounded resume brief + inbox as additionalContext;
+    SessionStart emits a bounded resume brief + briefing as additionalContext;
     PreCompact backgrounds ``coord-engine continuity park``. Both degrade
     silently (exit 0) when coord-engine is not on PATH.
   * app-thread automation — writes the coord2-first ``COORD2_WATCH_PROMPT``
@@ -49,6 +49,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -72,24 +73,35 @@ _EVENTS: "dict[str, tuple[str, str | None]]" = {
 COORD2_WATCH_PROMPT = """\
 [coord2 watch — managed by fulcra-agent-automation/scripts/codex; do not hand-edit]
 You are {agent} on coord2 team {team}. Each tick, in order:
-1. coord-engine continuity resume {team} {agent}   # resume before new work
-2. coord-engine inbox {team} --agent {agent}       # and your role inboxes, e.g. codex-reviewer
-3. coord-engine needs-me {team} --agent {agent}
-Act on anything new (reviews -> verdict via the review handshake). After completing
-any work item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
-Before this session ends: coord-engine continuity park {team} --agent {agent} --objective "..."
-If nothing is actionable reply WATCH_OK.
+1. coord-engine continuity resume {team} {agent}
+2. coord-engine briefing {team} --agent {agent}     # THE entry fold: identity+role inboxes+needs-me incl pending reviews
+3. For each REVIEW REQUEST (from briefing or inbox): extract its exact slug; do the review;
+   write team/{team}/review/<slug>/verdicts/{agent}.md (frontmatter type: Verdict / reviewer: {agent} / verdict: approve|changes);
+   use the exact name the request's `required:` list names you by (your role, not a session identity);
+   verify `coord-engine review status {team} <slug>` shows your verdict (non-PENDING for you);
+   ONLY THEN ack the request. Never satisfy a review via a different slug's status or a bare ack.
+4. Other actionable work: handle end-to-end.
+5. After each completed item: coord-engine continuity snapshot {team} {agent} <task> --objective "..."
+6. coord-engine usage log {team} --account <acct> --tier <tier> --units <est>   # ATC, when accounts are declared
+7. Before session end: coord-engine continuity park {team} --agent {agent} --objective "..."
+If nothing actionable reply WATCH_OK.
 """
 
 SESSION_START_SH = """\
 #!/bin/bash
-# coord2 SessionStart hook (Codex) — bounded resume brief + inbox context.
+# coord2 SessionStart hook (Codex) — bounded resume brief + briefing context.
 # Managed by fulcra-agent-automation/scripts/codex/install_codex_watch.py.
 # Output is bounded: an unbounded board dump is a known context-flooding
 # failure. Degrades silently (exit 0) when coord-engine is not on PATH.
+#
+# __TEAM__/__AGENT__/__HOOKS_DIR__/__CODEX_DIR__/__AUTOMATION_TOML__ are rendered
+# by install_codex_watch.py as SHELL-QUOTED literals (shlex.quote), so these
+# bare (unquoted) assignments round-trip any id/path byte verbatim — a raw
+# replace into a double-quoted context would let an id like `bad"agent` break
+# out of the string and inject shell.
 set +e
-TEAM="__TEAM__"; AGENT="__AGENT__"
-HOOKS_DIR="__HOOKS_DIR__"; CODEX_DIR="__CODEX_DIR__"
+TEAM=__TEAM__; AGENT=__AGENT__
+HOOKS_DIR=__HOOKS_DIR__; CODEX_DIR=__CODEX_DIR__
 export FULCRA_COORD_AGENT="$AGENT"
 INPUT="$(cat 2>/dev/null)"
 SESSION_ID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
@@ -97,18 +109,18 @@ SESSION_ID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load
 # managed automation does not exist yet, so a later session (e.g. a headless
 # exec run) can never steal an already-armed watch thread. Backgrounded +
 # silenced so it never blocks or slows session start.
-if [ -n "$SESSION_ID" ] && [ ! -f "__AUTOMATION_TOML__" ]; then
+if [ -n "$SESSION_ID" ] && [ ! -f __AUTOMATION_TOML__ ]; then
   python3 "$HOOKS_DIR/install_codex_watch.py" "$TEAM" "$AGENT" \\
     --codex-dir "$CODEX_DIR" --thread-id "$SESSION_ID" >/dev/null 2>&1 &
 fi
 command -v coord-engine >/dev/null 2>&1 || exit 0
 BRIEF="$(coord-engine continuity resume "$TEAM" "$AGENT" 2>/dev/null | head -25)"
-INBOX="$(coord-engine inbox "$TEAM" --agent "$AGENT" 2>/dev/null | head -8)"
-[ -z "$BRIEF$INBOX" ] && exit 0
-python3 - "$BRIEF" "$INBOX" <<'PYEOF'
+BRIEFING="$(coord-engine briefing "$TEAM" --agent "$AGENT" 2>/dev/null | head -60)"
+[ -z "$BRIEF$BRIEFING" ] && exit 0
+python3 - "$BRIEF" "$BRIEFING" <<'PYEOF'
 import json, sys
-brief, inbox = sys.argv[1], sys.argv[2]
-ctx = "coord2 resume brief:\\n" + brief + "\\n\\ncoord2 inbox:\\n" + inbox
+brief, briefing = sys.argv[1], sys.argv[2]
+ctx = "coord2 resume brief:\\n" + brief + "\\n\\ncoord2 briefing:\\n" + briefing
 print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "SessionStart", "additionalContext": ctx[:4000]}}))
 PYEOF
@@ -120,8 +132,10 @@ PRE_COMPACT_SH = """\
 # coord2 park-on-context-loss hook (Codex PreCompact).
 # Managed by fulcra-agent-automation/scripts/codex/install_codex_watch.py.
 # Backgrounded, never blocks; degrades silently if coord-engine is absent.
+# __TEAM__/__AGENT__ are rendered as shlex.quote'd literals (see session-start),
+# so these bare assignments round-trip any id byte without shell injection.
 set +e
-TEAM="__TEAM__"; AGENT="__AGENT__"
+TEAM=__TEAM__; AGENT=__AGENT__
 export FULCRA_COORD_AGENT="$AGENT"
 command -v coord-engine >/dev/null 2>&1 || exit 0
 coord-engine continuity park "$TEAM" --agent "$AGENT" \\
@@ -314,9 +328,15 @@ def install(team: str, agent: str, *, codex_dir: Path,
         shutil.rmtree(hooks_dir, ignore_errors=True)
     else:
         automation_toml = _automation_path(codex_dir, agent)
-        subs = {"__TEAM__": team, "__AGENT__": agent,
-                "__HOOKS_DIR__": str(hooks_dir), "__CODEX_DIR__": str(codex_dir),
-                "__AUTOMATION_TOML__": str(automation_toml)}
+        # Every value entering rendered shell source is shlex.quote'd (the
+        # Claude-installer discipline): the templates carry the tokens in
+        # UNQUOTED positions, so an operator id/path like `bad"agent`, `a$b`,
+        # or one with spaces/`/` round-trips verbatim instead of breaking out
+        # of a double-quoted assignment and injecting shell.
+        subs = {"__TEAM__": shlex.quote(team), "__AGENT__": shlex.quote(agent),
+                "__HOOKS_DIR__": shlex.quote(str(hooks_dir)),
+                "__CODEX_DIR__": shlex.quote(str(codex_dir)),
+                "__AUTOMATION_TOML__": shlex.quote(str(automation_toml))}
         hooks_dir.mkdir(parents=True, exist_ok=True)
         for fname, body in (("session-start.sh", SESSION_START_SH),
                             ("pre-compact.sh", PRE_COMPACT_SH)):
