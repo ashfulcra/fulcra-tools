@@ -15,8 +15,10 @@ improvise engagement state.
 
 - **The primitives doc is your capability sheet.** Before the architecture
   phase, read `FULCRA-PRIMITIVES.md` (repo root of ashfulcra/fulcra-tools) and
-  check the *installed* CLI version (`fulcra --version`) — the platform moves
-  fast and the doc tells you when it's stale.
+  check the *installed* surface, not the repo:
+  `uv tool list | grep fulcra-api` for the version,
+  `fulcra data-type --help` as a feature probe — the platform moves fast and
+  the doc tells you when it's stale.
 - **The artifact is the excuse for the conversation, not the spec.** Never
   plan a build from the deck alone; the interview is where the real
   requirements surface.
@@ -39,7 +41,7 @@ fde-engine list                       # existing engagements, if any
 ```
 
 If `fde-engine` is unavailable, degrade gracefully: manage the same file
-layout by hand with `fulcra-api file` (layout in `references/file-layout.md`)
+layout by hand with `fulcra file` (layout in `references/file-layout.md`)
 and warn the user that resume determinism is reduced.
 
 ## The engagement lifecycle

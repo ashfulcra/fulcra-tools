@@ -1,7 +1,8 @@
 # Capability mapping + gap register
 
 Read `FULCRA-PRIMITIVES.md` first (repo root of ashfulcra/fulcra-tools), then
-verify the installed surface: `fulcra --version`, `fulcra catalog`. The doc
+check the *installed* surface, not the repo: `uv tool list | grep fulcra-api`
+for the version, `fulcra data-type --help` as a feature probe. The doc
 states its own staleness rules — trust the installed CLI over the repo.
 
 ## Mapping
@@ -17,7 +18,7 @@ For each product need from the interview findings, name the primitive:
 | Reading data back | `fulcra get-records`, catalog, time series, sleep/location/calendar helpers |
 | "What's new since I looked" | `fulcra data-updates "<range>"` — the polling substrate |
 | Read-only agent access (chat clients) | MCP server (11 read-only tools) |
-| Passive collection | Context app (iOS; Android alpha), Collect daemon plugins, Attention extension |
+| Passive collection | Context app (iOS; Android alpha), Collect daemon plugins, Attention extension (see docs/collect.md in fulcra-tools) |
 
 Anything unmapped goes in the **gap register** of `architecture.md`, each with
 a design-around:
@@ -29,6 +30,10 @@ a design-around:
 | MCP is read-only | writer agents need shell (tier 1) or REST (tier 2) |
 | No cross-user reads (datashare unreleased) | single-account fallback + documented path to user-owned |
 | No server-side compute | local-first daemons; anything hosted is the user's own infra |
+
+The last two rows are inferred from the platform surface (poll-style reads,
+local daemon patterns only) — re-verify against the current primitives doc
+before relying on them.
 
 ## Tenancy decision
 

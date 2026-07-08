@@ -2,7 +2,7 @@
 
 Everything lives in the **user's own** Fulcra file store. `fde-engine` owns
 this layout; in degraded (engine-less) mode, reproduce it exactly with
-`fulcra-api file upload/download/list`.
+`fulcra file upload/download/list`.
 
     fde/engagements/<slug>/
       engagement.md            # machine-managed state record (schema
@@ -21,5 +21,5 @@ this layout; in degraded (engine-less) mode, reproduce it exactly with
 
 Local mirror default: `./fde/<slug>/` in the user's project. Sync is
 explicit-direction: `fde-engine sync <slug> pull` at session start,
-`... push` after local edits. The store's version history (`fulcra-api file
+`... push` after local edits. The store's version history (`fulcra file
 stat`) is the recovery path for a wrongly chosen direction.
