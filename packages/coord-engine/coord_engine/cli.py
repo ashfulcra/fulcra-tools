@@ -23,7 +23,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, atc, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
 from .transport import FulcraFileTransport, TransportError
 
@@ -839,6 +839,82 @@ def _presence_shards(transport: Any, team: str) -> list[dict[str, Any]]:
     return shards
 
 
+# --- ATC: cross-subscription cap ledger (fulcra-agent-atc) -------------------
+
+
+def _atc_accounts_path(team: str) -> str:
+    return f"team/{team}/atc/accounts.json"
+
+
+def _atc_usage_prefix(team: str) -> str:
+    return f"team/{team}/atc/usage/"
+
+
+def _atc_usage_shards(transport: Any, team: str) -> list[dict[str, Any]]:
+    """Read usage shards into the row shape ``atc.headroom`` folds.
+
+    Malformed shards (bad frontmatter, unparseable/absent ``ts``, no account)
+    are skipped rather than raising — one corrupt shard cannot break the fold.
+    """
+    rows: list[dict[str, Any]] = []
+    pfx = _atc_usage_prefix(team)
+    try:
+        entries = transport.list_dir(pfx)
+    except TransportError:
+        return rows
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        try:
+            fm = okf.parse_frontmatter(transport.read(pfx + n)) or {}
+            ts = continuity._parse_created_at(fm.get("ts"))
+            if ts is None or not fm.get("account"):
+                continue
+            rows.append({"account": fm["account"], "ts": ts,
+                         "units": int(fm.get("units") or 0),
+                         "throttled": bool(fm.get("throttled"))})
+        except Exception:
+            continue
+    return rows
+
+
+def cmd_usage_log(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    ts = _iso(_now())
+    fm = {"schema": "atc-usage/v1", "agent": agent, "ts": ts,
+          "account": args.account, "tier": args.tier,
+          "units": int(args.units or 0), "throttled": bool(args.throttled)}
+    # Path-safe stamp (colons stripped) + agent slug, matching the repo's
+    # timestamped-shard convention (_stamp_for_path); fm["ts"] keeps the real
+    # ISO value the headroom fold parses.
+    transport.write(_atc_usage_prefix(args.team) + _stamp_for_path(ts, agent) + ".md",
+                    okf.render_frontmatter(fm) + "\n")
+    print(f"logged {fm['units']} units -> {args.account} ({args.tier}"
+          + (", THROTTLED" if args.throttled else "") + ")")
+    return 0
+
+
+def cmd_headroom(args: argparse.Namespace, transport: Any) -> int:
+    text = transport.read(_atc_accounts_path(args.team))
+    parsed = atc.parse_accounts(text)
+    if not parsed["accounts"]:
+        print("headroom — no accounts declared"
+              + (f" ({parsed['error']})" if parsed.get("error") else "")
+              + " — see fulcra-agent-atc §setup")
+        return 0
+    rows = atc.headroom(parsed["accounts"], _atc_usage_shards(transport, args.team), _now())
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(f"headroom — {args.team}")
+    for r in rows:
+        flags = " THROTTLED(calibrate caps)" if r["throttled"] else ""
+        print(f"  {r['account']:<20} {r['window_hours']:>4}h  "
+              f"{r['headroom']}/{r['cap']} ({r['pct']}%){flags}")
+    return 0
+
+
 def cmd_presence_beat(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     fm = {
@@ -1267,6 +1343,18 @@ def build_parser() -> argparse.ArgumentParser:
     hl = sub.add_parser("health", help="fleet health: which hosts reconcile this team (fulcra-agent-health)")
     hl.add_argument("team"); add_json(hl)
     hl.set_defaults(func=cmd_health)
+
+    us = sub.add_parser("usage", help="ATC cap ledger (fulcra-agent-atc)")
+    ussub = us.add_subparsers(dest="usage_command", required=True)
+    ul = ussub.add_parser("log", help="record spend against an account after a dispatch")
+    ul.add_argument("team"); ul.add_argument("--account", required=True)
+    ul.add_argument("--tier", required=True); ul.add_argument("--units", type=int, default=0)
+    ul.add_argument("--throttled", action="store_true"); ul.add_argument("--agent")
+    ul.set_defaults(func=cmd_usage_log)
+
+    hr = sub.add_parser("headroom", help="per-account cap headroom fold (fulcra-agent-atc)")
+    hr.add_argument("team"); hr.add_argument("--json", action="store_true")
+    hr.set_defaults(func=cmd_headroom)
     dr = sub.add_parser("doctor", help="local preflight: tooling + store reachability")
     dr.add_argument("team", nargs="?")
     dr.set_defaults(func=cmd_doctor)
