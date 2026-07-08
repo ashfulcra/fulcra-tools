@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fde-engine"
+dynamic = ["version"]
+description = "Engagement engine for the Fulcra FDE skill — seven-phase lifecycle, Fulcra-Files-backed state, deterministic resume"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+# stdlib-only runtime (transport is a CLI-subprocess call to `fulcra-api`); no runtime deps.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+fde-engine = "fde_engine.cli:main"
+
+[tool.hatch.version]
+path = "fde_engine/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fde_engine"]
