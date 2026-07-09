@@ -145,7 +145,7 @@ The gate assumption is **confirmed**, and richer than assumed. `file` subcommand
   with no conflict error. A lost race is non-destructive — the loser becomes recoverable version history.
 - **Every upload is versioned.** `stat` returns microsecond `Uploaded:` time, a `Version:` UUID, and the
   full `Previous Versions:` list (UUID + time + size each). `restore <VERSION_ID>` rolls a **live** file
-  back to a prior version. → coord2 does **not** need its own append-only history/audit log — the File
+  back to a prior version. → coord does **not** need its own append-only history/audit log — the File
   Store versions every write (this is what teams' "audit via versioning" relies on, and it subsumes
   coord's NO-CAS append-only shard model).
 - **The reliable change-detector is the `stat` `Version:` UUID (or microsecond upload time).**

@@ -1,6 +1,6 @@
-# Standalone packaging — how coord2 installs on its own (pre-upstream)
+# Standalone packaging — how coord installs on its own (pre-upstream)
 
-**Goal (this phase):** make coord2 usable **standalone** — an agent/user installs it and gets the
+**Goal (this phase):** make coord usable **standalone** — an agent/user installs it and gets the
 `coord-engine` tool + the 6 `fulcra-agent-*` skills working over a `fulcra-agent-teams` space — **without
 publishing anything externally**. Sequence set by the operator: *standalone now → migrate off the
 incumbent `fulcra-tools-coord` → contribute upstream to `fulcradynamics/agent-skills` when happy.* So
@@ -19,7 +19,7 @@ external publishing (PyPI / plugin registry) is deliberately **deferred to the u
 
 ### A — Git-installable + a setup script (NO external publishing)  ← recommended for this phase
 - Engine: `uv tool install "git+…/coord2#subdirectory=engine"` (optionally `@<tag>`).
-- Skills: a top-level `scripts/coord2-setup.sh` that installs the engine and **links the 6 skills into the
+- Skills: a top-level `scripts/coord-setup.sh` that installs the engine and **links the 6 skills into the
   agent's skills location** (detect `~/.claude/skills/` and/or OpenClaw's skills dir; symlink or copy;
   consent-gated), then runs a self-test (`coord-engine --help`).
 - Quickstart in the README; tag `v0.4.0`.
@@ -49,7 +49,7 @@ to a `v0.4.0` tag, with a README quickstart. Publishing (B) is the *upstream pha
    "upstream to agent-skills" steps harder? (E.g. skill names, the `_coord/` sidecar, the `team/` layout.)
 
 ## Build (approach A), once feedback is in
-- `scripts/coord2-setup.sh [--claude|--openclaw] [--copy|--symlink] [--yes]` — install engine from git,
+- `scripts/coord-setup.sh [--claude|--openclaw] [--copy|--symlink] [--yes]` — install engine from git,
   wire skills, self-test. Validated inputs, consent-gated (same discipline as `install-heartbeat.sh`).
 - README "Install (standalone)" quickstart.
 - Tag `v0.4.0`.
@@ -63,7 +63,7 @@ to a `v0.4.0` tag, with a README quickstart. Publishing (B) is the *upstream pha
 - **Skills install = COPY by default** (matches upstream agent-skills' documented "clone and copy into
   `.claude/skills/`"); `--symlink` is a dev/dogfood flag only. **No plugin wrapper** (upstream has none).
   Skill discovery via `~/.claude/skills/<name>/SKILL.md` is **verified** (this machine loads symlinked
-  skills there). A real `skills` CLI exists (`npx skills add fulcradynamics/agent-skills`) — coord2's
+  skills there). A real `skills` CLI exists (`npx skills add fulcradynamics/agent-skills`) — coord's
   repo is shape-identical, so `npx skills add ashfulcra/coord2` should work too; the setup script is the
   no-CLI fallback and the version-coupled path.
 - **Version coupling solved structurally:** setup installs the engine from the SAME checkout as the skills

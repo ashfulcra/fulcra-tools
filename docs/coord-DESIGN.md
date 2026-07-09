@@ -1,4 +1,4 @@
-# coord2 — deterministic coordination add-ons for fulcra-agent-teams
+# coord — deterministic coordination add-ons for fulcra-agent-teams
 
 Eleven `fulcra-agent-*` skills that layer durable multi-agent coordination onto the official
 `fulcra-agent-teams` OKF-markdown convention, backed by one shared stdlib-only CLI (`coord-engine`)
@@ -17,7 +17,7 @@ disagreement heals nothing.
 
 - **`fulcra-agent-teams` = base tier.** Unchanged. Shared OKF-markdown space, inbox lifecycle,
   freeform progress notes. Everything here layers ON it; nothing replaces it.
-- **coord2 skills = pro tier, individually optional.** Each skill installs alone and degrades
+- **coord skills = pro tier, individually optional.** Each skill installs alone and degrades
   gracefully when its neighbors are absent. Adopt presence without roles, tasks without operator.
 
 ## The skills (wave = proposed upstream sequencing)

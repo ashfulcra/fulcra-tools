@@ -9,11 +9,11 @@ Subscription power users (Claude Max, OpenAI/Codex plans, multi-harness fleets) 
 
 ## Users
 
-v1: agent-fleet operators on subscriptions — concretely, this fleet (Claude Code CLI + Cowork + Codex app + OpenClaw + Hermes sandboxes on one coord2 bus). Presentable to: ClawHub/OpenClaw community (the existing Fulcra-adjacent install base), then the agent-skills upstream audience once proven here.
+v1: agent-fleet operators on subscriptions — concretely, this fleet (Claude Code CLI + Cowork + Codex app + OpenClaw + Hermes sandboxes on one coord bus). Presentable to: ClawHub/OpenClaw community (the existing Fulcra-adjacent install base), then the agent-skills upstream audience once proven here.
 
 ## Architecture — three layers (topology 3: hybrid)
 
-1. **Policy (prose, the skill):** `skills/fulcra-agent-atc/SKILL.md` — how any agent classifies a task into a tier and picks a target. Judgment stays prose per coord2 doctrine.
+1. **Policy (prose, the skill):** `skills/fulcra-agent-atc/SKILL.md` — how any agent classifies a task into a tier and picks a target. Judgment stays prose per coord doctrine.
 2. **Ledger (code, the engine):** stdlib-only cap ledger in `coord-engine` — usage shards written after spend, folded deterministically into per-account **headroom** (the presence-fold pattern). The genuinely novel piece: cross-subscription headroom as shared fleet state.
 3. **Dispatch (native, per harness):** no new execution machinery in v1. The agent that has work is already awake ("edge routing"); it consults policy + headroom, then dispatches via its own harness's native mechanism. Cross-harness work posts to the target's inbox; the already-deployed listeners/automations/heartbeats wake it.
 
@@ -25,7 +25,7 @@ v1: agent-fleet operators on subscriptions — concretely, this fleet (Claude Co
 |---|---|---|
 | Claude Code CLI | `Agent` tool `model:` param; `claude -p --model <m>` | launchd listener (consent-gated wake), ScheduleWakeup |
 | Claude desktop / Cowork | same CC core (Agent tool, hooks) | scheduled-tasks/routines opening a duty-cycle session |
-| Codex app | `codex exec -m <m>`; per-thread model | app automations (proven: coord2-watch) |
+| Codex app | `codex exec -m <m>`; per-thread model | app automations (proven: coord-watch) |
 | OpenClaw | per-agent model config | HEARTBEAT.md managed block |
 | Hermes (Daytona/Vercel sandboxes) | spawn env/config | AGENTS.md loop + provision adapter (fulcra-hermes-vercel #1) |
 

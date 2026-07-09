@@ -24,8 +24,10 @@ under `skills/`, each package with its own README, build, and tests.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent
-  actually drives it. (Identifiers keep their `coord2` spelling; the prose
-  name is coord.) `packages/fulcra-coord` and `packages/fulcra-coord-files`
+  actually drives it. (The `coord2` codename is fully retired — code,
+  identifiers, and prose all say coord; installers migrate coord2-era
+  on-host artifacts automatically when re-run.)
+  `packages/fulcra-coord` and `packages/fulcra-coord-files`
   are the **first-generation, LEGACY** layer — kept for provenance and the
   annotations helper only. **Don't build anything new on them.**
 - Other agent-facing layers (Continuity, Prefs, Vault, FDE, ATC) are described

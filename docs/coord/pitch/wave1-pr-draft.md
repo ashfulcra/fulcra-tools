@@ -7,11 +7,11 @@ gh token is expired — Ash renews or pushes).*
 ## Mechanical steps (coord-maintainer, ~30 min)
 
 1. Fresh drift re-check of upstream HEAD (risk 3 — repo moves weekly). Log deltas; adjust below.
-2. Fork `fulcradynamics/agent-skills`; branch `coord2-wave1`.
+2. Fork `fulcradynamics/agent-skills`; branch `coord-wave1`.
 3. `git mv`-equivalent copy of SIX skills into `skills/`:
    `fulcra-agent-presence`, `fulcra-agent-roles`, `fulcra-agent-continuity`,
    `fulcra-agent-review`, `fulcra-agent-directives`, `fulcra-agent-health`.
-4. Per-skill polish AT COPY TIME (not before — coord2 remains the working repo until acceptance):
+4. Per-skill polish AT COPY TIME (not before — coord remains the working repo until acceptance):
    - `homepage:` → `https://github.com/fulcradynamics/agent-skills`
    - Engine install line → pinned current release tag (v1.3.0 or later).
    - Verify cross-skill links only reference wave-1 siblings or fulcra-agent-teams; links to

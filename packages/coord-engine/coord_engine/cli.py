@@ -1,4 +1,4 @@
-"""CLI for coord-engine — the shared coord2 engine.
+"""CLI for coord-engine — the shared coord engine.
 
     coord-engine reconcile <team>
     coord-engine status    <team> [--json]
@@ -1713,7 +1713,7 @@ def cmd_forge_unwatch(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
-# --- migrate (incumbent fulcra-coord -> coord2, docs 06 approach C) ---
+# --- migrate (incumbent fulcra-coord -> coord, docs 06 approach C) ---
 
 def cmd_migrate(args: argparse.Namespace, transport: Any) -> int:
     res = migrate_mod.migrate(
@@ -1967,7 +1967,7 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--source", default="/coordination")
     mg.add_argument("--dry-run", action="store_true")
     mg.add_argument("--no-mark", dest="no_mark", action="store_true",
-                    help="rehearsal: don't tag incumbent tasks migrated:coord2")
+                    help="rehearsal: don't tag incumbent tasks migrated:coord")
     mg.add_argument("--include-terminal", action="store_true")
     mg.add_argument("--limit", type=int)
     mg.set_defaults(func=cmd_migrate)

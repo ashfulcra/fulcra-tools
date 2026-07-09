@@ -1,7 +1,7 @@
-# Migration — moving off `fulcra-tools-coord` onto coord2
+# Migration — moving off `fulcra-tools-coord` onto coord
 
 **Goal:** migrate real coordination from the incumbent (`/coordination/` JSON bus, fulcra-coord v0.15.16,
-launchd fleet) to coord2 (`team/<t>/` markdown + coord-engine), and test on a real team.
+launchd fleet) to coord (`team/<t>/` markdown + coord-engine), and test on a real team.
 
 ## Constraints that shape the choice
 - **The fleet is machine-gated.** ArcBot / Mac / Workbook / codex hosts run incumbent listeners,
@@ -15,15 +15,15 @@ launchd fleet) to coord2 (`team/<t>/` markdown + coord-engine), and test on a re
 ## Approaches compared
 
 ### A — Hard cutover
-Freeze the incumbent (broadcast), export open tasks → coord2 team, retire incumbent automation, point
-everyone at coord2.
+Freeze the incumbent (broadcast), export open tasks → coord team, retire incumbent automation, point
+everyone at coord.
 - **+** one truth immediately; no bridge code; cleanest end state.
 - **−** requires the whole fleet at once (machine-gated → impossible today); breaks the live Codex review
   workbook flow mid-flight; no rollback once incumbent automation is retired; big-bang risk on a
   system that coordinates the very agents doing the migration.
 
 ### B — Gradual bridge (dual-run + mirror)
-coord2 primary for new work; a bridge job mirrors incumbent directives/inbox into the coord2 team (and/or
+coord primary for new work; a bridge job mirrors incumbent directives/inbox into the coord team (and/or
 back) while hosts migrate one by one.
 - **+** nothing goes dark; per-host migration.
 - **−** exactly the "two systems bridged" failure doc 01 forbids: dual truth, drift, ack/status divergence
@@ -33,21 +33,21 @@ back) while hosts migrate one by one.
 ### C — Phased adoption with a one-shot exporter (RECOMMENDED)
 No mirror. Three phases, each independently safe:
 1. **Adopt (test on a real team):** create the real team space (`team/fulcra/`), migrate **open** tasks
-   once via a deterministic exporter (`coord-engine migrate` — incumbent JSON → coord2 task docs,
-   idempotent, `--dry-run` first), install coord2 heartbeat+listener on THIS host, and run real work on
+   once via a deterministic exporter (`coord-engine migrate` — incumbent JSON → coord task docs,
+   idempotent, `--dry-run` first), install coord heartbeat+listener on THIS host, and run real work on
    it (this epic's own follow-ups live there). The incumbent keeps running untouched for the fleet.
-2. **Per-host adoption:** as each fleet machine is touched (operator-gated), run `coord2-setup.sh`,
+2. **Per-host adoption:** as each fleet machine is touched (operator-gated), run `coord-setup.sh`,
    `install-heartbeat`/`install-listener` for the team, and retire that host's incumbent launchd jobs.
-   New work goes to coord2; an agent still on the incumbent simply isn't reachable by coord2 directives
+   New work goes to coord; an agent still on the incumbent simply isn't reachable by coord directives
    yet (visible in `presence`/`agents` — no silent loss).
-3. **Retire:** when `coord-engine health` shows every active host reconciling coord2 and the incumbent
+3. **Retire:** when `coord-engine health` shows every active host reconciling coord and the incumbent
    board is empty of open work, freeze the incumbent (final broadcast + read-only), keep `/coordination/`
    as cold history (no data deleted), remove remaining launchd jobs.
 - **+** no bridge code, no dual-truth window per task (a task lives in exactly one system: unmigrated =
-  incumbent, migrated = coord2; the exporter marks migrated tasks on the incumbent side), rollback at
+  incumbent, migrated = coord; the exporter marks migrated tasks on the incumbent side), rollback at
   every phase, fleet migrates at its own pace, real-world test is phase 1 itself.
 - **−** during phase 2 the OPERATOR watches two digests (bounded, explicit); incumbent history is not
-  ported (deliberate — it stays queryable read-only forever; coord2 starts with open work only).
+  ported (deliberate — it stays queryable read-only forever; coord starts with open work only).
 
 ## The exporter (`coord-engine migrate`) — deterministic mapping
 - Source: `/coordination/tasks/*.json` via the same transport. Filter: non-terminal only (default).
@@ -58,7 +58,7 @@ No mirror. Three phases, each independently safe:
   preserved in frontmatter `migrated_from`).
 - **Idempotent:** skip if a doc with the same `migrated_from` already exists in the team (or same slug).
 - **One-way + marked:** after a successful verified write, append a `migrated` event/tag on the incumbent
-  task (`tags += migrated:coord2`) so incumbent boards/digests can filter them out — the task now lives in
+  task (`tags += migrated:coord`) so incumbent boards/digests can filter them out — the task now lives in
   exactly one active system. `--dry-run` prints the plan without writing. `--no-mark` for rehearsal.
 - Never deletes anything on the incumbent.
 
@@ -75,17 +75,17 @@ rehearsal: `--dry-run` + `--no-mark` first on a scratch team.
 
 1. **The tag was decorative — the invariant is a TERMINAL TRANSITION.** The incumbent has no tag-based
    board exclusion (verified in its query.py), so a tagged-but-open task stays live on every incumbent
-   host (dual execution). The exporter now, on verified coord2 write: sets the incumbent task
-   `status: abandoned`, appends an `abandoned` event (`by: coord2-migrate`, summary pointing at the
-   coord2 doc), bumps `updated_at`, AND adds the `migrated:coord2` tag (metadata). Incumbent
+   host (dual execution). The exporter now, on verified coord write: sets the incumbent task
+   `status: abandoned`, appends an `abandoned` event (`by: coord-migrate`, summary pointing at the
+   coord doc), bumps `updated_at`, AND adds the `migrated:coord` tag (metadata). Incumbent
    OPEN_STATUSES then naturally hides it fleet-wide with zero incumbent code changes.
-2. **Repair pass built in:** a task already migrated (coord2 twin exists via `migrated_from`) but still
+2. **Repair pass built in:** a task already migrated (coord twin exists via `migrated_from`) but still
    open on the incumbent gets its terminal transition finished on the next run — partial failures
    (write-ok, mark-fail) self-heal instead of silently double-listing.
 3. **Open review loops are NOT migration-eligible.** Tasks carrying a `pr` field or review-verdict kinds
    stay on the incumbent until their loop closes (the Codex workbook produces/consumes verdicts there);
    this confines each verdict flow to one system with no bridge. Reported as `skipped_review`.
-4. **Identity policy: ids are IDENTICAL across systems** (nothing in coord2 forces different agent ids —
+4. **Identity policy: ids are IDENTICAL across systems** (nothing in coord forces different agent ids —
    keep `claude-code:<Host>:<ws>` verbatim), so inbox/assignee folds match without translation. An
    optional `--map old=new` handles exceptions.
 5. **Role registry is seeded MANUALLY during phase-1 acceptance** (registry docs only — leases NEVER

@@ -1,4 +1,4 @@
-"""coord-engine — the shared coord2 tool behind the fulcra-agent-* skills.
+"""coord-engine — the shared coord tool behind the fulcra-agent-* skills.
 
 One stdlib-only engine wrapping a ``fulcra-agent-teams`` OKF namespace, exposing
 ``coord-engine`` subcommands the skills invoke (like ``fulcra-api``):

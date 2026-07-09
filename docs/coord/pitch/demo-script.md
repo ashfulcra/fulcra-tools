@@ -1,4 +1,4 @@
-# 5-minute live demo script — coord2 on team/fulcra
+# 5-minute live demo script — coord on team/fulcra
 
 *Run on real production data. No slides. Every command is copy-pasteable from this file.*
 *Prep (once, before the meeting): `export FULCRA_COORD_AGENT=coord-maintainer`; confirm `coord-engine doctor fulcra` is green; have this file open.*

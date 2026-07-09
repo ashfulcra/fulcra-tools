@@ -166,7 +166,7 @@ Any agent runs this **before dispatching** work it can't or shouldn't do itself:
    |---|---|---|
    | Claude Code CLI | `Agent` tool `model:` param; `claude -p --model <m>` | launchd listener (consent-gated wake), ScheduleWakeup |
    | Claude desktop / Cowork | same CC core (Agent tool, hooks) | scheduled-tasks/routines opening a duty-cycle session |
-   | Codex app | `codex exec -m <m>`; per-thread model | app automations (proven: coord2-watch) |
+   | Codex app | `codex exec -m <m>`; per-thread model | app automations (proven: coord-watch) |
    | OpenClaw | per-agent model config | HEARTBEAT.md managed block |
    | Hermes (Daytona/Vercel sandboxes) | spawn env/config | AGENTS.md loop + provision adapter |
 

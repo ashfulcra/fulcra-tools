@@ -1,5 +1,5 @@
 #!/bin/bash
-# coord2 SessionStart hook — resume brief + briefing (THE entry fold: identity,
+# coord SessionStart hook — resume brief + briefing (THE entry fold: identity,
 # role inboxes, needs-me incl pending reviews). Output is bounded: the legacy
 # hook's unbounded board dump is a known context-flooding failure — each source
 # is head-capped and the whole context is clamped to 4000 chars.
@@ -16,7 +16,7 @@ BRIEFING="$(coord-engine briefing "$TEAM" --agent "$AGENT" 2>/dev/null | head -6
 python3 - "$BRIEF" "$BRIEFING" <<'EOF'
 import json, sys
 brief, briefing = sys.argv[1], sys.argv[2]
-ctx = "coord2 resume brief:\n" + brief + "\n\ncoord2 briefing:\n" + briefing
+ctx = "coord resume brief:\n" + brief + "\n\ncoord briefing:\n" + briefing
 print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "SessionStart", "additionalContext": ctx[:4000]}}))
 EOF

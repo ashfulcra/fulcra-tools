@@ -1,7 +1,7 @@
 # Full port — coord/continuity parity as optional add-ons
 
 **Goal (operator directive):** before migrating off `fulcra-tools-coord` and testing, port ALL remaining
-coord + continuity functionality to coord2, structured as **optional add-ons** wherever that doesn't make
+coord + continuity functionality to coord, structured as **optional add-ons** wherever that doesn't make
 the functionality useless. Base tier stays `fulcra-agent-teams`; each add-on is a `fulcra-agent-*` skill
 (pure prose) + `coord-engine` subcommands (every stateful fold deterministic + tested).
 
@@ -78,7 +78,7 @@ PR, opus + Codex review, tests, live verification.
   parent wake-401 lesson: verify auth at install, log loudly). SessionEnd-snapshot hook optional.
 
 **Deliberately not ported:** announce-version/self-update (git tags + setup script supersede), the ~35-view
-apparatus + event/directive parity samplers (coord2's single-listing reconcile is orphan-proof by
+apparatus + event/directive parity samplers (coord's single-listing reconcile is orphan-proof by
 construction — the parity machinery existed to detect drift that this architecture can't accrue),
 NO-CAS sub-log transport layer (the File Store's native versioning + ack/evidence shards subsume it).
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "coord-engine"
 dynamic = ["version"]
-description = "L1 of coord2 — the shared coord2 engine: reconcile + queries + roles fold over a fulcra-agent-teams namespace"
+description = "L1 of coord — the shared coord engine: reconcile + queries + roles fold over a fulcra-agent-teams namespace"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

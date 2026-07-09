@@ -6,7 +6,7 @@ Pure fold; the CLI renders it and (optionally) persists it to the team store.
 
 Timeline annotation note: the incumbent wrote digests to the Fulcra timeline and
 grew DUPLICATE data types from racy check-then-create (operator bug report).
-coord2 defers the timeline write until the record-write CLI surface is verified
+coord defers the timeline write until the record-write CLI surface is verified
 (research-before-building); `--store` persists the digest durably on the team
 store instead, deduped per day+window.
 """

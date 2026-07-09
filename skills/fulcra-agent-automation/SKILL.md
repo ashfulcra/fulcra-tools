@@ -9,7 +9,7 @@ metadata: { "openclaw": { "emoji": "⏱️" } }
 
 # Fulcra Agent Automation
 
-Ties the coord2 skills together for **unattended** operation. `fulcra-agent-reconcile` heals a team's
+Ties the coord skills together for **unattended** operation. `fulcra-agent-reconcile` heals a team's
 index/views, but someone has to run it; this skill **schedules** it, and makes wake-ups
 (cron/heartbeat) **resume structured continuity** first. Scheduling is a single, platform-specific action
 (not a fold), so this skill is prose + one bundled install script — no engine logic.
@@ -28,13 +28,16 @@ fails** (per the repo's skill-quality pattern, `docs/skill-quality-pattern.md`):
 | Heartbeat loaded? | `launchctl list \| grep coord-engine.heartbeat.<team>` (macOS only) | a line appears | reinstall via §1 (plist exists but is not loaded — a reboot-era failure mode) |
 | Listener installed + loaded? | `ls ~/Library/LaunchAgents/com.fulcra.coord-engine.listener.<team>.*.plist` and `launchctl list \| grep coord-engine.listener.<team>.` | file matches AND a launchctl line appears — then confirm the plist's `ProgramArguments` names the intended `<agent>` (the suffix is sanitized-agent+checksum; a wildcard can match a DIFFERENT agent's listener; never grep the raw id — colons sanitize to dashes) | §2 (install the listener) |
 | Views actually fresh? | `uv tool run coord-engine health <team>` | this host's row shows a recent `last reconcile` | jobs exist but are not ticking — check `log show` / cron mail, then reinstall |
-| Claude Code hooks installed? | `ls ~/.claude/fulcra-coord2-hooks/` | 3 scripts | §3 (install-claude-code.sh) |
-| Codex watch coord2-first? | `grep -l "coord2 watch" ~/.codex/hooks.json` | file matches | §3 (install_codex_watch.py) |
-| OpenClaw block present? | `grep "fulcra-coord2:begin" <workspace>/HEARTBEAT.md` | one match | §3 (install_openclaw.py) |
+| Claude Code hooks installed? | `ls ~/.claude/fulcra-agent-hooks/` | 3 scripts | §3 (install-claude-code.sh) |
+| Codex watch coord-first? | `grep -l "coord watch" ~/.codex/hooks.json` | file matches | §3 (install_codex_watch.py) |
+| OpenClaw block present? | `grep "fulcra-agent:begin" <workspace>/HEARTBEAT.md` | one match | §3 (install_openclaw.py) |
 
 All probes pass → nothing to install; re-running any installer is safe anyway (reinstall replaces the
 job, never duplicates — CI-tested for both the launchd and cron paths in
-`packages/coord-engine/tests/test_installers.py`).
+`packages/coord-engine/tests/test_installers.py`). Re-running after this upgrade also MIGRATES any
+coord2-era artifacts (old `fulcra-coord2-hooks/` dir, `coord2-watch-<agent>` automation, `coord2 watch`
+hooks marker, `fulcra-coord2:begin` fence) to the new names in place — old artifacts removed, zero
+orphans (host-simulation-tested in `packages/coord-engine/tests/test_adapter_installers.py`).
 
 ## 1. Heartbeat — keep the views healed
 Schedule `coord-engine reconcile <team>` on a timer so the index/aggregate never drift, even when no
@@ -70,7 +73,7 @@ The listener (§2) delivers inbox notifications, but the **lifecycle contract** 
 snapshot-on-change, park-before-context-loss — is owned by a per-harness adapter that hooks the
 platform's own session events. The contract itself (rules 1–4) lives in
 [`fulcra-agent-continuity` §The lifecycle contract](../fulcra-agent-continuity/SKILL.md); the adapters
-below automate it. Each keys everything on a distinct `coord2` marker and coexists with the legacy
+below automate it. Each keys everything on a distinct `coord` marker and coexists with the legacy
 `fulcra-coord` adapters until the phase-3 freeze retires them — installing one never touches a legacy
 entry. All installers are idempotent (reinstall replaces, never duplicates) and ship an `--uninstall`
 inverse.
@@ -97,10 +100,11 @@ doctrine it was rendered under.
 ./scripts/claude-code/install-claude-code.sh <team> <agent>
 ./scripts/claude-code/install-claude-code.sh --uninstall <team> <agent>
 ```
-Writes three scripts to `~/.claude/fulcra-coord2-hooks/` and merges their command paths into
+Writes three scripts to `~/.claude/fulcra-agent-hooks/` and merges their command paths into
 `~/.claude/settings.json`: **SessionStart** → bounded `continuity resume` + inbox brief injected as
 context; **PreCompact** and **SessionEnd** → backgrounded `continuity park`. It touches only its own
-command paths, so legacy `fulcra-coord-hooks` keep firing until the freeze. Cowork uses the same core
+command paths, so legacy `fulcra-coord-hooks` keep firing until the freeze; a coord2-era
+`fulcra-coord2-hooks` install is migrated to the new dir in place. Cowork uses the same core
 and the same settings.json, so the same installer covers it.
 
 **Codex** — `hooks.json` merge + app-thread automation.
@@ -108,10 +112,10 @@ and the same settings.json, so the same installer covers it.
 python3 scripts/codex/install_codex_watch.py <team> <agent> [--codex-dir DIR] [--thread-id ID] [--uninstall] [--dry-run]
 ```
 Merges SessionStart (matcher `startup|resume|clear|compact`) + PreCompact entries into
-`~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord2-first app-thread automation
-under `~/.codex/automations/coord2-watch-<agent>/` whose prompt embeds contract rules 1–3 and ticks the
+`~/.codex/hooks.json` — same entry shape as Claude Code — and seeds a coord-first app-thread automation
+under `~/.codex/automations/coord-watch-<agent>/` whose prompt embeds contract rules 1–3 and ticks the
 inbox. The consent-gated `wake.json` host-wake layer is **deliberately not shipped** (security ruling:
-it spawns headless `codex exec` with approvals/sandbox bypassed; the coord2 listener already covers
+it spawns headless `codex exec` with approvals/sandbox bypassed; the coord listener already covers
 wake). Deployment precondition: on the first real host, verify the SessionStart hook actually fires
 before relying on hook-based automation seeding — pass `--thread-id` for the deterministic path if you
 already know the watch thread.
@@ -120,7 +124,7 @@ already know the watch thread.
 ```bash
 python3 scripts/openclaw/install_openclaw.py <team> <agent> [--workspace DIR] [--uninstall] [--dry-run]
 ```
-Merges a `fulcra-coord2`-fenced block (`<!-- fulcra-coord2:begin … -->` / `<!-- fulcra-coord2:end -->`)
+Merges a `fulcra-agent`-fenced block (`<!-- fulcra-agent:begin … -->` / `<!-- fulcra-agent:end -->`)
 into the workspace's `HEARTBEAT.md` and `BOOT.md`, embedding contract rules 1–2 for OpenClaw to read at
 boot and on each heartbeat tick. Rule 3 (park on shutdown) is **not** embedded — the prose-block layer
 has no shutdown hook to fire it, so it must be followed as prose. This is the **prose-block layer
@@ -154,6 +158,6 @@ Then process the team inbox and, before concluding, snapshot again
 3. **Gate merges** with `fulcra-agent-review` (`review status`), and keep roles fresh with
    `fulcra-agent-roles` (`roles status`), escalating vacancies.
 
-That's the full coord2 stack running unattended on top of a `fulcra-agent-teams` space.
+That's the full coord stack running unattended on top of a `fulcra-agent-teams` space.
 
 See the bundled [`scripts/install-heartbeat.sh`](scripts/install-heartbeat.sh).

@@ -1,8 +1,8 @@
-"""One-shot exporter: incumbent fulcra-coord JSON tasks -> coord2 task docs.
+"""One-shot exporter: incumbent fulcra-coord JSON tasks -> coord task docs.
 
 The migration plan's approach C (docs 06): deterministic field mapping, idempotent
 (re-runs skip already-migrated work), one-way, and **marked** — after a verified
-coord2 write the incumbent task gains a ``migrated:coord2`` tag so a task lives in
+coord write the incumbent task gains a ``migrated:coord`` tag so a task lives in
 exactly one active system. Never deletes anything on the incumbent.
 """
 
@@ -16,7 +16,14 @@ from .model import VALID_PRIORITIES, VALID_STATUSES
 from .tasks import agent_key, slugify
 from .transport import TransportError
 
-MIGRATED_TAG = "migrated:coord2"
+# DATA-COMPAT: bus task docs at rest carry marker BYTES written by prior runs.
+# We WRITE the new ``coord`` spellings but RECOGNIZE both the new and the legacy
+# ``coord2`` spellings on read, so a fleet host that migrated tasks under the
+# old build is never re-migrated or mis-classified after this rename.
+MIGRATED_TAG = "migrated:coord"
+LEGACY_MIGRATED_TAG = "migrated:coord2"
+MIGRATE_BY = "coord-migrate"
+LEGACY_MIGRATE_BY = "coord2-migrate"
 
 #: Tasks in an open review loop are NOT migration-eligible (the verdict path
 #: lives on the incumbent until the loop closes — plan review, Resolution §3).
@@ -38,11 +45,11 @@ def _terminalize(t: dict[str, Any], *, now: str, team: str, slug: str) -> dict[s
     t["status"] = "abandoned"
     t["updated_at"] = now
     tags = t.setdefault("tags", [])
-    if MIGRATED_TAG not in tags:
+    if MIGRATED_TAG not in tags and LEGACY_MIGRATED_TAG not in tags:
         tags.append(MIGRATED_TAG)
     t.setdefault("events", []).append({
-        "at": now, "type": "abandoned", "by": "coord2-migrate",
-        "summary": f"migrated to coord2 team/{team}/task/{slug}.md",
+        "at": now, "type": "abandoned", "by": MIGRATE_BY,
+        "summary": f"migrated to coord team/{team}/task/{slug}.md",
     })
     return t
 
@@ -151,11 +158,12 @@ def migrate(
             # REPAIR PASS: twin exists but the incumbent transition never landed.
             # If OUR abandoned event is already there and the task is open again,
             # a human deliberately REOPENED it — never re-terminalize (review finding).
-            reopened = any(e.get("by") == "coord2-migrate" and e.get("type") == "abandoned"
+            reopened = any(e.get("by") in (MIGRATE_BY, LEGACY_MIGRATE_BY)
+                           and e.get("type") == "abandoned"
                            for e in (t.get("events") or []))
             if reopened and not already_terminal:
                 errors.append(f"{t['id']}: reopened by operator after migration — left open "
-                              f"(coord2 twin task/{twin}.md also exists; resolve manually)")
+                              f"(coord twin task/{twin}.md also exists; resolve manually)")
                 continue
             if not already_terminal and mark and not dry_run:
                 if transport.write(f"{source}/tasks/{n}",
@@ -166,7 +174,8 @@ def migrate(
             else:
                 skipped += 1
             continue
-        if MIGRATED_TAG in (t.get("tags") or []):
+        _tags = t.get("tags") or []
+        if MIGRATED_TAG in _tags or LEGACY_MIGRATED_TAG in _tags:
             skipped += 1
             continue
         if not include_terminal and already_terminal:
@@ -188,10 +197,10 @@ def migrate(
         dst = f"team/{team}/task/{slug}.md"
         content = okf.render_frontmatter(fm) + body
         if not transport.write(dst, content):
-            errors.append(f"{t['id']}: coord2 write failed; incumbent untouched")
+            errors.append(f"{t['id']}: coord write failed; incumbent untouched")
             continue
         if transport.read(dst) != content:  # verify before marking (one-active-system)
-            errors.append(f"{t['id']}: coord2 write not readable back; incumbent untouched")
+            errors.append(f"{t['id']}: coord write not readable back; incumbent untouched")
             continue
         migrated += 1
         existing_slugs.add(slug)

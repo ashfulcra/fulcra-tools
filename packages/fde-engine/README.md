@@ -5,7 +5,7 @@ Engagement engine for the **fulcra-fde** skill (see
 deterministic half of a forward-deployed-engineer workflow that takes a
 business plan, deck, or idea and builds it with Fulcra as the backend.
 
-coord2 doctrine applies: **judgment stays in prose, bookkeeping is code.**
+coord doctrine applies: **judgment stays in prose, bookkeeping is code.**
 The skill decides how to interview a founder and how to map a product onto
 Fulcra primitives; this package owns only what agents get wrong when
 improvising across sessions and harnesses:

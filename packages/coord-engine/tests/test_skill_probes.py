@@ -1,4 +1,4 @@
-"""Contract tests for the coord2 re-entrancy probe tables.
+"""Contract tests for the coord re-entrancy probe tables.
 
 Pattern-doc checklist item 4 (`docs/skill-quality-pattern.md`): pin every prose
 claim that code could falsify, so drift is caught at commit time instead of in

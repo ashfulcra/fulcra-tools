@@ -51,7 +51,7 @@ done, abandoned → (terminal)
 ## Usage
 Needs `fulcra-api` authenticated and `coord-engine` installed — standalone:
 `uv tool install "git+https://github.com/ashfulcra/fulcra-tools.git@<latest-coord-engine-tag>#subdirectory=packages/coord-engine"` (any
-coord2 skill brings the same engine; installing once serves all).
+coord skill brings the same engine; installing once serves all).
 ```bash
 # create a task doc at team/<team>/task/<slug>.md
 uv tool run coord-engine task start <team> "Fix the widget" \

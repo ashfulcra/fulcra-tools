@@ -1,6 +1,6 @@
-# Packaging decision — how coord2's layers ship
+# Packaging decision — how coord's layers ship
 
-**Question:** should coord2's layers be Python **packages**, pure-prose **skills**, or a **hybrid**?
+**Question:** should coord's layers be Python **packages**, pure-prose **skills**, or a **hybrid**?
 
 ## Options
 

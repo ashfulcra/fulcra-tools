@@ -1,5 +1,5 @@
 #!/bin/bash
-# coord2 park-on-context-loss hook (PreCompact).
+# coord park-on-context-loss hook (PreCompact).
 # Backgrounded, never blocks; degrades silently if coord-engine is absent.
 set +e
 # __TEAM__/__AGENT__ are rendered by install-claude-code.sh as shell-quoted

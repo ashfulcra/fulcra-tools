@@ -1,23 +1,30 @@
 #!/bin/bash
-# Install coord2 lifecycle hooks for Claude Code / Cowork (idempotent).
+# Install coord lifecycle hooks for Claude Code / Cowork (idempotent).
 # Usage: install-claude-code.sh <team> <agent>
 #        install-claude-code.sh --uninstall <team> <agent>
 #
-# Coexistence: writes to ~/.claude/fulcra-coord2-hooks/ (distinct from the
-# legacy ~/.claude/fulcra-coord-hooks/) and touches only its own command
-# paths in settings.json, so legacy coord hooks keep working until the freeze.
+# Coexistence + migration: writes to ~/.claude/fulcra-agent-hooks/ and touches
+# only its own command paths in settings.json. Two other generations may exist:
+#   * pre-coord2 legacy ~/.claude/fulcra-coord-hooks/ — never touched (distinct
+#     name, never matched);
+#   * coord2-era ~/.claude/fulcra-coord2-hooks/ (the prior build of THIS
+#     installer) — recognized as LEGACY_HOOKS_DIR and migrated in place: its
+#     dir is removed and its settings.json entries are stripped, converging a
+#     coord2-era host to the new names with zero orphans. Uninstall removes
+#     BOTH generations' dirs + entries; fresh install writes the new name only.
 set -euo pipefail
 UNINSTALL=0
 [ "${1:-}" = "--uninstall" ] && { UNINSTALL=1; shift; }
 TEAM="${1:?team}"; AGENT="${2:?agent}"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOOKS_DIR="$HOME/.claude/fulcra-coord2-hooks"
+HOOKS_DIR="$HOME/.claude/fulcra-agent-hooks"
+LEGACY_HOOKS_DIR="$HOME/.claude/fulcra-coord2-hooks"
 SETTINGS="$HOME/.claude/settings.json"
 
 if [ "$UNINSTALL" -eq 0 ]; then
   mkdir -p "$HOOKS_DIR"
   # Render the hook templates, substituting the __TEAM__/__AGENT__ tokens as
-  # SHELL-QUOTED literals. coord2 agent ids are NOT plain alphanumerics (engine
+  # SHELL-QUOTED literals. coord agent ids are NOT plain alphanumerics (engine
   # ids look like `claude_code/host/repo` or `claude-code:host:repo`); a raw
   # `sed s/__AGENT__/$AGENT/` would treat '/' as the substitute delimiter
   # (fatal: `sed: bad flag`) and '&' as the matched-text backreference (exit 0
@@ -38,11 +45,19 @@ for name in ("session-start.sh", "pre-compact.sh", "session-end.sh"):
         f.write(text)
     os.chmod(dest, 0o755)
 EOF
+  # Migration: converge a coord2-era host by dropping its old hooks dir now that
+  # the new one is materialized (zero orphans). Never removes the pre-coord2
+  # legacy ~/.claude/fulcra-coord-hooks/ — that name is not LEGACY_HOOKS_DIR.
+  [ "$HOOKS_DIR" != "$LEGACY_HOOKS_DIR" ] && rm -rf "$LEGACY_HOOKS_DIR"
+else
+  # Uninstall: remove BOTH generations' managed hooks dirs from disk.
+  rm -rf "$HOOKS_DIR" "$LEGACY_HOOKS_DIR"
 fi
 
-python3 - "$SETTINGS" "$HOOKS_DIR" "$UNINSTALL" <<'EOF'
+python3 - "$SETTINGS" "$HOOKS_DIR" "$LEGACY_HOOKS_DIR" "$UNINSTALL" <<'EOF'
 import json, os, sys
-settings_path, hooks_dir, uninstall = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+settings_path, hooks_dir, legacy_hooks_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+uninstall = sys.argv[4] == "1"
 # script -> (settings event, matcher). Per Task 0: live SessionStart entries
 # carry this matcher string; PreCompact/SessionEnd entries have no matcher key.
 mapping = {
@@ -58,19 +73,23 @@ else:
 hooks = d.setdefault("hooks", {})
 for event, (script, matcher) in mapping.items():
     cmd = f"{hooks_dir}/{script}"
+    legacy_cmd = f"{legacy_hooks_dir}/{script}"
+    # OUR commands, current + coord2-era. Both are exact paths distinct from the
+    # pre-coord2 legacy ~/.claude/fulcra-coord-hooks/ command, so that (and any
+    # foreign) entry is never disturbed.
+    ours = {cmd, legacy_cmd}
     rules = hooks.setdefault(event, [])
-    # dedupe: drop any prior entry for THIS exact command, then re-add.
-    # Keys on our exact path only, so legacy/foreign entries are never disturbed.
-    # A rule is dropped ONLY if removing our command is what emptied it; a rule
-    # that never held our command (including one already empty or lacking a
-    # hooks key) is left exactly as found.
+    # dedupe/migrate: drop any prior entry for OUR commands (new or coord2-era),
+    # then re-add the new one. A rule is dropped ONLY if removing our command is
+    # what emptied it; a rule that never held our command (including one already
+    # empty or lacking a hooks key) is left exactly as found.
     kept = []
     for r in rules:
         orig = r.get("hooks", [])
-        if not any(h.get("command") == cmd for h in orig):
+        if not any(h.get("command") in ours for h in orig):
             kept.append(r)  # foreign — leave untouched
             continue
-        r["hooks"] = [h for h in orig if h.get("command") != cmd]
+        r["hooks"] = [h for h in orig if h.get("command") not in ours]
         if r["hooks"]:
             kept.append(r)  # still has other hooks
         # else: our removal emptied it — drop
@@ -85,6 +104,6 @@ for event, (script, matcher) in mapping.items():
 with open(settings_path, "w") as f:
     json.dump(d, f, indent=2)
     f.write("\n")
-print(("removed" if uninstall else "installed") + " coord2 hooks:",
+print(("removed" if uninstall else "installed") + " coord hooks:",
       ", ".join(mapping))
 EOF

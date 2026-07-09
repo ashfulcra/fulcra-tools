@@ -47,6 +47,6 @@ uv tool run coord-engine escalate <team>        # vacancy sweep (heartbeat-safe)
 ```
 
 ## When to use
-- After installing coord2 on a new machine (doctor).
+- After installing coord on a new machine (doctor).
 - In monitoring/heartbeat wrappers (health --json; alert on `healthy: false`).
 - Diagnosing "the index looks stale" — health shows which reconciler stopped.
