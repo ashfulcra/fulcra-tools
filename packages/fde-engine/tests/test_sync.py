@@ -147,3 +147,49 @@ def test_pull_raises_actionable_error_on_file_vs_directory_collision(tmp_path):
     (d / "build").write_text("i am a file, not a directory", encoding="utf-8")
     with pytest.raises(sync.SyncError, match="build/logs/x.md"):
         sync.pull(t, "x", str(d))
+
+
+# --- Bug #1: sync must not crash on binary files --------------------------
+
+
+def test_push_skips_a_stray_binary_file_without_crashing(tmp_path):
+    """A non-UTF-8 file dropped anywhere in the mirror (e.g. a PDF in intake/)
+    must not crash the push — it is reported and skipped, text still uploads."""
+    t = FakeTransport()
+    d = tmp_path / "eng"
+    (d / "intake").mkdir(parents=True)
+    (d / "intake" / "deck.pdf").write_bytes(b"%PDF-1.7\x00\x01\x02\xff\xfe binary")
+    (d / "intake" / "brief.md").write_text("real brief", encoding="utf-8")
+
+    report = sync.push(t, "x", str(d))
+
+    assert report["pushed"] == ["intake/brief.md"]
+    assert report["skipped_binary"] == ["intake/deck.pdf"]
+    # the binary was never uploaded through the text mirror
+    assert t.read("fde/engagements/x/intake/deck.pdf") is None
+
+
+def test_push_ignores_the_intake_originals_binaries_area(tmp_path):
+    """intake/originals/ is the designated binaries area — managed directly
+    with `fulcra file`, never walked by sync in either direction."""
+    t = FakeTransport()
+    d = tmp_path / "eng"
+    (d / "intake" / "originals").mkdir(parents=True)
+    (d / "intake" / "originals" / "deck.pdf").write_bytes(b"\x00\xff binary original")
+    (d / "intake" / "brief.md").write_text("brief", encoding="utf-8")
+
+    report = sync.push(t, "x", str(d))
+
+    assert report["pushed"] == ["intake/brief.md"]
+    # not even reported as skipped_binary — the whole area is out of scope
+    assert report["skipped_binary"] == []
+
+
+def test_pull_ignores_the_intake_originals_binaries_area(tmp_path):
+    t = FakeTransport()
+    t.write("fde/engagements/x/intake/brief.md", "brief")
+    t.write("fde/engagements/x/intake/originals/deck.pdf", "binary-ish")
+    d = tmp_path / "eng"
+    report = sync.pull(t, "x", str(d))
+    assert report["pulled"] == ["intake/brief.md"]
+    assert not (d / "intake" / "originals" / "deck.pdf").exists()

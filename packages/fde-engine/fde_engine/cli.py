@@ -66,6 +66,14 @@ def cmd_sync(args, transport) -> int:
         if report.get("excluded"):
             msg += " (engagement.md is machine-managed — never pushed)"
         print(msg)
+        if report.get("skipped_binary"):
+            # The text mirror can't carry binaries; guide the user to the
+            # designated area + direct upload rather than silently dropping them.
+            names = ", ".join(report["skipped_binary"])
+            print(f"skipped {len(report['skipped_binary'])} binary file(s): {names}")
+            print(f"  the mirror is text-only — upload binaries directly, e.g.:")
+            print(f"  fulcra file upload <local> "
+                  f"fde/engagements/{args.slug}/intake/originals/<name>")
     else:
         report = sync.pull(transport, args.slug, local_dir)
         print(f"pulled: {', '.join(report['pulled']) or '(nothing)'} "

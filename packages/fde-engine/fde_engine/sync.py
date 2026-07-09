@@ -9,6 +9,10 @@ the recovery path if a direction was chosen wrongly.
 Engagement trees are small (dozens of files), so change detection is a full
 content compare — dead simple beats clever here.
 
+The mirror carries the engagement's *text* working set. Binary source
+materials (PDFs, decks, images, spreadsheets) do not round-trip through it —
+see ``_BINARY_AREA`` below.
+
 Known v1 limits:
 
 - Symlinked directories under the local mirror are not followed (``os.walk``
@@ -31,9 +35,31 @@ class SyncError(RuntimeError):
     pass
 
 
-def _local_files(local_dir: str) -> dict[str, str]:
-    """rel-path -> content for every non-hidden file under local_dir."""
-    out: dict[str, str] = {}
+# The mirror sync is text-only: the transport's read path decodes as UTF-8, so
+# a binary round-trip through it (pull) would corrupt bytes. Rather than crash
+# on a binary file — the original bug: a PDF in intake/ raised UnicodeDecodeError
+# — sync handles binaries two ways:
+#   1. `intake/originals/` is the *designated binaries area*. Binary source
+#      materials (decks, PDFs, images, spreadsheets) live here and are managed
+#      directly with `fulcra file upload/download`; sync skips this subtree in
+#      both directions, so large originals never churn through the text mirror.
+#   2. Anywhere else, a stray non-UTF-8 file is skipped (not crashed) and
+#      reported under `skipped_binary` so the caller can move it into the area.
+_BINARY_AREA = "intake/originals/"
+
+
+def _in_binary_area(rel: str) -> bool:
+    return rel == _BINARY_AREA.rstrip("/") or rel.startswith(_BINARY_AREA)
+
+
+def _local_files(local_dir: str) -> tuple[dict[str, str], list[str]]:
+    """Return (text-files rel->content, sorted rel-paths of skipped binaries).
+
+    Files under the binaries area are ignored entirely (not even reported).
+    A non-UTF-8 file elsewhere is recorded in the second list instead of
+    raising, so one stray binary can't abort the whole push."""
+    text: dict[str, str] = {}
+    binary_skipped: list[str] = []
     for root, dirs, files in os.walk(local_dir):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for name in files:
@@ -41,9 +67,14 @@ def _local_files(local_dir: str) -> dict[str, str]:
                 continue
             full = os.path.join(root, name)
             rel = os.path.relpath(full, local_dir).replace(os.sep, "/")
-            with open(full, encoding="utf-8") as fh:
-                out[rel] = fh.read()
-    return out
+            if _in_binary_area(rel):
+                continue
+            try:
+                with open(full, encoding="utf-8") as fh:
+                    text[rel] = fh.read()
+            except UnicodeDecodeError:
+                binary_skipped.append(rel)
+    return text, sorted(binary_skipped)
 
 
 # engagement.md is exclusively machine-managed via `fde-engine phase` (see
@@ -76,6 +107,8 @@ def _remote_files(transport, slug: str) -> dict[str, str]:
             name = entry["name"]
             rel = f"{rel_dir}{name}" if rel_dir else name
             _validate_rel(rel)
+            if _in_binary_area(rel):
+                continue  # binaries area is managed via `fulcra file`, not sync
             if entry.get("is_dir"):
                 pending.append(rel if rel.endswith("/") else rel + "/")
                 continue
@@ -93,8 +126,9 @@ def push(transport, slug: str, local_dir: str) -> dict[str, Any]:
             f"local dir {local_dir} does not exist — nothing to push "
             f"(wrong --dir or CWD?)"
         )
+    text_files, skipped_binary = _local_files(local_dir)
     pushed, skipped, excluded = [], 0, []
-    for rel, content in sorted(_local_files(local_dir).items()):
+    for rel, content in sorted(text_files.items()):
         if rel == _MACHINE_MANAGED:
             excluded.append(rel)
             continue
@@ -109,7 +143,8 @@ def push(transport, slug: str, local_dir: str) -> dict[str, Any]:
                 f"re-run `fde-engine sync <slug> push` after fixing the cause"
             )
         pushed.append(rel)
-    return {"pushed": pushed, "skipped": skipped, "excluded": excluded}
+    return {"pushed": pushed, "skipped": skipped, "excluded": excluded,
+            "skipped_binary": skipped_binary}
 
 
 def pull(transport, slug: str, local_dir: str) -> dict[str, Any]:
