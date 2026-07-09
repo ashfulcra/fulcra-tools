@@ -13,6 +13,16 @@ improvise engagement state.
 
 ## Ground rules
 
+- **Use real Fulcra data — never simulate.** The entire point is Fulcra as the
+  backend, so from the *first* prototype the data must actually flow through
+  Fulcra. Read the user's **existing** data types wherever they fit (HRV, heart
+  rate, steps, location, workouts, sleep, calendar — whatever the platform
+  already collects), and for anything Fulcra doesn't already carry, **create
+  the custom data type** and write real records. Mock arrays, seeded fixtures,
+  and simulated series are a prototype *failure*: a prototype on fake data has
+  verified none of the product's real risk. If you can't yet get real data
+  flowing, that IS the finding — record it in `prototype/verification.md`,
+  don't paper over it with fakes. (Discovery + binding: `references/capability-mapping.md`.)
 - **The primitives doc is your capability sheet.** Before the architecture
   phase, read `FULCRA-PRIMITIVES.md` (repo root of ashfulcra/fulcra-tools) and
   check the *installed* surface, not the repo:
@@ -87,8 +97,10 @@ session with `fde-engine resume <slug>` then `fde-engine sync <slug> pull`.
    (riskiest assumptions first + a deployment rehearsal) and the provisional
    production plan. See `references/build-doctrine.md`.
 5. **prototype** — build it in the user's project (never in fulcra-tools),
-   record per-item verify/fail results in `prototype/verification.md`.
-   **User gate on the verification record**: proceed, or loop back.
+   **on real Fulcra data** (discover + reuse existing types, create custom ones
+   for the rest — never simulate). Record per-item verify/fail results in
+   `prototype/verification.md`. **User gate on the verification record**:
+   proceed, or loop back.
 6. **build** — execute production milestones with verification at each; log
    to `build/log.md`.
 7. **retro** — `retro.md`: what repeated, what was missing, which platform

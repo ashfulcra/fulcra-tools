@@ -10,6 +10,12 @@ the production system will be (target machine, auth flow, scheduling), not
 just on the FDE's dev setup. An untested deployment plan is an assumption
 like any other.
 
+The list MUST also include a **real-data binding** item: the prototype reads
+the user's actual Fulcra data (existing types) and writes real records to any
+custom types it defines — PASS means the core value loop ran on real data end
+to end, not on fixtures. If every item on the risk list could pass against
+mock data, the prototype isn't testing the product.
+
 **Part 2 — provisional production plan.** Whole-product milestones (Fulcra
 carries everything it can; conventional infra covers the rest), explicitly
 marked provisional until the prototype validates them.
@@ -18,11 +24,23 @@ marked provisional until the prototype validates them.
 
 - Build in the user's project directory or a repo they choose — never in
   fulcra-tools.
-- Provision Fulcra resources first (data-type definitions, tags, file
-  layout); record every created definition's ID in `build/log.md` — you will
-  need them and should not re-look them up.
-- Implement the core value loop, then run the verification plan. Record every
-  item's result in `prototype/verification.md` as PASS or FAIL-with-why.
+- **Bind to real Fulcra data before writing feature code — never simulate.**
+  1. Discover what the user already has: `fulcra catalog` (each returned type
+     carries a `related_cli_commands` field naming how to query it) and
+     `fulcra data-updates "<range>"` (what's actually flowing). Standard
+     streams — HRV, heart rate, steps, location/visits, workouts, sleep,
+     calendar — already exist; **read them** with `fulcra get-records` / the
+     metric & event helpers. Do not reinvent them as local fixtures.
+  2. For anything Fulcra genuinely doesn't carry, **create the custom data
+     type** (`fulcra data-type create …`) and write real records (ingest).
+     Record every created definition's ID in `build/log.md` — you'll need
+     them and should not re-look them up.
+  Mock arrays, seeded fixtures, and simulated series are a prototype FAIL:
+  they test none of the product's real risk (does the data exist? is it
+  shaped as the plan assumed? does the value loop survive real, messy data?).
+- Implement the core value loop **against that real data**, then run the
+  verification plan. Record every item's result in `prototype/verification.md`
+  as PASS or FAIL-with-why.
 - FAIL results that invalidate the architecture or plan: transition backward
   (`fde-engine phase <slug> architecture` or `plan`), revise, return.
 - **User gate:** present the verification record; the user decides
@@ -33,9 +51,11 @@ marked provisional until the prototype validates them.
 - Execute Part 2 milestone by milestone; verify each before the next; log to
   `build/log.md`.
 - Stack defaults when the user has no standing preference: Python ≥3.10 + uv,
-  `fulcra-api` (CLI for shell paths, Python lib for app code), local-first
-  processes (the platform has no server-side compute — the Collect daemon is
-  the reference pattern for anything that must run on a schedule).
+  `fulcra-api` (CLI for shell paths, Python lib for app code), local-*compute*
+  processes (code runs locally because the platform has no server-side
+  compute — the Collect daemon is the reference pattern for anything that must
+  run on a schedule). "Local" is about where the *code* runs, never where the
+  *data* lives: data always lives in Fulcra, never in a local mock or fixture.
 - Where the harness supports subagents, dispatch independent milestones to
   them; otherwise execute sequentially. The plan is the contract either way.
 

@@ -5,13 +5,33 @@ check the *installed* surface, not the repo: `uv tool list | grep fulcra-api`
 for the version, `fulcra data-type --help` as a feature probe. The doc
 states its own staleness rules — trust the installed CLI over the repo.
 
+## Discover what the user already has (before you map anything)
+
+Fulcra already collects a lot. Before deciding a need means a *new* data type —
+or worse, a local fixture — check what is live in the user's own account:
+
+```bash
+fulcra catalog                  # every queryable data type + metadata; each
+                                # entry's `related_cli_commands` names how to read it
+fulcra data-updates "<range>"   # what data actually flowed in a window
+```
+
+(`data-available` / `data-sources` are REST-only — there is no such CLI verb;
+`catalog` + `data-updates` are the CLI discovery path.) If a need maps to a
+stream Fulcra already carries — HRV, heart rate, steps, location/visits,
+workouts, sleep stages/cycles, calendar events — **bind to that existing type**
+(`fulcra get-records`, the metric/event helpers). Only `data-type create` for a
+stream Fulcra genuinely doesn't have. Reuse existing, create only the novel,
+**simulate nothing**: a product on invented local data isn't on Fulcra at all.
+
 ## Mapping
 
 For each product need from the interview findings, name the primitive:
 
 | Product need | Fulcra primitive |
 |---|---|
-| User-defined event/measurement streams | annotation **definitions** (`fulcra data-type create`: moment, duration, boolean, numeric, scale) |
+| A stream Fulcra already collects (HRV, location, workouts, sleep, …) | **reuse the existing data type** — find it in `fulcra catalog`, read via `fulcra get-records` / metric & event helpers (don't recreate it) |
+| A stream genuinely novel to this product | annotation **definitions** (`fulcra data-type create`: moment, duration, boolean, numeric, scale) |
 | Writing timeline data | records via ingest (`POST /ingest/v1/record[/batch]`) — there is NO record edit/delete; corrections are superseding records |
 | Documents, images, arbitrary state | file library (`fulcra file ...`) — versioned, path-addressed |
 | Grouping/labeling | tags (`fulcra tag ...`) |
