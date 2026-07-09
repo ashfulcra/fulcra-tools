@@ -21,9 +21,9 @@ Before loading anything, probe how far this user already got. Enter at the
 | Probe (run in order) | Command | Passes when | If it fails, enter at |
 |---|---|---|---|
 | Authed? | `fulcra user-info` | exits 0 and prints valid JSON | [Pick your path](#pick-your-path) — install, then `fulcra auth login` |
-| Onboarded? | `fulcra-prefs compile` | exits 0 (`compiled N keys …`); exit 2 with `not onboarded` means no definition / `prefs/meta.json` yet | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-prefs onboard` |
+| Onboarded? | `fulcra-prefs compile` (an idempotent write — also drains queued captures; safe anytime) | exits 0 (`compiled N keys …`); exit 2 with `not onboarded` means no definition / `prefs/meta.json` yet | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-prefs onboard` |
 | Prefs present? | `fulcra-prefs inject --platform <your-platform>` | non-empty output (a rendered preference block) | [Pick your path](#pick-your-path) tier-1 capture — nothing to load yet; start capturing |
-| Hooks installed? | `grep -q fulcra-prefs-hooks ~/.claude/settings.json` (or `~/.codex/hooks.json`) | exits 0 — a managed SessionStart/capture hook is wired | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-prefs install-hooks --platform <claude-code\|codex>` |
+| Hooks installed? | `grep -q fulcra-prefs-hooks ~/.claude/settings.json` (or `~/.codex/hooks.json`; custom `--target-dir` installs won't match this grep) | exits 0 — a managed SessionStart/capture hook is wired | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-prefs install-hooks --platform <claude-code\|codex>` |
 
 First failure wins. Hooks are optional: a CLI-capable agent runs `inject`/`capture`
 by hand without them, so a hookless-but-onboarded user is fully usable — the last

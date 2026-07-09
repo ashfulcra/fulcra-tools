@@ -47,7 +47,8 @@ humans and reviewers catch it late; CI catches it at commit time).
 ## Adoption checklist (per skill)
 
 1. SKILL.md presents an ordered probe table before any state instructions (or a one-line
-   "stateless — no probes" declaration for pure reference skills).
+   "stateless — no probes" declaration for skills with no cross-session state — pure
+   reference skills, or per-invocation idempotent pipelines).
 2. Probe commands are copy-pasteable and their pass criteria machine-checkable.
 3. Every bundled executable has a loader + tests (wire shapes, idempotency, failure modes).
 4. A contract test pins any SKILL.md claim that code could falsify (counts, command names,

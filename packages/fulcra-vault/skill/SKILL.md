@@ -28,7 +28,7 @@ Before loading anything, probe how far this user already got. Enter at the
 | Authed? | `fulcra user-info` | exits 0 and prints valid JSON | [Pick your path](#pick-your-path) — install, then `fulcra auth login` |
 | Vault initialized? | `fulcra-vault map --check` | exits 0 (`MAP/HOT render check passed`); exit 2 naming `/vault/meta.json` means no vault yet | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-vault init` |
 | Content present? | `fulcra-vault read HOT` | non-empty stdout (HOT.md renders notes) | [Pick your path](#pick-your-path) tier-1 write — vault is empty; start writing durable context |
-| Hooks installed? | `grep -q fulcra-vault-hooks ~/.claude/settings.json` (or `~/.codex/hooks.json`) | exits 0 — SessionStart injects `HOT.md` | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-vault install-hooks --platform <claude-code\|codex>` |
+| Hooks installed? | `grep -q fulcra-vault-hooks ~/.claude/settings.json` (or `~/.codex/hooks.json`; custom `--target-dir` installs won't match this grep) | exits 0 — SessionStart injects `HOT.md` | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-vault install-hooks --platform <claude-code\|codex>` |
 
 First failure wins. Hooks are optional: without them you just `read HOT`
 yourself; everything else works the same. All four pass → `HOT.md` is auto-injected
