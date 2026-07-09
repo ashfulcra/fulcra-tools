@@ -101,5 +101,5 @@ def test_render_sanitizes_the_body_heading_too():
         "schema": model.SCHEMA, "slug": "x", "title": "Two\nLines", "phase": "intake",
         "created_at": "t0", "updated_at": "t0", "phase_history": ["intake t0"],
     })
-    heading = [l for l in text.splitlines() if l.startswith("# Engagement:")][0]
+    heading = [ln for ln in text.splitlines() if ln.startswith("# Engagement:")][0]
     assert heading == "# Engagement: Two Lines"
