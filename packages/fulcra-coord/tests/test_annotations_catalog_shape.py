@@ -1,5 +1,6 @@
 """Regression: catalog-shape drift minted duplicate timeline definitions daily."""
 import json
+import types
 from unittest import mock
 
 from fulcra_coord import annotations
@@ -13,6 +14,9 @@ OLD_SHAPE = {"name": "Test Track",
              "metadata": {"annotation_type": "moment", "id": "ccc-333"}}
 WRONG_NAME = {"id": "MomentAnnotation/zzz", "name": "Test Track SMOKE",
               "column_name": "moment"}
+# A same-name entry in a THIRD shape — neither the legacy metadata.moment shape
+# nor the current MomentAnnotation/ top-id shape (schema drift / unrecognized).
+THIRD_SHAPE = {"name": "Test Track", "kind": "brand_new_shape", "ref": "xyz"}
 
 
 def _resolve(entries):
@@ -41,6 +45,35 @@ def test_legacy_metadata_shape_still_matches():
 def test_creates_only_when_no_exact_match():
     got, created = _resolve([WRONG_NAME])
     assert created and got == "NEW-MINTED"
+
+
+# --- Fail-closed guards backported from fulcra_common 2026-07-08 ------------
+
+def test_rc0_banner_only_stdout_refuses_no_create(monkeypatch):
+    # The 2026-07-03 fail-OPEN: rc==0 stdout that is a plain-text banner (format
+    # drift / warning), not JSONL. The real parser must read "non-empty lines,
+    # zero parsed" as a LOOKUP ERROR (None), so resolution REFUSES rather than
+    # reading it as an empty catalog and minting a duplicate definition.
+    def fake_run(cmd, *a, **k):
+        return types.SimpleNamespace(
+            returncode=0, stdout="WARNING: fulcra catalog format changed; re-auth\n",
+            stderr="")
+
+    with mock.patch.object(annotations.subprocess, "run", side_effect=fake_run), \
+         mock.patch.object(annotations, "_fulcra_cli_json") as create:
+        create.return_value = {"id": "SHOULD-NOT"}
+        got = annotations._resolve_def_via_cli("Test Track", "d", [])
+    assert got == "", "a non-JSON banner is a lookup error, not an empty catalog; must refuse"
+    assert not create.called, "must NOT create when the catalog reply was unparseable"
+
+
+def test_same_name_third_shape_refuses_no_create():
+    # A same-name entry in a shape we can classify as neither recognized-live nor
+    # recognized-soft-deleted is NOT "verifiably absent"; creating would be the
+    # fail-OPEN. Must refuse.
+    got, created = _resolve([THIRD_SHAPE])
+    assert got == "", "an unreadable same-name entry is NOT verified-absent; must refuse"
+    assert not created, "must NOT create when a same-name entry is in an unknown shape"
 
 
 def test_pinned_cache_entry_never_expires(tmp_path, monkeypatch):

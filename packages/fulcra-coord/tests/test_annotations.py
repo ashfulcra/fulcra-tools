@@ -1165,8 +1165,11 @@ class TestFulcraCliJson(unittest.TestCase):
 class TestFulcraCliJsonLines(unittest.TestCase):
     """`_fulcra_cli_json_lines` shells out to the resolved CLI base + args and
     parses stdout as JSONL — one JSON object per non-empty line. Best-effort:
-    ANY failure (rc!=0, timeout, missing CLI) yields [] and NEVER raises; a
-    single unparseable line is SKIPPED, not fatal (the rest still parse)."""
+    NEVER raises. A LOOKUP ERROR (rc!=0, timeout, missing CLI, OR rc==0 stdout
+    whose non-empty lines ALL fail to parse) yields None (the fail-closed
+    sentinel backported 2026-07-08); a genuinely-empty reply yields []; a single
+    unparseable line among parseable ones is SKIPPED, not fatal (the rest still
+    parse)."""
 
     def test_rc0_jsonl_parsed_per_line(self):
         def fake_run(cmd, *a, **k):
@@ -1197,23 +1200,43 @@ class TestFulcraCliJsonLines(unittest.TestCase):
                 annotations._fulcra_cli_json_lines(["catalog"]),
                 [{"id": "A"}, {"id": "B"}])
 
-    def test_rc_nonzero_returns_empty(self):
+    def test_rc_nonzero_returns_lookup_error(self):
+        # rc!=0 is a LOOKUP ERROR -> None (fail-closed sentinel), never [].
         def fake_run(cmd, *a, **k):
             return types.SimpleNamespace(returncode=1, stdout='{"id": "A"}', stderr="x")
 
         with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            self.assertEqual(annotations._fulcra_cli_json_lines(["catalog"]), [])
+            self.assertIsNone(annotations._fulcra_cli_json_lines(["catalog"]))
 
-    def test_timeout_returns_empty(self):
+    def test_timeout_returns_lookup_error(self):
         def fake_run(cmd, *a, **k):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
 
         with patch.object(annotations.subprocess, "run", side_effect=fake_run):
-            self.assertEqual(annotations._fulcra_cli_json_lines(["catalog"]), [])
+            self.assertIsNone(annotations._fulcra_cli_json_lines(["catalog"]))
 
-    def test_missing_cli_returns_empty(self):
+    def test_missing_cli_returns_lookup_error(self):
         def fake_run(cmd, *a, **k):
             raise FileNotFoundError("no such binary")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._fulcra_cli_json_lines(["catalog"]))
+
+    def test_rc0_all_unparseable_stdout_is_lookup_error(self):
+        # rc==0 but every non-empty line fails to parse (banner / format drift):
+        # a LOOKUP ERROR (None), NOT a genuinely-empty catalog ([]).
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(
+                returncode=0, stdout="WARNING: catalog format changed\nre-auth\n",
+                stderr="")
+
+        with patch.object(annotations.subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(annotations._fulcra_cli_json_lines(["catalog"]))
+
+    def test_rc0_empty_stdout_is_verified_absent(self):
+        # rc==0 with no output is a genuinely-empty catalog -> [] (safe to create).
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(returncode=0, stdout="\n\n", stderr="")
 
         with patch.object(annotations.subprocess, "run", side_effect=fake_run):
             self.assertEqual(annotations._fulcra_cli_json_lines(["catalog"]), [])
@@ -1281,13 +1304,18 @@ class TestResolveDefViaCli(unittest.TestCase):
         self.assertIn("--add-to-timeline", cmd)
         self.assertEqual(cmd[cmd.index("--tag") + 1], "x")
 
-    def test_non_moment_exact_name_is_skipped(self):
+    def test_non_moment_same_name_refuses_no_create(self):
+        # FAIL-CLOSED (backported 2026-07-08): a same-name entry that is neither a
+        # recognized-live moment nor a recognized soft-delete (here a non-moment
+        # "span" shape) is NOT "verifiably absent" — the resolver must REFUSE
+        # (return "") rather than mint a duplicate moment definition.
         catalog = [self._entry("Agent Tasks", ann_type="span", meta_id="span-uuid")]
         with patch.object(annotations, "_fulcra_cli_json_lines", return_value=catalog), \
                 patch.object(annotations, "_fulcra_cli_json",
-                             return_value={"id": "made-uuid"}):
+                             return_value={"id": "made-uuid"}) as cli:
             got = annotations._resolve_def_via_cli("Agent Tasks", "desc", [])
-        self.assertEqual(got, "made-uuid")
+        self.assertEqual(got, "")
+        cli.assert_not_called()
 
     def test_empty_catalog_then_create(self):
         with patch.object(annotations, "_fulcra_cli_json_lines", return_value=[]), \
@@ -1315,13 +1343,27 @@ class TestResolveDefViaCli(unittest.TestCase):
         self.assertEqual(got, "")
 
     def test_never_raises_on_bad_entries(self):
-        # Non-dict and metadata-less catalog entries must not raise.
-        catalog = ["weird", {"name": "Agent Tasks"}, 42]
+        # Non-dict entries and non-matching dicts must not raise; with no
+        # same-name entry the catalog is verifiably absent -> create. (A same-name
+        # metadata-less entry now fails closed — see
+        # test_never_raises_on_bad_entries_same_name_refuses.)
+        catalog = ["weird", {"name": "Some Other Track"}, 42]
         with patch.object(annotations, "_fulcra_cli_json_lines", return_value=catalog), \
                 patch.object(annotations, "_fulcra_cli_json",
                              return_value={"id": "made"}):
             got = annotations._resolve_def_via_cli("Agent Tasks", "desc", [])
         self.assertEqual(got, "made")
+
+    def test_never_raises_on_bad_entries_same_name_refuses(self):
+        # A same-name entry with no usable shape (metadata-less) is unreadable,
+        # not verifiably absent -> refuse, never create; still never raises.
+        catalog = ["weird", {"name": "Agent Tasks"}, 42]
+        with patch.object(annotations, "_fulcra_cli_json_lines", return_value=catalog), \
+                patch.object(annotations, "_fulcra_cli_json",
+                             return_value={"id": "made"}) as cli:
+            got = annotations._resolve_def_via_cli("Agent Tasks", "desc", [])
+        self.assertEqual(got, "")
+        cli.assert_not_called()
 
 
 class _DefResolveBase(unittest.TestCase):

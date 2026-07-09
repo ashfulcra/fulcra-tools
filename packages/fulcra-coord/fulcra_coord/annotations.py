@@ -71,9 +71,14 @@ from __future__ import annotations
 # TOMBSTONE (2026-07-08): ported to fulcra_common.annotations (typed ingest
 # endpoint + fail-closed definition resolution). This module is deprecated-in-
 # place during the fulcra-pm cutover window; do not extend it — see
-# packages/fulcra-common/fulcra_common/annotations.py.
+# packages/fulcra-common/fulcra_common/annotations.py. The fail-closed
+# definition-resolution guards were backported 2026-07-08 (fulcra_common commit
+# 12f97ec) because the ACTIVE coord runtime (writepipe/lifecycle/digest) still
+# imports THIS resolver, so the 2026-07-03 definition-proliferation bug would
+# still fire through the live path; full cutover (typed ingest endpoint) pending.
 
 import json
+import logging
 import os
 import subprocess
 import urllib.error
@@ -85,6 +90,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import cache, remote, remote_root
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -580,34 +587,52 @@ def _fulcra_cli_json(args: list[str], *, backend: Optional[list[str]] = None) ->
         return None
 
 
-def _fulcra_cli_json_lines(args: list[str], *, backend: Optional[list[str]] = None) -> list:
+def _fulcra_cli_json_lines(
+    args: list[str], *, backend: Optional[list[str]] = None
+) -> Optional[list]:
     """Run ``<cli-base> <args>`` and parse stdout as JSONL — one JSON object PER
-    LINE — returning the parsed list, or ``[]`` on ANY failure (rc!=0, timeout,
-    missing CLI). Sibling of ``_fulcra_cli_json`` for commands like ``catalog``
-    that emit one ``json.dumps(entry)`` per line rather than a single JSON value
-    (``_fulcra_cli_json`` would fail to parse that multi-line output). Each
-    non-empty line is parsed independently; an UNPARSEABLE line is SKIPPED (not
-    fatal) so a stray log line can't drop the rest. Never raises — the annotation
-    writer is best-effort. ``backend`` overrides the CLI base for tests; uses the
-    SAME base resolution as file ops (``_annotation_cli_base``)."""
+    LINE — returning the parsed list, or **None on a lookup ERROR** (rc!=0,
+    timeout, missing CLI, OR rc==0 stdout whose non-empty lines ALL fail to
+    parse). Sibling of ``_fulcra_cli_json`` for commands like ``catalog`` that
+    emit one ``json.dumps(entry)`` per line rather than a single JSON value.
+
+    This None-vs-``[]`` distinction is the fail-closed hinge (backported from
+    ``fulcra_common.annotations`` 2026-07-08): an empty list means the catalog
+    verifiably has no matching entry (safe for the caller to create), while None
+    means the lookup itself failed and the caller MUST refuse to create — an
+    ``[]`` there would read as "verifiably absent" and re-open the 2026-07-03
+    definition-proliferation bug. A SINGLE unparseable line among parseable ones
+    is still SKIPPED (not fatal) so a stray log line can't drop the rest. Never
+    raises — the annotation writer is best-effort. ``backend`` overrides the CLI
+    base for tests; uses the SAME base resolution as file ops
+    (``_annotation_cli_base``)."""
     base = backend if backend is not None else _annotation_cli_base()
     try:
         result = subprocess.run(
             list(base) + args, capture_output=True, text=True, timeout=_write_timeout(),
         )
         if result.returncode != 0:
-            return []
+            return None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return []
+        return None
     out: list = []
+    saw_nonempty_line = False
     for line in (result.stdout or "").splitlines():
         line = line.strip()
         if not line:
             continue
+        saw_nonempty_line = True
         try:
             out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    if saw_nonempty_line and not out:
+        # rc==0 but every non-empty stdout line failed to parse — a banner /
+        # warning / format-drift, NOT a genuinely-empty catalog. Return the
+        # lookup-ERROR sentinel (None), never [] — [] would read as "verifiably
+        # absent" and let the caller mint a duplicate definition. The per-line
+        # skip above still holds when at least one line DID parse.
+        return None
     return out
 
 
@@ -872,16 +897,38 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
     is not soft-deleted — taking its ``metadata.id`` (the def UUID). On no live
     exact match we ``data-type create MomentAnnotation <def_name>
     --add-to-timeline`` with the tag NAMES (``--tag`` auto-creates them); its
-    single-line stdout carries the new def's ``id``."""
+    single-line stdout carries the new def's ``id``.
+
+    FAIL-CLOSED (backported from fulcra_common 2026-07-08): a catalog LOOKUP
+    ERROR — ``_fulcra_cli_json_lines`` returning None (rc!=0 / timeout / missing
+    CLI / rc==0 but all-unparseable stdout) — refuses (logs ERROR, returns "")
+    and NEVER creates; likewise a same-name entry sitting in an unrecognized
+    shape (neither recognized-live nor recognized-soft-deleted) is NOT
+    "verifiably absent" and refuses. A create happens ONLY on a verified-absent
+    (clean, empty) catalog reply. This is the guard the 2026-07-03 definition-
+    proliferation bug lacked; the ACTIVE runtime still calls this resolver, so it
+    must fail closed here too."""
+    lines = _fulcra_cli_json_lines(["catalog", "--name", def_name])
+    if lines is None:
+        # LOOKUP ERROR: refuse to write. Creating here is exactly the 2026-07-03
+        # definition-proliferation bug (fail-OPEN).
+        logger.error(
+            "annotations: catalog lookup for definition %r failed (CLI error); "
+            "refusing to create to avoid definition proliferation", def_name)
+        return ""
+
     matches: list[str] = []
-    for e in _fulcra_cli_json_lines(["catalog", "--name", def_name]):
+    has_unreadable_same_name = False
+    for e in lines:
         if not isinstance(e, dict) or e.get("name") != def_name:
             continue
         meta = e.get("metadata") or {}
         # legacy catalog shape: metadata.{annotation_type,id,deleted_at}
-        if (meta.get("annotation_type") == "moment" and meta.get("id")
-                and not meta.get("deleted_at")):
-            matches.append(str(meta["id"]))
+        if meta.get("annotation_type") == "moment" and meta.get("id"):
+            if not meta.get("deleted_at"):
+                matches.append(str(meta["id"]))
+            # else: RECOGNIZED legacy soft-delete (deleted_at set) — permits a
+            # create (legacy behavior preserved); a known shape, not unreadable.
             continue
         # current fulcra-api shape (>=0.1.35): TOP-LEVEL id "MomentAnnotation/<uuid>",
         # column_name "moment", no metadata at all. The old matcher saw {} here and
@@ -889,14 +936,31 @@ def _resolve_def_via_cli(def_name: str, description: str, tag_names: list[str]) 
         # duplicate "Agent Tasks" definition per day (operator-reported).
         top_id = e.get("id")
         if (e.get("column_name") == "moment" and isinstance(top_id, str)
-                and top_id.startswith("MomentAnnotation/") and not e.get("deprecated")):
-            matches.append(top_id.split("/", 1)[1])
+                and top_id.startswith("MomentAnnotation/")):
+            if not e.get("deprecated"):
+                matches.append(top_id.split("/", 1)[1])
+            # else: RECOGNIZED current soft-delete (deprecated) — permits create.
+            continue
+        # A same-name entry in NEITHER recognized shape: catalog schema drift.
+        # NOT verifiably absent — refuse below rather than create a duplicate.
+        has_unreadable_same_name = True
     if matches:
         # DETERMINISTIC-OLDEST convergence (TASK-...413fc6b6): with duplicates
         # already in the catalog, every host must pick the SAME canonical id —
         # min() over the uuid strings is stable everywhere — and must NEVER
         # create while any exact-name match exists.
         return min(matches)
+    if has_unreadable_same_name:
+        # A same-name catalog entry exists but sits in a shape we can classify as
+        # neither recognized-live nor recognized-soft-deleted (schema drift). An
+        # unreadable same-name entry is NOT "verified absent" — creating here is
+        # exactly the 2026-07-03 proliferation bug's fail-OPEN. Refuse.
+        logger.error(
+            "annotations: catalog for definition %r has a same-name entry in an "
+            "unrecognized shape (neither recognized-live nor recognized-soft-"
+            "deleted); refusing to create to avoid definition proliferation",
+            def_name)
+        return ""
     cmd = ["data-type", "create", "MomentAnnotation", def_name,
            "--description", description, "--add-to-timeline"]
     for t in tag_names:
