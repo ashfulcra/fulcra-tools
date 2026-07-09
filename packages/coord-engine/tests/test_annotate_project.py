@@ -248,6 +248,39 @@ def test_generator_transitions_are_consumed_not_treated_as_empty():
     assert len(specs) == 3
 
 
+def test_mtime_fallback_ts_is_parseable_in_fold_and_prunes():
+    # FIX 1: a timestamp-less task projects with a ts derived from the store mtime.
+    # That ts must be a real ISO-Z the fold's _parse_ts can read, so seen_ids
+    # prunes by time (stays bounded) instead of degrading to always-emit.
+    from coord_engine import aggregate
+    old_ts = aggregate._normalize_ts("2026-07-09 09:00AM UTC")   # 70 min back
+    new_ts = aggregate._normalize_ts("2026-07-09 10:10AM UTC")   # watermark
+    assert annotate._parse_ts(old_ts) is not None                # parseable, not raw
+    assert annotate._parse_ts(new_ts) is not None
+    txns = [_txn("T-1", "create", old_ts), _txn("T-2", "update", new_ts)]
+    specs, cur = project(txns, _fresh_cursor(), team=TEAM, now=NOW)
+    ids = {s.task_id: s.id for s in specs}
+    assert cur["last_ts"] == new_ts
+    # older-than-margin id is pruned out -> seen_ids does not grow unbounded
+    assert ids["T-1"] not in cur["seen_ids"]
+    assert ids["T-2"] in cur["seen_ids"]
+
+
+def test_cursor_for_landed_re_emits_only_failed_specs():
+    # FIX 2 (fold level): spec[0] lands, spec[1] fails -> the persisted cursor
+    # dedups spec[0] but keeps spec[1] a live candidate, so a re-fold emits ONLY
+    # spec[1]. Never a manufactured dup, never a lost transition.
+    txns = [_txn("T-1", "create", "2026-07-09T09:00:00Z"),
+            _txn("T-2", "update", "2026-07-09T09:05:00Z")]
+    specs, _ = project(txns, _fresh_cursor(), team=TEAM, now=NOW)
+    landed = {specs[0].id}  # spec[0] landed, spec[1] failed
+    cursor = annotate.cursor_for_landed(txns, _fresh_cursor(), landed, team=TEAM, now=NOW)
+    assert specs[0].id in cursor["seen_ids"]      # succeeded -> dedup'd
+    assert specs[1].id not in cursor["seen_ids"]  # failed -> still projectable
+    specs2, _ = project(txns, cursor, team=TEAM, now=NOW)
+    assert [s.task_id for s in specs2] == ["T-2"]  # ONLY the failed one re-emits
+
+
 # ===========================================================================
 # CLI paths: resolution gate + project (end-to-end idempotency) + status
 # ===========================================================================
@@ -347,6 +380,35 @@ def test_cli_project_cursor_round_trips(monkeypatch):
 
 
 # --- writer absent -> degrade to exit 0, cursor NOT advanced (retry later) --
+
+def test_cli_project_partial_failure_advances_per_spec(capsys, monkeypatch):
+    # FIX 2 (end-to-end): with two pending transitions, the writer lands spec[0]
+    # (task a) and FAILS spec[1] (task b) on the first pass. The next pass must
+    # re-project ONLY b — never re-emit a (a manufactured dup on the no-dedup
+    # endpoint), never drop b.
+    t = FakeTransport()
+    t.put(annotate.resolution_path("r"), "transitions\n")
+    t.put("team/r/task/a.md", _task_ts("Alpha", "active", "2026-07-09T09:00:00Z"))
+    t.put("team/r/task/b.md", _task_ts("Beta", "active", "2026-07-09T09:05:00Z"))
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+
+    # first pass: writer lands everything EXCEPT task b
+    seen1 = []
+    def land_all_but_b(spec, *, agent):
+        seen1.append(spec)
+        return spec.task_id != "b"
+    monkeypatch.setattr(cli, "_emit_projection_spec", land_all_but_b)
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projected 1/2" in capsys.readouterr().out
+    assert {s.task_id for s in seen1} == {"a", "b"}    # both were TRIED
+    assert annotate.cursor_path("r") in t.store         # partial cursor persisted
+
+    # second pass: writer now works -> ONLY b re-projects (a is dedup'd)
+    seen2 = _stub_writer(monkeypatch, ok=True)
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projected 1/1" in capsys.readouterr().out
+    assert [s.task_id for s in seen2] == ["b"]          # a NOT re-emitted
+
 
 def test_cli_project_writer_absent_degrades_exit_0(capsys, monkeypatch):
     t = FakeTransport()

@@ -53,6 +53,50 @@ def _label(row: dict[str, Any]) -> str:
     return f"[{title}]({href})"
 
 
+# ---------------------------------------------------------------------------
+# Shared categorization — the SINGLE source of truth both diff views consume
+# ---------------------------------------------------------------------------
+#
+# ``diff_rows`` (log bullets) and ``diff_transitions`` (fold-ready dicts) MUST
+# agree on WHICH changes count as a transition and in WHAT order. Rather than
+# keep two hand-mirrored loops honest with a comment + one test (the byte-identity
+# guard only pins ``diff_rows``' formatting, not its categorization, so a change
+# to the status-change rule could silently drift the two), both fold over this one
+# generator. Drift-proof by construction: edit the rule here and both views move
+# together.
+
+def _categorize(
+    prior_rows: list[dict[str, Any]], new_rows: list[dict[str, Any]]
+) -> list[tuple[str, dict[str, Any], Optional[dict[str, Any]]]]:
+    """Three-way categorization of the change from ``prior_rows`` to ``new_rows``,
+    keyed by task id: ``(kind, row, prior_row)`` tuples where ``kind`` is one of
+    ``create`` / ``update`` / ``deprecate``.
+
+    * ``create``   — id present in new only; ``row`` = new row, ``prior_row`` None.
+    * ``update``   — id in both with a CHANGED ``status``; ``row`` = new row,
+                     ``prior_row`` = the prior row (its old status, for the arrow).
+    * ``deprecate``— id present in prior only; ``row`` = the removed prior row,
+                     ``prior_row`` None.
+
+    Content-only edits (same status) are intentionally NOT a change (they live in
+    the file's own version history). Order is stable: creations + status-updates
+    over ``new`` (by id) first, then removals over ``prior`` (by id) — the order
+    ``diff_rows`` has always emitted, which the byte-identity guard pins.
+    """
+    prior = rows_by_id(prior_rows)
+    new = rows_by_id(new_rows)
+    out: list[tuple[str, dict[str, Any], Optional[dict[str, Any]]]] = []
+    for rid, r in new.items():
+        if rid not in prior:
+            out.append(("create", r, None))
+        elif prior[rid].get("status") != r.get("status"):
+            out.append(("update", r, prior[rid]))
+    for rid, r in prior.items():
+        if rid not in new:
+            out.append(("deprecate", r, None))
+    return out
+
+
 def diff_rows(
     prior_rows: list[dict[str, Any]], new_rows: list[dict[str, Any]]
 ) -> list[str]:
@@ -60,21 +104,19 @@ def diff_rows(
 
     Creations, status transitions, and removals — keyed by task id. Content-only
     edits (no status change) are intentionally not logged (they're in the file's
-    own version history).
+    own version history). Categorization comes from :func:`_categorize` (shared
+    with :func:`diff_transitions`); this function only renders the bullets.
     """
-    prior = rows_by_id(prior_rows)
-    new = rows_by_id(new_rows)
     out: list[str] = []
-    for rid, r in new.items():
-        if rid not in prior:
+    for kind, r, prior_r in _categorize(prior_rows, new_rows):
+        if kind == "create":
             out.append(f"* **Creation**: {_label(r)} created ({r.get('status')}).")
-        elif prior[rid].get("status") != r.get("status"):
+        elif kind == "update":
             out.append(
                 f"* **Update**: {_label(r)} "
-                f"{prior[rid].get('status')} → {r.get('status')}."
+                f"{(prior_r or {}).get('status')} → {r.get('status')}."
             )
-    for rid, r in prior.items():
-        if rid not in new:
+        else:  # deprecate
             out.append(f"* **Deprecation**: {_label(r)} removed.")
     return out
 
@@ -92,21 +134,53 @@ def diff_rows(
 #     byte-identical (existing aggregate/reconcile tests are the guardrail), so
 #     its signature is left untouched — a second return value would force every
 #     caller (reconcile + the aggregate tests) to change, breaking that guarantee.
-#   * The two share no code so ``diff_rows`` cannot be perturbed, but they MUST
-#     stay in lockstep on WHICH changes count as a transition (the categorization
-#     below mirrors ``diff_rows`` exactly). Kinds: create / update / deprecate.
+#   * The two share their categorization via ``_categorize`` (above) so they can
+#     never drift on WHICH changes count as a transition: ``diff_rows`` renders
+#     each ``(kind, row, prior_row)`` as a bullet, ``diff_transitions`` as a dict.
+#     Kinds: create / update / deprecate.
 #
 # ``ts`` is the task row's own ``updated_at`` — the frontmatter ``timestamp``
 # reconcile stamps on every write (``mtime`` as a defensive fallback) — normalized
 # to a UTC-``Z`` zero-padded ISO string per the Task-1 ts contract so the fold's
 # watermark ordering and skew-margin arithmetic hold.
 
+#: The store's ``file list`` mtime format(s) — UTC, minute-granular, e.g.
+#: ``2026-07-01 04:12PM UTC`` (see ``transport.parse_list_output``). This is the
+#: DEFENSIVE ts fallback when a task carries no ``timestamp`` frontmatter. Because
+#: it carries a full date (year included), it normalizes cleanly to a UTC-``Z``
+#: ISO instant — there is no ls-style yearless ambiguity to resolve, so the ts
+#: contract (parseable, lexicographically comparable) holds even for a
+#: timestamp-less task, keeping the fold's skew math + seen_ids prune bounded.
+_STORE_MTIME_FORMATS = ("%Y-%m-%d %I:%M%p %Z", "%Y-%m-%d %I:%M%p")
+
+
+def _parse_store_mtime(s: str) -> Optional[datetime]:
+    """Parse the transport's list-style mtime string into a datetime, or None.
+
+    The store lists times in UTC; a naive parse (``%Z`` absent) is stamped UTC so
+    the normalized result is a real UTC instant, not a floating one. Never raises."""
+    for fmt in _STORE_MTIME_FORMATS:
+        try:
+            dt = datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    return None
+
+
 def _normalize_ts(raw: Any) -> str:
     """Normalize a row timestamp to a lexicographically-comparable UTC-``Z`` ISO
-    string (``2026-07-09T09:00:00Z``). An unparseable value is passed through
-    unchanged (the fold tolerates a non-normalized ts — it degrades to emit/keep
-    rather than dropping a transition); ``None``/blank -> ``""`` (the fold treats
-    a falsy ts as malformed and skips it). Never raises."""
+    string (``2026-07-09T09:00:00Z``). Accepts ISO-8601 (the ``timestamp``
+    frontmatter reconcile stamps) AND the store's list-style ``mtime``
+    (``2026-07-01 04:12PM UTC``), the defensive fallback — so a task with no
+    ``timestamp`` still yields a parseable ISO ts (the fold's ``_parse_ts``
+    succeeds, the skew boundary + seen_ids prune stay bounded) rather than a raw,
+    unparseable string. A genuinely unparseable value is passed through unchanged
+    (the fold tolerates a non-normalized ts — it degrades to emit/keep rather than
+    dropping a transition); ``None``/blank -> ``""`` (the fold treats a falsy ts as
+    malformed and skips it). Never raises."""
     if raw is None:
         return ""
     s = str(raw).strip()
@@ -116,7 +190,9 @@ def _normalize_ts(raw: Any) -> str:
     try:
         dt = datetime.fromisoformat(iso)
     except ValueError:
-        return s
+        dt = _parse_store_mtime(s)
+        if dt is None:
+            return s  # genuinely unparseable -> pass through (fold tolerates it)
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat(timespec="seconds") + "Z"

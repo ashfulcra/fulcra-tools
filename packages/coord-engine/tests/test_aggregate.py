@@ -109,3 +109,38 @@ def test_diff_transitions_ts_normalized_to_utc_z():
     assert aggregate._normalize_ts("not-a-ts") == "not-a-ts"
     assert aggregate._normalize_ts(None) == ""
     assert aggregate._normalize_ts("") == ""
+
+
+def test_normalize_ts_parses_store_mtime_fallback():
+    # FIX 1: the store's list-style mtime (the fallback when a task has no
+    # `timestamp` frontmatter) must normalize to a parseable UTC-Z ISO — not pass
+    # through raw — or the fold's skew math degrades to always-emit and seen_ids
+    # grows unbounded. Format is `%Y-%m-%d %I:%M%p UTC` (transport.parse_list_output).
+    assert aggregate._normalize_ts("2026-07-01 04:12PM UTC") == "2026-07-01T16:12:00Z"
+    assert aggregate._normalize_ts("2026-07-09 09:00AM UTC") == "2026-07-09T09:00:00Z"
+    assert aggregate._normalize_ts("2026-07-09 12:00PM UTC") == "2026-07-09T12:00:00Z"
+
+
+def test_diff_transitions_ts_falls_back_to_mtime_as_iso():
+    # a task row with NO `timestamp` but an mtime yields a parseable ISO-Z ts
+    # (the ts contract holds for timestamp-less teams).
+    new = [{"id": "a", "name": "a", "title": "A", "status": "proposed",
+            "mtime": "2026-07-01 04:12PM UTC"}]
+    (t,) = aggregate.diff_transitions([], new)
+    assert t["ts"] == "2026-07-01T16:12:00Z"
+
+
+def test_categorize_is_shared_source_of_both_diff_views():
+    # FIX 3: diff_rows and diff_transitions both fold over _categorize, so they
+    # can never drift on WHICH changes count (or their order). Drift-proof by
+    # construction — not by a mirrored comment.
+    prior = [_row("a", "active"), _row("b", "active")]
+    new = [_row("a", "done"), _row("c", "proposed")]
+    cats = aggregate._categorize(prior, new)
+    assert [(k, r["id"]) for k, r, _p in cats] == [
+        ("update", "a"), ("create", "c"), ("deprecate", "b")]
+    # diff_transitions' categorization is exactly _categorize's
+    assert [(t["kind"], t["task_id"]) for t in aggregate.diff_transitions(prior, new)] \
+        == [(k, r["id"]) for k, r, _p in cats]
+    # diff_rows renders exactly one bullet per category, in the same order
+    assert len(aggregate.diff_rows(prior, new)) == len(cats)

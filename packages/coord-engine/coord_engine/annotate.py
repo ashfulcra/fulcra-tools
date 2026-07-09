@@ -303,6 +303,58 @@ def project(
     use (e.g. stamping); the id keys on the transition's own ts, never ``now``,
     so projection is independent of when the heartbeat happens to run.
     """
+    return _fold(transitions, cursor, team=team, now=now, log=log, landed=None)
+
+
+def cursor_for_landed(
+    transitions: Any,
+    cursor: Any,
+    landed_ids: Any,
+    *,
+    team: str,
+    now: str,
+    log: Optional[Logger] = None,
+) -> dict[str, Any]:
+    """The cursor to PERSIST after a PARTIAL writer success — pure, never raises.
+
+    ``project`` emits candidate specs assuming they all land; the CLI then calls
+    the writer per spec and passes the ids that ACTUALLY landed here. Re-folds the
+    same ``transitions`` from the same starting ``cursor``, but only folds a
+    LANDED spec's id into ``seen_ids`` and holds the watermark at/below the oldest
+    UN-landed spec's ts. The effect: every succeeded spec is dedup'd (never
+    re-emitted), while every failed spec stays a live candidate next run (its id
+    absent from ``seen_ids`` AND its ts still inside the skew boundary) — so a
+    transient partial failure re-projects ONLY the specs that did not land, never
+    manufacturing a duplicate and never losing a transition.
+
+    Re-folds (a second in-memory pass over ``transitions``) rather than
+    post-patching ``project``'s cursor, so the ``seen_ids`` TIME-prune runs
+    against the correct (held-back) watermark — patching afterwards would prune
+    against the wrong boundary and could reopen a re-emit."""
+    landed = {str(x) for x in landed_ids} if landed_ids is not None else set()
+    _, new_cursor = _fold(transitions, cursor, team=team, now=now, log=log, landed=landed)
+    return new_cursor
+
+
+def _fold(
+    transitions: Any,
+    cursor: Any,
+    *,
+    team: str,
+    now: str,
+    log: Optional[Logger],
+    landed: Optional[set[str]],
+) -> tuple[list[AnnotationSpec], dict[str, Any]]:
+    """Shared core of :func:`project` / :func:`cursor_for_landed`.
+
+    ``landed`` gates whether an emitted spec is treated as PERSISTED:
+      * ``None`` — every emitted spec is assumed to land (``project``'s posture):
+        its id folds into ``seen_ids`` and the watermark may advance past it.
+      * a set — only ids IN the set are folded into ``seen_ids``; an emitted spec
+        whose id is absent is a FAILED write, so its id is left out AND the
+        watermark is held at/below its ts (via ``failed_floor``) so the boundary
+        can't suppress its re-emit next run.
+    """
     log = log or get_logger("annotate")
     norm = _normalize_cursor(cursor)
     watermark = norm["last_ts"]
@@ -318,6 +370,11 @@ def project(
     specs: list[AnnotationSpec] = []
     new_watermark = watermark
     skipped = 0
+    # Oldest ts (as a normalized string) among specs that were emitted but did NOT
+    # land — the watermark must not advance past it, or the boundary could drop the
+    # retry. Only parseable ts participate (an unparseable-ts spec always re-emits
+    # regardless of the watermark, so it needs no floor and must not corrupt it).
+    failed_floor: Optional[str] = None
 
     for row in _iter_transition_rows(transitions, team=team, log=log):
         txn = _parse_transition(row)
@@ -364,14 +421,25 @@ def project(
             task_id=txn["task_id"],
             ts=ts,
         ))
-        seen.append(ann_id)
-        seen_set.add(ann_id)
+        if landed is None or ann_id in landed:
+            seen.append(ann_id)
+            seen_set.add(ann_id)
+        elif ts_dt is not None and (failed_floor is None or ts < failed_floor):
+            # A failed write with a parseable ts: hold the watermark back so this
+            # transition stays inside the boundary and re-projects next run.
+            failed_floor = ts
+
+    # Hold the watermark at/below the oldest un-landed spec so the boundary cannot
+    # suppress its retry; only lowers (never raises) the watermark, and only under
+    # a partial failure (``project`` passes ``landed=None`` -> no failed_floor).
+    if failed_floor is not None and (new_watermark is None or failed_floor < new_watermark):
+        new_watermark = failed_floor
 
     # Prune seen_ids by TIME: retain every id whose ts is within the skew margin
-    # of the ADVANCED watermark. Ids older than that need no retention — the
-    # boundary already suppresses their re-fire. An id whose ts is unknown (legacy
-    # cursor) or unparseable is kept defensively (dropping it could reopen a
-    # re-emit); such ids simply carry no ``seen_ts`` entry.
+    # of the (possibly held-back) watermark. Ids older than that need no retention
+    # — the boundary already suppresses their re-fire. An id whose ts is unknown
+    # (legacy cursor) or unparseable is kept defensively (dropping it could reopen
+    # a re-emit); such ids simply carry no ``seen_ts`` entry.
     new_watermark_dt = _parse_ts(new_watermark)
     lower_bound = (new_watermark_dt - margin) if new_watermark_dt is not None else None
     kept: list[str] = []
