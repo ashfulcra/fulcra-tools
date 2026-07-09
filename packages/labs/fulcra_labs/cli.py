@@ -153,6 +153,13 @@ def ingest_cmd(observations: str, source_doc: str | None, dry_run: bool,
         f"review-held={outcome.review_held}  rejected={outcome.rejected}  "
         f"in-run-dupes={outcome.skipped_duplicate}"
     )
+    if outcome.skipped_already_present:
+        # Distinct from validation skips: these rows were valid, but their
+        # deterministic source ids are already in Fulcra from a prior run —
+        # the pre-POST check skipped them (the typed endpoint has no
+        # server-side dedup, so this check IS the idempotency guarantee).
+        click.echo(
+            f"already in Fulcra (skipped): {outcome.skipped_already_present}")
     if outcome.tracks_created:
         click.echo(f"tracks created: {outcome.tracks_created}")
     if outcome.tracks_adopted:

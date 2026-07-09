@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import httpx
 from click.testing import CliRunner
 
-from fulcra_labs import cli
+from fulcra_labs import cli, store
 from labs_test_helpers import json_response, make_client
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -65,16 +65,26 @@ def test_ingest_dry_run(monkeypatch):
 
 
 def test_ingest_real_json(monkeypatch, tmp_path):
-    posted = []
+    """End-to-end typed ingest: a JSONL batch posts to
+    /ingest/v1/record/NumericAnnotation and the landed-verification poll
+    re-queries the event endpoint before the CLI reports success."""
+    posted: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/user/v1alpha1/annotation":
+        path = request.url.path
+        method = request.method
+        if path == "/user/v1alpha1/annotation" and method == "POST":
             return json_response(200, {"id": "def-x"})
-        if request.url.path == "/ingest/v1/record":
-            posted.append(json.loads(request.content))
-            return httpx.Response(204)
+        if path == "/ingest/v1/record/NumericAnnotation" and method == "POST":
+            for line in request.content.decode().split("\n"):
+                if line.strip():
+                    posted.append(json.loads(line))
+            return json_response(201, {"upload_id": "up-1"})
+        if path == "/data/v1alpha1/event/NumericAnnotation" and method == "GET":
+            return json_response(200, posted)   # everything lands
         raise AssertionError(request.url)
 
+    monkeypatch.setattr(store, "_LANDING_POLL_SLEEP_S", 0)
     client, _ = make_client(handler)
     monkeypatch.setattr(cli, "build_client", lambda: client)
     res = CliRunner().invoke(cli.cli, [
@@ -84,6 +94,45 @@ def test_ingest_real_json(monkeypatch, tmp_path):
     payload = json.loads(res.output)
     assert payload["outcome"]["ingested"] == 10
     assert len(posted) == 10
+    assert all(r["unit"] and "value" in r for r in posted)   # first-class unit
+
+
+def test_ingest_rerun_reports_already_present(monkeypatch):
+    """Re-running the same report posts nothing (no server-side dedup on the
+    typed endpoint — the pre-check is the only guard) and tells the operator
+    distinctly from validation skips."""
+    posted: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        method = request.method
+        if path == "/user/v1alpha1/annotation" and method == "POST":
+            return json_response(200, {"id": "def-x"})
+        if path.startswith("/user/v1alpha1/annotation/") and method == "GET":
+            return json_response(200, {"id": "def-x", "deleted_at": None})
+        if path == "/ingest/v1/record/NumericAnnotation" and method == "POST":
+            for line in request.content.decode().split("\n"):
+                if line.strip():
+                    posted.append(json.loads(line))
+            return json_response(201, {"upload_id": "up-1"})
+        if path == "/data/v1alpha1/event/NumericAnnotation" and method == "GET":
+            return json_response(200, posted)
+        raise AssertionError(request.url)
+
+    monkeypatch.setattr(store, "_LANDING_POLL_SLEEP_S", 0)
+    client, _ = make_client(handler)
+    monkeypatch.setattr(cli, "build_client", lambda: client)
+    args = ["ingest", str(FIXTURES / "labcorp_pass_a.json")]
+
+    first = CliRunner().invoke(cli.cli, args)
+    assert first.exit_code == 0, first.output
+    assert len(posted) == 10
+
+    second = CliRunner().invoke(cli.cli, args)
+    assert second.exit_code == 0, second.output
+    assert len(posted) == 10                    # zero new POSTs
+    assert "ingested 0/10" in second.output
+    assert "already in Fulcra (skipped): 10" in second.output
 
 
 def test_status_empty_state(monkeypatch):
