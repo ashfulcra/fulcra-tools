@@ -550,8 +550,13 @@ def test_run_import_poll_recovery_is_silent_and_keeps_claims(
     # Both claims kept — the records landed.
     assert "com.fulcra.media.netflix.id0001" in store
     assert "com.fulcra.media.netflix.id0002" in store
-    # Nothing above DEBUG.
-    assert [r for r in caplog.records if r.levelno > logging.DEBUG] == []
+    # Nothing above DEBUG from the pipeline itself. Scope to our logger so the
+    # assertion tracks the capture setup above (at_level pins fulcra_media.fulcra)
+    # and stays immune to unrelated ambient chatter — e.g. httpx's INFO "HTTP
+    # Request" lines, which surface whenever some other test has lowered the root
+    # logger level and left it that way.
+    assert [r for r in caplog.records
+            if r.levelno > logging.DEBUG and r.name.startswith("fulcra_media")] == []
 
 
 def test_run_import_verify_error_warns_but_keeps_claims(

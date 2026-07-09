@@ -1,9 +1,34 @@
 """Shared test fixtures for fulcra-collect."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logging():
+    """Snapshot and restore the global root logger around every collect test.
+
+    Several CLI commands (``daemon``, the hidden ``_worker``) call
+    ``_configure_logging`` as a side effect, which sets the *root* logger to
+    INFO and installs a stderr handler. That is correct in production but,
+    left unrestored, leaks across the whole pytest process: raising the root
+    level to INFO makes third-party INFO records (notably httpx's "HTTP
+    Request" lines) start propagating, which broke an order-sensitive caplog
+    assertion in the media-helpers suite ("nothing above DEBUG"). Restoring
+    the root handlers + level here keeps that configuration contained to the
+    test that triggered it. (``test_logging_config`` keeps its own, broader
+    fixture that also restores the FULCRA_COLLECT_LOG_LEVEL env var.)"""
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    try:
+        yield
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
 
 
 @pytest.fixture(autouse=True)
