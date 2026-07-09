@@ -50,17 +50,39 @@ def test_empty_transitions_fresh_cursor_normalized():
 # --- (b) N transitions -> N specs, ids deterministic + stable across re-run -
 
 def test_n_transitions_yield_n_specs():
+    # ts spaced within the skew margin so all three stay in the retained window.
     txns = [
         _txn("T-1", "create", "2026-07-09T09:00:00Z", title="Alpha"),
-        _txn("T-2", "update", "2026-07-09T10:00:00Z", title="Beta"),
-        _txn("T-3", "complete", "2026-07-09T11:00:00Z", title="Gamma"),
+        _txn("T-2", "update", "2026-07-09T09:05:00Z", title="Beta"),
+        _txn("T-3", "complete", "2026-07-09T09:10:00Z", title="Gamma"),
     ]
     specs, new_cursor = project(txns, _fresh_cursor(), team=TEAM, now=NOW)
     assert len(specs) == 3
     assert all(isinstance(s, AnnotationSpec) for s in specs)
-    # watermark advanced to the newest ts; every id recorded in seen_ids
-    assert new_cursor["last_ts"] == "2026-07-09T11:00:00Z"
+    # watermark advanced to the newest ts; every in-window id recorded in seen_ids
+    assert new_cursor["last_ts"] == "2026-07-09T09:10:00Z"
     assert sorted(new_cursor["seen_ids"]) == sorted(s.id for s in specs)
+
+
+def test_seen_ids_pruned_by_time_not_count():
+    # ts spread WIDER than the skew margin: only the ids whose ts is within
+    # SKEW_MARGIN_SECONDS of the advanced watermark are retained; older emitted
+    # ids are dropped (the boundary already suppresses their re-fire).
+    txns = [
+        _txn("T-1", "create", "2026-07-09T09:00:00Z"),   # 70 min back -> pruned
+        _txn("T-2", "update", "2026-07-09T09:55:00Z"),   # 15 min back -> kept (== margin)
+        _txn("T-3", "complete", "2026-07-09T10:10:00Z"),  # watermark -> kept
+    ]
+    specs, new_cursor = project(txns, _fresh_cursor(), team=TEAM, now=NOW)
+    assert len(specs) == 3  # all three still EMITTED
+    ids = {s.task_id: s.id for s in specs}
+    assert new_cursor["last_ts"] == "2026-07-09T10:10:00Z"
+    # T-1 (older than the margin) pruned out; T-2/T-3 retained
+    assert ids["T-1"] not in new_cursor["seen_ids"]
+    assert ids["T-2"] in new_cursor["seen_ids"]
+    assert ids["T-3"] in new_cursor["seen_ids"]
+    # seen_ts carries the ts of each retained id (exact prune, no drift)
+    assert new_cursor["seen_ts"][ids["T-3"]] == "2026-07-09T10:10:00Z"
 
 
 def test_ids_deterministic_and_stable_across_reruns():
@@ -171,16 +193,53 @@ def test_spec_field_set_is_bounded():
     assert set(vars(spec)) == {"id", "note", "tags", "kind", "task_id", "ts"}
 
 
-# --- seen_ids window bound --------------------------------------------------
+# --- skew-lookback boundary: same-ts newcomer, burst replay, unparseable ts -
 
-def test_seen_ids_pruned_to_window():
-    many = [
-        _txn(f"T-{i}", "update", f"2026-07-09T00:00:{i:02d}Z")
-        for i in range(annotate.SEEN_IDS_WINDOW + 25)
-    ]
-    specs, new_cursor = project(many, _fresh_cursor(), team=TEAM, now=NOW)
-    assert len(specs) == annotate.SEEN_IDS_WINDOW + 25
-    # cursor stays bounded — only the most-recent window of ids is retained
-    assert len(new_cursor["seen_ids"]) == annotate.SEEN_IDS_WINDOW
-    # the retained ids are the most recent ones (tail of the emit order)
-    assert new_cursor["seen_ids"] == [s.id for s in specs][-annotate.SEEN_IDS_WINDOW:]
+def test_same_ts_newcomer_still_emits():
+    # THE (a) fix: a genuinely-new transition whose ts EQUALS the watermark must
+    # still land. Strict ``> watermark`` would drop it forever; the skew lookback
+    # (>= watermark - margin) plus the seen_ids miss lets the newcomer through.
+    prior_id = annotate._stable_id(TEAM, "T-old", "create", "2026-07-09T11:00:00Z")
+    cursor = {"last_ts": "2026-07-09T11:00:00Z", "seen_ids": [prior_id],
+              "seen_ts": {prior_id: "2026-07-09T11:00:00Z"}}
+    newcomer = _txn("T-new", "update", "2026-07-09T11:00:00Z", title="Same tick")
+    specs, new_cursor = project([newcomer], cursor, team=TEAM, now=NOW)
+    assert [s.task_id for s in specs] == ["T-new"]
+    assert specs[0].ts == "2026-07-09T11:00:00Z"
+
+
+def test_burst_replay_beyond_window_does_not_reemit():
+    # THE (b) fix: an already-emitted transition whose id has been pruned out of
+    # seen_ids (its ts is now far behind the watermark) must NOT re-emit when it
+    # replays — the boundary suppresses it even though seen_ids no longer holds it.
+    old = _txn("T-1", "create", "2026-07-09T09:00:00Z", title="Alpha")
+    (spec1,), cursor1 = project([old], _fresh_cursor(), team=TEAM, now=NOW)
+    # A fresh emit far in the future advances the watermark well past the margin,
+    # pruning the old id out of the retained window.
+    newer = _txn("T-2", "update", "2026-07-09T12:00:00Z", title="Beta")
+    _, cursor2 = project([newer], cursor1, team=TEAM, now=NOW)
+    assert spec1.id not in cursor2["seen_ids"]  # evicted by the time-prune
+    # The old transition replays (async duplicate). It is > the margin behind the
+    # watermark, so the boundary drops it — no double-write despite the eviction.
+    specs3, _ = project([old], cursor2, team=TEAM, now=NOW)
+    assert specs3 == []
+
+
+def test_unparseable_ts_does_not_raise_and_does_not_drop():
+    # An unparseable (non-normalized) ts must never crash and never be silently
+    # dropped — it degrades to "emit / keep" rather than vanishing from the timeline.
+    bad = {"task_id": "T-x", "kind": "update", "ts": "not-a-timestamp"}
+    # fresh cursor: emits
+    specs, cursor = project([bad], _fresh_cursor(), team=TEAM, now=NOW)
+    assert [s.task_id for s in specs] == ["T-x"]
+    # even with a real watermark set, an unparseable txn ts is kept (not dropped)
+    cursor2 = {"last_ts": "2026-07-09T11:00:00Z", "seen_ids": []}
+    specs2, _ = project([bad], cursor2, team=TEAM, now=NOW)
+    assert [s.task_id for s in specs2] == ["T-x"]
+
+
+def test_generator_transitions_are_consumed_not_treated_as_empty():
+    # LOW-2: a generator source must be projected, not silently dropped.
+    gen = (_txn(f"T-{i}", "update", f"2026-07-09T09:0{i}:00Z") for i in range(3))
+    specs, _ = project(gen, _fresh_cursor(), team=TEAM, now=NOW)
+    assert len(specs) == 3
