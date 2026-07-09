@@ -65,6 +65,19 @@ Collect is the product; the daemon is the hub everything else plugs into.
 | [`packages/menubar`](../packages/menubar) | The **macOS menu-bar companion** — quick-records Moment annotations and surfaces daemon status. |
 | [`packages/fulcra-common`](../packages/fulcra-common) | The **shared Fulcra API client** + cross-plugin definition resolver. Pulled in by every other package. |
 
+**Writing (the ingest path):** moments, durations, and numeric records go
+through the **typed endpoint** (`POST /ingest/v1/record/{data_type}`,
+unwrapped payloads, JSONL batches); tombstones stay on the legacy wrapped
+endpoint (their machine-state payload has no typed slot). The typed endpoint
+has three sharp edges, each with a shipped compensation: it does **no
+server-side source-id dedup** (media's claim machinery + labs' pre-post
+existing-check prevent duplicates), it **silently drops** unknown fields and
+bad JSONL lines (media self-heals by unclaiming confirmed-missing events for
+next-run retry; labs refuses to ingest when it cannot verify), and it is
+**async** (~1–2 min to visibility — both writers verify landings by
+re-querying, and `fulcra-collect doctor` has a schema-drift row that fails
+loudly if our wire shape ever diverges from the served schema).
+
 **Reading it back:** everything Collect ingests is readable by any agent or
 tool via the `fulcra` CLI (`get-records`, `data-updates`), the REST API, or
 the official read-only MCP server (`uvx fulcra-context-mcp@latest` / hosted at
