@@ -975,6 +975,15 @@ def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None)
         if merged:
             inner["note"] = merged
 
+        # ``id`` is a served MomentAnnotation column (not silently stripped). When
+        # the caller supplies a deterministic record id (projection), pass it
+        # through so the record itself carries it — enabling record-level
+        # idempotency on re-POST. ``_post_typed_moment_record`` preserves any id
+        # already present in ``inner``.
+        rec_id = payload.get("id")
+        if rec_id:
+            inner["id"] = rec_id
+
         lifecycle = payload.get("lifecycle") or "event"
         sources = [
             f"com.fulcradynamics.fulcra-coord.{lifecycle}.{uuid.uuid4()}",
@@ -1060,6 +1069,7 @@ def emit_projection_annotation(
     note: str,
     tags: list[str],
     recorded_at: Optional[str],
+    id: Optional[str] = None,
     agent: Optional[str] = None,
     backend: Optional[list[str]] = None,
 ) -> bool:
@@ -1101,6 +1111,14 @@ def emit_projection_annotation(
             "lifecycle": "projection",
             "recorded_at": recorded_at,
         }
+        # The projection's DETERMINISTIC id (keyed on team/task_id/kind/ts, computed
+        # by coord_engine.annotate FOR idempotency). ``id`` IS a served
+        # MomentAnnotation column, so threading it onto the record lets a record
+        # re-POSTed after a cursor-persist failure carry the SAME id rather than
+        # mint a distinct timeline row — the record-level idempotency layer this
+        # id was designed for. Only set when supplied so we never write an empty id.
+        if id:
+            payload["id"] = id
         return bool(_write_http(payload, backend=backend))
     except Exception:
         logger.debug("annotations: emit_projection failed (best-effort)", exc_info=True)

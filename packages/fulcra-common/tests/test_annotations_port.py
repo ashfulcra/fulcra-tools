@@ -506,10 +506,15 @@ def test_projection_emit_posts_note_tags_recorded_at_and_source(monkeypatch):
     _stub_cli(monkeypatch, catalog_lines=[_existing_def_row(uuid="def-x")])
     router = _install_router(monkeypatch)
 
+    # spec.id is the deterministic dedup key coord_engine.annotate computes FOR
+    # idempotency; it must ride onto the posted record verbatim so a re-POST after
+    # a cursor-persist failure carries the SAME id, not a distinct timeline row.
+    spec_id = "proj-abc123-deterministic"
     assert ann.emit_projection_annotation(
         note="update: Fix widget · assignee: claude:s",
         tags=["agent-tasks", "update"],
         recorded_at="2026-07-09T09:00:00Z",
+        id=spec_id,
     ) is True
 
     rec = json.loads(router.posts()[0][2].decode().strip())
@@ -517,6 +522,8 @@ def test_projection_emit_posts_note_tags_recorded_at_and_source(monkeypatch):
     assert set(rec) <= {"note", "recorded_at", "tags", "sources", "id"}
     assert rec["note"] == "update: Fix widget · assignee: claude:s"
     assert rec["recorded_at"] == "2026-07-09T09:00:00Z"
+    # the designed deterministic id lands on the record EXACTLY
+    assert rec["id"] == spec_id
     # tags resolved from the bare names via the CLI stub
     assert rec["tags"] == ["tag-agent-tasks", "tag-update"]
     # provenance: the projection namespace + the resolved def uuid both present

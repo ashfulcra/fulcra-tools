@@ -1791,7 +1791,8 @@ def _emit_projection_spec(spec: Any, *, agent: str) -> bool:
         return False
     try:
         return bool(_ann.emit_projection_annotation(
-            note=spec.note, tags=list(spec.tags), recorded_at=spec.ts, agent=agent))
+            note=spec.note, tags=list(spec.tags), recorded_at=spec.ts,
+            id=spec.id, agent=agent))
     except Exception:
         return False
 
