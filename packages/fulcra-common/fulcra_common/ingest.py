@@ -22,6 +22,7 @@ Design note on the dedicated-field shape:
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -251,4 +252,34 @@ class IngestPipeline:
                 "content-type": "application/x-jsonl",
             },
         )
+        r.raise_for_status()
+
+    def ingest_typed(self, base_type: str, records: list[dict]) -> None:
+        """POST unwrapped records to /ingest/v1/record/{base_type}.
+
+        One record → application/json; several → application/x-jsonl (one
+        per line). Returns 201 {"upload_id": ...} and processing is ASYNC
+        (~1-2 min; live-verified 2026-07-08). Three hazards callers MUST
+        compensate for (Global Constraints of the typed-ingest plan):
+        - NO server-side source-id dedup — dedup client-side before calling.
+        - A JSONL batch with an invalid line returns 201 and silently drops
+          the line — verify landed counts after the visibility lag.
+        - Unknown fields are silently stripped — build records with
+          wire.build_typed_record only.
+        """
+        if self.client is None:
+            raise RuntimeError(
+                "IngestPipeline.ingest_typed needs a BaseFulcraClient")
+        if not records:
+            return
+        if len(records) == 1:
+            r = self.client._client().post(
+                f"/ingest/v1/record/{base_type}", json=records[0],
+                headers=self.client._authed_headers())
+        else:
+            body = "\n".join(json.dumps(r, sort_keys=True) for r in records)
+            r = self.client._client().post(
+                f"/ingest/v1/record/{base_type}", content=body.encode(),
+                headers={**self.client._authed_headers(),
+                         "content-type": "application/x-jsonl"})
         r.raise_for_status()

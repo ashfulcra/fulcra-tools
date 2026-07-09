@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 
 import httpx
+import pytest
 
 from fulcra_common.ingest import (
     DurationEvent,
@@ -283,3 +284,45 @@ def test_ingest_one_does_not_swallow_real_errors():
             ts=datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC),
         ))
     assert len(transport.calls) == 1
+
+
+# ---- typed ingest (unwrapped records, single JSON / JSONL batch) ----
+
+
+def test_ingest_typed_single_posts_json():
+    transport = _FakeTransport()
+    pipe = IngestPipeline(client=_client_with(transport))
+    pipe.ingest_typed("MomentAnnotation",
+                      [{"recorded_at": "2026-07-08T21:00:00Z", "sources": ["s"]}])
+    url, body, headers = transport.calls[0]
+    assert url == "https://api.test/ingest/v1/record/MomentAnnotation"
+    assert headers["content-type"] == "application/json"
+    assert json.loads(body)["sources"] == ["s"]
+
+
+def test_ingest_typed_batch_posts_jsonl():
+    """Content type must be application/x-jsonl exactly — the server 415s
+    'application/x-jsonlines' (live-verified 2026-07-08)."""
+    transport = _FakeTransport()
+    pipe = IngestPipeline(client=_client_with(transport))
+    pipe.ingest_typed("MomentAnnotation", [
+        {"recorded_at": "2026-07-08T21:00:00Z", "sources": ["a"]},
+        {"recorded_at": "2026-07-08T21:01:00Z", "sources": ["b"]},
+    ])
+    url, body, headers = transport.calls[0]
+    assert url.endswith("/ingest/v1/record/MomentAnnotation")
+    assert headers["content-type"] == "application/x-jsonl"
+    lines = [json.loads(ln) for ln in body.decode().split("\n") if ln]
+    assert [ln["sources"] for ln in lines] == [["a"], ["b"]]
+
+
+def test_ingest_typed_empty_is_noop_and_errors_raise():
+    transport = _FakeTransport()
+    pipe = IngestPipeline(client=_client_with(transport))
+    pipe.ingest_typed("MomentAnnotation", [])
+    assert transport.calls == []
+    bad = _StatusTransport([422])
+    pipe2 = IngestPipeline(client=_client_with(bad))
+    with pytest.raises(httpx.HTTPStatusError):
+        pipe2.ingest_typed("MomentAnnotation",
+                           [{"recorded_at": "x", "sources": ["s"]}])
