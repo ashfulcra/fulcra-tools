@@ -79,14 +79,25 @@ each transition is one `fde-engine phase <slug> <phase>` away.
 
 `intake → interview → architecture → plan → prototype → build → retro`
 (prototype may transition backward to architecture or plan when verification
-findings invalidate them). Transition with `fde-engine phase <slug> <phase>`;
-answer "where are we" with `fde-engine status <slug>`; start every fresh
+findings invalidate them). **Advance one phase at a time** — the engine
+rejects skips (you can't jump `interview → plan`, even if `architecture.md`
+already exists; go `interview → architecture → plan`). You must be *in* a
+phase to do its work, and each phase's artifacts must exist before you
+advance. Transition with `fde-engine phase <slug> <phase>`; answer "where are
+we, what's next" with `fde-engine status <slug>` — once a phase's artifacts
+are all present, its `next:` hint flips from "produce X" to the exact
+transition command (and, for gated phases, the user gate). Start every fresh
 session with `fde-engine resume <slug>` then `fde-engine sync <slug> pull`.
 
-1. **intake** — `fde-engine init <slug> --title "..."`. Upload the source
-   materials to `intake/`; write `intake/brief.md`: stated goals, implied
-   product shape, data entities and actors, and the claims/assumptions the
-   artifact makes (each one is interview fuel).
+1. **intake** — `fde-engine init <slug> --title "..."`. Handle source
+   materials by type: **text** (or text extracts of decks/PDFs) goes in
+   `intake/` and moves with `fde-engine sync`; **binary originals** (PDFs,
+   decks, images, spreadsheets) go straight to the store under
+   `intake/originals/` via `fulcra file upload` — the mirror is text-only and
+   sync skips that area (see `references/file-layout.md`). Write
+   `intake/brief.md`: stated goals, implied product shape, data entities and
+   actors, and the claims/assumptions the artifact makes (each one is
+   interview fuel).
 2. **interview** — follow `references/interview.md`. Build the prioritized
    topic map in `interview/plan.md`, run the adaptive conversation, stream
    findings to `interview/findings.md`.

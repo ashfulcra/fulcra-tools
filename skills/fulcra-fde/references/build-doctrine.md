@@ -41,6 +41,17 @@ marked provisional until the prototype validates them.
 - Implement the core value loop **against that real data**, then run the
   verification plan. Record every item's result in `prototype/verification.md`
   as PASS or FAIL-with-why.
+- **State the data mode explicitly** — it is dangerously easy to build a
+  Fulcra-*shaped* prototype on sample data and imply it's reading Fulcra.
+  `prototype/verification.md` MUST open with a line:
+
+      Data mode: sample | Fulcra live read | Fulcra live read/write
+
+  and the report MUST list exactly which Fulcra primitives are actually
+  connected (which data types read via which command; which custom types
+  written via ingest). `Data mode: sample` is not a passing prototype — it's a
+  FAIL on the real-data binding item, recorded honestly so the gap is visible
+  rather than hidden.
 - FAIL results that invalidate the architecture or plan: transition backward
   (`fde-engine phase <slug> architecture` or `plan`), revise, return.
 - **User gate:** present the verification record; the user decides

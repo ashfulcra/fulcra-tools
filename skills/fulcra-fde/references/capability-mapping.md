@@ -49,7 +49,7 @@ a design-around:
 | No record delete/replace | model corrections as superseding records; fold at read time |
 | MCP is read-only | writer agents need shell (tier 1) or REST (tier 2) |
 | No cross-user reads (datashare unreleased) | single-account fallback + documented path to user-owned |
-| No server-side compute | local-first daemons; anything hosted is the user's own infra |
+| No server-side compute | local-*compute* daemons; anything hosted is the user's own infra |
 
 The last two rows are inferred from the platform surface (poll-style reads,
 local daemon patterns only) — re-verify against the current primitives doc

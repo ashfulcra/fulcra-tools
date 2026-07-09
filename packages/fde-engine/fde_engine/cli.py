@@ -71,7 +71,7 @@ def cmd_sync(args, transport) -> int:
             # designated area + direct upload rather than silently dropping them.
             names = ", ".join(report["skipped_binary"])
             print(f"skipped {len(report['skipped_binary'])} binary file(s): {names}")
-            print(f"  the mirror is text-only — upload binaries directly, e.g.:")
+            print("  the mirror is text-only — upload binaries directly, e.g.:")
             print(f"  fulcra file upload <local> "
                   f"fde/engagements/{args.slug}/intake/originals/<name>")
     else:
