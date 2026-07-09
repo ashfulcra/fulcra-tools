@@ -75,3 +75,20 @@ def test_sync_push_and_pull(capsys, tmp_path):
     capsys.readouterr()
     assert run(["sync", "x", "pull", "--dir", str(d)], t) == 0
     assert "engagement.md" in capsys.readouterr().out
+
+
+def test_sync_push_binary_prints_upload_guidance(capsys, tmp_path):
+    """A binary file in the mirror doesn't crash push; the CLI guides the user
+    to upload it directly into the designated binaries area (bug #1)."""
+    t = FakeTransport()
+    run(["init", "x", "--title", "X"], t)
+    capsys.readouterr()
+    d = tmp_path / "mirror"
+    (d / "intake").mkdir(parents=True)
+    (d / "intake" / "deck.pdf").write_bytes(b"%PDF-1.7\x00\xff\xfe")
+    assert run(["sync", "x", "push", "--dir", str(d)], t) == 0
+    out = capsys.readouterr().out
+    assert "skipped 1 binary file(s)" in out
+    assert "intake/deck.pdf" in out
+    assert "fulcra file upload" in out
+    assert "intake/originals" in out

@@ -13,6 +13,16 @@ improvise engagement state.
 
 ## Ground rules
 
+- **Use real Fulcra data — never simulate.** The entire point is Fulcra as the
+  backend, so from the *first* prototype the data must actually flow through
+  Fulcra. Read the user's **existing** data types wherever they fit (HRV, heart
+  rate, steps, location, workouts, sleep, calendar — whatever the platform
+  already collects), and for anything Fulcra doesn't already carry, **create
+  the custom data type** and write real records. Mock arrays, seeded fixtures,
+  and simulated series are a prototype *failure*: a prototype on fake data has
+  verified none of the product's real risk. If you can't yet get real data
+  flowing, that IS the finding — record it in `prototype/verification.md`,
+  don't paper over it with fakes. (Discovery + binding: `references/capability-mapping.md`.)
 - **The primitives doc is your capability sheet.** Before the architecture
   phase, read `FULCRA-PRIMITIVES.md` (repo root of ashfulcra/fulcra-tools) and
   check the *installed* surface, not the repo:
@@ -69,14 +79,25 @@ each transition is one `fde-engine phase <slug> <phase>` away.
 
 `intake → interview → architecture → plan → prototype → build → retro`
 (prototype may transition backward to architecture or plan when verification
-findings invalidate them). Transition with `fde-engine phase <slug> <phase>`;
-answer "where are we" with `fde-engine status <slug>`; start every fresh
+findings invalidate them). **Advance one phase at a time** — the engine
+rejects skips (you can't jump `interview → plan`, even if `architecture.md`
+already exists; go `interview → architecture → plan`). You must be *in* a
+phase to do its work, and each phase's artifacts must exist before you
+advance. Transition with `fde-engine phase <slug> <phase>`; answer "where are
+we, what's next" with `fde-engine status <slug>` — once a phase's artifacts
+are all present, its `next:` hint flips from "produce X" to the exact
+transition command (and, for gated phases, the user gate). Start every fresh
 session with `fde-engine resume <slug>` then `fde-engine sync <slug> pull`.
 
-1. **intake** — `fde-engine init <slug> --title "..."`. Upload the source
-   materials to `intake/`; write `intake/brief.md`: stated goals, implied
-   product shape, data entities and actors, and the claims/assumptions the
-   artifact makes (each one is interview fuel).
+1. **intake** — `fde-engine init <slug> --title "..."`. Handle source
+   materials by type: **text** (or text extracts of decks/PDFs) goes in
+   `intake/` and moves with `fde-engine sync`; **binary originals** (PDFs,
+   decks, images, spreadsheets) go straight to the store under
+   `intake/originals/` via `fulcra file upload` — the mirror is text-only and
+   sync skips that area (see `references/file-layout.md`). Write
+   `intake/brief.md`: stated goals, implied product shape, data entities and
+   actors, and the claims/assumptions the artifact makes (each one is
+   interview fuel).
 2. **interview** — follow `references/interview.md`. Build the prioritized
    topic map in `interview/plan.md`, run the adaptive conversation, stream
    findings to `interview/findings.md`.
@@ -87,8 +108,10 @@ session with `fde-engine resume <slug>` then `fde-engine sync <slug> pull`.
    (riskiest assumptions first + a deployment rehearsal) and the provisional
    production plan. See `references/build-doctrine.md`.
 5. **prototype** — build it in the user's project (never in fulcra-tools),
-   record per-item verify/fail results in `prototype/verification.md`.
-   **User gate on the verification record**: proceed, or loop back.
+   **on real Fulcra data** (discover + reuse existing types, create custom ones
+   for the rest — never simulate). Record per-item verify/fail results in
+   `prototype/verification.md`. **User gate on the verification record**:
+   proceed, or loop back.
 6. **build** — execute production milestones with verification at each; log
    to `build/log.md`.
 7. **retro** — `retro.md`: what repeated, what was missing, which platform

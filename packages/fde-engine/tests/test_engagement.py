@@ -64,6 +64,47 @@ def test_status_folds_meta_artifacts_and_hint():
     assert "interview" in st["next"]  # hint points at the next move
 
 
+# --- Bug #4: next-hint must track artifact completion, not just the phase ---
+
+
+def test_next_hint_says_produce_while_phase_artifacts_incomplete():
+    t = FakeTransport()
+    engagement.init_engagement(t, "x", "X", now=NOW)
+    engagement.set_phase(t, "x", "interview", now=LATER)
+    # interview needs plan.md AND findings.md; write only one
+    t.write("fde/engagements/x/interview/plan.md", "topics")
+    st = engagement.status(t, "x")
+    assert "write interview/findings.md" in st["next"] or "interview/plan.md" in st["next"]
+    # still in "produce" mode — not telling the user to advance yet
+    assert "phase x architecture" not in st["next"]
+
+
+def test_next_hint_says_advance_once_phase_artifacts_complete():
+    t = FakeTransport()
+    engagement.init_engagement(t, "x", "X", now=NOW)
+    engagement.set_phase(t, "x", "interview", now=LATER)
+    t.write("fde/engagements/x/interview/plan.md", "topics")
+    t.write("fde/engagements/x/interview/findings.md", "findings")
+    st = engagement.status(t, "x")
+    # both artifacts present -> advance hint (distinct from the produce hint):
+    # leads with advancing, names the transition command, doesn't re-ask for
+    # artifacts already written.
+    assert "advance to architecture" in st["next"]
+    assert "in place" in st["next"]
+    assert "fde-engine phase <slug> architecture" in st["next"]
+
+
+def test_prototype_complete_hint_surfaces_the_user_gate():
+    t = FakeTransport()
+    engagement.init_engagement(t, "x", "X", now=NOW)
+    for i, ph in enumerate(["interview", "architecture", "plan", "prototype"], start=1):
+        engagement.set_phase(t, "x", ph, now=f"2026-07-09T0{i}:00:00Z")
+    t.write("fde/engagements/x/prototype/verification.md", "1. real-data: PASS")
+    st = engagement.status(t, "x")
+    nxt = st["next"].lower()
+    assert "gate" in nxt or ("build" in nxt and "iterate" in nxt)
+
+
 def test_status_raises_for_missing_engagement():
     with pytest.raises(engagement.EngagementError):
         engagement.status(FakeTransport(), "ghost")

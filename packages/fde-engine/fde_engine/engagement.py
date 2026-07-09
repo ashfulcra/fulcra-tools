@@ -26,14 +26,30 @@ EXPECTED_ARTIFACTS: dict[str, list[str]] = {
     "retro": ["retro.md"],
 }
 
+# Two hint sets, chosen by whether the current phase's expected artifacts exist
+# (see status()). NEXT_HINT = "you still have this phase's work to do";
+# ADVANCE_HINT = "artifacts are in place, here's the move to the next phase".
+# A flat phase-only lookup went stale (bug #4): after writing plan.md it still
+# said "write plan.md", and after recording verification it still said "build
+# the prototype" — the hint has to track artifact state, not just the phase.
 NEXT_HINT: dict[str, str] = {
     "intake": "produce intake/brief.md from the source materials, then `fde-engine phase <slug> interview`",
     "interview": "write interview/plan.md (prioritized topic map), run the adaptive interview into interview/findings.md, then `fde-engine phase <slug> architecture`",
     "architecture": "write architecture.md (capability map + gap register + tenancy decision), get user approval, then `fde-engine phase <slug> plan`",
     "plan": "write plan.md (prototype verification plan + provisional production plan), then `fde-engine phase <slug> prototype`",
-    "prototype": "build the verification prototype, record results in prototype/verification.md, then `fde-engine phase <slug> build` — or back to architecture/plan if findings invalidate them",
+    "prototype": "build the verification prototype on real Fulcra data, record results in prototype/verification.md, then `fde-engine phase <slug> build` — or back to architecture/plan if findings invalidate them",
     "build": "execute production milestones, logging to build/log.md, then `fde-engine phase <slug> retro`",
     "retro": "write retro.md and append repeatable patterns to fde/playbook.md",
+}
+
+ADVANCE_HINT: dict[str, str] = {
+    "intake": "intake/brief.md is in place — advance to interview: `fde-engine phase <slug> interview`",
+    "interview": "interview plan + findings are in place — advance to architecture: `fde-engine phase <slug> architecture`",
+    "architecture": "architecture.md is in place — get the user's approval on it, then advance to plan: `fde-engine phase <slug> plan`",
+    "plan": "plan.md is in place — advance to prototype: `fde-engine phase <slug> prototype`",
+    "prototype": "verification recorded — USER GATE: proceed to build (`fde-engine phase <slug> build`), iterate on the prototype, or stop; loop back to architecture/plan if findings invalidated them",
+    "build": "build/log.md is in place — advance to retro: `fde-engine phase <slug> retro`",
+    "retro": "retro.md is in place — engagement complete; append repeatable patterns to fde/playbook.md",
 }
 
 
@@ -164,14 +180,22 @@ def status(transport, slug: str) -> dict[str, Any]:
     for phase in model.PHASES:
         for rel in EXPECTED_ARTIFACTS[phase]:
             artifacts[rel] = transport.read(remote_path(slug, rel)) is not None
+    current = meta.get("phase", "")
+    # If every artifact this phase is expected to produce already exists, the
+    # user's next move is to advance, not to keep producing — surface the
+    # transition (and, for gated phases, the gate) instead of stale "write X".
+    phase_complete = bool(EXPECTED_ARTIFACTS.get(current)) and all(
+        artifacts.get(rel) for rel in EXPECTED_ARTIFACTS.get(current, [])
+    )
+    hint_set = ADVANCE_HINT if phase_complete else NEXT_HINT
     return {
         "slug": slug,
         "title": meta.get("title", ""),
-        "phase": meta.get("phase", ""),
+        "phase": current,
         "updated_at": meta.get("updated_at", ""),
         "phase_history": list(meta.get("phase_history", [])),
         "artifacts": artifacts,
-        "next": NEXT_HINT.get(meta.get("phase", ""), ""),
+        "next": hint_set.get(current, ""),
     }
 
 
