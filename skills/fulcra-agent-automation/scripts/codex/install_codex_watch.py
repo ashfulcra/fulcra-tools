@@ -8,12 +8,12 @@ adapter mechanics onto the coord engine, in three layers:
     + PreCompact, same entry shape as Claude Code settings.json. Deliberately
     NO Stop hook: Codex Stop fires every turn, and parking the active task on
     every turn would thrash it between active/waiting.
-  * managed scripts — materialized under ``<codex>/fulcra-coord2-hooks/``.
+  * managed scripts — materialized under ``<codex>/fulcra-agent-hooks/``.
     SessionStart emits a bounded resume brief + briefing as additionalContext;
     PreCompact backgrounds ``coord-engine continuity park``. Both degrade
     silently (exit 0) when coord-engine is not on PATH.
-  * app-thread automation — writes the coord2-first ``COORD2_WATCH_PROMPT``
-    to ``<codex>/automations/coord2-watch-<agent-slug>/automation.toml``.
+  * app-thread automation — writes the coord-first ``COORD_WATCH_PROMPT``
+    to ``<codex>/automations/coord-watch-<agent-slug>/automation.toml``.
     This is the durable coord-first replacement for the legacy watch prompt.
     The target thread id is taken from ``--thread-id``, else preserved from
     our existing managed automation; with neither, the automation write is
@@ -27,14 +27,25 @@ host-wake layer. It spawns headless ``codex exec`` sessions with
 security-sensitive surface not shipped in this pass. The existing coord
 listener already covers wake.
 
-COEXISTENCE: the legacy adapter is live on real hosts — managed scripts dir
-``fulcra-coord-hooks`` and automation ids ``fulcra-coord-task-listener-*``.
-This installer keys everything on the DISTINCT marker ``fulcra-coord2-hooks``
-and automation id prefix ``coord2-watch-``; neither marker is a substring of
-the other's, so this installer's dedupe/uninstall can never match — let alone
-modify — a legacy-managed hooks entry, and it only ever unlinks its own
-automation directory. Those legacy names appear in this file only in this
-comment.
+COEXISTENCE + MIGRATION: this installer keys everything on the marker
+``fulcra-agent-hooks`` and automation id prefix ``coord-watch-``. Two other
+generations may exist on a real host:
+
+  * PRE-COORD2 LEGACY (never touched) — managed scripts dir ``fulcra-coord-hooks``
+    and automation ids ``fulcra-coord-task-listener-*``. Neither current marker
+    is a substring of a legacy one (``fulcra-agent-hooks`` vs ``fulcra-coord-hooks``;
+    ``coord-watch-`` vs ``fulcra-coord-task-listener-``) in either direction, so
+    this installer's dedupe/uninstall can never match — let alone modify — a
+    pre-coord2 legacy hooks entry or its automation directory.
+  * COORD2-ERA (migrated in place) — the immediately-prior build of THIS
+    installer used dir ``fulcra-coord2-hooks`` and prefix ``coord2-watch-``.
+    Those old names are recognized (``LEGACY_MANAGED_DIRNAME`` /
+    ``LEGACY_AUTOMATION_ID_PREFIX`` / ``LEGACY_MANAGED_MARKER``) so a re-run
+    converges a coord2-era host to the new names: old hooks-dir removed, old
+    hooks.json entries stripped, old automation dir replaced (its target thread
+    id + created_at preserved). Uninstall removes BOTH generations. Fresh
+    install writes the new names only. The pre-coord2 and coord2-era legacy
+    names appear in this file only as these recognition constants + comments.
 
 CLI:
   python3 install_codex_watch.py <team> <agent>
@@ -56,13 +67,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-MANAGED_DIRNAME = "fulcra-coord2-hooks"
-AUTOMATION_ID_PREFIX = "coord2-watch-"
+MANAGED_DIRNAME = "fulcra-agent-hooks"
+AUTOMATION_ID_PREFIX = "coord-watch-"
+# coord2-era names of THIS installer, recognized for in-place migration only.
+LEGACY_MANAGED_DIRNAME = "fulcra-coord2-hooks"
+LEGACY_AUTOMATION_ID_PREFIX = "coord2-watch-"
 WATCH_INTERVAL_MIN = 5
 # Marker carried once in hooks.json (as a trailing shell comment on the
 # SessionStart command — inert under sh -c) and as the automation prompt's
 # first line, so re-runs converge and audits can grep one string.
-MANAGED_MARKER = "coord2 watch (managed by fulcra-agent-automation/scripts/codex)"
+MANAGED_MARKER = "coord watch (managed by fulcra-agent-automation/scripts/codex)"
+LEGACY_MANAGED_MARKER = "coord2 watch (managed by fulcra-agent-automation/scripts/codex)"
 
 # event name -> (script filename, matcher or None). Deliberately NO Stop.
 _EVENTS: "dict[str, tuple[str, str | None]]" = {
@@ -70,9 +85,9 @@ _EVENTS: "dict[str, tuple[str, str | None]]" = {
     "PreCompact": ("pre-compact.sh", None),
 }
 
-COORD2_WATCH_PROMPT = """\
-[coord2 watch — managed by fulcra-agent-automation/scripts/codex; do not hand-edit]
-You are {agent} on coord2 team {team}. Each tick, in order:
+COORD_WATCH_PROMPT = """\
+[coord watch — managed by fulcra-agent-automation/scripts/codex; do not hand-edit]
+You are {agent} on coord team {team}. Each tick, in order:
 1. coord-engine continuity resume {team} {agent}
 2. coord-engine briefing {team} --agent {agent}     # THE entry fold: identity+role inboxes+needs-me incl pending reviews
 3. For each REVIEW REQUEST (from briefing or inbox): extract its exact slug; do the review;
@@ -92,7 +107,7 @@ You are {agent} on coord2 team {team}. Each tick, in order:
 
 SESSION_START_SH = """\
 #!/bin/bash
-# coord2 SessionStart hook (Codex) — bounded resume brief + briefing context.
+# coord SessionStart hook (Codex) — bounded resume brief + briefing context.
 # Managed by fulcra-agent-automation/scripts/codex/install_codex_watch.py.
 # Output is bounded: an unbounded board dump is a known context-flooding
 # failure. Degrades silently (exit 0) when coord-engine is not on PATH.
@@ -108,7 +123,7 @@ HOOKS_DIR=__HOOKS_DIR__; CODEX_DIR=__CODEX_DIR__
 export FULCRA_COORD_AGENT="$AGENT"
 INPUT="$(cat 2>/dev/null)"
 SESSION_ID="$(printf '%s' "$INPUT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
-# Seed the coord2 watch automation with this app thread's id — only while the
+# Seed the coord watch automation with this app thread's id — only while the
 # managed automation does not exist yet, so a later session (e.g. a headless
 # exec run) can never steal an already-armed watch thread. Backgrounded +
 # silenced so it never blocks or slows session start.
@@ -132,7 +147,7 @@ exit 0
 
 PRE_COMPACT_SH = """\
 #!/bin/bash
-# coord2 park-on-context-loss hook (Codex PreCompact).
+# coord park-on-context-loss hook (Codex PreCompact).
 # Managed by fulcra-agent-automation/scripts/codex/install_codex_watch.py.
 # Backgrounded, never blocks; degrades silently if coord-engine is absent.
 # __TEAM__/__AGENT__ are rendered as shlex.quote'd literals (see session-start),
@@ -154,7 +169,10 @@ def _agent_slug(agent: str) -> str:
 
 
 def _is_managed(cmd: str) -> bool:
-    return MANAGED_DIRNAME in cmd
+    """Recognize a hooks.json command as OURS — current or coord2-era. Both
+    dirnames are distinct non-substrings of the pre-coord2 legacy
+    ``fulcra-coord-hooks``, so a pre-coord2 entry is never matched."""
+    return MANAGED_DIRNAME in cmd or LEGACY_MANAGED_DIRNAME in cmd
 
 
 def _atomic_write(path: Path, text: str, mode: "int | None" = None) -> None:
@@ -212,6 +230,21 @@ def _automation_path(codex_dir: Path, agent: str) -> Path:
     return codex_dir / "automations" / aid / "automation.toml"
 
 
+def _legacy_automation_path(codex_dir: Path, agent: str) -> Path:
+    """coord2-era automation path, recognized for migration/uninstall only."""
+    aid = LEGACY_AUTOMATION_ID_PREFIX + _agent_slug(agent)
+    return codex_dir / "automations" / aid / "automation.toml"
+
+
+def _remove_automation(path: Path) -> None:
+    """Unlink an automation.toml and prune its now-empty id directory."""
+    try:
+        path.unlink()
+        path.parent.rmdir()
+    except OSError:
+        pass
+
+
 def _toml_str(s: str) -> str:
     return json.dumps(s)
 
@@ -240,22 +273,25 @@ def install_automation(team: str, agent: str, codex_dir: Path, *,
     (absent an explicit --thread-id) the existing target thread on re-runs;
     with no thread id at all, defers (SessionStart hook seeds it later)."""
     path = _automation_path(codex_dir, agent)
+    legacy_path = _legacy_automation_path(codex_dir, agent)
     aid = path.parent.name
     plan: dict = {"id": aid, "path": str(path), "deferred": False}
     if uninstall:
-        if not dry_run and path.exists():
-            try:
-                path.unlink()
-                path.parent.rmdir()
-            except OSError:
-                pass
+        # Remove BOTH generations' automation dirs.
+        if not dry_run:
+            _remove_automation(path)
+            _remove_automation(legacy_path)
         plan["removed"] = True
         return plan
 
+    # Preserve created_at + the armed target thread across re-runs. Read from
+    # our current automation if present, else from a coord2-era one (migration)
+    # so an already-armed watch thread is carried over, never re-seeded/stolen.
     existing: dict = {}
-    if path.is_file():
+    src = path if path.is_file() else (legacy_path if legacy_path.is_file() else None)
+    if src is not None:
         try:
-            existing = _parse_simple_toml_fields(path.read_text())
+            existing = _parse_simple_toml_fields(src.read_text())
         except OSError:
             existing = {}
     thread = thread_id or existing.get("target_thread_id") or ""
@@ -268,12 +304,12 @@ def install_automation(team: str, agent: str, codex_dir: Path, *,
     now_ms = int(time.time() * 1000)
     created = existing.get("created_at")
     created_at = created if isinstance(created, int) else now_ms
-    prompt = COORD2_WATCH_PROMPT.format(team=team, agent=agent)
+    prompt = COORD_WATCH_PROMPT.format(team=team, agent=agent)
     body = (
         "version = 1\n"
         f"id = {_toml_str(aid)}\n"
         'kind = "heartbeat"\n'
-        f"name = {_toml_str('coord2 watch (' + agent + ')')}\n"
+        f"name = {_toml_str('coord watch (' + agent + ')')}\n"
         f"prompt = {_toml_str(prompt)}\n"
         'status = "ACTIVE"\n'
         f'rrule = "FREQ=MINUTELY;INTERVAL={WATCH_INTERVAL_MIN}"\n'
@@ -283,9 +319,15 @@ def install_automation(team: str, agent: str, codex_dir: Path, *,
     )
     plan["target_thread_id"] = str(thread)
     plan["would_write"] = body
+    if legacy_path.exists():
+        plan["migrated_from"] = str(legacy_path.parent.name)
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, body)
+        # Migration: drop the coord2-era automation dir now that the new one is
+        # armed with its preserved thread — zero orphans.
+        if legacy_path.resolve() != path.resolve():
+            _remove_automation(legacy_path)
     return plan
 
 
@@ -294,6 +336,7 @@ def install(team: str, agent: str, *, codex_dir: Path,
             dry_run: bool = False) -> dict:
     hooks_path = codex_dir / "hooks.json"
     hooks_dir = codex_dir / MANAGED_DIRNAME
+    legacy_hooks_dir = codex_dir / LEGACY_MANAGED_DIRNAME
     plan: dict = {"hooks_file": str(hooks_path), "hooks_dir": str(hooks_dir),
                   "uninstall": uninstall, "dry_run": dry_run,
                   "events": [], "scripts": []}
@@ -324,11 +367,13 @@ def install(team: str, agent: str, *, codex_dir: Path,
     if dry_run:
         plan["would_write_hooks_json"] = config
         if not uninstall:
-            plan["prompt"] = COORD2_WATCH_PROMPT.format(team=team, agent=agent)
+            plan["prompt"] = COORD_WATCH_PROMPT.format(team=team, agent=agent)
         return plan
 
     if uninstall:
+        # Remove BOTH generations' managed hooks dirs.
         shutil.rmtree(hooks_dir, ignore_errors=True)
+        shutil.rmtree(legacy_hooks_dir, ignore_errors=True)
     else:
         automation_toml = _automation_path(codex_dir, agent)
         # Every value entering rendered shell source is shlex.quote'd (the
@@ -351,6 +396,10 @@ def install(team: str, agent: str, *, codex_dir: Path,
         dest = hooks_dir / "install_codex_watch.py"
         if not (dest.exists() and dest.resolve() == me):
             _atomic_write(dest, me.read_text(), mode=0o755)
+        # Migration: drop the coord2-era managed hooks dir now that the new one
+        # is materialized — zero orphans on a converged host.
+        if legacy_hooks_dir.resolve() != hooks_dir.resolve():
+            shutil.rmtree(legacy_hooks_dir, ignore_errors=True)
 
     if not (uninstall and not hooks_path.exists()):
         hooks_path.parent.mkdir(parents=True, exist_ok=True)

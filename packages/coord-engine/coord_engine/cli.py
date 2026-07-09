@@ -1967,7 +1967,7 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--source", default="/coordination")
     mg.add_argument("--dry-run", action="store_true")
     mg.add_argument("--no-mark", dest="no_mark", action="store_true",
-                    help="rehearsal: don't tag incumbent tasks migrated:coord2")
+                    help="rehearsal: don't tag incumbent tasks migrated:coord")
     mg.add_argument("--include-terminal", action="store_true")
     mg.add_argument("--limit", type=int)
     mg.set_defaults(func=cmd_migrate)

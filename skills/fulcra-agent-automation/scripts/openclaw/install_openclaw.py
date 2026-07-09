@@ -16,16 +16,25 @@ carried a second, shorter marker pair (``<!-- fulcra-coord:begin -->`` /
 fence ported here; the fence ported here is the BOOT/HEARTBEAT prose-merge pair
 (legacy ``openclaw.py`` lines ~75-76).
 
-COEXISTENCE: the legacy adapter is live on real hosts and fences its BOOT.md /
-HEARTBEAT.md block with ``<!-- fulcra-coord:begin ... -->`` /
-``<!-- fulcra-coord:end -->``. This installer uses a DISTINCT coord2 pair,
-``<!-- fulcra-coord2:begin ... -->`` / ``<!-- fulcra-coord2:end -->``. The
-scanner matches marker lines by exact string comparison against the coord
-markers, and ``fulcra-coord2:begin`` is not a substring of
-``fulcra-coord:begin`` (nor vice-versa), so this installer's install/uninstall
-can only ever touch the coord2-fenced region — a workspace carrying the legacy
-fulcra-coord block keeps it untouched until the phase-3 freeze retires it. The
-legacy marker string appears in this file only in this comment.
+COEXISTENCE + MIGRATION: this installer fences its BOOT.md / HEARTBEAT.md block
+with ``<!-- fulcra-agent:begin ... -->`` / ``<!-- fulcra-agent:end -->``. Two
+other generations may exist in a workspace:
+
+  * PRE-COORD2 LEGACY (never touched) — the original adapter fenced with
+    ``<!-- fulcra-coord:begin ... -->`` / ``<!-- fulcra-coord:end -->``. The
+    scanner matches marker lines by EXACT string comparison, and
+    ``fulcra-agent:begin`` is not a substring of ``fulcra-coord:begin`` (nor
+    vice-versa), so a workspace carrying a pre-coord2 block keeps it untouched.
+  * COORD2-ERA (migrated in place) — the immediately-prior build of THIS
+    installer used ``<!-- fulcra-coord2:begin ... -->`` /
+    ``<!-- fulcra-coord2:end -->``. The scanner recognizes that pair too
+    (``_LEGACY_BEGIN`` / ``_LEGACY_END``) and treats a coord2-fenced block as
+    a managed block: a re-install strips it and writes the new fence in its
+    place (user content outside the fence preserved), an uninstall removes it.
+    Integrity is enforced for BOTH generations — an unbalanced marker of either
+    generation, or a block whose BEGIN and END fences are of DIFFERENT
+    generations, aborts with no write. The pre-coord2 and coord2-era marker
+    strings appear in this file only as these recognition constants + comments.
 
 PATH SAFETY (ported posture): the installer only ever writes the two canonical
 workspace basenames (``HEARTBEAT.md``, ``BOOT.md``) directly under the given
@@ -71,17 +80,20 @@ from typing import Any
 
 # Marker block fencing our managed content inside BOOT.md / HEARTBEAT.md so a
 # re-install or uninstall is surgical and never clobbers the user's own boot /
-# heartbeat prose. Renamed from the legacy ``fulcra-coord`` fence to a distinct
-# ``fulcra-coord2`` pair so both can coexist until the freeze (see module doc).
-_BEGIN = "<!-- fulcra-coord2:begin (managed; do not edit between markers) -->"
-_END = "<!-- fulcra-coord2:end -->"
+# heartbeat prose. The current fence is ``fulcra-agent``; the coord2-era
+# ``fulcra-coord2`` pair is recognized for in-place migration only (see module
+# doc). Neither collides with the pre-coord2 ``fulcra-coord`` fence.
+_BEGIN = "<!-- fulcra-agent:begin (managed; do not edit between markers) -->"
+_END = "<!-- fulcra-agent:end -->"
+_LEGACY_BEGIN = "<!-- fulcra-coord2:begin (managed; do not edit between markers) -->"
+_LEGACY_END = "<!-- fulcra-coord2:end -->"
 
 # Block bodies (brief-binding: the canonical watcher tick, OpenClaw voice).
 # {team} / {agent} are the only format fields; the placeholders `<slug>`,
 # `<task>`, `<acct>`, `<tier>`, `<est>`, the `"..."`, and HEARTBEAT_OK are
 # literal prose the agent fills in / emits at run time.
 HEARTBEAT_BLOCK = """\
-On each heartbeat, as {agent} on coord2 team {team}, in order:
+On each heartbeat, as {agent} on coord team {team}, in order:
 1. coord-engine continuity resume {team} {agent}
 2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
 3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
@@ -100,7 +112,7 @@ On each heartbeat, as {agent} on coord2 team {team}, in order:
 """
 
 BOOT_BLOCK = """\
-On boot, as {agent} on coord2 team {team}, before any new work, in order:
+On boot, as {agent} on coord team {team}, before any new work, in order:
 1. coord-engine continuity resume {team} {agent}
 2. coord-engine briefing {team} --agent {agent}   # THE entry fold: identity, role inboxes, needs-me incl pending reviews
 3. For each REVIEW REQUEST (from the briefing or your inbox): extract its exact slug; do the review;
@@ -152,10 +164,25 @@ def _is_marker_line(raw: str, marker: str) -> bool:
     A marker with leading whitespace, trailing text, or embedded mid-line is
     inert prose: it is neither counted for integrity nor spanned for strip.
     The blocks this installer writes always satisfy this shape. Exact string
-    comparison means a legacy ``fulcra-coord`` marker line can never match
-    (distinct strings), so legacy blocks are untouched.
+    comparison means the pre-coord2 ``fulcra-coord`` marker line can never match
+    (distinct strings), so pre-coord2 blocks are untouched.
     """
     return raw.rstrip("\r\n").rstrip() == marker and raw.startswith(marker)
+
+
+def _marker_kind(raw: str) -> "tuple[str, str] | None":
+    """Classify a line as a managed marker: ``(role, generation)`` where role is
+    ``begin``/``end`` and generation is ``new`` (fulcra-agent) or ``legacy``
+    (coord2-era), else None. Both generations are managed; the pre-coord2
+    ``fulcra-coord`` fence classifies as None (distinct strings) so it is inert.
+    """
+    for marker, role, gen in (
+        (_BEGIN, "begin", "new"), (_END, "end", "new"),
+        (_LEGACY_BEGIN, "begin", "legacy"), (_LEGACY_END, "end", "legacy"),
+    ):
+        if _is_marker_line(raw, marker):
+            return role, gen
+    return None
 
 
 def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]":
@@ -163,24 +190,31 @@ def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]"
 
     Returns ``(lines, spans)`` where ``lines`` is ``splitlines(keepends=True)``
     and each span is an inclusive ``(begin_line_idx, end_line_idx)`` of a
-    well-formed coord block. Lines whose stripped form starts with ``` toggle
+    well-formed managed block of EITHER generation (current ``fulcra-agent`` or
+    coord2-era ``fulcra-coord2``). Lines whose stripped form starts with ``` toggle
     code-fence state; marker lines inside a code fence are IGNORED for both
     counting and span matching (finding 2). Raises MarkerIntegrityError on an
-    orphan BEGIN, an END with no open BEGIN, or a nested BEGIN (finding 1) —
-    callers must write NOTHING in that case; manual repair is the only safe
-    path.
+    orphan BEGIN, an END with no open BEGIN, a nested BEGIN (finding 1), or a
+    block whose BEGIN and END fences are of DIFFERENT generations (a mismatched
+    fence that could only arise from corruption/hand-edit) — callers must write
+    NOTHING in that case; manual repair is the only safe path.
     """
     lines = text.splitlines(keepends=True)
     spans: "list[tuple[int, int]]" = []
     in_code_fence = False
     open_begin: "int | None" = None
+    open_gen: "str | None" = None
     for i, raw in enumerate(lines):
         if raw.strip().startswith("```"):
             in_code_fence = not in_code_fence
             continue
         if in_code_fence:
             continue
-        if _is_marker_line(raw, _BEGIN):
+        mk = _marker_kind(raw)
+        if mk is None:
+            continue
+        role, gen = mk
+        if role == "begin":
             if open_begin is not None:
                 raise MarkerIntegrityError(
                     f"{filename}: coord BEGIN marker on line {i + 1} while the "
@@ -188,15 +222,23 @@ def _scan(text: str, filename: str) -> "tuple[list[str], list[tuple[int, int]]]"
                     "(unbalanced markers). Refusing to modify the file; repair "
                     "it manually so every BEGIN has exactly one matching END.")
             open_begin = i
-        elif _is_marker_line(raw, _END):
+            open_gen = gen
+        else:  # role == "end"
             if open_begin is None:
                 raise MarkerIntegrityError(
                     f"{filename}: coord END marker on line {i + 1} with no "
                     "preceding BEGIN (unbalanced markers). Refusing to modify "
                     "the file; repair it manually so every END follows its "
                     "BEGIN.")
+            if gen != open_gen:
+                raise MarkerIntegrityError(
+                    f"{filename}: coord END marker on line {i + 1} closes a "
+                    f"block opened on line {open_begin + 1} with a fence of a "
+                    "DIFFERENT generation (mismatched fulcra-agent/fulcra-coord2 "
+                    "markers). Refusing to modify the file; repair it manually.")
             spans.append((open_begin, i))
             open_begin = None
+            open_gen = None
     if open_begin is not None:
         raise MarkerIntegrityError(
             f"{filename}: orphan coord BEGIN marker on line "

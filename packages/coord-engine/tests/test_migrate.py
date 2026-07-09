@@ -50,7 +50,9 @@ def test_migrate_end_to_end_idempotent_and_marked():
     marked = json.loads(t.store["/coordination/tasks/TASK-X-1.json"])
     assert migrate.MIGRATED_TAG in marked["tags"]
     assert marked["status"] == "abandoned"
-    assert any(e.get("by") == "coord2-migrate" for e in marked.get("events", []))
+    # DATA-COMPAT: new runs WRITE the new marker bytes.
+    assert migrate.MIGRATED_TAG == "migrated:coord"
+    assert any(e.get("by") == "coord-migrate" for e in marked.get("events", []))
     # second run: skip via the tag (and via migrated_from even if tag missing)
     res2 = migrate.migrate(t, "fulcra", now=NOW)
     assert res2["migrated"] == 0 and res2["skipped"] >= 1
@@ -147,6 +149,8 @@ def test_repair_pass_never_clobbers_operator_reopen():
     t = FakeTransport()
     t.put("team/fulcra/task/fix-it.md",
           "---\ntype: Task\ntitle: Fix it\nstatus: active\nmigrated_from: TASK-X-1\n---\n")
+    # DATA-COMPAT: the reopen marker was written by an OLD build (`coord2-migrate`);
+    # recognition must still hold after the rename or we'd re-terminalize an operator reopen.
     reopened = _incumbent("TASK-X-1", "Fix it", status="active",
                           events=[{"at": "x", "type": "abandoned", "by": "coord2-migrate",
                                    "summary": "migrated"}])
@@ -155,6 +159,53 @@ def test_repair_pass_never_clobbers_operator_reopen():
     assert res["repaired"] == 0
     assert any("reopened by operator" in e for e in res["errors"])
     assert json.loads(t.store["/coordination/tasks/TASK-X-1.json"])["status"] == "active"
+
+
+def test_repair_pass_recognizes_new_marker_reopen():
+    # Mirror of the legacy-marker reopen test, proving the NEW `coord-migrate`
+    # bytes are read back as a reopen signal too.
+    t = FakeTransport()
+    t.put("team/fulcra/task/fix-it.md",
+          "---\ntype: Task\ntitle: Fix it\nstatus: active\nmigrated_from: TASK-X-1\n---\n")
+    reopened = _incumbent("TASK-X-1", "Fix it", status="active",
+                          events=[{"at": "x", "type": "abandoned", "by": "coord-migrate",
+                                   "summary": "migrated"}])
+    t.put("/coordination/tasks/TASK-X-1.json", json.dumps(reopened))
+    res = migrate.migrate(t, "fulcra", now=NOW)
+    assert res["repaired"] == 0
+    assert any("reopened by operator" in e for e in res["errors"])
+    assert json.loads(t.store["/coordination/tasks/TASK-X-1.json"])["status"] == "active"
+
+
+def test_migrate_skips_task_tagged_by_old_build():
+    # DATA-COMPAT: a task an OLD build already migrated carries `migrated:coord2`.
+    # It must be recognized and skipped (never re-migrated) after the rename.
+    t = FakeTransport()
+    t.put("/coordination/tasks/TASK-X-1.json",
+          json.dumps(_incumbent("TASK-X-1", "Fix it",
+                                tags=["agent:x", migrate.LEGACY_MIGRATED_TAG])))
+    res = migrate.migrate(t, "fulcra", now=NOW)
+    assert res["migrated"] == 0 and res["skipped"] >= 1
+    # untouched: not re-terminalized, no coord twin written
+    assert "team/fulcra/task/fix-it.md" not in t.store
+    assert json.loads(t.store["/coordination/tasks/TASK-X-1.json"])["status"] == "active"
+
+
+def test_migrate_mixed_store_folds_both_generations():
+    # A store holding one already-migrated (old-tag) task, one already-migrated
+    # (new-tag) task, and one fresh task: only the fresh one migrates; both
+    # generations of marker are recognized as done.
+    t = FakeTransport()
+    t.put("/coordination/tasks/OLD.json",
+          json.dumps(_incumbent("OLD", "Old done", tags=[migrate.LEGACY_MIGRATED_TAG])))
+    t.put("/coordination/tasks/NEW.json",
+          json.dumps(_incumbent("NEW", "New done", tags=[migrate.MIGRATED_TAG])))
+    t.put("/coordination/tasks/FRESH.json", json.dumps(_incumbent("FRESH", "Fresh work")))
+    res = migrate.migrate(t, "fulcra", now=NOW)
+    assert res["migrated"] == 1 and res["skipped"] == 2
+    fresh = json.loads(t.store["/coordination/tasks/FRESH.json"])
+    assert migrate.MIGRATED_TAG in fresh["tags"]                # fresh got the NEW tag
+    assert any(e.get("by") == "coord-migrate" for e in fresh.get("events", []))
 
 
 def test_map_task_preserves_links_and_checklist_in_body():
