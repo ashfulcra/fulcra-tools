@@ -18,6 +18,22 @@ relevant notes, and WRITE durable context back as you learn it.
 each note carries flat frontmatter, agent-owned sections, and an append-only
 `## Log`.
 
+## Where to start — the re-entrancy probes
+
+Before loading anything, probe how far this user already got. Enter at the
+**first row whose probe fails**:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Authed? | `fulcra user-info` | exits 0 and prints valid JSON | [Pick your path](#pick-your-path) — install, then `fulcra auth login` |
+| Vault initialized? | `fulcra-vault map --check` | exits 0 (`MAP/HOT render check passed`); exit 2 naming `/vault/meta.json` means no vault yet | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-vault init` |
+| Content present? | `fulcra-vault read HOT` | non-empty stdout (HOT.md renders notes) | [Pick your path](#pick-your-path) tier-1 write — vault is empty; start writing durable context |
+| Hooks installed? | `grep -q fulcra-vault-hooks ~/.claude/settings.json` (or `~/.codex/hooks.json`) | exits 0 — SessionStart injects `HOT.md` | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-vault install-hooks --platform <claude-code\|codex>` |
+
+First failure wins. Hooks are optional: without them you just `read HOT`
+yourself; everything else works the same. All four pass → `HOT.md` is auto-injected
+at session start; read the relevant notes and write durable context back as you learn it.
+
 ## Pick your path
 
 1. **You can run shell commands** → use the CLI. Setup once:

@@ -13,6 +13,23 @@ The user's preferences and facts live in their Fulcra account as typed,
 decaying signals, compiled into per-platform preference documents. Your job:
 LOAD them at session start, APPLY them, and CAPTURE new ones.
 
+## Where to start — the re-entrancy probes
+
+Before loading anything, probe how far this user already got. Enter at the
+**first row whose probe fails**:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Authed? | `fulcra user-info` | exits 0 and prints valid JSON | [Pick your path](#pick-your-path) — install, then `fulcra auth login` |
+| Onboarded? | `fulcra-prefs compile` | exits 0 (`compiled N keys …`); exit 2 with `not onboarded` means no definition / `prefs/meta.json` yet | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-prefs onboard` |
+| Prefs present? | `fulcra-prefs inject --platform <your-platform>` | non-empty output (a rendered preference block) | [Pick your path](#pick-your-path) tier-1 capture — nothing to load yet; start capturing |
+| Hooks installed? | `grep -q fulcra-prefs-hooks ~/.claude/settings.json` (or `~/.codex/hooks.json`) | exits 0 — a managed SessionStart/capture hook is wired | [Onboarding a new user](#onboarding-a-new-user) — `fulcra-prefs install-hooks --platform <claude-code\|codex>` |
+
+First failure wins. Hooks are optional: a CLI-capable agent runs `inject`/`capture`
+by hand without them, so a hookless-but-onboarded user is fully usable — the last
+row only tells you whether load/capture is automatic. All four pass → `inject` at
+session start already carries their prefs; apply them and capture new ones.
+
 ## Pick your path
 
 1. **You can run shell commands** → use the CLI. Setup once:

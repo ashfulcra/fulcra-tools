@@ -73,6 +73,31 @@ def test_probe_heading_present_in_each_skill():
         )
 
 
+AGENTS_MD = REPO / "AGENTS.md"
+ROUTER_HEADING = "## Where to start"
+
+
+def _router_section() -> str:
+    text = AGENTS_MD.read_text(encoding="utf-8")
+    start = text.index(ROUTER_HEADING)
+    rest = text[start + len(ROUTER_HEADING):]
+    m = re.search(r"\n## ", rest)
+    return rest[: m.start()] if m else rest
+
+
+def test_agents_md_router_present_and_verbs_real():
+    """The root AGENTS.md 'Where to start' router grid must exist and every
+    ``coord-engine <verb>`` probe it names must be a real CLI verb."""
+    section = _router_section()
+    real = _real_verbs()
+    assert {"doctor", "briefing"} <= real, f"verb parse broken — got {sorted(real)}"
+    mentioned = _probe_verbs(section)
+    unknown = {v for v in mentioned if v not in real}
+    assert not unknown, (
+        f"AGENTS.md router invokes coord-engine verb(s) not in cli.py: {sorted(unknown)}"
+    )
+
+
 def test_every_probe_verb_is_a_real_cli_verb():
     real = _real_verbs()
     # sanity: the parse found the CLI's own verbs, so a bug here can't vacuously pass
