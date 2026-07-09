@@ -106,6 +106,25 @@ def test_reconcile_no_pending_when_resolution_off():
     assert annotate.pending_path("r") not in t.store
 
 
+def test_reconcile_empty_diff_does_not_wipe_live_pending():
+    # CRITICAL-1: a reconcile whose diff is empty must NOT overwrite a pending
+    # transition the projection fold is still holding LIVE — i.e. one that has not
+    # landed (absent from the cursor's seen_ids). The deployed
+    # `reconcile && annotate project` topology reconciles every beat; a blind
+    # overwrite with [] here would DROP that moment before projection ever emits it.
+    t = FakeTransport()
+    t.put(annotate.resolution_path("r"), "transitions\n")
+    t.put("team/r/task/a.md", _task_ts("Alpha", "active", "2026-07-09T09:00:00Z"))
+    _run(t)  # first pass: create-a persisted to pending; cursor never advanced
+    pend1 = json.loads(t.store[annotate.pending_path("r")])["transitions"]
+    assert [x["task_id"] for x in pend1] == ["a"]
+    # second pass: task a unchanged -> empty diff. Merge-and-carry keeps the
+    # un-landed create-a (cursor has no seen_ids) rather than wiping to [].
+    _run(t)
+    pend2 = json.loads(t.store[annotate.pending_path("r")])["transitions"]
+    assert [x["task_id"] for x in pend2] == ["a"]
+
+
 def test_reconcile_is_orphan_proof():
     t = FakeTransport()
     prior = {"schema": "coord.teams.summaries.v1", "rows": [

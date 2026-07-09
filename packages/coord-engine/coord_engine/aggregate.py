@@ -222,16 +222,12 @@ def diff_transitions(
     :func:`diff_rows`, categorized identically (creation / status-transition /
     removal by task id). ``ts`` = each row's own ``updated_at`` (frontmatter
     ``timestamp``), normalized to UTC-``Z``. Content-only edits are not a
-    transition (mirrors ``diff_rows``)."""
-    prior = rows_by_id(prior_rows)
-    new = rows_by_id(new_rows)
-    out: list[dict[str, Any]] = []
-    for rid, r in new.items():
-        if rid not in prior:
-            out.append(_transition(r, "create"))
-        elif prior[rid].get("status") != r.get("status"):
-            out.append(_transition(r, "update"))
-    for rid, r in prior.items():
-        if rid not in new:
-            out.append(_transition(r, "deprecate"))
-    return out
+    transition (mirrors ``diff_rows``).
+
+    Folds over the SAME :func:`_categorize` generator ``diff_rows`` does — so the
+    two views cannot drift on WHICH changes count as a transition or in WHAT
+    order; each ``(kind, row, _prior)`` tuple renders here as a structured dict
+    and there as a bullet."""
+    return [
+        _transition(r, kind) for kind, r, _prior in _categorize(prior_rows, new_rows)
+    ]

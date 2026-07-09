@@ -25,9 +25,12 @@ from typing import Any, Optional
 
 from . import aggregate, annotate as annotate_mod, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
+from .log import get_logger
 from .transport import FulcraFileTransport, TransportError
 
 __all__ = ["main"]
+
+_log = get_logger("cli")
 
 
 def _now() -> datetime:
@@ -1850,17 +1853,29 @@ def cmd_annotate_project(args: argparse.Namespace, transport: Any) -> int:
     # the failed ones (that would lose a transition).
     landed_ids = {s.id for s in specs if _emit_projection_spec(s, agent=agent)}
     emitted = len(landed_ids)
+
+    def _persist_cursor(new_cursor: dict) -> None:
+        # A swallowed cursor-write failure is a DUPLICATE vector now that pending
+        # merges-and-carries: the same landed ids stay in pending, and without an
+        # advanced cursor to dedup them the next beat re-emits to the no-dedup
+        # endpoint. Surface it loudly rather than silently drop the write.
+        if not annotate_mod.write_cursor(transport, team, new_cursor):
+            _log.warn("annotate project: cursor write FAILED — landed ids may "
+                      "re-project (duplicate risk)", team=team,
+                      last_ts=new_cursor.get("last_ts"),
+                      seen_ids=len(new_cursor.get("seen_ids") or []))
+
     if not specs or emitted == len(specs):
         # All landed (or none to emit): the fold's cursor already folds every
         # emitted id into seen_ids and advances the watermark — persist it.
-        annotate_mod.write_cursor(transport, team, full_cursor)
+        _persist_cursor(full_cursor)
     elif emitted:
         # Partial success: fold ONLY the landed ids into the cursor and hold the
         # watermark at the oldest failed spec, so the next heartbeat re-projects
         # exactly the un-landed specs and nothing else.
         partial = annotate_mod.cursor_for_landed(
             pending, cursor, landed_ids, team=team, now=now)
-        annotate_mod.write_cursor(transport, team, partial)
+        _persist_cursor(partial)
     # else (emitted == 0 with specs present): total writer failure — leave the
     # cursor untouched so every spec retries next run (over-capture beats loss).
     print(f"projected {emitted}/{len(specs)} transition(s) for team/{team}")

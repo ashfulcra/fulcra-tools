@@ -567,13 +567,57 @@ def read_pending(transport: Any, team: str) -> list[Any]:
     return data if isinstance(data, list) else []
 
 
+def _pending_dedup_id(team: str, row: Any) -> Optional[str]:
+    """The projection id a transition ROW folds to — the SAME
+    ``_stable_id(team, task_id, kind, ts)`` the fold computes, via the SAME
+    ``_parse_transition`` normalization. Used to reconcile prior pending rows
+    against the cursor's ``seen_ids`` in the merge. ``None`` for a malformed row
+    (the fold would skip it too, so carrying it is pointless). Never raises."""
+    txn = _parse_transition(row)
+    if txn is None:
+        return None
+    return _stable_id(team, txn["task_id"], txn["kind"], txn["ts"])
+
+
 def write_pending(transport: Any, team: str, transitions: list[Any], *, now: str) -> bool:
-    """Persist this reconcile pass's structured transitions for a later
-    ``annotate project`` (which runs as a SEPARATE CLI invocation on the
-    heartbeat, so the transitions must round-trip through the bus). Never raises."""
+    """Persist structured transitions for a later ``annotate project`` (a SEPARATE
+    CLI invocation on the heartbeat, so transitions must round-trip through the
+    bus). MERGE-AND-CARRY, never a blind overwrite: the deployed topology runs
+    ``reconcile && annotate project`` every beat, so a reconcile that fires
+    between two projections must NOT wipe a transition the fold is still holding
+    live (an un-landed row after a partial/failed writer pass). Both loss
+    sequences the review flagged are closed here:
+
+      * single-host — a new transition forces a full pass whose diff is just
+        ``[new]``; the prior failed row would vanish under a blind overwrite;
+      * empty-diff — a pass that observes no change diffs ``[]``; a blind
+        overwrite would replace a live pending with ``[]``.
+
+    So: union this pass's ``transitions`` with prior pending rows whose id is NOT
+    in the cursor's ``seen_ids`` (i.e. not yet landed) and not already superseded
+    by a row in this pass. NEVER replace a non-empty pending with an empty set —
+    if the merge is empty but prior pending was not, leave it be. Carried stale
+    rows are safe: the cursor dedups landed ids, the fold's skew boundary
+    suppresses ancient ones, and re-reading an all-landed pending is a proven
+    no-op. Never raises."""
     try:
-        doc = {"schema": _PENDING_SCHEMA, "generated_at": now,
-               "transitions": list(transitions)}
+        new_rows = list(transitions)
+        prior = read_pending(transport, team)
+        seen = set((read_cursor(transport, team) or {}).get("seen_ids") or [])
+        new_ids = {i for i in (_pending_dedup_id(team, r) for r in new_rows) if i}
+        carried = []
+        for row in prior:
+            rid = _pending_dedup_id(team, row)
+            if rid is None or rid in seen or rid in new_ids:
+                continue  # malformed / already landed / superseded this pass
+            carried.append(row)
+        merged = new_rows + carried
+        if not merged and prior:
+            # Nothing new and everything prior has landed (or was malformed):
+            # do NOT wipe a non-empty pending — a re-read of it is a no-op, and
+            # not-overwriting closes the empty-diff drop unconditionally.
+            return True
+        doc = {"schema": _PENDING_SCHEMA, "generated_at": now, "transitions": merged}
         return bool(transport.write(pending_path(team), json.dumps(doc, indent=2)))
     except Exception:
         return False

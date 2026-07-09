@@ -1084,6 +1084,16 @@ def emit_projection_annotation(
     symmetry but unused — a projected moment is host-agnostic. Returns True only
     when a record was actually written on THIS call."""
     try:
+        # Tripwire: projection is the SUCCESSOR to the in-process lifecycle writer,
+        # and both emit Agent-Tasks moments for the same transition to a no-dedup
+        # endpoint. If the legacy writer is enabled here, this call is the exact
+        # point where both would be live and the timeline double-writes — surface
+        # it loudly rather than let the duplication go silent.
+        if _mode() == "on":
+            logger.warning(
+                "annotations: projection is emitting while the legacy in-process "
+                "writer is ON (FULCRA_COORD_ANNOTATIONS) — both write the same "
+                "transition to a no-dedup endpoint; disable the legacy writer")
         payload: dict[str, Any] = {
             "cli_tags": [t for t in (tags or []) if t],
             "desc": note or "",

@@ -410,6 +410,39 @@ def test_cli_project_partial_failure_advances_per_spec(capsys, monkeypatch):
     assert [s.task_id for s in seen2] == ["b"]          # a NOT re-emitted
 
 
+def test_cli_project_partial_failure_survives_intervening_reconcile(capsys, monkeypatch):
+    # THE MASKED CASE (CRITICAL-1): the deployed topology runs
+    # `reconcile && annotate project` every beat, so a reconcile fires BETWEEN a
+    # failed projection and its retry. That reconcile diffs empty (statuses
+    # unchanged) — a BLIND pending overwrite would wipe the un-landed spec b (a
+    # DROPPED moment). The prior partial-failure test re-ran `project` with NO
+    # intervening reconcile, so it never exercised this. Merge-and-carry keeps b.
+    t = FakeTransport()
+    t.put(annotate.resolution_path("r"), "transitions\n")
+    t.put("team/r/task/a.md", _task_ts("Alpha", "active", "2026-07-09T09:00:00Z"))
+    t.put("team/r/task/b.md", _task_ts("Beta", "active", "2026-07-09T09:05:00Z"))
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+
+    # pass 1: writer lands a, FAILS b -> partial cursor (a dedup'd, b held live)
+    def land_all_but_b(spec, *, agent):
+        return spec.task_id != "b"
+    monkeypatch.setattr(cli, "_emit_projection_spec", land_all_but_b)
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projected 1/2" in capsys.readouterr().out
+
+    # INTERVENING reconcile: a and b unchanged -> diff is []. Old code overwrote
+    # pending with [] and lost b; merge-and-carry drops the landed a but carries b.
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+    pend = json.loads(t.store[annotate.pending_path("r")])["transitions"]
+    assert [x["task_id"] for x in pend] == ["b"]
+
+    # pass 2 (writer works): ONLY b re-projects — a is not duplicated, b not lost.
+    seen2 = _stub_writer(monkeypatch, ok=True)
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projected 1/1" in capsys.readouterr().out
+    assert [s.task_id for s in seen2] == ["b"]
+
+
 def test_cli_project_writer_absent_degrades_exit_0(capsys, monkeypatch):
     t = FakeTransport()
     seen = _reconcile_then(t, monkeypatch, ok=False)  # writer returns False

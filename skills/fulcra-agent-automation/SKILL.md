@@ -69,9 +69,16 @@ coord-engine annotate status <team>                    # resolution level + curs
 ```
 The level is stored on the bus, so every host's heartbeat reads the same setting. With projection on,
 `install-heartbeat.sh` runs `coord-engine annotate project <team>` immediately after each `reconcile` —
-it consumes reconcile's just-written `log.md`, emits one annotation per new transition (deterministic
+it consumes the structured `pending.json` transitions reconcile just wrote (the `log.md` bullets can't
+feed the fold — they carry no task_id/kind/ts), emits one annotation per new transition (deterministic
 id + cursor, so a re-run or mid-run crash never double-writes), and advances the cursor. Off or absent
 ⇒ the step no-ops.
+
+The cursor's deterministic id dedups within a host, but the endpoint has no server-side dedup: if two
+hosts run `reconcile && annotate project` in the same window, both read the same cursor and pending and
+both emit, duplicating each transition on the timeline. Until a bus lease serializes projection
+(follow-up), run projection from a **single** host — keep `annotate resolution transitions` scoped to
+one heartbeat and leave the others at `off`.
 
 `resolution` is a **level axis, not a boolean**: `{off, transitions}` are live today; finer levels (tool
 calls, I/O, …) are additive later without a config-shape change. Any other value is rejected.
