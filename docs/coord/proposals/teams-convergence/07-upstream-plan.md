@@ -33,7 +33,7 @@ Three options, in recommended adoption order:
 1. **`fulcradynamics/coord-engine` repo + PyPI** under Fulcra's org. This is the preferred initial ask:
    it keeps the tool/skill separation, gives the official skills a Fulcra-owned dependency, and lets API
    reviewers inspect a stdlib-only CLI without also accepting a fulcra-api surface-area change.
-2. **Tagged coord2 engine as bootstrap** (`ashfulcra/coord2` tag, already proven at v1.x). This is the
+2. **Tagged coord engine as bootstrap** (`ashfulcra/coord2` tag, already proven at v1.x). This is the
    lowest-friction bridge while Fulcra decides ownership. It must be explicitly temporary and pinned by
    tag/commit in docs so upstream skills do not drift against `main`.
 3. **Fold into `fulcra-api`** as a command group (`fulcra-api team …`). Best end-state: one tool, one
@@ -75,7 +75,7 @@ Each has a concrete incident/measurement behind it from this build:
    upstream (setup script already installs by copy — repointing the clone URL is the whole change).
 
 ## Standalone posture if Fulcra stalls
-If Fulcra does not accept or host the work within ~3 months, coord2 remains a credible standalone package
+If Fulcra does not accept or host the work within ~3 months, coord remains a credible standalone package
 rather than an indefinitely personal experiment:
 - Release cadence: monthly patch releases while active, immediate patch for data-loss/security bugs, and
   a tagged minor release whenever the OKF/task/review schema changes.
@@ -86,7 +86,7 @@ rather than an indefinitely personal experiment:
 - Ownership: Ash owns product direction; automation agents can prepare fixes, but security and
   data-loss releases require explicit operator review plus the same independent bus review before merge.
 - Exit criteria: if Fulcra accepts wave 1 or hosts the engine, standalone docs switch to "development
-  mirror"; if not, coord2 keeps tagged releases and compatibility notes until the bus stack is replaced.
+  mirror"; if not, coord keeps tagged releases and compatibility notes until the bus stack is replaced.
 
 ## Road not taken — one bundled skill
 One `fulcra-agent-teams-v2` or `fulcra-agent-teams-pro` package would improve one-shot install and make
