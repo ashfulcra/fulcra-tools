@@ -112,6 +112,13 @@ skills. Subagent-only work stays OFF the bus.
   --task-class <tag> --outcome clean|rework|escalated`. That ledger feeds the
   headroom fold and demotes a model that keeps failing a task class. Rubric and
   routing procedure: [`fulcra-agent-atc`](skills/fulcra-agent-atc/SKILL.md).
+- **Timeline projection (opt-in).** `coord-engine annotate resolution <team>
+  transitions` (default `off`) makes the heartbeat project task transitions onto
+  your Fulcra timeline model-free, right after each reconcile; `annotate status
+  <team>` shows the level + cursor. It is the successor to the legacy
+  `fulcra-coord annotations` writer — enabling it requires that writer stay off
+  (see [Fulcra platform surface](#fulcra-platform-surface--records)). Setup:
+  [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
 
 ## Working tree
 
@@ -184,8 +191,11 @@ not the repo** (the CLI ships ahead of its git main on PyPI).
   primitives doc gets a full re-verification, not a patch — flag it on the bus.
 - **The legacy `fulcra-coord annotations` writer must stay OFF on every host.**
   It defaults to off (inert); leave it there — an accidental `on` has caused
-  duplicate-record proliferation. The writer is being ported to coord with a
-  fail-closed fix; until that ships, do not enable it.
+  duplicate-record proliferation. Its successor is the heartbeat **projection
+  fold** (`coord-engine annotate resolution <team> transitions`); the two write
+  the same Agent-Tasks moments to a no-dedup endpoint, so enabling projection
+  requires this writer stay off — use projection for timeline annotations, never
+  this writer.
 
 ## The daemon (Collect)
 

@@ -55,6 +55,34 @@ It runs `coord-engine reconcile <team>`; needs `coord-engine` + an authenticated
 `fulcra-agent-teams`' automation section) that runs `uv tool run coord-engine reconcile <team>` on your
 chosen cadence. Prefer a longer interval or an external loop over waking the model every tick.
 
+### Projection — task transitions onto your Fulcra timeline (model-free)
+The heartbeat can project each task transition (create / pickup / update / complete) onto your Fulcra
+timeline as an Agent-Tasks annotation, mechanically, spending no model tokens — and it annotates
+transitions made by *any* agent or harness, not just this host. Reconcile already computes the
+transitions; projection folds them onto the timeline right after.
+
+Opt in **per team** (default is `off`):
+```bash
+coord-engine annotate resolution <team> transitions   # turn projection on for this team
+coord-engine annotate resolution <team> off           # turn it back off
+coord-engine annotate status <team>                    # resolution level + cursor position
+```
+The level is stored on the bus, so every host's heartbeat reads the same setting. With projection on,
+`install-heartbeat.sh` runs `coord-engine annotate project <team>` immediately after each `reconcile` —
+it consumes reconcile's just-written `log.md`, emits one annotation per new transition (deterministic
+id + cursor, so a re-run or mid-run crash never double-writes), and advances the cursor. Off or absent
+⇒ the step no-ops.
+
+`resolution` is a **level axis, not a boolean**: `{off, transitions}` are live today; finer levels (tool
+calls, I/O, …) are additive later without a config-shape change. Any other value is rejected.
+
+**Projection is the successor to the in-process `fulcra-coord annotations` writer.** Both emit
+Agent-Tasks moments for the same transition to a no-dedup endpoint, so running both double-writes the
+timeline. Enabling projection therefore requires the legacy annotations writer stay off — which the
+standing rule ([`AGENTS.md` → Fulcra platform surface](../../AGENTS.md)) already mandates on every host.
+Projection is the sanctioned replacement; do not switch the legacy writer back on to get timeline
+annotations — turn projection on instead.
+
 ## 2. Listener — inbox notifications + consent-gated wake (A8)
 Schedule an inbox check so directed work reaches you without polling:
 ```bash
