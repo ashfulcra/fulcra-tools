@@ -1047,6 +1047,56 @@ def emit_needs_user_annotation(
         return False
 
 
+#: Provenance namespace for coord-*projected* moments — a transition annotated
+#: mechanically from the reconcile heartbeat (model-free, platform-agnostic)
+#: rather than by an in-process lifecycle writer. Mirrors
+#: ``coord_engine.annotate.SOURCE_MARKER``; the record's first source lands under
+#: this namespace (``_write_http`` appends a per-record uuid).
+PROJECTION_SOURCE = "com.fulcradynamics.fulcra-coord.projection"
+
+
+def emit_projection_annotation(
+    *,
+    note: str,
+    tags: list[str],
+    recorded_at: Optional[str],
+    agent: Optional[str] = None,
+    backend: Optional[list[str]] = None,
+) -> bool:
+    """Emit ONE coord-*projected* timeline annotation. BEST-EFFORT, NEVER RAISES.
+
+    This is the writer seam for coord-engine's projection fold (an
+    ``AnnotationSpec`` -> a record). Unlike :func:`emit_lifecycle_annotation` it
+    is deliberately NOT gated by the machine-local :func:`_mode` config and does
+    NOT restrict the transition kind, because projection carries its OWN opt-in
+    (the team's bus ``annotate resolution`` level) and its OWN idempotency (the
+    projection cursor + ``seen_ids``), both owned by coord-engine's heartbeat —
+    the whole point is to annotate a transition made by ANY host/harness, not
+    only one running the in-process writer.
+
+    It REUSES the same hardened typed-record path as the lifecycle writer
+    (``_write_http`` -> ``_post_typed_moment_record``): fail-closed definition
+    resolution, closed-schema-safe note folding, stdlib ``urllib`` POST. It does
+    NOT open a second POST path. ``note`` is the already-composed one-line
+    summary (title/kind/assignee/next-action folded in — ``title`` is not a
+    served key); ``tags`` are the bare tag NAMES (e.g. ``[agent-tasks, update]``);
+    ``recorded_at`` is the transition ts. ``agent`` is accepted for signature
+    symmetry but unused — a projected moment is host-agnostic. Returns True only
+    when a record was actually written on THIS call."""
+    try:
+        payload: dict[str, Any] = {
+            "cli_tags": [t for t in (tags or []) if t],
+            "desc": note or "",
+            # lifecycle "projection" -> sources[0] under PROJECTION_SOURCE
+            "lifecycle": "projection",
+            "recorded_at": recorded_at,
+        }
+        return bool(_write_http(payload, backend=backend))
+    except Exception:
+        logger.debug("annotations: emit_projection failed (best-effort)", exc_info=True)
+        return False
+
+
 def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
                            backend: Optional[list[str]] = None) -> bool:
     """Emit ONE operator-digest moment on the ``Agent Tasks — Digest`` track.

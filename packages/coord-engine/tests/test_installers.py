@@ -95,7 +95,10 @@ class TestHeartbeatBothPlatforms:
             assert pl["Label"] == "com.fulcra.coord-engine.heartbeat.teamx"  # label == filename stem
             assert pl["StartInterval"] == 15 * 60
             args = [str(a) for a in pl["ProgramArguments"]]
-            assert args[-2:] == ["reconcile", "teamx"]
+            # heartbeat chains reconcile + `annotate project` via /bin/sh -c so a
+            # team opted into projection lands its transitions on the timeline.
+            assert args[:2] == ["/bin/sh", "-c"]
+            assert "reconcile teamx" in args[-1] and "annotate project teamx" in args[-1]
             # the hardening the script exists for: pinned HOME + shims-first PATH
             envd = pl["EnvironmentVariables"]
             assert envd["HOME"] == str(env["home"])
@@ -105,7 +108,7 @@ class TestHeartbeatBothPlatforms:
         else:
             lines = _cron_lines(env)
             assert len(lines) == 1
-            assert "reconcile teamx" in lines[0]
+            assert "reconcile teamx" in lines[0] and "annotate project teamx" in lines[0]
             assert lines[0].startswith("*/15 ")
             assert "# com.fulcra.coord-engine.heartbeat.teamx" in lines[0]
 

@@ -74,6 +74,7 @@ Stdlib-only (plus the intra-package skew constant); folds pure; never crashes.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -397,3 +398,114 @@ def project(
     if kept_ts:
         new_cursor["seen_ts"] = kept_ts
     return specs, new_cursor
+
+
+# ---------------------------------------------------------------------------
+# Bus-persisted config + cursor + pending transitions (Task 2 seam)
+# ---------------------------------------------------------------------------
+#
+# The pure fold above is I/O-free. These helpers are the thin, never-raising
+# transport seam the CLI (`annotate resolution/status/project`) and the reconcile
+# heartbeat share. They live on the BUS (not local disk) on purpose — per Ash's
+# binding decision the RESOLUTION level is stored on the team's store so ANY
+# host's heartbeat reads the same opt-in, unlike the writer's machine-local
+# on/off config. All take a duck-typed transport (``read``/``write``) and
+# tolerate absent/garbage state (a corrupt cursor never wedges the heartbeat).
+
+#: The resolution axis is a LEVEL string, not a boolean — future levels
+#: (tools / io / reasoning ...) are additive. Today exactly these two are live.
+LEVELS = ("off", "transitions")
+
+#: Levels that actually project. ``off`` and absent both mean "no projection".
+LIVE_PROJECTING = frozenset({"transitions"})
+
+#: Schema tag on the persisted pending-transitions artifact.
+_PENDING_SCHEMA = "coord.teams.annotate.pending.v1"
+
+
+def _annotate_prefix(team: str) -> str:
+    return f"team/{team}/_coord/annotate/"
+
+
+def resolution_path(team: str) -> str:
+    return _annotate_prefix(team) + "resolution"
+
+
+def cursor_path(team: str) -> str:
+    return _annotate_prefix(team) + "cursor.json"
+
+
+def pending_path(team: str) -> str:
+    return _annotate_prefix(team) + "pending.json"
+
+
+def read_resolution(transport: Any, team: str) -> str:
+    """The team's projection resolution level from the bus, or ``"off"`` when
+    absent/unreadable/unknown. Mirrors the writer's plain-text config posture.
+    Never raises."""
+    try:
+        raw = transport.read(resolution_path(team))
+    except Exception:
+        return "off"
+    if not raw:
+        return "off"
+    level = str(raw).strip()
+    return level if level in LEVELS else "off"
+
+
+def write_resolution(transport: Any, team: str, level: str) -> bool:
+    """Persist the resolution ``level`` to the bus (plain text). Never raises."""
+    try:
+        return bool(transport.write(resolution_path(team), level + "\n"))
+    except Exception:
+        return False
+
+
+def read_cursor(transport: Any, team: str) -> dict[str, Any]:
+    """The persisted projection cursor, or a fresh cursor when absent/garbage.
+    (The fold's ``_normalize_cursor`` is the second line of defense.) Never raises."""
+    fresh = {"last_ts": None, "seen_ids": [], "seen_ts": {}}
+    try:
+        raw = transport.read(cursor_path(team))
+        if not raw:
+            return fresh
+        data = json.loads(raw)
+    except Exception:
+        return fresh
+    return data if isinstance(data, dict) else fresh
+
+
+def write_cursor(transport: Any, team: str, cursor: dict[str, Any]) -> bool:
+    """Persist the advanced cursor to the bus (JSON). Never raises."""
+    try:
+        return bool(transport.write(cursor_path(team), json.dumps(cursor, indent=2)))
+    except Exception:
+        return False
+
+
+def read_pending(transport: Any, team: str) -> list[Any]:
+    """The structured transitions reconcile last persisted for projection, or
+    ``[]`` when absent/garbage. Never raises."""
+    try:
+        raw = transport.read(pending_path(team))
+        if not raw:
+            return []
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        txns = data.get("transitions")
+        return txns if isinstance(txns, list) else []
+    return data if isinstance(data, list) else []
+
+
+def write_pending(transport: Any, team: str, transitions: list[Any], *, now: str) -> bool:
+    """Persist this reconcile pass's structured transitions for a later
+    ``annotate project`` (which runs as a SEPARATE CLI invocation on the
+    heartbeat, so the transitions must round-trip through the bus). Never raises."""
+    try:
+        doc = {"schema": _PENDING_SCHEMA, "generated_at": now,
+               "transitions": list(transitions)}
+        return bool(transport.write(pending_path(team), json.dumps(doc, indent=2)))
+    except Exception:
+        return False

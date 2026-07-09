@@ -8,8 +8,11 @@ must never re-emit a transition already projected. Everything is pure + stdlib.
 
 from __future__ import annotations
 
-from coord_engine import annotate
+import json
+
+from coord_engine import annotate, cli
 from coord_engine.annotate import AnnotationSpec, project
+from coord_engine_test_helpers import FakeTransport
 
 
 TEAM = "demo"
@@ -243,3 +246,142 @@ def test_generator_transitions_are_consumed_not_treated_as_empty():
     gen = (_txn(f"T-{i}", "update", f"2026-07-09T09:0{i}:00Z") for i in range(3))
     specs, _ = project(gen, _fresh_cursor(), team=TEAM, now=NOW)
     assert len(specs) == 3
+
+
+# ===========================================================================
+# CLI paths: resolution gate + project (end-to-end idempotency) + status
+# ===========================================================================
+
+def _task_ts(title, status, ts):
+    return (f"---\ntype: Task\ntitle: {title}\nstatus: {status}\n"
+            f"timestamp: {ts}\n---\nbody")
+
+
+def _stub_writer(monkeypatch, *, ok=True):
+    """Replace the real fulcra_common writer seam with a recorder. Returns the
+    list of AnnotationSpecs the CLI tried to emit."""
+    seen = []
+    def fake(spec, *, agent):
+        seen.append(spec)
+        return ok
+    monkeypatch.setattr(cli, "_emit_projection_spec", fake)
+    return seen
+
+
+# --- resolution config axis (validated; stored on the bus) ------------------
+
+def test_cli_resolution_sets_level_and_status_reads_it(capsys):
+    t = FakeTransport()
+    assert cli.main(["annotate", "resolution", "r", "transitions"], transport=t) == 0
+    assert annotate.read_resolution(t, "r") == "transitions"
+    assert cli.main(["annotate", "status", "r"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "resolution=transitions" in out and "last_ts=(none)" in out
+
+
+def test_cli_resolution_unknown_level_exits_2_and_writes_nothing(capsys):
+    t = FakeTransport()
+    assert cli.main(["annotate", "resolution", "r", "verbose"], transport=t) == 2
+    err = capsys.readouterr().err
+    assert "unknown resolution; known: off, transitions" in err
+    assert annotate.resolution_path("r") not in t.store  # rejected before any write
+
+
+def test_cli_resolution_off_is_accepted(capsys):
+    t = FakeTransport()
+    assert cli.main(["annotate", "resolution", "r", "off"], transport=t) == 0
+    assert annotate.read_resolution(t, "r") == "off"
+
+
+# --- project gate: off / absent -> refuse, exit 0, zero writes --------------
+
+def test_cli_project_refuses_when_resolution_absent(capsys, monkeypatch):
+    t = FakeTransport()
+    seen = _stub_writer(monkeypatch)
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projection off" in capsys.readouterr().out
+    assert seen == []                                   # nothing emitted
+    assert annotate.cursor_path("r") not in t.store     # cursor untouched
+
+
+def test_cli_project_refuses_when_resolution_off(capsys, monkeypatch):
+    t = FakeTransport()
+    t.put(annotate.resolution_path("r"), "off\n")
+    seen = _stub_writer(monkeypatch)
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert seen == []
+
+
+# --- end-to-end idempotency THROUGH the CLI (real fold + stubbed writer) -----
+
+def _reconcile_then(t, monkeypatch, *, ok=True):
+    """Opt in, seed a task, reconcile (writes pending), stub the writer."""
+    t.put(annotate.resolution_path("r"), "transitions\n")
+    t.put("team/r/task/a.md", _task_ts("Alpha", "active", "2026-07-09T09:00:00Z"))
+    assert cli.main(["reconcile", "r"], transport=t) == 0
+    return _stub_writer(monkeypatch, ok=ok)
+
+
+def test_cli_project_emits_once_then_rerun_emits_zero(capsys, monkeypatch):
+    t = FakeTransport()
+    seen = _reconcile_then(t, monkeypatch)
+    # first project: the creation transition lands once
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projected 1/1" in capsys.readouterr().out
+    assert [s.task_id for s in seen] == ["a"]
+    assert annotate.cursor_path("r") in t.store   # cursor advanced (all emitted)
+    # re-run over the SAME pending + advanced cursor: zero new emits (idempotency
+    # against the no-dedup endpoint, proven end-to-end through the CLI)
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projected 0/0" in capsys.readouterr().out
+    assert [s.task_id for s in seen] == ["a"]      # writer NOT called again
+
+
+def test_cli_project_cursor_round_trips(monkeypatch):
+    t = FakeTransport()
+    _reconcile_then(t, monkeypatch)
+    cli.main(["annotate", "project", "r"], transport=t)
+    cur = json.loads(t.store[annotate.cursor_path("r")])
+    assert cur["last_ts"] == "2026-07-09T09:00:00Z"
+    assert len(cur["seen_ids"]) == 1
+
+
+# --- writer absent -> degrade to exit 0, cursor NOT advanced (retry later) --
+
+def test_cli_project_writer_absent_degrades_exit_0(capsys, monkeypatch):
+    t = FakeTransport()
+    seen = _reconcile_then(t, monkeypatch, ok=False)  # writer returns False
+    assert cli.main(["annotate", "project", "r"], transport=t) == 0
+    assert "projected 0/1" in capsys.readouterr().out
+    assert seen and seen[0].task_id == "a"            # it TRIED to emit
+    # cursor left unadvanced so a later run (working writer) still projects it
+    assert annotate.cursor_path("r") not in t.store
+
+
+def test_cli_project_missing_fulcra_common_is_not_fatal(monkeypatch):
+    # the real seam: fulcra_common may be entirely absent on a stdlib-only host.
+    # _emit_projection_spec must swallow the ImportError -> False, exit 0.
+    import builtins
+    real_import = builtins.__import__
+    def blocked(name, *a, **k):
+        if name.startswith("fulcra_common"):
+            raise ImportError("no fulcra_common on this host")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", blocked)
+
+    class _Spec:
+        note = "x"; tags = ["agent-tasks", "create"]; ts = "2026-07-09T09:00:00Z"
+    assert cli._emit_projection_spec(_Spec(), agent="h") is False
+
+
+def test_cli_status_json_reports_cursor(capsys, monkeypatch):
+    t = FakeTransport()
+    _reconcile_then(t, monkeypatch)
+    cli.main(["annotate", "project", "r"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["annotate", "status", "r", "--json"], transport=t) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resolution"] == "transitions"
+    assert payload["projecting"] is True
+    assert payload["last_ts"] == "2026-07-09T09:00:00Z"
+    assert payload["seen_ids"] == 1

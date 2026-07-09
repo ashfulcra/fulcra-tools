@@ -496,3 +496,53 @@ def test_integration_real_write_and_read():
         capture_output=True, text=True, timeout=60,
     )
     assert "integration test" in out.stdout
+
+
+# ---------------------------------------------------------------------------
+# emit_projection_annotation — the coord-engine projection seam
+# ---------------------------------------------------------------------------
+
+def test_projection_emit_posts_note_tags_recorded_at_and_source(monkeypatch):
+    _stub_cli(monkeypatch, catalog_lines=[_existing_def_row(uuid="def-x")])
+    router = _install_router(monkeypatch)
+
+    assert ann.emit_projection_annotation(
+        note="update: Fix widget · assignee: claude:s",
+        tags=["agent-tasks", "update"],
+        recorded_at="2026-07-09T09:00:00Z",
+    ) is True
+
+    rec = json.loads(router.posts()[0][2].decode().strip())
+    # served-set discipline: no stray top-level keys; note carries the summary
+    assert set(rec) <= {"note", "recorded_at", "tags", "sources", "id"}
+    assert rec["note"] == "update: Fix widget · assignee: claude:s"
+    assert rec["recorded_at"] == "2026-07-09T09:00:00Z"
+    # tags resolved from the bare names via the CLI stub
+    assert rec["tags"] == ["tag-agent-tasks", "tag-update"]
+    # provenance: the projection namespace + the resolved def uuid both present
+    assert any(s.startswith(ann.PROJECTION_SOURCE + ".") for s in rec["sources"])
+    assert "com.fulcradynamics.annotation.def-x" in rec["sources"]
+
+
+def test_projection_emit_not_gated_by_local_mode(monkeypatch):
+    # projection has its OWN opt-in (bus resolution) + its OWN dedup (cursor), so
+    # it must NOT be suppressed by the machine-local annotations on/off config —
+    # unlike emit_lifecycle_annotation.
+    monkeypatch.setenv("FULCRA_COORD_ANNOTATIONS", "off")
+    _stub_cli(monkeypatch, catalog_lines=[_existing_def_row()])
+    router = _install_router(monkeypatch)
+
+    assert ann.emit_projection_annotation(
+        note="create: Alpha", tags=["agent-tasks", "create"],
+        recorded_at="2026-07-09T09:00:00Z") is True
+    assert len(router.posts()) == 1
+
+
+def test_projection_emit_fail_closed_on_lookup_error(monkeypatch):
+    # a catalog LOOKUP ERROR must refuse (no create, no post) -> False, never raise
+    _stub_cli(monkeypatch, catalog_lines=None)
+    router = _install_router(monkeypatch)
+    assert ann.emit_projection_annotation(
+        note="create: Alpha", tags=["agent-tasks", "create"],
+        recorded_at="2026-07-09T09:00:00Z") is False
+    assert router.posts() == []

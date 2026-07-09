@@ -384,6 +384,19 @@ def reconcile(
         ):
             warnings.append("log.md write failed")
 
+    # --- structured transitions for the projection fold (ADDITIVE; the bullet
+    # strings + log.md above are untouched). Persist this pass's transitions to
+    # the bus so a SEPARATE `annotate project` invocation (the heartbeat runs it
+    # right after reconcile) can fold them onto the timeline. Gated by the bus
+    # resolution level and defaulting OFF, so a team that never opted in sees no
+    # extra artifact and existing reconcile behavior is unchanged. Best-effort:
+    # a local import (annotate imports a constant from this module) + never-raise
+    # helpers keep it from ever affecting the core pass.
+    from . import annotate as _annotate
+    if _annotate.read_resolution(transport, team) in _annotate.LIVE_PROJECTING:
+        structured = aggregate.diff_transitions(prior_for_diff, rows)
+        _annotate.write_pending(transport, team, structured, now=now)
+
     agg = aggregate.build_aggregate(
         team, rows, generated_at=now, reconcile_host=host, warnings=warnings
     )
