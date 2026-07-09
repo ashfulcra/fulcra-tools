@@ -16,8 +16,11 @@ writer; everything else is behavior-preserving:
       uuid in the record's ``sources`` array
       (``com.fulcradynamics.annotation.<def-uuid>``) — a custom type is NOT a
       valid path segment (``…/MomentAnnotation/<uuid>`` 404s; live-verified
-      2026-07-08). The moment's ``title``/``note`` are flattened to the top-level
-      body (the legacy path JSON-encoded them inside ``data``) so nothing is lost.
+      2026-07-08). The typed schema is flat and CLOSED
+      (``{note, recorded_at, tags, sources, id}``) — it SILENTLY STRIPS any other
+      top-level key — so the moment's title line is folded into ``note`` (the one
+      served free-text slot; the legacy path JSON-encoded title+note inside
+      ``data``). Nothing is lost: title + summary + task_id all ride in ``note``.
 
   (b) FAIL-CLOSED definition resolution — the 2026-07-03 definition-proliferation
       root cause. The legacy resolver could not tell a *failed* catalog lookup
@@ -959,13 +962,18 @@ def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None)
             # write a record that would be orphaned or mint a duplicate def.
             return False
 
+        # The typed MomentAnnotation schema is flat and CLOSED —
+        # {note, recorded_at, tags, sources, id} — and the server SILENTLY
+        # STRIPS any other top-level key. ``title`` is not a served column, so
+        # emitting it here would drop the title line (and the task_id it
+        # carries) on 100% of writes. Fold the title into ``note`` (the only
+        # served free-text slot) so nothing is lost.
         inner: dict[str, Any] = {}
         title = (payload.get("name") or "").strip()
         note = (payload.get("desc") or payload.get("description") or "").strip()
-        if title:
-            inner["title"] = title
-        if note:
-            inner["note"] = note
+        merged = "\n\n".join(part for part in (title, note) if part)
+        if merged:
+            inner["note"] = merged
 
         lifecycle = payload.get("lifecycle") or "event"
         sources = [
@@ -1066,11 +1074,12 @@ def emit_digest_annotation(*, name: str, note: str, window: str, agent: str,
         if not def_id:
             return False
 
+        # Fold the digest title into ``note``; the typed schema is closed and
+        # SILENTLY STRIPS a top-level ``title`` (see ``_write_http``).
         inner: dict[str, Any] = {}
-        if name.strip():
-            inner["title"] = name.strip()
-        if note.strip():
-            inner["note"] = note.strip()
+        merged = "\n\n".join(part for part in (name.strip(), note.strip()) if part)
+        if merged:
+            inner["note"] = merged
         sources = [
             f"com.fulcradynamics.fulcra-coord.digest.{uuid.uuid4()}",
             f"com.fulcradynamics.annotation.{def_id}",

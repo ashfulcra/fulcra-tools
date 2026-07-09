@@ -191,19 +191,50 @@ def test_body_is_one_flat_record_per_line(monkeypatch):
     assert isinstance(rec["tags"], list)
     # sources — PLURAL — for the typed endpoint (legacy used metadata.source).
     assert isinstance(rec["sources"], list)
+    # The typed schema is flat and CLOSED — {note, recorded_at, tags, sources,
+    # id}. Any extra top-level key (notably `title`) is SILENTLY STRIPPED by the
+    # server, so the writer must not emit one. Guard: keys ⊆ the served set.
+    assert "title" not in rec
+    assert set(rec) <= {"note", "recorded_at", "tags", "sources", "id"}
 
 
-def test_title_and_note_preserved_flat(monkeypatch):
+def test_title_folded_into_note_no_title_key(monkeypatch):
     _stub_cli(monkeypatch, catalog_lines=[_existing_def_row()])
     router = _install_router(monkeypatch)
 
     ann._write_http(_payload())
 
     rec = json.loads(router.posts()[0][2].decode().strip())
-    # The legacy path JSON-encoded {title, note} inside `data`; the typed body
-    # flattens them to top level so the title is NOT lost in the swap.
-    assert rec["title"].startswith("complete: Fix the widget pipeline")
+    # `title` is a NON-served key the typed endpoint silently strips — it must
+    # NOT be emitted. The title line (which carries the task_id) is folded into
+    # `note`, the one served free-text slot, so nothing is lost.
+    assert "title" not in rec
+    # Title text (incl. the task_id) now lands inside `note`...
+    assert "complete: Fix the widget pipeline" in rec["note"]
+    assert "20260708-fix-widget" in rec["note"]
+    # ...alongside the original desc/summary body.
     assert "rewiring" in rec["note"]
+
+
+def test_digest_folds_title_into_note_no_title_key(monkeypatch):
+    # The OTHER build site — emit_digest_annotation — must also never emit a
+    # top-level `title`; the digest name is folded into `note`.
+    _stub_cli(monkeypatch, catalog_lines=[_existing_def_row()])
+    router = _install_router(monkeypatch)
+
+    assert ann.emit_digest_annotation(
+        name="Morning digest — 3 blocked on you",
+        note="tasks: ship-widget, review-pr",
+        window="morning",
+        agent="claude-code:mb:repo",
+    ) is True
+
+    rec = json.loads(router.posts()[0][2].decode().strip())
+    assert "title" not in rec
+    assert set(rec) <= {"note", "recorded_at", "tags", "sources", "id"}
+    # Both the digest title line and its body survive inside `note`.
+    assert "Morning digest — 3 blocked on you" in rec["note"]
+    assert "ship-widget" in rec["note"]
 
 
 def test_custom_definition_referenced_in_sources_on_base_path(monkeypatch):
