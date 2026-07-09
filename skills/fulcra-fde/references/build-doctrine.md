@@ -32,7 +32,14 @@ marked provisional until the prototype validates them.
      calendar — already exist; **read them** with `fulcra get-records` / the
      metric & event helpers. Do not reinvent them as local fixtures.
   2. For anything Fulcra genuinely doesn't carry, **create the custom data
-     type** (`fulcra data-type create …`) and write real records (ingest).
+     type** (`fulcra data-type create …`) and write real records via **REST
+     ingest** (there's no `fulcra` CLI write verb). Watch the custom-type
+     trap: you POST to the **base** type endpoint
+     (`POST /ingest/v1/record/MomentAnnotation`) and name your definition in
+     the record's `sources` array as
+     `com.fulcradynamics.annotation.<definition-uuid>` — a custom uuid as a
+     URL path segment 404s. Fetch the record schema first from the v1 catalog.
+     Full mechanism: `references/capability-mapping.md` → "Writing records".
      Record every created definition's ID in `build/log.md` — you'll need
      them and should not re-look them up.
   Mock arrays, seeded fixtures, and simulated series are a prototype FAIL:
