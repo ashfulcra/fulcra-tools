@@ -55,11 +55,15 @@ def test_real_netflix_csv_full_pipeline(recording_transport):
                 200,
                 [{"source_id": _DEF_SID, "sources": [sid, _DEF_SID]} for sid in posted_so_far],
             )
-        if request.method == "POST" and request.url.path == "/ingest/v1/record/batch":
+        if (request.method == "POST"
+                and request.url.path == "/ingest/v1/record/DurationAnnotation"):
             for line in request.content.splitlines():
+                if not line.strip():
+                    continue
                 rec = json.loads(line)
-                # Source array always has the deterministic ID at position 0
-                posted_so_far.add(rec["metadata"]["source"][0])
+                # Typed records are unwrapped: the deterministic ID sits at
+                # position 0 of the top-level `sources` array.
+                posted_so_far.add(rec["sources"][0])
                 posted_lines.append(line)
             return httpx.Response(204)
         pytest.fail(f"unexpected {request.method} {request.url}")
@@ -80,14 +84,17 @@ def test_real_netflix_csv_full_pipeline(recording_transport):
     assert result.verified == len(events)
     assert len(posted_lines) == len(events)
 
-    # Spot-check the first emitted line
+    # Spot-check the first emitted line — the UNWRAPPED typed shape.
     first = json.loads(posted_lines[0])
-    assert first["specversion"] == 1
-    md = first["metadata"]
-    assert md["data_type"] == "DurationAnnotation"
-    assert "start_time" in md["recorded_at"] and "end_time" in md["recorded_at"]
-    assert md["tags"] == ["tag-netflix"]
-    assert any("com.fulcradynamics.annotation." in s for s in md["source"])
-    inner = json.loads(first["data"])
-    assert inner["service"] == "netflix"
-    assert inner["timestamp_confidence"] == "low"
+    assert "specversion" not in first
+    assert "metadata" not in first
+    assert "data" not in first
+    assert "start_time" in first["recorded_at"] and "end_time" in first["recorded_at"]
+    assert first["tags"] == ["tag-netflix"]
+    assert any("com.fulcradynamics.annotation." in s for s in first["sources"])
+    # note is the only free-form slot; service / timestamp_confidence had no
+    # typed slot and are dropped from the wire (nothing reads them back from
+    # the server — see FulcraClient.ingest_batch_typed).
+    assert first["note"]
+    assert "service" not in first
+    assert "timestamp_confidence" not in first

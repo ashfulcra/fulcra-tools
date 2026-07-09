@@ -150,12 +150,19 @@ def test_run_import_claim_same_run_fingerprint_collision_posts_both(recording_tr
     5-minute bucket), NOT a cross-source twin: BOTH must post. The second
     event's already-claimed fingerprint is stripped before its claim, so it
     claims (and posts with) only its remaining keys."""
+    import json as _json
     post_bodies: list = []
+    landed_rows: list[dict] = []  # echo POSTed records back on verify GETs
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
-            return json_response(200, [])
+            return json_response(200, landed_rows)
         post_bodies.append(request.content)
+        for line in request.content.splitlines():
+            landed_rows.append({
+                "source_id": "com.fulcradynamics.annotation.d",
+                "sources": _json.loads(line)["sources"],
+            })
         return httpx.Response(204)
 
     transport = recording_transport(handler)
@@ -192,9 +199,8 @@ def test_run_import_claim_same_run_fingerprint_collision_posts_both(recording_tr
     # query-time source-merging can't collapse the replay into the original.
     lines = post_bodies[0].splitlines()
     assert len(lines) == 2
-    import json as _json
     sources_by_line = [
-        _json.loads(line)["metadata"]["source"] for line in lines
+        _json.loads(line)["sources"] for line in lines
     ]
     fp_carriers = [s for s in sources_by_line if shared_fp in s]
     assert len(fp_carriers) == 1
@@ -270,14 +276,24 @@ def test_run_import_unclaims_on_post_failure_so_event_is_retried(
 
 
 def test_run_import_keeps_claim_on_post_success(recording_transport):
-    """The complement: a SUCCESSFUL POST leaves the claim in place, so a
-    re-run skips the already-written event (no duplicate)."""
+    """The complement: a SUCCESSFUL POST that LANDS leaves the claim in
+    place, so a re-run skips the already-written event (no duplicate).
+    The handler echoes POSTed records back on verify GETs — a landed
+    record; a record that never lands now has its claim released by the
+    delayed-verify self-heal instead."""
+    import json as _json
     post_count = {"n": 0}
+    landed_rows: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
-            return json_response(200, [])
+            return json_response(200, landed_rows)
         post_count["n"] += 1
+        for line in request.content.splitlines():
+            landed_rows.append({
+                "source_id": "com.fulcradynamics.annotation.d",
+                "sources": _json.loads(line)["sources"],
+            })
         return httpx.Response(204)
 
     transport = recording_transport(handler)
@@ -354,3 +370,217 @@ def test_run_import_chunks_large_input(recording_transport):
     assert result.posted == 25
     assert result.verified == 0
     assert post_count["n"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Typed-ingest adoption (Task 4): run_import posts UNWRAPPED records to the
+# typed endpoint, and its landed-count check surfaces silent JSONL drops.
+# ---------------------------------------------------------------------------
+
+_DEF_WATCHED = "com.fulcradynamics.annotation.def-watched"
+
+
+def test_run_import_posts_typed_jsonl_to_base_type_endpoint(recording_transport):
+    """A multi-event run posts UNWRAPPED records to
+    /ingest/v1/record/DurationAnnotation as application/x-jsonl — the typed
+    endpoint requires exactly that content-type (application/x-jsonlines
+    415s, live-verified 2026-07-08) and silently strips the wrapped
+    specversion/metadata/data envelope, so run_import must emit the
+    unwrapped shape.
+    """
+    import json
+
+    captured: dict = {}
+    call = {"get": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            call["get"] += 1
+            if call["get"] == 1:  # dedup readback: nothing exists yet
+                return json_response(200, [])
+            # verify readback: both records landed
+            return json_response(200, [
+                {"source_id": _DEF_WATCHED,
+                 "sources": ["com.fulcra.media.netflix.id0001", _DEF_WATCHED]},
+                {"source_id": _DEF_WATCHED,
+                 "sources": ["com.fulcra.media.netflix.id0002", _DEF_WATCHED]},
+            ])
+        if request.method == "POST":
+            captured["path"] = request.url.path
+            captured["content_type"] = request.headers.get("content-type")
+            captured["body"] = request.content
+            return httpx.Response(204)
+        pytest.fail(str(request.url))
+
+    client = FulcraClient(transport=recording_transport(handler))
+    state = State(
+        watched_definition_id="def-watched",
+        listened_definition_id="def-listened",
+        tag_ids={"netflix": "tag-netflix"},
+    )
+    result = client.run_import([_ev(1), _ev(2)], state, chunk_size=10)
+    assert result.posted == 2
+    assert result.verified == 2
+
+    assert captured["path"] == "/ingest/v1/record/DurationAnnotation"
+    assert captured["content_type"].startswith("application/x-jsonl")
+    lines = [ln for ln in captured["body"].splitlines() if ln.strip()]
+    assert len(lines) == 2
+    recs = [json.loads(ln) for ln in lines]
+    for rec in recs:
+        # UNWRAPPED — no CloudEvents envelope.
+        assert "specversion" not in rec
+        assert "metadata" not in rec
+        assert "data" not in rec
+        # Duration recorded_at is the {start,end} object.
+        assert set(rec["recorded_at"]) == {"start_time", "end_time"}
+        assert _DEF_WATCHED in rec["sources"]
+    notes = {rec["note"] for rec in recs}
+    assert notes == {"N1", "N2"}
+
+
+def _delayed_verify_setup(recording_transport, poll_rows_fn):
+    """Client + claim/unclaim store + sleep recorder for the delayed-verify
+    tests. GET #1 is the dedup readback (empty), GET #2 the immediate
+    post-POST verify (only id0001 landed), GET #3+ are the delayed poll
+    attempts, answered by ``poll_rows_fn(attempt_number)``.
+    """
+    call = {"get": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            call["get"] += 1
+            if call["get"] == 1:  # dedup readback: nothing exists yet
+                return json_response(200, [])
+            if call["get"] == 2:  # immediate verify: only id0001 landed
+                return json_response(200, [
+                    {"source_id": _DEF_WATCHED,
+                     "sources": ["com.fulcra.media.netflix.id0001",
+                                 _DEF_WATCHED]},
+                ])
+            return poll_rows_fn(call["get"] - 2)  # poll attempt 1, 2, ...
+        if request.method == "POST":
+            return httpx.Response(204)
+        pytest.fail(str(request.url))
+
+    client = FulcraClient(transport=recording_transport(handler))
+    state = State(
+        watched_definition_id="def-watched",
+        listened_definition_id="def-listened",
+        tag_ids={"netflix": "tag-netflix"},
+    )
+    store: set[str] = set()
+    claim, unclaim = _claim_pair(store)
+    sleeps: list[float] = []
+    return client, state, store, claim, unclaim, sleeps
+
+
+def test_run_import_unclaims_and_warns_when_still_missing_after_poll(
+        recording_transport, caplog):
+    """The self-healing path for a silent JSONL drop: typed ingest is async
+    (201 != stored) and a batch silently drops a bad line (live-verified
+    2026-07-08). A record still missing after the bounded delayed poll has
+    its dedup keys UNCLAIMED (so the next run retries it instead of
+    skipping it forever — a held claim + dropped line = permanent loss)
+    and ONE WARNING names the missing source-ids.
+    """
+    import logging
+    from fulcra_media import fulcra as fulcra_mod
+
+    def poll_rows(_attempt):  # id0002 never lands
+        return json_response(200, [
+            {"source_id": _DEF_WATCHED,
+             "sources": ["com.fulcra.media.netflix.id0001", _DEF_WATCHED]},
+        ])
+
+    client, state, store, claim, unclaim, sleeps = _delayed_verify_setup(
+        recording_transport, poll_rows)
+    with caplog.at_level(logging.WARNING, logger="fulcra_media.fulcra"):
+        result = client.run_import([_ev(1), _ev(2)], state, chunk_size=10,
+                                   claim=claim, unclaim=unclaim,
+                                   sleep_fn=sleeps.append)
+
+    assert result.posted == 2
+    assert result.verified == 1
+    # The poll ran to its bound: attempts x delay, first attempt delayed too.
+    assert sleeps == [fulcra_mod._LANDED_VERIFY_DELAY_S] * \
+        fulcra_mod._LANDED_VERIFY_ATTEMPTS
+    # The missing event's keys were released for retry; the landed one kept.
+    assert "com.fulcra.media.netflix.id0002" not in store
+    assert "com.fulcra.media.netflix.id0001" in store
+
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    msg = warnings[0]
+    assert "still not visible" in msg
+    assert "unclaimed for retry next run" in msg
+    # Names the MISSING id, not the one that landed.
+    assert "com.fulcra.media.netflix.id0002" in msg
+    assert "com.fulcra.media.netflix.id0001" not in msg
+
+
+def test_run_import_poll_recovery_is_silent_and_keeps_claims(
+        recording_transport, caplog):
+    """A record that becomes visible during the delayed poll is just the
+    normal async lag (~1-2 min): no output above DEBUG, claims stay, and
+    the record counts as verified."""
+    import logging
+    from fulcra_media import fulcra as fulcra_mod
+
+    def poll_rows(_attempt):  # both visible on the first poll attempt
+        return json_response(200, [
+            {"source_id": _DEF_WATCHED,
+             "sources": ["com.fulcra.media.netflix.id0001", _DEF_WATCHED]},
+            {"source_id": _DEF_WATCHED,
+             "sources": ["com.fulcra.media.netflix.id0002", _DEF_WATCHED]},
+        ])
+
+    client, state, store, claim, unclaim, sleeps = _delayed_verify_setup(
+        recording_transport, poll_rows)
+    with caplog.at_level(logging.DEBUG, logger="fulcra_media.fulcra"):
+        result = client.run_import([_ev(1), _ev(2)], state, chunk_size=10,
+                                   claim=claim, unclaim=unclaim,
+                                   sleep_fn=sleeps.append)
+
+    assert result.posted == 2
+    assert result.verified == 2  # 1 immediate + 1 via the delayed poll
+    # Poll stopped after the first (successful) attempt.
+    assert sleeps == [fulcra_mod._LANDED_VERIFY_DELAY_S]
+    # Both claims kept — the records landed.
+    assert "com.fulcra.media.netflix.id0001" in store
+    assert "com.fulcra.media.netflix.id0002" in store
+    # Nothing above DEBUG.
+    assert [r for r in caplog.records if r.levelno > logging.DEBUG] == []
+
+
+def test_run_import_verify_error_warns_but_keeps_claims(
+        recording_transport, caplog):
+    """If the verification readback itself FAILS, do NOT unclaim (fail-safe:
+    a kept claim loses the event only if it was ALSO dropped; unclaiming on
+    unknown risks duplicates — the typed endpoint has no server-side dedup).
+    A WARNING says landings could not be verified; the import still returns
+    normally."""
+    import logging
+
+    def poll_rows(_attempt):  # verification readback errors out
+        return httpx.Response(500)
+
+    client, state, store, claim, unclaim, sleeps = _delayed_verify_setup(
+        recording_transport, poll_rows)
+    with caplog.at_level(logging.WARNING, logger="fulcra_media.fulcra"):
+        result = client.run_import([_ev(1), _ev(2)], state, chunk_size=10,
+                                   claim=claim, unclaim=unclaim,
+                                   sleep_fn=sleeps.append)
+
+    assert result.posted == 2
+    assert result.verified == 1
+    # Claims for BOTH events kept — outcome unknown, fail-safe.
+    assert "com.fulcra.media.netflix.id0001" in store
+    assert "com.fulcra.media.netflix.id0002" in store
+
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "could not verify landings" in warnings[0]
+    assert "unclaimed" not in warnings[0]

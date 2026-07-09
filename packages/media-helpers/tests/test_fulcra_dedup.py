@@ -160,14 +160,22 @@ def test_pre_gate_zero_count_skips_readback_but_claim_still_runs(recording_trans
     """Zero DurationAnnotation records processed since win_start → the
     pre-POST readback GET is skipped entirely, events are treated as new,
     and the per-event claim still runs (write-dedup guarantee untouched)."""
+    import json as _json
     gets = {"n": 0}
     posts = {"n": 0}
+    landed_rows: list[dict] = []  # echo POSTed records back on the verify GET
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
             gets["n"] += 1
-            return json_response(200, [])  # only the post-POST verify readback
+            # only the post-POST verify readback (dedup readback is gated off)
+            return json_response(200, landed_rows)
         posts["n"] += 1
+        for line in request.content.splitlines():
+            landed_rows.append({
+                "source_id": "com.fulcradynamics.annotation.def-l",
+                "sources": _json.loads(line)["sources"],
+            })
         return httpx.Response(204)
 
     client = FulcraClient(transport=recording_transport(handler))

@@ -688,10 +688,10 @@ def test_record_annotation_unauthenticated(collect_home, monkeypatch):
 def test_record_annotation_happy_path(collect_home, monkeypatch):
     """record_annotation calls Fulcra POST and surfaces ok=True + activity entry.
 
-    Quick-record is a single-shot write, so it uses the single-record
-    endpoint (POST /ingest/v1/record, one DataRecordV1 as JSON — per-record
-    error bodies). This test asserts the POST URL and that the def's tags
-    propagate into the wire record's metadata.
+    Quick-record is a single-shot write, so it posts one UNWRAPPED record to
+    the typed endpoint POST /ingest/v1/record/MomentAnnotation (as JSON). This
+    test asserts the typed URL, that the def's tags propagate into the record,
+    and that the comment lands in the typed ``note`` slot.
     """
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret", lambda key: "tok")
 
@@ -726,23 +726,24 @@ def test_record_annotation_happy_path(collect_home, monkeypatch):
     post_reqs = [r for r in fake_client.requests if r["method"] == "POST"]
     assert len(post_reqs) == 1
     post = post_reqs[0]
-    assert post["url"] == "/ingest/v1/record"
+    assert post["url"] == "/ingest/v1/record/MomentAnnotation"
     assert post["headers"]["Authorization"] == "Bearer tok"
 
-    import json
+    # Typed records are UNWRAPPED — no specversion / metadata / data string.
     record = post["json"]
-    assert record["specversion"] == 1
-    md = record["metadata"]
-    assert md["data_type"] == "MomentAnnotation"
-    # The def's tags must propagate into the event so Fulcra associates
+    assert "specversion" not in record and "metadata" not in record
+    assert "data" not in record
+    # A Moment carries a scalar ISO recorded_at.
+    assert isinstance(record["recorded_at"], str)
+    # The def's tags must propagate into the record so Fulcra associates
     # the moment with the def's tag membership.
-    assert md["tags"] == ["tag-uuid-a", "tag-uuid-b"]
-    # source[] contains both the per-event quick-record marker and the
-    # annotation-definition source so /ingest dedups + scopes correctly.
-    assert any("quick-record" in s for s in md["source"])
-    assert "com.fulcradynamics.annotation.def-abcdef12" in md["source"]
-    # The comment travels in the wire body's data payload (JSON-encoded).
-    assert json.loads(record["data"]) == {"comment": "hello from the test"}
+    assert record["tags"] == ["tag-uuid-a", "tag-uuid-b"]
+    # sources[] contains both the per-event quick-record marker and the
+    # annotation-definition source so the record binds to the def.
+    assert any("quick-record" in s for s in record["sources"])
+    assert "com.fulcradynamics.annotation.def-abcdef12" in record["sources"]
+    # The comment travels in the typed schema's free-form `note` slot.
+    assert record["note"] == "hello from the test"
 
     # Activity buffer shows a friendly entry using the def name, not its id prefix.
     entries = d.activity.recent(limit=1)
@@ -812,11 +813,11 @@ def test_record_annotation_api_error_surfaces_activity_failure(collect_home, mon
 
 def test_record_annotation_duration_writes_duration_record(
         collect_home, monkeypatch):
-    """When start_time AND end_time are supplied, the daemon writes a
-    DurationAnnotation with recorded_at as the {start,end} object and
-    duration_seconds in the data payload.
+    """When start_time AND end_time are supplied, the daemon posts a typed
+    DurationAnnotation with recorded_at as the {start,end} object. The
+    legacy wrapped duration_seconds field has no typed slot and is dropped
+    (the {start,end} range makes it derivable).
     """
-    import json
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
 
@@ -840,28 +841,26 @@ def test_record_annotation_duration_writes_duration_record(
 
     posts = [r for r in fake_client.requests if r["method"] == "POST"]
     assert len(posts) == 1
+    assert posts[0]["url"] == "/ingest/v1/record/DurationAnnotation"
     record = posts[0]["json"]
-    md = record["metadata"]
-    assert md["data_type"] == "DurationAnnotation"
+    assert "metadata" not in record and "data" not in record
     # recorded_at is an object for durations.
-    assert md["recorded_at"] == {
+    assert record["recorded_at"] == {
         "start_time": "2026-05-26T20:00:00Z",
         "end_time": "2026-05-26T22:14:00Z",
     }
-    assert md["tags"] == ["t-movie"]
-    assert "com.fulcradynamics.annotation.def-dur1" in md["source"]
-    payload = json.loads(record["data"])
-    assert payload["comment"] == "Just watched The Hunt for Red October"
-    # 2h 14m = 8040 seconds.
-    assert payload["duration_seconds"] == 8040.0
+    assert record["tags"] == ["t-movie"]
+    assert "com.fulcradynamics.annotation.def-dur1" in record["sources"]
+    # The comment lands in the typed `note` slot; duration_seconds is gone.
+    assert record["note"] == "Just watched The Hunt for Red October"
+    assert "duration_seconds" not in record
 
 
 def test_record_annotation_moment_fallback_when_no_times(
         collect_home, monkeypatch):
     """With neither start_time nor end_time, the existing Moment behavior
-    is preserved — the daemon writes a MomentAnnotation with a scalar
+    is preserved — the daemon writes a typed MomentAnnotation with a scalar
     recorded_at."""
-    import json
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
                         lambda key: "tok")
     fake_client = FakeHttpxClient(get_data=[
@@ -876,11 +875,11 @@ def test_record_annotation_moment_fallback_when_no_times(
     assert reply["ok"] is True
 
     posts = [r for r in fake_client.requests if r["method"] == "POST"]
+    assert posts[0]["url"] == "/ingest/v1/record/MomentAnnotation"
     record = posts[0]["json"]
-    md = record["metadata"]
-    assert md["data_type"] == "MomentAnnotation"
+    assert "metadata" not in record
     # recorded_at is a scalar string for moments.
-    assert isinstance(md["recorded_at"], str)
+    assert isinstance(record["recorded_at"], str)
 
 
 def test_record_annotation_rejects_partial_duration_spec(
@@ -915,6 +914,12 @@ def test_delete_annotation_writes_tombstone(collect_home, monkeypatch):
 
     Caveat: this is a SOFT marker (Fulcra has no per-event delete
     primitive); the original record stays on the user's timeline.
+
+    Regression pin: tombstones stay on the LEGACY single endpoint
+    (POST /ingest/v1/record) with the wrapped ``data`` payload intact —
+    their supersedes_source_id / superseded_by machine-state has NO slot in
+    the typed schema (only ``note`` is free-form), so this path must NOT
+    migrate to /ingest/v1/record/{base_type}.
     """
     import json
     monkeypatch.setattr("fulcra_collect.credentials.get_user_secret",
@@ -934,7 +939,12 @@ def test_delete_annotation_writes_tombstone(collect_home, monkeypatch):
 
     posts = [r for r in fake_client.requests if r["method"] == "POST"]
     assert len(posts) == 1
+    # Legacy single-record endpoint — NOT the typed /ingest/v1/record/{type}.
+    assert posts[0]["url"] == "/ingest/v1/record"
     record = posts[0]["json"]
+    # Wrapped CloudEvents envelope intact (the typed path is unwrapped).
+    assert record["specversion"] == 1
+    assert record["metadata"]["data_type"] == "MomentAnnotation"
     payload = json.loads(record["data"])
     # The tombstone references the original source_id so any future
     # Fulcra-side superseded-by logic can join them.

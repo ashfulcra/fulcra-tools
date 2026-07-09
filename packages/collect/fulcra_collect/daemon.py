@@ -718,15 +718,19 @@ class Daemon:
           (2026-05-26) added this so the menubar can record finished
           movies / listening sessions / reading sessions inline.
 
-        Uses the same /ingest/v1/record/batch + CloudEvents wire format
-        as every plugin importer (see fulcra_common.wire). Per-call
-        source_id (uuid) — duplicate clicks intentionally produce
-        duplicate events; that's the menubar button's whole job.
+        Writes through the typed endpoint POST /ingest/v1/record/{base_type}
+        (unwrapped record, one per call) — the quick-record ``comment``
+        moves to the typed schema's ``note`` slot, which is the only
+        free-form field the typed schema offers (the wrapped ``data``
+        payload has no typed equivalent; live-verified 2026-07-08).
+        Per-call source_id (uuid) — duplicate clicks intentionally produce
+        duplicate events (the typed endpoint has no server-side source-id
+        dedup, so this is inherent, not a regression); that's the menubar
+        button's whole job.
         """
         import uuid
-        from fulcra_common.ingest import (
-            DurationEvent, IngestableEvent, IngestPipeline, MomentEvent,
-        )
+        from fulcra_common import wire
+        from fulcra_common.ingest import IngestPipeline
         from . import credentials as _creds
         if not definition_id:
             return {"ok": False, "error": "definition_id required"}
@@ -781,34 +785,39 @@ class Daemon:
             f"com.fulcradynamics.fulcra-collect.quick-record.{uuid.uuid4()}"
         )
         tags = tuple(def_dict.get("tags") or [])
+        # The quick-record comment moves to the typed schema's `note` slot
+        # (the typed endpoint has no wrapped `data` payload). An empty /
+        # absent comment omits `note` entirely rather than writing "".
+        note = comment or None
         if parsed_start is not None and parsed_end is not None:
             # Duration record. ISO strings were already validated above.
-            # Refactor #69 normalization: the legacy site emitted
-            # duration_seconds as a FLOAT (.total_seconds() returns
-            # float). The pipeline emits it as an int. Float→int on a
-            # whole-second duration is observably identical to every
-            # Fulcra consumer, but the bytes differ — called out in the
-            # refactor-#69 commits.
-            event: IngestableEvent = DurationEvent(
-                definition_id=definition_id,
+            # duration_seconds (the #30 defensive field the legacy wrapped
+            # `data` carried) has no typed slot and is dropped — the
+            # {start_time, end_time} recorded_at makes it derivable.
+            base_type = wire.DURATION_ANNOTATION
+            record = wire.build_typed_record(
+                base_type=base_type,
+                start_time=parsed_start,
+                end_time=parsed_end,
+                note=note,
                 source_id=source_id,
+                definition_id=definition_id,
                 tags=tags,
-                comment=comment or "",
-                start=parsed_start,
-                end=parsed_end,
             )
         else:
-            event = MomentEvent(
-                definition_id=definition_id,
+            base_type = wire.MOMENT_ANNOTATION
+            record = wire.build_typed_record(
+                base_type=base_type,
+                start_time=now,
+                note=note,
                 source_id=source_id,
+                definition_id=definition_id,
                 tags=tags,
-                comment=comment or "",
-                ts=now,
             )
         try:
             IngestPipeline(
                 client=_QuickRecordClient(token=token),
-            ).ingest_one(event)
+            ).ingest_typed(base_type, [record])
         except Exception as exc:
             logging.getLogger("fulcra_collect.daemon").exception(
                 "_record_annotation(%s): Fulcra API request failed",
@@ -874,6 +883,7 @@ class Daemon:
         # Tombstone has no annotation definition attached — Fulcra
         # accepts the event and the tombstone is identifiable purely via
         # its source_id prefix + the supersedes_source_id pointer.
+        # Tombstones stay on legacy /ingest/v1/record: their supersedes_source_id payload has no slot in the typed schema (note is user-visible text, not machine state). Revisit when the API grows a data/extensions field.
         tombstone = MomentEvent(
             definition_id=None,
             source_id=tombstone_source_id,

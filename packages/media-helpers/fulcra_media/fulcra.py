@@ -11,6 +11,8 @@ soft-delete, and event readback come from the base.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -26,6 +28,8 @@ if TYPE_CHECKING:
 
 __all__ = ["FulcraClient", "ImportResult"]
 
+_log = logging.getLogger("fulcra_media.fulcra")
+
 _MEDIA_NAMESPACE = "com.fulcra.media."
 
 # The dedup-readback pre-gate (GET /data/v1/updates before the per-chunk
@@ -39,6 +43,19 @@ _MEDIA_NAMESPACE = "com.fulcra.media."
 # have win_start within minutes of now, so they gate; historical bulk
 # imports skip the gate entirely and pay the normal readback.
 _UPDATES_GATE_MAX_SPAN = timedelta(hours=48)
+
+# Delayed landed-count verification for the typed ingest endpoint. The
+# typed POST returns 201 and processes ASYNC (~1-2 min observed), and a
+# JSONL batch containing a bad line returns 201 while SILENTLY dropping
+# that line — no per-line error, no upload-status endpoint (all
+# live-verified 2026-07-08). The immediate post-POST readback therefore
+# usually misses fresh records; run_import re-polls records not yet
+# visible up to _LANDED_VERIFY_ATTEMPTS times, sleeping
+# _LANDED_VERIFY_DELAY_S before EACH attempt (the first attempt is also
+# delayed — nothing is visible sooner). 4 x 30 s covers the observed lag;
+# a record slower than that is unclaimed and self-heals on the next run.
+_LANDED_VERIFY_ATTEMPTS = 4
+_LANDED_VERIFY_DELAY_S = 30.0
 
 
 def _importer_namespace_prefix(det_id: str) -> str | None:
@@ -166,6 +183,98 @@ class FulcraClient(BaseFulcraClient):
             )
         pipeline.ingest_batch(ingestable)
 
+    def ingest_batch_typed(
+        self, events: list["NormalizedEvent"], state: "State"
+    ) -> None:
+        """Typed-ingest counterpart of ``ingest_batch``, used by ``run_import``.
+
+        Maps each NormalizedEvent onto its IngestableEvent (via
+        ``to_duration_event`` — media events are all durations today),
+        builds an UNWRAPPED record with ``wire.build_typed_record`` (note =
+        the event's note; the det source_id + cross-source content
+        fingerprints via ``extra_sources``; the definition binding via
+        ``definition_id``), groups by base type (MomentEvent →
+        MomentAnnotation, DurationEvent → DurationAnnotation), and posts
+        each group via ``IngestPipeline.ingest_typed``. The source-array
+        composition is identical to what ``ingest_batch``/``build_record``
+        produced — [source_id, *extra_sources, definition-source] — so the
+        dedup readback still matches.
+
+        The typed endpoint has NO server-side source-id dedup and returns
+        201 for a JSONL batch even when it SILENTLY drops a bad line
+        (live-verified 2026-07-08): ``run_import``'s claim + readback
+        machinery is the required dedup compensation and is left untouched,
+        and its landed-count WARNING surfaces any silent drop. The legacy
+        ``ingest_batch`` stays for the webhook receiver (no rug-pull).
+
+        The wrapped ``data`` payload the legacy path carried (title,
+        service, timestamp_confidence, external_ids, duration_seconds) has
+        NO typed slot and is dropped from the wire — nothing reads those
+        back from the server: external_ids was never surfaced on event
+        queries (twin_cache.py exists precisely because of that), and
+        title/service/timestamp_confidence are read only off the in-memory
+        events pre/post-POST (health checks, cli), never re-queried. So no
+        queryable state is lost; ``note`` is the only free-form slot the
+        typed schema offers.
+        """
+        if not events:
+            return
+        from fulcra_common.ingest import (
+            DurationEvent, IngestPipeline, MomentEvent,
+        )
+        pipeline = IngestPipeline(client=self)
+
+        category_to_def = {
+            "watched":  state.watched_definition_id,
+            "listened": state.listened_definition_id,
+            "read":     state.read_definition_id,
+        }
+        groups: dict[str, list[dict]] = {}
+        for ev in events:
+            def_id = category_to_def.get(ev.category)
+            if def_id is None:
+                raise RuntimeError(
+                    f"missing {ev.category} definition id in state; "
+                    "run bootstrap first",
+                )
+            service_tag = state.tag_ids.get(ev.service)
+            tag_ids = (service_tag,) if service_tag else ()
+            ingestable = ev.to_duration_event(
+                definition_id=def_id, tags=tag_ids,
+            )
+            if isinstance(ingestable, DurationEvent):
+                base_type = wire.DURATION_ANNOTATION
+                record = wire.build_typed_record(
+                    base_type=base_type,
+                    start_time=ingestable.start,
+                    end_time=ingestable.end,
+                    note=ingestable.note,
+                    source_id=ingestable.source_id,
+                    definition_id=ingestable.definition_id,
+                    extra_sources=ingestable.extra_source_ids,
+                    tags=ingestable.tags,
+                )
+            elif isinstance(ingestable, MomentEvent):
+                base_type = wire.MOMENT_ANNOTATION
+                record = wire.build_typed_record(
+                    base_type=base_type,
+                    start_time=ingestable.ts,
+                    note=ingestable.note,
+                    source_id=ingestable.source_id,
+                    definition_id=ingestable.definition_id,
+                    extra_sources=ingestable.extra_source_ids,
+                    tags=ingestable.tags,
+                )
+            else:  # pragma: no cover - defensive; only two subclasses exist
+                raise TypeError(
+                    "unknown IngestableEvent subclass: "
+                    f"{type(ingestable).__name__}"
+                )
+            groups.setdefault(base_type, []).append(record)
+
+        for base_type, records in groups.items():
+            pipeline.ingest_typed(base_type, records)
+
     def run_import(
         self,
         events: "list[NormalizedEvent]",
@@ -176,6 +285,7 @@ class FulcraClient(BaseFulcraClient):
         claim: "Callable[[set[str]], bool] | None" = None,
         unclaim: "Callable[[set[str]], None] | None" = None,
         updates_summary: "Callable[[datetime, datetime], dict[str, int]] | None" = None,
+        sleep_fn: "Callable[[float], None] | None" = None,
     ) -> ImportResult:
         """Run the dedup-readback + ingest pipeline.
 
@@ -232,6 +342,15 @@ class FulcraClient(BaseFulcraClient):
         window for an old chunk would span years and the endpoint 500s on
         large windows. Injected callables receive ``(window_start,
         window_end)`` datetimes and return ``{data_type: processed_count}``.
+
+        `sleep_fn`: injectable sleeper (tests) for the run-end delayed
+        landed-count verification; defaults to ``time.sleep``. The delayed
+        verify + self-healing unclaim (see the block after the chunk loop)
+        exists because the typed endpoint pairs badly with persistent
+        claims: a 201'd-but-silently-dropped JSONL line whose claim is
+        never released would be skipped by every future run — permanent
+        loss the legacy synchronous, server-deduped path could not
+        produce.
         """
         events = list(events)
         total = len(events)
@@ -267,6 +386,15 @@ class FulcraClient(BaseFulcraClient):
         # this set is a same-source quick replay BY CONSTRUCTION — see the
         # claim block below.
         run_claimed_keys: set[str] = set()
+
+        # POSTed-but-not-yet-visible bookkeeping for the run-end delayed
+        # verification: one entry per chunk that posted, carrying the
+        # chunk's readback window and, per still-missing event, the exact
+        # dedup keys ITS claim inserted (so a self-healing unclaim releases
+        # precisely those). Only populated on claim runs — without a claim
+        # store nothing blocks a retry (the next run's readback finds no
+        # record and re-posts), so there is nothing to heal.
+        pending_verify: list[tuple[datetime, datetime, dict[str, set[str]]]] = []
 
         # The readback (and therefore the pre-gate) is over DurationAnnotation
         # records: run_import ingests every NormalizedEvent category through
@@ -368,6 +496,9 @@ class FulcraClient(BaseFulcraClient):
             # whose claim returned True, so it never includes pre-existing
             # rows or keys owned by a different event/batch.
             newly_claimed_keys: set[str] = set()
+            # Per-event claim keys for this chunk — feeds the run-end
+            # delayed verification's self-healing unclaim.
+            chunk_event_keys: dict[str, set[str]] = {}
             if claim is not None and not check_only:
                 claimed_events = []
                 for e in new_events:
@@ -386,6 +517,7 @@ class FulcraClient(BaseFulcraClient):
                         claimed_events.append(e)
                         newly_claimed_keys |= keyset
                         run_claimed_keys |= keyset
+                        chunk_event_keys[e.deterministic_id] = keyset
                     # else: conservative edge, OLD behaviour preserved. The
                     # collision is on the det_id (true dup / concurrent run)
                     # or on a fingerprint claimed by a CONCURRENT process —
@@ -403,7 +535,7 @@ class FulcraClient(BaseFulcraClient):
                     posted += len(new_events)
                 else:
                     try:
-                        self.ingest_batch(new_events, state)
+                        self.ingest_batch_typed(new_events, state)
                     except Exception:
                         # Durable-loss guard: the POST failed, so release the
                         # claims this batch took (scoped to keys WE newly
@@ -421,9 +553,115 @@ class FulcraClient(BaseFulcraClient):
                     after = self.fetch_existing_source_ids(
                         win_start, win_end, only_for_defs=current_def_source_ids or None
                     )
-                    verified += sum(1 for e in new_events if e.deterministic_id in after)
+                    verified += sum(
+                        1 for e in new_events if e.deterministic_id in after
+                    )
+                    # Records the immediate readback did not see are the
+                    # NORMAL case on the typed endpoint (201 = queued,
+                    # processing is async ~1-2 min; live-verified
+                    # 2026-07-08) — no warning here. On claim runs they
+                    # enter the run-end delayed verification below, which
+                    # is where a genuine silent drop becomes visible and
+                    # self-heals. On claimless runs (standalone CLI) the
+                    # verified<posted gap in ImportResult is the caller's
+                    # signal, and a dropped record re-posts naturally on
+                    # the next run.
+                    if claim is not None:
+                        chunk_missing = {
+                            e.deterministic_id:
+                                chunk_event_keys.get(e.deterministic_id, set())
+                            for e in new_events
+                            if e.deterministic_id not in after
+                        }
+                        if chunk_missing:
+                            pending_verify.append(
+                                (win_start, win_end, chunk_missing))
+
+        # Run-end delayed verification + self-healing unclaim (claim runs
+        # only). Why it exists: the typed endpoint returns 201 with async
+        # processing AND silently drops a bad JSONL line (no per-line
+        # error, no upload-status endpoint; live-verified 2026-07-08),
+        # while `unclaim` above fires only on a POST *failure* — so a
+        # dropped line after a 201 would leave its claim held forever and
+        # the event skipped by every future run: permanent loss the legacy
+        # synchronous, server-deduped path could not produce. The fix:
+        # re-poll the still-missing ids over each chunk's own narrow
+        # readback window (the event endpoint's ~4k pagination ceiling
+        # rules out one wide query), bounded to _LANDED_VERIFY_ATTEMPTS x
+        # _LANDED_VERIFY_DELAY_S with the first attempt delayed too.
+        if pending_verify and not check_only:
+            sleep = sleep_fn if sleep_fn is not None else time.sleep
+            recovered = 0
+            verify_error: Exception | None = None
+            for _attempt in range(_LANDED_VERIFY_ATTEMPTS):
+                sleep(_LANDED_VERIFY_DELAY_S)
+                try:
+                    for vwin_start, vwin_end, missing in pending_verify:
+                        if not missing:
+                            continue
+                        found = self.records_visible(
+                            readback_data_type, set(missing),
+                            vwin_start, vwin_end,
+                        )
+                        for det_id in found:
+                            del missing[det_id]
+                        recovered += len(found)
+                        verified += len(found)
+                except Exception as exc:  # noqa: BLE001 — fail-safe branch below
+                    verify_error = exc
+                    break
+                if not any(missing for _, _, missing in pending_verify):
+                    break
+
+            still_missing: dict[str, set[str]] = {}
+            for _, _, missing in pending_verify:
+                still_missing.update(missing)
+
+            if verify_error is not None:
+                # Fail-safe: do NOT unclaim on an unverifiable outcome.
+                # Keeping the claim loses the event only if it was ALSO
+                # silently dropped; unclaiming on unknown risks a duplicate
+                # write (the typed endpoint has no server-side source-id
+                # dedup). Prefer the rarer loss.
+                _log.warning(
+                    "typed ingest: could not verify landings for %d posted "
+                    "record(s) (readback failed: %s); leaving dedup claims "
+                    "in place — unclaiming on an unknown outcome risks "
+                    "duplicates (no server-side dedup)",
+                    len(still_missing), verify_error,
+                )
+            elif still_missing:
+                # Genuine silent drop — or indexing lag beyond the poll
+                # bound, in which case the unclaim makes the next run's
+                # readback find the (by then visible) record and skip it,
+                # so this self-heals either way.
+                if unclaim is not None:
+                    try:
+                        unclaim(set().union(*still_missing.values()))
+                    except Exception:  # noqa: BLE001 — never mask the warning
+                        pass
+                heal = ("dedup keys unclaimed for retry next run"
+                        if unclaim is not None
+                        else "no unclaim hook — keys remain claimed")
+                _log.warning(
+                    "typed ingest: %d record(s) still not visible %.0f s "
+                    "after POST; missing source-ids: %s — %s (a "
+                    "silently-dropped JSONL line, or indexing lag beyond "
+                    "the poll bound, which also self-heals next run)",
+                    len(still_missing),
+                    _LANDED_VERIFY_ATTEMPTS * _LANDED_VERIFY_DELAY_S,
+                    ", ".join(sorted(still_missing)), heal,
+                )
+            elif recovered:
+                # Everything landed during the poll — the expected async
+                # lag, nothing above DEBUG.
+                _log.debug(
+                    "typed ingest: %d record(s) became visible during the "
+                    "delayed verification", recovered,
+                )
 
         # Note: `verified < posted` is no longer fatal. Fulcra accepts the POST
-        # (204) but indexing can lag seconds-to-minutes behind for large batches.
-        # Callers display the gap so the user knows what's still settling.
+        # (201, async processing) but indexing can lag behind the delayed
+        # verification's bound for large batches. Callers display the gap so
+        # the user knows what's still settling.
         return ImportResult(total=total, skipped_existing=skipped, posted=posted, verified=verified)
