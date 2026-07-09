@@ -10,9 +10,8 @@ status label and the fix-hint substring appear in the output.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -399,3 +398,114 @@ def test_doctor_data_liveness_warns_not_fails_when_signed_out(
     assert "[WARN]" in liveness
     assert "not signed in" in liveness
     assert "401" not in liveness  # the raw stderr FAIL path was not taken
+
+
+# ---------------------------------------------------------------------------
+# (f) typed-ingest schema drift: wire.build_typed_record vs served schema.
+#     The catalog schema fetch is stubbed so these stay hermetic (no network);
+#     an autouse default serves schemas that MATCH the wire shape (→ OK), and
+#     the drift/absent tests override it.
+# ---------------------------------------------------------------------------
+
+# Served schemas that match what wire.build_typed_record emits for the
+# doctor's canned samples (moment: recorded_at/sources/tags/note; numeric:
+# +value/unit). required is satisfied by the samples, so the row reads OK.
+_SERVED_MOMENT = {"properties": {"id": {}, "tags": {}, "sources": {},
+                                 "recorded_at": {}, "note": {}},
+                  "required": []}
+_SERVED_NUMERIC = {"properties": {"id": {}, "tags": {}, "sources": {},
+                                  "value": {}, "unit": {},
+                                  "recorded_at": {}, "note": {}},
+                   "required": ["value"]}
+
+
+@pytest.fixture(autouse=True)
+def _stub_schema_fetch(monkeypatch):
+    """Default the typed-ingest schema probe to schemas matching the wire
+    shape, so every doctor test is hermetic (no live catalog fetch) and the
+    drift row reads OK unless a test overrides this."""
+    def _served(client, base_type, **kw):
+        return _SERVED_MOMENT if base_type == "MomentAnnotation" else _SERVED_NUMERIC
+    monkeypatch.setattr("fulcra_common.schema_check.fetch_record_schema", _served)
+
+
+def _schema_drift_line(output: str) -> str:
+    return [ln for ln in output.splitlines()
+            if "typed-ingest schema drift" in ln][0]
+
+
+def test_doctor_schema_drift_ok_when_wire_matches_served(collect_home: Path,
+                                                         monkeypatch):
+    """Served schema carries every key the wire emits → OK, no FAIL."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _dispatch_probe_ok(cmd))
+    result = CliRunner().invoke(cli, ["doctor"])
+    line = _schema_drift_line(result.output)
+    assert "[OK]" in line
+    assert "wire shape matches served schema" in line
+
+
+def test_doctor_schema_drift_fails_when_served_schema_missing_a_wire_key(
+        collect_home: Path, monkeypatch):
+    """The served Moment schema drops `note` (a key the wire emits) → the row
+    FAILs naming the drifted key and doctor exits nonzero."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _dispatch_probe_ok(cmd))
+
+    drifted_moment = {"properties": {"id": {}, "tags": {}, "sources": {},
+                                     "recorded_at": {}},  # no "note"
+                      "required": []}
+    monkeypatch.setattr(
+        "fulcra_common.schema_check.fetch_record_schema",
+        lambda client, base_type, **kw: (
+            drifted_moment if base_type == "MomentAnnotation" else _SERVED_NUMERIC))
+
+    result = CliRunner().invoke(cli, ["doctor"])
+    line = _schema_drift_line(result.output)
+    assert "[FAIL]" in line
+    assert "MomentAnnotation" in line and "note" in line and "stripped" in line
+    assert result.exit_code == 1
+
+
+def test_doctor_schema_drift_warns_when_catalog_endpoint_absent(
+        collect_home: Path, monkeypatch):
+    """An older API that does not serve the catalog schema (404 → the fetch
+    raises) is feature-detected: WARN, never FAIL."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _dispatch_probe_ok(cmd))
+
+    import httpx
+
+    def _raise_404(client, base_type, **kw):
+        raise httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=MagicMock(status_code=404))
+    monkeypatch.setattr("fulcra_common.schema_check.fetch_record_schema",
+                        _raise_404)
+
+    result = CliRunner().invoke(cli, ["doctor"])
+    line = _schema_drift_line(result.output)
+    assert "[WARN]" in line
+    assert "typed-ingest schema endpoint unavailable" in line
+    # feature-detect must not turn absence into a hard failure
+    assert "[FAIL]" not in line
+
+
+def test_doctor_schema_drift_warns_when_signed_out(collect_home: Path,
+                                                   monkeypatch):
+    """Signed-out (CLI auth fails) → the row skips with a WARN, like the
+    liveness row, rather than attempting an unauthenticated fetch."""
+    monkeypatch.setattr("fulcra_collect.credentials._find_fulcra_cli",
+                        lambda: "/usr/local/bin/fulcra")
+    _quiet_other_checks(collect_home, monkeypatch)
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _make_cli_fail())
+
+    result = CliRunner().invoke(cli, ["doctor"])
+    line = _schema_drift_line(result.output)
+    assert "[WARN]" in line
+    assert "not signed in" in line
