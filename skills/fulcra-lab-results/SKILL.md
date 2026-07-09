@@ -32,6 +32,16 @@ passes validation (`ok`) or the operator explicitly confirms a flagged row.
 
 ---
 
+## Where to start
+
+**Stateless — no probes.** Each PDF is a fresh, operator-gated transaction; there is no cross-session
+journey to resume into. The intermediate files (`pass_a.json`, `pass_b.json`, `agreed.json`) are ephemeral
+local scratch, and re-running any step on the same file is a server-side no-op (deterministic source ids),
+so an interrupted run simply restarts from Intake with the same PDF. The only prerequisites — an authed
+`fulcra` account and the `fulcra-labs` engine — are covered under Invocation above.
+
+---
+
 ## The flow
 
 ### 1. Intake

@@ -49,6 +49,22 @@ If `fde-engine` is unavailable, degrade gracefully: manage the same file
 layout by hand with `fulcra file` (layout in `references/file-layout.md`)
 and warn the user that resume determinism is reduced.
 
+## Where to start — the re-entrancy probes
+
+Engagements are durable server-side state, so a fresh session resumes rather than
+restarts. Probe top to bottom; enter at the **first row whose probe fails**:
+
+| Probe (run in order) | Command | Passes when | If it fails, enter at |
+|---|---|---|---|
+| Authed? | `fulcra user-info` | exits 0 and prints valid JSON | [Setup](#setup) — `fulcra auth login` (delegate new-user onboarding to fulcra-onboarding) |
+| Engine present? | `fde-engine list` | exits 0 — the CLI resolves and runs | [Setup](#setup) — install `fde-engine`, or degrade to the `fulcra file` layout |
+| Any engagements? | `fde-engine list` | prints one or more engagements with their phase | [The engagement lifecycle](#the-engagement-lifecycle) step 1 (intake) — `fde-engine init <slug> --title "..."` |
+| Resuming one? | `fde-engine resume <slug>` then `fde-engine sync <slug> pull` | prints the resume brief and current phase | the phase named by `fde-engine status <slug>` — re-enter that step of [The engagement lifecycle](#the-engagement-lifecycle) |
+
+First failure wins. A brand-new engagement fails the third probe → start at intake.
+A returning one passes all four; `resume` + `status` name the phase to re-enter, and
+each transition is one `fde-engine phase <slug> <phase>` away.
+
 ## The engagement lifecycle
 
 `intake → interview → architecture → plan → prototype → build → retro`

@@ -11,6 +11,21 @@ rules — MUST update this file in the same PR. Reviewers: treat a stale
 `AGENTS.md` as a blocking finding. If your change doesn't alter what an agent
 needs to know, say so in the PR body ("AGENTS.md: no change needed").
 
+## Where to start
+
+Landing cold? Run the probes top to bottom, then jump to the layer you're
+touching. First failing probe is where your setup gap is.
+
+| Probe / question | Command | Passes when | Where to go |
+|---|---|---|---|
+| Engine + auth usable? | `coord-engine doctor <team>` | exits 0 — tooling present, store reachable | fix the reported gap first (auth: `fulcra auth login`; missing/old `coord-engine`: reinstall) |
+| On the bus? | `coord-engine briefing <team> --agent <you>` | prints your identity, role inboxes, and everything that needs you | [Coordinate on the bus](#coordinate-on-the-bus) — that fold IS your work queue |
+| Own worktree? | `git worktree list` | your cwd is a dedicated worktree, not a shared checkout (no conflict markers or foreign staged files) | [Working tree](#working-tree) — carve your own before committing |
+| Touching Collect / the daemon? | — | — | [The daemon (Collect)](#the-daemon-collect) |
+| Touching coord conventions? | — | — | [Coordinate on the bus](#coordinate-on-the-bus) |
+| Touching the platform surface? | — | — | [Fulcra platform surface & records](#fulcra-platform-surface--records) |
+| Touching CI / hooks? | — | — | [CI, the pre-push hook, and workspace membership](#ci-the-pre-push-hook-and-workspace-membership) |
+
 ## Layout
 
 uv-workspace monorepo, macOS-first. Packages under `packages/`, agent skills
