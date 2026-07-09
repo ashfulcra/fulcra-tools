@@ -64,16 +64,22 @@ def _listen(det_id: str, start: datetime,
 
 
 def _client(recording_transport, existing_records):
-    """FulcraClient whose GET readback returns ``existing_records`` and whose
+    """FulcraClient whose GET readback returns ``existing_records`` (plus an
+    echo of every POSTed record — a landed record, so the post-POST verify
+    confirms it and the typed delayed-verify poll never engages) and whose
     POST returns 204. Captures decoded JSONL POST records for assertions."""
     posted_records: list[dict] = []
+    landed_rows: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
-            return json_response(200, existing_records)
+            return json_response(200, list(existing_records) + landed_rows)
         if request.method == "POST":
             for line in request.content.splitlines():
-                posted_records.append(json.loads(line))
+                rec = json.loads(line)
+                posted_records.append(rec)
+                landed_rows.append({"source_id": _DEF_SID,
+                                    "sources": rec["sources"]})
             return httpx.Response(204)
         pytest.fail(request.url)
 
@@ -109,7 +115,7 @@ def test_same_source_replay_cross_run_is_posted_with_fp_stripped(
     assert result.posted == 1
     assert result.skipped_existing == 0
     assert len(posted_records) == 1
-    wire_sources = posted_records[0]["metadata"]["source"]
+    wire_sources = posted_records[0]["sources"]
     assert det_b in wire_sources
     assert _FP not in wire_sources, (
         "fingerprint must be stripped or query-time source-merging "
@@ -170,12 +176,12 @@ def test_batch_internal_replay_with_claim_posts_both(recording_transport):
     assert len(posted_records) == 2
 
     by_det = {
-        next(s for s in rec["metadata"]["source"]
+        next(s for s in rec["sources"]
              if s.startswith("com.fulcra.media.")): rec
         for rec in posted_records
     }
-    assert _FP in by_det[det_a]["metadata"]["source"]
-    assert _FP not in by_det[det_b]["metadata"]["source"]
+    assert _FP in by_det[det_a]["sources"]
+    assert _FP not in by_det[det_b]["sources"]
 
     # First event claimed its full key set; the second claimed only its
     # remaining keys (det_id) after the same-run fingerprint strip.
@@ -221,4 +227,4 @@ def test_event_without_fingerprint_behaves_as_before(recording_transport):
     assert result.posted == 1
     assert result.skipped_existing == 1
     assert len(posted_records) == 1
-    assert det_b in posted_records[0]["metadata"]["source"]
+    assert det_b in posted_records[0]["sources"]
