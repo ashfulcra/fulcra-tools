@@ -66,8 +66,9 @@ def new_task_doc(
     """Return ``(slug, content)`` for a new OKF Task doc. Raises on bad enums.
 
     ``slug`` overrides the title-derived slug (used for both the filename and the
-    ``id`` frontmatter field) — the directive re-slug path passes a hash-suffixed
-    slug so a genuine collision lands at a distinct, deduped id, not the title's.
+    ``id`` frontmatter field) — the directive path passes a payload-hash-suffixed
+    slug so identical messages dedupe onto one id and distinct messages get
+    distinct, non-racing ids.
     """
     if status not in VALID_STATUSES:
         raise TaskError(f"invalid status {status!r}")

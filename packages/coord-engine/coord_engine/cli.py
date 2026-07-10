@@ -452,7 +452,12 @@ def _tally_from_verdict_entries(
     ``deadline`` (F2) is an absolute ``time.monotonic()`` instant bounding the
     per-verdict read loop: ONE review with many shards would otherwise read every
     shard unbounded (N x transport.timeout), blowing the aggregate fold budget
-    with no degraded marker. On expiry the loop STOPS mid-slug and returns
+    with no degraded marker. The deadline is checked BOTH before and AFTER each
+    shard read: a strict wall-clock bound is impossible without cancellable
+    transport, so the guarantee is that an overrun is DETECTED and REPORTED
+    immediately after the blocking op (a single stalled read that sleeps past the
+    budget can no longer return a clean row) — budget overshoot is bounded by ONE
+    transport timeout. On expiry the loop STOPS mid-slug and returns
     ``fully_scanned=False`` — the partial tally is a floor the caller MUST NOT
     trust (it counts the slug as skipped, surfaces the degraded marker). None
     (``review status``, no budget) never bounds and always scans fully."""
@@ -475,6 +480,13 @@ def _tally_from_verdict_entries(
             fully_scanned = False
             break
         raw_v = transport.read(_verdicts_prefix(team, slug) + n)
+        if deadline is not None and time.monotonic() >= deadline:
+            # The deadline passed DURING this read (F2/P1-B): checking only BEFORE
+            # the read let one stalled read complete and return a clean row despite
+            # blowing the budget. Detect the overrun immediately after the blocking
+            # op — the slug is not fully scanned. Overshoot is bounded by ONE read.
+            fully_scanned = False
+            break
         if raw_v is None:
             reads_ok = False  # listed file unreadable -> tally is incomplete
         fm = okf.parse_frontmatter(raw_v) or {}
@@ -610,6 +622,15 @@ def _pending_reviews_for(
                 # settled, not silently pending. Count it, keep scanning.
                 skipped += 1
                 continue
+            if time.monotonic() >= deadline:
+                # The doc read itself pushed us over budget (P1-B): check AFTER the
+                # blocking op, not only between slugs. Don't start the verdict
+                # reads — this slug is UNKNOWN. Count it skipped and surface the
+                # degraded marker; the budget is spent.
+                skipped += 1
+                out.append({"type": "review-fold-degraded", "scanned": scanned,
+                            "total": total, "skipped": skipped})
+                return out
             tally, vreads_ok, fully = _tally_from_verdict_entries(
                 transport, team, slug, ventries, doc_raw, deadline=deadline)
             if not fully:
@@ -927,9 +948,14 @@ def _directive_payload(title: Optional[str], summary: Optional[str],
                        next_action: Optional[str],
                        assignee: Optional[str]) -> tuple[str, str, str, str]:
     """The message-identity fields — title, summary, next_action, ASSIGNEE.
-    Timestamp, owner, and not_before are delivery metadata, not the message, so
-    they never enter the identity/dedup comparison (a relay re-sending the same
-    reminder to the same agent is the same message). Assignee IS identity: the
+
+    Identity == path: ``_create_directive`` hashes this payload into the canonical
+    directive slug (``<title-slug>-<sha256(payload)[:8]>``), so identical payloads
+    map to one path (dedupe by construction) and distinct payloads to distinct
+    paths (they can never race). Timestamp, owner, and not_before are delivery
+    metadata, not the message, so they never enter the identity/dedup comparison
+    (a relay re-sending the same reminder to the same agent is the same message).
+    Assignee IS identity: the
     same text told to a DIFFERENT agent is a different directive (each recipient
     must get their copy), while broadcast's ``*`` audience means identical
     re-broadcasts still dedupe — and a broadcast stays distinct from a directed
@@ -947,8 +973,10 @@ def _directive_payload(title: Optional[str], summary: Optional[str],
 
 def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
     """Message-identity payload of an existing task doc, or ``None`` when its
-    frontmatter won't parse — the caller then treats it as a DIFFERENT message
-    (suffix + deliver): a duplicate directive is cheaper than a dropped one."""
+    frontmatter won't parse. On the write path an unparseable/corrupt doc at our
+    canonical (hash-bearing) slot can no longer be a colliding DIFFERENT message —
+    only corruption — so the caller fails loud (cannot verify delivery) rather
+    than overwriting: never claim a delivery we can't confirm."""
     fm = okf.parse_frontmatter(doc)
     if fm is None:
         return None
@@ -957,111 +985,98 @@ def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
 
 
 def _payload_hash(payload: tuple[str, str, str, str]) -> str:
-    """Stable short id for a distinct message. Hashes the payload (NOT the time),
-    so a retry of the same distinct message maps to the same suffixed slug and
-    dedupes correctly."""
+    """Stable short id carried by EVERY directive slug. Hashes the payload (NOT
+    the time), so a retry of the same message maps to the same slug (dedupe) and
+    distinct messages to distinct slugs (no shared slot to race over)."""
     return hashlib.sha256("\x00".join(payload).encode("utf-8")).hexdigest()[:8]
 
 
 def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
                      content: str, payload: tuple[str, str, str, str], assignee: str,
-                     not_before: Optional[str]) -> Optional[int]:
-    """Deliver ``content`` at ``slug``, deduping on an identical existing payload.
+                     not_before: Optional[str]) -> int:
+    """Deliver ``content`` at ``slug`` — whose canonical path already carries the
+    payload hash (see ``_create_directive``), so the path IS the message identity.
 
-    Returns a return code when the slot is decided (0 delivered / 0 already
-    delivered / rc unchanged), or ``None`` when the slot is a genuine collision
-    (occupied by a DIFFERENT message) and the caller must re-slug.
+    Two senders of the SAME payload compute the SAME path and write the SAME
+    bytes: a race is idempotent (last-writer-wins is a no-op), so the existence
+    of the slot means "already delivered". Distinct payloads land on DISTINCT
+    paths and can never race each other — the lost-race case that the old
+    read-back guarded against cannot arise, so a read-back MISMATCH now means
+    only transport corruption (or an astronomically improbable hash collision),
+    never a racer's different message. We never overwrite and never claim a
+    delivery we cannot verify.
     """
     path = _task_path(args.team, slug)
     existing = transport.read(path)
-    if existing is None:
-        # A read of None is AMBIGUOUS (T1: timeout and genuinely-absent both map
-        # to None). Treating it as "empty slot" would let a degraded transport
-        # clobber an occupied slot (I1). Confirm absence via a directory listing:
-        # list_dir RAISES TransportError on failure (surfacing loud through main's
-        # catch-all), and its entry names distinguish missing from unreadable. One
-        # list_dir per tell is acceptable (tell is not a hot fold).
-        parent, entry = path.rsplit("/", 1)
-        names = {e.get("name") for e in transport.list_dir(parent + "/")}
-        if entry in names:
-            # Listing succeeded and the slot IS present, yet the read returned
-            # None: the transport degraded mid-operation. Refuse to overwrite.
-            print(f"directive {slug}: slot present but unreadable "
-                  f"(transport degraded), refusing to overwrite", file=sys.stderr)
-            return 1
-        # Listing succeeded and the slug is absent -> genuinely empty. A write
-        # that fails (T1: False, not a raise) must NOT be reported as delivered
-        # (C1): the message would be silently lost. A failed write leaves the slot
-        # empty, so a retry re-enters this dedup/collision logic cleanly.
-        if not transport.write(path, content):
-            print("directive write failed (transport)", file=sys.stderr)
-            return 1
-        # F3: the absence check + write is TOCTOU — the transport has no atomic
-        # create, so a concurrent colliding tell could have written a DIFFERENT
-        # message to this same slot between our list_dir and our write, and
-        # last-writer-wins would silently clobber one of us (both rc 0). Verify by
-        # reading BACK: if the slot no longer holds OUR payload, we lost the race.
-        readback = transport.read(path)
-        if readback is None:
-            # Read-back failed (transport degraded mid-op): we cannot confirm our
-            # write landed/survived. Fail loud (C1) rather than claim a delivery
-            # we can't verify.
-            print(f"directive {slug}: write unverifiable (read-back failed, "
-                  f"transport degraded)", file=sys.stderr)
-            return 1
-        if _doc_payload(readback) != payload:
-            # A racer's different message holds this slot. Return None so the
-            # caller re-slugs to our deterministic hash-suffixed slot: the racer
-            # keeps the base, we converge to the suffix — both messages durable,
-            # both visible in inbox folds.
-            return None
-        print(f"directive {slug} -> {assignee}"
-              + (f" (visible {not_before})" if not_before else ""))
-        return 0
-    if _doc_payload(existing) == payload:
-        # Same message already on the bus: sanctioned dedup, success not failure.
-        print(f"directive {slug} already delivered")
-        return 0
-    return None  # collision with a different message
+    if existing is not None:
+        # The path is the payload identity, so an existing readable doc here IS
+        # our message. Matching payload -> sanctioned dedup (already delivered).
+        if _doc_payload(existing) == payload:
+            print(f"directive {slug} already delivered")
+            return 0
+        # Present but NOT our payload: unparseable/corrupt content (or a hash
+        # collision). We cannot verify our message is the one on the bus and must
+        # never overwrite — fail loud so the caller retries.
+        print(f"directive {slug}: slot holds unverifiable content, "
+              f"cannot verify delivery, retry", file=sys.stderr)
+        return 1
+    # existing is None is AMBIGUOUS (T1: timeout and genuinely-absent both map to
+    # None). Treating it as "empty slot" would let a degraded transport clobber an
+    # occupied slot (I1). Confirm absence via a directory listing: list_dir RAISES
+    # TransportError on failure (loud through main's catch-all), and its entry
+    # names distinguish missing from unreadable. One list_dir per tell is fine.
+    parent, entry = path.rsplit("/", 1)
+    names = {e.get("name") for e in transport.list_dir(parent + "/")}
+    if entry in names:
+        # Present in the listing yet the read returned None: transport degraded
+        # mid-op. Cannot verify delivery, must not overwrite.
+        print(f"directive {slug}: slot present but unreadable "
+              f"(transport degraded), cannot verify delivery, retry", file=sys.stderr)
+        return 1
+    # Genuinely absent -> write. A write that fails (T1: False, not a raise) must
+    # NOT be reported as delivered (C1): a failed write leaves the slot empty, so
+    # a retry re-enters this dedup logic cleanly.
+    if not transport.write(path, content):
+        print("directive write failed (transport)", file=sys.stderr)
+        return 1
+    # Post-write read-back as WRITE-VERIFICATION only: None (read-back failed) or a
+    # mismatch (corruption) both mean we cannot confirm our bytes landed -> fail
+    # loud (C1) rather than claim an unverifiable delivery. A mismatch can no
+    # longer mean a lost race (distinct payloads never share this path).
+    readback = transport.read(path)
+    if readback is None:
+        print(f"directive {slug}: write unverifiable (read-back failed, "
+              f"transport degraded)", file=sys.stderr)
+        return 1
+    if _doc_payload(readback) != payload:
+        print(f"directive {slug}: write unverifiable (read-back mismatch, "
+              f"transport corruption)", file=sys.stderr)
+        return 1
+    print(f"directive {slug} -> {assignee}"
+          + (f" (visible {not_before})" if not_before else ""))
+    return 0
 
 
 def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str,
                       not_before: Optional[str] = None) -> int:
+    # The canonical directive path ALWAYS carries the payload hash: identical
+    # payloads (any senders, any order) converge on one path and dedupe by
+    # construction; distinct payloads occupy distinct paths and can never race.
     payload = _directive_payload(args.title, args.summary, args.next, assignee)
+    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
     try:
-        base_slug, content = tasks.new_task_doc(
+        _, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
             status="proposed", priority=args.priority,
             owner=getattr(args, "sender", None) or _host(), assignee=assignee,
             summary=args.summary or "", next_action=args.next, kind="directive",
-            not_before=not_before,
+            not_before=not_before, slug=slug,
         )
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
         return 1
-    rc = _write_directive(transport, args, slug=base_slug, content=content,
-                          payload=payload, assignee=assignee, not_before=not_before)
-    if rc is not None:
-        return rc
-    # Base slug is taken by a DIFFERENT message: re-slug with a stable hash of the
-    # payload and deliver there. Same distinct message -> same suffixed slug.
-    suffixed = f"{base_slug}-{_payload_hash(payload)}"
-    _, content = tasks.new_task_doc(
-        args.title, now=_iso(_now()), workstream=args.workstream,
-        status="proposed", priority=args.priority,
-        owner=getattr(args, "sender", None) or _host(), assignee=assignee,
-        summary=args.summary or "", next_action=args.next, kind="directive",
-        not_before=not_before, slug=suffixed,
-    )
-    rc = _write_directive(transport, args, slug=suffixed, content=content,
-                          payload=payload, assignee=assignee, not_before=not_before)
-    if rc is not None:
-        return rc
-    # Suffixed slug ALSO holds a different message (pathological): fail loudly
-    # rather than clobber or drop.
-    print(f"directive collision unresolved: {base_slug} and {suffixed} both hold "
-          f"different messages", file=sys.stderr)
-    return 1
+    return _write_directive(transport, args, slug=slug, content=content,
+                            payload=payload, assignee=assignee, not_before=not_before)
 
 
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:

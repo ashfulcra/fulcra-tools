@@ -298,6 +298,35 @@ def test_single_slug_many_verdicts_bounded_by_budget(capsys):
     assert deg[0]["total"] == 1 and deg[0]["scanned"] == 1 and deg[0]["skipped"] == 1, deg[0]
 
 
+def test_single_slow_verdict_read_overrun_marks_slug_skipped(capsys):
+    # P1-B (codex r2): the deadline was checked only BEFORE each verdict read, so
+    # ONE stalled read that sleeps past the budget still completed and the slug
+    # returned a clean `fully_scanned` row — the budget was blown with no degraded
+    # marker. The check must also run AFTER the blocking read: a read that pushes
+    # us over budget marks the slug not-fully-scanned (skipped) and surfaces the
+    # degraded marker. Overshoot is bounded by ONE transport timeout.
+    class SlowVerdictRead(CountingTransport):
+        def read(self, path):
+            if "/verdicts/" in path and path.endswith(".md"):
+                time.sleep(0.2)  # the single stalled read that overruns the budget
+            return super().read(path)
+
+    t = SlowVerdictRead()
+    # two required reviewers; bob's verdict shard exists (a shard to read), alice
+    # is still pending -> at HEAD this yields a clean review-pending row for alice.
+    cli.main(["review", "request", "r", "pr-stall", "--of", "url",
+              "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    t.put("team/r/review/pr-stall/verdicts/bob.md",
+          "---\ntype: Verdict\nreviewer: bob\nverdict: approve\n---\n")
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1, f"a single over-budget read must surface a degraded marker: {out}"
+    assert deg[0]["scanned"] == 1 and deg[0]["skipped"] == 1, deg[0]
+    assert not any(r.get("type") == "review-pending" for r in out), \
+        "a slug whose read blew the budget must NOT return a clean pending row"
+
+
 def test_review_status_removes_stale_marker_on_pending(capsys):
     # F4: a `.settled` marker planted on a since-reopened (still-PENDING) review
     # is provably stale. `review status` recomputes the truth AND best-effort
