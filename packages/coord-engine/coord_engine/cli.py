@@ -414,42 +414,85 @@ def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> 
         pass
 
 
+def _is_settleable(tally: dict[str, Any]) -> bool:
+    """True only for a tally that may be CACHED as settled: APPROVED, nothing
+    pending, and a parsed NON-EMPTY required list. The required gate is the
+    false-settle guard: ``transport.read()`` returns None on failure (incl.
+    timeout — it never raises), so a transient doc-read failure yields
+    required=None and ``review.tally(..., required=None)`` goes APPROVED off any
+    one readable approval verdict — cache that and a genuinely-pending review is
+    hidden from every fold, durably. ``review request`` refuses to open a review
+    without --reviewer, so an absent/empty required list can only mean doc-read
+    failure, doc corruption, or a legacy/forge-style doc — never a legitimate
+    settle state. Such tallies stay UNCACHED (re-tallied each fold); only the
+    marker write is gated here, never the reported state."""
+    return (tally.get("state") == review.APPROVED
+            and not tally.get("pending_required")
+            and bool(tally.get("required")))
+
+
 def _tally_from_verdict_entries(
-    transport: Any, team: str, slug: str, entries: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Doc read + verdict-shard reads -> tally, given an already-fetched verdicts
-    listing. Split out so the fold can list ONCE, short-circuit on `.settled`,
-    and only then pay for the doc/verdict reads."""
-    req_doc = okf.parse_frontmatter(transport.read(_review_doc_path(team, slug))) or {}
+    transport: Any, team: str, slug: str, entries: list[dict[str, Any]],
+    doc_raw: Optional[str],
+) -> tuple[dict[str, Any], bool]:
+    """Verdict-shard reads -> ``(tally, verdict_reads_ok)``, given an
+    already-fetched verdicts listing and the already-read review doc
+    (``doc_raw``). A None ``doc_raw`` means the doc read failed or the doc is
+    missing — callers on the fold path must treat that as UNKNOWN (skip +
+    count), not pass it here; this helper just tallies what it is given.
+
+    ``verdict_reads_ok`` is False when any listed verdict file's read returned
+    None (transport failure — the file EXISTS, its content is unknown): the
+    tally is then a floor, not the truth — a lost CHANGES verdict would look
+    APPROVED — so settle-marker writers must not cache it. A file that reads
+    fine but parses to garbage is NOT a read failure (garbage is simply not a
+    verdict). Split out so the fan-out fold can list ONCE, short-circuit on
+    `.settled`, read the doc, and only then pay for the verdict reads."""
+    req_doc = okf.parse_frontmatter(doc_raw) or {}
     required = req_doc.get("required")
     if isinstance(required, str):
         required = [r.strip() for r in required.split(",") if r.strip()]
     elif isinstance(required, list):
         required = [str(r).strip() for r in required if str(r).strip()]
     verdicts: list[dict[str, Any]] = []
+    reads_ok = True
     for e in entries:
         n = e.get("name") or ""
         if e.get("is_dir") or not n.endswith(".md"):
             continue
-        fm = okf.parse_frontmatter(transport.read(_verdicts_prefix(team, slug) + n)) or {}
+        raw_v = transport.read(_verdicts_prefix(team, slug) + n)
+        if raw_v is None:
+            reads_ok = False  # listed file unreadable -> tally is incomplete
+        fm = okf.parse_frontmatter(raw_v) or {}
         # Key by the FILENAME stem (ACL-controlled path), not the frontmatter
         # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
         # could shadow alice's real verdict. One verdict file per reviewer.
         verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
-    return review.tally(verdicts, required=required)
+    return review.tally(verdicts, required=required), reads_ok
 
 
-def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
-    """Shared review fold: doc + verdict shards -> tally dict.
+def _review_tally(
+    transport: Any, team: str, slug: str
+) -> tuple[dict[str, Any], bool, bool]:
+    """Shared review fold: doc + verdict shards ->
+    ``(tally, doc_ok, verdict_reads_ok)``.
 
     ALWAYS computes the full tally — it never consults the `.settled` marker, so
     a corrupt/stale marker can never hide the truth on a direct `review status`
-    query (the marker only serves the fan-out fold, `_pending_reviews_for`)."""
+    query (the marker only serves the fan-out fold, `_pending_reviews_for`).
+
+    ``doc_ok`` is False when the review doc could not be read (missing OR
+    transport failure — ``read()`` returns None for both, indistinguishably):
+    the tally was built on NO required list and must be treated as unknown,
+    never as a clean state. ``verdict_reads_ok`` is False when a listed verdict
+    file's content could not be read — the tally is a floor, not the truth."""
+    raw = transport.read(_review_doc_path(team, slug))
     try:
         entries = transport.list_dir(_verdicts_prefix(team, slug))
     except TransportError:
         entries = []
-    return _tally_from_verdict_entries(transport, team, slug, entries)
+    tally, vok = _tally_from_verdict_entries(transport, team, slug, entries, raw)
+    return tally, raw is not None, vok
 
 
 def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
@@ -502,8 +545,11 @@ def _pending_reviews_for(
       ``COORD_REVIEW_FOLD_BUDGET``) checked BETWEEN slugs. On breach the scan
       STOPS and a ``review-fold-degraded`` marker (``scanned``/``total``) is
       appended — never a clean-looking partial. A single slug whose tally raises
-      ``TransportError`` (Task-1 timeout) is skipped, counted in ``skipped``, and
-      surfaced via the same marker (partial knowledge must be VISIBLE).
+      ``TransportError`` (Task-1 timeout) or whose review DOC read returns None
+      (``read()`` never raises — None here means the read failed, since the slug
+      came from the listing) is skipped, counted in ``skipped``, and surfaced
+      via the same marker (an unreadable slug is UNKNOWN — not settled, not
+      silently pending; partial knowledge must be VISIBLE).
 
     If review counts keep growing the right home for this is the reconcile
     pre-fold (like task rows) — tracked on the bus."""
@@ -539,7 +585,16 @@ def _pending_reviews_for(
             ventries = transport.list_dir(_verdicts_prefix(team, slug))
             if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
                 continue  # settled -> skip entirely, zero reads beyond this listing
-            tally = _tally_from_verdict_entries(transport, team, slug, ventries)
+            doc_raw = transport.read(_review_doc_path(team, slug))
+            if doc_raw is None:
+                # The slug came from the review/ listing, so its doc exists —
+                # a None read is a transport failure (read() returns None on
+                # timeout, it never raises). The slug's state is UNKNOWN: not
+                # settled, not silently pending. Count it, keep scanning.
+                skipped += 1
+                continue
+            tally, vreads_ok = _tally_from_verdict_entries(
+                transport, team, slug, ventries, doc_raw)
         except TransportError:
             # A single slug's tally timed out (Task-1 contract): skip it, keep
             # scanning the rest, and make the gap visible via `skipped` below.
@@ -548,7 +603,11 @@ def _pending_reviews_for(
         state = tally.get("state")
         pending = tally.get("pending_required") or []
         if state == review.APPROVED and not pending:
-            _write_settled_marker(transport, team, slug, now=now)  # best-effort cache
+            # Cache only a PROVEN settle: non-empty required (false-settle
+            # guard, see _is_settleable) AND every listed verdict actually read
+            # (an unreadable verdict could be a hidden CHANGES).
+            if _is_settleable(tally) and vreads_ok:
+                _write_settled_marker(transport, team, slug, now=now)
             continue
         if state != "PENDING" or not pending:
             continue
@@ -695,11 +754,23 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
-    result = _review_tally(transport, team, slug)
+    result, doc_ok, vreads_ok = _review_tally(transport, team, slug)
+    if not doc_ok:
+        # The doc read returned None: missing slug OR transport failure —
+        # indistinguishable, and either way the tally is UNKNOWN. Without the
+        # required list, one readable approval verdict tallies as a clean
+        # APPROVED with pending:[] — printing that (or caching it) under a
+        # transient timeout would durably hide a pending review. Fail loud.
+        print(f"review status failed: {_review_doc_path(team, slug)} unreadable "
+              f"(missing slug or degraded transport) — tally unknown, retry",
+              file=sys.stderr)
+        return 1
     # A direct query recomputes the truth (never trusts the marker) and, when the
-    # result is terminal-settled, refreshes the fold cache so the fan-out fold can
-    # skip this slug next time. Self-healing: a wrong marker gets overwritten here.
-    if result.get("state") == review.APPROVED and not result.get("pending_required"):
+    # result is PROVEN terminal-settled (non-empty required, every listed verdict
+    # actually read — see _is_settleable), refreshes the fold cache so the fan-out
+    # fold can skip this slug next time. Self-healing: a wrong marker gets
+    # overwritten here.
+    if _is_settleable(result) and vreads_ok:
         _write_settled_marker(transport, team, slug, now=_iso(_now()))
     result.update({"team": team, "slug": slug})
     if args.json:

@@ -140,6 +140,113 @@ def test_briefing_and_needs_me_degraded_exit_zero_with_text(capsys, monkeypatch)
         "json path must surface the marker as-is"
 
 
+class DocReadFailsTransport(CountingTransport):
+    """Doc reads return None (the Task-1 `read()` timeout contract — it never
+    raises) while verdict reads succeed: the false-settle incident shape."""
+
+    def __init__(self):
+        super().__init__()
+        self.doc_reads_fail = True
+
+    def read(self, path):
+        if (self.doc_reads_fail and path.startswith("team/r/review/")
+                and path.endswith(".md") and "/verdicts/" not in path):
+            self.reads.append(path)
+            return None  # timeout: content unknown, no exception raised
+        return super().read(path)
+
+
+def _trap(t, slug="pr-t"):
+    """Open a required-alice review, then plant a READABLE stray approval —
+    with the doc unreadable, required=None + one approval = false APPROVED."""
+    cli.main(["review", "request", "r", slug, "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    t.put(f"team/r/review/{slug}/verdicts/bob.md",
+          "---\ntype: Verdict\nreviewer: bob\nverdict: approve\n---\n")
+
+
+def test_doc_read_timeout_never_writes_false_settled(capsys):
+    # Regression (review REJECTED finding): doc read -> None => required=None
+    # => tally APPROVED off one readable approval => durable false .settled.
+    t = DocReadFailsTransport()
+    _trap(t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert "team/r/review/pr-t/verdicts/.settled" not in t.store, \
+        "a doc-read timeout must NEVER settle the review"
+    # the slug is unknown, not silently dropped: surfaced via skipped
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1 and deg[0]["skipped"] == 1, deg
+    assert not [r for r in out if r.get("type") == "review-pending"], \
+        "unknown is not pending either — it is skipped, visibly"
+
+
+def test_review_status_doc_read_timeout_fails_loud_no_marker(capsys):
+    t = DocReadFailsTransport()
+    _trap(t)
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-t", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "unreadable" in cap.err
+    assert "APPROVED" not in cap.out, "must not print a clean APPROVED on unknown"
+    assert "team/r/review/pr-t/verdicts/.settled" not in t.store
+
+
+def test_recovered_transport_tallies_pending_again(capsys):
+    # After the transient failure clears, the same slug tallies to the truth.
+    t = DocReadFailsTransport()
+    _trap(t)
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "alice")  # degraded pass, writes nothing
+    t.doc_reads_fail = False                   # transport recovers
+    out = cli._pending_reviews_for(t, "r", "alice")
+    pend = [r for r in out if r.get("type") == "review-pending"]
+    assert len(pend) == 1 and pend[0]["name"] == "pr-t" \
+        and pend[0]["pending_required"] == ["alice"]
+    cli.main(["review", "status", "r", "pr-t", "--json"], transport=t)
+    assert json.loads(capsys.readouterr().out)["state"] == "PENDING"
+
+
+def test_unreadable_verdict_blocks_settle_marker(capsys):
+    # Same defect class one level down: a listed verdict whose READ returns None
+    # could be a hidden CHANGES — an APPROVED tally over it must not be cached.
+    class VerdictReadFails(CountingTransport):
+        def read(self, path):
+            if path == "team/r/review/pr-v/verdicts/carol.md":
+                self.reads.append(path)
+                return None
+            return super().read(path)
+
+    t = VerdictReadFails()
+    cli.main(["review", "request", "r", "pr-v", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    t.put("team/r/review/pr-v/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\n")
+    t.put("team/r/review/pr-v/verdicts/carol.md",   # exists, content unreadable
+          "---\ntype: Verdict\nreviewer: carol\nverdict: changes\n---\n")
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "alice")
+    assert "team/r/review/pr-v/verdicts/.settled" not in t.store
+    assert cli.main(["review", "status", "r", "pr-v", "--json"], transport=t) == 0
+    assert "team/r/review/pr-v/verdicts/.settled" not in t.store
+
+
+def test_forge_style_doc_without_required_never_settles(capsys):
+    # Legacy/forge review docs carry no `required:` — legitimately APPROVED but
+    # NOT cacheable (an empty required list is indistinguishable from the
+    # doc-read-failure shape, so it never earns a marker; state is unaffected).
+    t = FakeTransport()
+    t.put("team/r/review/pr-f.md", "---\ntype: Review\ntitle: R\n---\n")
+    t.put("team/r/review/pr-f/verdicts/forge.md",
+          "---\ntype: Verdict\nreviewer: forge\nverdict: approve\n---\n")
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "alice")
+    assert "team/r/review/pr-f/verdicts/.settled" not in t.store
+    assert cli.main(["review", "status", "r", "pr-f", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
+    assert "team/r/review/pr-f/verdicts/.settled" not in t.store
+
+
 def test_single_slug_transport_error_skipped_and_counted(capsys):
     class OneSlugFails(CountingTransport):
         def list_dir(self, prefix):
