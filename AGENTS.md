@@ -36,6 +36,14 @@ under `skills/`, each package with its own README, build, and tests.
   menu-bar app, PyObjC / rumps), `fulcra-common` (shared API client + ingest
   pipeline), plus the importer packages (`dayone`, `csv-importer`,
   `media-helpers`, `attention`, `netflix-skill`, …).
+- **`packages/gmail`** (`fulcra-gmail`) — the local Gmail relay (rebuild of
+  ArcBot's unrecoverable MVP). Multi-account, read-only (`gmail.readonly`),
+  keyed by opaque `account_id` (email is metadata, never a path/key segment).
+  Task 1 ships the client + OAuth account registry only: `GmailClient` (Gmail
+  REST v1 httpx wrapper, refresh-on-401, fail-soft `invalid_grant`) and the
+  `AccountRegistry` (keychain secrets via collect's `credentials` helpers +
+  a JSON registry doc; B4 single-use OAuth `state`-nonce → `users.getProfile`
+  account binding). Rules/ledger/Files-writer/plugin land in later tasks.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent
