@@ -90,7 +90,13 @@ skills. Subagent-only work stays OFF the bus.
   per required reviewer through the canonical hash-slug path (so a verb-opened
   review fires each reviewer's inbox/`listen` — never hand-send a review tell),
   and a partial notification failure is reported loud (rc 1) naming exactly which
-  reviewers were and were not notified;
+  reviewers were and were not notified — and is **retryable**: re-running the SAME
+  request (same `of`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
+  only the reviewers a prior partial failure dropped (the doc is left byte-unchanged,
+  already-delivered directives dedupe rc 0), so no reviewer is stranded by the
+  exists-guard; a re-request with a *different* `of`/required-set/requester is a
+  loud rc 1 conflict (a changed required set re-opens only via a new slug), and a
+  present-but-unreadable doc fails closed (rc 1, never overwritten);
   `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
   and gates the merge. The `<artifact>` is an opaque ref (PR#, branch, commit
   SHA, URL, or a non-code deliverable), so the handshake works with any forge

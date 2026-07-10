@@ -812,6 +812,87 @@ def _forge_feedback_line(r: dict[str, Any]) -> str:
             f"{r.get('count')} item(s) from {who}")
 
 
+def _normalize_required(required: Any) -> list[str]:
+    """Coerce a doc's ``required:`` field (list or legacy comma-string) into a
+    clean list of stripped, non-empty reviewer names — the shape `review.tally`
+    and the request-identity comparison both consume."""
+    if isinstance(required, str):
+        return [r.strip() for r in required.split(",") if r.strip()]
+    if isinstance(required, list):
+        return [str(r).strip() for r in required if str(r).strip()]
+    return []
+
+
+def _review_request_diff(
+    fm: dict[str, Any], *, of: Any, required: list[str], requested_by: str,
+) -> Optional[tuple[str, str, str]]:
+    """Compare an existing review doc's frontmatter against the request being made.
+
+    Returns ``None`` when it is the SAME request (idempotent recovery), else
+    ``(field, existing_value, requested_value)`` naming the FIRST identity field
+    that differs. Request identity is ``requested_by`` + ``of`` + the required SET
+    (order-normalized): a different requester re-opening someone else's review is a
+    conflict (not a silent recovery), and a changed required set re-opens a review
+    only via a NEW slug (the settled-review immutability contract)."""
+    ex_rb = str(fm.get("requested_by") or "")
+    if ex_rb != (requested_by or ""):
+        return ("requested_by", ex_rb, requested_by or "")
+    ex_of = str(fm.get("of") or "")
+    if ex_of != (str(of) if of is not None else ""):
+        return ("of", ex_of, str(of) if of is not None else "")
+    ex_req = sorted(_normalize_required(fm.get("required")))
+    if ex_req != sorted(required):
+        return ("required set", ", ".join(ex_req), ", ".join(sorted(required)))
+    return None
+
+
+def _deliver_all_review_directives(
+    transport: Any, team: str, slug: str, required: list[str], *, owner: str, of: str,
+) -> tuple[list[str], list[str]]:
+    """Deliver ONE directive per required reviewer through the canonical hash-slug
+    path. Returns ``(delivered, failed)``. Payload-hash dedup makes this idempotent:
+    a reviewer whose directive already landed re-verifies as "already delivered"
+    (rc 0), so this is safe to re-run on a recovery retry — it fills the gaps."""
+    delivered: list[str] = []
+    failed: list[str] = []
+    for r in required:
+        if _deliver_review_directive(transport, team, slug, r,
+                                     sender=owner, of=of) == 0:
+            delivered.append(r)
+        else:
+            failed.append(r)
+    return delivered, failed
+
+
+def _print_partial_review_failure(
+    slug: str, delivered: list[str], failed: list[str], *, doc_note: str,
+) -> None:
+    """The loud partial-failure line: names exactly who was NOT notified and who
+    was, and points the requester at the retry that dedupes the delivered ones."""
+    print(f"review {slug} {doc_note} but reviewer notification FAILED for: "
+          f"{', '.join(failed)} (delivered: {', '.join(delivered) or 'none'}) — "
+          f"retry the request to re-notify; delivered directives dedupe by payload "
+          f"hash", file=sys.stderr)
+
+
+def _print_review_success(
+    args: argparse.Namespace, team: str, slug: str, required: list[str], *,
+    recovered: bool,
+) -> None:
+    if recovered:
+        print(f"review {slug} already exists (matching) — re-verified reviewer "
+              f"delivery (required: {', '.join(required)})")
+    else:
+        print(f"review {slug} requested (required: {', '.join(required)})")
+    for r in required:
+        print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
+    # Point the requester at the await primitive for the verdict wait (they poll
+    # `review status`; `listen` is the same arm-a-listener discipline every ask uses).
+    sender = _known_sender(args)
+    if sender:
+        print(f"await verdicts: coord-engine listen {team} --agent {sender}")
+
+
 def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     """Open a review with named REQUIRED reviewers, making the obligation
     structurally durable: the doc lands at the SAME path `_review_tally` reads
@@ -834,13 +915,68 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 2
     path = _review_doc_path(team, slug)
-    if transport.read(path) is not None:
-        print(f"review {slug} already exists", file=sys.stderr)
+    owner = getattr(args, "sender", None) or _host()
+    existing = transport.read(path)
+    if existing is not None:
+        # A doc already occupies the slot. This is NOT automatically a conflict:
+        # the atomic-delivery partial-failure path below tells the requester to
+        # RETRY, and after a partial failure the doc necessarily EXISTS — so a
+        # blanket "already exists" rc 1 would strand the un-notified reviewers
+        # forever (the exact orphan class this command exists to kill). Parse the
+        # doc and adjudicate: matching request -> idempotent recovery; different
+        # request -> loud conflict; unparseable -> loud, never overwrite.
+        existing_fm = okf.parse_frontmatter(existing)
+        if existing_fm is None:
+            # Present but unparseable/corrupt: we cannot prove it is OUR request,
+            # and overwriting could clobber a live review. Fail loud, never write.
+            print(f"review {slug} already exists but is unreadable (corrupt "
+                  f"frontmatter) — cannot verify, will not overwrite; retry",
+                  file=sys.stderr)
+            return 1
+        diff = _review_request_diff(existing_fm, of=args.of, required=required,
+                                    requested_by=owner)
+        if diff is not None:
+            field, existing_val, requested_val = diff
+            print(f"review {slug} already exists with a different {field} "
+                  f"(existing: {existing_val!r}, requested: {requested_val!r}) — a "
+                  f"different {field} re-opens a review only via a new slug; "
+                  f"refusing to overwrite", file=sys.stderr)
+            return 1
+        # IDEMPOTENT RECOVERY: same requested_by + of + required set. Skip the doc
+        # write (it already holds our request), keep the harmless stale-marker
+        # delete (a prior fold may have settled it; its absence just makes the next
+        # fold recompute), and RE-RUN reviewer delivery for EVERY required reviewer
+        # — hash-path dedup re-verifies the ones that landed (rc 0 "already
+        # delivered") and delivers the ones a prior partial failure dropped. This
+        # is what makes a partial-delivery retry CONVERGE instead of dying here.
+        transport.delete(_settled_marker_path(team, slug))
+        delivered, failed = _deliver_all_review_directives(
+            transport, team, slug, required, owner=owner, of=args.of)
+        if failed:
+            _print_partial_review_failure(slug, delivered, failed,
+                                          doc_note="already exists (matching)")
+            return 1
+        _print_review_success(args, team, slug, required, recovered=True)
+        return 0
+    # existing is None is AMBIGUOUS (T1: a read timeout and a genuinely-absent doc
+    # both map to None). Treating it as an empty slot would let a degraded transport
+    # clobber a live review (I1 / post-#342). Confirm absence via a directory
+    # listing before writing: list_dir RAISES TransportError on failure (loud
+    # through main's catch-all), and its entry names distinguish missing from
+    # present-but-unreadable. One list_dir per request is cheap.
+    parent, entry = path.rsplit("/", 1)
+    names = {e.get("name") for e in transport.list_dir(parent + "/")}
+    if entry in names:
+        # Present in the listing yet the read returned None: transport degraded
+        # mid-op. We cannot verify what the doc holds and must not overwrite it.
+        print(f"review {slug}: doc present but unreadable (transport degraded) — "
+              f"cannot verify, will not overwrite; retry", file=sys.stderr)
         return 1
+    # Genuinely absent -> write the fresh review doc.
     fm = {
         "type": "Review",
         "schema": "review-request/v1",
-        "requested_by": getattr(args, "sender", None) or _host(),
+        "requested_by": owner,
         "of": args.of,
         "required": required,
         "ts": _iso(_now()),
@@ -853,45 +989,25 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         # obligation is durable.
         print("review request write failed (transport)", file=sys.stderr)
         return 1
-    # The exists-guard above passes on a read timeout, so a re-request can land a
-    # fresh required list on top of a review that a prior fold already marked
-    # `.settled`. That stale marker would hide the NEW obligation from every
-    # settled-skipping fold (I2). Best-effort clear it (delete is timeout-safe ->
-    # False, which we ignore): the marker is only a fold cache, and its absence
-    # just makes the next fold recompute the (now-pending) tally.
+    # A fresh doc can carry no stale `.settled` marker, but a since-deleted-and-
+    # reopened slug at the same path could; clear it best-effort (delete is
+    # timeout-safe -> False, which we ignore) so the next fold recomputes.
     transport.delete(_settled_marker_path(team, slug))
     # Atomic notification: with the doc durably landed, deliver ONE directive per
     # required reviewer through the canonical hash-slug directive path, so a
     # verb-opened review FIRES the reviewer's inbox/listen — this is what removes
     # the reason agents hand-send review tells (the PR-344 orphan class) and makes
     # the listener's `await verdicts` breadcrumb genuine. Same C1 write discipline
-    # as the doc: a doc-write fail already returned above with nothing delivered;
-    # any reviewer-directive fail is reported LOUD naming exactly what landed and
-    # what did not (partial is never silent).
-    owner = getattr(args, "sender", None) or _host()
-    delivered: list[str] = []
-    failed: list[str] = []
-    for r in required:
-        if _deliver_review_directive(transport, team, slug, r,
-                                     sender=owner, of=args.of) == 0:
-            delivered.append(r)
-        else:
-            failed.append(r)
+    # as the doc: any reviewer-directive fail is reported LOUD naming exactly what
+    # landed and what did not (partial is never silent), and the requester's retry
+    # re-enters the idempotent-recovery path above to fill the gaps.
+    delivered, failed = _deliver_all_review_directives(
+        transport, team, slug, required, owner=owner, of=args.of)
     if failed:
-        print(f"review {slug} requested (doc written) but reviewer notification "
-              f"FAILED for: {', '.join(failed)} "
-              f"(delivered: {', '.join(delivered) or 'none'}) — retry the request "
-              f"to re-notify; delivered directives dedupe by payload hash",
-              file=sys.stderr)
+        _print_partial_review_failure(slug, delivered, failed,
+                                      doc_note="requested (doc written)")
         return 1
-    print(f"review {slug} requested (required: {', '.join(required)})")
-    for r in required:
-        print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
-    # Point the requester at the await primitive for the verdict wait (they poll
-    # `review status`; `listen` is the same arm-a-listener discipline every ask uses).
-    sender = _known_sender(args)
-    if sender:
-        print(f"await verdicts: coord-engine listen {team} --agent {sender}")
+    _print_review_success(args, team, slug, required, recovered=False)
     return 0
 
 
