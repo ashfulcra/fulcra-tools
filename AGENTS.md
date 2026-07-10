@@ -85,7 +85,12 @@ skills. Subagent-only work stays OFF the bus.
   a direct push to `main`**. The handshake rides the bus, not the forge:
   `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
-  verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`;
+  verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`.
+  The request is **atomic**: with the doc landed it also delivers one directive
+  per required reviewer through the canonical hash-slug path (so a verb-opened
+  review fires each reviewer's inbox/`listen` — never hand-send a review tell),
+  and a partial notification failure is reported loud (rc 1) naming exactly which
+  reviewers were and were not notified;
   `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
   and gates the merge. The `<artifact>` is an opaque ref (PR#, branch, commit
   SHA, URL, or a non-code deliverable), so the handshake works with any forge
@@ -108,15 +113,18 @@ skills. Subagent-only work stays OFF the bus.
   rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
   tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
-  <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) two sources
-  against a per-agent state file — new inbox directives (the same fold `inbox` shows) and new **responses
-  to directives you own** (the reply leg `respond` writes but nothing used to surface). One event line
-  per new item (`DIRECTIVE`/`RESPONSE`), `--json` for one object per line; a quiet tick prints NOTHING
+  <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
+  against a per-agent state file — new inbox directives (the same fold `inbox` shows), new **responses
+  to directives you own** (the reply leg `respond` writes but nothing used to surface), and new
+  **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
+  bounded: one review-root listing per tick, requester cached, and a `.settled` review is dropped so it
+  is never listed again). One event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`), `--json` for
+  one object per line; a quiet tick prints NOTHING
   (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
   the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** —
-  the `inbox` (summaries index), `responses` (responses subtree), and `orphans` (a response whose owning
-  directive won't resolve) streaks are independent, so a permanent orphan can't pin the flag and silence a
-  fresh transport outage. `--once` **always exits 0** (a tick never fails the schedule; no output means
+  the `inbox` (summaries index), `responses` (responses subtree), `orphans` (a response whose owning
+  directive won't resolve), and `verdicts` (review root / review doc / verdict shard unreadable) streaks
+  are independent, so a permanent orphan can't pin the flag and silence a fresh transport outage. `--once` **always exits 0** (a tick never fails the schedule; no output means
   nothing new, not an error) — run it on a scheduler, or run bare for a poll loop (`--interval`,
   SIGINT-clean). Every send verb arms you: `tell`/`broadcast`/`remind` print `replies: coord-engine listen
   <team> --agent <sender>` and `review request` prints `await verdicts: …` (both only when the sender

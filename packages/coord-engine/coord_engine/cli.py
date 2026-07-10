@@ -860,6 +860,30 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     # False, which we ignore): the marker is only a fold cache, and its absence
     # just makes the next fold recompute the (now-pending) tally.
     transport.delete(_settled_marker_path(team, slug))
+    # Atomic notification: with the doc durably landed, deliver ONE directive per
+    # required reviewer through the canonical hash-slug directive path, so a
+    # verb-opened review FIRES the reviewer's inbox/listen — this is what removes
+    # the reason agents hand-send review tells (the PR-344 orphan class) and makes
+    # the listener's `await verdicts` breadcrumb genuine. Same C1 write discipline
+    # as the doc: a doc-write fail already returned above with nothing delivered;
+    # any reviewer-directive fail is reported LOUD naming exactly what landed and
+    # what did not (partial is never silent).
+    owner = getattr(args, "sender", None) or _host()
+    delivered: list[str] = []
+    failed: list[str] = []
+    for r in required:
+        if _deliver_review_directive(transport, team, slug, r,
+                                     sender=owner, of=args.of) == 0:
+            delivered.append(r)
+        else:
+            failed.append(r)
+    if failed:
+        print(f"review {slug} requested (doc written) but reviewer notification "
+              f"FAILED for: {', '.join(failed)} "
+              f"(delivered: {', '.join(delivered) or 'none'}) — retry the request "
+              f"to re-notify; delivered directives dedupe by payload hash",
+              file=sys.stderr)
+        return 1
     print(f"review {slug} requested (required: {', '.join(required)})")
     for r in required:
         print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
@@ -1159,6 +1183,39 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     return rc
 
 
+def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
+                              *, sender: str, of: str) -> int:
+    """Deliver ONE review-request directive to ``reviewer`` via the canonical
+    hash-slug directive path — the SAME ``_write_directive`` delivery (payload-hash
+    dedup + C1 write-verification) every ``tell`` gets, so a verb-opened review
+    NOTIFIES its reviewers instead of relying on a hand-sent tell (the PR-344
+    orphan class: a review directive sent by hand, with no verdict target). The
+    text carries the exact slug AND the verdict-file path (the fail-closed watcher
+    contract). Returns ``_write_directive``'s rc (0 delivered/deduped, 1 failed).
+
+    Distinct (slug, reviewer) pairs produce distinct payloads -> distinct paths,
+    so reviewers never collide and a re-request idempotently dedupes."""
+    verdict_file = f"{_verdicts_prefix(team, slug)}{reviewer}.md"
+    title = f"REVIEW REQUEST: {slug}"
+    summary = f"Verdict owed on {of} — file it at {verdict_file}"
+    next_action = f"file your verdict at {verdict_file}"
+    payload = _directive_payload(title, summary, next_action, reviewer)
+    dslug = f"{tasks.slugify(title)}-{_payload_hash(payload)}"
+    try:
+        _, content = tasks.new_task_doc(
+            title, now=_iso(_now()), status="proposed", owner=sender,
+            assignee=reviewer, summary=summary, next_action=next_action,
+            kind="directive", slug=dslug,
+        )
+    except tasks.TaskError as e:
+        print(f"review-request directive for {reviewer} failed: {e}", file=sys.stderr)
+        return 1
+    # `_write_directive` only needs args.team; a minimal namespace carries it.
+    return _write_directive(transport, argparse.Namespace(team=team), slug=dslug,
+                            content=content, payload=payload, assignee=reviewer,
+                            not_before=None)
+
+
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
     return _create_directive(args, transport, assignee=args.assignee)
 
@@ -1273,14 +1330,18 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 # directive's owner — so `respond` wrote shards no fold delivered, and the reply
 # leg of `tell` did not exist. Three agents independently hand-rolled watchers
 # around `inbox --json`; `listen` ports that id-diff into the engine so the
-# lifecycle owns listening. Two event sources, each id-diff'd against a state
+# lifecycle owns listening. Three event sources, each id-diff'd against a state
 # file, per tick:
 #   1. new inbox directives for the agent (the SAME fold `inbox` shows).
 #   2. new responses to directives the agent OWNS (the reply leg).
+#   3. new verdicts on reviews the agent REQUESTED (`requested_by == agent`) —
+#      the await leg of `review request`, now that a verb-opened review notifies
+#      its reviewers atomically (so the `await verdicts` breadcrumb is genuine).
 #
-# Three failure SOURCES are tracked independently — inbox (summaries index),
-# responses (the responses subtree transport), and orphans (a response whose
-# owning directive doc won't resolve). Each is its own degraded streak.
+# Four failure SOURCES are tracked independently — inbox (summaries index),
+# responses (the responses subtree transport), orphans (a response whose owning
+# directive doc won't resolve), and verdicts (the review root / a review doc /
+# a verdict shard unreadable). Each is its own degraded streak.
 #
 # Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
 #   * No false advance — a failed/None read during a tick must NOT mark unknown
@@ -1303,7 +1364,7 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 
 
 # The independent degraded streaks. Each source alarms once per its own streak.
-_LISTEN_SOURCES = ("inbox", "responses", "orphans")
+_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts")
 
 
 def _fresh_degraded() -> dict[str, bool]:
@@ -1345,6 +1406,11 @@ def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
         "inbox_ids": list(data.get("inbox_ids") or []),
         "response_keys": list(data.get("response_keys") or []),
         "slug_owned": dict(data.get("slug_owned") or {}),
+        # Source 3 (verdicts) bookkeeping — legacy state files lack these keys;
+        # they default empty, so an upgrade re-surfaces nothing spuriously.
+        "verdict_keys": list(data.get("verdict_keys") or []),
+        "review_requested": dict(data.get("review_requested") or {}),
+        "settled_reviews": list(data.get("settled_reviews") or []),
         "degraded": _coerce_degraded(data.get("degraded")),
     }
 
@@ -1445,15 +1511,84 @@ def _listen_tick(transport: Any, team: str, agent: str,
                            "outcome": str(rfm.get("outcome") or "?")})
             response_keys.add(key)
 
+    # Source 3 — new verdicts on reviews THIS agent REQUESTED. One list_dir of
+    # the review root; per-NEW-slug the review doc is read once and the requester
+    # (`requested_by`) cached; verdict dirs are listed ONLY for my still-unsettled
+    # slugs, and a `.settled` listing drops the slug so it is never listed again
+    # (the review is immutable once settled). Its OWN degraded source `verdicts`.
+    review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
+    verdict_keys = set(state.get("verdict_keys") or [])
+    settled_reviews = set(state.get("settled_reviews") or [])
+    review_prefix = f"team/{team}/review/"
+    try:
+        rentries = transport.list_dir(review_prefix)
+    except TransportError as e:
+        _fail("verdicts", f"review listing unreadable ({e})")
+        rentries = None
+    for e in rentries or []:
+        name = e.get("name") or ""
+        # The review DOCS are the `.md` entries; `{slug}/` dirs hold the verdicts.
+        if e.get("is_dir") or not name.endswith(".md"):
+            continue
+        slug = name[:-3]
+        if not slug or slug in settled_reviews:
+            continue  # settled -> immutable, never list its verdicts again
+        requested = review_requested.get(slug)
+        if requested is None:
+            doc = transport.read(_review_doc_path(team, slug))
+            if doc is None:
+                # The slug came from the listing so the doc exists — a None read
+                # is a transient transport failure. Requester UNKNOWN: do NOT
+                # cache and do NOT advance (no-false-advance), retry next tick.
+                _fail("verdicts", f"requester unresolved for {slug}")
+                continue
+            fm = okf.parse_frontmatter(doc) or {}
+            requested = str(fm.get("requested_by") or "").strip() == agent
+            review_requested[slug] = requested  # definitive classification: cache
+        if not requested:
+            continue  # someone else's review -> noise
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError as ex:
+            _fail("verdicts", f"verdicts dir {slug} unreadable ({ex})")
+            continue
+        if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
+            # Terminal-settled: no further verdicts can land. Drop it from the
+            # active set so it costs zero verdict-dir listings hereafter.
+            settled_reviews.add(slug)
+            continue
+        for ve in ventries:
+            vname = ve.get("name") or ""
+            if ve.get("is_dir") or not vname.endswith(".md"):
+                continue  # `.settled` and dirs are not verdict shards
+            vkey = f"{slug}/{vname[:-3]}"
+            if vkey in verdict_keys:
+                continue
+            shard = transport.read(_verdicts_prefix(team, slug) + vname)
+            if shard is None:
+                # listed file unreadable -> unknown, do NOT advance (retry)
+                _fail("verdicts", f"verdict {vkey} unreadable")
+                continue
+            vfm = okf.parse_frontmatter(shard) or {}
+            events.append({"type": "verdict", "slug": slug,
+                           "reviewer": vname[:-3],
+                           "verdict": str(vfm.get("verdict") or "?")})
+            verdict_keys.add(vkey)
+
     state["inbox_ids"] = sorted(inbox_ids)
     state["response_keys"] = sorted(response_keys)
     state["slug_owned"] = slug_owned
+    state["verdict_keys"] = sorted(verdict_keys)
+    state["review_requested"] = review_requested
+    state["settled_reviews"] = sorted(settled_reviews)
     return events, failures
 
 
 def _format_listen_event(ev: dict[str, Any]) -> str:
     if ev["type"] == "directive":
         return f"DIRECTIVE {ev['slug']} (from {ev['owner']}): {ev['title'][:80]}"
+    if ev["type"] == "verdict":
+        return f"VERDICT {ev['slug']} by {ev['reviewer']}: {ev['verdict']}"
     return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
 
 
@@ -1482,7 +1617,8 @@ def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any
         print(f"LISTEN DEGRADED: {'; '.join(newly)}", file=sys.stderr)
     elif verbose and not events and not failures:
         print(f"listen: quiet ({len(state['inbox_ids'])} inbox, "
-              f"{len(state['response_keys'])} responses seen)", file=sys.stderr)
+              f"{len(state['response_keys'])} responses, "
+              f"{len(state.get('verdict_keys') or [])} verdicts seen)", file=sys.stderr)
     sys.stderr.flush()
     return events, failures
 

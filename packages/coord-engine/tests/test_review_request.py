@@ -9,7 +9,7 @@ failure where a reviewer acked directives and the obligation vanished.
 import json
 import time
 
-from coord_engine import cli, okf
+from coord_engine import cli, okf, reconcile
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
@@ -535,7 +535,12 @@ def test_rerequest_clears_stale_settled_marker_so_new_obligation_surfaces(capsys
         def __init__(self, base):
             self.__dict__ = base.__dict__
         def read(self, path):
-            return None
+            # only the review-doc read times out (so the exists-guard slips);
+            # the atomic reviewer-directive delivery still verifies its writes.
+            if (path.startswith("team/r/review/") and path.endswith(".md")
+                    and "/verdicts/" not in path):
+                return None
+            return super().read(path)
 
     capsys.readouterr()
     assert cli.main(["review", "request", "r", "pr-x", "--of", "url",
@@ -565,6 +570,80 @@ def test_request_write_timeout_fails_loud(capsys):
     assert rc == 1
     assert "write failed" in cap.err
     assert "requested" not in cap.out, "must not claim a review that never landed"
+
+
+# --- atomic notification: request also delivers a directive per reviewer -----
+
+def test_request_notifies_each_required_reviewer(capsys):
+    # Atomicity: the doc lands AND every required reviewer gets a directive
+    # through the canonical task path, so a verb-opened review fires the
+    # reviewer's inbox/listen instead of relying on a hand-sent tell.
+    t = FakeTransport()
+    assert cli.main(["review", "request", "r", "pr-note", "--of", "PR#7",
+                     "--reviewer", "alice", "--reviewer", "bob",
+                     "--from", "requester"], transport=t) == 0
+    assert t.read("team/r/review/pr-note.md") is not None, "the review doc must land"
+
+    # the directive text carries the slug + the EXACT verdict-file path (the
+    # fail-closed watcher contract)
+    task_docs = [c for p, c in t.store.items() if p.startswith("team/r/task/")]
+    for reviewer in ("alice", "bob"):
+        hit = [c for c in task_docs
+               if f"team/r/review/pr-note/verdicts/{reviewer}.md" in c
+               and f"assignee: {reviewer}" in c]
+        assert hit, f"{reviewer} must get a directive naming her verdict file"
+
+    # real fold: after reconcile each reviewer's inbox surfaces the directive
+    reconcile.reconcile(t, "r", now="2026-07-10T00:00:00Z",
+                        today="2026-07-10", host="h")
+    for reviewer in ("alice", "bob"):
+        capsys.readouterr()
+        cli.main(["inbox", "r", "--agent", reviewer, "--json"], transport=t)
+        got = json.loads(capsys.readouterr().out)
+        assert any("REVIEW REQUEST: pr-note" in (r.get("title") or "")
+                   for r in got), (reviewer, got)
+
+
+def test_doc_write_fail_writes_no_directive(capsys):
+    # doc-write fail -> rc 1 and NOTHING else (no reviewer directive attempted).
+    class ReviewDocWriteFails(FakeTransport):
+        def write(self, path, content):
+            if (path.startswith("team/r/review/") and path.endswith(".md")
+                    and "/" not in path[len("team/r/review/"):]):
+                return False  # the review DOC write times out
+            return super().write(path, content)
+
+    t = ReviewDocWriteFails()
+    rc = cli.main(["review", "request", "r", "pr-d", "--of", "url",
+                   "--reviewer", "alice"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "write failed" in cap.err
+    assert not [p for p in t.store if p.startswith("team/r/task/")], \
+        "a failed doc write must not deliver any reviewer directive"
+
+
+def test_partial_directive_failure_is_loud_rc1(capsys):
+    # doc lands, but one reviewer's directive write fails -> rc 1 naming exactly
+    # what landed and what did not (partial is loud, never silent).
+    class OneDirectiveWriteFails(FakeTransport):
+        def write(self, path, content):
+            if path.startswith("team/r/task/") and "verdicts/bob.md" in content:
+                return False  # bob's directive write times out
+            return super().write(path, content)
+
+    t = OneDirectiveWriteFails()
+    rc = cli.main(["review", "request", "r", "pr-p", "--of", "url",
+                   "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert t.read("team/r/review/pr-p.md") is not None, "the doc still landed"
+    # names what FAILED (bob) and what was DELIVERED (alice)
+    assert "bob" in cap.err and "FAILED" in cap.err
+    assert "alice" in cap.err
+    # alice's directive really landed
+    assert [p for p in t.store
+            if p.startswith("team/r/task/") and "alice" in t.store[p]]
 
 
 def test_request_requires_at_least_one_reviewer(capsys):

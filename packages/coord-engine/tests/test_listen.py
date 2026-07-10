@@ -40,9 +40,36 @@ def _reconcile(t):
     reconcile.reconcile(t, TEAM, now=NOW, today=TODAY, host="h")
 
 
+def _put_review(t, slug, *, requested_by, required=("rev",)):
+    fm = {"type": "Review", "schema": "review-request/v1",
+          "requested_by": requested_by, "of": "url",
+          "required": list(required), "ts": NOW}
+    t.put(cli._review_doc_path(TEAM, slug), okf.render_frontmatter(fm) + "\n")
+
+
+def _put_verdict(t, slug, reviewer, verdict="approve"):
+    fm = {"type": "Verdict", "reviewer": reviewer, "verdict": verdict}
+    t.put(cli._verdicts_prefix(TEAM, slug) + f"{reviewer}.md",
+          okf.render_frontmatter(fm) + "\n")
+
+
+class ListCountingTransport(FakeTransport):
+    """FakeTransport that records every list_dir prefix (for cost assertions)."""
+
+    def __init__(self):
+        super().__init__()
+        self.lists: list[str] = []
+
+    def list_dir(self, prefix):
+        self.lists.append(prefix)
+        return super().list_dir(prefix)
+
+
 def _fresh_state():
     return {"inbox_ids": [], "response_keys": [], "slug_owned": {},
-            "degraded": {"inbox": False, "responses": False, "orphans": False}}
+            "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
+            "degraded": {"inbox": False, "responses": False, "orphans": False,
+                         "verdicts": False}}
 
 
 # --- Source 1: inbox directives -------------------------------------------
@@ -329,12 +356,13 @@ def test_legacy_single_bool_degraded_migrates_to_per_source(tmp_path):
     path.write_text(_j.dumps({"inbox_ids": ["x"], "response_keys": [],
                               "slug_owned": {}, "degraded": True}), encoding="utf-8")
     state = cli._load_listen_state(path)
-    assert state["degraded"] == {"inbox": True, "responses": True, "orphans": True}
+    assert state["degraded"] == {"inbox": True, "responses": True,
+                                 "orphans": True, "verdicts": True}
     assert state["inbox_ids"] == ["x"]
 
     path.write_text(_j.dumps({"degraded": False}), encoding="utf-8")
     assert cli._load_listen_state(path)["degraded"] == {
-        "inbox": False, "responses": False, "orphans": False}
+        "inbox": False, "responses": False, "orphans": False, "verdicts": False}
 
 
 def test_verbose_heartbeat_only_on_quiet_tick_and_only_stderr(capsys):
@@ -344,6 +372,149 @@ def test_verbose_heartbeat_only_on_quiet_tick_and_only_stderr(capsys):
     err = capsys.readouterr()
     assert err.out == ""  # quiet: nothing to stdout even with --verbose
     assert "listen: quiet" in err.err
+
+
+# --- Source 3: verdicts on reviews the agent REQUESTED --------------------
+
+def test_verdict_on_requested_review_fires_then_quiet(capsys):
+    t = FakeTransport()
+    _put_review(t, "pr-1", requested_by="me")
+    _put_verdict(t, "pr-1", "rev", "approve")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    out = capsys.readouterr().out
+    assert failures == {}
+    assert [e["type"] for e in events] == ["verdict"]
+    assert out.strip() == "VERDICT pr-1 by rev: approve"
+    assert state["verdict_keys"] == ["pr-1/rev"]
+    assert state["review_requested"] == {"pr-1": True}
+
+    # second tick: same verdict, no new id -> quiet
+    events2, _ = cli._run_listen_tick(t, TEAM, "me", state,
+                                      json_mode=False, verbose=False)
+    assert events2 == []
+    assert capsys.readouterr().out == ""
+
+
+def test_second_verdict_on_requested_review_fires(capsys):
+    t = FakeTransport()
+    _put_review(t, "pr-2", requested_by="me", required=("alice", "bob"))
+    _put_verdict(t, "pr-2", "alice", "approve")
+    state = _fresh_state()
+    cli._run_listen_tick(t, TEAM, "me", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    # a SECOND reviewer files a verdict on the same, still-unsettled slug
+    _put_verdict(t, "pr-2", "bob", "changes")
+    events, _ = cli._run_listen_tick(t, TEAM, "me", state,
+                                     json_mode=False, verbose=False)
+    out = capsys.readouterr().out
+    assert [e["reviewer"] for e in events] == ["bob"]
+    assert "VERDICT pr-2 by bob: changes" in out
+
+
+def test_verdict_on_others_review_is_quiet(capsys):
+    t = FakeTransport()
+    _put_review(t, "pr-3", requested_by="alice")
+    _put_verdict(t, "pr-3", "rev")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    assert events == []
+    assert failures == {}
+    assert capsys.readouterr().out == ""
+    # requester decided once and cached as not-mine (skips listing forever)
+    assert state["review_requested"] == {"pr-3": False}
+    assert state["verdict_keys"] == []
+
+
+def test_verdict_json_mode_one_object_per_line(capsys):
+    t = FakeTransport()
+    _put_review(t, "pr-j", requested_by="me")
+    _put_verdict(t, "pr-j", "rev", "changes")
+    cli._run_listen_tick(t, TEAM, "me", _fresh_state(),
+                         json_mode=True, verbose=False)
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert obj == {"type": "verdict", "slug": "pr-j",
+                   "reviewer": "rev", "verdict": "changes"}
+
+
+def test_settled_review_stops_verdict_listings(capsys):
+    # Bounded cost: once a review is `.settled`, the listener drops it from the
+    # active set and never lists its verdicts dir again.
+    t = ListCountingTransport()
+    _put_review(t, "pr-s", requested_by="me")
+    _put_verdict(t, "pr-s", "rev")
+    t.put(cli._settled_marker_path(TEAM, "pr-s"),
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    state = _fresh_state()
+    # tick 1: lists review root + the slug's verdicts dir (sees .settled -> drop)
+    cli._run_listen_tick(t, TEAM, "me", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert "pr-s" in state["settled_reviews"]
+    # tick 2: the settled slug costs ZERO verdicts-dir listings
+    t.lists.clear()
+    cli._run_listen_tick(t, TEAM, "me", state, json_mode=False, verbose=False)
+    assert cli._verdicts_prefix(TEAM, "pr-s") not in t.lists, \
+        f"settled slug must not be listed again, got {t.lists}"
+
+
+def test_requester_unresolved_no_false_advance_then_recovers(capsys):
+    """A review doc that can't be read is UNKNOWN requester: don't cache, don't
+    advance, flag the `verdicts` source degraded — then resolve on recovery."""
+    class ReviewDocReadFails(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.doc_fail = True
+
+        def read(self, path):
+            if (self.doc_fail and path.startswith("team/r/review/")
+                    and path.endswith(".md") and "/verdicts/" not in path):
+                return None  # timeout: content unknown, no exception raised
+            return super().read(path)
+
+    t = ReviewDocReadFails()
+    _put_review(t, "pr-u", requested_by="me")
+    _put_verdict(t, "pr-u", "rev")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    err = capsys.readouterr()
+    assert events == []
+    assert "verdicts" in failures
+    assert "LISTEN DEGRADED" in err.err
+    assert state["review_requested"] == {}   # not classified
+    assert state["verdict_keys"] == []        # not advanced
+    assert state["degraded"]["verdicts"] is True
+
+    # review doc becomes readable -> next tick resolves + fires the verdict
+    t.doc_fail = False
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "me", state,
+                                              json_mode=False, verbose=False)
+    out2 = capsys.readouterr().out
+    assert failures2 == {}
+    assert [e["slug"] for e in events2] == ["pr-u"]
+    assert "VERDICT pr-u by rev: approve" in out2
+    assert state["review_requested"] == {"pr-u": True}
+
+
+def test_review_root_listing_failure_is_verdicts_degraded(capsys):
+    # A verdicts-source outage is attributed to its OWN source, not inbox/responses.
+    class ReviewListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = ReviewListFails()
+    state = _fresh_state()
+    _, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                       json_mode=False, verbose=False)
+    err = capsys.readouterr()
+    assert "verdicts" in failures
+    assert "inbox" not in failures and "responses" not in failures
+    assert "LISTEN DEGRADED" in err.err
+    assert state["degraded"]["verdicts"] is True
 
 
 # --- State persistence + driver -------------------------------------------
@@ -365,7 +536,9 @@ def test_load_state_tolerates_corrupt_file(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     state = cli._load_listen_state(path)
     assert state == {"inbox_ids": [], "response_keys": [], "slug_owned": {},
-                     "degraded": {"inbox": False, "responses": False, "orphans": False}}
+                     "verdict_keys": [], "review_requested": {}, "settled_reviews": [],
+                     "degraded": {"inbox": False, "responses": False,
+                                  "orphans": False, "verdicts": False}}
 
 
 def test_cmd_listen_once_exits_zero(tmp_path, monkeypatch, capsys):
