@@ -499,9 +499,9 @@ def _tally_from_verdict_entries(
 
 def _review_tally(
     transport: Any, team: str, slug: str
-) -> tuple[dict[str, Any], bool, bool]:
+) -> tuple[dict[str, Any], bool, bool, bool]:
     """Shared review fold: doc + verdict shards ->
-    ``(tally, doc_ok, verdict_reads_ok)``.
+    ``(tally, doc_ok, verdict_reads_ok, listing_ok)``.
 
     ALWAYS computes the full tally — it never consults the `.settled` marker, so
     a corrupt/stale marker can never hide the truth on a direct `review status`
@@ -511,16 +511,27 @@ def _review_tally(
     transport failure — ``read()`` returns None for both, indistinguishably):
     the tally was built on NO required list and must be treated as unknown,
     never as a clean state. ``verdict_reads_ok`` is False when a listed verdict
-    file's content could not be read — the tally is a floor, not the truth."""
+    file's content could not be read — the tally is a floor, not the truth.
+
+    ``listing_ok`` is False when the verdicts LISTING raised (the prefix is
+    unlistable under a degraded transport). We still fall back to ``entries=[]``
+    so this never crashes, but that fallback makes ``verdict_reads_ok`` vacuously
+    True (no listed files = no failed reads) and the tally a floor built over
+    ZERO verdicts — so the caller MUST treat a False ``listing_ok`` exactly like
+    the other unknowns (fail closed; never a clean state, never a marker
+    delete/write). An EMPTY-but-readable listing (list_dir returns []) is a
+    legitimate no-verdicts PENDING and keeps ``listing_ok`` True."""
     raw = transport.read(_review_doc_path(team, slug))
+    listing_ok = True
     try:
         entries = transport.list_dir(_verdicts_prefix(team, slug))
     except TransportError:
         entries = []
+        listing_ok = False
     # No deadline: `review status` is a direct, per-slug query with no fold
     # budget, so it always scans every verdict shard (fully_scanned ignored).
     tally, vok, _ = _tally_from_verdict_entries(transport, team, slug, entries, raw)
-    return tally, raw is not None, vok
+    return tally, raw is not None, vok, listing_ok
 
 
 def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
@@ -817,7 +828,7 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
-    result, doc_ok, vreads_ok = _review_tally(transport, team, slug)
+    result, doc_ok, vreads_ok, listing_ok = _review_tally(transport, team, slug)
     if not doc_ok:
         # The doc read returned None: missing slug OR transport failure —
         # indistinguishable, and either way the tally is UNKNOWN. Without the
@@ -826,6 +837,19 @@ def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
         # transient timeout would durably hide a pending review. Fail loud.
         print(f"review status failed: {_review_doc_path(team, slug)} unreadable "
               f"(missing slug or degraded transport) — tally unknown, retry",
+              file=sys.stderr)
+        return 1
+    if not listing_ok:
+        # F-listing: the verdicts LISTING raised, so `_review_tally` fell back to
+        # entries=[] and the tally is a floor built over ZERO verdicts —
+        # vreads_ok is vacuously True. Printing that (a false PENDING) rc 0 gives
+        # clean output on a failed listing, and letting the F4 self-heal below
+        # run on it would DELETE a legitimate `.settled` marker off a vacuous
+        # non-settleable tally. Fail closed FIRST — same register as the doc /
+        # shard-unreadable cases — so neither the report nor the marker-delete
+        # gate is ever reached on an unknown tally.
+        print(f"review status failed: verdicts listing unreadable under "
+              f"{_verdicts_prefix(team, slug)} — tally unknown, retry",
               file=sys.stderr)
         return 1
     if not vreads_ok:
