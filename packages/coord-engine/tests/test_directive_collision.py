@@ -109,6 +109,60 @@ def test_pathological_double_collision_fails_rc1_naming_both(capsys):
     assert "ship-it" in err and suffixed_slug in err  # names both slugs
 
 
+def test_same_text_different_assignees_delivers_both(capsys):
+    # Assignee IS message identity: the same text told to a different agent is a
+    # DIFFERENT directive — bob must get his copy (under a suffixed slug).
+    t = FakeTransport()
+    assert cli.main(["tell", "r", "amy", "Ship it", "-s", "now"], transport=t) == 0
+    assert cli.main(["tell", "r", "bob", "Ship it", "-s", "now"], transport=t) == 0
+    docs = _task_docs(t)
+    assert len(docs) == 2, "bob's copy must be delivered, not deduped away"
+    assert "team/r/task/ship-it.md" in docs
+    suffixed = next(d for d in docs if d != "team/r/task/ship-it.md")
+    suffixed_slug = suffixed[len("team/r/task/"):-len(".md")]
+    assert suffixed_slug.startswith("ship-it-")
+
+    # each copy surfaces in its OWN recipient's inbox
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["inbox", "r", "--agent", "amy", "--json"], transport=t) == 0
+    amy = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    assert cli.main(["inbox", "r", "--agent", "bob", "--json"], transport=t) == 0
+    bob = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    assert amy == {"ship-it"}
+    assert bob == {suffixed_slug}
+
+    # deterministic per-recipient identity: a retry of bob's copy dedupes at
+    # bob's suffixed slug rather than colliding with amy's or forking a third.
+    capsys.readouterr()
+    assert cli.main(["tell", "r", "bob", "Ship it", "-s", "now"], transport=t) == 0
+    assert "already delivered" in capsys.readouterr().out
+    assert len(_task_docs(t)) == 2
+
+
+def test_identical_retell_same_assignee_still_dedupes(capsys):
+    # With assignee in the identity, the relay re-send case must still dedupe.
+    t = FakeTransport()
+    assert cli.main(["tell", "r", "amy", "Ship it", "-s", "now"], transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["tell", "r", "amy", "Ship it", "-s", "now"], transport=t) == 0
+    assert "already delivered" in capsys.readouterr().out
+    assert _task_docs(t) == ["team/r/task/ship-it.md"]
+
+
+def test_identical_rebroadcast_dedupes(capsys):
+    # broadcast pins assignee="*": identical re-broadcasts are the same message.
+    t = FakeTransport()
+    assert cli.main(["broadcast", "r", "All hands", "-s", "now"], transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["broadcast", "r", "All hands", "-s", "now"], transport=t) == 0
+    assert "already delivered" in capsys.readouterr().out
+    assert _task_docs(t) == ["team/r/task/all-hands.md"]
+    # ...while a directed tell of the same text is a DIFFERENT audience -> delivered.
+    assert cli.main(["tell", "r", "amy", "All hands", "-s", "now"], transport=t) == 0
+    assert len(_task_docs(t)) == 2
+
+
 def test_never_crashes_on_unparseable_existing_doc(capsys):
     # A base slug occupied by a doc with no parseable frontmatter must be treated
     # as DIFFERENT (suffix + deliver) — losing a message is worse than a dup.

@@ -667,28 +667,34 @@ def _stamp_for_path(now: str, agent: str) -> str:
 
 
 def _directive_payload(title: Optional[str], summary: Optional[str],
-                       next_action: Optional[str]) -> tuple[str, str, str]:
-    """The message-bearing fields — title, summary, next_action — ONLY. Timestamp,
-    owner, assignee, and not_before are delivery metadata, not the message, so they
-    never enter the identity/dedup comparison (a relay re-sending the same reminder
-    to the same agent is the same message). None and "" normalize to the same value
-    so a missing summary compares equal to an empty one."""
+                       next_action: Optional[str],
+                       assignee: Optional[str]) -> tuple[str, str, str, str]:
+    """The message-identity fields — title, summary, next_action, ASSIGNEE.
+    Timestamp, owner, and not_before are delivery metadata, not the message, so
+    they never enter the identity/dedup comparison (a relay re-sending the same
+    reminder to the same agent is the same message). Assignee IS identity: the
+    same text told to a DIFFERENT agent is a different directive (each recipient
+    must get their copy), while broadcast's ``*`` audience means identical
+    re-broadcasts still dedupe — and a broadcast stays distinct from a directed
+    tell of the same text (different audiences). None and "" normalize to the
+    same value so a missing summary compares equal to an empty one."""
     def norm(x: Optional[str]) -> str:
         return "" if x is None else str(x)
-    return (norm(title), norm(summary), norm(next_action))
+    return (norm(title), norm(summary), norm(next_action), norm(assignee))
 
 
-def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str]]:
-    """Message-bearing payload of an existing task doc, or ``None`` when its
+def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
+    """Message-identity payload of an existing task doc, or ``None`` when its
     frontmatter won't parse — the caller then treats it as a DIFFERENT message
     (suffix + deliver): a duplicate directive is cheaper than a dropped one."""
     fm = okf.parse_frontmatter(doc)
     if fm is None:
         return None
-    return _directive_payload(fm.get("title"), fm.get("description"), fm.get("next_action"))
+    return _directive_payload(fm.get("title"), fm.get("description"),
+                              fm.get("next_action"), fm.get("assignee"))
 
 
-def _payload_hash(payload: tuple[str, str, str]) -> str:
+def _payload_hash(payload: tuple[str, str, str, str]) -> str:
     """Stable short id for a distinct message. Hashes the payload (NOT the time),
     so a retry of the same distinct message maps to the same suffixed slug and
     dedupes correctly."""
@@ -696,7 +702,7 @@ def _payload_hash(payload: tuple[str, str, str]) -> str:
 
 
 def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
-                     content: str, payload: tuple[str, str, str], assignee: str,
+                     content: str, payload: tuple[str, str, str, str], assignee: str,
                      not_before: Optional[str]) -> Optional[int]:
     """Deliver ``content`` at ``slug``, deduping on an identical existing payload.
 
@@ -720,7 +726,7 @@ def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
 
 def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str,
                       not_before: Optional[str] = None) -> int:
-    payload = _directive_payload(args.title, args.summary or "", args.next)
+    payload = _directive_payload(args.title, args.summary or "", args.next, assignee)
     try:
         base_slug, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
