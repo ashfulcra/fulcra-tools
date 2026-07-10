@@ -161,7 +161,10 @@ class FulcraFileTransport:
         return cp.stdout
 
     def write(self, path: str, content: str) -> bool:
-        # contract: True on success, False on any failure (incl. timeout/exec error).
+        # contract: True on success, False on any REMOTE failure (incl. timeout/exec
+        # error) — the upload subprocess. NOTE: staging the content to a local
+        # tempfile happens first and can still raise OSError (disk full, bad perms);
+        # that surfaces to the caller rather than returning False.
         with tempfile.NamedTemporaryFile(
             "w", suffix=".tmp", delete=False, encoding="utf-8"
         ) as fh:

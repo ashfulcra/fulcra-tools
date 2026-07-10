@@ -745,7 +745,20 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         "ts": _iso(_now()),
     }
     body = f"\nReview requested: {args.of}\n"
-    transport.write(path, okf.render_frontmatter(fm) + body)
+    if not transport.write(path, okf.render_frontmatter(fm) + body):
+        # T1: a timed-out write returns False, not a raise. An rc-0 "review
+        # requested" that never landed is the requester-side incident (mirror of
+        # C1). Fail loud so the requester retries rather than believing the
+        # obligation is durable.
+        print("review request write failed (transport)", file=sys.stderr)
+        return 1
+    # The exists-guard above passes on a read timeout, so a re-request can land a
+    # fresh required list on top of a review that a prior fold already marked
+    # `.settled`. That stale marker would hide the NEW obligation from every
+    # settled-skipping fold (I2). Best-effort clear it (delete is timeout-safe ->
+    # False, which we ignore): the marker is only a fold cache, and its absence
+    # just makes the next fold recompute the (now-pending) tally.
+    transport.delete(_settled_marker_path(team, slug))
     print(f"review {slug} requested (required: {', '.join(required)})")
     for r in required:
         print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
@@ -875,7 +888,12 @@ def _directive_payload(title: Optional[str], summary: Optional[str],
     must get their copy), while broadcast's ``*`` audience means identical
     re-broadcasts still dedupe — and a broadcast stays distinct from a directed
     tell of the same text (different audiences). None and "" normalize to the
-    same value so a missing summary compares equal to an empty one."""
+    same value so a missing summary compares equal to an empty one.
+
+    By design, not_before and priority are delivery metadata OUTSIDE this
+    identity, so a reschedule or priority change of the same title dedupes onto
+    the original doc (keeping its schedule) rather than re-delivering: to re-arm
+    with a new schedule or priority, send a new title."""
     def norm(x: Optional[str]) -> str:
         return "" if x is None else str(x)
     return (norm(title), norm(summary), norm(next_action), norm(assignee))
@@ -911,7 +929,27 @@ def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
     path = _task_path(args.team, slug)
     existing = transport.read(path)
     if existing is None:
-        transport.write(path, content)
+        # A read of None is AMBIGUOUS (T1: timeout and genuinely-absent both map
+        # to None). Treating it as "empty slot" would let a degraded transport
+        # clobber an occupied slot (I1). Confirm absence via a directory listing:
+        # list_dir RAISES TransportError on failure (surfacing loud through main's
+        # catch-all), and its entry names distinguish missing from unreadable. One
+        # list_dir per tell is acceptable (tell is not a hot fold).
+        parent, entry = path.rsplit("/", 1)
+        names = {e.get("name") for e in transport.list_dir(parent + "/")}
+        if entry in names:
+            # Listing succeeded and the slot IS present, yet the read returned
+            # None: the transport degraded mid-operation. Refuse to overwrite.
+            print(f"directive {slug}: slot present but unreadable "
+                  f"(transport degraded), refusing to overwrite", file=sys.stderr)
+            return 1
+        # Listing succeeded and the slug is absent -> genuinely empty. A write
+        # that fails (T1: False, not a raise) must NOT be reported as delivered
+        # (C1): the message would be silently lost. A failed write leaves the slot
+        # empty, so a retry re-enters this dedup/collision logic cleanly.
+        if not transport.write(path, content):
+            print("directive write failed (transport)", file=sys.stderr)
+            return 1
         print(f"directive {slug} -> {assignee}"
               + (f" (visible {not_before})" if not_before else ""))
         return 0
@@ -924,7 +962,7 @@ def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
 
 def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str,
                       not_before: Optional[str] = None) -> int:
-    payload = _directive_payload(args.title, args.summary or "", args.next, assignee)
+    payload = _directive_payload(args.title, args.summary, args.next, assignee)
     try:
         base_slug, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,

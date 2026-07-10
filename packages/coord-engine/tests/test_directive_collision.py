@@ -172,3 +172,57 @@ def test_never_crashes_on_unparseable_existing_doc(capsys):
     docs = _task_docs(t)
     assert len(docs) == 2
     assert any(d.startswith("team/r/task/ship-it-") for d in docs)
+
+
+def test_write_timeout_fails_loud_reports_nothing_delivered(capsys):
+    # C1: T1 made a timed-out write() return False (never raise). Discarding that
+    # bool prints "directive <slug> -> <assignee>" rc 0 while the message is GONE.
+    # A False write must fail loud (rc 1), write no doc, and NOT claim delivery.
+    class WriteTimesOut(FakeTransport):
+        def write(self, path, content):
+            return False  # timeout/exec failure -> False, never raises
+
+    t = WriteTimesOut()
+    rc = cli.main(["tell", "r", "codex", "Serve r3 review NOW", "-s", "urgent"],
+                  transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert _task_docs(t) == [], "a failed write must leave the slot empty"
+    assert "directive write failed" in cap.err
+    assert "-> codex" not in cap.out, "must NOT report an undelivered message as delivered"
+
+
+def test_read_timeout_over_occupied_slot_refuses_to_clobber(capsys):
+    # I1: read() timeout returns None (T1), indistinguishable from a missing slot.
+    # Treating None as "empty" would overwrite an occupied slot. A list_dir of the
+    # parent confirms the slot IS present -> refuse to write (rc 1), original kept.
+    class ReadTimesOut(FakeTransport):
+        def read(self, path):
+            return None  # timeout: content unknown, no exception
+
+    t = ReadTimesOut()
+    original = ("---\ntype: Task\ntitle: Ship it\ndescription: ORIGINAL urgent\n"
+                "assignee: amy\n---\n")
+    t.store["team/r/task/ship-it.md"] = original
+    rc = cli.main(["tell", "r", "bob", "Ship it", "-s", "different message"],
+                  transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert t.store["team/r/task/ship-it.md"] == original, "original directive must survive"
+    assert "unreadable" in cap.err
+
+
+def test_reremind_new_when_dedupes_and_keeps_original_schedule(capsys):
+    # Minor (a): re-reminding the same reminder with a DIFFERENT not_before is the
+    # same message (not_before is delivery metadata, outside identity) -> rc 0
+    # dedup, original schedule kept, one doc.
+    t = FakeTransport()
+    assert cli.main(["remind", "r", "amy", "2026-07-11T09:00:00+00:00", "standup"],
+                    transport=t) == 0
+    capsys.readouterr()
+    assert cli.main(["remind", "r", "amy", "2026-07-12T15:00:00+00:00", "standup"],
+                    transport=t) == 0
+    assert "already delivered" in capsys.readouterr().out
+    assert _task_docs(t) == ["team/r/task/standup.md"]
+    doc = t.store["team/r/task/standup.md"]
+    assert "2026-07-11" in doc and "2026-07-12" not in doc, "original schedule kept"

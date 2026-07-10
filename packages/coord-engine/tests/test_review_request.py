@@ -360,6 +360,54 @@ def test_review_status_reflects_required_gating(capsys):
     assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
 
 
+def test_rerequest_clears_stale_settled_marker_so_new_obligation_surfaces(capsys):
+    # I2: the exists-guard passes on a read timeout, so a re-request can rewrite
+    # the doc with a NEW required list on top of a review a prior fold already
+    # marked `.settled`. That stale marker would hide the new obligation from
+    # every settled-skipping fold. The re-request must clear the marker.
+    t = FakeTransport()
+    _approve(t, "pr-x")               # required: rev, then rev approves
+    cli._pending_reviews_for(t, "r", "rev")   # settles -> writes marker
+    assert "team/r/review/pr-x/verdicts/.settled" in t.store
+
+    # Re-request under a read timeout: read()->None so the exists-guard slips and
+    # the doc is rewritten with required=[bob]. Shares t's store for writes/deletes.
+    class ReRequestUnderReadTimeout(FakeTransport):
+        def __init__(self, base):
+            self.__dict__ = base.__dict__
+        def read(self, path):
+            return None
+
+    capsys.readouterr()
+    assert cli.main(["review", "request", "r", "pr-x", "--of", "url",
+                     "--reviewer", "bob"],
+                    transport=ReRequestUnderReadTimeout(t)) == 0
+    assert "team/r/review/pr-x/verdicts/.settled" not in t.store, \
+        "re-request must clear the stale settled marker"
+    out = cli._pending_reviews_for(t, "r", "bob")
+    pend = [r for r in out if r.get("type") == "review-pending"]
+    assert len(pend) == 1 and pend[0]["name"] == "pr-x" \
+        and pend[0]["pending_required"] == ["bob"], \
+        "the new obligation must be visible to the fold, not hidden by the marker"
+
+
+def test_request_write_timeout_fails_loud(capsys):
+    # I2 (requester-side C1 mirror): a timed-out write() returns False (T1), not a
+    # raise. An rc-0 "review requested" that never landed is the requester-side
+    # incident. A False write must fail loud (rc 1).
+    class WriteTimesOut(FakeTransport):
+        def write(self, path, content):
+            return False
+
+    t = WriteTimesOut()
+    rc = cli.main(["review", "request", "r", "pr-z", "--of", "url",
+                   "--reviewer", "alice"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "write failed" in cap.err
+    assert "requested" not in cap.out, "must not claim a review that never landed"
+
+
 def test_request_requires_at_least_one_reviewer(capsys):
     t = FakeTransport()
     # argparse-level: --reviewer is required; missing -> SystemExit(2)
