@@ -61,13 +61,19 @@ def new_task_doc(
     next_action: Optional[str] = None,
     kind: Optional[str] = None,
     not_before: Optional[str] = None,
+    slug: Optional[str] = None,
 ) -> tuple[str, str]:
-    """Return ``(slug, content)`` for a new OKF Task doc. Raises on bad enums."""
+    """Return ``(slug, content)`` for a new OKF Task doc. Raises on bad enums.
+
+    ``slug`` overrides the title-derived slug (used for both the filename and the
+    ``id`` frontmatter field) — the directive re-slug path passes a hash-suffixed
+    slug so a genuine collision lands at a distinct, deduped id, not the title's.
+    """
     if status not in VALID_STATUSES:
         raise TaskError(f"invalid status {status!r}")
     if priority not in VALID_PRIORITIES:
         raise TaskError(f"invalid priority {priority!r}")
-    slug = slugify(title)
+    slug = slug or slugify(title)
     tags = []
     if workstream:
         tags.append(f"workstream:{workstream}")

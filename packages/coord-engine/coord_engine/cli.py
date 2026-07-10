@@ -14,6 +14,7 @@ network; ``main`` builds the real ``FulcraFileTransport``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -665,10 +666,63 @@ def _stamp_for_path(now: str, agent: str) -> str:
     return f"{safe_time}-{tasks.agent_key(agent)}"
 
 
+def _directive_payload(title: Optional[str], summary: Optional[str],
+                       next_action: Optional[str]) -> tuple[str, str, str]:
+    """The message-bearing fields — title, summary, next_action — ONLY. Timestamp,
+    owner, assignee, and not_before are delivery metadata, not the message, so they
+    never enter the identity/dedup comparison (a relay re-sending the same reminder
+    to the same agent is the same message). None and "" normalize to the same value
+    so a missing summary compares equal to an empty one."""
+    def norm(x: Optional[str]) -> str:
+        return "" if x is None else str(x)
+    return (norm(title), norm(summary), norm(next_action))
+
+
+def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str]]:
+    """Message-bearing payload of an existing task doc, or ``None`` when its
+    frontmatter won't parse — the caller then treats it as a DIFFERENT message
+    (suffix + deliver): a duplicate directive is cheaper than a dropped one."""
+    fm = okf.parse_frontmatter(doc)
+    if fm is None:
+        return None
+    return _directive_payload(fm.get("title"), fm.get("description"), fm.get("next_action"))
+
+
+def _payload_hash(payload: tuple[str, str, str]) -> str:
+    """Stable short id for a distinct message. Hashes the payload (NOT the time),
+    so a retry of the same distinct message maps to the same suffixed slug and
+    dedupes correctly."""
+    return hashlib.sha256("\x00".join(payload).encode("utf-8")).hexdigest()[:8]
+
+
+def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
+                     content: str, payload: tuple[str, str, str], assignee: str,
+                     not_before: Optional[str]) -> Optional[int]:
+    """Deliver ``content`` at ``slug``, deduping on an identical existing payload.
+
+    Returns a return code when the slot is decided (0 delivered / 0 already
+    delivered / rc unchanged), or ``None`` when the slot is a genuine collision
+    (occupied by a DIFFERENT message) and the caller must re-slug.
+    """
+    path = _task_path(args.team, slug)
+    existing = transport.read(path)
+    if existing is None:
+        transport.write(path, content)
+        print(f"directive {slug} -> {assignee}"
+              + (f" (visible {not_before})" if not_before else ""))
+        return 0
+    if _doc_payload(existing) == payload:
+        # Same message already on the bus: sanctioned dedup, success not failure.
+        print(f"directive {slug} already delivered")
+        return 0
+    return None  # collision with a different message
+
+
 def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str,
                       not_before: Optional[str] = None) -> int:
+    payload = _directive_payload(args.title, args.summary or "", args.next)
     try:
-        slug, content = tasks.new_task_doc(
+        base_slug, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
             status="proposed", priority=args.priority,
             owner=getattr(args, "sender", None) or _host(), assignee=assignee,
@@ -678,13 +732,29 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
         return 1
-    path = _task_path(args.team, slug)
-    if transport.read(path) is not None:
-        print(f"directive {slug} already exists", file=sys.stderr)
-        return 1
-    transport.write(path, content)
-    print(f"directive {slug} -> {assignee}" + (f" (visible {not_before})" if not_before else ""))
-    return 0
+    rc = _write_directive(transport, args, slug=base_slug, content=content,
+                          payload=payload, assignee=assignee, not_before=not_before)
+    if rc is not None:
+        return rc
+    # Base slug is taken by a DIFFERENT message: re-slug with a stable hash of the
+    # payload and deliver there. Same distinct message -> same suffixed slug.
+    suffixed = f"{base_slug}-{_payload_hash(payload)}"
+    _, content = tasks.new_task_doc(
+        args.title, now=_iso(_now()), workstream=args.workstream,
+        status="proposed", priority=args.priority,
+        owner=getattr(args, "sender", None) or _host(), assignee=assignee,
+        summary=args.summary or "", next_action=args.next, kind="directive",
+        not_before=not_before, slug=suffixed,
+    )
+    rc = _write_directive(transport, args, slug=suffixed, content=content,
+                          payload=payload, assignee=assignee, not_before=not_before)
+    if rc is not None:
+        return rc
+    # Suffixed slug ALSO holds a different message (pathological): fail loudly
+    # rather than clobber or drop.
+    print(f"directive collision unresolved: {base_slug} and {suffixed} both hold "
+          f"different messages", file=sys.stderr)
+    return 1
 
 
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
