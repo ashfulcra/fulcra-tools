@@ -130,6 +130,14 @@ hooks/prompts/blocks are rendered artifacts, not live references:** after upgrad
 **RE-RUN YOUR ADAPTER INSTALLER** to regenerate them — an un-regenerated hook keeps emitting the
 doctrine it was rendered under.
 
+**Degraded review fold.** The `briefing`/`needs-me` fold that surfaces pending reviews is wall-clock
+bounded (`COORD_REVIEW_FOLD_BUDGET`, default 45s): on a slow transport it stops early and emits a
+`review-fold-degraded` row (`{scanned, total}`, plus `skipped` when a slug's doc or verdict read failed)
+rather than a clean-looking partial. A watcher that sees it must NOT treat the fold as authoritative —
+fall back to a per-slug `review status` sweep over the `review/` listing for the unscanned and skipped
+remainder, and clear those verdicts before acking. Codex's repaired watch prompt already does this; the
+fallback is doctrine, not optional.
+
 **Claude Code / Cowork** — settings.json hooks.
 ```bash
 ./scripts/claude-code/install-claude-code.sh <team> <agent>

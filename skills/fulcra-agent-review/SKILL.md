@@ -96,6 +96,17 @@ proceed to request a new review or advance an existing one below.
    **CHANGES** if any reviewer requests changes; **APPROVED** if there's an approval, no outstanding
    changes, and all `required` reviewers approved; **PENDING** otherwise.
 
+   A review that reaches **APPROVED** with every `required` verdict in is *settled*: the fold caches it
+   at `verdicts/.settled` so the fan-out folds (`briefing`/`needs-me`) skip it. Settled reviews are
+   immutable — re-opening under a changed `required` list is a **new slug**, never an edit to the old
+   one. `review status` never trusts the marker: it recomputes the full tally on every call, so a stale
+   or wrong marker self-heals on direct query.
+
+   `review status` **exits 1** with `... unreadable (missing slug or degraded transport) — tally unknown,
+   retry` when the review doc can't be read — a transport failure or a nonexistent slug, indistinguishable
+   and both UNKNOWN (without the `required` list a lone approval would tally as a clean APPROVED and
+   durably hide a pending review). A watcher must read rc 1 as *transport down, retry*, never as a state.
+
 ## When to use
 - Gating a merge/land on review in a multi-agent team.
 - Any "N reviewers must sign off" flow where you need an unambiguous, non-drifting verdict state.

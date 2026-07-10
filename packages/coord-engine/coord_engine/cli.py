@@ -14,12 +14,14 @@ network; ``main`` builds the real ``FulcraFileTransport``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
 import secrets
 import socket
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -128,6 +130,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             if r.get("type") == "review-pending":
                 print(f"  [REVIEW] pending verdict: {r['name']} "
                       f"(required: {', '.join(r['pending_required'])})")
+            elif r.get("type") == "review-fold-degraded":
+                print(_review_degraded_line(r))
             elif r.get("type") == "forge-feedback":
                 print(_forge_feedback_line(r))
             else:
@@ -363,28 +367,160 @@ def _verdicts_prefix(team: str, slug: str) -> str:
     return f"team/{team}/review/{slug}/verdicts/"
 
 
-def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
-    """Shared review fold: doc + verdict shards -> tally dict."""
-    req_doc = okf.parse_frontmatter(transport.read(_review_doc_path(team, slug))) or {}
+# Settled-skip: once a review reaches a terminal APPROVED state with no
+# outstanding required reviewers, a tiny cache marker is dropped IN the verdicts
+# prefix (so the ONE listing the fold already does reveals it — zero extra
+# reads). It is not a `.md` file, so the verdict-reading loop already ignores it.
+# CONTRACT: a settled review is IMMUTABLE — a new verdict on it is a no-op by
+# definition (already APPROVED, required list frozen), and changing the required
+# set re-opens the review only via a NEW slug. The marker is a fold cache, never
+# a source of truth: `review status` recomputes the full tally every time and so
+# self-heals a wrong/stale marker on direct query.
+SETTLED_MARKER = ".settled"
+
+DEFAULT_REVIEW_FOLD_BUDGET = 45.0
+
+
+def _settled_marker_path(team: str, slug: str) -> str:
+    return _verdicts_prefix(team, slug) + SETTLED_MARKER
+
+
+def _review_fold_budget() -> float:
+    """Aggregate deadline for `_pending_reviews_for`, seconds. Env override
+    ``COORD_REVIEW_FOLD_BUDGET``; anything unparseable or non-positive falls back
+    to the default (never let a bad env value disable the fold or make it hang)."""
+    raw = os.environ.get("COORD_REVIEW_FOLD_BUDGET")
+    if raw is None:
+        return DEFAULT_REVIEW_FOLD_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REVIEW_FOLD_BUDGET
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_REVIEW_FOLD_BUDGET
+    return v
+
+
+def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
+    """Best-effort settled-cache write. Failure is swallowed: the marker only
+    speeds the fan-out fold; its absence just means the next fold recomputes."""
+    try:
+        transport.write(
+            _settled_marker_path(team, slug),
+            okf.render_frontmatter({"schema": "review-settled/v1",
+                                    "state": review.APPROVED, "ts": now}),
+        )
+    except Exception:
+        pass
+
+
+def _is_settleable(tally: dict[str, Any]) -> bool:
+    """True only for a tally that may be CACHED as settled: APPROVED, nothing
+    pending, and a parsed NON-EMPTY required list. The required gate is the
+    false-settle guard: ``transport.read()`` returns None on failure (incl.
+    timeout — it never raises), so a transient doc-read failure yields
+    required=None and ``review.tally(..., required=None)`` goes APPROVED off any
+    one readable approval verdict — cache that and a genuinely-pending review is
+    hidden from every fold, durably. ``review request`` refuses to open a review
+    without --reviewer, so an absent/empty required list can only mean doc-read
+    failure, doc corruption, or a legacy/forge-style doc — never a legitimate
+    settle state. Such tallies stay UNCACHED (re-tallied each fold); only the
+    marker write is gated here, never the reported state."""
+    return (tally.get("state") == review.APPROVED
+            and not tally.get("pending_required")
+            and bool(tally.get("required")))
+
+
+def _tally_from_verdict_entries(
+    transport: Any, team: str, slug: str, entries: list[dict[str, Any]],
+    doc_raw: Optional[str], *, deadline: Optional[float] = None,
+) -> tuple[dict[str, Any], bool, bool]:
+    """Verdict-shard reads -> ``(tally, verdict_reads_ok, fully_scanned)``, given
+    an already-fetched verdicts listing and the already-read review doc
+    (``doc_raw``). A None ``doc_raw`` means the doc read failed or the doc is
+    missing — callers on the fold path must treat that as UNKNOWN (skip +
+    count), not pass it here; this helper just tallies what it is given.
+
+    ``verdict_reads_ok`` is False when any listed verdict file's read returned
+    None (transport failure — the file EXISTS, its content is unknown): the
+    tally is then a floor, not the truth — a lost CHANGES verdict would look
+    APPROVED — so settle-marker writers must not cache it. A file that reads
+    fine but parses to garbage is NOT a read failure (garbage is simply not a
+    verdict). Split out so the fan-out fold can list ONCE, short-circuit on
+    `.settled`, read the doc, and only then pay for the verdict reads.
+
+    ``deadline`` (F2) is an absolute ``time.monotonic()`` instant bounding the
+    per-verdict read loop: ONE review with many shards would otherwise read every
+    shard unbounded (N x transport.timeout), blowing the aggregate fold budget
+    with no degraded marker. The deadline is checked BOTH before and AFTER each
+    shard read: a strict wall-clock bound is impossible without cancellable
+    transport, so the guarantee is that an overrun is DETECTED and REPORTED
+    immediately after the blocking op (a single stalled read that sleeps past the
+    budget can no longer return a clean row) — budget overshoot is bounded by ONE
+    transport timeout. On expiry the loop STOPS mid-slug and returns
+    ``fully_scanned=False`` — the partial tally is a floor the caller MUST NOT
+    trust (it counts the slug as skipped, surfaces the degraded marker). None
+    (``review status``, no budget) never bounds and always scans fully."""
+    req_doc = okf.parse_frontmatter(doc_raw) or {}
     required = req_doc.get("required")
     if isinstance(required, str):
         required = [r.strip() for r in required.split(",") if r.strip()]
     elif isinstance(required, list):
         required = [str(r).strip() for r in required if str(r).strip()]
     verdicts: list[dict[str, Any]] = []
+    reads_ok = True
+    fully_scanned = True
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            # Budget expired mid-slug: stop reading shards. The tally built so far
+            # is a floor, not the truth — the caller treats this slug as skipped.
+            fully_scanned = False
+            break
+        raw_v = transport.read(_verdicts_prefix(team, slug) + n)
+        if deadline is not None and time.monotonic() >= deadline:
+            # The deadline passed DURING this read (F2/P1-B): checking only BEFORE
+            # the read let one stalled read complete and return a clean row despite
+            # blowing the budget. Detect the overrun immediately after the blocking
+            # op — the slug is not fully scanned. Overshoot is bounded by ONE read.
+            fully_scanned = False
+            break
+        if raw_v is None:
+            reads_ok = False  # listed file unreadable -> tally is incomplete
+        fm = okf.parse_frontmatter(raw_v) or {}
+        # Key by the FILENAME stem (ACL-controlled path), not the frontmatter
+        # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
+        # could shadow alice's real verdict. One verdict file per reviewer.
+        verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
+    return review.tally(verdicts, required=required), reads_ok, fully_scanned
+
+
+def _review_tally(
+    transport: Any, team: str, slug: str
+) -> tuple[dict[str, Any], bool, bool]:
+    """Shared review fold: doc + verdict shards ->
+    ``(tally, doc_ok, verdict_reads_ok)``.
+
+    ALWAYS computes the full tally — it never consults the `.settled` marker, so
+    a corrupt/stale marker can never hide the truth on a direct `review status`
+    query (the marker only serves the fan-out fold, `_pending_reviews_for`).
+
+    ``doc_ok`` is False when the review doc could not be read (missing OR
+    transport failure — ``read()`` returns None for both, indistinguishably):
+    the tally was built on NO required list and must be treated as unknown,
+    never as a clean state. ``verdict_reads_ok`` is False when a listed verdict
+    file's content could not be read — the tally is a floor, not the truth."""
+    raw = transport.read(_review_doc_path(team, slug))
     try:
-        for e in transport.list_dir(_verdicts_prefix(team, slug)):
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md"):
-                continue
-            fm = okf.parse_frontmatter(transport.read(_verdicts_prefix(team, slug) + n)) or {}
-            # Key by the FILENAME stem (ACL-controlled path), not the frontmatter
-            # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
-            # could shadow alice's real verdict. One verdict file per reviewer.
-            verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
+        entries = transport.list_dir(_verdicts_prefix(team, slug))
     except TransportError:
-        pass
-    return review.tally(verdicts, required=required)
+        entries = []
+    # No deadline: `review status` is a direct, per-slug query with no fold
+    # budget, so it always scans every verdict shard (fully_scanned ignored).
+    tally, vok, _ = _tally_from_verdict_entries(transport, team, slug, entries, raw)
+    return tally, raw is not None, vok
 
 
 def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
@@ -416,16 +552,37 @@ def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> li
     return [str(l.get("agent")) for l in roles.fresh_holders(leases, now=now, sla_hours=sla)]
 
 
-def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+def _pending_reviews_for(
+    transport: Any, team: str, agent: str, *, deadline_seconds: Optional[float] = None
+) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
-    it holds a fresh lease on. Best-effort: any listing failure yields []
+    it holds a fresh lease on. Best-effort: the top listing failing yields []
     (needs-me/briefing must not fail because the review add-on is absent).
 
-    COST: one listing of review/ plus, per unsettled review, the verdict fold —
-    and per unique role-shaped pending name, one role-doc read + lease fold.
-    Fine for inbox polling on teams with tens of reviews; do NOT call in a tight
-    loop. If review counts grow, the right home for this is the reconcile
+    BOUNDED (2026-07-09 incident fix). Two guards keep a degraded transport from
+    turning this into a multi-minute hang read as "bus down":
+
+    - **Settled-skip.** Each unsettled review costs one verdicts listing + a doc
+      read + a read per verdict. Once a review is terminal-APPROVED with no
+      outstanding required reviewers, a `.settled` marker is dropped IN the
+      verdicts prefix; the ONE listing this fold already does then reveals it and
+      the slug is skipped with ZERO further reads. The fold also drops that marker
+      the first time it computes such a tally, so settled history stops costing.
+
+    - **Aggregate budget.** A wall-clock deadline (default 45s, env
+      ``COORD_REVIEW_FOLD_BUDGET``) checked BETWEEN slugs. On breach the scan
+      STOPS and a ``review-fold-degraded`` marker (``scanned``/``total``) is
+      appended — never a clean-looking partial. A single slug whose tally raises
+      ``TransportError`` (Task-1 timeout) or whose review DOC read returns None
+      (``read()`` never raises — None here means the read failed, since the slug
+      came from the listing) is skipped, counted in ``skipped``, and surfaced
+      via the same marker (an unreadable slug is UNKNOWN — not settled, not
+      silently pending; partial knowledge must be VISIBLE).
+
+    If review counts keep growing the right home for this is the reconcile
     pre-fold (like task rows) — tracked on the bus."""
+    if deadline_seconds is None:
+        deadline_seconds = _review_fold_budget()
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
@@ -433,14 +590,76 @@ def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
         return []
-    for e in entries:
-        n = e.get("name") or ""
-        if e.get("is_dir") or not n.endswith(".md"):
+    slug_entries = [
+        e for e in entries
+        if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
+    ]
+    total = len(slug_entries)
+    scanned = 0
+    skipped = 0
+    start = time.monotonic()
+    deadline = start + deadline_seconds  # absolute monotonic instant (F2)
+    for e in slug_entries:
+        # Budget is checked BETWEEN slugs (after at least one is scanned, so a
+        # slow transport still makes measurable progress before degrading).
+        if scanned and time.monotonic() >= deadline:
+            marker = {"type": "review-fold-degraded", "scanned": scanned, "total": total}
+            if skipped:
+                marker["skipped"] = skipped
+            out.append(marker)
+            return out
+        slug = (e.get("name") or "")[:-3]
+        scanned += 1
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+            if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
+                continue  # settled -> skip entirely, zero reads beyond this listing
+            doc_raw = transport.read(_review_doc_path(team, slug))
+            if doc_raw is None:
+                # The slug came from the review/ listing, so its doc exists —
+                # a None read is a transport failure (read() returns None on
+                # timeout, it never raises). The slug's state is UNKNOWN: not
+                # settled, not silently pending. Count it, keep scanning.
+                skipped += 1
+                continue
+            if time.monotonic() >= deadline:
+                # The doc read itself pushed us over budget (P1-B): check AFTER the
+                # blocking op, not only between slugs. Don't start the verdict
+                # reads — this slug is UNKNOWN. Count it skipped and surface the
+                # degraded marker; the budget is spent.
+                skipped += 1
+                out.append({"type": "review-fold-degraded", "scanned": scanned,
+                            "total": total, "skipped": skipped})
+                return out
+            tally, vreads_ok, fully = _tally_from_verdict_entries(
+                transport, team, slug, ventries, doc_raw, deadline=deadline)
+            if not fully:
+                # Budget expired MID-SLUG (F2): a single review with many verdict
+                # shards would otherwise read them all unbounded. The partial
+                # tally is untrusted. This slug was reached (scanned already
+                # counts it), so it joins `skipped` — same accounting as a
+                # doc-read failure (scanned includes skipped; unscanned=total-scanned).
+                # The budget is spent: stop and surface the degraded marker.
+                skipped += 1
+                marker = {"type": "review-fold-degraded", "scanned": scanned,
+                          "total": total, "skipped": skipped}
+                out.append(marker)
+                return out
+        except TransportError:
+            # A single slug's tally timed out (Task-1 contract): skip it, keep
+            # scanning the rest, and make the gap visible via `skipped` below.
+            skipped += 1
             continue
-        slug = n[:-3]
-        tally = _review_tally(transport, team, slug)
+        state = tally.get("state")
         pending = tally.get("pending_required") or []
-        if tally.get("state") != "PENDING" or not pending:
+        if state == review.APPROVED and not pending:
+            # Cache only a PROVEN settle: non-empty required (false-settle
+            # guard, see _is_settleable) AND every listed verdict actually read
+            # (an unreadable verdict could be a hidden CHANGES).
+            if _is_settleable(tally) and vreads_ok:
+                _write_settled_marker(transport, team, slug, now=now)
+            continue
+        if state != "PENDING" or not pending:
             continue
         if agent not in pending:  # direct hit needs no role folding at all
             for r in pending:
@@ -449,7 +668,20 @@ def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str
         if review.is_pending_for(pending, agent, role_holders):
             out.append({"type": "review-pending", "name": slug,
                         "state": "PENDING", "pending_required": pending})
+    if skipped:
+        # Completed inside budget but some slugs were unreadable: partial
+        # knowledge must be visible, so emit the degraded marker anyway.
+        out.append({"type": "review-fold-degraded", "scanned": scanned,
+                    "total": total, "skipped": skipped})
     return out
+
+
+def _review_degraded_line(r: dict[str, Any]) -> str:
+    line = (f"  review fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
+            f"before budget — run per-slug review status for the rest")
+    if r.get("skipped"):
+        line += f" ({r['skipped']} slug(s) skipped on transport error)"
+    return line
 
 
 def _forge_responsible(transport: Any, team: str) -> dict[str, set]:
@@ -563,7 +795,20 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         "ts": _iso(_now()),
     }
     body = f"\nReview requested: {args.of}\n"
-    transport.write(path, okf.render_frontmatter(fm) + body)
+    if not transport.write(path, okf.render_frontmatter(fm) + body):
+        # T1: a timed-out write returns False, not a raise. An rc-0 "review
+        # requested" that never landed is the requester-side incident (mirror of
+        # C1). Fail loud so the requester retries rather than believing the
+        # obligation is durable.
+        print("review request write failed (transport)", file=sys.stderr)
+        return 1
+    # The exists-guard above passes on a read timeout, so a re-request can land a
+    # fresh required list on top of a review that a prior fold already marked
+    # `.settled`. That stale marker would hide the NEW obligation from every
+    # settled-skipping fold (I2). Best-effort clear it (delete is timeout-safe ->
+    # False, which we ignore): the marker is only a fold cache, and its absence
+    # just makes the next fold recompute the (now-pending) tally.
+    transport.delete(_settled_marker_path(team, slug))
     print(f"review {slug} requested (required: {', '.join(required)})")
     for r in required:
         print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
@@ -572,7 +817,41 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
 
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
-    result = _review_tally(transport, team, slug)
+    result, doc_ok, vreads_ok = _review_tally(transport, team, slug)
+    if not doc_ok:
+        # The doc read returned None: missing slug OR transport failure —
+        # indistinguishable, and either way the tally is UNKNOWN. Without the
+        # required list, one readable approval verdict tallies as a clean
+        # APPROVED with pending:[] — printing that (or caching it) under a
+        # transient timeout would durably hide a pending review. Fail loud.
+        print(f"review status failed: {_review_doc_path(team, slug)} unreadable "
+              f"(missing slug or degraded transport) — tally unknown, retry",
+              file=sys.stderr)
+        return 1
+    if not vreads_ok:
+        # F1: a listed verdict shard read returned None (the file EXISTS, its
+        # content is unknown under a degraded transport). The tally is a FLOOR,
+        # not the truth — a lost CHANGES verdict reads as APPROVED. Printing that
+        # partial tally rc 0 defeats the exact-slug fail-closed sweep watchers
+        # run. Fail closed, same register as the doc-unreadable case.
+        print(f"review status failed: verdict shard unreadable under "
+              f"{_verdicts_prefix(team, slug)} — tally unknown, retry",
+              file=sys.stderr)
+        return 1
+    # A direct query recomputes the truth (never trusts the marker). doc_ok and
+    # vreads_ok are both proven above, so the tally is trustworthy here.
+    if _is_settleable(result):
+        # PROVEN terminal-settled (non-empty required, every listed verdict read):
+        # refresh the fold cache so the fan-out fold can skip this slug next time.
+        _write_settled_marker(transport, team, slug, now=_iso(_now()))
+    else:
+        # F4: a full, trustworthy tally that is NOT settleable, yet a `.settled`
+        # marker may linger (e.g. a since-reopened review). It is provably stale —
+        # the marker only ever caches a terminal-APPROVED state. Best-effort
+        # delete (delete is timeout-safe -> False, ignored) so the next fan-out
+        # fold recomputes and sees the pending obligation, complementing the I2
+        # re-request delete. Self-healing on direct query.
+        transport.delete(_settled_marker_path(team, slug))
     result.update({"team": team, "slug": slug})
     if args.json:
         print(json.dumps(result, indent=2))
@@ -665,26 +944,139 @@ def _stamp_for_path(now: str, agent: str) -> str:
     return f"{safe_time}-{tasks.agent_key(agent)}"
 
 
+def _directive_payload(title: Optional[str], summary: Optional[str],
+                       next_action: Optional[str],
+                       assignee: Optional[str]) -> tuple[str, str, str, str]:
+    """The message-identity fields — title, summary, next_action, ASSIGNEE.
+
+    Identity == path: ``_create_directive`` hashes this payload into the canonical
+    directive slug (``<title-slug>-<sha256(payload)[:8]>``), so identical payloads
+    map to one path (dedupe by construction) and distinct payloads to distinct
+    paths (they can never race). Timestamp, owner, and not_before are delivery
+    metadata, not the message, so they never enter the identity/dedup comparison
+    (a relay re-sending the same reminder to the same agent is the same message).
+    Assignee IS identity: the
+    same text told to a DIFFERENT agent is a different directive (each recipient
+    must get their copy), while broadcast's ``*`` audience means identical
+    re-broadcasts still dedupe — and a broadcast stays distinct from a directed
+    tell of the same text (different audiences). None and "" normalize to the
+    same value so a missing summary compares equal to an empty one.
+
+    By design, not_before and priority are delivery metadata OUTSIDE this
+    identity, so a reschedule or priority change of the same title dedupes onto
+    the original doc (keeping its schedule) rather than re-delivering: to re-arm
+    with a new schedule or priority, send a new title."""
+    def norm(x: Optional[str]) -> str:
+        return "" if x is None else str(x)
+    return (norm(title), norm(summary), norm(next_action), norm(assignee))
+
+
+def _doc_payload(doc: Optional[str]) -> Optional[tuple[str, str, str, str]]:
+    """Message-identity payload of an existing task doc, or ``None`` when its
+    frontmatter won't parse. On the write path an unparseable/corrupt doc at our
+    canonical (hash-bearing) slot can no longer be a colliding DIFFERENT message —
+    only corruption — so the caller fails loud (cannot verify delivery) rather
+    than overwriting: never claim a delivery we can't confirm."""
+    fm = okf.parse_frontmatter(doc)
+    if fm is None:
+        return None
+    return _directive_payload(fm.get("title"), fm.get("description"),
+                              fm.get("next_action"), fm.get("assignee"))
+
+
+def _payload_hash(payload: tuple[str, str, str, str]) -> str:
+    """Stable short id carried by EVERY directive slug. Hashes the payload (NOT
+    the time), so a retry of the same message maps to the same slug (dedupe) and
+    distinct messages to distinct slugs (no shared slot to race over)."""
+    return hashlib.sha256("\x00".join(payload).encode("utf-8")).hexdigest()[:8]
+
+
+def _write_directive(transport: Any, args: argparse.Namespace, *, slug: str,
+                     content: str, payload: tuple[str, str, str, str], assignee: str,
+                     not_before: Optional[str]) -> int:
+    """Deliver ``content`` at ``slug`` — whose canonical path already carries the
+    payload hash (see ``_create_directive``), so the path IS the message identity.
+
+    Two senders of the SAME payload compute the SAME path and write the SAME
+    bytes: a race is idempotent (last-writer-wins is a no-op), so the existence
+    of the slot means "already delivered". Distinct payloads land on DISTINCT
+    paths and can never race each other — the lost-race case that the old
+    read-back guarded against cannot arise, so a read-back MISMATCH now means
+    only transport corruption (or an astronomically improbable hash collision),
+    never a racer's different message. We never overwrite and never claim a
+    delivery we cannot verify.
+    """
+    path = _task_path(args.team, slug)
+    existing = transport.read(path)
+    if existing is not None:
+        # The path is the payload identity, so an existing readable doc here IS
+        # our message. Matching payload -> sanctioned dedup (already delivered).
+        if _doc_payload(existing) == payload:
+            print(f"directive {slug} already delivered")
+            return 0
+        # Present but NOT our payload: unparseable/corrupt content (or a hash
+        # collision). We cannot verify our message is the one on the bus and must
+        # never overwrite — fail loud so the caller retries.
+        print(f"directive {slug}: slot holds unverifiable content, "
+              f"cannot verify delivery, retry", file=sys.stderr)
+        return 1
+    # existing is None is AMBIGUOUS (T1: timeout and genuinely-absent both map to
+    # None). Treating it as "empty slot" would let a degraded transport clobber an
+    # occupied slot (I1). Confirm absence via a directory listing: list_dir RAISES
+    # TransportError on failure (loud through main's catch-all), and its entry
+    # names distinguish missing from unreadable. One list_dir per tell is fine.
+    parent, entry = path.rsplit("/", 1)
+    names = {e.get("name") for e in transport.list_dir(parent + "/")}
+    if entry in names:
+        # Present in the listing yet the read returned None: transport degraded
+        # mid-op. Cannot verify delivery, must not overwrite.
+        print(f"directive {slug}: slot present but unreadable "
+              f"(transport degraded), cannot verify delivery, retry", file=sys.stderr)
+        return 1
+    # Genuinely absent -> write. A write that fails (T1: False, not a raise) must
+    # NOT be reported as delivered (C1): a failed write leaves the slot empty, so
+    # a retry re-enters this dedup logic cleanly.
+    if not transport.write(path, content):
+        print("directive write failed (transport)", file=sys.stderr)
+        return 1
+    # Post-write read-back as WRITE-VERIFICATION only: None (read-back failed) or a
+    # mismatch (corruption) both mean we cannot confirm our bytes landed -> fail
+    # loud (C1) rather than claim an unverifiable delivery. A mismatch can no
+    # longer mean a lost race (distinct payloads never share this path).
+    readback = transport.read(path)
+    if readback is None:
+        print(f"directive {slug}: write unverifiable (read-back failed, "
+              f"transport degraded)", file=sys.stderr)
+        return 1
+    if _doc_payload(readback) != payload:
+        print(f"directive {slug}: write unverifiable (read-back mismatch, "
+              f"transport corruption)", file=sys.stderr)
+        return 1
+    print(f"directive {slug} -> {assignee}"
+          + (f" (visible {not_before})" if not_before else ""))
+    return 0
+
+
 def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str,
                       not_before: Optional[str] = None) -> int:
+    # The canonical directive path ALWAYS carries the payload hash: identical
+    # payloads (any senders, any order) converge on one path and dedupe by
+    # construction; distinct payloads occupy distinct paths and can never race.
+    payload = _directive_payload(args.title, args.summary, args.next, assignee)
+    slug = f"{tasks.slugify(args.title)}-{_payload_hash(payload)}"
     try:
-        slug, content = tasks.new_task_doc(
+        _, content = tasks.new_task_doc(
             args.title, now=_iso(_now()), workstream=args.workstream,
             status="proposed", priority=args.priority,
             owner=getattr(args, "sender", None) or _host(), assignee=assignee,
             summary=args.summary or "", next_action=args.next, kind="directive",
-            not_before=not_before,
+            not_before=not_before, slug=slug,
         )
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
         return 1
-    path = _task_path(args.team, slug)
-    if transport.read(path) is not None:
-        print(f"directive {slug} already exists", file=sys.stderr)
-        return 1
-    transport.write(path, content)
-    print(f"directive {slug} -> {assignee}" + (f" (visible {not_before})" if not_before else ""))
-    return 0
+    return _write_directive(transport, args, slug=slug, content=content,
+                            payload=payload, assignee=assignee, not_before=not_before)
 
 
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
@@ -940,9 +1332,15 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in out["inbox"][:5]:
         print(_line(r))
     print(f"  needs-me: {len(out['needs_me'])} item(s)")
-    print(f"  pending reviews: {len(out['pending_reviews'])} item(s)")
-    for r in out["pending_reviews"][:5]:
+    pend_rows = [r for r in out["pending_reviews"]
+                 if r.get("type") != "review-fold-degraded"]
+    degraded_rows = [r for r in out["pending_reviews"]
+                     if r.get("type") == "review-fold-degraded"]
+    print(f"  pending reviews: {len(pend_rows)} item(s)")
+    for r in pend_rows[:5]:
         print(_line(r))
+    for r in degraded_rows:  # always shown — a degraded fold must never hide
+        print(_review_degraded_line(r))
     print(f"  forge feedback: {len(out.get('forge_feedback') or [])} PR(s)")
     for r in (out.get("forge_feedback") or [])[:5]:
         print(_forge_feedback_line(r))

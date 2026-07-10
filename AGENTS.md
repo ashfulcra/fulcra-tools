@@ -95,6 +95,17 @@ skills. Subagent-only work stays OFF the bus.
   before ack, on the exact slug — never a bare ack.** Full rules and per-harness
   wiring live in [`fulcra-agent-review`](skills/fulcra-agent-review/SKILL.md)
   and [`fulcra-agent-automation`](skills/fulcra-agent-automation/SKILL.md).
+- **Engine surfaces a watcher must honor.** Every directive slug now carries a payload hash
+  (`<title-slug>-<sha256(payload)[:8]>`), so identical resends dedupe by construction and distinct
+  messages can never share (or clobber) a slot; rc 0 `directive <slug> already delivered` is a *deduped
+  identical resend*, not a fresh write, and rc 1 `cannot verify delivery, retry` means the slot was
+  unreadable — never overwritten, safe to retry. `briefing`/`needs-me` may emit a `review-fold-degraded`
+  row when their pending-review scan exceeds `COORD_REVIEW_FOLD_BUDGET` (default 45s, enforced *within* a
+  slug too — checked after each verdict/doc read, so one stalled read can't return a clean row) — honor it
+  with a per-slug `review status` sweep;
+  never read the fold as complete. That sweep itself **fails closed**: `review status` returns rc 1
+  (`tally unknown, retry`) when the doc or any verdict shard is unreadable, rather than printing a
+  partial APPROVED — so a degraded transport can never green-light a merge.
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

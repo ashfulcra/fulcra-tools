@@ -7,9 +7,345 @@ failure where a reviewer acked directives and the obligation vanished.
 """
 
 import json
+import time
 
 from coord_engine import cli, okf
+from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
+
+
+# --- bounded-review-fold fixtures (Task 2) -----------------------------------
+
+class CountingTransport(FakeTransport):
+    """FakeTransport that records every read/list path for cost assertions."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads: list[str] = []
+        self.lists: list[str] = []
+
+    def read(self, path):
+        self.reads.append(path)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        self.lists.append(prefix)
+        return super().list_dir(prefix)
+
+
+class SlowTransport(CountingTransport):
+    """Every read/list sleeps — models a degraded transport for budget tests."""
+
+    def __init__(self, delay=0.03):
+        super().__init__()
+        self.delay = delay
+
+    def read(self, path):
+        time.sleep(self.delay)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        time.sleep(self.delay)
+        return super().list_dir(prefix)
+
+
+def _approve(t, slug, reviewer="rev"):
+    """Open a single-reviewer review and file that reviewer's approval, leaving
+    the review terminal-APPROVED with no pending_required."""
+    cli.main(["review", "request", "r", slug, "--of", "url",
+              "--reviewer", reviewer], transport=t)
+    t.put(f"team/r/review/{slug}/verdicts/{reviewer}.md",
+          f"---\ntype: Verdict\nreviewer: {reviewer}\nverdict: approve\n---\n")
+
+
+def test_settled_slug_skipped_with_zero_reads(capsys):
+    # First fold computes the APPROVED tally and drops the .settled marker...
+    t = CountingTransport()
+    _approve(t, "pr-set")
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "someone")
+    assert "team/r/review/pr-set/verdicts/.settled" in t.store, "fold must settle it"
+    # ...so a second fold skips the slug with ZERO reads of its doc/verdicts.
+    t.reads.clear()
+    cli._pending_reviews_for(t, "r", "someone")
+    slug_reads = [p for p in t.reads if "pr-set" in p]
+    assert slug_reads == [], f"settled slug must cost zero reads, got {slug_reads}"
+
+
+def test_pending_slug_fully_tallied_and_unmarked(capsys):
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-pend", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    pend = [r for r in out if r.get("type") == "review-pending"]
+    assert len(pend) == 1 and pend[0]["name"] == "pr-pend"
+    assert "team/r/review/pr-pend/verdicts/.settled" not in t.store, \
+        "a pending review must NOT be settled"
+
+
+def test_review_status_writes_settled_marker(capsys):
+    t = FakeTransport()
+    _approve(t, "pr-rs")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-rs", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
+    assert "team/r/review/pr-rs/verdicts/.settled" in t.store
+
+
+def test_review_status_ignores_wrong_stale_marker(capsys):
+    # A corrupt marker claiming APPROVED must NOT fool a direct query.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-w", "--of", "url",
+              "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    t.put("team/r/review/pr-w/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    cli.main(["review", "status", "r", "pr-w", "--json"], transport=t)
+    res = json.loads(capsys.readouterr().out)
+    assert res["state"] == "PENDING", "review status must compute truth, not trust the marker"
+    assert set(res["pending_required"]) == {"alice", "bob"}
+
+
+def test_fold_budget_emits_degraded_marker(capsys):
+    t = SlowTransport(delay=0.03)
+    for i in range(4):
+        cli.main(["review", "request", "r", f"pr-{i}", "--of", "url",
+                  "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.01)
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1, "budget breach must append exactly one degraded marker"
+    assert deg[0]["total"] == 4
+    assert 1 <= deg[0]["scanned"] < 4, deg[0]
+
+
+def test_briefing_and_needs_me_degraded_exit_zero_with_text(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_REVIEW_FOLD_BUDGET", "0.01")
+    t = SlowTransport(delay=0.03)
+    for i in range(4):
+        cli.main(["review", "request", "r", f"pr-{i}", "--of", "url",
+                  "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+
+    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 0
+    assert "review fold degraded" in capsys.readouterr().out
+
+    assert cli.main(["briefing", "r", "--agent", "alice"], transport=t) == 0
+    assert "review fold degraded" in capsys.readouterr().out
+
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    got = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "review-fold-degraded" for r in got), \
+        "json path must surface the marker as-is"
+
+
+class DocReadFailsTransport(CountingTransport):
+    """Doc reads return None (the Task-1 `read()` timeout contract — it never
+    raises) while verdict reads succeed: the false-settle incident shape."""
+
+    def __init__(self):
+        super().__init__()
+        self.doc_reads_fail = True
+
+    def read(self, path):
+        if (self.doc_reads_fail and path.startswith("team/r/review/")
+                and path.endswith(".md") and "/verdicts/" not in path):
+            self.reads.append(path)
+            return None  # timeout: content unknown, no exception raised
+        return super().read(path)
+
+
+def _trap(t, slug="pr-t"):
+    """Open a required-alice review, then plant a READABLE stray approval —
+    with the doc unreadable, required=None + one approval = false APPROVED."""
+    cli.main(["review", "request", "r", slug, "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    t.put(f"team/r/review/{slug}/verdicts/bob.md",
+          "---\ntype: Verdict\nreviewer: bob\nverdict: approve\n---\n")
+
+
+def test_doc_read_timeout_never_writes_false_settled(capsys):
+    # Regression (review REJECTED finding): doc read -> None => required=None
+    # => tally APPROVED off one readable approval => durable false .settled.
+    t = DocReadFailsTransport()
+    _trap(t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert "team/r/review/pr-t/verdicts/.settled" not in t.store, \
+        "a doc-read timeout must NEVER settle the review"
+    # the slug is unknown, not silently dropped: surfaced via skipped
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1 and deg[0]["skipped"] == 1, deg
+    assert not [r for r in out if r.get("type") == "review-pending"], \
+        "unknown is not pending either — it is skipped, visibly"
+
+
+def test_review_status_doc_read_timeout_fails_loud_no_marker(capsys):
+    t = DocReadFailsTransport()
+    _trap(t)
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-t", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "unreadable" in cap.err
+    assert "APPROVED" not in cap.out, "must not print a clean APPROVED on unknown"
+    assert "team/r/review/pr-t/verdicts/.settled" not in t.store
+
+
+def test_recovered_transport_tallies_pending_again(capsys):
+    # After the transient failure clears, the same slug tallies to the truth.
+    t = DocReadFailsTransport()
+    _trap(t)
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "alice")  # degraded pass, writes nothing
+    t.doc_reads_fail = False                   # transport recovers
+    out = cli._pending_reviews_for(t, "r", "alice")
+    pend = [r for r in out if r.get("type") == "review-pending"]
+    assert len(pend) == 1 and pend[0]["name"] == "pr-t" \
+        and pend[0]["pending_required"] == ["alice"]
+    cli.main(["review", "status", "r", "pr-t", "--json"], transport=t)
+    assert json.loads(capsys.readouterr().out)["state"] == "PENDING"
+
+
+def test_unreadable_verdict_blocks_settle_marker(capsys):
+    # Same defect class one level down: a listed verdict whose READ returns None
+    # could be a hidden CHANGES — an APPROVED tally over it must not be cached.
+    class VerdictReadFails(CountingTransport):
+        def read(self, path):
+            if path == "team/r/review/pr-v/verdicts/carol.md":
+                self.reads.append(path)
+                return None
+            return super().read(path)
+
+    t = VerdictReadFails()
+    cli.main(["review", "request", "r", "pr-v", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    t.put("team/r/review/pr-v/verdicts/alice.md",
+          "---\ntype: Verdict\nreviewer: alice\nverdict: approve\n---\n")
+    t.put("team/r/review/pr-v/verdicts/carol.md",   # exists, content unreadable
+          "---\ntype: Verdict\nreviewer: carol\nverdict: changes\n---\n")
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "alice")
+    assert "team/r/review/pr-v/verdicts/.settled" not in t.store
+    # F1: an unreadable verdict shard makes the tally a floor (carol's CHANGES is
+    # hidden) — `review status` must fail closed, not print a false APPROVED rc 0.
+    assert cli.main(["review", "status", "r", "pr-v", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "verdict shard unreadable" in cap.err
+    assert "APPROVED" not in cap.out, "must not print a clean state on an unknown tally"
+    assert "team/r/review/pr-v/verdicts/.settled" not in t.store
+
+
+def test_forge_style_doc_without_required_never_settles(capsys):
+    # Legacy/forge review docs carry no `required:` — legitimately APPROVED but
+    # NOT cacheable (an empty required list is indistinguishable from the
+    # doc-read-failure shape, so it never earns a marker; state is unaffected).
+    t = FakeTransport()
+    t.put("team/r/review/pr-f.md", "---\ntype: Review\ntitle: R\n---\n")
+    t.put("team/r/review/pr-f/verdicts/forge.md",
+          "---\ntype: Verdict\nreviewer: forge\nverdict: approve\n---\n")
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "alice")
+    assert "team/r/review/pr-f/verdicts/.settled" not in t.store
+    assert cli.main(["review", "status", "r", "pr-f", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
+    assert "team/r/review/pr-f/verdicts/.settled" not in t.store
+
+
+def test_single_slug_transport_error_skipped_and_counted(capsys):
+    class OneSlugFails(CountingTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-bad/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OneSlugFails()
+    cli.main(["review", "request", "r", "pr-bad", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    cli.main(["review", "request", "r", "pr-good", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-good"
+               for r in out), "a sibling slug's timeout must not hide pr-good"
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1 and deg[0]["skipped"] == 1, deg
+
+
+def test_single_slug_many_verdicts_bounded_by_budget(capsys):
+    # F2: the budget was checked only BETWEEN slugs, so ONE review with many
+    # verdict shards read every shard unbounded (N x transport.timeout) with no
+    # degraded marker. The deadline must be threaded into the per-verdict loop:
+    # the fold stops mid-slug, counts it skipped, and surfaces the marker.
+    t = SlowTransport(delay=0.02)
+    cli.main(["review", "request", "r", "pr-big", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    for i in range(40):
+        t.put(f"team/r/review/pr-big/verdicts/rev{i:02d}.md",
+              f"---\ntype: Verdict\nreviewer: rev{i:02d}\nverdict: approve\n---\n")
+    capsys.readouterr()
+    t.reads.clear()
+    start = time.monotonic()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
+    elapsed = time.monotonic() - start
+    # Bounded: reading all 40 shards would take ~0.8s; the budget must cut it off.
+    assert elapsed < 0.4, f"per-slug verdict reads must respect the budget, took {elapsed:.3f}s"
+    shard_reads = [r for r in t.reads if "/verdicts/rev" in r]
+    assert len(shard_reads) < 40, f"budget must stop mid-slug, read {len(shard_reads)}/40"
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1, "a mid-slug budget breach must surface a degraded marker"
+    # coherent accounting: the cut-off slug is counted (scanned) AND skipped.
+    assert deg[0]["total"] == 1 and deg[0]["scanned"] == 1 and deg[0]["skipped"] == 1, deg[0]
+
+
+def test_single_slow_verdict_read_overrun_marks_slug_skipped(capsys):
+    # P1-B (codex r2): the deadline was checked only BEFORE each verdict read, so
+    # ONE stalled read that sleeps past the budget still completed and the slug
+    # returned a clean `fully_scanned` row — the budget was blown with no degraded
+    # marker. The check must also run AFTER the blocking read: a read that pushes
+    # us over budget marks the slug not-fully-scanned (skipped) and surfaces the
+    # degraded marker. Overshoot is bounded by ONE transport timeout.
+    class SlowVerdictRead(CountingTransport):
+        def read(self, path):
+            if "/verdicts/" in path and path.endswith(".md"):
+                time.sleep(0.2)  # the single stalled read that overruns the budget
+            return super().read(path)
+
+    t = SlowVerdictRead()
+    # two required reviewers; bob's verdict shard exists (a shard to read), alice
+    # is still pending -> at HEAD this yields a clean review-pending row for alice.
+    cli.main(["review", "request", "r", "pr-stall", "--of", "url",
+              "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    t.put("team/r/review/pr-stall/verdicts/bob.md",
+          "---\ntype: Verdict\nreviewer: bob\nverdict: approve\n---\n")
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1, f"a single over-budget read must surface a degraded marker: {out}"
+    assert deg[0]["scanned"] == 1 and deg[0]["skipped"] == 1, deg[0]
+    assert not any(r.get("type") == "review-pending" for r in out), \
+        "a slug whose read blew the budget must NOT return a clean pending row"
+
+
+def test_review_status_removes_stale_marker_on_pending(capsys):
+    # F4: a `.settled` marker planted on a since-reopened (still-PENDING) review
+    # is provably stale. `review status` recomputes the truth AND best-effort
+    # deletes the marker, so the next fan-out fold sees the pending obligation
+    # again instead of settled-skipping it.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-st", "--of", "url",
+              "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    t.put("team/r/review/pr-st/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-st", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "PENDING"
+    assert "team/r/review/pr-st/verdicts/.settled" not in t.store, \
+        "a provably-stale marker must be self-healed away on direct query"
+    # the fold now sees the obligation rather than skipping a 'settled' slug.
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-st"
+               for r in out), "next fold must surface the pending obligation"
 
 
 def test_request_creates_doc_at_tally_path(capsys):
@@ -103,6 +439,54 @@ def test_review_status_reflects_required_gating(capsys):
           "---\ntype: Verdict\nreviewer: bob\nverdict: approve\n---\n")
     cli.main(["review", "status", "r", "pr-9", "--json"], transport=t)
     assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
+
+
+def test_rerequest_clears_stale_settled_marker_so_new_obligation_surfaces(capsys):
+    # I2: the exists-guard passes on a read timeout, so a re-request can rewrite
+    # the doc with a NEW required list on top of a review a prior fold already
+    # marked `.settled`. That stale marker would hide the new obligation from
+    # every settled-skipping fold. The re-request must clear the marker.
+    t = FakeTransport()
+    _approve(t, "pr-x")               # required: rev, then rev approves
+    cli._pending_reviews_for(t, "r", "rev")   # settles -> writes marker
+    assert "team/r/review/pr-x/verdicts/.settled" in t.store
+
+    # Re-request under a read timeout: read()->None so the exists-guard slips and
+    # the doc is rewritten with required=[bob]. Shares t's store for writes/deletes.
+    class ReRequestUnderReadTimeout(FakeTransport):
+        def __init__(self, base):
+            self.__dict__ = base.__dict__
+        def read(self, path):
+            return None
+
+    capsys.readouterr()
+    assert cli.main(["review", "request", "r", "pr-x", "--of", "url",
+                     "--reviewer", "bob"],
+                    transport=ReRequestUnderReadTimeout(t)) == 0
+    assert "team/r/review/pr-x/verdicts/.settled" not in t.store, \
+        "re-request must clear the stale settled marker"
+    out = cli._pending_reviews_for(t, "r", "bob")
+    pend = [r for r in out if r.get("type") == "review-pending"]
+    assert len(pend) == 1 and pend[0]["name"] == "pr-x" \
+        and pend[0]["pending_required"] == ["bob"], \
+        "the new obligation must be visible to the fold, not hidden by the marker"
+
+
+def test_request_write_timeout_fails_loud(capsys):
+    # I2 (requester-side C1 mirror): a timed-out write() returns False (T1), not a
+    # raise. An rc-0 "review requested" that never landed is the requester-side
+    # incident. A False write must fail loud (rc 1).
+    class WriteTimesOut(FakeTransport):
+        def write(self, path, content):
+            return False
+
+    t = WriteTimesOut()
+    rc = cli.main(["review", "request", "r", "pr-z", "--of", "url",
+                   "--reviewer", "alice"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "write failed" in cap.err
+    assert "requested" not in cap.out, "must not claim a review that never landed"
 
 
 def test_request_requires_at_least_one_reviewer(capsys):

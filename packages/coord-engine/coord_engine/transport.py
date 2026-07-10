@@ -114,12 +114,34 @@ class FulcraFileTransport:
             return None
 
     def _run(self, args: list[str], **kw: Any) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [*self.command, "file", *args],
-            capture_output=True, text=True, timeout=self.timeout, **kw,
-        )
+        """Invoke ``fulcra-api file <args>``.
+
+        A hung CLI call must not escape as a raw ``subprocess.TimeoutExpired`` —
+        that bypasses the ``except TransportError`` guards in the folds and crashes
+        never-crash surfaces (briefing/needs-me). Likewise a missing/unrunnable
+        binary raises ``OSError`` (e.g. ``FileNotFoundError``) from ``subprocess``.
+        Both are normalized to ``TransportError`` so the public contract holds:
+        transport methods raise ``TransportError`` or honor their documented
+        soft-failure return, and nothing else escapes.
+        """
+        try:
+            return subprocess.run(
+                [*self.command, "file", *args],
+                capture_output=True, text=True, timeout=self.timeout, **kw,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TransportError(
+                f"timeout after {self.timeout}s: file {' '.join(args)}"
+            ) from exc
+        except OSError as exc:
+            # binary missing / not executable / other exec-level failure
+            raise TransportError(
+                f"exec failed: file {' '.join(args)}: {exc}"
+            ) from exc
 
     def list_dir(self, prefix: str) -> list[dict[str, Any]]:
+        # contract: raises TransportError on any failure (incl. timeout/exec error,
+        # which _run has already converted).
         cp = self._run(["list", prefix])
         if cp.returncode != 0:
             raise TransportError(f"list {prefix} failed: {cp.stderr.strip()}")
@@ -128,12 +150,21 @@ class FulcraFileTransport:
         return sorted(parse_list_output(cp.stdout), key=lambda e: e.get("name") or "")
 
     def read(self, path: str) -> Optional[str]:
-        cp = self._run(["download", path, "-"])
+        # contract: None on any failure — timeout/exec error follow the same path
+        # as a non-zero return code.
+        try:
+            cp = self._run(["download", path, "-"])
+        except TransportError:
+            return None
         if cp.returncode != 0:
             return None  # not found / error -> None (caller handles)
         return cp.stdout
 
     def write(self, path: str, content: str) -> bool:
+        # contract: True on success, False on any REMOTE failure (incl. timeout/exec
+        # error) — the upload subprocess. NOTE: staging the content to a local
+        # tempfile happens first and can still raise OSError (disk full, bad perms);
+        # that surfaces to the caller rather than returning False.
         with tempfile.NamedTemporaryFile(
             "w", suffix=".tmp", delete=False, encoding="utf-8"
         ) as fh:
@@ -142,6 +173,8 @@ class FulcraFileTransport:
         try:
             cp = self._run(["upload", local, path])
             return cp.returncode == 0
+        except TransportError:
+            return False
         finally:
             try:
                 os.unlink(local)
@@ -149,13 +182,21 @@ class FulcraFileTransport:
                 pass
 
     def stat(self, path: str) -> Optional[dict[str, Any]]:
-        cp = self._run(["stat", path])
+        # contract: None on any failure (incl. timeout/exec error).
+        try:
+            cp = self._run(["stat", path])
+        except TransportError:
+            return None
         if cp.returncode != 0:
             return None
         return parse_stat_output(cp.stdout)
 
     def delete(self, path: str) -> bool:
-        return self._run(["delete", path]).returncode == 0
+        # contract: True on success, False on any failure (incl. timeout/exec error).
+        try:
+            return self._run(["delete", path]).returncode == 0
+        except TransportError:
+            return False
 
 
 class TransportError(RuntimeError):

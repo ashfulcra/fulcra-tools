@@ -1,7 +1,15 @@
 import json
 
-from coord_engine import cli
+from coord_engine import cli, tasks
 from coord_engine_test_helpers import FakeTransport, _task
+
+
+def _dslug(title, *, summary=None, next=None, assignee):
+    """The canonical hash-bearing directive slug the CLI now computes — directive
+    paths are ``<title-slug>-<sha256(payload)[:8]>`` (identical resends dedupe,
+    distinct messages never share a slot)."""
+    payload = cli._directive_payload(title, summary, next, assignee)
+    return f"{tasks.slugify(title)}-{cli._payload_hash(payload)}"
 
 
 def test_cli_reconcile_then_status_and_board(capsys):
@@ -332,22 +340,24 @@ def test_cli_presence_colliding_ids_both_survive(capsys):
 def test_cli_tell_inbox_ack_flow(capsys):
     import json as _j
     t = FakeTransport()
+    do_slug = _dslug("Do the thing", assignee="amy")
+    all_slug = _dslug("All hands", assignee="*")
     assert cli.main(["tell", "r", "amy", "Do the thing", "-p", "P1", "--from", "boss"], transport=t) == 0
     cli.main(["broadcast", "r", "All hands"], transport=t)
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
     got = {r["name"] for r in _j.loads(capsys.readouterr().out)}
-    assert got == {"do-the-thing", "all-hands"}
+    assert got == {do_slug, all_slug}
     # ack the direct one -> disappears for amy, broadcast still there
-    cli.main(["inbox", "r", "-a", "amy", "--ack", "do-the-thing"], transport=t)
+    cli.main(["inbox", "r", "-a", "amy", "--ack", do_slug], transport=t)
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
-    assert {r["name"] for r in _j.loads(capsys.readouterr().out)} == {"all-hands"}
+    assert {r["name"] for r in _j.loads(capsys.readouterr().out)} == {all_slug}
     # bob sees only the broadcast (do-the-thing is amy's)
     cli.main(["inbox", "r", "-a", "bob", "--json"], transport=t)
-    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == ["all-hands"]
+    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == [all_slug]
 
 
 def test_cli_inbox_ack_hides_before_reconcile(capsys):
@@ -357,7 +367,8 @@ def test_cli_inbox_ack_hides_before_reconcile(capsys):
     cli.main(["reconcile", "r"], transport=t)
     capsys.readouterr()
 
-    cli.main(["inbox", "r", "-a", "amy", "--ack", "immediate-hide"], transport=t)
+    cli.main(["inbox", "r", "-a", "amy", "--ack",
+              _dslug("Immediate hide", assignee="amy")], transport=t)
     capsys.readouterr()
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
     assert _j.loads(capsys.readouterr().out) == []
@@ -383,7 +394,8 @@ def test_cli_later_backlog_only_with_all(capsys):
     cli.main(["inbox", "r", "-a", "@backlog", "--json"], transport=t)
     assert _j.loads(capsys.readouterr().out) == []
     cli.main(["inbox", "r", "-a", "@backlog", "--all", "--json"], transport=t)
-    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == ["someday-idea"]
+    assert [r["name"] for r in _j.loads(capsys.readouterr().out)] == [
+        _dslug("Someday idea", assignee="@backlog")]
 
 
 def test_cli_handoff_atomic_single_write(capsys):
@@ -404,11 +416,12 @@ def test_cli_respond_closes_and_records(capsys):
     t = FakeTransport()
     cli.main(["tell", "r", "amy", "Question"], transport=t)
     capsys.readouterr()
-    assert cli.main(["respond", "r", "question", "-o", "answered", "-a", "amy"], transport=t) == 0
+    slug = _dslug("Question", assignee="amy")
+    assert cli.main(["respond", "r", slug, "-o", "answered", "-a", "amy"], transport=t) == 0
     out = capsys.readouterr().out
     assert "closed" in out
-    assert okf.parse_frontmatter(t.store["team/r/task/question.md"])["status"] == "done"
-    assert any(p.startswith("team/r/_coord/responses/question/") for p in t.store)
+    assert okf.parse_frontmatter(t.store[f"team/r/task/{slug}.md"])["status"] == "done"
+    assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
 
 def test_cli_respond_response_paths_do_not_collide(monkeypatch, capsys):
@@ -469,7 +482,8 @@ def test_cli_inbox_ack_hides_immediately_pre_reconcile(capsys):
     t = FakeTransport()
     cli.main(["tell", "r", "amy", "Quick"], transport=t)
     cli.main(["reconcile", "r"], transport=t)
-    cli.main(["inbox", "r", "-a", "amy", "--ack", "quick"], transport=t)
+    cli.main(["inbox", "r", "-a", "amy", "--ack",
+              _dslug("Quick", assignee="amy")], transport=t)
     capsys.readouterr()
     # NO reconcile between ack and read — live self-hide must apply
     cli.main(["inbox", "r", "-a", "amy", "--json"], transport=t)
@@ -655,7 +669,8 @@ def test_cli_digest_sections_and_store_dedupe(capsys):
     assert cli.main(["digest", "r", "--json"], transport=t) == 0
     d = _j.loads(capsys.readouterr().out)
     assert [r["name"] for r in d["blocked_on_you"]] == ["ask"]      # needs:human
-    assert [r["name"] for r in d["upcoming"]] == ["soon-thing"]     # not_before in 7d
+    assert [r["name"] for r in d["upcoming"]] == [
+        _dslug("Soon thing", assignee="amy")]                       # not_before in 7d
     assert any(a["agent"] == "amy" for a in d["per_agent"])
     # --store persists once per day+window
     cli.main(["digest", "r", "--store"], transport=t); capsys.readouterr()
@@ -770,7 +785,7 @@ def test_cli_briefing_full_and_empty_store(capsys):
     capsys.readouterr()
     assert cli.main(["briefing", "r", "-a", "amy", "--json"], transport=t) == 0
     b = _j.loads(capsys.readouterr().out)
-    assert b["inbox"] and b["inbox"][0]["name"] == "do-it"
+    assert b["inbox"] and b["inbox"][0]["name"] == _dslug("Do it", assignee="amy")
     assert b["resume"]["objective"] == "finish"
     assert any(p["agent"] == "amy" for p in b["presence"])
     # empty store: every section degrades gracefully
@@ -782,7 +797,8 @@ def test_cli_briefing_respects_live_ack_shards(capsys):
     t = FakeTransport()
     cli.main(["tell", "r", "amy", "Do it", "-p", "P1"], transport=t)
     cli.main(["reconcile", "r"], transport=t)
-    cli.main(["inbox", "r", "-a", "amy", "--ack", "do-it"], transport=t)
+    cli.main(["inbox", "r", "-a", "amy", "--ack",
+              _dslug("Do it", assignee="amy")], transport=t)
     capsys.readouterr()
     assert cli.main(["briefing", "r", "-a", "amy", "--json"], transport=t) == 0
     b = _j.loads(capsys.readouterr().out)
