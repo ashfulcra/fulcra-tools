@@ -113,8 +113,16 @@ skills. Subagent-only work stays OFF the bus.
   to directives you own** (the reply leg `respond` writes but nothing used to surface). One event line
   per new item (`DIRECTIVE`/`RESPONSE`), `--json` for one object per line; a quiet tick prints NOTHING
   (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
-  the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr once per failure streak. Run
-  `--once` on a scheduler (a tick never fails the schedule) or bare for a poll loop (`--interval`, SIGINT-clean).
+  the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** —
+  the `inbox` (summaries index), `responses` (responses subtree), and `orphans` (a response whose owning
+  directive won't resolve) streaks are independent, so a permanent orphan can't pin the flag and silence a
+  fresh transport outage. `--once` **always exits 0** (a tick never fails the schedule; no output means
+  nothing new, not an error) — run it on a scheduler, or run bare for a poll loop (`--interval`,
+  SIGINT-clean). Every send verb arms you: `tell`/`broadcast`/`remind` print `replies: coord-engine listen
+  <team> --agent <sender>` and `review request` prints `await verdicts: …` (both only when the sender
+  identity is known — `--from` or `FULCRA_COORD_AGENT`, never the bare host tag), and `respond` confirms
+  `the owner's listen surfaces it`. The launchd/cron listener, live sessions, Codex, and headless all
+  delegate to this one verb (see [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)).
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

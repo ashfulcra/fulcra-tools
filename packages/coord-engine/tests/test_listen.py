@@ -41,7 +41,8 @@ def _reconcile(t):
 
 
 def _fresh_state():
-    return {"inbox_ids": [], "response_keys": [], "slug_owned": {}, "degraded": False}
+    return {"inbox_ids": [], "response_keys": [], "slug_owned": {},
+            "degraded": {"inbox": False, "responses": False, "orphans": False}}
 
 
 # --- Source 1: inbox directives -------------------------------------------
@@ -55,7 +56,7 @@ def test_new_directive_fires_then_quiet_and_state_round_trips(capsys):
     events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
                                             json_mode=False, verbose=False)
     out = capsys.readouterr().out
-    assert failures == []
+    assert failures == {}
     assert len(events) == 1
     assert out.strip() == "DIRECTIVE do-thing-a1 (from alice): Do the thing"
     assert state["inbox_ids"] == ["do-thing-a1"]
@@ -114,7 +115,7 @@ def test_new_response_on_owned_slug_fires(capsys):
     events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
                                             json_mode=False, verbose=False)
     out = capsys.readouterr().out
-    assert failures == []
+    assert failures == {}
     assert [e["type"] for e in events] == ["response"]
     assert out.strip() == "RESPONSE owned-1 by carol: ACK"
     assert state["response_keys"] == ["owned-1/20260710T0000-carol"]
@@ -136,7 +137,7 @@ def test_response_on_unowned_slug_is_quiet(capsys):
     events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
                                             json_mode=False, verbose=False)
     assert events == []
-    assert failures == []
+    assert failures == {}
     assert capsys.readouterr().out == ""
     # ownership decided once and cached as not-owned (skips listing forever)
     assert state["slug_owned"] == {"other-1": False}
@@ -188,7 +189,7 @@ def test_transport_failure_degraded_once_no_advance_then_recovers(capsys):
     assert failures  # a failure was recorded
     assert err.out == ""  # nothing to stdout on a degraded/quiet tick
     assert err.err.count("LISTEN DEGRADED") == 1
-    assert state["degraded"] is True
+    assert state["degraded"]["responses"] is True
     assert state["response_keys"] == []  # NOT advanced over unknown data
     assert state["slug_owned"] == {}     # ownership not cached from a failed pass
 
@@ -203,10 +204,10 @@ def test_transport_failure_degraded_once_no_advance_then_recovers(capsys):
     events3, failures3 = cli._run_listen_tick(t, TEAM, "bob", state,
                                               json_mode=False, verbose=False)
     out3 = capsys.readouterr().out
-    assert failures3 == []
+    assert failures3 == {}
     assert [e["slug"] for e in events3] == ["owned-3"]
     assert "RESPONSE owned-3 by carol: ACK" in out3
-    assert state["degraded"] is False
+    assert not any(state["degraded"].values())  # every source streak reset
     assert state["response_keys"] == ["owned-3/20260710T0000-carol"]
 
 
@@ -231,10 +232,109 @@ def test_owner_unresolved_does_not_cache_or_advance(capsys):
     events2, failures2 = cli._run_listen_tick(t, TEAM, "bob", state,
                                               json_mode=False, verbose=False)
     out2 = capsys.readouterr().out
-    assert failures2 == []
+    assert failures2 == {}
     assert [e["slug"] for e in events2] == ["ghost-1"]
     assert "RESPONSE ghost-1 by carol: ACK" in out2
     assert state["slug_owned"] == {"ghost-1": True}
+
+
+def test_inbox_index_unreadable_is_degraded_not_silent(capsys):
+    """M1: an unreadable summaries index must surface as degraded, not fold to a
+    silent empty inbox indistinguishable from 'no directives'. Red at HEAD: a
+    corrupt index was swallowed to [] with no LISTEN DEGRADED line."""
+    t = FakeTransport()
+    # index present but corrupt -> json parse fails (was silently folded to [])
+    t.put(reconcile.summaries_path(TEAM), "{ not json")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                            json_mode=False, verbose=False)
+    err = capsys.readouterr()
+    assert events == []
+    assert "LISTEN DEGRADED" in err.err       # surfaced, not silent
+    assert "inbox" in failures                # attributed to the inbox source
+    assert state["degraded"]["inbox"] is True
+
+
+def test_inbox_transport_down_is_degraded_not_empty(capsys):
+    """A summaries read of None under a down transport (list_dir raises) is unknown,
+    not a confirmed-empty inbox — the inbox source goes degraded."""
+    t = FakeTransport()
+    t.fail_list = True  # no summaries doc + list_dir raises -> cannot confirm empty
+    state = _fresh_state()
+    _, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                       json_mode=False, verbose=False)
+    err = capsys.readouterr()
+    assert "inbox" in failures
+    assert "LISTEN DEGRADED" in err.err
+    assert state["degraded"]["inbox"] is True
+
+
+def test_absent_index_is_readable_empty_not_degraded(capsys):
+    """A genuinely-absent index (fresh team, no reconcile) is empty-and-readable —
+    it must NOT alarm (do not conflate empty-and-readable with failed)."""
+    t = FakeTransport()
+    state = _fresh_state()
+    _, failures = cli._run_listen_tick(t, TEAM, "bob", state,
+                                       json_mode=False, verbose=False)
+    err = capsys.readouterr()
+    assert "inbox" not in failures
+    assert "LISTEN DEGRADED" not in err.err
+
+
+def test_pinned_orphan_does_not_silence_a_new_distinct_failure(capsys):
+    """M2: per-source streaks. A permanent orphan (owner unresolved every tick)
+    pins the `orphans` streak, but must NOT silence a NEW, distinct outage. Red at
+    HEAD: one shared `degraded` bool stayed True from the orphan and swallowed the
+    later transport failure — no second LISTEN DEGRADED ever fired."""
+    t = FakeTransport()
+    # a response whose directive doc never resolves -> owner unresolved every tick
+    _put_response(t, "ghost-x", "20260710T0000-carol", agent="carol", outcome="ACK")
+    state = _fresh_state()
+
+    # tick 1: the orphan alarms once and pins its own streak
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    e1 = capsys.readouterr().err
+    assert e1.count("LISTEN DEGRADED") == 1
+    assert state["degraded"]["orphans"] is True
+
+    # tick 2: orphan STILL unresolved AND a NEW distinct failure — the responses
+    # subtree goes unreadable. A single shared flag would stay pinned and swallow
+    # this; per-source streaks must re-alarm on the new source.
+    t.fail_list = True
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    e2 = capsys.readouterr().err
+    assert "LISTEN DEGRADED" in e2                 # the new outage is NOT silenced
+    assert state["degraded"]["responses"] is True
+
+
+def test_degraded_alarms_once_per_source_streak_then_suppresses(capsys):
+    """A source that stays degraded alarms only once for its streak (no flooding),
+    independent of other sources' streaks."""
+    t = FakeTransport()
+    _put_response(t, "ghost-y", "20260710T0000-carol", agent="carol", outcome="ACK")
+    state = _fresh_state()
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    assert capsys.readouterr().err.count("LISTEN DEGRADED") == 1
+    # same orphan next tick -> suppressed (once per streak)
+    cli._run_listen_tick(t, TEAM, "bob", state, json_mode=False, verbose=False)
+    assert "LISTEN DEGRADED" not in capsys.readouterr().err
+
+
+def test_legacy_single_bool_degraded_migrates_to_per_source(tmp_path):
+    """Backward-compat: a state file with the old single ``degraded`` bool migrates
+    to the per-source dict (same value on each source), so an upgrade neither loses
+    the streak nor invents one."""
+    import json as _j
+    path = tmp_path / "listen-r-bob.json"
+    path.write_text(_j.dumps({"inbox_ids": ["x"], "response_keys": [],
+                              "slug_owned": {}, "degraded": True}), encoding="utf-8")
+    state = cli._load_listen_state(path)
+    assert state["degraded"] == {"inbox": True, "responses": True, "orphans": True}
+    assert state["inbox_ids"] == ["x"]
+
+    path.write_text(_j.dumps({"degraded": False}), encoding="utf-8")
+    assert cli._load_listen_state(path)["degraded"] == {
+        "inbox": False, "responses": False, "orphans": False}
 
 
 def test_verbose_heartbeat_only_on_quiet_tick_and_only_stderr(capsys):
@@ -264,7 +364,8 @@ def test_load_state_tolerates_corrupt_file(tmp_path):
     path = tmp_path / "corrupt.json"
     path.write_text("{not json", encoding="utf-8")
     state = cli._load_listen_state(path)
-    assert state == {"inbox_ids": [], "response_keys": [], "slug_owned": {}, "degraded": False}
+    assert state == {"inbox_ids": [], "response_keys": [], "slug_owned": {},
+                     "degraded": {"inbox": False, "responses": False, "orphans": False}}
 
 
 def test_cmd_listen_once_exits_zero(tmp_path, monkeypatch, capsys):
@@ -304,3 +405,18 @@ def test_main_wires_listen_once(tmp_path, monkeypatch, capsys):
     rc = cli.main(["listen", TEAM, "--agent", "bob", "--once"], transport=t)
     assert rc == 0
     assert "DIRECTIVE wired-1" in capsys.readouterr().out
+
+
+def test_listen_state_path_prints_and_does_not_tick(tmp_path, monkeypatch, capsys):
+    """The hidden `--state-path` resolver (listener-tick.sh's migration uses it)
+    prints the engine-resolved state file path and exits 0 WITHOUT ticking or
+    writing — the slug/agent_key naming stays owned by the engine, not the shell."""
+    monkeypatch.setenv("COORD_LISTENER_STATE", str(tmp_path))
+    t = FakeTransport()
+    _put_directive(t, "np-1", "NoTick", owner="alice", assignee="bob")
+    _reconcile(t)
+    rc = cli.main(["listen", TEAM, "--agent", "bob", "--state-path"], transport=t)
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out == str(cli._listen_state_path(TEAM, "bob"))
+    assert not cli._listen_state_path(TEAM, "bob").exists()  # resolver never writes

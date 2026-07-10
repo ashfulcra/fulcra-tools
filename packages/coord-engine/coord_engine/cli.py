@@ -51,14 +51,54 @@ def _human() -> str:
     return os.environ.get("FULCRA_COORD_HUMAN") or "human"
 
 
-def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
-    raw = transport.read(rec.summaries_path(team))
-    if not raw:
-        return []
+def _known_sender(args: argparse.Namespace) -> Optional[str]:
+    """The sender identity a reply would be addressed to, or None when only the
+    anonymous host fallback is available. `_create_directive` records ownership as
+    ``--from`` or ``FULCRA_COORD_AGENT`` (else ``coord-reconcile:<host>``); the
+    breadcrumb points others at ``listen --agent <sender>``, so we print it only
+    when the sender is a real identity someone actually listens as — never the
+    bare host tag."""
+    return getattr(args, "sender", None) or os.environ.get("FULCRA_COORD_AGENT")
+
+
+def _replies_breadcrumb(team: str, sender: str) -> str:
+    return f"replies: coord-engine listen {team} --agent {sender}"
+
+
+def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool]:
+    """Summaries rows plus whether the index was READABLE. ``ok`` is False only for
+    an index we could not read as intended — present-but-unparseable, or a read/
+    listing that failed under a degraded transport. A genuinely-absent index (a
+    fresh team, no reconcile yet) is empty-and-readable (``ok`` True): absence is a
+    normal empty state, never conflated with failure.
+
+    ``read`` returning None is ambiguous (absent vs transport-down — the T1 lesson),
+    so a None is disambiguated with one parent listing: ``list_dir`` RAISES on a
+    transport failure and its entry names distinguish missing from present-but-
+    unreadable (the #343 discipline). This is what lets `listen` surface a summaries
+    failure instead of folding it to a silent [] indistinguishable from empty."""
+    path = rec.summaries_path(team)
     try:
-        return aggregate.aggregate_rows(json.loads(raw))
+        raw = transport.read(path)
     except Exception:
-        return []
+        return [], False
+    if raw:
+        try:
+            return aggregate.aggregate_rows(json.loads(raw)), True
+        except Exception:
+            return [], False  # index present but corrupt -> unreadable, surface it
+    parent, entry = path.rsplit("/", 1)
+    try:
+        names = {e.get("name") for e in transport.list_dir(parent + "/")}
+    except TransportError:
+        return [], False  # transport down -> unknown, not a confirmed-empty index
+    if entry in names:
+        return [], False  # index there yet unreadable (read returned None) -> degraded
+    return [], True  # genuinely absent -> a real, readable empty
+
+
+def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
+    return _load_rows_status(transport, team)[0]
 
 
 def _line(row: dict[str, Any]) -> str:
@@ -823,6 +863,11 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     print(f"review {slug} requested (required: {', '.join(required)})")
     for r in required:
         print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
+    # Point the requester at the await primitive for the verdict wait (they poll
+    # `review status`; `listen` is the same arm-a-listener discipline every ask uses).
+    sender = _known_sender(args)
+    if sender:
+        print(f"await verdicts: coord-engine listen {team} --agent {sender}")
     return 0
 
 
@@ -1103,8 +1148,15 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
         return 1
-    return _write_directive(transport, args, slug=slug, content=content,
-                            payload=payload, assignee=assignee, not_before=not_before)
+    rc = _write_directive(transport, args, slug=slug, content=content,
+                          payload=payload, assignee=assignee, not_before=not_before)
+    # On a delivered ask (not a backlog capture — @backlog awaits no reply), point
+    # the sender at the reply leg: the return of `respond` surfaces in their listen.
+    if rc == 0 and assignee != directives.BACKLOG:
+        sender = _known_sender(args)
+        if sender:
+            print(_replies_breadcrumb(args.team, sender))
+    return rc
 
 
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
@@ -1144,15 +1196,16 @@ def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
-def _inbox_rows(transport: Any, team: str, agent: str, *,
-                include_backlog: bool = False) -> list[dict[str, Any]]:
-    """The open-directive fold `inbox` surfaces for `agent`, with live-ack shard
-    filtering. Extracted so `listen` awaits the SAME source `inbox` shows — one
-    inbox computation, no second implementation to drift. Never raises: a failed
-    summaries read folds to an empty list (the ``_load_rows`` contract), matching
-    cmd_inbox / briefing degradation."""
+def _inbox_rows_status(transport: Any, team: str, agent: str, *,
+                       include_backlog: bool = False) -> tuple[list[dict[str, Any]], bool]:
+    """The open-directive fold `inbox` surfaces for `agent`, plus whether the
+    summaries index was readable (``ok``). Extracted so `listen` awaits the SAME
+    source `inbox` shows — one inbox computation, no second implementation to
+    drift. Never raises: an unreadable summaries read folds to an empty list, but
+    now with ``ok=False`` so a listener can surface the degradation rather than
+    mistake it for an empty inbox."""
     now = _iso(_now())
-    rows = _load_rows(transport, team)
+    rows, ok = _load_rows_status(transport, team)
     acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
     stale_visible = directives.inbox(rows, acks, agent, now=now,
                                      include_backlog=include_backlog)
@@ -1164,7 +1217,15 @@ def _inbox_rows(transport: Any, team: str, agent: str, *,
     # read-your-write: an ack written since the last reconcile hides the item
     # for the acking agent immediately (live shard check, only for shown items).
     return [r for r in got
-            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None]
+            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None], ok
+
+
+def _inbox_rows(transport: Any, team: str, agent: str, *,
+                include_backlog: bool = False) -> list[dict[str, Any]]:
+    """Rows-only view of ``_inbox_rows_status`` for callers that don't surface the
+    readable flag (cmd_inbox / briefing keep their existing degradation behavior)."""
+    return _inbox_rows_status(transport, team, agent,
+                              include_backlog=include_backlog)[0]
 
 
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
@@ -1200,6 +1261,8 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
         print(f"responded {args.name}: {args.outcome} (closed)")
     except tasks.TaskError as e:
         print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
+    # The reply leg: this shard is what the directive's owner sees on their listen.
+    print("response recorded — the owner's listen surfaces it")
     return 0
 
 
@@ -1215,14 +1278,21 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 #   1. new inbox directives for the agent (the SAME fold `inbox` shows).
 #   2. new responses to directives the agent OWNS (the reply leg).
 #
+# Three failure SOURCES are tracked independently — inbox (summaries index),
+# responses (the responses subtree transport), and orphans (a response whose
+# owning directive doc won't resolve). Each is its own degraded streak.
+#
 # Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
 #   * No false advance — a failed/None read during a tick must NOT mark unknown
 #     ids as seen. State is a UNION of affirmatively-processed ids, so a degraded
 #     read contributes nothing and recovery re-surfaces the still-pending id.
 #   * Fail visible, no flooding — a transport failure emits `LISTEN DEGRADED:`
-#     ONCE per consecutive-failure streak (the streak flag persists IN the state
-#     file, so a scheduler re-running `--once` does not re-alarm every tick) and
-#     resets on recovery. It goes to STDERR so `--json` stdout stays a clean
+#     ONCE per consecutive-failure streak, PER SOURCE (the streak flags persist IN
+#     the state file, so a scheduler re-running `--once` does not re-alarm every
+#     tick). Per-source is load-bearing: a single shared flag would let a permanent
+#     orphan (`owner unresolved` every tick) pin it TRUE forever and silence a NEW,
+#     distinct outage. Each source alerts once per ITS OWN streak and resets on ITS
+#     OWN recovery. It goes to STDERR so `--json` stdout stays a clean
 #     one-object-per-line event stream for filter-free streaming consumers.
 #   * Quiet ticks print NOTHING to stdout (the monitor-flood lesson) — only
 #     `--verbose` emits a heartbeat, and only to stderr.
@@ -1230,6 +1300,25 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
 #     slugs the agent owns; a slug's ownership is read once (from its task doc)
 #     and cached in state, so not-owned / broadcast slugs cost nothing after the
 #     first classification and the scan is never proportional to total history.
+
+
+# The independent degraded streaks. Each source alarms once per its own streak.
+_LISTEN_SOURCES = ("inbox", "responses", "orphans")
+
+
+def _fresh_degraded() -> dict[str, bool]:
+    return {s: False for s in _LISTEN_SOURCES}
+
+
+def _coerce_degraded(value: Any) -> dict[str, bool]:
+    """Normalize the persisted ``degraded`` field to the per-source dict. A legacy
+    single bool (pre per-source schema) migrates to the same value on EVERY source:
+    an in-progress streak stays suppressed across the upgrade (no spurious re-alarm)
+    and a clean state stays clean — either way each source then alarms/resets on its
+    own going forward."""
+    if isinstance(value, dict):
+        return {s: bool(value.get(s)) for s in _LISTEN_SOURCES}
+    return {s: bool(value) for s in _LISTEN_SOURCES}
 
 
 def _listen_state_dir() -> pathlib.Path:
@@ -1256,7 +1345,7 @@ def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
         "inbox_ids": list(data.get("inbox_ids") or []),
         "response_keys": list(data.get("response_keys") or []),
         "slug_owned": dict(data.get("slug_owned") or {}),
-        "degraded": bool(data.get("degraded")),
+        "degraded": _coerce_degraded(data.get("degraded")),
     }
 
 
@@ -1271,18 +1360,28 @@ def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
 
 
 def _listen_tick(transport: Any, team: str, agent: str,
-                 state: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    """One listen pass. Returns ``(events, failures)`` and mutates ``state`` with
-    ONLY affirmatively-processed ids (add-only — see the section note): a failed
-    read/list adds nothing, so it can never mark unknown data as seen."""
+                 state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
+    degraded SOURCE (``inbox`` / ``responses`` / ``orphans``) to its messages, and
+    mutates ``state`` with ONLY affirmatively-processed ids (add-only — see the
+    section note): a failed read/list adds nothing, so it can never mark unknown
+    data as seen."""
     events: list[dict[str, Any]] = []
-    failures: list[str] = []
+    failures: dict[str, list[str]] = {}
+
+    def _fail(source: str, msg: str) -> None:
+        failures.setdefault(source, []).append(msg)
+
     inbox_ids = set(state["inbox_ids"])
     response_keys = set(state["response_keys"])
     slug_owned: dict[str, Any] = dict(state["slug_owned"])
 
-    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces).
-    for r in _inbox_rows(transport, team, agent):
+    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces). An
+    # unreadable summaries index is degraded, NOT a legitimately-empty inbox.
+    inbox, inbox_ok = _inbox_rows_status(transport, team, agent)
+    if not inbox_ok:
+        _fail("inbox", "summaries index unreadable")
+    for r in inbox:
         slug = str(r.get("name") or "")
         if not slug or slug in inbox_ids:
             continue
@@ -1297,7 +1396,7 @@ def _listen_tick(transport: Any, team: str, agent: str,
     try:
         entries = transport.list_dir(prefix)
     except TransportError as e:
-        failures.append(f"responses listing unreadable ({e})")
+        _fail("responses", f"responses listing unreadable ({e})")
         entries = None
     for e in entries or []:
         raw = e.get("name") or ""
@@ -1313,7 +1412,9 @@ def _listen_tick(transport: Any, team: str, agent: str,
                 # Ambiguous: a transient read failure OR an orphan response whose
                 # directive doc is gone. Either way ownership is UNKNOWN, so we do
                 # NOT cache and do NOT advance — unknown != seen, retry next tick.
-                failures.append(f"owner unresolved for {slug}")
+                # This is its OWN source: a permanent orphan can pin `orphans`
+                # forever without silencing a fresh `responses`/`inbox` outage.
+                _fail("orphans", f"owner unresolved for {slug}")
                 continue
             fm = okf.parse_frontmatter(doc) or {}
             owner = str(fm.get("owner") or "").strip()
@@ -1324,7 +1425,7 @@ def _listen_tick(transport: Any, team: str, agent: str,
         try:
             stamps = transport.list_dir(prefix + slug + "/")
         except TransportError as ex:
-            failures.append(f"response dir {slug} unreadable ({ex})")
+            _fail("responses", f"response dir {slug} unreadable ({ex})")
             continue
         for se in stamps:
             sname = se.get("name") or ""
@@ -1336,7 +1437,7 @@ def _listen_tick(transport: Any, team: str, agent: str,
             shard = transport.read(prefix + slug + "/" + sname)
             if shard is None:
                 # unread shard -> unknown, do NOT advance over it (retry next tick)
-                failures.append(f"response {key} unreadable")
+                _fail("responses", f"response {key} unreadable")
                 continue
             rfm = okf.parse_frontmatter(shard) or {}
             events.append({"type": "response", "slug": slug,
@@ -1357,22 +1458,31 @@ def _format_listen_event(ev: dict[str, Any]) -> str:
 
 
 def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any],
-                     *, json_mode: bool, verbose: bool) -> tuple[list, list]:
+                     *, json_mode: bool, verbose: bool) -> tuple[list, dict[str, list[str]]]:
     events, failures = _listen_tick(transport, team, agent, state)
     for ev in events:
         print(json.dumps(ev) if json_mode else _format_listen_event(ev))
     sys.stdout.flush()
-    if failures:
-        # ONCE per consecutive-failure streak (streak flag lives in state, so it
-        # survives across `--once` invocations) — no per-tick flooding.
-        if not state.get("degraded"):
-            print(f"LISTEN DEGRADED: {'; '.join(failures)}", file=sys.stderr)
-            state["degraded"] = True
-    else:
-        state["degraded"] = False  # streak cleared; recovery's events already printed
-        if verbose and not events:
-            print(f"listen: quiet ({len(state['inbox_ids'])} inbox, "
-                  f"{len(state['response_keys'])} responses seen)", file=sys.stderr)
+
+    # Per-source streaks: each source alarms ONCE per its own consecutive-failure
+    # streak (the flags persist in state across `--once` runs) and resets on its
+    # own recovery — a pinned orphan can't swallow a new inbox/responses outage.
+    degraded = _coerce_degraded(state.get("degraded"))  # defensive: tolerate legacy bool
+    state["degraded"] = degraded
+    newly: list[str] = []
+    for source in _LISTEN_SOURCES:
+        msgs = failures.get(source)
+        if msgs:
+            if not degraded[source]:  # this source just entered a failure streak
+                newly.append("; ".join(msgs))
+                degraded[source] = True
+        else:
+            degraded[source] = False  # clean this tick -> streak reset for this source
+    if newly:
+        print(f"LISTEN DEGRADED: {'; '.join(newly)}", file=sys.stderr)
+    elif verbose and not events and not failures:
+        print(f"listen: quiet ({len(state['inbox_ids'])} inbox, "
+              f"{len(state['response_keys'])} responses seen)", file=sys.stderr)
     sys.stderr.flush()
     return events, failures
 
@@ -1380,6 +1490,12 @@ def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any
 def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     state_path = _listen_state_path(args.team, agent)
+    if getattr(args, "state_path", False):
+        # Resolver for listener-tick.sh's one-time `.items` -> listen-state
+        # migration: the slugify/agent_key naming lives here, so the shell asks the
+        # engine rather than reimplementing it. Print and exit; no tick, no writes.
+        print(str(state_path))
+        return 0
     state = _load_listen_state(state_path)
     json_mode = bool(getattr(args, "json", False))
     verbose = bool(getattr(args, "verbose", False))
@@ -2604,6 +2720,8 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--interval", type=int, default=60, help="loop poll seconds (default 60; ignored with --once)")
     ls.add_argument("--once", action="store_true", help="one tick then exit 0 — scheduler-friendly (a tick never fails the schedule)")
     ls.add_argument("--verbose", action="store_true", help="heartbeat quiet ticks to stderr")
+    ls.add_argument("--state-path", action="store_true", dest="state_path",
+                    help=argparse.SUPPRESS)  # print resolved state file path, no tick
     add_json(ls); ls.set_defaults(func=cmd_listen)
     hl = sub.add_parser("health", help="fleet health: which hosts reconcile this team (fulcra-agent-health)")
     hl.add_argument("team"); add_json(hl)

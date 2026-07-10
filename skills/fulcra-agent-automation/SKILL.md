@@ -90,18 +90,48 @@ standing rule ([`AGENTS.md` → Fulcra platform surface](../../AGENTS.md)) alrea
 Projection is the sanctioned replacement; do not switch the legacy writer back on to get timeline
 annotations — turn projection on instead.
 
-## 2. Listener — inbox notifications + consent-gated wake (A8)
-Schedule an inbox check so directed work reaches you without polling:
-```bash
-./scripts/install-listener.sh <team> <agent> [interval-minutes]           # notify only (default 10m)
-./scripts/install-listener.sh <team> <agent> 10 --wake-cmd "…headless…"   # + consent-gated wake
-./scripts/install-listener.sh --uninstall <team> <agent>
+## 2. Listener — await new directives + responses (the reply leg)
+Every agent that sends an ask (`tell`/`broadcast`/`remind`/`review request`) should **arm a listener**:
+the send verbs now print the exact `listen` line to run for replies. `listen` is the engine-owned await
+leg — one implementation of the diff/notify logic that the launchd tick, live sessions, Codex, and
+headless all delegate to. Each tick surfaces two id-diff'd sources: **new inbox directives** for the
+agent, and **responses to directives the agent owns** (the return of `respond`). Quiet ticks print
+nothing; a transport failure prints `LISTEN DEGRADED: <what>` to stderr once per source per streak.
+
 ```
-Each tick runs `coord-engine inbox --agent <agent>`; on NEW items it posts a macOS notification (or a
-log line) and, only if you consented to `--wake-cmd` at install, runs your wake command. Note: `--yes` skips BOTH the schedule prompt and the wake-command acknowledgement — only use it when
-that consent was already given. Hardened like
-the heartbeat: validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent
-project's wake silently 401'd on exactly this), `plutil` lint, install-time self-test.
+coord-engine listen <team> --agent <agent> [--interval N=60] [--once] [--json] [--verbose]
+```
+`--once` runs exactly one tick and **always exits 0** — a tick never fails the schedule, so a scheduler
+re-running it treats no output as "nothing new", not an error. Long-running mode loops at `--interval`
+seconds and exits cleanly on SIGINT.
+
+### Per-platform — pick the leg that matches how the agent runs
+- **launchd / cron (unattended host):** the bundled installer — unchanged UX. The scheduled job's tick
+  delegates to `listen --once` and keeps the notification + consent-gated wake around it.
+  ```bash
+  ./scripts/install-listener.sh <team> <agent> [interval-minutes]           # notify only (default 10m)
+  ./scripts/install-listener.sh <team> <agent> 10 --wake-cmd "…headless…"   # + consent-gated wake
+  ./scripts/install-listener.sh --uninstall <team> <agent>
+  ```
+  On NEW events it posts a macOS notification (or a log line) and, only if you consented to `--wake-cmd`
+  at install, runs your wake command. `--yes` skips BOTH the schedule prompt and the wake-command
+  acknowledgement — only use it when that consent was already given. Hardened like the heartbeat:
+  validated inputs, pinned `PATH`/`HOME` (scheduled jobs source no profile — the parent project's wake
+  silently 401'd on exactly this), `plutil` lint, install-time self-test.
+- **Claude Code live session:** wrap the loop in the harness's background monitor so `DIRECTIVE`/
+  `RESPONSE` lines surface into the session as they arrive (this closes the live-session gap where an
+  agent waiting on a reply hand-rolled a watcher):
+  ```bash
+  coord-engine listen <team> --agent <agent> --interval 60
+  ```
+- **Codex:** one automation-prompt line, ticked once per automation run:
+  ```bash
+  coord-engine listen <team> --agent <agent> --once
+  ```
+- **headless / any foreground process:** run the loop in the foreground and stream its output:
+  ```bash
+  coord-engine listen <team> --agent <agent>
+  ```
 
 ## 3. Harness adapters — lifecycle wiring
 The listener (§2) delivers inbox notifications, but the **lifecycle contract** — resume-on-wake,
