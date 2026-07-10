@@ -23,11 +23,14 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import aggregate, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
+from . import aggregate, annotate as annotate_mod, atc, atc_dash, continuity, continuity_audit, digest as digest_mod, directives, forge as forge_mod, health as health_mod, migrate as migrate_mod, okf, presence, query, review, roles, tasks
 from . import reconcile as rec
+from .log import get_logger
 from .transport import FulcraFileTransport, TransportError
 
 __all__ = ["main"]
+
+_log = get_logger("cli")
 
 
 def _now() -> datetime:
@@ -1772,6 +1775,114 @@ def cmd_answer(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+# --- annotate (activity-annotation projection) ---
+
+def _emit_projection_spec(spec: Any, *, agent: str) -> bool:
+    """Hand ONE projected AnnotationSpec to the hardened fulcra_common writer.
+
+    Best-effort: coord-engine is stdlib-only, so the writer package (and the
+    fulcra-api CLI / token it needs) may be entirely absent — that degrades to
+    False, never an exception, so `annotate project` still exits 0 on a host
+    without the writer. Reuses the writer's typed-record POST path; never opens a
+    second one."""
+    try:
+        from fulcra_common import annotations as _ann
+    except Exception:
+        return False
+    try:
+        return bool(_ann.emit_projection_annotation(
+            note=spec.note, tags=list(spec.tags), recorded_at=spec.ts,
+            id=spec.id, agent=agent))
+    except Exception:
+        return False
+
+
+def cmd_annotate_resolution(args: argparse.Namespace, transport: Any) -> int:
+    """Set the team's projection RESOLUTION level on the bus (any host's
+    heartbeat reads it). Live set today: off, transitions. An unknown level is
+    rejected (exit 2) — the axis is a level string, so future levels are additive."""
+    level = args.level
+    if level not in annotate_mod.LEVELS:
+        print(f"unknown resolution; known: {', '.join(annotate_mod.LEVELS)}",
+              file=sys.stderr)
+        return 2
+    annotate_mod.write_resolution(transport, args.team, level)
+    print(f"annotate resolution for team/{args.team} -> {level}"
+          + ("" if level in annotate_mod.LIVE_PROJECTING else " (no projection)"))
+    return 0
+
+
+def cmd_annotate_status(args: argparse.Namespace, transport: Any) -> int:
+    """Print the team's resolution level + the projection cursor position."""
+    team = args.team
+    res = annotate_mod.read_resolution(transport, team)
+    cursor = annotate_mod.read_cursor(transport, team)
+    last_ts = cursor.get("last_ts")
+    seen = cursor.get("seen_ids") or []
+    if args.json:
+        print(json.dumps({"team": team, "resolution": res,
+                          "projecting": res in annotate_mod.LIVE_PROJECTING,
+                          "last_ts": last_ts, "seen_ids": len(seen)}, indent=2))
+    else:
+        proj = "" if res in annotate_mod.LIVE_PROJECTING else "  (no projection)"
+        print(f"annotate — team/{team}: resolution={res}{proj}")
+        print(f"  cursor: last_ts={last_ts or '(none)'}, "
+              f"{len(seen)} id(s) in the replay window")
+    return 0
+
+
+def cmd_annotate_project(args: argparse.Namespace, transport: Any) -> int:
+    """Fold the freshly-reconciled structured transitions onto the operator's
+    timeline. Reads reconcile's just-written pending transitions + the cursor
+    from the bus, calls the pure fold, emits each spec via the hardened writer,
+    and advances the cursor. Refuses (exit 0) when the team has not opted in."""
+    team = args.team
+    res = annotate_mod.read_resolution(transport, team)
+    if res not in annotate_mod.LIVE_PROJECTING:
+        print(f"projection off (resolution={res or 'absent'}) — "
+              f"opt in with `annotate resolution {team} transitions`")
+        return 0
+    pending = annotate_mod.read_pending(transport, team)
+    cursor = annotate_mod.read_cursor(transport, team)
+    now = _iso(_now())
+    specs, full_cursor = annotate_mod.project(pending, cursor, team=team, now=now)
+    agent = _host()
+    # Emit each spec and record which ids ACTUALLY landed — the cursor advances
+    # PER LANDED SPEC, not all-or-nothing. A transient partial writer failure
+    # (some specs land, some fail) must not re-project the succeeded specs next
+    # run (that would manufacture duplicates on the no-dedup endpoint), nor drop
+    # the failed ones (that would lose a transition).
+    landed_ids = {s.id for s in specs if _emit_projection_spec(s, agent=agent)}
+    emitted = len(landed_ids)
+
+    def _persist_cursor(new_cursor: dict) -> None:
+        # A swallowed cursor-write failure is a DUPLICATE vector now that pending
+        # merges-and-carries: the same landed ids stay in pending, and without an
+        # advanced cursor to dedup them the next beat re-emits to the no-dedup
+        # endpoint. Surface it loudly rather than silently drop the write.
+        if not annotate_mod.write_cursor(transport, team, new_cursor):
+            _log.warn("annotate project: cursor write FAILED — landed ids may "
+                      "re-project (duplicate risk)", team=team,
+                      last_ts=new_cursor.get("last_ts"),
+                      seen_ids=len(new_cursor.get("seen_ids") or []))
+
+    if not specs or emitted == len(specs):
+        # All landed (or none to emit): the fold's cursor already folds every
+        # emitted id into seen_ids and advances the watermark — persist it.
+        _persist_cursor(full_cursor)
+    elif emitted:
+        # Partial success: fold ONLY the landed ids into the cursor and hold the
+        # watermark at the oldest failed spec, so the next heartbeat re-projects
+        # exactly the un-landed specs and nothing else.
+        partial = annotate_mod.cursor_for_landed(
+            pending, cursor, landed_ids, team=team, now=now)
+        _persist_cursor(partial)
+    # else (emitted == 0 with specs present): total writer failure — leave the
+    # cursor untouched so every spec retries next run (over-capture beats loss).
+    print(f"projected {emitted}/{len(specs)} transition(s) for team/{team}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="coord-engine", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -2050,6 +2161,21 @@ def build_parser() -> argparse.ArgumentParser:
     ctr.add_argument("team"); ctr.add_argument("agent"); ctr.add_argument("task", nargs="?")
     ctr.add_argument("--json", action="store_true")
     ctr.set_defaults(func=cmd_continuity_resume)
+
+    an = sub.add_parser("annotate",
+                        help="project task transitions onto the Fulcra timeline (heartbeat concern)")
+    ansub = an.add_subparsers(dest="annotate_command", required=True)
+    anr = ansub.add_parser("resolution",
+                           help="set the projection resolution level on the bus (off|transitions)")
+    anr.add_argument("team"); anr.add_argument("level")
+    anr.set_defaults(func=cmd_annotate_resolution)
+    ans = ansub.add_parser("status", help="show resolution level + cursor position")
+    ans.add_argument("team"); add_json(ans)
+    ans.set_defaults(func=cmd_annotate_status)
+    anp = ansub.add_parser("project",
+                           help="fold reconcile's fresh transitions onto the timeline (model-free)")
+    anp.add_argument("team")
+    anp.set_defaults(func=cmd_annotate_project)
     return p
 
 

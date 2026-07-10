@@ -1,6 +1,6 @@
 import json
 
-from coord_engine import reconcile
+from coord_engine import annotate, reconcile
 from coord_engine.transport import TransportError
 
 
@@ -76,6 +76,53 @@ def test_reconcile_skips_index_and_non_task_docs():
     t.put("team/r/task/index.md", "# Tasks\n(stale)")
     t.put("team/r/task/note.md", "---\ntype: Reference\n---\nnot a task")
     assert _run(t)["tasks"] == 1
+
+
+def _task_ts(title, status, ts):
+    return (f"---\ntype: Task\ntitle: {title}\nstatus: {status}\n"
+            f"timestamp: {ts}\n---\nbody")
+
+
+def test_reconcile_persists_pending_when_resolution_live():
+    # opt-in on the bus -> reconcile threads the pass's STRUCTURED transitions to
+    # the projection artifact (ts = the task's own updated_at, normalized).
+    t = FakeTransport()
+    t.put(annotate.resolution_path("r"), "transitions\n")
+    t.put("team/r/task/a.md", _task_ts("Alpha", "active", "2026-07-09T09:00:00Z"))
+    _run(t)  # first pass: creation transition for Alpha
+    assert annotate.pending_path("r") in t.store
+    pend = json.loads(t.store[annotate.pending_path("r")])
+    assert pend["transitions"] == [
+        {"task_id": "a", "kind": "create", "ts": "2026-07-09T09:00:00Z", "title": "Alpha"}]
+    # bullets/log.md are still produced unchanged (behavior-preserving)
+    assert "Creation" in t.store["team/r/task/log.md"]
+
+
+def test_reconcile_no_pending_when_resolution_off():
+    # default (no resolution on the bus) -> no projection artifact written at all.
+    t = FakeTransport()
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    _run(t)
+    assert annotate.pending_path("r") not in t.store
+
+
+def test_reconcile_empty_diff_does_not_wipe_live_pending():
+    # CRITICAL-1: a reconcile whose diff is empty must NOT overwrite a pending
+    # transition the projection fold is still holding LIVE — i.e. one that has not
+    # landed (absent from the cursor's seen_ids). The deployed
+    # `reconcile && annotate project` topology reconciles every beat; a blind
+    # overwrite with [] here would DROP that moment before projection ever emits it.
+    t = FakeTransport()
+    t.put(annotate.resolution_path("r"), "transitions\n")
+    t.put("team/r/task/a.md", _task_ts("Alpha", "active", "2026-07-09T09:00:00Z"))
+    _run(t)  # first pass: create-a persisted to pending; cursor never advanced
+    pend1 = json.loads(t.store[annotate.pending_path("r")])["transitions"]
+    assert [x["task_id"] for x in pend1] == ["a"]
+    # second pass: task a unchanged -> empty diff. Merge-and-carry keeps the
+    # un-landed create-a (cursor has no seen_ids) rather than wiping to [].
+    _run(t)
+    pend2 = json.loads(t.store[annotate.pending_path("r")])["transitions"]
+    assert [x["task_id"] for x in pend2] == ["a"]
 
 
 def test_reconcile_is_orphan_proof():

@@ -975,6 +975,15 @@ def _write_http(payload: dict[str, Any], *, backend: Optional[list[str]] = None)
         if merged:
             inner["note"] = merged
 
+        # ``id`` is a served MomentAnnotation column (not silently stripped). When
+        # the caller supplies a deterministic record id (projection), pass it
+        # through so the record itself carries it — enabling record-level
+        # idempotency on re-POST. ``_post_typed_moment_record`` preserves any id
+        # already present in ``inner``.
+        rec_id = payload.get("id")
+        if rec_id:
+            inner["id"] = rec_id
+
         lifecycle = payload.get("lifecycle") or "event"
         sources = [
             f"com.fulcradynamics.fulcra-coord.{lifecycle}.{uuid.uuid4()}",
@@ -1044,6 +1053,75 @@ def emit_needs_user_annotation(
         return bool(wrote)
     except Exception:
         logger.debug("annotations: emit_needs_user failed (best-effort)", exc_info=True)
+        return False
+
+
+#: Provenance namespace for coord-*projected* moments — a transition annotated
+#: mechanically from the reconcile heartbeat (model-free, platform-agnostic)
+#: rather than by an in-process lifecycle writer. Mirrors
+#: ``coord_engine.annotate.SOURCE_MARKER``; the record's first source lands under
+#: this namespace (``_write_http`` appends a per-record uuid).
+PROJECTION_SOURCE = "com.fulcradynamics.fulcra-coord.projection"
+
+
+def emit_projection_annotation(
+    *,
+    note: str,
+    tags: list[str],
+    recorded_at: Optional[str],
+    id: Optional[str] = None,
+    agent: Optional[str] = None,
+    backend: Optional[list[str]] = None,
+) -> bool:
+    """Emit ONE coord-*projected* timeline annotation. BEST-EFFORT, NEVER RAISES.
+
+    This is the writer seam for coord-engine's projection fold (an
+    ``AnnotationSpec`` -> a record). Unlike :func:`emit_lifecycle_annotation` it
+    is deliberately NOT gated by the machine-local :func:`_mode` config and does
+    NOT restrict the transition kind, because projection carries its OWN opt-in
+    (the team's bus ``annotate resolution`` level) and its OWN idempotency (the
+    projection cursor + ``seen_ids``), both owned by coord-engine's heartbeat —
+    the whole point is to annotate a transition made by ANY host/harness, not
+    only one running the in-process writer.
+
+    It REUSES the same hardened typed-record path as the lifecycle writer
+    (``_write_http`` -> ``_post_typed_moment_record``): fail-closed definition
+    resolution, closed-schema-safe note folding, stdlib ``urllib`` POST. It does
+    NOT open a second POST path. ``note`` is the already-composed one-line
+    summary (title/kind/assignee/next-action folded in — ``title`` is not a
+    served key); ``tags`` are the bare tag NAMES (e.g. ``[agent-tasks, update]``);
+    ``recorded_at`` is the transition ts. ``agent`` is accepted for signature
+    symmetry but unused — a projected moment is host-agnostic. Returns True only
+    when a record was actually written on THIS call."""
+    try:
+        # Tripwire: projection is the SUCCESSOR to the in-process lifecycle writer,
+        # and both emit Agent-Tasks moments for the same transition to a no-dedup
+        # endpoint. If the legacy writer is enabled here, this call is the exact
+        # point where both would be live and the timeline double-writes — surface
+        # it loudly rather than let the duplication go silent.
+        if _mode() == "on":
+            logger.warning(
+                "annotations: projection is emitting while the legacy in-process "
+                "writer is ON (FULCRA_COORD_ANNOTATIONS) — both write the same "
+                "transition to a no-dedup endpoint; disable the legacy writer")
+        payload: dict[str, Any] = {
+            "cli_tags": [t for t in (tags or []) if t],
+            "desc": note or "",
+            # lifecycle "projection" -> sources[0] under PROJECTION_SOURCE
+            "lifecycle": "projection",
+            "recorded_at": recorded_at,
+        }
+        # The projection's DETERMINISTIC id (keyed on team/task_id/kind/ts, computed
+        # by coord_engine.annotate FOR idempotency). ``id`` IS a served
+        # MomentAnnotation column, so threading it onto the record lets a record
+        # re-POSTed after a cursor-persist failure carry the SAME id rather than
+        # mint a distinct timeline row — the record-level idempotency layer this
+        # id was designed for. Only set when supplied so we never write an empty id.
+        if id:
+            payload["id"] = id
+        return bool(_write_http(payload, backend=backend))
+    except Exception:
+        logger.debug("annotations: emit_projection failed (best-effort)", exc_info=True)
         return False
 
 

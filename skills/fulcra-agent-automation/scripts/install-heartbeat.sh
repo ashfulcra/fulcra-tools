@@ -41,7 +41,13 @@ if [[ "$UNINSTALL" != "1" ]]; then
   [[ -n "$FA" ]] || { echo "error: fulcra-api not found on PATH (coord-engine needs it)" >&2; exit 3; }
 fi
 JOB_PATH="$(dirname "${CE:-/usr/bin/true}"):$(dirname "${FA:-/usr/bin/true}"):/usr/local/bin:/usr/bin:/bin"
-CMD="${CE:-coord-engine} reconcile ${TEAM}"
+CEB="${CE:-coord-engine}"
+# Reconcile heals the views AND (when the team opted in via `annotate resolution
+# <team> transitions`) writes the pass's structured transitions; `annotate
+# project` then folds them onto the operator's Fulcra timeline right after. The
+# projection self-gates on the bus resolution level, so this runs unconditionally
+# and is a cheap exit-0 no-op when projection is off — one degradation-safe chain.
+CMD="${CEB} reconcile ${TEAM} && ${CEB} annotate project ${TEAM}"
 
 confirm() {
   [[ "$YES" == "1" ]] && return 0
@@ -79,7 +85,7 @@ if [[ "$os" == "Darwin" ]]; then
     <key>HOME</key><string>${HOME}</string>
   </dict>
   <key>ProgramArguments</key><array>
-    <string>${CE}</string><string>reconcile</string><string>${TEAM}</string>
+    <string>/bin/sh</string><string>-c</string><string>${CMD//&/&amp;}</string>
   </array>
   <key>StartInterval</key><integer>$(( INTERVAL * 60 ))</integer>
   <key>StandardErrorPath</key><string>${LOGDIR}/heartbeat-${TEAM}.err.log</string>
