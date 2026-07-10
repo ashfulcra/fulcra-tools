@@ -107,6 +107,14 @@ skills. Subagent-only work stays OFF the bus.
   (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
   rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
   tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
+- **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
+  <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) two sources
+  against a per-agent state file — new inbox directives (the same fold `inbox` shows) and new **responses
+  to directives you own** (the reply leg `respond` writes but nothing used to surface). One event line
+  per new item (`DIRECTIVE`/`RESPONSE`), `--json` for one object per line; a quiet tick prints NOTHING
+  (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
+  the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr once per failure streak. Run
+  `--once` on a scheduler (a tick never fails the schedule) or bare for a poll loop (`--interval`, SIGINT-clean).
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

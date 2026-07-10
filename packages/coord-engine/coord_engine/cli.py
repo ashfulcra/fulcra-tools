@@ -959,6 +959,10 @@ def _ack_path(team: str, slug: str, agent: str) -> str:
     return f"team/{team}/_coord/acks/{slug}/{tasks.agent_key(agent)}.md"
 
 
+def _responses_prefix(team: str) -> str:
+    return f"team/{team}/_coord/responses/"
+
+
 def _response_path(team: str, slug: str, stamp: str) -> str:
     return f"team/{team}/_coord/responses/{slug}/{stamp}.md"
 
@@ -1140,6 +1144,29 @@ def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _inbox_rows(transport: Any, team: str, agent: str, *,
+                include_backlog: bool = False) -> list[dict[str, Any]]:
+    """The open-directive fold `inbox` surfaces for `agent`, with live-ack shard
+    filtering. Extracted so `listen` awaits the SAME source `inbox` shows — one
+    inbox computation, no second implementation to drift. Never raises: a failed
+    summaries read folds to an empty list (the ``_load_rows`` contract), matching
+    cmd_inbox / briefing degradation."""
+    now = _iso(_now())
+    rows = _load_rows(transport, team)
+    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
+    stale_visible = directives.inbox(rows, acks, agent, now=now,
+                                     include_backlog=include_backlog)
+    for r in stale_visible:
+        slug = str(r.get("name") or "")
+        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(team, slug, agent)):
+            acks.setdefault(slug, []).append(agent)
+    got = directives.inbox(rows, acks, agent, now=now, include_backlog=include_backlog)
+    # read-your-write: an ack written since the last reconcile hides the item
+    # for the acking agent immediately (live shard check, only for shown items).
+    return [r for r in got
+            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None]
+
+
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     if args.ack:
@@ -1148,20 +1175,7 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
                         okf.render_frontmatter(fm) + "\nacked\n")
         print(f"acked {args.ack}")
         return 0
-    rows = _load_rows(transport, args.team)
-    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
-    stale_visible = directives.inbox(rows, acks, agent, now=_iso(_now()),
-                                     include_backlog=args.all)
-    for r in stale_visible:
-        slug = str(r.get("name") or "")
-        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(args.team, slug, agent)):
-            acks.setdefault(slug, []).append(agent)
-    got = directives.inbox(rows, acks, agent, now=_iso(_now()),
-                           include_backlog=args.all)
-    # read-your-write: an ack written since the last reconcile hides the item
-    # for the acking agent immediately (live shard check, only for shown items).
-    got = [r for r in got
-           if transport.read(_ack_path(args.team, str(r.get("name")), agent)) is None]
+    got = _inbox_rows(transport, args.team, agent, include_backlog=args.all)
     if args.json:
         print(json.dumps(got, indent=2))
         return 0
@@ -1187,6 +1201,206 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
     except tasks.TaskError as e:
         print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
     return 0
+
+
+# --- listen: the await leg of `tell` (this task) ---------------------------
+#
+# The bus had send verbs (tell/broadcast/remind) and `respond`, but nothing that
+# SURFACED either new inbox directives or the responses that come back to a
+# directive's owner — so `respond` wrote shards no fold delivered, and the reply
+# leg of `tell` did not exist. Three agents independently hand-rolled watchers
+# around `inbox --json`; `listen` ports that id-diff into the engine so the
+# lifecycle owns listening. Two event sources, each id-diff'd against a state
+# file, per tick:
+#   1. new inbox directives for the agent (the SAME fold `inbox` shows).
+#   2. new responses to directives the agent OWNS (the reply leg).
+#
+# Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
+#   * No false advance — a failed/None read during a tick must NOT mark unknown
+#     ids as seen. State is a UNION of affirmatively-processed ids, so a degraded
+#     read contributes nothing and recovery re-surfaces the still-pending id.
+#   * Fail visible, no flooding — a transport failure emits `LISTEN DEGRADED:`
+#     ONCE per consecutive-failure streak (the streak flag persists IN the state
+#     file, so a scheduler re-running `--once` does not re-alarm every tick) and
+#     resets on recovery. It goes to STDERR so `--json` stdout stays a clean
+#     one-object-per-line event stream for filter-free streaming consumers.
+#   * Quiet ticks print NOTHING to stdout (the monitor-flood lesson) — only
+#     `--verbose` emits a heartbeat, and only to stderr.
+#   * Bounded cost — one list_dir of _coord/responses/ + per-slug work ONLY for
+#     slugs the agent owns; a slug's ownership is read once (from its task doc)
+#     and cached in state, so not-owned / broadcast slugs cost nothing after the
+#     first classification and the scan is never proportional to total history.
+
+
+def _listen_state_dir() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("COORD_LISTENER_STATE")
+                        or (pathlib.Path.home() / ".cache" / "coord-engine"))
+
+
+def _listen_state_path(team: str, agent: str) -> pathlib.Path:
+    # agent_key is injective (distinct agents never share a state file); team is
+    # slugified for a filesystem-safe name.
+    return _listen_state_dir() / f"listen-{tasks.slugify(team) or 'team'}-{tasks.agent_key(agent)}.json"
+
+
+def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
+    """Load the one-doc state, tolerating a missing/corrupt/foreign file (fresh
+    default). Never raises — a tick never fails on its own bookkeeping."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "inbox_ids": list(data.get("inbox_ids") or []),
+        "response_keys": list(data.get("response_keys") or []),
+        "slug_owned": dict(data.get("slug_owned") or {}),
+        "degraded": bool(data.get("degraded")),
+    }
+
+
+def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
+    # Best-effort: a state-write failure must never crash a tick. Worst case of a
+    # lost write is one re-notify on the next run, never a missed event.
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    except OSError as e:
+        _log.warning("listen state write failed", path=str(path), error=str(e))
+
+
+def _listen_tick(transport: Any, team: str, agent: str,
+                 state: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    """One listen pass. Returns ``(events, failures)`` and mutates ``state`` with
+    ONLY affirmatively-processed ids (add-only — see the section note): a failed
+    read/list adds nothing, so it can never mark unknown data as seen."""
+    events: list[dict[str, Any]] = []
+    failures: list[str] = []
+    inbox_ids = set(state["inbox_ids"])
+    response_keys = set(state["response_keys"])
+    slug_owned: dict[str, Any] = dict(state["slug_owned"])
+
+    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces).
+    for r in _inbox_rows(transport, team, agent):
+        slug = str(r.get("name") or "")
+        if not slug or slug in inbox_ids:
+            continue
+        events.append({"type": "directive", "slug": slug,
+                       "owner": str(r.get("owner") or "?"),
+                       "title": str(r.get("title") or slug)})
+        inbox_ids.add(slug)
+
+    # Source 2 — new responses to directives THIS agent owns. One list_dir of the
+    # responses root; per-slug work only for owned slugs, ownership cached.
+    prefix = _responses_prefix(team)
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError as e:
+        failures.append(f"responses listing unreadable ({e})")
+        entries = None
+    for e in entries or []:
+        raw = e.get("name") or ""
+        if not (e.get("is_dir") or raw.endswith("/")):
+            continue  # only slug dirs live here
+        slug = raw.rstrip("/")
+        if not slug:
+            continue
+        owned = slug_owned.get(slug)
+        if owned is None:
+            doc = transport.read(_task_path(team, slug))
+            if doc is None:
+                # Ambiguous: a transient read failure OR an orphan response whose
+                # directive doc is gone. Either way ownership is UNKNOWN, so we do
+                # NOT cache and do NOT advance — unknown != seen, retry next tick.
+                failures.append(f"owner unresolved for {slug}")
+                continue
+            fm = okf.parse_frontmatter(doc) or {}
+            owner = str(fm.get("owner") or "").strip()
+            owned = owner == agent  # owner is the directive's SENDER; broadcast/absent -> not owned
+            slug_owned[slug] = owned  # definitive classification: cache it
+        if not owned:
+            continue  # responses to other-owner / broadcast directives are noise
+        try:
+            stamps = transport.list_dir(prefix + slug + "/")
+        except TransportError as ex:
+            failures.append(f"response dir {slug} unreadable ({ex})")
+            continue
+        for se in stamps:
+            sname = se.get("name") or ""
+            if se.get("is_dir") or not sname.endswith(".md"):
+                continue
+            key = f"{slug}/{sname[:-3]}"
+            if key in response_keys:
+                continue
+            shard = transport.read(prefix + slug + "/" + sname)
+            if shard is None:
+                # unread shard -> unknown, do NOT advance over it (retry next tick)
+                failures.append(f"response {key} unreadable")
+                continue
+            rfm = okf.parse_frontmatter(shard) or {}
+            events.append({"type": "response", "slug": slug,
+                           "agent": str(rfm.get("agent") or "?"),
+                           "outcome": str(rfm.get("outcome") or "?")})
+            response_keys.add(key)
+
+    state["inbox_ids"] = sorted(inbox_ids)
+    state["response_keys"] = sorted(response_keys)
+    state["slug_owned"] = slug_owned
+    return events, failures
+
+
+def _format_listen_event(ev: dict[str, Any]) -> str:
+    if ev["type"] == "directive":
+        return f"DIRECTIVE {ev['slug']} (from {ev['owner']}): {ev['title'][:80]}"
+    return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
+
+
+def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any],
+                     *, json_mode: bool, verbose: bool) -> tuple[list, list]:
+    events, failures = _listen_tick(transport, team, agent, state)
+    for ev in events:
+        print(json.dumps(ev) if json_mode else _format_listen_event(ev))
+    sys.stdout.flush()
+    if failures:
+        # ONCE per consecutive-failure streak (streak flag lives in state, so it
+        # survives across `--once` invocations) — no per-tick flooding.
+        if not state.get("degraded"):
+            print(f"LISTEN DEGRADED: {'; '.join(failures)}", file=sys.stderr)
+            state["degraded"] = True
+    else:
+        state["degraded"] = False  # streak cleared; recovery's events already printed
+        if verbose and not events:
+            print(f"listen: quiet ({len(state['inbox_ids'])} inbox, "
+                  f"{len(state['response_keys'])} responses seen)", file=sys.stderr)
+    sys.stderr.flush()
+    return events, failures
+
+
+def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    state_path = _listen_state_path(args.team, agent)
+    state = _load_listen_state(state_path)
+    json_mode = bool(getattr(args, "json", False))
+    verbose = bool(getattr(args, "verbose", False))
+
+    def tick() -> None:
+        _run_listen_tick(transport, args.team, agent, state,
+                         json_mode=json_mode, verbose=verbose)
+        _save_listen_state(state_path, state)
+
+    if args.once:
+        tick()
+        return 0
+    interval = args.interval if args.interval and args.interval > 0 else 60
+    try:
+        while True:
+            tick()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        if verbose:
+            print("listen: stopped", file=sys.stderr)
+        return 0
 
 
 # --- continuity completion (A6): role checkpoints, park, briefing ---
@@ -2385,6 +2599,12 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
     ib.add_argument("--all", action="store_true", help="include @backlog"); add_json(ib)
     ib.set_defaults(func=cmd_inbox)
+    ls = sub.add_parser("listen", help="await new directives + responses to directives you own (the reply leg of tell)")
+    ls.add_argument("team"); ls.add_argument("--agent", "-a")
+    ls.add_argument("--interval", type=int, default=60, help="loop poll seconds (default 60; ignored with --once)")
+    ls.add_argument("--once", action="store_true", help="one tick then exit 0 — scheduler-friendly (a tick never fails the schedule)")
+    ls.add_argument("--verbose", action="store_true", help="heartbeat quiet ticks to stderr")
+    add_json(ls); ls.set_defaults(func=cmd_listen)
     hl = sub.add_parser("health", help="fleet health: which hosts reconcile this team (fulcra-agent-health)")
     hl.add_argument("team"); add_json(hl)
     hl.set_defaults(func=cmd_health)
