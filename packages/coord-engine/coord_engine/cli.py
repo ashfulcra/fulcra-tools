@@ -1514,8 +1514,9 @@ def _listen_tick(transport: Any, team: str, agent: str,
     # Source 3 — new verdicts on reviews THIS agent REQUESTED. One list_dir of
     # the review root; per-NEW-slug the review doc is read once and the requester
     # (`requested_by`) cached; verdict dirs are listed ONLY for my still-unsettled
-    # slugs, and a `.settled` listing drops the slug so it is never listed again
-    # (the review is immutable once settled). Its OWN degraded source `verdicts`.
+    # slugs. A `.settled` listing first EMITS every unseen shard + one terminal
+    # SETTLED event, then drops the slug so it is never listed again (the review
+    # is immutable once settled). Its OWN degraded source `verdicts`.
     review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
     verdict_keys = set(state.get("verdict_keys") or [])
     settled_reviews = set(state.get("settled_reviews") or [])
@@ -1552,11 +1553,15 @@ def _listen_tick(transport: Any, team: str, agent: str,
         except TransportError as ex:
             _fail("verdicts", f"verdicts dir {slug} unreadable ({ex})")
             continue
-        if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
-            # Terminal-settled: no further verdicts can land. Drop it from the
-            # active set so it costs zero verdict-dir listings hereafter.
-            settled_reviews.add(slug)
-            continue
+        settling = any((x.get("name") or "") == SETTLED_MARKER for x in ventries)
+        # Emit every UNSEEN shard BEFORE any settle-drop. The settling tick is
+        # the DOMINANT flow, not an edge: a single approve settles the review and
+        # the reviewer settles it themselves (`review status` right after filing,
+        # per doctrine), so the final — often only — verdict shard and `.settled`
+        # co-exist by the requester's next tick. Dropping the slug first would
+        # swallow that verdict and make the `await verdicts:` breadcrumb false.
+        # Cost stays bounded: only unseen shards are read, once per slug lifetime.
+        unread = False
         for ve in ventries:
             vname = ve.get("name") or ""
             if ve.get("is_dir") or not vname.endswith(".md"):
@@ -1568,12 +1573,25 @@ def _listen_tick(transport: Any, team: str, agent: str,
             if shard is None:
                 # listed file unreadable -> unknown, do NOT advance (retry)
                 _fail("verdicts", f"verdict {vkey} unreadable")
+                unread = True
                 continue
             vfm = okf.parse_frontmatter(shard) or {}
             events.append({"type": "verdict", "slug": slug,
                            "reviewer": vname[:-3],
                            "verdict": str(vfm.get("verdict") or "?")})
             verdict_keys.add(vkey)
+        if settling and not unread:
+            # Terminal-settled AND every shard affirmatively seen: emit the one
+            # terminal SETTLED event (so the requester learns the outcome even
+            # when all shards were seen on earlier ticks), then drop the slug —
+            # zero verdict-dir listings hereafter. The marker only ever caches
+            # terminal-APPROVED (`_write_settled_marker`), so the state is known
+            # without reading it. An unreadable shard keeps the slug ACTIVE
+            # (degraded already flagged): settling must not swallow an
+            # unreadable final verdict — it emits on recovery, then drops.
+            events.append({"type": "settled", "slug": slug,
+                           "state": review.APPROVED})
+            settled_reviews.add(slug)
 
     state["inbox_ids"] = sorted(inbox_ids)
     state["response_keys"] = sorted(response_keys)
@@ -1589,6 +1607,8 @@ def _format_listen_event(ev: dict[str, Any]) -> str:
         return f"DIRECTIVE {ev['slug']} (from {ev['owner']}): {ev['title'][:80]}"
     if ev["type"] == "verdict":
         return f"VERDICT {ev['slug']} by {ev['reviewer']}: {ev['verdict']}"
+    if ev["type"] == "settled":
+        return f"SETTLED {ev['slug']}: {ev['state']}"
     return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
 
 

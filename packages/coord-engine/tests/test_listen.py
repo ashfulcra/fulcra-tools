@@ -439,24 +439,108 @@ def test_verdict_json_mode_one_object_per_line(capsys):
                    "reviewer": "rev", "verdict": "changes"}
 
 
-def test_settled_review_stops_verdict_listings(capsys):
-    # Bounded cost: once a review is `.settled`, the listener drops it from the
-    # active set and never lists its verdicts dir again.
+def test_settling_tick_emits_final_verdict_and_settled_then_stops_listings(capsys):
+    # THE DOMINANT FLOW: a single approve settles the review and the reviewer
+    # settles it themselves (`review status` after filing, per doctrine), so the
+    # verdict shard and `.settled` CO-EXIST before the requester's next tick.
+    # That tick must emit the settling (often only) verdict + one terminal
+    # SETTLED line — dropping the slug first would swallow the final verdict
+    # and make `await verdicts:` false in the standard single-reviewer flow.
     t = ListCountingTransport()
     _put_review(t, "pr-s", requested_by="me")
     _put_verdict(t, "pr-s", "rev")
     t.put(cli._settled_marker_path(TEAM, "pr-s"),
           "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
     state = _fresh_state()
-    # tick 1: lists review root + the slug's verdicts dir (sees .settled -> drop)
-    cli._run_listen_tick(t, TEAM, "me", state, json_mode=False, verbose=False)
-    capsys.readouterr()
+    # tick 1: the settling tick EMITS (verdict first, then the terminal line)
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    out = capsys.readouterr().out
+    assert failures == {}
+    assert [e["type"] for e in events] == ["verdict", "settled"]
+    assert "VERDICT pr-s by rev: approve" in out
+    assert "SETTLED pr-s: APPROVED" in out
+    assert state["verdict_keys"] == ["pr-s/rev"]
     assert "pr-s" in state["settled_reviews"]
-    # tick 2: the settled slug costs ZERO verdicts-dir listings
+    # tick 2: quiet, and the settled slug costs ZERO verdicts-dir listings
     t.lists.clear()
-    cli._run_listen_tick(t, TEAM, "me", state, json_mode=False, verbose=False)
+    events2, _ = cli._run_listen_tick(t, TEAM, "me", state,
+                                      json_mode=False, verbose=False)
+    assert events2 == []
+    assert capsys.readouterr().out == ""
     assert cli._verdicts_prefix(TEAM, "pr-s") not in t.lists, \
         f"settled slug must not be listed again, got {t.lists}"
+
+
+def test_settle_after_seen_verdicts_emits_settled_only(capsys):
+    # All shards previously seen, THEN the marker lands: the requester still
+    # learns the terminal state via one SETTLED event (json contract included).
+    t = FakeTransport()
+    _put_review(t, "pr-a", requested_by="me")
+    _put_verdict(t, "pr-a", "rev")
+    state = _fresh_state()
+    cli._run_listen_tick(t, TEAM, "me", state, json_mode=False, verbose=False)
+    capsys.readouterr()
+    assert state["verdict_keys"] == ["pr-a/rev"]
+
+    t.put(cli._settled_marker_path(TEAM, "pr-a"),
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=True, verbose=False)
+    assert failures == {}
+    assert events == [{"type": "settled", "slug": "pr-a", "state": "APPROVED"}]
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert obj == {"type": "settled", "slug": "pr-a", "state": "APPROVED"}
+    assert "pr-a" in state["settled_reviews"]
+
+    # re-tick: quiet (SETTLED fires exactly once per slug lifetime)
+    events2, _ = cli._run_listen_tick(t, TEAM, "me", state,
+                                      json_mode=True, verbose=False)
+    assert events2 == []
+    assert capsys.readouterr().out == ""
+
+
+def test_unreadable_final_shard_at_settle_not_swallowed(capsys):
+    # Settling must not swallow an unreadable final verdict: a None shard read
+    # on a settling tick flags `verdicts` degraded and keeps the slug ACTIVE
+    # (not dropped) — recovery emits the verdict + SETTLED, then drops.
+    class ShardReadFails(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.shard_fail = True
+
+        def read(self, path):
+            if (self.shard_fail and "/verdicts/" in path
+                    and path.endswith(".md")):
+                return None  # timeout: content unknown, no exception raised
+            return super().read(path)
+
+    t = ShardReadFails()
+    _put_review(t, "pr-f", requested_by="me")
+    _put_verdict(t, "pr-f", "rev")
+    t.put(cli._settled_marker_path(TEAM, "pr-f"),
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    state = _fresh_state()
+    events, failures = cli._run_listen_tick(t, TEAM, "me", state,
+                                            json_mode=False, verbose=False)
+    err = capsys.readouterr()
+    assert events == []
+    assert "verdicts" in failures
+    assert "LISTEN DEGRADED" in err.err
+    assert state["verdict_keys"] == []                 # not advanced
+    assert "pr-f" not in state["settled_reviews"], \
+        "an unreadable final verdict must keep the slug active (retry)"
+
+    # transport recovers -> the final verdict emits, THEN the slug settles
+    t.shard_fail = False
+    events2, failures2 = cli._run_listen_tick(t, TEAM, "me", state,
+                                              json_mode=False, verbose=False)
+    out2 = capsys.readouterr().out
+    assert failures2 == {}
+    assert [e["type"] for e in events2] == ["verdict", "settled"]
+    assert "VERDICT pr-f by rev: approve" in out2
+    assert "SETTLED pr-f: APPROVED" in out2
+    assert "pr-f" in state["settled_reviews"]
 
 
 def test_requester_unresolved_no_false_advance_then_recovers(capsys):

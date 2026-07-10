@@ -117,8 +117,10 @@ skills. Subagent-only work stays OFF the bus.
   against a per-agent state file — new inbox directives (the same fold `inbox` shows), new **responses
   to directives you own** (the reply leg `respond` writes but nothing used to surface), and new
   **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
-  bounded: one review-root listing per tick, requester cached, and a `.settled` review is dropped so it
-  is never listed again). One event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`), `--json` for
+  bounded: one review-root listing per tick, requester cached; a `.settled` review first emits its
+  unseen verdicts plus one terminal `SETTLED <slug>: APPROVED` line, then is dropped so it is never
+  listed again — the settling tick is the standard single-reviewer flow, so the final verdict always
+  emits). One event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`), `--json` for
   one object per line; a quiet tick prints NOTHING
   (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
   the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** —
