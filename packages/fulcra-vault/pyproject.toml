@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fulcra-vault"
 version = "0.1.0"
-description = "Design-stage Obsidian-like shared knowledge vault on the Fulcra file library."
+description = "Obsidian-like shared knowledge vault on the Fulcra file library."
 readme = "docs/SPEC.md"
 requires-python = ">=3.11"
 dependencies = []

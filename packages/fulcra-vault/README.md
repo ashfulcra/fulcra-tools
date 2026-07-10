@@ -21,16 +21,27 @@ The package now includes:
 - Deterministic scaffold and additive restructure planning.
 - Fulcra Files text store wrapper.
 - Advisory per-note locks for agent writes.
-- Initial CLI commands:
+- Applied `rename` (moves the note and rewrites inbound wikilinks, never
+  overwriting the destination) and `delete`, both `--force`-gated, locking
+  every touched note and aborting if a note changed since it was read.
+- Platform hook installer (`install-hooks`) that injects `HOT.md` at session
+  start for `claude-code` and `codex`; the managed-config merge is surgical,
+  idempotent, and reversible (`--uninstall`, `--dry-run`).
+- Packaged agent skill (`skill/SKILL.md` plus write and raw-HTTP references)
+  that routes agents by capability: CLI, raw HTTP, or MCP read-only.
+- CLI commands:
+  - `init`
   - `read`
   - `write-section`
   - `append-log`
   - `backlinks`
   - `reindex`
   - `map`
+  - `rename`
+  - `delete`
+  - `install-hooks`
 
-Sync, delete, rename application, installer support, and the packaged agent
-skill are still planned work.
+Sync (vault sync / local mirror) is still planned work.
 
 ## Install For Local Development
 
@@ -161,7 +172,7 @@ uv run fulcra-vault map --check
 - A write aborts if the note changes between read and pre-write stat.
 - Every CLI mutation appends one line to `vault/LOG.md`.
 - Excluded paths from `meta.json` refuse writes.
-- Deletes and applied renames (planned) will be explicit commands, never write side effects.
+- Deletes and applied renames are explicit commands, never write side effects.
 
 Locks coordinate agent writes. They do not restrict direct human edits through
 the future local mirror.
