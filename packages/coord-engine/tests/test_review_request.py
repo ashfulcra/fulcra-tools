@@ -348,6 +348,84 @@ def test_review_status_removes_stale_marker_on_pending(capsys):
                for r in out), "next fold must surface the pending obligation"
 
 
+class VerdictsListFails(CountingTransport):
+    """The verdicts-prefix LISTING raises (the prefix is unlistable under a
+    degraded transport — its very membership is unknown, not empty) while the
+    doc and everything else read fine. Distinct from an EMPTY verdicts dir
+    (list_dir returns []), which is a legitimate no-verdicts PENDING."""
+
+    def __init__(self):
+        super().__init__()
+        self.list_fails = True
+
+    def list_dir(self, prefix):
+        if self.list_fails and prefix.endswith("/verdicts/"):
+            raise TransportError("boom")
+        return super().list_dir(prefix)
+
+
+def test_review_status_verdicts_listing_failure_fails_loud_keeps_marker(capsys):
+    # F-listing: the verdicts LISTING raised, but `_review_tally` swallowed it and
+    # fell back to entries=[] -> vreads_ok VACUOUSLY True -> two fail-closed
+    # violations on a direct query: (1) a false PENDING printed rc 0 (clean output
+    # on a failed listing), and (2) the F4 self-heal DELETES a legitimate .settled
+    # marker off that vacuous non-settleable tally. Now: rc 1 in the same register
+    # as the doc/shard-unreadable cases, and the marker is left untouched.
+    t = VerdictsListFails()
+    cli.main(["review", "request", "r", "pr-ll", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    # a legitimate settled marker that must SURVIVE an unreadable-listing query
+    t.put("team/r/review/pr-ll/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-ll", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "verdicts listing unreadable" in cap.err
+    assert "PENDING" not in cap.out and "APPROVED" not in cap.out, \
+        "a failed listing must not print any clean state"
+    assert "team/r/review/pr-ll/verdicts/.settled" in t.store, \
+        "a failed listing must NOT delete a legitimate .settled marker"
+
+
+def test_review_status_recovers_after_verdicts_listing_failure(capsys):
+    # Once the listing recovers, the same slug tallies to the truth (PENDING).
+    t = VerdictsListFails()
+    cli.main(["review", "request", "r", "pr-rec", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-rec", "--json"], transport=t) == 1
+    capsys.readouterr()
+    t.list_fails = False
+    assert cli.main(["review", "status", "r", "pr-rec", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "PENDING"
+
+
+def test_fold_counts_slug_skipped_when_verdicts_listing_fails(capsys):
+    # Fan-out fold alignment: a verdicts-listing failure for a slug is UNKNOWN —
+    # counted skipped and surfaced via the degraded marker (same semantics as a
+    # doc-read failure), never silently settled or dropped. A readable sibling
+    # still surfaces its pending obligation.
+    class OneSlugListFails(CountingTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-bad/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OneSlugListFails()
+    cli.main(["review", "request", "r", "pr-bad", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    cli.main(["review", "request", "r", "pr-good", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-good"
+               for r in out), "a sibling's listing failure must not hide pr-good"
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1 and deg[0]["skipped"] == 1, deg
+    assert "team/r/review/pr-bad/verdicts/.settled" not in t.store, \
+        "an unlistable slug must never be settled"
+
+
 def test_request_creates_doc_at_tally_path(capsys):
     # (a) the request writes to the SAME path _review_doc_path/_review_tally read.
     t = FakeTransport()

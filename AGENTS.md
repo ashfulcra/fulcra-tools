@@ -104,8 +104,9 @@ skills. Subagent-only work stays OFF the bus.
   slug too — checked after each verdict/doc read, so one stalled read can't return a clean row) — honor it
   with a per-slug `review status` sweep;
   never read the fold as complete. That sweep itself **fails closed**: `review status` returns rc 1
-  (`tally unknown, retry`) when the doc or any verdict shard is unreadable, rather than printing a
-  partial APPROVED — so a degraded transport can never green-light a merge.
+  (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
+  rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
+  tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything
