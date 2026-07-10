@@ -98,8 +98,11 @@ skills. Subagent-only work stays OFF the bus.
 - **Engine surfaces a watcher must honor.** A directive slug collision now delivers distinct messages
   under a hash-suffixed slug; rc 0 `directive <slug> already delivered` is a *deduped identical resend*,
   not a fresh write. `briefing`/`needs-me` may emit a `review-fold-degraded` row when their pending-review
-  scan exceeds `COORD_REVIEW_FOLD_BUDGET` (default 45s) — honor it with a per-slug `review status` sweep;
-  never read the fold as complete.
+  scan exceeds `COORD_REVIEW_FOLD_BUDGET` (default 45s, now enforced *within* a slug too, so one
+  many-shard review can't blow the budget) — honor it with a per-slug `review status` sweep;
+  never read the fold as complete. That sweep itself **fails closed**: `review status` returns rc 1
+  (`tally unknown, retry`) when the doc or any verdict shard is unreadable, rather than printing a
+  partial APPROVED — so a degraded transport can never green-light a merge.
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

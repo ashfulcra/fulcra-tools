@@ -14,6 +14,63 @@ from coord_engine import cli, tasks
 from coord_engine_test_helpers import FakeTransport
 
 
+def test_lost_race_readback_reslugs_to_suffixed(capsys):
+    # F3: two colliding tells race. Our absence check passes and our write
+    # "succeeds", but a concurrent racer's DIFFERENT message won the slot
+    # (last-writer-wins). The I1 fix only checks absence BEFORE writing, so both
+    # racers reported rc 0 and one message was silently clobbered. Post-write
+    # read-back must reveal the slot holds the OTHER payload -> we lost the race
+    # -> re-slug to our deterministic hash-suffixed slot. Both messages durable.
+    base_slug = tasks.slugify("Ship it")
+    other_doc = ("---\ntype: Task\ntitle: Ship it\ndescription: RACER won\n"
+                 "assignee: amy\nstatus: proposed\npriority: P2\n---\nbody\n")
+
+    class LostRaceAtBase(FakeTransport):
+        def write(self, path, content):
+            # base slot: the racer's write lands instead of ours (last wins).
+            if path == f"team/r/task/{base_slug}.md":
+                self.store[path] = other_doc
+                return True
+            return super().write(path, content)
+
+    t = LostRaceAtBase()
+    rc = cli.main(["tell", "r", "amy", "Ship it", "-s", "OURS"], transport=t)
+    assert rc == 0, "we still deliver — at the suffixed slot, not a false clobber"
+    docs = _task_docs(t)
+    assert len(docs) == 2, "both the racer's and our message must be durable"
+    # base holds the racer's message; ours lands at the deterministic suffix.
+    assert t.store[f"team/r/task/{base_slug}.md"] == other_doc
+    suffixed = next(d for d in docs if d != f"team/r/task/{base_slug}.md")
+    suffixed_slug = suffixed[len("team/r/task/"):-len(".md")]
+    assert suffixed_slug.startswith(f"{base_slug}-"), "stable hash suffix"
+    assert "OURS" in t.store[suffixed], "our message must survive at the suffix"
+    # both surface in the recipient's inbox fold
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["inbox", "r", "--agent", "amy", "--json"], transport=t) == 0
+    names = {r["name"] for r in json.loads(capsys.readouterr().out)}
+    assert names == {base_slug, suffixed_slug}, "both messages visible in inbox"
+
+
+def test_write_readback_none_fails_loud(capsys):
+    # F3 corollary: if the post-write read-back returns None (transport degraded),
+    # we cannot confirm our write landed/survived -> fail loud (C1), never a
+    # silent rc-0 success on an unverifiable delivery.
+    class ReadBackNone(FakeTransport):
+        def read(self, path):
+            return None  # absence check AND read-back both time out
+
+        def list_dir(self, prefix):
+            return []  # slot genuinely absent -> we proceed to write
+
+    t = ReadBackNone()
+    rc = cli.main(["tell", "r", "amy", "Ship it", "-s", "OURS"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "read-back failed" in cap.err or "unverifiable" in cap.err
+    assert "-> amy" not in cap.out, "must not claim delivery it cannot verify"
+
+
 def _task_docs(t):
     return sorted(
         k for k in t.store

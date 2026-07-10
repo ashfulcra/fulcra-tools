@@ -227,7 +227,12 @@ def test_unreadable_verdict_blocks_settle_marker(capsys):
     capsys.readouterr()
     cli._pending_reviews_for(t, "r", "alice")
     assert "team/r/review/pr-v/verdicts/.settled" not in t.store
-    assert cli.main(["review", "status", "r", "pr-v", "--json"], transport=t) == 0
+    # F1: an unreadable verdict shard makes the tally a floor (carol's CHANGES is
+    # hidden) — `review status` must fail closed, not print a false APPROVED rc 0.
+    assert cli.main(["review", "status", "r", "pr-v", "--json"], transport=t) == 1
+    cap = capsys.readouterr()
+    assert "verdict shard unreadable" in cap.err
+    assert "APPROVED" not in cap.out, "must not print a clean state on an unknown tally"
     assert "team/r/review/pr-v/verdicts/.settled" not in t.store
 
 
@@ -265,6 +270,53 @@ def test_single_slug_transport_error_skipped_and_counted(capsys):
                for r in out), "a sibling slug's timeout must not hide pr-good"
     deg = [r for r in out if r.get("type") == "review-fold-degraded"]
     assert len(deg) == 1 and deg[0]["skipped"] == 1, deg
+
+
+def test_single_slug_many_verdicts_bounded_by_budget(capsys):
+    # F2: the budget was checked only BETWEEN slugs, so ONE review with many
+    # verdict shards read every shard unbounded (N x transport.timeout) with no
+    # degraded marker. The deadline must be threaded into the per-verdict loop:
+    # the fold stops mid-slug, counts it skipped, and surfaces the marker.
+    t = SlowTransport(delay=0.02)
+    cli.main(["review", "request", "r", "pr-big", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    for i in range(40):
+        t.put(f"team/r/review/pr-big/verdicts/rev{i:02d}.md",
+              f"---\ntype: Verdict\nreviewer: rev{i:02d}\nverdict: approve\n---\n")
+    capsys.readouterr()
+    t.reads.clear()
+    start = time.monotonic()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.05)
+    elapsed = time.monotonic() - start
+    # Bounded: reading all 40 shards would take ~0.8s; the budget must cut it off.
+    assert elapsed < 0.4, f"per-slug verdict reads must respect the budget, took {elapsed:.3f}s"
+    shard_reads = [r for r in t.reads if "/verdicts/rev" in r]
+    assert len(shard_reads) < 40, f"budget must stop mid-slug, read {len(shard_reads)}/40"
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1, "a mid-slug budget breach must surface a degraded marker"
+    # coherent accounting: the cut-off slug is counted (scanned) AND skipped.
+    assert deg[0]["total"] == 1 and deg[0]["scanned"] == 1 and deg[0]["skipped"] == 1, deg[0]
+
+
+def test_review_status_removes_stale_marker_on_pending(capsys):
+    # F4: a `.settled` marker planted on a since-reopened (still-PENDING) review
+    # is provably stale. `review status` recomputes the truth AND best-effort
+    # deletes the marker, so the next fan-out fold sees the pending obligation
+    # again instead of settled-skipping it.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-st", "--of", "url",
+              "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    t.put("team/r/review/pr-st/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-st", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "PENDING"
+    assert "team/r/review/pr-st/verdicts/.settled" not in t.store, \
+        "a provably-stale marker must be self-healed away on direct query"
+    # the fold now sees the obligation rather than skipping a 'settled' slug.
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-st"
+               for r in out), "next fold must surface the pending obligation"
 
 
 def test_request_creates_doc_at_tally_path(capsys):
