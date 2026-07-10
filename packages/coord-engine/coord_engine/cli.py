@@ -21,6 +21,7 @@ import pathlib
 import secrets
 import socket
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -129,6 +130,8 @@ def cmd_needs_me(args: argparse.Namespace, transport: Any) -> int:
             if r.get("type") == "review-pending":
                 print(f"  [REVIEW] pending verdict: {r['name']} "
                       f"(required: {', '.join(r['pending_required'])})")
+            elif r.get("type") == "review-fold-degraded":
+                print(_review_degraded_line(r))
             elif r.get("type") == "forge-feedback":
                 print(_forge_feedback_line(r))
             else:
@@ -364,8 +367,59 @@ def _verdicts_prefix(team: str, slug: str) -> str:
     return f"team/{team}/review/{slug}/verdicts/"
 
 
-def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
-    """Shared review fold: doc + verdict shards -> tally dict."""
+# Settled-skip: once a review reaches a terminal APPROVED state with no
+# outstanding required reviewers, a tiny cache marker is dropped IN the verdicts
+# prefix (so the ONE listing the fold already does reveals it — zero extra
+# reads). It is not a `.md` file, so the verdict-reading loop already ignores it.
+# CONTRACT: a settled review is IMMUTABLE — a new verdict on it is a no-op by
+# definition (already APPROVED, required list frozen), and changing the required
+# set re-opens the review only via a NEW slug. The marker is a fold cache, never
+# a source of truth: `review status` recomputes the full tally every time and so
+# self-heals a wrong/stale marker on direct query.
+SETTLED_MARKER = ".settled"
+
+DEFAULT_REVIEW_FOLD_BUDGET = 45.0
+
+
+def _settled_marker_path(team: str, slug: str) -> str:
+    return _verdicts_prefix(team, slug) + SETTLED_MARKER
+
+
+def _review_fold_budget() -> float:
+    """Aggregate deadline for `_pending_reviews_for`, seconds. Env override
+    ``COORD_REVIEW_FOLD_BUDGET``; anything unparseable or non-positive falls back
+    to the default (never let a bad env value disable the fold or make it hang)."""
+    raw = os.environ.get("COORD_REVIEW_FOLD_BUDGET")
+    if raw is None:
+        return DEFAULT_REVIEW_FOLD_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REVIEW_FOLD_BUDGET
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_REVIEW_FOLD_BUDGET
+    return v
+
+
+def _write_settled_marker(transport: Any, team: str, slug: str, *, now: str) -> None:
+    """Best-effort settled-cache write. Failure is swallowed: the marker only
+    speeds the fan-out fold; its absence just means the next fold recomputes."""
+    try:
+        transport.write(
+            _settled_marker_path(team, slug),
+            okf.render_frontmatter({"schema": "review-settled/v1",
+                                    "state": review.APPROVED, "ts": now}),
+        )
+    except Exception:
+        pass
+
+
+def _tally_from_verdict_entries(
+    transport: Any, team: str, slug: str, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Doc read + verdict-shard reads -> tally, given an already-fetched verdicts
+    listing. Split out so the fold can list ONCE, short-circuit on `.settled`,
+    and only then pay for the doc/verdict reads."""
     req_doc = okf.parse_frontmatter(transport.read(_review_doc_path(team, slug))) or {}
     required = req_doc.get("required")
     if isinstance(required, str):
@@ -373,19 +427,29 @@ def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
     elif isinstance(required, list):
         required = [str(r).strip() for r in required if str(r).strip()]
     verdicts: list[dict[str, Any]] = []
-    try:
-        for e in transport.list_dir(_verdicts_prefix(team, slug)):
-            n = e.get("name") or ""
-            if e.get("is_dir") or not n.endswith(".md"):
-                continue
-            fm = okf.parse_frontmatter(transport.read(_verdicts_prefix(team, slug) + n)) or {}
-            # Key by the FILENAME stem (ACL-controlled path), not the frontmatter
-            # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
-            # could shadow alice's real verdict. One verdict file per reviewer.
-            verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
-    except TransportError:
-        pass
+    for e in entries:
+        n = e.get("name") or ""
+        if e.get("is_dir") or not n.endswith(".md"):
+            continue
+        fm = okf.parse_frontmatter(transport.read(_verdicts_prefix(team, slug) + n)) or {}
+        # Key by the FILENAME stem (ACL-controlled path), not the frontmatter
+        # `reviewer:` — otherwise a file `mallory.md` claiming `reviewer: alice`
+        # could shadow alice's real verdict. One verdict file per reviewer.
+        verdicts.append({"reviewer": n[:-3], "verdict": fm.get("verdict")})
     return review.tally(verdicts, required=required)
+
+
+def _review_tally(transport: Any, team: str, slug: str) -> dict[str, Any]:
+    """Shared review fold: doc + verdict shards -> tally dict.
+
+    ALWAYS computes the full tally — it never consults the `.settled` marker, so
+    a corrupt/stale marker can never hide the truth on a direct `review status`
+    query (the marker only serves the fan-out fold, `_pending_reviews_for`)."""
+    try:
+        entries = transport.list_dir(_verdicts_prefix(team, slug))
+    except TransportError:
+        entries = []
+    return _tally_from_verdict_entries(transport, team, slug, entries)
 
 
 def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> list[str]:
@@ -417,16 +481,34 @@ def _role_fresh_holders(transport: Any, team: str, name: str, *, now: str) -> li
     return [str(l.get("agent")) for l in roles.fresh_holders(leases, now=now, sla_hours=sla)]
 
 
-def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str, Any]]:
+def _pending_reviews_for(
+    transport: Any, team: str, agent: str, *, deadline_seconds: Optional[float] = None
+) -> list[dict[str, Any]]:
     """Reviews whose pending_required names the agent — directly or via a role
-    it holds a fresh lease on. Best-effort: any listing failure yields []
+    it holds a fresh lease on. Best-effort: the top listing failing yields []
     (needs-me/briefing must not fail because the review add-on is absent).
 
-    COST: one listing of review/ plus, per unsettled review, the verdict fold —
-    and per unique role-shaped pending name, one role-doc read + lease fold.
-    Fine for inbox polling on teams with tens of reviews; do NOT call in a tight
-    loop. If review counts grow, the right home for this is the reconcile
+    BOUNDED (2026-07-09 incident fix). Two guards keep a degraded transport from
+    turning this into a multi-minute hang read as "bus down":
+
+    - **Settled-skip.** Each unsettled review costs one verdicts listing + a doc
+      read + a read per verdict. Once a review is terminal-APPROVED with no
+      outstanding required reviewers, a `.settled` marker is dropped IN the
+      verdicts prefix; the ONE listing this fold already does then reveals it and
+      the slug is skipped with ZERO further reads. The fold also drops that marker
+      the first time it computes such a tally, so settled history stops costing.
+
+    - **Aggregate budget.** A wall-clock deadline (default 45s, env
+      ``COORD_REVIEW_FOLD_BUDGET``) checked BETWEEN slugs. On breach the scan
+      STOPS and a ``review-fold-degraded`` marker (``scanned``/``total``) is
+      appended — never a clean-looking partial. A single slug whose tally raises
+      ``TransportError`` (Task-1 timeout) is skipped, counted in ``skipped``, and
+      surfaced via the same marker (partial knowledge must be VISIBLE).
+
+    If review counts keep growing the right home for this is the reconcile
     pre-fold (like task rows) — tracked on the bus."""
+    if deadline_seconds is None:
+        deadline_seconds = _review_fold_budget()
     out: list[dict[str, Any]] = []
     now = _iso(_now())
     role_holders: dict[str, list[str]] = {}
@@ -434,14 +516,41 @@ def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str
         entries = transport.list_dir(f"team/{team}/review/")
     except TransportError:
         return []
-    for e in entries:
-        n = e.get("name") or ""
-        if e.get("is_dir") or not n.endswith(".md"):
+    slug_entries = [
+        e for e in entries
+        if not e.get("is_dir") and (e.get("name") or "").endswith(".md")
+    ]
+    total = len(slug_entries)
+    scanned = 0
+    skipped = 0
+    start = time.monotonic()
+    for e in slug_entries:
+        # Budget is checked BETWEEN slugs (after at least one is scanned, so a
+        # slow transport still makes measurable progress before degrading).
+        if scanned and (time.monotonic() - start) >= deadline_seconds:
+            marker = {"type": "review-fold-degraded", "scanned": scanned, "total": total}
+            if skipped:
+                marker["skipped"] = skipped
+            out.append(marker)
+            return out
+        slug = (e.get("name") or "")[:-3]
+        scanned += 1
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+            if any((x.get("name") or "") == SETTLED_MARKER for x in ventries):
+                continue  # settled -> skip entirely, zero reads beyond this listing
+            tally = _tally_from_verdict_entries(transport, team, slug, ventries)
+        except TransportError:
+            # A single slug's tally timed out (Task-1 contract): skip it, keep
+            # scanning the rest, and make the gap visible via `skipped` below.
+            skipped += 1
             continue
-        slug = n[:-3]
-        tally = _review_tally(transport, team, slug)
+        state = tally.get("state")
         pending = tally.get("pending_required") or []
-        if tally.get("state") != "PENDING" or not pending:
+        if state == review.APPROVED and not pending:
+            _write_settled_marker(transport, team, slug, now=now)  # best-effort cache
+            continue
+        if state != "PENDING" or not pending:
             continue
         if agent not in pending:  # direct hit needs no role folding at all
             for r in pending:
@@ -450,7 +559,20 @@ def _pending_reviews_for(transport: Any, team: str, agent: str) -> list[dict[str
         if review.is_pending_for(pending, agent, role_holders):
             out.append({"type": "review-pending", "name": slug,
                         "state": "PENDING", "pending_required": pending})
+    if skipped:
+        # Completed inside budget but some slugs were unreadable: partial
+        # knowledge must be visible, so emit the degraded marker anyway.
+        out.append({"type": "review-fold-degraded", "scanned": scanned,
+                    "total": total, "skipped": skipped})
     return out
+
+
+def _review_degraded_line(r: dict[str, Any]) -> str:
+    line = (f"  review fold degraded: scanned {r.get('scanned')}/{r.get('total')} "
+            f"before budget — run per-slug review status for the rest")
+    if r.get("skipped"):
+        line += f" ({r['skipped']} slug(s) skipped on transport error)"
+    return line
 
 
 def _forge_responsible(transport: Any, team: str) -> dict[str, set]:
@@ -574,6 +696,11 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
 def cmd_review_status(args: argparse.Namespace, transport: Any) -> int:
     team, slug = args.team, args.slug
     result = _review_tally(transport, team, slug)
+    # A direct query recomputes the truth (never trusts the marker) and, when the
+    # result is terminal-settled, refreshes the fold cache so the fan-out fold can
+    # skip this slug next time. Self-healing: a wrong marker gets overwritten here.
+    if result.get("state") == review.APPROVED and not result.get("pending_required"):
+        _write_settled_marker(transport, team, slug, now=_iso(_now()))
     result.update({"team": team, "slug": slug})
     if args.json:
         print(json.dumps(result, indent=2))
@@ -1016,9 +1143,15 @@ def cmd_briefing(args: argparse.Namespace, transport: Any) -> int:
     for r in out["inbox"][:5]:
         print(_line(r))
     print(f"  needs-me: {len(out['needs_me'])} item(s)")
-    print(f"  pending reviews: {len(out['pending_reviews'])} item(s)")
-    for r in out["pending_reviews"][:5]:
+    pend_rows = [r for r in out["pending_reviews"]
+                 if r.get("type") != "review-fold-degraded"]
+    degraded_rows = [r for r in out["pending_reviews"]
+                     if r.get("type") == "review-fold-degraded"]
+    print(f"  pending reviews: {len(pend_rows)} item(s)")
+    for r in pend_rows[:5]:
         print(_line(r))
+    for r in degraded_rows:  # always shown — a degraded fold must never hide
+        print(_review_degraded_line(r))
     print(f"  forge feedback: {len(out.get('forge_feedback') or [])} PR(s)")
     for r in (out.get("forge_feedback") or [])[:5]:
         print(_forge_feedback_line(r))

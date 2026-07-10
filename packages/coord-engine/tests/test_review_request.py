@@ -7,9 +7,157 @@ failure where a reviewer acked directives and the obligation vanished.
 """
 
 import json
+import time
 
 from coord_engine import cli, okf
+from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
+
+
+# --- bounded-review-fold fixtures (Task 2) -----------------------------------
+
+class CountingTransport(FakeTransport):
+    """FakeTransport that records every read/list path for cost assertions."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads: list[str] = []
+        self.lists: list[str] = []
+
+    def read(self, path):
+        self.reads.append(path)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        self.lists.append(prefix)
+        return super().list_dir(prefix)
+
+
+class SlowTransport(CountingTransport):
+    """Every read/list sleeps — models a degraded transport for budget tests."""
+
+    def __init__(self, delay=0.03):
+        super().__init__()
+        self.delay = delay
+
+    def read(self, path):
+        time.sleep(self.delay)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        time.sleep(self.delay)
+        return super().list_dir(prefix)
+
+
+def _approve(t, slug, reviewer="rev"):
+    """Open a single-reviewer review and file that reviewer's approval, leaving
+    the review terminal-APPROVED with no pending_required."""
+    cli.main(["review", "request", "r", slug, "--of", "url",
+              "--reviewer", reviewer], transport=t)
+    t.put(f"team/r/review/{slug}/verdicts/{reviewer}.md",
+          f"---\ntype: Verdict\nreviewer: {reviewer}\nverdict: approve\n---\n")
+
+
+def test_settled_slug_skipped_with_zero_reads(capsys):
+    # First fold computes the APPROVED tally and drops the .settled marker...
+    t = CountingTransport()
+    _approve(t, "pr-set")
+    capsys.readouterr()
+    cli._pending_reviews_for(t, "r", "someone")
+    assert "team/r/review/pr-set/verdicts/.settled" in t.store, "fold must settle it"
+    # ...so a second fold skips the slug with ZERO reads of its doc/verdicts.
+    t.reads.clear()
+    cli._pending_reviews_for(t, "r", "someone")
+    slug_reads = [p for p in t.reads if "pr-set" in p]
+    assert slug_reads == [], f"settled slug must cost zero reads, got {slug_reads}"
+
+
+def test_pending_slug_fully_tallied_and_unmarked(capsys):
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-pend", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    pend = [r for r in out if r.get("type") == "review-pending"]
+    assert len(pend) == 1 and pend[0]["name"] == "pr-pend"
+    assert "team/r/review/pr-pend/verdicts/.settled" not in t.store, \
+        "a pending review must NOT be settled"
+
+
+def test_review_status_writes_settled_marker(capsys):
+    t = FakeTransport()
+    _approve(t, "pr-rs")
+    capsys.readouterr()
+    assert cli.main(["review", "status", "r", "pr-rs", "--json"], transport=t) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
+    assert "team/r/review/pr-rs/verdicts/.settled" in t.store
+
+
+def test_review_status_ignores_wrong_stale_marker(capsys):
+    # A corrupt marker claiming APPROVED must NOT fool a direct query.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-w", "--of", "url",
+              "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    t.put("team/r/review/pr-w/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    cli.main(["review", "status", "r", "pr-w", "--json"], transport=t)
+    res = json.loads(capsys.readouterr().out)
+    assert res["state"] == "PENDING", "review status must compute truth, not trust the marker"
+    assert set(res["pending_required"]) == {"alice", "bob"}
+
+
+def test_fold_budget_emits_degraded_marker(capsys):
+    t = SlowTransport(delay=0.03)
+    for i in range(4):
+        cli.main(["review", "request", "r", f"pr-{i}", "--of", "url",
+                  "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice", deadline_seconds=0.01)
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1, "budget breach must append exactly one degraded marker"
+    assert deg[0]["total"] == 4
+    assert 1 <= deg[0]["scanned"] < 4, deg[0]
+
+
+def test_briefing_and_needs_me_degraded_exit_zero_with_text(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_REVIEW_FOLD_BUDGET", "0.01")
+    t = SlowTransport(delay=0.03)
+    for i in range(4):
+        cli.main(["review", "request", "r", f"pr-{i}", "--of", "url",
+                  "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+
+    assert cli.main(["needs-me", "r", "--agent", "alice"], transport=t) == 0
+    assert "review fold degraded" in capsys.readouterr().out
+
+    assert cli.main(["briefing", "r", "--agent", "alice"], transport=t) == 0
+    assert "review fold degraded" in capsys.readouterr().out
+
+    cli.main(["needs-me", "r", "--agent", "alice", "--json"], transport=t)
+    got = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "review-fold-degraded" for r in got), \
+        "json path must surface the marker as-is"
+
+
+def test_single_slug_transport_error_skipped_and_counted(capsys):
+    class OneSlugFails(CountingTransport):
+        def list_dir(self, prefix):
+            if prefix == "team/r/review/pr-bad/verdicts/":
+                raise TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = OneSlugFails()
+    cli.main(["review", "request", "r", "pr-bad", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    cli.main(["review", "request", "r", "pr-good", "--of", "url",
+              "--reviewer", "alice"], transport=t)
+    capsys.readouterr()
+    out = cli._pending_reviews_for(t, "r", "alice")
+    assert any(r.get("type") == "review-pending" and r.get("name") == "pr-good"
+               for r in out), "a sibling slug's timeout must not hide pr-good"
+    deg = [r for r in out if r.get("type") == "review-fold-degraded"]
+    assert len(deg) == 1 and deg[0]["skipped"] == 1, deg
 
 
 def test_request_creates_doc_at_tally_path(capsys):
