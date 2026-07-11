@@ -1646,6 +1646,53 @@ def test_presence_shard_unreadable_counts_skipped_not_crash():
     assert {s.get("agent") for s in shards} == {"amy"}   # partial roster: readable shard only
 
 
+def test_presence_shards_deadline_spent_before_listing_skips_call():
+    # Codex P1 (round 2): an already-spent deadline must SKIP the listing entirely
+    # (never pay one more transport timeout of stall) and return the degraded
+    # marker, not a falsely-clean empty roster.
+    class _ListingMustNotRun(FakeTransport):
+        def list_dir(self, prefix):
+            if "/presence/" in prefix:
+                raise AssertionError("listing must not run once the deadline is spent")
+            return super().list_dir(prefix)
+
+    t = _ListingMustNotRun()
+    _seed_presence(t)
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() - 1)
+    assert shards == []
+    assert marker == {"type": "presence-degraded", "scanned": 0, "total": 0}
+
+
+def test_presence_shards_slow_listing_overrun_visible_even_when_empty():
+    # Codex P1 (round 2): the deadline passing DURING the listing itself must be
+    # detected AFTER the blocking op — even when the listing returns [] (no shard
+    # reads happen, so the per-shard loop can't catch it): `([], None)` here would
+    # be a falsely-clean empty roster despite blowing the budget.
+    class _SlowListingOnly(FakeTransport):
+        def list_dir(self, prefix):
+            if "/presence/" in prefix:
+                _time.sleep(0.05)
+            return super().list_dir(prefix)
+
+    t = _SlowListingOnly()  # NO shards seeded: listing returns [] after the stall
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() + 0.01)
+    assert shards == []
+    assert marker is not None and marker["type"] == "presence-degraded"
+    assert marker["scanned"] == 0 and marker["total"] == 0
+
+    # And with shards present, the post-listing overrun stops before any read.
+    t2 = _SlowListingOnly()
+    _seed_presence(t2)
+    reads = []
+    orig_read = t2.read
+    t2.read = lambda p: (reads.append(p), orig_read(p))[1]
+    shards2, marker2 = cli._presence_shards_bounded(t2, "r", deadline=_time.monotonic() + 0.01)
+    assert marker2 is not None and marker2["type"] == "presence-degraded"
+    assert marker2["scanned"] == 0 and marker2["total"] == 4
+    assert [p for p in reads if "/presence/" in p] == [], \
+        "no shard reads once the listing spent the budget"
+
+
 def test_briefing_presence_degraded_exits_zero_other_sections_intact(capsys, monkeypatch):
     monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
     t = _SlowPresenceTransport(delay=0.03)

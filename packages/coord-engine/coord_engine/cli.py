@@ -2551,12 +2551,22 @@ def _presence_shards_bounded(
     forge/review fold discipline: the deadline is checked BOTH before and after
     each blocking read (a single stalled read can't return a clean row — overshoot
     is bounded by ONE read), a listed-but-unreadable shard (read -> None) counts as
-    ``skipped``, and a top-level listing failure yields ``scanned=0``. On any
-    breach/failure a single ``presence-degraded`` row
-    ``{type, scanned, total[, skipped]}`` (same shape family as ``forge-degraded``)
-    is returned alongside the PARTIAL roster — the section never hangs, never
-    crashes, never silently truncates. Dashboards/digests keep the unbounded
-    ``_presence_shards`` (they are not on the briefing hang path)."""
+    ``skipped``, and a top-level listing failure yields ``scanned=0``. The LISTING
+    itself is a blocking op under the same discipline (codex round-2 P1): a deadline
+    already spent when we get here skips the call entirely (an earlier section spent
+    the budget — paying one more transport timeout of stall would re-open the hang),
+    and an overrun detected AFTER the listing surfaces the marker even when the
+    listing returned [] (otherwise a slow empty listing fell through the per-shard
+    loop to ``([], None)`` — a falsely-clean empty roster). On any breach/failure a
+    single ``presence-degraded`` row ``{type, scanned, total[, skipped]}`` (same
+    shape family as ``forge-degraded``) is returned alongside the PARTIAL roster —
+    the section never hangs, never crashes, never silently truncates.
+    Dashboards/digests keep the unbounded ``_presence_shards`` (they are not on the
+    briefing hang path)."""
+    if deadline is not None and time.monotonic() >= deadline:
+        # Budget already spent before the section started: skip the listing — don't
+        # pay one more blocking op. total=0: the roster size is UNKNOWN (never listed).
+        return [], {"type": "presence-degraded", "scanned": 0, "total": 0}
     pfx = _presence_prefix(team)
     try:
         entries = transport.list_dir(pfx)
@@ -2567,6 +2577,12 @@ def _presence_shards_bounded(
     files = [e for e in entries
              if not e.get("is_dir") and (e.get("name") or "").endswith(".md")]
     total = len(files)
+    if deadline is not None and time.monotonic() >= deadline:
+        # The deadline passed DURING the listing: detect the overrun immediately
+        # after the blocking op — even for total==0, where the per-shard loop below
+        # never runs and could not surface it. No shard is read (the budget is
+        # spent); the listing we already paid for still prices ``total`` honestly.
+        return [], {"type": "presence-degraded", "scanned": 0, "total": total}
     shards: list[dict[str, Any]] = []
     scanned = 0
     skipped = 0
