@@ -420,6 +420,7 @@ def test_cli_respond_closes_and_records(capsys):
     assert cli.main(["respond", "r", slug, "-o", "answered", "-a", "amy"], transport=t) == 0
     out = capsys.readouterr().out
     assert "closed" in out
+    assert "response recorded — the owner's listen surfaces it" in out  # reply-leg breadcrumb
     assert okf.parse_frontmatter(t.store[f"team/r/task/{slug}.md"])["status"] == "done"
     assert any(p.startswith(f"team/r/_coord/responses/{slug}/") for p in t.store)
 
@@ -436,6 +437,58 @@ def test_cli_respond_response_paths_do_not_collide(monkeypatch, capsys):
     capsys.readouterr()
     paths = [p for p in t.store if p.startswith("team/r/_coord/responses/waiting/")]
     assert len(paths) == 2
+
+
+# --- listen breadcrumbs: every ask points at the reply/verdict leg -----------
+
+def test_tell_prints_replies_breadcrumb_when_sender_known(capsys):
+    t = FakeTransport()
+    assert cli.main(["tell", "r", "amy", "Do it", "--from", "boss"], transport=t) == 0
+    out = capsys.readouterr().out
+    assert "replies: coord-engine listen r --agent boss" in out
+
+
+def test_broadcast_prints_replies_breadcrumb_when_sender_known(capsys):
+    t = FakeTransport()
+    assert cli.main(["broadcast", "r", "All hands", "--from", "boss"], transport=t) == 0
+    assert "replies: coord-engine listen r --agent boss" in capsys.readouterr().out
+
+
+def test_remind_prints_replies_breadcrumb_when_sender_known(capsys):
+    t = FakeTransport()
+    assert cli.main(["remind", "r", "amy", "2h", "Soon", "--from", "boss"], transport=t) == 0
+    assert "replies: coord-engine listen r --agent boss" in capsys.readouterr().out
+
+
+def test_tell_sender_from_env_when_no_from_flag(capsys, monkeypatch):
+    monkeypatch.setenv("FULCRA_COORD_AGENT", "envboss")
+    t = FakeTransport()
+    assert cli.main(["tell", "r", "amy", "Env sender"], transport=t) == 0
+    assert "replies: coord-engine listen r --agent envboss" in capsys.readouterr().out
+
+
+def test_tell_no_breadcrumb_when_sender_anonymous(capsys, monkeypatch):
+    # No --from and no FULCRA_COORD_AGENT: only the host fallback exists, which is
+    # not an identity anyone listens as -> print NO breadcrumb (a hostname would
+    # mislead the reader into `listen --agent coord-reconcile:...`).
+    monkeypatch.delenv("FULCRA_COORD_AGENT", raising=False)
+    t = FakeTransport()
+    assert cli.main(["tell", "r", "amy", "Anon"], transport=t) == 0
+    assert "replies:" not in capsys.readouterr().out
+
+
+def test_later_backlog_has_no_replies_breadcrumb(capsys):
+    # A @backlog capture is not an ask awaiting a reply -> no breadcrumb even with --from.
+    t = FakeTransport()
+    assert cli.main(["later", "r", "Someday", "--from", "boss"], transport=t) == 0
+    assert "replies:" not in capsys.readouterr().out
+
+
+def test_review_request_prints_await_verdicts_breadcrumb(capsys):
+    t = FakeTransport()
+    assert cli.main(["review", "request", "r", "pr-9", "--of", "url",
+                     "--reviewer", "alice", "--from", "boss"], transport=t) == 0
+    assert "await verdicts: coord-engine listen r --agent boss" in capsys.readouterr().out
 
 
 def test_reconcile_gcs_orphaned_ack_shards(capsys):

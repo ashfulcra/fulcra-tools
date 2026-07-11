@@ -85,7 +85,18 @@ skills. Subagent-only work stays OFF the bus.
   a direct push to `main`**. The handshake rides the bus, not the forge:
   `coord-engine review request <team> <slug> --of <artifact> --reviewer <role>`
   opens a durable obligation that sits in the reviewer's `needs-me` until their
-  verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`;
+  verdict file exists at `team/<team>/review/<slug>/verdicts/<reviewer>.md`.
+  The request is **atomic**: with the doc landed it also delivers one directive
+  per required reviewer through the canonical hash-slug path (so a verb-opened
+  review fires each reviewer's inbox/`listen` — never hand-send a review tell),
+  and a partial notification failure is reported loud (rc 1) naming exactly which
+  reviewers were and were not notified — and is **retryable**: re-running the SAME
+  request (same `of`/`--reviewer` set/`--from`) is idempotent recovery, re-notifying
+  only the reviewers a prior partial failure dropped (the doc is left byte-unchanged,
+  already-delivered directives dedupe rc 0), so no reviewer is stranded by the
+  exists-guard; a re-request with a *different* `of`/required-set/requester is a
+  loud rc 1 conflict (a changed required set re-opens only via a new slug), and a
+  present-but-unreadable doc fails closed (rc 1, never overwritten);
   `coord-engine review status <team> <slug>` computes APPROVED/CHANGES/PENDING
   and gates the merge. The `<artifact>` is an opaque ref (PR#, branch, commit
   SHA, URL, or a non-code deliverable), so the handshake works with any forge
@@ -107,6 +118,27 @@ skills. Subagent-only work stays OFF the bus.
   (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
   rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a
   tally built over an unlistable prefix) — so a degraded transport can never green-light a merge.
+- **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
+  <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
+  against a per-agent state file — new inbox directives (the same fold `inbox` shows), new **responses
+  to directives you own** (the reply leg `respond` writes but nothing used to surface), and new
+  **verdicts on reviews you requested** (`requested_by == you` — the await leg of `review request`,
+  bounded: one review-root listing per tick, requester cached; a `.settled` review first emits its
+  unseen verdicts plus one terminal `SETTLED <slug>: APPROVED` line, then is dropped so it is never
+  listed again — the settling tick is the standard single-reviewer flow, so the final verdict always
+  emits). One event line per new item (`DIRECTIVE`/`RESPONSE`/`VERDICT`/`SETTLED`), `--json` for
+  one object per line; a quiet tick prints NOTHING
+  (streaming-consumer friendly). It never advances state over an unread tick (a failed read re-surfaces
+  the pending event on recovery) and prints `LISTEN DEGRADED:` to stderr **once per source per streak** —
+  the `inbox` (summaries index), `responses` (responses subtree), `orphans` (a response whose owning
+  directive won't resolve), and `verdicts` (review root / review doc / verdict shard unreadable) streaks
+  are independent, so a permanent orphan can't pin the flag and silence a fresh transport outage. `--once` **always exits 0** (a tick never fails the schedule; no output means
+  nothing new, not an error) — run it on a scheduler, or run bare for a poll loop (`--interval`,
+  SIGINT-clean). Every send verb arms you: `tell`/`broadcast`/`remind` print `replies: coord-engine listen
+  <team> --agent <sender>` and `review request` prints `await verdicts: …` (both only when the sender
+  identity is known — `--from` or `FULCRA_COORD_AGENT`, never the bare host tag), and `respond` confirms
+  `the owner's listen surfaces it`. The launchd/cron listener, live sessions, Codex, and headless all
+  delegate to this one verb (see [`fulcra-agent-automation` §2](skills/fulcra-agent-automation/SKILL.md)).
 - **Delivery rule.** The human-visible report is a turn's (or tick's)
   **terminal output** — composed last, after every tool call. Text followed by
   more tool activity may never render ("sent" is not "delivered"), so anything

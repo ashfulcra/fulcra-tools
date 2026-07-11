@@ -51,14 +51,54 @@ def _human() -> str:
     return os.environ.get("FULCRA_COORD_HUMAN") or "human"
 
 
-def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
-    raw = transport.read(rec.summaries_path(team))
-    if not raw:
-        return []
+def _known_sender(args: argparse.Namespace) -> Optional[str]:
+    """The sender identity a reply would be addressed to, or None when only the
+    anonymous host fallback is available. `_create_directive` records ownership as
+    ``--from`` or ``FULCRA_COORD_AGENT`` (else ``coord-reconcile:<host>``); the
+    breadcrumb points others at ``listen --agent <sender>``, so we print it only
+    when the sender is a real identity someone actually listens as — never the
+    bare host tag."""
+    return getattr(args, "sender", None) or os.environ.get("FULCRA_COORD_AGENT")
+
+
+def _replies_breadcrumb(team: str, sender: str) -> str:
+    return f"replies: coord-engine listen {team} --agent {sender}"
+
+
+def _load_rows_status(transport: Any, team: str) -> tuple[list[dict[str, Any]], bool]:
+    """Summaries rows plus whether the index was READABLE. ``ok`` is False only for
+    an index we could not read as intended — present-but-unparseable, or a read/
+    listing that failed under a degraded transport. A genuinely-absent index (a
+    fresh team, no reconcile yet) is empty-and-readable (``ok`` True): absence is a
+    normal empty state, never conflated with failure.
+
+    ``read`` returning None is ambiguous (absent vs transport-down — the T1 lesson),
+    so a None is disambiguated with one parent listing: ``list_dir`` RAISES on a
+    transport failure and its entry names distinguish missing from present-but-
+    unreadable (the #343 discipline). This is what lets `listen` surface a summaries
+    failure instead of folding it to a silent [] indistinguishable from empty."""
+    path = rec.summaries_path(team)
     try:
-        return aggregate.aggregate_rows(json.loads(raw))
+        raw = transport.read(path)
     except Exception:
-        return []
+        return [], False
+    if raw:
+        try:
+            return aggregate.aggregate_rows(json.loads(raw)), True
+        except Exception:
+            return [], False  # index present but corrupt -> unreadable, surface it
+    parent, entry = path.rsplit("/", 1)
+    try:
+        names = {e.get("name") for e in transport.list_dir(parent + "/")}
+    except TransportError:
+        return [], False  # transport down -> unknown, not a confirmed-empty index
+    if entry in names:
+        return [], False  # index there yet unreadable (read returned None) -> degraded
+    return [], True  # genuinely absent -> a real, readable empty
+
+
+def _load_rows(transport: Any, team: str) -> list[dict[str, Any]]:
+    return _load_rows_status(transport, team)[0]
 
 
 def _line(row: dict[str, Any]) -> str:
@@ -772,6 +812,87 @@ def _forge_feedback_line(r: dict[str, Any]) -> str:
             f"{r.get('count')} item(s) from {who}")
 
 
+def _normalize_required(required: Any) -> list[str]:
+    """Coerce a doc's ``required:`` field (list or legacy comma-string) into a
+    clean list of stripped, non-empty reviewer names — the shape `review.tally`
+    and the request-identity comparison both consume."""
+    if isinstance(required, str):
+        return [r.strip() for r in required.split(",") if r.strip()]
+    if isinstance(required, list):
+        return [str(r).strip() for r in required if str(r).strip()]
+    return []
+
+
+def _review_request_diff(
+    fm: dict[str, Any], *, of: Any, required: list[str], requested_by: str,
+) -> Optional[tuple[str, str, str]]:
+    """Compare an existing review doc's frontmatter against the request being made.
+
+    Returns ``None`` when it is the SAME request (idempotent recovery), else
+    ``(field, existing_value, requested_value)`` naming the FIRST identity field
+    that differs. Request identity is ``requested_by`` + ``of`` + the required SET
+    (order-normalized): a different requester re-opening someone else's review is a
+    conflict (not a silent recovery), and a changed required set re-opens a review
+    only via a NEW slug (the settled-review immutability contract)."""
+    ex_rb = str(fm.get("requested_by") or "")
+    if ex_rb != (requested_by or ""):
+        return ("requested_by", ex_rb, requested_by or "")
+    ex_of = str(fm.get("of") or "")
+    if ex_of != (str(of) if of is not None else ""):
+        return ("of", ex_of, str(of) if of is not None else "")
+    ex_req = sorted(_normalize_required(fm.get("required")))
+    if ex_req != sorted(required):
+        return ("required set", ", ".join(ex_req), ", ".join(sorted(required)))
+    return None
+
+
+def _deliver_all_review_directives(
+    transport: Any, team: str, slug: str, required: list[str], *, owner: str, of: str,
+) -> tuple[list[str], list[str]]:
+    """Deliver ONE directive per required reviewer through the canonical hash-slug
+    path. Returns ``(delivered, failed)``. Payload-hash dedup makes this idempotent:
+    a reviewer whose directive already landed re-verifies as "already delivered"
+    (rc 0), so this is safe to re-run on a recovery retry — it fills the gaps."""
+    delivered: list[str] = []
+    failed: list[str] = []
+    for r in required:
+        if _deliver_review_directive(transport, team, slug, r,
+                                     sender=owner, of=of) == 0:
+            delivered.append(r)
+        else:
+            failed.append(r)
+    return delivered, failed
+
+
+def _print_partial_review_failure(
+    slug: str, delivered: list[str], failed: list[str], *, doc_note: str,
+) -> None:
+    """The loud partial-failure line: names exactly who was NOT notified and who
+    was, and points the requester at the retry that dedupes the delivered ones."""
+    print(f"review {slug} {doc_note} but reviewer notification FAILED for: "
+          f"{', '.join(failed)} (delivered: {', '.join(delivered) or 'none'}) — "
+          f"retry the request to re-notify; delivered directives dedupe by payload "
+          f"hash", file=sys.stderr)
+
+
+def _print_review_success(
+    args: argparse.Namespace, team: str, slug: str, required: list[str], *,
+    recovered: bool,
+) -> None:
+    if recovered:
+        print(f"review {slug} already exists (matching) — re-verified reviewer "
+              f"delivery (required: {', '.join(required)})")
+    else:
+        print(f"review {slug} requested (required: {', '.join(required)})")
+    for r in required:
+        print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
+    # Point the requester at the await primitive for the verdict wait (they poll
+    # `review status`; `listen` is the same arm-a-listener discipline every ask uses).
+    sender = _known_sender(args)
+    if sender:
+        print(f"await verdicts: coord-engine listen {team} --agent {sender}")
+
+
 def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
     """Open a review with named REQUIRED reviewers, making the obligation
     structurally durable: the doc lands at the SAME path `_review_tally` reads
@@ -794,13 +915,68 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
               file=sys.stderr)
         return 2
     path = _review_doc_path(team, slug)
-    if transport.read(path) is not None:
-        print(f"review {slug} already exists", file=sys.stderr)
+    owner = getattr(args, "sender", None) or _host()
+    existing = transport.read(path)
+    if existing is not None:
+        # A doc already occupies the slot. This is NOT automatically a conflict:
+        # the atomic-delivery partial-failure path below tells the requester to
+        # RETRY, and after a partial failure the doc necessarily EXISTS — so a
+        # blanket "already exists" rc 1 would strand the un-notified reviewers
+        # forever (the exact orphan class this command exists to kill). Parse the
+        # doc and adjudicate: matching request -> idempotent recovery; different
+        # request -> loud conflict; unparseable -> loud, never overwrite.
+        existing_fm = okf.parse_frontmatter(existing)
+        if existing_fm is None:
+            # Present but unparseable/corrupt: we cannot prove it is OUR request,
+            # and overwriting could clobber a live review. Fail loud, never write.
+            print(f"review {slug} already exists but is unreadable (corrupt "
+                  f"frontmatter) — cannot verify, will not overwrite; retry",
+                  file=sys.stderr)
+            return 1
+        diff = _review_request_diff(existing_fm, of=args.of, required=required,
+                                    requested_by=owner)
+        if diff is not None:
+            field, existing_val, requested_val = diff
+            print(f"review {slug} already exists with a different {field} "
+                  f"(existing: {existing_val!r}, requested: {requested_val!r}) — a "
+                  f"different {field} re-opens a review only via a new slug; "
+                  f"refusing to overwrite", file=sys.stderr)
+            return 1
+        # IDEMPOTENT RECOVERY: same requested_by + of + required set. Skip the doc
+        # write (it already holds our request), keep the harmless stale-marker
+        # delete (a prior fold may have settled it; its absence just makes the next
+        # fold recompute), and RE-RUN reviewer delivery for EVERY required reviewer
+        # — hash-path dedup re-verifies the ones that landed (rc 0 "already
+        # delivered") and delivers the ones a prior partial failure dropped. This
+        # is what makes a partial-delivery retry CONVERGE instead of dying here.
+        transport.delete(_settled_marker_path(team, slug))
+        delivered, failed = _deliver_all_review_directives(
+            transport, team, slug, required, owner=owner, of=args.of)
+        if failed:
+            _print_partial_review_failure(slug, delivered, failed,
+                                          doc_note="already exists (matching)")
+            return 1
+        _print_review_success(args, team, slug, required, recovered=True)
+        return 0
+    # existing is None is AMBIGUOUS (T1: a read timeout and a genuinely-absent doc
+    # both map to None). Treating it as an empty slot would let a degraded transport
+    # clobber a live review (I1 / post-#342). Confirm absence via a directory
+    # listing before writing: list_dir RAISES TransportError on failure (loud
+    # through main's catch-all), and its entry names distinguish missing from
+    # present-but-unreadable. One list_dir per request is cheap.
+    parent, entry = path.rsplit("/", 1)
+    names = {e.get("name") for e in transport.list_dir(parent + "/")}
+    if entry in names:
+        # Present in the listing yet the read returned None: transport degraded
+        # mid-op. We cannot verify what the doc holds and must not overwrite it.
+        print(f"review {slug}: doc present but unreadable (transport degraded) — "
+              f"cannot verify, will not overwrite; retry", file=sys.stderr)
         return 1
+    # Genuinely absent -> write the fresh review doc.
     fm = {
         "type": "Review",
         "schema": "review-request/v1",
-        "requested_by": getattr(args, "sender", None) or _host(),
+        "requested_by": owner,
         "of": args.of,
         "required": required,
         "ts": _iso(_now()),
@@ -813,16 +989,25 @@ def cmd_review_request(args: argparse.Namespace, transport: Any) -> int:
         # obligation is durable.
         print("review request write failed (transport)", file=sys.stderr)
         return 1
-    # The exists-guard above passes on a read timeout, so a re-request can land a
-    # fresh required list on top of a review that a prior fold already marked
-    # `.settled`. That stale marker would hide the NEW obligation from every
-    # settled-skipping fold (I2). Best-effort clear it (delete is timeout-safe ->
-    # False, which we ignore): the marker is only a fold cache, and its absence
-    # just makes the next fold recompute the (now-pending) tally.
+    # A fresh doc can carry no stale `.settled` marker, but a since-deleted-and-
+    # reopened slug at the same path could; clear it best-effort (delete is
+    # timeout-safe -> False, which we ignore) so the next fold recomputes.
     transport.delete(_settled_marker_path(team, slug))
-    print(f"review {slug} requested (required: {', '.join(required)})")
-    for r in required:
-        print(f"  reviewer {r} -> file verdict at {_verdicts_prefix(team, slug)}{r}.md")
+    # Atomic notification: with the doc durably landed, deliver ONE directive per
+    # required reviewer through the canonical hash-slug directive path, so a
+    # verb-opened review FIRES the reviewer's inbox/listen — this is what removes
+    # the reason agents hand-send review tells (the PR-344 orphan class) and makes
+    # the listener's `await verdicts` breadcrumb genuine. Same C1 write discipline
+    # as the doc: any reviewer-directive fail is reported LOUD naming exactly what
+    # landed and what did not (partial is never silent), and the requester's retry
+    # re-enters the idempotent-recovery path above to fill the gaps.
+    delivered, failed = _deliver_all_review_directives(
+        transport, team, slug, required, owner=owner, of=args.of)
+    if failed:
+        _print_partial_review_failure(slug, delivered, failed,
+                                      doc_note="requested (doc written)")
+        return 1
+    _print_review_success(args, team, slug, required, recovered=False)
     return 0
 
 
@@ -957,6 +1142,10 @@ def cmd_continuity_resume(args: argparse.Namespace, transport: Any) -> int:
 
 def _ack_path(team: str, slug: str, agent: str) -> str:
     return f"team/{team}/_coord/acks/{slug}/{tasks.agent_key(agent)}.md"
+
+
+def _responses_prefix(team: str) -> str:
+    return f"team/{team}/_coord/responses/"
 
 
 def _response_path(team: str, slug: str, stamp: str) -> str:
@@ -1099,8 +1288,48 @@ def _create_directive(args: argparse.Namespace, transport: Any, *, assignee: str
     except tasks.TaskError as e:
         print(f"directive failed: {e}", file=sys.stderr)
         return 1
-    return _write_directive(transport, args, slug=slug, content=content,
-                            payload=payload, assignee=assignee, not_before=not_before)
+    rc = _write_directive(transport, args, slug=slug, content=content,
+                          payload=payload, assignee=assignee, not_before=not_before)
+    # On a delivered ask (not a backlog capture — @backlog awaits no reply), point
+    # the sender at the reply leg: the return of `respond` surfaces in their listen.
+    if rc == 0 and assignee != directives.BACKLOG:
+        sender = _known_sender(args)
+        if sender:
+            print(_replies_breadcrumb(args.team, sender))
+    return rc
+
+
+def _deliver_review_directive(transport: Any, team: str, slug: str, reviewer: str,
+                              *, sender: str, of: str) -> int:
+    """Deliver ONE review-request directive to ``reviewer`` via the canonical
+    hash-slug directive path — the SAME ``_write_directive`` delivery (payload-hash
+    dedup + C1 write-verification) every ``tell`` gets, so a verb-opened review
+    NOTIFIES its reviewers instead of relying on a hand-sent tell (the PR-344
+    orphan class: a review directive sent by hand, with no verdict target). The
+    text carries the exact slug AND the verdict-file path (the fail-closed watcher
+    contract). Returns ``_write_directive``'s rc (0 delivered/deduped, 1 failed).
+
+    Distinct (slug, reviewer) pairs produce distinct payloads -> distinct paths,
+    so reviewers never collide and a re-request idempotently dedupes."""
+    verdict_file = f"{_verdicts_prefix(team, slug)}{reviewer}.md"
+    title = f"REVIEW REQUEST: {slug}"
+    summary = f"Verdict owed on {of} — file it at {verdict_file}"
+    next_action = f"file your verdict at {verdict_file}"
+    payload = _directive_payload(title, summary, next_action, reviewer)
+    dslug = f"{tasks.slugify(title)}-{_payload_hash(payload)}"
+    try:
+        _, content = tasks.new_task_doc(
+            title, now=_iso(_now()), status="proposed", owner=sender,
+            assignee=reviewer, summary=summary, next_action=next_action,
+            kind="directive", slug=dslug,
+        )
+    except tasks.TaskError as e:
+        print(f"review-request directive for {reviewer} failed: {e}", file=sys.stderr)
+        return 1
+    # `_write_directive` only needs args.team; a minimal namespace carries it.
+    return _write_directive(transport, argparse.Namespace(team=team), slug=dslug,
+                            content=content, payload=payload, assignee=reviewer,
+                            not_before=None)
 
 
 def cmd_tell(args: argparse.Namespace, transport: Any) -> int:
@@ -1140,6 +1369,38 @@ def cmd_handoff(args: argparse.Namespace, transport: Any) -> int:
     return 0
 
 
+def _inbox_rows_status(transport: Any, team: str, agent: str, *,
+                       include_backlog: bool = False) -> tuple[list[dict[str, Any]], bool]:
+    """The open-directive fold `inbox` surfaces for `agent`, plus whether the
+    summaries index was readable (``ok``). Extracted so `listen` awaits the SAME
+    source `inbox` shows — one inbox computation, no second implementation to
+    drift. Never raises: an unreadable summaries read folds to an empty list, but
+    now with ``ok=False`` so a listener can surface the degradation rather than
+    mistake it for an empty inbox."""
+    now = _iso(_now())
+    rows, ok = _load_rows_status(transport, team)
+    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
+    stale_visible = directives.inbox(rows, acks, agent, now=now,
+                                     include_backlog=include_backlog)
+    for r in stale_visible:
+        slug = str(r.get("name") or "")
+        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(team, slug, agent)):
+            acks.setdefault(slug, []).append(agent)
+    got = directives.inbox(rows, acks, agent, now=now, include_backlog=include_backlog)
+    # read-your-write: an ack written since the last reconcile hides the item
+    # for the acking agent immediately (live shard check, only for shown items).
+    return [r for r in got
+            if transport.read(_ack_path(team, str(r.get("name")), agent)) is None], ok
+
+
+def _inbox_rows(transport: Any, team: str, agent: str, *,
+                include_backlog: bool = False) -> list[dict[str, Any]]:
+    """Rows-only view of ``_inbox_rows_status`` for callers that don't surface the
+    readable flag (cmd_inbox / briefing keep their existing degradation behavior)."""
+    return _inbox_rows_status(transport, team, agent,
+                              include_backlog=include_backlog)[0]
+
+
 def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
     agent = args.agent or _host()
     if args.ack:
@@ -1148,20 +1409,7 @@ def cmd_inbox(args: argparse.Namespace, transport: Any) -> int:
                         okf.render_frontmatter(fm) + "\nacked\n")
         print(f"acked {args.ack}")
         return 0
-    rows = _load_rows(transport, args.team)
-    acks = {str(r.get("name")): (r.get("acked_by") or []) for r in rows}
-    stale_visible = directives.inbox(rows, acks, agent, now=_iso(_now()),
-                                     include_backlog=args.all)
-    for r in stale_visible:
-        slug = str(r.get("name") or "")
-        if agent not in (acks.get(slug) or []) and transport.read(_ack_path(args.team, slug, agent)):
-            acks.setdefault(slug, []).append(agent)
-    got = directives.inbox(rows, acks, agent, now=_iso(_now()),
-                           include_backlog=args.all)
-    # read-your-write: an ack written since the last reconcile hides the item
-    # for the acking agent immediately (live shard check, only for shown items).
-    got = [r for r in got
-           if transport.read(_ack_path(args.team, str(r.get("name")), agent)) is None]
+    got = _inbox_rows(transport, args.team, agent, include_backlog=args.all)
     if args.json:
         print(json.dumps(got, indent=2))
         return 0
@@ -1186,7 +1434,361 @@ def cmd_respond(args: argparse.Namespace, transport: Any) -> int:
         print(f"responded {args.name}: {args.outcome} (closed)")
     except tasks.TaskError as e:
         print(f"responded {args.name}: {args.outcome} (response recorded; not closed: {e})")
+    # The reply leg: this shard is what the directive's owner sees on their listen.
+    print("response recorded — the owner's listen surfaces it")
     return 0
+
+
+# --- listen: the await leg of `tell` (this task) ---------------------------
+#
+# The bus had send verbs (tell/broadcast/remind) and `respond`, but nothing that
+# SURFACED either new inbox directives or the responses that come back to a
+# directive's owner — so `respond` wrote shards no fold delivered, and the reply
+# leg of `tell` did not exist. Three agents independently hand-rolled watchers
+# around `inbox --json`; `listen` ports that id-diff into the engine so the
+# lifecycle owns listening. Three event sources, each id-diff'd against a state
+# file, per tick:
+#   1. new inbox directives for the agent (the SAME fold `inbox` shows).
+#   2. new responses to directives the agent OWNS (the reply leg).
+#   3. new verdicts on reviews the agent REQUESTED (`requested_by == agent`) —
+#      the await leg of `review request`, now that a verb-opened review notifies
+#      its reviewers atomically (so the `await verdicts` breadcrumb is genuine).
+#
+# Four failure SOURCES are tracked independently — inbox (summaries index),
+# responses (the responses subtree transport), orphans (a response whose owning
+# directive doc won't resolve), and verdicts (the review root / a review doc /
+# a verdict shard unreadable). Each is its own degraded streak.
+#
+# Disciplines (each a real incident this week; state is ADD-ONLY so they hold):
+#   * No false advance — a failed/None read during a tick must NOT mark unknown
+#     ids as seen. State is a UNION of affirmatively-processed ids, so a degraded
+#     read contributes nothing and recovery re-surfaces the still-pending id.
+#   * Fail visible, no flooding — a transport failure emits `LISTEN DEGRADED:`
+#     ONCE per consecutive-failure streak, PER SOURCE (the streak flags persist IN
+#     the state file, so a scheduler re-running `--once` does not re-alarm every
+#     tick). Per-source is load-bearing: a single shared flag would let a permanent
+#     orphan (`owner unresolved` every tick) pin it TRUE forever and silence a NEW,
+#     distinct outage. Each source alerts once per ITS OWN streak and resets on ITS
+#     OWN recovery. It goes to STDERR so `--json` stdout stays a clean
+#     one-object-per-line event stream for filter-free streaming consumers.
+#   * Quiet ticks print NOTHING to stdout (the monitor-flood lesson) — only
+#     `--verbose` emits a heartbeat, and only to stderr.
+#   * Bounded cost — one list_dir of _coord/responses/ + per-slug work ONLY for
+#     slugs the agent owns; a slug's ownership is read once (from its task doc)
+#     and cached in state, so not-owned / broadcast slugs cost nothing after the
+#     first classification and the scan is never proportional to total history.
+
+
+# The independent degraded streaks. Each source alarms once per its own streak.
+_LISTEN_SOURCES = ("inbox", "responses", "orphans", "verdicts")
+
+
+def _fresh_degraded() -> dict[str, bool]:
+    return {s: False for s in _LISTEN_SOURCES}
+
+
+def _coerce_degraded(value: Any) -> dict[str, bool]:
+    """Normalize the persisted ``degraded`` field to the per-source dict. A legacy
+    single bool (pre per-source schema) migrates to the same value on EVERY source:
+    an in-progress streak stays suppressed across the upgrade (no spurious re-alarm)
+    and a clean state stays clean — either way each source then alarms/resets on its
+    own going forward."""
+    if isinstance(value, dict):
+        return {s: bool(value.get(s)) for s in _LISTEN_SOURCES}
+    return {s: bool(value) for s in _LISTEN_SOURCES}
+
+
+def _listen_state_dir() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("COORD_LISTENER_STATE")
+                        or (pathlib.Path.home() / ".cache" / "coord-engine"))
+
+
+def _listen_state_path(team: str, agent: str) -> pathlib.Path:
+    # agent_key is injective (distinct agents never share a state file); team is
+    # slugified for a filesystem-safe name.
+    return _listen_state_dir() / f"listen-{tasks.slugify(team) or 'team'}-{tasks.agent_key(agent)}.json"
+
+
+def _load_listen_state(path: pathlib.Path) -> dict[str, Any]:
+    """Load the one-doc state, tolerating a missing/corrupt/foreign file (fresh
+    default). Never raises — a tick never fails on its own bookkeeping."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "inbox_ids": list(data.get("inbox_ids") or []),
+        "response_keys": list(data.get("response_keys") or []),
+        "slug_owned": dict(data.get("slug_owned") or {}),
+        # Source 3 (verdicts) bookkeeping — legacy state files lack these keys;
+        # they default empty, so an upgrade re-surfaces nothing spuriously.
+        "verdict_keys": list(data.get("verdict_keys") or []),
+        "review_requested": dict(data.get("review_requested") or {}),
+        "settled_reviews": list(data.get("settled_reviews") or []),
+        "degraded": _coerce_degraded(data.get("degraded")),
+    }
+
+
+def _save_listen_state(path: pathlib.Path, state: dict[str, Any]) -> None:
+    # Best-effort: a state-write failure must never crash a tick. Worst case of a
+    # lost write is one re-notify on the next run, never a missed event.
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    except OSError as e:
+        _log.warning("listen state write failed", path=str(path), error=str(e))
+
+
+def _listen_tick(transport: Any, team: str, agent: str,
+                 state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """One listen pass. Returns ``(events, failures)`` where ``failures`` maps each
+    degraded SOURCE (``inbox`` / ``responses`` / ``orphans``) to its messages, and
+    mutates ``state`` with ONLY affirmatively-processed ids (add-only — see the
+    section note): a failed read/list adds nothing, so it can never mark unknown
+    data as seen."""
+    events: list[dict[str, Any]] = []
+    failures: dict[str, list[str]] = {}
+
+    def _fail(source: str, msg: str) -> None:
+        failures.setdefault(source, []).append(msg)
+
+    inbox_ids = set(state["inbox_ids"])
+    response_keys = set(state["response_keys"])
+    slug_owned: dict[str, Any] = dict(state["slug_owned"])
+
+    # Source 1 — new inbox directives (the SAME fold `inbox` surfaces). An
+    # unreadable summaries index is degraded, NOT a legitimately-empty inbox.
+    inbox, inbox_ok = _inbox_rows_status(transport, team, agent)
+    if not inbox_ok:
+        _fail("inbox", "summaries index unreadable")
+    for r in inbox:
+        slug = str(r.get("name") or "")
+        if not slug or slug in inbox_ids:
+            continue
+        events.append({"type": "directive", "slug": slug,
+                       "owner": str(r.get("owner") or "?"),
+                       "title": str(r.get("title") or slug)})
+        inbox_ids.add(slug)
+
+    # Source 2 — new responses to directives THIS agent owns. One list_dir of the
+    # responses root; per-slug work only for owned slugs, ownership cached.
+    prefix = _responses_prefix(team)
+    try:
+        entries = transport.list_dir(prefix)
+    except TransportError as e:
+        _fail("responses", f"responses listing unreadable ({e})")
+        entries = None
+    for e in entries or []:
+        raw = e.get("name") or ""
+        if not (e.get("is_dir") or raw.endswith("/")):
+            continue  # only slug dirs live here
+        slug = raw.rstrip("/")
+        if not slug:
+            continue
+        owned = slug_owned.get(slug)
+        if owned is None:
+            doc = transport.read(_task_path(team, slug))
+            if doc is None:
+                # Ambiguous: a transient read failure OR an orphan response whose
+                # directive doc is gone. Either way ownership is UNKNOWN, so we do
+                # NOT cache and do NOT advance — unknown != seen, retry next tick.
+                # This is its OWN source: a permanent orphan can pin `orphans`
+                # forever without silencing a fresh `responses`/`inbox` outage.
+                _fail("orphans", f"owner unresolved for {slug}")
+                continue
+            fm = okf.parse_frontmatter(doc) or {}
+            owner = str(fm.get("owner") or "").strip()
+            owned = owner == agent  # owner is the directive's SENDER; broadcast/absent -> not owned
+            slug_owned[slug] = owned  # definitive classification: cache it
+        if not owned:
+            continue  # responses to other-owner / broadcast directives are noise
+        try:
+            stamps = transport.list_dir(prefix + slug + "/")
+        except TransportError as ex:
+            _fail("responses", f"response dir {slug} unreadable ({ex})")
+            continue
+        for se in stamps:
+            sname = se.get("name") or ""
+            if se.get("is_dir") or not sname.endswith(".md"):
+                continue
+            key = f"{slug}/{sname[:-3]}"
+            if key in response_keys:
+                continue
+            shard = transport.read(prefix + slug + "/" + sname)
+            if shard is None:
+                # unread shard -> unknown, do NOT advance over it (retry next tick)
+                _fail("responses", f"response {key} unreadable")
+                continue
+            rfm = okf.parse_frontmatter(shard) or {}
+            events.append({"type": "response", "slug": slug,
+                           "agent": str(rfm.get("agent") or "?"),
+                           "outcome": str(rfm.get("outcome") or "?")})
+            response_keys.add(key)
+
+    # Source 3 — new verdicts on reviews THIS agent REQUESTED. One list_dir of
+    # the review root; per-NEW-slug the review doc is read once and the requester
+    # (`requested_by`) cached; verdict dirs are listed ONLY for my still-unsettled
+    # slugs. A `.settled` listing first EMITS every unseen shard + one terminal
+    # SETTLED event, then drops the slug so it is never listed again (the review
+    # is immutable once settled). Its OWN degraded source `verdicts`.
+    review_requested: dict[str, Any] = dict(state.get("review_requested") or {})
+    verdict_keys = set(state.get("verdict_keys") or [])
+    settled_reviews = set(state.get("settled_reviews") or [])
+    review_prefix = f"team/{team}/review/"
+    try:
+        rentries = transport.list_dir(review_prefix)
+    except TransportError as e:
+        _fail("verdicts", f"review listing unreadable ({e})")
+        rentries = None
+    for e in rentries or []:
+        name = e.get("name") or ""
+        # The review DOCS are the `.md` entries; `{slug}/` dirs hold the verdicts.
+        if e.get("is_dir") or not name.endswith(".md"):
+            continue
+        slug = name[:-3]
+        if not slug or slug in settled_reviews:
+            continue  # settled -> immutable, never list its verdicts again
+        requested = review_requested.get(slug)
+        if requested is None:
+            doc = transport.read(_review_doc_path(team, slug))
+            if doc is None:
+                # The slug came from the listing so the doc exists — a None read
+                # is a transient transport failure. Requester UNKNOWN: do NOT
+                # cache and do NOT advance (no-false-advance), retry next tick.
+                _fail("verdicts", f"requester unresolved for {slug}")
+                continue
+            fm = okf.parse_frontmatter(doc) or {}
+            requested = str(fm.get("requested_by") or "").strip() == agent
+            review_requested[slug] = requested  # definitive classification: cache
+        if not requested:
+            continue  # someone else's review -> noise
+        try:
+            ventries = transport.list_dir(_verdicts_prefix(team, slug))
+        except TransportError as ex:
+            _fail("verdicts", f"verdicts dir {slug} unreadable ({ex})")
+            continue
+        settling = any((x.get("name") or "") == SETTLED_MARKER for x in ventries)
+        # Emit every UNSEEN shard BEFORE any settle-drop. The settling tick is
+        # the DOMINANT flow, not an edge: a single approve settles the review and
+        # the reviewer settles it themselves (`review status` right after filing,
+        # per doctrine), so the final — often only — verdict shard and `.settled`
+        # co-exist by the requester's next tick. Dropping the slug first would
+        # swallow that verdict and make the `await verdicts:` breadcrumb false.
+        # Cost stays bounded: only unseen shards are read, once per slug lifetime.
+        unread = False
+        for ve in ventries:
+            vname = ve.get("name") or ""
+            if ve.get("is_dir") or not vname.endswith(".md"):
+                continue  # `.settled` and dirs are not verdict shards
+            vkey = f"{slug}/{vname[:-3]}"
+            if vkey in verdict_keys:
+                continue
+            shard = transport.read(_verdicts_prefix(team, slug) + vname)
+            if shard is None:
+                # listed file unreadable -> unknown, do NOT advance (retry)
+                _fail("verdicts", f"verdict {vkey} unreadable")
+                unread = True
+                continue
+            vfm = okf.parse_frontmatter(shard) or {}
+            events.append({"type": "verdict", "slug": slug,
+                           "reviewer": vname[:-3],
+                           "verdict": str(vfm.get("verdict") or "?")})
+            verdict_keys.add(vkey)
+        if settling and not unread:
+            # Terminal-settled AND every shard affirmatively seen: emit the one
+            # terminal SETTLED event (so the requester learns the outcome even
+            # when all shards were seen on earlier ticks), then drop the slug —
+            # zero verdict-dir listings hereafter. The marker only ever caches
+            # terminal-APPROVED (`_write_settled_marker`), so the state is known
+            # without reading it. An unreadable shard keeps the slug ACTIVE
+            # (degraded already flagged): settling must not swallow an
+            # unreadable final verdict — it emits on recovery, then drops.
+            events.append({"type": "settled", "slug": slug,
+                           "state": review.APPROVED})
+            settled_reviews.add(slug)
+
+    state["inbox_ids"] = sorted(inbox_ids)
+    state["response_keys"] = sorted(response_keys)
+    state["slug_owned"] = slug_owned
+    state["verdict_keys"] = sorted(verdict_keys)
+    state["review_requested"] = review_requested
+    state["settled_reviews"] = sorted(settled_reviews)
+    return events, failures
+
+
+def _format_listen_event(ev: dict[str, Any]) -> str:
+    if ev["type"] == "directive":
+        return f"DIRECTIVE {ev['slug']} (from {ev['owner']}): {ev['title'][:80]}"
+    if ev["type"] == "verdict":
+        return f"VERDICT {ev['slug']} by {ev['reviewer']}: {ev['verdict']}"
+    if ev["type"] == "settled":
+        return f"SETTLED {ev['slug']}: {ev['state']}"
+    return f"RESPONSE {ev['slug']} by {ev['agent']}: {ev['outcome']}"
+
+
+def _run_listen_tick(transport: Any, team: str, agent: str, state: dict[str, Any],
+                     *, json_mode: bool, verbose: bool) -> tuple[list, dict[str, list[str]]]:
+    events, failures = _listen_tick(transport, team, agent, state)
+    for ev in events:
+        print(json.dumps(ev) if json_mode else _format_listen_event(ev))
+    sys.stdout.flush()
+
+    # Per-source streaks: each source alarms ONCE per its own consecutive-failure
+    # streak (the flags persist in state across `--once` runs) and resets on its
+    # own recovery — a pinned orphan can't swallow a new inbox/responses outage.
+    degraded = _coerce_degraded(state.get("degraded"))  # defensive: tolerate legacy bool
+    state["degraded"] = degraded
+    newly: list[str] = []
+    for source in _LISTEN_SOURCES:
+        msgs = failures.get(source)
+        if msgs:
+            if not degraded[source]:  # this source just entered a failure streak
+                newly.append("; ".join(msgs))
+                degraded[source] = True
+        else:
+            degraded[source] = False  # clean this tick -> streak reset for this source
+    if newly:
+        print(f"LISTEN DEGRADED: {'; '.join(newly)}", file=sys.stderr)
+    elif verbose and not events and not failures:
+        print(f"listen: quiet ({len(state['inbox_ids'])} inbox, "
+              f"{len(state['response_keys'])} responses, "
+              f"{len(state.get('verdict_keys') or [])} verdicts seen)", file=sys.stderr)
+    sys.stderr.flush()
+    return events, failures
+
+
+def cmd_listen(args: argparse.Namespace, transport: Any) -> int:
+    agent = args.agent or _host()
+    state_path = _listen_state_path(args.team, agent)
+    if getattr(args, "state_path", False):
+        # Resolver for listener-tick.sh's one-time `.items` -> listen-state
+        # migration: the slugify/agent_key naming lives here, so the shell asks the
+        # engine rather than reimplementing it. Print and exit; no tick, no writes.
+        print(str(state_path))
+        return 0
+    state = _load_listen_state(state_path)
+    json_mode = bool(getattr(args, "json", False))
+    verbose = bool(getattr(args, "verbose", False))
+
+    def tick() -> None:
+        _run_listen_tick(transport, args.team, agent, state,
+                         json_mode=json_mode, verbose=verbose)
+        _save_listen_state(state_path, state)
+
+    if args.once:
+        tick()
+        return 0
+    interval = args.interval if args.interval and args.interval > 0 else 60
+    try:
+        while True:
+            tick()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        if verbose:
+            print("listen: stopped", file=sys.stderr)
+        return 0
 
 
 # --- continuity completion (A6): role checkpoints, park, briefing ---
@@ -2385,6 +2987,14 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("team"); ib.add_argument("--agent", "-a"); ib.add_argument("--ack")
     ib.add_argument("--all", action="store_true", help="include @backlog"); add_json(ib)
     ib.set_defaults(func=cmd_inbox)
+    ls = sub.add_parser("listen", help="await new directives + responses to directives you own (the reply leg of tell)")
+    ls.add_argument("team"); ls.add_argument("--agent", "-a")
+    ls.add_argument("--interval", type=int, default=60, help="loop poll seconds (default 60; ignored with --once)")
+    ls.add_argument("--once", action="store_true", help="one tick then exit 0 — scheduler-friendly (a tick never fails the schedule)")
+    ls.add_argument("--verbose", action="store_true", help="heartbeat quiet ticks to stderr")
+    ls.add_argument("--state-path", action="store_true", dest="state_path",
+                    help=argparse.SUPPRESS)  # print resolved state file path, no tick
+    add_json(ls); ls.set_defaults(func=cmd_listen)
     hl = sub.add_parser("health", help="fleet health: which hosts reconcile this team (fulcra-agent-health)")
     hl.add_argument("team"); add_json(hl)
     hl.set_defaults(func=cmd_health)

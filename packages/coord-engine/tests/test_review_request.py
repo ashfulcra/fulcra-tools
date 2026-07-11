@@ -9,7 +9,7 @@ failure where a reviewer acked directives and the obligation vanished.
 import json
 import time
 
-from coord_engine import cli, okf
+from coord_engine import cli, okf, reconcile
 from coord_engine.transport import TransportError
 from coord_engine_test_helpers import FakeTransport
 
@@ -519,35 +519,142 @@ def test_review_status_reflects_required_gating(capsys):
     assert json.loads(capsys.readouterr().out)["state"] == "APPROVED"
 
 
-def test_rerequest_clears_stale_settled_marker_so_new_obligation_surfaces(capsys):
-    # I2: the exists-guard passes on a read timeout, so a re-request can rewrite
-    # the doc with a NEW required list on top of a review a prior fold already
-    # marked `.settled`. That stale marker would hide the new obligation from
-    # every settled-skipping fold. The re-request must clear the marker.
+def test_rerequest_under_read_timeout_fails_closed_no_overwrite(capsys):
+    # P1/#342: a re-request whose review-doc READ times out (returns None) must
+    # NOT fall through to WRITE — post-#342 that could clobber a live review under
+    # a degraded transport. The I1-style listing guard sees the doc PRESENT in the
+    # listing + read None -> rc 1 "unreadable, retry", never overwrite. (Changing a
+    # required set re-opens only via a NEW slug; a matching request recovers once
+    # the read succeeds.)
     t = FakeTransport()
-    _approve(t, "pr-x")               # required: rev, then rev approves
-    cli._pending_reviews_for(t, "r", "rev")   # settles -> writes marker
-    assert "team/r/review/pr-x/verdicts/.settled" in t.store
+    cli.main(["review", "request", "r", "pr-u", "--of", "url",
+              "--reviewer", "alice", "--from", "requester"], transport=t)
+    doc_before = t.read("team/r/review/pr-u.md")
+    assert doc_before is not None
 
-    # Re-request under a read timeout: read()->None so the exists-guard slips and
-    # the doc is rewritten with required=[bob]. Shares t's store for writes/deletes.
-    class ReRequestUnderReadTimeout(FakeTransport):
+    class DocReadTimesOut(FakeTransport):
         def __init__(self, base):
             self.__dict__ = base.__dict__
         def read(self, path):
-            return None
+            # only the review-doc read times out (present-but-unreadable);
+            # everything else (listing, directive writes) behaves normally.
+            if (path.startswith("team/r/review/") and path.endswith(".md")
+                    and "/verdicts/" not in path):
+                return None
+            return super().read(path)
 
     capsys.readouterr()
-    assert cli.main(["review", "request", "r", "pr-x", "--of", "url",
-                     "--reviewer", "bob"],
-                    transport=ReRequestUnderReadTimeout(t)) == 0
-    assert "team/r/review/pr-x/verdicts/.settled" not in t.store, \
-        "re-request must clear the stale settled marker"
-    out = cli._pending_reviews_for(t, "r", "bob")
-    pend = [r for r in out if r.get("type") == "review-pending"]
-    assert len(pend) == 1 and pend[0]["name"] == "pr-x" \
-        and pend[0]["pending_required"] == ["bob"], \
-        "the new obligation must be visible to the fold, not hidden by the marker"
+    rc = cli.main(["review", "request", "r", "pr-u", "--of", "url",
+                   "--reviewer", "bob", "--from", "requester"],
+                  transport=DocReadTimesOut(t))
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "unreadable" in cap.err and "retry" in cap.err
+    assert t.read("team/r/review/pr-u.md") == doc_before, \
+        "a present-but-unreadable doc must never be overwritten"
+
+
+def test_matching_rerequest_clears_stale_settled_marker(capsys):
+    # The stale-marker self-heal (former I2) now rides the MATCHING-recovery path:
+    # a re-request byte-identical in of/required/requested_by clears a lingering
+    # `.settled` marker so the next fold recomputes — WITHOUT the dangerous
+    # rewrite-on-read-timeout the old path relied on, and without rewriting the doc.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-m", "--of", "url",
+              "--reviewer", "alice", "--from", "requester"], transport=t)
+    doc_before = t.read("team/r/review/pr-m.md")
+    t.put("team/r/review/pr-m/verdicts/.settled",
+          "---\nschema: review-settled/v1\nstate: APPROVED\n---\n")
+    capsys.readouterr()
+    rc = cli.main(["review", "request", "r", "pr-m", "--of", "url",
+                   "--reviewer", "alice", "--from", "requester"], transport=t)
+    assert rc == 0
+    assert "matching" in capsys.readouterr().out
+    assert "team/r/review/pr-m/verdicts/.settled" not in t.store, \
+        "a matching recovery must clear a stale settled marker"
+    assert t.read("team/r/review/pr-m.md") == doc_before, \
+        "recovery must not rewrite the doc"
+
+
+def test_partial_failure_then_recovery_notifies_missing_reviewer(capsys):
+    # P1 (the exact repro): bob's directive write fails on the first request, so the
+    # doc lands but bob is never notified -> rc 1 "retry". At HEAD every retry died
+    # at the exists-guard ("already exists" rc 1) because the doc now exists, so bob
+    # stayed an invisible orphan forever. Fix: a MATCHING re-request is idempotent
+    # RECOVERY — alice's already-delivered directive dedupes (rc 0), bob's missing
+    # one is delivered, the doc is byte-unchanged, and each reviewer ends with
+    # EXACTLY ONE canonical directive.
+    fail = {"bob": True}
+
+    class BobDirectiveFailsOnce(FakeTransport):
+        def write(self, path, content):
+            if (fail["bob"] and path.startswith("team/r/task/")
+                    and "verdicts/bob.md" in content):
+                return False  # bob's directive write times out (partial failure)
+            return super().write(path, content)
+
+    t = BobDirectiveFailsOnce()
+    rc1 = cli.main(["review", "request", "r", "pr-rec", "--of", "PR#1",
+                    "--reviewer", "alice", "--reviewer", "bob",
+                    "--from", "requester"], transport=t)
+    cap1 = capsys.readouterr()
+    assert rc1 == 1 and "bob" in cap1.err and "FAILED" in cap1.err
+    doc_before = t.read("team/r/review/pr-rec.md")
+    assert doc_before is not None
+
+    fail["bob"] = False  # transport recovers
+    rc2 = cli.main(["review", "request", "r", "pr-rec", "--of", "PR#1",
+                    "--reviewer", "alice", "--reviewer", "bob",
+                    "--from", "requester"], transport=t)
+    out = capsys.readouterr().out
+    assert rc2 == 0, "a matching re-request after partial failure must recover"
+    assert "matching" in out and "re-verified" in out
+    assert t.read("team/r/review/pr-rec.md") == doc_before, \
+        "recovery must NOT rewrite the doc (byte-compare)"
+    # BOTH reviewers now hold EXACTLY ONE canonical directive each.
+    for reviewer in ("alice", "bob"):
+        hits = [p for p, c in t.store.items()
+                if p.startswith("team/r/task/")
+                and f"team/r/review/pr-rec/verdicts/{reviewer}.md" in c
+                and f"assignee: {reviewer}" in c]
+        assert len(hits) == 1, (reviewer, hits)
+
+
+def test_rerequest_with_different_required_is_conflict(capsys):
+    # A re-request with a DIFFERENT required set is a conflict, not a recovery:
+    # changing the required set re-opens a review only via a new slug. rc 1 naming
+    # what differs; the doc is never overwritten.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-c", "--of", "url",
+              "--reviewer", "alice", "--from", "requester"], transport=t)
+    doc_before = t.read("team/r/review/pr-c.md")
+    capsys.readouterr()
+    rc = cli.main(["review", "request", "r", "pr-c", "--of", "url",
+                   "--reviewer", "alice", "--reviewer", "bob",
+                   "--from", "requester"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "required" in cap.err  # names the field that differs
+    assert "bob" in cap.err       # and both sides of the difference
+    assert t.read("team/r/review/pr-c.md") == doc_before, \
+        "a conflicting re-request must never overwrite the doc"
+
+
+def test_rerequest_by_different_requester_is_conflict(capsys):
+    # requested_by is part of the request identity: a DIFFERENT requester re-opening
+    # someone else's review is a conflict, never a silent recovery. rc 1, no rewrite.
+    t = FakeTransport()
+    cli.main(["review", "request", "r", "pr-cr", "--of", "url",
+              "--reviewer", "alice", "--from", "alice-req"], transport=t)
+    doc_before = t.read("team/r/review/pr-cr.md")
+    capsys.readouterr()
+    rc = cli.main(["review", "request", "r", "pr-cr", "--of", "url",
+                   "--reviewer", "alice", "--from", "mallory"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "requested_by" in cap.err
+    assert t.read("team/r/review/pr-cr.md") == doc_before, \
+        "a different requester must not overwrite the original review doc"
 
 
 def test_request_write_timeout_fails_loud(capsys):
@@ -565,6 +672,80 @@ def test_request_write_timeout_fails_loud(capsys):
     assert rc == 1
     assert "write failed" in cap.err
     assert "requested" not in cap.out, "must not claim a review that never landed"
+
+
+# --- atomic notification: request also delivers a directive per reviewer -----
+
+def test_request_notifies_each_required_reviewer(capsys):
+    # Atomicity: the doc lands AND every required reviewer gets a directive
+    # through the canonical task path, so a verb-opened review fires the
+    # reviewer's inbox/listen instead of relying on a hand-sent tell.
+    t = FakeTransport()
+    assert cli.main(["review", "request", "r", "pr-note", "--of", "PR#7",
+                     "--reviewer", "alice", "--reviewer", "bob",
+                     "--from", "requester"], transport=t) == 0
+    assert t.read("team/r/review/pr-note.md") is not None, "the review doc must land"
+
+    # the directive text carries the slug + the EXACT verdict-file path (the
+    # fail-closed watcher contract)
+    task_docs = [c for p, c in t.store.items() if p.startswith("team/r/task/")]
+    for reviewer in ("alice", "bob"):
+        hit = [c for c in task_docs
+               if f"team/r/review/pr-note/verdicts/{reviewer}.md" in c
+               and f"assignee: {reviewer}" in c]
+        assert hit, f"{reviewer} must get a directive naming her verdict file"
+
+    # real fold: after reconcile each reviewer's inbox surfaces the directive
+    reconcile.reconcile(t, "r", now="2026-07-10T00:00:00Z",
+                        today="2026-07-10", host="h")
+    for reviewer in ("alice", "bob"):
+        capsys.readouterr()
+        cli.main(["inbox", "r", "--agent", reviewer, "--json"], transport=t)
+        got = json.loads(capsys.readouterr().out)
+        assert any("REVIEW REQUEST: pr-note" in (r.get("title") or "")
+                   for r in got), (reviewer, got)
+
+
+def test_doc_write_fail_writes_no_directive(capsys):
+    # doc-write fail -> rc 1 and NOTHING else (no reviewer directive attempted).
+    class ReviewDocWriteFails(FakeTransport):
+        def write(self, path, content):
+            if (path.startswith("team/r/review/") and path.endswith(".md")
+                    and "/" not in path[len("team/r/review/"):]):
+                return False  # the review DOC write times out
+            return super().write(path, content)
+
+    t = ReviewDocWriteFails()
+    rc = cli.main(["review", "request", "r", "pr-d", "--of", "url",
+                   "--reviewer", "alice"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "write failed" in cap.err
+    assert not [p for p in t.store if p.startswith("team/r/task/")], \
+        "a failed doc write must not deliver any reviewer directive"
+
+
+def test_partial_directive_failure_is_loud_rc1(capsys):
+    # doc lands, but one reviewer's directive write fails -> rc 1 naming exactly
+    # what landed and what did not (partial is loud, never silent).
+    class OneDirectiveWriteFails(FakeTransport):
+        def write(self, path, content):
+            if path.startswith("team/r/task/") and "verdicts/bob.md" in content:
+                return False  # bob's directive write times out
+            return super().write(path, content)
+
+    t = OneDirectiveWriteFails()
+    rc = cli.main(["review", "request", "r", "pr-p", "--of", "url",
+                   "--reviewer", "alice", "--reviewer", "bob"], transport=t)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert t.read("team/r/review/pr-p.md") is not None, "the doc still landed"
+    # names what FAILED (bob) and what was DELIVERED (alice)
+    assert "bob" in cap.err and "FAILED" in cap.err
+    assert "alice" in cap.err
+    # alice's directive really landed
+    assert [p for p in t.store
+            if p.startswith("team/r/task/") and "alice" in t.store[p]]
 
 
 def test_request_requires_at_least_one_reviewer(capsys):
