@@ -696,13 +696,69 @@ def test_overlay_cap_env_override_honored(monkeypatch):
 
 
 def test_overlay_under_cap_unchanged_no_flag():
-    """At-or-under the cap nothing changes: all fresh docs served, no degradation."""
+    """At-or-under the cap nothing changes: all fresh docs served, no degradation.
+    (Also the healthy-under-budget guard: runs under the default 10s
+    COORD_OVERLAY_BUDGET — fast reads never trip it.)"""
     t = FakeTransport()
     cli.main(["reconcile", "r"], transport=t)
     _put_fresh_docs(t, 3)
     rows, ok, reason = cli._load_rows_status(t, "r")
     assert ok is True and reason == ""
     assert {r["name"] for r in rows} == {"fresh-00", "fresh-01", "fresh-02"}
+
+
+def test_overlay_budget_stops_slow_reads_partial_served(monkeypatch):
+    """MUST (whole-branch review): the cap bounds read COUNT, not TIME — slow
+    per-doc reads (each running toward the transport's subprocess timeout) must not
+    starve every canonical surface read. A tiny budget + reads that sleep past it →
+    the overlay stops after the first slow read (after-op discipline), serves what
+    it got plus the index rows, and degrades with the budget reason."""
+    import time as _time
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)            # index present (empty)
+    _put_fresh_docs(t, 3)
+    orig_read = t.read
+    def slow_read(path):
+        if "/task/fresh-" in path:
+            _time.sleep(0.05)                            # each read blows the budget
+        return orig_read(path)
+    t.read = slow_read
+    monkeypatch.setenv("COORD_OVERLAY_BUDGET", "0.01")
+    t0 = _time.monotonic()
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 1.0                                 # order-of-magnitude of the budget,
+    assert ok is False                                   # not 3 serial timeouts
+    assert "budget exhausted" in reason and "1 of 3" in reason
+    assert {r["name"] for r in rows} == {"fresh-00"}     # everything read so far served
+
+
+def test_overlay_budget_fast_none_keeps_unreadable_degrade(monkeypatch):
+    """A FAST None (doc deleted between list and read — returns quickly) keeps the
+    continue-and-degrade behavior under a small budget: all readables served, and
+    the degrade reason is the unreadable one, not a budget breach."""
+    t = FakeTransport()
+    cli.main(["reconcile", "r"], transport=t)
+    _put_fresh_docs(t, 3)
+    orig_read = t.read
+    t.read = lambda p: None if p == "team/r/task/fresh-01.md" else orig_read(p)
+    monkeypatch.setenv("COORD_OVERLAY_BUDGET", "5")      # small but ample for fast reads
+    rows, ok, reason = cli._load_rows_status(t, "r")
+    assert ok is False
+    assert "fresh-01.md unreadable" in reason and "budget" not in reason
+    assert {r["name"] for r in rows} == {"fresh-00", "fresh-02"}
+
+
+def test_overlay_budget_env_fallback():
+    """Bad COORD_OVERLAY_BUDGET values never disable the bound."""
+    import os as _os
+    for bad in ("bananas", "0", "-3", "inf", "nan"):
+        _os.environ["COORD_OVERLAY_BUDGET"] = bad
+        try:
+            assert cli._overlay_budget() == cli.DEFAULT_OVERLAY_BUDGET, bad
+        finally:
+            del _os.environ["COORD_OVERLAY_BUDGET"]
+    assert cli._overlay_budget() == cli.DEFAULT_OVERLAY_BUDGET
 
 
 def test_parse_when_date_only_gates_until_end_of_day():

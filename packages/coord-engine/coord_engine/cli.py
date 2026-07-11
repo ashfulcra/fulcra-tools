@@ -88,6 +88,34 @@ def _overlay_cap() -> int:
     return v if v > 0 else DEFAULT_OVERLAY_CAP
 
 
+#: Time budget (seconds) for the freshness overlay's doc reads. The cap bounds
+#: READ COUNT, not TIME: under partial degradation (listing succeeds, each doc
+#: read runs to the transport's subprocess timeout) 16 absent names could mean
+#: minutes of serial timeouts inside EVERY canonical surface read — inbox/
+#: needs-me/listen have no other budget on this path (the briefing budget opens
+#: only AFTER _load_rows). That latency is the hang class this branch kills;
+#: the overlay carries its own deadline so a watcher's tick can never starve on
+#: it. Fast failures (a doc deleted between list and read returns quickly) keep
+#: the continue-and-degrade behavior — the budget only stops the SLOW bleed.
+DEFAULT_OVERLAY_BUDGET = 10.0
+
+
+def _overlay_budget() -> float:
+    """Env override ``COORD_OVERLAY_BUDGET`` (same parse discipline as
+    ``COORD_BRIEFING_BUDGET``): unparseable, non-positive, NaN, or inf falls back
+    to the default — a bad env value must never disable the bound."""
+    raw = os.environ.get("COORD_OVERLAY_BUDGET")
+    if raw is None:
+        return DEFAULT_OVERLAY_BUDGET
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_OVERLAY_BUDGET
+    if not (v > 0) or v == float("inf"):  # NaN, <=0, inf -> default
+        return DEFAULT_OVERLAY_BUDGET
+    return v
+
+
 def _fresh_overlay_rows(
     transport: Any, team: str, index_rows: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], bool, str]:
@@ -113,10 +141,18 @@ def _fresh_overlay_rows(
         kills, at the overlay's own read step;
       * the absent set exceeded the cap (truncated — served subset is deterministic:
         absent names are read in sorted order, so every agent converges on the SAME
-        served subset; the reason carries {served, absent_total}).
+        served subset; the reason carries {served, absent_total});
+      * the ``COORD_OVERLAY_BUDGET`` deadline expired with docs still unread (the
+        cap bounds read COUNT, this bounds TIME — slow per-doc reads must not
+        starve a surface read/watcher tick; checked AFTER each read, the after-op
+        discipline). Everything read so far is still served. When both the budget
+        and the cap trip, the budget reason wins (it is the truthful one — the cap
+        wasn't what stopped us).
     Parse-garbage / not-a-Task docs remain sanctioned SILENT skips (mirrors
     reconcile's own tolerance). Cost: one extra ``list_dir`` per row load, plus one
-    ``read`` per genuinely-new (unsummarized) slug, at most the cap."""
+    ``read`` per genuinely-new (unsummarized) slug, at most the cap, within the
+    budget."""
+    deadline = time.monotonic() + _overlay_budget()
     prefix = rec.task_prefix(team)
     try:
         listing = transport.list_dir(prefix)
@@ -137,27 +173,41 @@ def _fresh_overlay_rows(
     cap = _overlay_cap()
     overlay: list[dict[str, Any]] = []
     ok, reason = True, ""
+    served = 0
+    budget_breached = False
     for name, entry in absent[:cap]:
         try:
             raw = transport.read(f"{prefix}{name}")
         except Exception:
             raw = None
+        served += 1
         if raw is None:
             # LISTED but unreadable: a transport problem on a doc we know exists.
             # Degrade visibly (never a silent vanish); other overlay docs + the
-            # index rows are still served.
+            # index rows are still served. A FAST failure (doc deleted between
+            # list and read) keeps this continue-and-degrade path — only the
+            # budget check below stops the slow bleed.
             ok = False
             reason = f"task-dir overlay: fresh doc {name} unreadable"
-            continue
-        try:
-            fm = okf.parse_frontmatter(raw)
-            if not model.is_task(fm):
-                continue  # parse-garbage / not a Task -> sanctioned silent skip
-            overlay.append(model.row_from_frontmatter(
-                fm, name=name[:-3], path=f"task/{name}", mtime=entry.get("mtime")))
-        except Exception:
-            continue  # malformed content is a skip, not a transport failure
-    if len(absent) > cap:
+        else:
+            try:
+                fm = okf.parse_frontmatter(raw)
+                if fm is not None and model.is_task(fm):
+                    overlay.append(model.row_from_frontmatter(
+                        fm, name=name[:-3], path=f"task/{name}", mtime=entry.get("mtime")))
+                # else: parse-garbage / not a Task -> sanctioned silent skip
+            except Exception:
+                pass  # malformed content is a skip, not a transport failure
+        if time.monotonic() > deadline:
+            # After-op discipline: the budget bounds TIME where the cap bounds
+            # COUNT — stop reading, serve what we have, degrade visibly.
+            budget_breached = True
+            break
+    if budget_breached and served < len(absent):
+        ok = False
+        reason = (f"task-dir overlay budget exhausted: served {served} of "
+                  f"{len(absent)} fresh docs")
+    elif len(absent) > cap:
         ok = False
         reason = (f"task-dir overlay truncated: served {cap} of {len(absent)} "
                   f"fresh docs (COORD_OVERLAY_CAP={cap})")

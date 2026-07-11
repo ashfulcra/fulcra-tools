@@ -139,8 +139,13 @@ skills. Subagent-only work stays OFF the bus.
   does not surface newest- or highest-priority-first), only stable and reproducible — and the truncation
   itself degrades the `inbox` source with `{served, absent_total}` counts — capped-but-visible, never
   silent truncation. The next reconcile folds the whole set back into the index, so the cap only bites
-  during a sustained outage. A fresh team (no summaries yet) is unchanged —
-  the overlay only runs once an index exists.
+  during a sustained outage. The overlay is also **time-budgeted** — the cap bounds read COUNT, not
+  TIME, and slow per-doc reads (each running toward the transport timeout) must not starve a surface
+  read or a watcher tick: `COORD_OVERLAY_BUDGET` (default 10s) opens at overlay start and is checked
+  after each read; on breach the overlay stops reading, serves everything read so far plus the index
+  rows, and degrades the `inbox` source with `served k of n` counts (when both the budget and the cap
+  trip, the budget reason wins — it is what actually stopped the read). A fresh team (no summaries yet)
+  is unchanged — the overlay only runs once an index exists.
 - **`listen` is the engine-owned watcher — don't hand-roll one.** `coord-engine listen <team> --agent
   <you> [--once] [--json]` is the await leg of `tell`: each tick it id-diffs (not counts) three sources
   against a per-agent state file — new inbox directives **plus directives routed to a role you hold a
