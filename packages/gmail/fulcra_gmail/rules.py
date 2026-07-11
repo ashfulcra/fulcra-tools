@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from . import convert
@@ -68,6 +68,11 @@ class Rule:
     name: str
     match: str
     actions: list[str]
+    #: Raw pattern strings kept for serialization/debugging. The COMPILED
+    #: objects (``from_regex_re`` / ``subject_regex_re``) are what
+    #: :func:`evaluate` matches against — they are compiled + validated once,
+    #: at parse time, so a malformed operator pattern fails config validation
+    #: instead of raising ``re.error`` mid-poll.
     from_regex: str | None = None
     subject_regex: str | None = None
     has_attachment: bool | None = None
@@ -78,6 +83,10 @@ class Rule:
     accounts: list[str] | None = None
     #: First-run window widener (in days). ``None`` == default 7d.
     backfill: int | None = None
+    #: Precompiled post-filter patterns (``None`` when the raw field is unset).
+    #: ``compare=False`` so equality/repr stay driven by the raw strings.
+    from_regex_re: "re.Pattern[str] | None" = field(default=None, compare=False)
+    subject_regex_re: "re.Pattern[str] | None" = field(default=None, compare=False)
 
     def applies_to_account(self, account_id: str, email: str) -> bool:
         """True if this rule targets the given account (by id or email).
@@ -99,13 +108,16 @@ def parse_rules(raw_rules: list[dict]) -> list[Rule]:
     """Parse TOML-shaped rule dicts into :class:`Rule` objects.
 
     Raises :class:`ValueError` on a missing required field
-    (``id``/``version``/``name``/``match``/``actions``) or an unknown action.
+    (``id``/``version``/``name``/``match``/``actions``), an unknown action, or
+    a malformed post-filter regex — the last so an operator's bad pattern fails
+    at parse/startup naming the rule id + field, rather than raising
+    ``re.error`` mid-poll and blocking otherwise-valid mail.
     """
     parsed: list[Rule] = []
     for raw in raw_rules:
-        for field in _REQUIRED_FIELDS:
-            if field not in raw:
-                raise ValueError(f"rule missing required field: {field!r}")
+        for required in _REQUIRED_FIELDS:
+            if required not in raw:
+                raise ValueError(f"rule missing required field: {required!r}")
         actions = list(raw["actions"])
         for action in actions:
             if action not in VALID_ACTIONS:
@@ -113,6 +125,10 @@ def parse_rules(raw_rules: list[dict]) -> list[Rule]:
                     f"rule {raw['id']!r} has unknown action {action!r} "
                     f"(allowed: {VALID_ACTIONS})"
                 )
+        from_regex = raw.get("from_regex")
+        subject_regex = raw.get("subject_regex")
+        from_regex_re = _compile_pattern(raw["id"], "from_regex", from_regex)
+        subject_regex_re = _compile_pattern(raw["id"], "subject_regex", subject_regex)
         accounts = raw.get("accounts")
         parsed.append(Rule(
             id=str(raw["id"]),
@@ -120,15 +136,36 @@ def parse_rules(raw_rules: list[dict]) -> list[Rule]:
             name=str(raw["name"]),
             match=str(raw["match"]),
             actions=actions,
-            from_regex=raw.get("from_regex"),
-            subject_regex=raw.get("subject_regex"),
+            from_regex=from_regex,
+            subject_regex=subject_regex,
             has_attachment=raw.get("has_attachment"),
             relay_to=raw.get("relay_to"),
             relay_priority=raw.get("relay_priority"),
             accounts=list(accounts) if accounts is not None else None,
             backfill=raw.get("backfill"),
+            from_regex_re=from_regex_re,
+            subject_regex_re=subject_regex_re,
         ))
     return parsed
+
+
+def _compile_pattern(
+    rule_id: object, field_name: str, pattern: str | None
+) -> "re.Pattern[str] | None":
+    """Compile an optional post-filter pattern at parse time.
+
+    Returns ``None`` when the field is unset. Re-raises a malformed pattern as
+    a :class:`ValueError` naming the offending rule id AND field, so config
+    validation catches it (never ``re.error`` inside :func:`evaluate`).
+    """
+    if pattern is None:
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(
+            f"rule {rule_id!r}: invalid {field_name}: {exc}"
+        ) from exc
 
 
 def build_query(rule: Rule, *, cursor_epoch: int | None = None) -> str:
@@ -161,14 +198,14 @@ def evaluate(rule: Rule, message: dict, *, account_id: str) -> MatchDecision:
     payload = message.get("payload") or {}
     reason = MatchReason.MATCHED
 
-    if rule.from_regex is not None:
+    if rule.from_regex_re is not None:
         from_value = convert.get_header(payload, "From") or ""
-        if re.search(rule.from_regex, from_value) is None:
+        if rule.from_regex_re.search(from_value) is None:
             reason = MatchReason.REJECTED_FROM_REGEX
 
-    if reason is MatchReason.MATCHED and rule.subject_regex is not None:
+    if reason is MatchReason.MATCHED and rule.subject_regex_re is not None:
         subject_value = convert.get_header(payload, "Subject") or ""
-        if re.search(rule.subject_regex, subject_value) is None:
+        if rule.subject_regex_re.search(subject_value) is None:
             reason = MatchReason.REJECTED_SUBJECT_REGEX
 
     if reason is MatchReason.MATCHED and rule.has_attachment is not None:

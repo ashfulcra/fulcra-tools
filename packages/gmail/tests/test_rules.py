@@ -72,6 +72,39 @@ def test_parse_rejects_missing_required_field():
                             "actions": ["file"]}])  # no version
 
 
+def test_parse_rejects_malformed_from_regex_naming_rule_and_field():
+    with pytest.raises(ValueError, match=r"r1.*from_regex"):
+        rules.parse_rules([{
+            "id": "r1", "version": 1, "name": "n", "match": "in:inbox",
+            "actions": ["file"], "from_regex": "[",  # unbalanced → re.error
+        }])
+
+
+def test_parse_rejects_malformed_subject_regex_naming_rule_and_field():
+    with pytest.raises(ValueError, match=r"r1.*subject_regex"):
+        rules.parse_rules([{
+            "id": "r1", "version": 1, "name": "n", "match": "in:inbox",
+            "actions": ["file"], "subject_regex": "(",  # unterminated group
+        }])
+
+
+def test_malformed_regex_never_reaches_evaluate():
+    # parse raises BEFORE any Rule is produced, so a bad pattern can never
+    # blow up inside evaluate() on the first candidate.
+    with pytest.raises(ValueError):
+        rules.parse_rules([{
+            "id": "r1", "version": 1, "name": "n", "match": "in:inbox",
+            "actions": ["file"], "from_regex": "[",
+        }])
+    # A valid rule with the same shape still parses + evaluates fine.
+    (rule,) = rules.parse_rules([{
+        "id": "r1", "version": 1, "name": "n", "match": "in:inbox",
+        "actions": ["file"], "from_regex": r".*@ok\.example\.com",
+    }])
+    msg = make_message(headers=[header("From", "a@ok.example.com")])
+    assert rules.evaluate(rule, msg, account_id="a").matched
+
+
 # -- rule identity ----------------------------------------------------------
 
 
