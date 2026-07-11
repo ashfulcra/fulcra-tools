@@ -165,7 +165,15 @@ it (not on PyPI).
   `briefing`/`needs-me` emit a `forge-degraded` row `{scanned, total, skipped}` when the forge fan-out
   exceeds the shared `COORD_BRIEFING_BUDGET` (default 60s, opened once for the whole add-on stack and spent
   cumulatively; a raised feedback listing counts as `skipped`) — honor it with a `forge feedback` sweep,
-  never read the section as complete.
+  never read the section as complete. The `COORD_BRIEFING_BUDGET` deadline now opens at the TOP of
+  `briefing` — before the **presence** section — so it bounds the whole add-on stack (presence + forge +
+  resume), not just the forge fan-out: the team-global presence-shard reads (one `list_dir` + a read per
+  agent) used to run unbudgeted AND before the deadline even opened, hanging the whole briefing under a
+  degraded transport. `briefing` now emits a `presence-degraded` row `{scanned, total, skipped}` (same
+  shape family, appended to the `presence` section list — json passthrough + one text line) when the
+  presence fan-out breaches the budget, a listed shard is unreadable, or the presence listing raises;
+  honor it with a `presence show` sweep, never read a partial roster as complete. The `resume`
+  (own-continuity) read shares the same deadline and truncates (stderr note) rather than hang the tail.
   That review sweep itself **fails closed**: `review status` returns rc 1
   (`tally unknown, retry`) when the doc, the verdicts *listing*, or any verdict shard is unreadable,
   rather than printing a partial APPROVED (or self-healing away a legitimate `.settled` marker off a

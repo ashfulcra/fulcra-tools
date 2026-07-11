@@ -1541,6 +1541,201 @@ def test_needs_me_forge_degraded_exits_zero(capsys, monkeypatch):
     assert any(r.get("type") == "forge-degraded" for r in got)
 
 
+# --- presence-shard budget (P1: codex-reviewer) ------------------------------
+# `cmd_briefing -> presence.roster(_presence_shards(...))` did unbounded, team-
+# global per-shard reads BEFORE the shared briefing deadline even opened, so a
+# degraded transport hung the whole briefing in the PRESENCE section (needed a
+# SIGINT). These pin the fix: the shared `COORD_BRIEFING_BUDGET` now opens at the
+# top of cmd_briefing and bounds the presence fan-out too, mirroring forge/review:
+# breach/failure -> a `presence-degraded` row `{scanned, total[, skipped]}` (json
+# passthrough + one text line), a PARTIAL roster served, never a hang or a silent
+# drop. Healthy path stays byte-identical.
+
+
+class _SlowPresenceTransport(FakeTransport):
+    """Sleeps only on presence-prefix ops — everything else (summaries load,
+    reconcile, forge) stays fast, so `total` and the other sections are
+    deterministic while the per-shard presence reads are slow."""
+
+    def __init__(self, delay=0.03):
+        super().__init__()
+        self.delay = delay
+
+    def _slow(self, path):
+        if "/presence/" in path:
+            _time.sleep(self.delay)
+
+    def read(self, path):
+        self._slow(path)
+        return super().read(path)
+
+    def list_dir(self, prefix):
+        self._slow(prefix)
+        return super().list_dir(prefix)
+
+
+def _seed_presence(t, agents=("amy", "bob", "cid", "dee")):
+    for a in agents:
+        cli.main(["presence", "beat", "r", "-a", a], transport=t)
+
+
+def test_presence_shards_bounded_healthy_byte_identical():
+    # Healthy transport, generous/absent deadline: the bounded reader yields the
+    # SAME shards as the legacy `_presence_shards` (folds to an identical roster)
+    # and NO degraded marker — the healthy path must not change.
+    t = FakeTransport()
+    _seed_presence(t)
+    legacy = cli._presence_shards(t, "r")
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() + 60)
+    assert marker is None
+    now = "2026-07-01T12:00:00Z"
+    from coord_engine import presence as _presence
+    assert _presence.roster(shards, now=now) == _presence.roster(legacy, now=now)
+    # deadline=None (legacy/unbounded) is likewise clean
+    shards2, marker2 = cli._presence_shards_bounded(t, "r", deadline=None)
+    assert marker2 is None
+    assert _presence.roster(shards2, now=now) == _presence.roster(legacy, now=now)
+
+
+def test_presence_shards_bounded_budget_emits_degraded_marker():
+    # Slow per-shard reads + a tiny deadline: the fan-out must stop early, return a
+    # PARTIAL roster plus exactly one degraded marker, and not read every shard.
+    t = _SlowPresenceTransport(delay=0.03)
+    _seed_presence(t)
+    start = _time.monotonic()
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() + 0.05)
+    elapsed = _time.monotonic() - start
+    assert marker is not None and marker["type"] == "presence-degraded"
+    assert marker["total"] == 4
+    assert 0 <= marker["scanned"] <= 4
+    assert len(shards) <= 4          # partial roster served
+    assert elapsed < 1.0, "the fold must not read every shard unbounded"
+
+
+def test_presence_shards_listing_raises_degraded_not_crash():
+    # The presence listing itself raises: roster is UNKNOWN (scanned=0), surfaced
+    # as a degraded marker — never crash, never a silent empty roster.
+    class _PresenceListFails(FakeTransport):
+        def list_dir(self, prefix):
+            if "/presence/" in prefix:
+                raise _TransportError("boom")
+            return super().list_dir(prefix)
+
+    t = _PresenceListFails()
+    _seed_presence(t)
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() + 60)
+    assert shards == []
+    assert marker is not None and marker["type"] == "presence-degraded" and marker["scanned"] == 0
+
+
+def test_presence_shard_unreadable_counts_skipped_not_crash():
+    # A listed shard whose read returns None is UNKNOWN (transport problem, not a
+    # vanish): counted skipped, the rest still scanned, degraded surfaced.
+    bob_shard = f"/presence/{tasks.agent_key('bob')}.md"
+
+    class _OneShardUnreadable(FakeTransport):
+        def read(self, path):
+            if path.endswith(bob_shard):
+                return None
+            return super().read(path)
+
+    t = _OneShardUnreadable()
+    _seed_presence(t, agents=("amy", "bob"))
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() + 60)
+    assert marker is not None and marker.get("skipped") == 1
+    assert {s.get("agent") for s in shards} == {"amy"}   # partial roster: readable shard only
+
+
+def test_presence_shards_deadline_spent_before_listing_skips_call():
+    # Codex P1 (round 2): an already-spent deadline must SKIP the listing entirely
+    # (never pay one more transport timeout of stall) and return the degraded
+    # marker, not a falsely-clean empty roster.
+    class _ListingMustNotRun(FakeTransport):
+        def list_dir(self, prefix):
+            if "/presence/" in prefix:
+                raise AssertionError("listing must not run once the deadline is spent")
+            return super().list_dir(prefix)
+
+    t = _ListingMustNotRun()
+    _seed_presence(t)
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() - 1)
+    assert shards == []
+    assert marker == {"type": "presence-degraded", "scanned": 0, "total": 0}
+
+
+def test_presence_shards_slow_listing_overrun_visible_even_when_empty():
+    # Codex P1 (round 2): the deadline passing DURING the listing itself must be
+    # detected AFTER the blocking op — even when the listing returns [] (no shard
+    # reads happen, so the per-shard loop can't catch it): `([], None)` here would
+    # be a falsely-clean empty roster despite blowing the budget.
+    class _SlowListingOnly(FakeTransport):
+        def list_dir(self, prefix):
+            if "/presence/" in prefix:
+                _time.sleep(0.05)
+            return super().list_dir(prefix)
+
+    t = _SlowListingOnly()  # NO shards seeded: listing returns [] after the stall
+    shards, marker = cli._presence_shards_bounded(t, "r", deadline=_time.monotonic() + 0.01)
+    assert shards == []
+    assert marker is not None and marker["type"] == "presence-degraded"
+    assert marker["scanned"] == 0 and marker["total"] == 0
+
+    # And with shards present, the post-listing overrun stops before any read.
+    t2 = _SlowListingOnly()
+    _seed_presence(t2)
+    reads = []
+    orig_read = t2.read
+    t2.read = lambda p: (reads.append(p), orig_read(p))[1]
+    shards2, marker2 = cli._presence_shards_bounded(t2, "r", deadline=_time.monotonic() + 0.01)
+    assert marker2 is not None and marker2["type"] == "presence-degraded"
+    assert marker2["scanned"] == 0 and marker2["total"] == 4
+    assert [p for p in reads if "/presence/" in p] == [], \
+        "no shard reads once the listing spent the budget"
+
+
+def test_briefing_presence_degraded_exits_zero_other_sections_intact(capsys, monkeypatch):
+    monkeypatch.setenv("COORD_BRIEFING_BUDGET", "0.01")
+    t = _SlowPresenceTransport(delay=0.03)
+    _seed_presence(t)
+    t.put("team/r/task/a.md", _task("Alpha", "active"))
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+
+    start = _time.monotonic()
+    assert cli.main(["briefing", "r", "--agent", "amy"], transport=t) == 0
+    assert _time.monotonic() - start < 2.0, "briefing must return within budget order-of-magnitude"
+    out = capsys.readouterr().out
+    assert "presence fold degraded" in out
+    assert "board:" in out and "needs-me:" in out   # other sections still rendered
+
+    assert cli.main(["briefing", "r", "--agent", "amy", "--json"], transport=t) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert any(r.get("type") == "presence-degraded" for r in doc["presence"]), \
+        "json path must surface the presence-degraded marker as-is"
+    assert "board" in doc and "needs_me" in doc and "inbox" in doc
+
+
+def test_briefing_presence_healthy_no_degraded_row(capsys):
+    # Healthy transport: real roster, NO presence-degraded marker in text or json.
+    t = FakeTransport()
+    _seed_presence(t, agents=("amy",))
+    cli.main(["reconcile", "r"], transport=t)
+    capsys.readouterr()
+    assert cli.main(["briefing", "r", "--agent", "amy", "--json"], transport=t) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert any(p.get("agent") == "amy" for p in doc["presence"])
+    assert not any(r.get("type") == "presence-degraded" for r in doc["presence"])
+
+
+def test_version_coherent_and_doctor_reports_it(capsys):
+    import re
+    from coord_engine import __version__ as _v
+    assert re.fullmatch(r"\d+\.\d+\.\d+", _v), f"__version__ must be semver: {_v!r}"
+    t = FakeTransport()
+    assert cli.main(["doctor", "r"], transport=t) == 0
+    assert f"coord-engine v{_v}" in capsys.readouterr().out
+
+
 # --- Task 2: fail-closed roles/vacancy fold ----------------------------------
 
 def test_roles_status_lease_listing_unknown_rc1_no_vacancy(capsys):
