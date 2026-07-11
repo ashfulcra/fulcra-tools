@@ -33,4 +33,5 @@ BUNDLED_PLUGINS: tuple[tuple[str, str], ...] = (
     ("media-webhook", "fulcra_media.plugins.media_webhook:PLUGIN"),
     ("dayone", "fulcra_dayone.collect_plugin:PLUGIN"),
     ("attention-relay", "fulcra_attention.collect_plugin:PLUGIN"),
+    ("gmail", "fulcra_gmail.collect_plugin:PLUGIN"),
 )

@@ -51,7 +51,24 @@ under `skills/`, each package with its own README, build, and tests.
   JSON; attachments = metadata only, bytes deferred to v2), and `ledger`
   (append-only per-account JSONL, fsync per append, torn-line tolerance,
   processed-set keyed by `(message_id, rule_id, rule_version)`, deterministic
-  relay outbox key). Files-writer/relay-emitter/plugin land in Task 3.
+  relay outbox key). Task 3 ships the daemon layer: `files_writer` (selected
+  email → Fulcra Files at `/collect/gmail/<account_id>/<yyyy-mm>/<message_id>
+  .json`; same id → same path, post-crash rewrite is a same-content overwrite),
+  `relay` (B3 exactly-once-visible bus relay — a byte-stable coord directive
+  keyed by the ledger `outbox_key`, emitted + readback-verified via
+  `coord-engine tell`/`search` so retries converge on one visible directive;
+  the installed engine's deterministic slug + readback satisfy the B3 version
+  pin), `cursors` (per-`(account, rule)` contiguous-frontier watermark),
+  `pipeline` (the crash-safe poll: fully paginate → refine to effective matches
+  → order oldest-first by `(internalDate, id)` → `file → ledger → relay →
+  ledger` → advance the watermark only through the contiguous done prefix), and
+  `collect_plugin` (scheduled 15-min plugin; Cloud-Console-clickpath +
+  repeatable add-account wizard; per-account health; registered via entry point
+  + `_bundled_plugins`). NOTE: the multi-account add-account callback route
+  (nonce-as-state → getProfile bind) is not wired into collect's generic
+  single-namespace OAuth route — it is exposed as
+  `collect_plugin.begin_add_account`/`complete_add_account` for the host/Task-4
+  to drive.
 - **coord** — the agent-coordination layer. In prose it is **coord**; the
   engine is `packages/coord-engine` (a **stdlib-only** CLI, `coord-engine`),
   and the twelve `fulcra-agent-*` skills under `skills/` are how an agent

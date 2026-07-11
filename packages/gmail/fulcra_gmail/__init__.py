@@ -30,8 +30,21 @@ Task 2 adds the pure-local processing layer (no daemon, no network):
   ``(message_id, rule_id, rule_version)``, torn-line tolerance, and the
   deterministic relay outbox key.
 
-The Fulcra Files writer, bus relay emitter, and the collect plugin land in
-Task 3.
+Task 3 adds the daemon layer that ties it all together:
+
+* :mod:`fulcra_gmail.files_writer` — writes selected-email JSON to Fulcra Files
+  at the deterministic ``/collect/gmail/<account_id>/<yyyy-mm>/<message_id>.json``
+  path (same id → same path; post-crash rewrite is a same-content overwrite).
+* :mod:`fulcra_gmail.relay` — the B3 bus relay emitter: a byte-stable directive
+  keyed by the ledger ``outbox_key``, emitted + readback-verified through
+  coord-engine so retries converge on one visible directive.
+* :mod:`fulcra_gmail.cursors` — the per-``(account, rule)`` contiguous-frontier
+  watermark store.
+* :mod:`fulcra_gmail.pipeline` — the crash-safe poll: fully paginate → refine to
+  effective matches → order oldest-first → ``file → ledger → relay → ledger`` →
+  advance the watermark only through the contiguous done prefix.
+* :mod:`fulcra_gmail.collect_plugin` — the scheduled collect plugin (wizard,
+  multi-account poll, per-account health).
 
 Credit: the original design of the Gmail relay is ArcBot's (openclaw). Its
 June MVP was unrecoverable; this is a clean-room rebuild on current main that
@@ -40,4 +53,7 @@ privacy ledger, bus relay).
 """
 from __future__ import annotations
 
-__all__ = ["accounts", "client", "convert", "ledger", "rules"]
+__all__ = [
+    "accounts", "client", "collect_plugin", "convert", "cursors",
+    "files_writer", "ledger", "pipeline", "relay", "rules",
+]
